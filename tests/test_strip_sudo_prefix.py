@@ -9,7 +9,9 @@ from aish.security.security_manager import SimpleSecurityManager
 
 
 def test_strip_sudo_prefix_preserves_shell_operators() -> None:
-    stripped, sudo_detected, ok = strip_sudo_prefix("sudo apt update && sudo apt install -y nginx")
+    stripped, sudo_detected, ok = strip_sudo_prefix(
+        "sudo apt update && sudo apt install -y nginx"
+    )
     assert sudo_detected is True
     assert ok is True
     assert stripped == "apt update && sudo apt install -y nginx"
@@ -23,7 +25,9 @@ def test_strip_sudo_prefix_strips_options_and_preserves_quotes() -> None:
     assert stripped == "bash -lc 'echo hi && echo ok'"
 
 
-def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(tmp_path: Path) -> None:
+def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(
+    tmp_path: Path,
+) -> None:
     class DummySandbox:
         enabled = True
 
@@ -34,7 +38,9 @@ def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(tmp_path:
             return SandboxSecurityResult(
                 command=command,
                 cwd=(cwd or tmp_path),
-                sandbox=SandboxResult(exit_code=100, stdout="", stderr="E: fail", changes=[]),
+                sandbox=SandboxResult(
+                    exit_code=100, stdout="", stderr="E: fail", changes=[]
+                ),
             )
 
     manager = SimpleSecurityManager(
@@ -54,3 +60,27 @@ def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(tmp_path:
     assert isinstance(analysis.get("sandbox"), dict)
     assert analysis["sandbox"]["reason"] == "sandbox_execute_failed"
     assert sm._FAIL_OPEN_PANEL_SHOWN is False
+
+
+def test_policy_disabled_sudo_bash_lc_rm_hits_fallback_rule() -> None:
+    from aish.security.security_policy import PolicyRule, RiskLevel, SandboxOffAction, SecurityPolicy
+
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    manager = SimpleSecurityManager(policy=policy)
+
+    decision = manager.decide("sudo -E -u root bash -lc 'rm -rf /etc'", is_ai_command=True)
+
+    assert decision.allow is False
+    assert decision.analysis.get("fallback_rule_matched") is True

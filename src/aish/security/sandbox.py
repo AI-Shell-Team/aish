@@ -4,15 +4,15 @@ Sandbox core: data types, executor and high-level wrapper.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, List, Optional, Tuple
 import os
 import re
 import stat
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
 
 from .sandbox_types import FsChange, SandboxResult
 
@@ -28,7 +28,7 @@ def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
     Returns (stripped_command, sudo_detected, ok).
     """
 
-    raw = (command or "")
+    raw = command or ""
     raw_l = raw.lstrip()
     if not raw_l.startswith("sudo ") and raw_l != "sudo":
         return command, False, True
@@ -112,7 +112,11 @@ def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
             if opt.startswith("-g") and opt != "-g":
                 idx = opt_end
                 continue
-            if opt.startswith("--user=") or opt.startswith("--group=") or opt.startswith("--prompt="):
+            if (
+                opt.startswith("--user=")
+                or opt.startswith("--group=")
+                or opt.startswith("--prompt=")
+            ):
                 idx = opt_end
                 continue
 
@@ -128,12 +132,10 @@ def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
     return stripped, True, True
 
 
-
 def _unescape_mountinfo_path(value: str) -> str:
     # mountinfo encodes special chars using octal escapes like "\040" for space.
     # Ref: proc(5)
     return _MOUNTINFO_ESC_RE.sub(lambda m: chr(int(m.group(1), 8)), value)
-
 
 
 def _read_host_mount_points_under(repo_root: Path) -> list[Path]:
@@ -147,7 +149,9 @@ def _read_host_mount_points_under(repo_root: Path) -> list[Path]:
     repo_root = repo_root.resolve()
 
     try:
-        mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace")
+        mountinfo = Path("/proc/self/mountinfo").read_text(
+            encoding="utf-8", errors="replace"
+        )
     except OSError:
         return []
 
@@ -238,7 +242,9 @@ class SandboxExecutor:
     def __init__(self, config: SandboxConfig) -> None:
         self._config = config
 
-    def _mount_overlay(self, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path) -> None:
+    def _mount_overlay(
+        self, lowerdir: Path, upperdir: Path, workdir: Path, merged: Path
+    ) -> None:
         """Mount an overlayfs.
 
         NOTE: This typically requires root or appropriate kernel settings.
@@ -312,7 +318,9 @@ class SandboxExecutor:
                 details=(first_line or f"exit_code={proc.returncode}"),
             )
 
-    def _prepare_overlay_dirs_for_user(self, *, upperdir: Path, workdir: Path, uid: int, gid: int) -> None:
+    def _prepare_overlay_dirs_for_user(
+        self, *, upperdir: Path, workdir: Path, uid: int, gid: int
+    ) -> None:
         """Ensure overlay upperdir/workdir are writable by the payload user.
 
         When the sandbox is created by a privileged daemon but the payload is
@@ -329,9 +337,13 @@ class SandboxExecutor:
             os.chmod(upperdir, 0o700)
             os.chmod(workdir, 0o700)
         except OSError as exc:
-            raise SandboxUnavailableError("overlay_perm_failed", details=str(exc)) from exc
+            raise SandboxUnavailableError(
+                "overlay_perm_failed", details=str(exc)
+            ) from exc
 
-    def _sync_overlay_upper_root_metadata(self, *, lowerdir: Path, upperdir: Path) -> None:
+    def _sync_overlay_upper_root_metadata(
+        self, *, lowerdir: Path, upperdir: Path
+    ) -> None:
         """Sync upperdir root metadata with lowerdir root metadata.
 
         For per-top-level overlays (repo_root == '/'), the overlay root inode may
@@ -433,7 +445,9 @@ class SandboxExecutor:
 
         return overlays
 
-    def _collect_fs_changes(self, lowerdir: Path, upperdir: Path, repo_root: Path) -> List[FsChange]:
+    def _collect_fs_changes(
+        self, lowerdir: Path, upperdir: Path, repo_root: Path
+    ) -> List[FsChange]:
         """基于 overlay upperdir 内容推导 created/modified/deleted 路径。"""
 
         changes: List[FsChange] = []
@@ -448,7 +462,9 @@ class SandboxExecutor:
             deleted_paths.add(path_value)
             changes.append(FsChange(path=path_value, kind="deleted"))
 
-        def _build_meta_detail(upper_path: Path, lower_path: Path) -> Optional[dict[str, str]]:
+        def _build_meta_detail(
+            upper_path: Path, lower_path: Path
+        ) -> Optional[dict[str, str]]:
             """Return chmod/chown deltas when both sides exist."""
 
             try:
@@ -459,7 +475,9 @@ class SandboxExecutor:
 
             detail: dict[str, str] = {}
             if stat.S_IMODE(up.st_mode) != stat.S_IMODE(low.st_mode):
-                detail["mode"] = f"{stat.S_IMODE(low.st_mode):o}->{stat.S_IMODE(up.st_mode):o}"
+                detail["mode"] = (
+                    f"{stat.S_IMODE(low.st_mode):o}->{stat.S_IMODE(up.st_mode):o}"
+                )
             if up.st_uid != low.st_uid:
                 detail["uid"] = f"{low.st_uid}->{up.st_uid}"
             if up.st_gid != low.st_gid:
@@ -495,7 +513,11 @@ class SandboxExecutor:
                 if lower_path.exists():
                     detail = _build_meta_detail(dir_path, lower_path)
                     if detail:
-                        changes.append(FsChange(path=logical_rel_str, kind="modified", detail=detail))
+                        changes.append(
+                            FsChange(
+                                path=logical_rel_str, kind="modified", detail=detail
+                            )
+                        )
                 else:
                     changes.append(FsChange(path=logical_rel_str, kind="created"))
 
@@ -553,7 +575,9 @@ class SandboxExecutor:
                             for name2 in files2:
                                 entry_rel = rel_from_lower / name2
                                 try:
-                                    logical_rel_to_repo = (lowerdir / entry_rel).relative_to(repo_root)
+                                    logical_rel_to_repo = (
+                                        lowerdir / entry_rel
+                                    ).relative_to(repo_root)
                                     logical_rel_str = str(logical_rel_to_repo)
                                 except ValueError:
                                     logical_rel_str = str(lowerdir / entry_rel)
@@ -561,7 +585,11 @@ class SandboxExecutor:
                 else:
                     if lower_path.exists():
                         detail = _build_meta_detail(file_path, lower_path)
-                        changes.append(FsChange(path=logical_rel_str, kind="modified", detail=detail))
+                        changes.append(
+                            FsChange(
+                                path=logical_rel_str, kind="modified", detail=detail
+                            )
+                        )
                     else:
                         changes.append(FsChange(path=logical_rel_str, kind="created"))
 
@@ -632,11 +660,17 @@ class SandboxExecutor:
 
         # overlay 的具体挂载由 _mount_overlay 完成；此处仅将其作为根 / 暴露给命令。
         merged_root = workdir.parent / "merged"
-        bwrap_cmd.extend([
-            "--bind", str(merged_root), "/",
-            "--dev", "/dev",
-            "--proc", "/proc",
-        ])
+        bwrap_cmd.extend(
+            [
+                "--bind",
+                str(merged_root),
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+            ]
+        )
 
         # 追加只读挂载白名单；如果未配置则使用一组安全的默认值。
         readonly_binds = self._config.readonly_binds
@@ -654,16 +688,24 @@ class SandboxExecutor:
                 ]
 
         for host_path, sandbox_path in readonly_binds:
-            bwrap_cmd.extend([
-                "--ro-bind", str(host_path), str(sandbox_path),
-            ])
+            bwrap_cmd.extend(
+                [
+                    "--ro-bind",
+                    str(host_path),
+                    str(sandbox_path),
+                ]
+            )
 
         # 追加读写挂载白名单（可选）。
         if self._config.readwrite_binds:
             for host_path, sandbox_path in self._config.readwrite_binds:
-                bwrap_cmd.extend([
-                    "--bind", str(host_path), str(sandbox_path),
-                ])
+                bwrap_cmd.extend(
+                    [
+                        "--bind",
+                        str(host_path),
+                        str(sandbox_path),
+                    ]
+                )
 
         # 将工作目录切换到目标目录并执行命令。
         #
@@ -676,7 +718,10 @@ class SandboxExecutor:
 
         if run_as_uid is not None or run_as_gid is not None:
             if run_as_uid is None or run_as_gid is None:
-                raise SandboxUnavailableError("bubblewrap_failed", details="run_as_uid/run_as_gid must both be set")
+                raise SandboxUnavailableError(
+                    "bubblewrap_failed",
+                    details="run_as_uid/run_as_gid must both be set",
+                )
             bwrap_cmd.extend(
                 [
                     "setpriv",
@@ -694,7 +739,11 @@ class SandboxExecutor:
         else:
             bwrap_cmd.extend(["bash", "-lc", command])
 
-        proc = run_cmd(bwrap_cmd, timeout=timeout_s) if timeout_s is not None else run_cmd(bwrap_cmd)
+        proc = (
+            run_cmd(bwrap_cmd, timeout=timeout_s)
+            if timeout_s is not None
+            else run_cmd(bwrap_cmd)
+        )
         return proc
 
     def _run_in_overlay_sandbox(
@@ -774,7 +823,9 @@ class SandboxExecutor:
                     else:
                         # Root-mode simulation (e.g. stripped sudo): preserve target
                         # directory metadata such as /tmp 1777.
-                        self._sync_overlay_upper_root_metadata(lowerdir=lower, upperdir=upperdir)
+                        self._sync_overlay_upper_root_metadata(
+                            lowerdir=lower, upperdir=upperdir
+                        )
 
                     try:
                         target.mkdir(parents=True, exist_ok=True)
@@ -785,7 +836,12 @@ class SandboxExecutor:
                         ) from exc
 
                     try:
-                        self._mount_overlay(lowerdir=lower, upperdir=upperdir, workdir=ovl_workdir, merged=target)
+                        self._mount_overlay(
+                            lowerdir=lower,
+                            upperdir=upperdir,
+                            workdir=ovl_workdir,
+                            merged=target,
+                        )
                     except SandboxUnavailableError as exc:
                         detail = exc.details or str(exc)
                         raise SandboxUnavailableError(
@@ -808,7 +864,12 @@ class SandboxExecutor:
                         gid=int(run_as_gid),
                     )
 
-                self._mount_overlay(lowerdir=repo_root, upperdir=upperdir, workdir=upper_workdir, merged=merged)
+                self._mount_overlay(
+                    lowerdir=repo_root,
+                    upperdir=upperdir,
+                    workdir=upper_workdir,
+                    merged=merged,
+                )
                 overlays.append((repo_root, upperdir))
 
             try:
@@ -833,7 +894,11 @@ class SandboxExecutor:
 
                 fs_changes: list[FsChange] = []
                 for lower, upper in overlays:
-                    fs_changes.extend(self._collect_fs_changes(lowerdir=lower, upperdir=upper, repo_root=repo_root))
+                    fs_changes.extend(
+                        self._collect_fs_changes(
+                            lowerdir=lower, upperdir=upper, repo_root=repo_root
+                        )
+                    )
 
                 return SandboxResult(
                     exit_code=proc.returncode,
@@ -845,7 +910,11 @@ class SandboxExecutor:
                 # Unmount overlays first (deep-to-shallow), then the root bind mount.
                 try:
                     overlay_targets = sorted(
-                        (merged / lower.relative_to(repo_root) for (lower, _upper) in overlays if repo_root == Path("/")),
+                        (
+                            merged / lower.relative_to(repo_root)
+                            for (lower, _upper) in overlays
+                            if repo_root == Path("/")
+                        ),
                         key=lambda p: (len(p.parts), str(p)),
                         reverse=True,
                     )
@@ -923,7 +992,9 @@ class SandboxSecurity:
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
 
-    def run(self, command: str, cwd: Optional[Path] = None) -> Optional[SandboxSecurityResult]:
+    def run(
+        self, command: str, cwd: Optional[Path] = None
+    ) -> Optional[SandboxSecurityResult]:
         """在沙箱中执行命令并返回结果。
 
         如果未启用（enabled=False），则返回 None。
@@ -936,7 +1007,9 @@ class SandboxSecurity:
         stripped_command, sudo_detected, ok = strip_sudo_prefix(command)
         if sudo_detected:
             if not ok:
-                raise SandboxUnavailableError("sandbox_execute_failed", details="missing_command")
+                raise SandboxUnavailableError(
+                    "sandbox_execute_failed", details="missing_command"
+                )
             command = stripped_command
         try:
             sandbox_result = self._executor.simulate(command, cwd=cwd)

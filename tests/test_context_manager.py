@@ -3,6 +3,7 @@ Comprehensive tests for Context Manager system with sliding window and token bud
 """
 
 import pytest
+
 from aish.context_manager import ContextManager, MemoryType
 
 
@@ -25,7 +26,7 @@ class TestContextManager:
 
     def test_context_manager_initialization(self):
         """Test ContextManager initialization with default values"""
-        assert hasattr(self.context_manager, 'memories')
+        assert hasattr(self.context_manager, "memories")
         assert isinstance(self.context_manager.memories, list)
         assert len(self.context_manager.memories) == 0
         assert self.context_manager.max_llm_messages == 50
@@ -38,7 +39,7 @@ class TestContextManager:
             max_llm_messages=100,
             max_shell_messages=30,
             token_budget=4000,
-            model="gpt-4"
+            model="gpt-4",
         )
         assert cm.max_llm_messages == 100
         assert cm.max_shell_messages == 30
@@ -94,7 +95,9 @@ class TestContextManager:
             cm.add_memory(MemoryType.SHELL, f"$ command_{i} → ✓")
 
         # Should only keep the last 3
-        shell_count = sum(1 for m in cm.memories if m["memory_type"] == MemoryType.SHELL)
+        shell_count = sum(
+            1 for m in cm.memories if m["memory_type"] == MemoryType.SHELL
+        )
         assert shell_count == 3
 
     def test_mixed_memory_types_trimming(self):
@@ -107,7 +110,9 @@ class TestContextManager:
             cm.add_memory(MemoryType.SHELL, f"$ shell_{i} → ✓")
 
         llm_count = sum(1 for m in cm.memories if m["memory_type"] == MemoryType.LLM)
-        shell_count = sum(1 for m in cm.memories if m["memory_type"] == MemoryType.SHELL)
+        shell_count = sum(
+            1 for m in cm.memories if m["memory_type"] == MemoryType.SHELL
+        )
 
         assert llm_count == 3
         assert shell_count == 2
@@ -132,7 +137,7 @@ class TestContextManager:
         for i in range(20):
             cm.add_memory(
                 MemoryType.LLM,
-                {"role": "user", "content": "This is a long message " * 10}
+                {"role": "user", "content": "This is a long message " * 10},
             )
 
         # Should be trimmed to fit token budget
@@ -141,9 +146,13 @@ class TestContextManager:
 
     def test_get_context_size(self):
         """Test getting context statistics"""
-        self.context_manager.add_memory(MemoryType.LLM, {"role": "user", "content": "Hello"})
+        self.context_manager.add_memory(
+            MemoryType.LLM, {"role": "user", "content": "Hello"}
+        )
         self.context_manager.add_memory(MemoryType.SHELL, "$ ls → ✓")
-        self.context_manager.add_memory(MemoryType.KNOWLEDGE, {"key": "os", "value": "Darwin"})
+        self.context_manager.add_memory(
+            MemoryType.KNOWLEDGE, {"key": "os", "value": "Darwin"}
+        )
 
         stats = self.context_manager.get_context_size()
 
@@ -155,9 +164,13 @@ class TestContextManager:
 
     def test_clear_memories(self):
         """Test clearing all memories"""
-        self.context_manager.add_memory(MemoryType.LLM, {"role": "user", "content": "test"})
+        self.context_manager.add_memory(
+            MemoryType.LLM, {"role": "user", "content": "test"}
+        )
         self.context_manager.add_memory(MemoryType.SHELL, "$ test → ✓")
-        self.context_manager.add_memory(MemoryType.KNOWLEDGE, {"key": "test", "value": "data"})
+        self.context_manager.add_memory(
+            MemoryType.KNOWLEDGE, {"key": "test", "value": "data"}
+        )
 
         self.context_manager.clear(preserve_knowledge=True)
 
@@ -166,8 +179,12 @@ class TestContextManager:
 
     def test_clear_all_including_knowledge(self):
         """Test clearing all memories including knowledge"""
-        self.context_manager.add_memory(MemoryType.LLM, {"role": "user", "content": "test"})
-        self.context_manager.add_memory(MemoryType.KNOWLEDGE, {"key": "test", "value": "data"})
+        self.context_manager.add_memory(
+            MemoryType.LLM, {"role": "user", "content": "test"}
+        )
+        self.context_manager.add_memory(
+            MemoryType.KNOWLEDGE, {"key": "test", "value": "data"}
+        )
 
         self.context_manager.clear(preserve_knowledge=False)
 
@@ -179,8 +196,7 @@ class TestContextManager:
         # Add 10 messages
         for i in range(10):
             self.context_manager.add_memory(
-                MemoryType.LLM,
-                {"role": "user", "content": f"Message {i}"}
+                MemoryType.LLM, {"role": "user", "content": f"Message {i}"}
             )
 
         # Manually trim to 5
@@ -191,16 +207,11 @@ class TestContextManager:
     def test_as_messages_format(self):
         """Test converting memories to message format"""
         self.context_manager.add_memory(
-            MemoryType.LLM,
-            {"role": "user", "content": "Hello"}
+            MemoryType.LLM, {"role": "user", "content": "Hello"}
         )
+        self.context_manager.add_memory(MemoryType.SHELL, "$ ls → ✓")
         self.context_manager.add_memory(
-            MemoryType.SHELL,
-            "$ ls → ✓"
-        )
-        self.context_manager.add_memory(
-            MemoryType.KNOWLEDGE,
-            {"key": "os_info", "value": "Darwin 25.0.0"}
+            MemoryType.KNOWLEDGE, {"key": "os_info", "value": "Darwin 25.0.0"}
         )
 
         messages = self.context_manager.as_messages()
@@ -224,7 +235,7 @@ class TestContextManager:
         knowledge_items = [
             {"key": "system_info", "value": "Darwin"},
             {"key": "os_info", "value": "macOS"},
-            {"key": "output_language", "value": "English"}
+            {"key": "output_language", "value": "English"},
         ]
 
         for item in knowledge_items:
@@ -261,14 +272,14 @@ class TestContextManager:
         self.context_manager.add_memory(MemoryType.SHELL, "$ pwd → ✓")
         self.context_manager.add_memory(MemoryType.SHELL, "$ ls -la → ✓")
         self.context_manager.add_memory(
-            MemoryType.SHELL,
-            "$ invalid_cmd → ✗ (exit 127)\nerror: command not found"
+            MemoryType.SHELL, "$ invalid_cmd → ✗ (exit 127)\nerror: command not found"
         )
 
         messages = self.context_manager.as_messages()
 
         shell_contents = [
-            m["content"] for m in messages
+            m["content"]
+            for m in messages
             if "pwd" in m["content"] or "invalid_cmd" in m["content"]
         ]
 
@@ -314,7 +325,10 @@ class TestContextManager:
         for i in range(200):
             cm.add_memory(
                 MemoryType.LLM,
-                {"role": "user", "content": f"This is message number {i} with some content"}
+                {
+                    "role": "user",
+                    "content": f"This is message number {i} with some content",
+                },
             )
 
         # Should be trimmed
@@ -339,8 +353,14 @@ class TestContextManagerIntegration:
         cm.add_memory(MemoryType.SHELL, "$ ls -la → ✓")
 
         # AI conversation
-        cm.add_memory(MemoryType.LLM, {"role": "user", "content": "What files are in this directory?"})
-        cm.add_memory(MemoryType.LLM, {"role": "assistant", "content": "Based on the ls output, you have..."})
+        cm.add_memory(
+            MemoryType.LLM,
+            {"role": "user", "content": "What files are in this directory?"},
+        )
+        cm.add_memory(
+            MemoryType.LLM,
+            {"role": "assistant", "content": "Based on the ls output, you have..."},
+        )
 
         messages = cm.as_messages()
 
@@ -359,7 +379,9 @@ class TestContextManagerIntegration:
         # Simulate long session
         for i in range(50):
             cm.add_memory(MemoryType.LLM, {"role": "user", "content": f"Query {i}"})
-            cm.add_memory(MemoryType.LLM, {"role": "assistant", "content": f"Response {i}"})
+            cm.add_memory(
+                MemoryType.LLM, {"role": "assistant", "content": f"Response {i}"}
+            )
             cm.add_memory(MemoryType.SHELL, f"$ command_{i} → ✓")
 
         stats = cm.get_context_size()

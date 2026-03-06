@@ -4,12 +4,10 @@ import re
 
 import click
 import typer
-
 from rich.console import Console
 from rich.panel import Panel
 
 from . import t
-
 
 _CONSOLE = Console()
 

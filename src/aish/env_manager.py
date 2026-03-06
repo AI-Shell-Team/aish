@@ -4,7 +4,7 @@ Environment Manager for AI Shell - Manages environment variables with export fun
 
 import os
 import subprocess
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 
 class EnvironmentManager:
@@ -27,17 +27,19 @@ class EnvironmentManager:
         self._env_vars = os.environ.copy()
 
         # Add color support environment variables (if missing)
-        if 'TERM' not in self._env_vars:
-            self._env_vars['TERM'] = 'xterm-256color'
+        if "TERM" not in self._env_vars:
+            self._env_vars["TERM"] = "xterm-256color"
 
         # Force enable ls color output
-        self._env_vars['CLICOLOR'] = '1'
-        self._env_vars['CLICOLOR_FORCE'] = '1'
+        self._env_vars["CLICOLOR"] = "1"
+        self._env_vars["CLICOLOR_FORCE"] = "1"
 
         # If system has LS_COLORS, keep it; otherwise use default value
-        if 'LS_COLORS' not in self._env_vars:
+        if "LS_COLORS" not in self._env_vars:
             # Default LS_COLORS settings to distinguish files and directories
-            self._env_vars['LS_COLORS'] = 'di=1;34:fi=0:ln=1;36:pi=1;33:so=1;35:do=1;35:bd=1;33:cd=1;33:or=1;31:mi=1;31:ex=1;32:*.tar=1;31:*.tgz=1;31:*.arc=1;31:*.arj=1;31:*.taz=1;31:*.lha=1;31:*.lz4=1;31:*.lzh=1;31:*.lzma=1;31:*.tlz=1;31:*.txz=1;31:*.tzo=1;31:*.t7z=1;31:*.zip=1;31:*.z=1;31:*.Z=1;31:*.dz=1;31:*.gz=1;31:*.lrz=1;31:*.lz=1;31:*.lzo=1;31:*.xz=1;31:*.zst=1;31:*.tzst=1;31:*.bz2=1;31:*.bz=1;31:*.tbz=1;31:*.tbz2=1;31:*.tz=1;31:*.deb=1;31:*.rpm=1;31:*.jar=1;31:*.war=1;31:*.ear=1;31:*.sar=1;31:*.rar=1;31:*.alz=1;31:*.ace=1;31:*.zoo=1;31:*.cpio=1;31:*.7z=1;31:*.rz=1;31:*.cab=1;31:*.wim=1;31:*.swm=1;31:*.dwm=1;31:*.esd=1;31'
+            self._env_vars["LS_COLORS"] = (
+                "di=1;34:fi=0:ln=1;36:pi=1;33:so=1;35:do=1;35:bd=1;33:cd=1;33:or=1;31:mi=1;31:ex=1;32:*.tar=1;31:*.tgz=1;31:*.arc=1;31:*.arj=1;31:*.taz=1;31:*.lha=1;31:*.lz4=1;31:*.lzh=1;31:*.lzma=1;31:*.tlz=1;31:*.txz=1;31:*.tzo=1;31:*.t7z=1;31:*.zip=1;31:*.z=1;31:*.Z=1;31:*.dz=1;31:*.gz=1;31:*.lrz=1;31:*.lz=1;31:*.lzo=1;31:*.xz=1;31:*.zst=1;31:*.tzst=1;31:*.bz2=1;31:*.bz=1;31:*.tbz=1;31:*.tbz2=1;31:*.tz=1;31:*.deb=1;31:*.rpm=1;31:*.jar=1;31:*.war=1;31:*.ear=1;31:*.sar=1;31:*.rar=1;31:*.alz=1;31:*.ace=1;31:*.zoo=1;31:*.cpio=1;31:*.7z=1;31:*.rz=1;31:*.cab=1;31:*.wim=1;31:*.swm=1;31:*.dwm=1;31:*.esd=1;31"
+            )
 
         # Load environment from bashrc and bash_profile
         self._load_bash_env()
@@ -78,10 +80,10 @@ class EnvironmentManager:
 
                 if result.returncode == 0:
                     # Parse the null-delimited output
-                    env_output = result.stdout.decode('utf-8', errors='replace')
-                    for line in env_output.split('\0'):
-                        if '=' in line:
-                            key, value = line.split('=', 1)
+                    env_output = result.stdout.decode("utf-8", errors="replace")
+                    for line in env_output.split("\0"):
+                        if "=" in line:
+                            key, value = line.split("=", 1)
                             # Only add new variables, don't overwrite existing ones
                             # This preserves parent shell's environment (e.g., PATH)
                             if key not in self._env_vars:

@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
 import io
+from pathlib import Path
 
 from rich.console import Console
 
+from aish.security.sandbox import SandboxSecurityResult
+from aish.security.sandbox_types import SandboxResult
 from aish.security.security_config import load_security_policy
 from aish.security.security_manager import SimpleSecurityManager
-from aish.security.security_policy import PolicyRule, RiskLevel, SecurityPolicy
+from aish.security.security_policy import PolicyRule, RiskLevel, SandboxOffAction, SecurityPolicy
 
 
 def _quiet_console() -> Console:
     return Console(file=io.StringIO(), force_terminal=False, width=120)
 
 
-def test_load_security_policy_ignores_sandbox_off_action_field(tmp_path: Path):
+def test_load_security_policy_parses_sandbox_off_action(tmp_path: Path):
     policy_path = tmp_path / "security_policy.yaml"
     policy_path.write_text(
         "global:\n"
@@ -26,57 +28,30 @@ def test_load_security_policy_ignores_sandbox_off_action_field(tmp_path: Path):
 
     policy = load_security_policy(config_path=policy_path)
     assert policy.enable_sandbox is False
-    assert not hasattr(policy, "sandbox_off_action")
+    assert policy.sandbox_off_action == SandboxOffAction.BLOCK
 
 
-def test_sandbox_fallback_high_blocks_ai_command_by_path_match_even_without_operation_check():
-    policy = SecurityPolicy(
-        enable_sandbox=False,
-        rules=[
-            PolicyRule(
-                pattern="/etc/**",
-                risk=RiskLevel.HIGH,
-                operations={"DELETE"},
-                rule_id="H-001",
-            )
-        ],
-    )
-    mgr = SimpleSecurityManager(
-        policy=policy,
-        console=_quiet_console(),
-    )
-
-    decision = mgr.decide("touch /etc/hosts", is_ai_command=True)
-    assert decision.allow is False
-    assert decision.require_confirmation is False
-    assert decision.analysis.get("mode") == "command_fallback"
-
-
-def test_sandbox_fallback_medium_requires_confirmation():
-    policy = SecurityPolicy(
-        enable_sandbox=False,
-        rules=[
-            PolicyRule(
-                pattern="/home/**",
-                risk=RiskLevel.MEDIUM,
-                rule_id="M-001",
-            )
-        ],
-    )
-    mgr = SimpleSecurityManager(
-        policy=policy,
-        console=_quiet_console(),
-    )
-
-    decision = mgr.decide("rm -rf /home/lixin/a", is_ai_command=True)
-    assert decision.allow is True
-    assert decision.require_confirmation is True
-
-
-def test_sandbox_fallback_no_path_allows_without_confirmation():
+def test_sandbox_fallback_high_blocks_ai_command():
     policy = SecurityPolicy(
         enable_sandbox=False,
         rules=[],
+        sandbox_off_action=SandboxOffAction.BLOCK,
+    )
+    mgr = SimpleSecurityManager(
+        policy=policy,
+        console=_quiet_console(),
+    )
+
+    decision = mgr.decide("echo hi", is_ai_command=True)
+    assert decision.allow is False
+    assert decision.require_confirmation is False
+
+
+def test_sandbox_disabled_confirm_action_allows_without_confirmation_popup():
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[],
+        sandbox_off_action=SandboxOffAction.CONFIRM,
     )
     mgr = SimpleSecurityManager(
         policy=policy,
@@ -88,104 +63,186 @@ def test_sandbox_fallback_no_path_allows_without_confirmation():
     assert decision.require_confirmation is False
 
 
-def test_non_ai_command_does_not_enter_command_fallback():
+def test_sandbox_fallback_low_allows_without_confirmation():
     policy = SecurityPolicy(
         enable_sandbox=False,
-        rules=[
-            PolicyRule(
-                pattern="/etc/**",
-                risk=RiskLevel.HIGH,
-                rule_id="H-001",
-            )
-        ],
+        rules=[],
+        sandbox_off_action=SandboxOffAction.ALLOW,
     )
     mgr = SimpleSecurityManager(
         policy=policy,
         console=_quiet_console(),
     )
 
-    decision = mgr.decide("touch /etc/hosts", is_ai_command=False)
+    decision = mgr.decide("echo hi", is_ai_command=True)
     assert decision.allow is True
     assert decision.require_confirmation is False
-    assert decision.analysis.get("mode") == "sandbox"
 
 
-def test_command_fallback_blacklist_mode_ls_with_system_path_is_low():
-    policy = SecurityPolicy(
-        enable_sandbox=False,
-        rules=[
-            PolicyRule(
-                pattern="/etc/**",
-                risk=RiskLevel.HIGH,
-                rule_id="H-001",
-            )
-        ],
-    )
-    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
-
-    decision = mgr.decide("ls /etc", is_ai_command=True)
-
-    assert decision.level == RiskLevel.LOW
-    assert decision.allow is True
-    assert decision.require_confirmation is False
-    assert decision.analysis.get("matched_rules") == []
-
-
-def test_command_fallback_blacklist_mode_rm_with_system_path_still_blocks():
-    policy = SecurityPolicy(
-        enable_sandbox=False,
-        rules=[
-            PolicyRule(
-                pattern="/etc/**",
-                risk=RiskLevel.HIGH,
-                rule_id="H-001",
-            )
-        ],
-    )
-    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
-
-    decision = mgr.decide("rm -f /etc/passwd", is_ai_command=True)
-
-    assert decision.level == RiskLevel.HIGH
-    assert decision.allow is False
-    assert decision.require_confirmation is False
-
-
-def test_command_fallback_dd_raw_device_is_high_and_blocked():
-    policy = SecurityPolicy(
-        enable_sandbox=False,
-        rules=[],
-    )
-    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
-
-    decision = mgr.decide("dd if=/dev/zero of=/dev/sda bs=1M", is_ai_command=True)
-
-    assert decision.level == RiskLevel.HIGH
-    assert decision.allow is False
-    assert decision.require_confirmation is False
-    reasons = decision.analysis.get("reasons") or []
-    assert any("高危命令" in str(item) for item in reasons)
-
-
-def test_fallback_invalid_rule_match_escalates_to_medium(tmp_path: Path):
+def test_load_security_policy_parses_rule_command_list(tmp_path: Path):
     policy_path = tmp_path / "security_policy.yaml"
     policy_path.write_text(
         "global:\n"
         "  enable_sandbox: false\n"
         "rules:\n"
         "  - id: H-001\n"
-        "    path: ['/etc/**']\n"
-        "    risk: MIDUEM\n",
+        "    command_list: [rm]\n"
+        "    path: [/etc/**]\n"
+        "    operations: [DELETE]\n"
+        "    risk: HIGH\n",
         encoding="utf-8",
     )
 
     policy = load_security_policy(config_path=policy_path)
+    matched = next(rule for rule in policy.rules if rule.rule_id == "H-001")
+    assert matched.command_list == {"rm"}
+
+
+def test_policy_disabled_rm_high_risk_path_blocks_without_sandbox():
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
     mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
 
-    decision = mgr.decide("rm -f /etc/passwd", is_ai_command=True)
+    decision = mgr.decide("rm -rf /etc", is_ai_command=True)
 
-    assert decision.level == RiskLevel.MEDIUM
+    assert decision.allow is False
+    assert decision.require_confirmation is False
+    assert decision.analysis.get("fallback_rule_matched") is True
+
+
+def test_policy_disabled_bash_lc_rm_high_risk_path_blocks_without_sandbox():
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
+
+    decision = mgr.decide("bash -lc 'rm -rf /etc'", is_ai_command=True)
+
+    assert decision.allow is False
+    assert decision.require_confirmation is False
+    assert decision.analysis.get("fallback_rule_matched") is True
+
+
+def test_policy_disabled_complex_bash_lc_falls_back_to_global_action():
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
+
+    decision = mgr.decide("bash -lc 'echo ok; rm -rf /etc'", is_ai_command=True)
+
+    assert decision.allow is True
+    assert decision.require_confirmation is False
+    assert decision.analysis.get("fallback_rule_matched") is None
+
+
+def test_policy_disabled_cp_write_path_matches_rule_without_hardcode():
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[
+            PolicyRule(
+                pattern="/home/**",
+                risk=RiskLevel.MEDIUM,
+                operations={"WRITE"},
+                command_list={"cp"},
+                rule_id="M-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
+
+    decision = mgr.decide("cp /tmp/a.txt /home/lixin/a.txt", is_ai_command=True)
+
     assert decision.allow is True
     assert decision.require_confirmation is True
-    assert decision.analysis.get("matched_invalid_rule_ids") == ["H-001"]
-    assert decision.analysis.get("matched_rules") == []
+    assert decision.analysis.get("fallback_rule_matched") is True
+
+
+def test_policy_disabled_rm_wildcard_path_matches_rule():
+    policy = SecurityPolicy(
+        enable_sandbox=False,
+        rules=[
+            PolicyRule(
+                pattern="/home/**",
+                risk=RiskLevel.MEDIUM,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="M-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console())
+
+    decision = mgr.decide("rm -rf /home/lixin/testdir/*", is_ai_command=True)
+
+    assert decision.allow is True
+    assert decision.require_confirmation is True
+    assert decision.analysis.get("fallback_rule_matched") is True
+
+
+def test_fallback_rule_does_not_affect_enabled_sandbox_flow(tmp_path: Path):
+    class DummySandbox:
+        enabled = True
+
+        def run(self, command: str, cwd: Path | None = None) -> SandboxSecurityResult:
+            return SandboxSecurityResult(
+                command=command,
+                cwd=(cwd or tmp_path),
+                sandbox=SandboxResult(exit_code=0, stdout="", stderr="", changes=[]),
+            )
+
+    policy = SecurityPolicy(
+        enable_sandbox=True,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console(), repo_root=tmp_path, use_privileged_sandbox=False)
+    mgr._sandbox_security = DummySandbox()  # type: ignore[attr-defined]
+
+    decision = mgr.decide("bash -lc 'rm -rf /etc'", is_ai_command=True, cwd=tmp_path)
+
+    assert decision.allow is True
+    assert decision.require_confirmation is False
+    assert decision.analysis.get("sandbox", {}).get("enabled") is True
+    assert decision.analysis.get("fallback_rule_matched") is None

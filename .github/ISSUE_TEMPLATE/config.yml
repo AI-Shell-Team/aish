@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/AI-Shell-Team/aish/blob/main/README.md
+    about: "Check the README and documentation for usage guidance."
+  - name: GitHub Discussions
+    url: https://github.com/AI-Shell-Team/aish/discussions
+    about: "Join the community discussions for questions and ideas."

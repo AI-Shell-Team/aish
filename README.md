@@ -1,84 +1,100 @@
 <div align="center">
 
-[English](README_EN.md) | 简体中文
+English | [简体中文](README_CN.md)
 
 ---
 
 # AISH
 
-让 Shell 拥有思考力，让运维由此进化
+Empower the Shell to think. Evolve Operations.
 
-[![Official Website](https://img.shields.io/badge/官网-aishell.ai-blue.svg)](https://aishell.ai)
+[![Official Website](https://img.shields.io/badge/Website-aishell.ai-blue.svg)](https://aishell.ai)
 [![GitHub](https://img.shields.io/badge/GitHub-AI--Shell--Team/aish-black.svg)](https://github.com/AI-Shell-Team/aish/)
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](#)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-![](./docs/images/demo_show.gif)
+![](./docs/images/demo.gif)
 
-**一个真实可用的 AI Shell：完整 PTY + 可配置的安全与风险控制**
+**A Real AI Shell: Complete PTY + Configurable Security & Risk Control**
 
 </div>
 
 ---
 
-## 目录
+## Table of Contents
 
-- [为什么选择 AISH](#为什么选择-ai-shell)
-- [快速开始](#快速开始)
-- [安装](#安装)
-- [卸载](#卸载)
-- [配置](#配置)
-- [使用方式](#使用方式)
-- [安全与风险控制](#安全与风险控制)
-- [Skills（插件）](#skills插件)
-- [数据与隐私](#数据与隐私)
-- [文档](#文档)
-- [开发与测试](#开发与测试)
-- [贡献](#贡献)
-- [许可证](#许可证)
-
----
-
-## 为什么选择 AISH
-
-- **真正的交互式 Shell**：完整 PTY 支持，可运行 `vim` / `ssh` / `top` 等交互程序
-- **AI 原生集成**：用自然语言描述任务，生成、解释并执行命令
-- **安全可控**：AI 命令有风险分级与确认流程；可选沙箱预跑做变更评估
-- **可扩展**：Skills 插件系统，支持热加载与优先级覆盖
-- **低迁移成本**：兼容常规命令与工作流，默认在终端里完成
+- [Why Choose AISH](#why-choose-aish)
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+- [Uninstallation](#uninstallation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+- [Security & Risk Control](#security--risk-control)
+- [Skills (Plugins)](#skills-plugins)
+- [Data & Privacy](#data--privacy)
+- [Documentation](#documentation)
+- [Community & Support](#community--support)
+- [Development & Testing](#development--testing)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-## 功能对比
+## Why Choose AISH
 
-| 特性 | AISH | Claude Code |
-|------|------|-------------|
-| 🎯 **核心定位** | 运维/系统排障 CLI | 开发编码助手 |
-| 🤖 **多模型支持** | ✅ 完全开放 | ⚠️ 主要 Claude |
-| 🔧 **子代理系统** | ✅ ReAct 诊断代理 | ✅ 多类型代理 |
-| 🧩 **Skills 支持** | ✅ 热加载 | ✅ |
-| 🖥️ **原生终端集成** | ✅ PTY 完整支持 | ⚠️ 有限支持 |
-| 🛡️ **安全风险评估** | ✅ 安全确认 | ✅ 安全确认 |
-| 🌐 **本地模型支持** | ✅ 完全支持 | ❌ |
-| 📁 **文件操作工具** | ✅ 读/写/编辑 | ✅ 完整支持 |
-| 💰 **完全免费** | ✅ 开源 | ❌ 付费服务 |
-| 📊 **可观测性** | ✅ Langfuse 可选 | ⚠️ 内置 |
-| 🌍 **多语言输出** | ✅ 自动检测 | ✅ |
-| 🔐 **数据隐私** | ✅ 本地优先 | ⚠️ 云端处理 |
+- **True Interactive Shell**: Full PTY support, runs interactive programs like `vim` / `ssh` / `top`
+- **AI Native Integration**: Describe tasks in natural language, generate, explain and execute commands
+- **Secure & Controllable**: AI commands have risk grading and confirmation flow; optional sandbox pre-run for change assessment
+- **Extensible**: Skills plugin system with hot loading and priority override
+- **Low Migration Cost**: Compatible with regular commands and workflows, everything in terminal by default
 
-## 快速开始
+---
 
-### 1) 安装并启动
+## Feature Comparison
+
+| Feature | AISH | Claude Code |
+|---------|------|-------------|
+| 🎯 **Core Positioning** | Ops/System Troubleshooting CLI | Development Coding Assistant |
+| 🤖 **Multi-Model Support** | ✅ Fully Open | ⚠️ Mainly Claude |
+| 🔧 **Sub-Agent System** | ✅ ReAct Diagnostic Agent | ✅ Multiple Agent Types |
+| 🧩 **Skills Support** | ✅ Hot Loading | ✅ |
+| 🖥️ **Native Terminal Integration** | ✅ Full PTY Support | ⚠️ Limited Support |
+| 🛡️ **Security Risk Assessment** | ✅ Security Confirmation | ✅ Security Confirmation |
+| 🌐 **Local Model Support** | ✅ Fully Supported | ❌ |
+| 📁 **File Operation Tools** | ✅ Read/Write/Edit | ✅ Full Support |
+| 💰 **Completely Free** | ✅ Open Source | ❌ Paid Service |
+| 📊 **Observability** | ✅ Langfuse Optional | ⚠️ Built-in |
+| 🌍 **Multi-language Output** | ✅ Auto Detection | ✅ |
+| 🔐 **Data Privacy** | ✅ Local First | ⚠️ Cloud Processing |
+
+---
+
+## Quick Start
+
+### 1) Install and Launch
+
+**Option 1: One-line install (Recommended)**
+
+```bash
+curl -fsSL https://www.aishell.ai/repo/install.sh | bash
+```
+
+**Option 2: Install from .deb package**
 
 ```bash
 sudo dpkg -i aish_<version>_<arch>.deb
+```
+
+Then launch:
+
+```bash
 aish
 ```
 
-说明：`aish` 无子命令时等价于 `aish run`。
+Note: `aish` without subcommands is equivalent to `aish run`.
 
-### 2) 像普通 Shell 一样用
+### 2) Use Like a Regular Shell
 
 ```bash
 aish> ls -la
@@ -86,51 +102,51 @@ aish> cd /etc
 aish> vim hosts
 ```
 
-### 3) 用 AI 做事（首字符输入 ；）
+### 3) Let AI Do the Work (Start with ;)
 
-以 `;` 或 `；` 开头会进入 AI 模式：
+Starting with `;` or `；` enters AI mode:
 
 ```bash
-aish> ;查找当前目录大于 100M 的文件并按大小排序
-aish> ;解释一下这个命令：tar -czf a.tgz ./dir
+aish> ;find files larger than 100M in current directory and sort by size
+aish> ;explain this command: tar -czf a.tgz ./dir
 ```
 
 ---
 
-## 安装
+## Installation
 
-### Debian/Ubuntu 等 发行版
+### Debian/Ubuntu Distributions
 
 ```bash
 sudo dpkg -i aish_<version>_<arch>.deb
 ```
 
-### 从源码运行（开发/试用）
+### Run from Source (Development/Trial)
 
 ```bash
 uv sync
 uv run aish
-# 或
+# or
 python -m aish
 ```
 
 ---
 
-## 卸载
+## Uninstallation
 
-卸载（保留配置文件）：
+Uninstall (keep configuration files):
 
 ```bash
 sudo dpkg -r aish
 ```
 
-彻底卸载（同时删除系统级安全策略）：
+Complete uninstallation (also removes system-level security policies):
 
 ```bash
 sudo dpkg -P aish
 ```
 
-可选：清理用户级配置（会清空模型/API Key 等）：
+Optional: Clean user-level configuration (will clear model/API keys etc.):
 
 ```bash
 rm -rf ~/.config/aish
@@ -138,19 +154,19 @@ rm -rf ~/.config/aish
 
 ---
 
-## 配置
+## Configuration
 
-### 配置文件位置
+### Configuration File Location
 
-- 默认：`~/.config/aish/config.yaml`（如设置了 `XDG_CONFIG_HOME`，则在 `$XDG_CONFIG_HOME/aish/config.yaml`）
+- Default: `~/.config/aish/config.yaml` (or `$XDG_CONFIG_HOME/aish/config.yaml` if `XDG_CONFIG_HOME` is set)
 
-### 优先级（从高到低）
+### Priority (High to Low)
 
-1. 命令行参数
-2. 环境变量
-3. 配置文件
+1. Command-line arguments
+2. Environment variables
+3. Configuration file
 
-### 最小配置示例
+### Minimal Configuration Example
 
 ```yaml
 # ~/.config/aish/config.yaml
@@ -159,7 +175,7 @@ api_base: https://openrouter.ai/api/v1
 api_key: your_api_key
 ```
 
-也可通过环境变量（更适合放置密钥）：
+Alternatively via environment variables (more suitable for secrets):
 
 ```bash
 export AISH_MODEL="openai/deepseek-chat"
@@ -168,29 +184,29 @@ export AISH_API_KEY="your_api_key"
 
 ```
 
-> 提示：LiteLLM 也支持读取特定厂商的环境变量（如 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`）。
+> Tip: LiteLLM also supports reading vendor-specific environment variables (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
 
-交互式配置（可选）：
+Interactive configuration (optional):
 
 ```bash
 aish setup
 ```
 
-工具调用兼容性检查（确认所选模型/渠道支持 tool calling）：
+Tool calling compatibility check (confirm selected model/channel supports tool calling):
 
 ```bash
 aish check-tool-support --model openai/deepseek-chat --api-base https://openrouter.ai/api/v1 --api-key your_api_key
 ```
 
-Langfuse（可选观测性）：
+Langfuse (optional observability):
 
-1) 在配置里打开：
+1) Enable in configuration:
 
 ```yaml
 enable_langfuse: true
 ```
 
-2) 设置环境变量：
+2) Set environment variables:
 
 ```bash
 export LANGFUSE_PUBLIC_KEY="..."
@@ -198,22 +214,22 @@ export LANGFUSE_SECRET_KEY="..."
 export LANGFUSE_HOST="https://cloud.langfuse.com"
 ```
 
-`aish check-langfuse` 会在项目根目录存在 `check_langfuse.py` 时执行检查。
+`aish check-langfuse` will run checks when `check_langfuse.py` exists in project root.
 
 ---
 
-## 使用方式
+## Usage
 
-### 常用输入类型
+### Common Input Types
 
-| 类型 | 示例 | 说明 |
-|:----:|------|------|
-| Shell 命令 | `ls -la`、`cd /path`、`git status` | 直接执行常规命令 |
-| AI 请求 | `;如何查看端口占用`、`；查找大于100M的文件` | 以 `;`/`；` 前缀进入 AI 模式 |
-| 内置命令 | `help`、`clear`、`exit`、`quit` | Shell 内置控制命令 |
-| 模型切换 | `/model gpt-4` | 查看或切换模型 |
+| Type | Example | Description |
+|:----:|---------|-------------|
+| Shell Commands | `ls -la`, `cd /path`, `git status` | Execute regular commands directly |
+| AI Requests | `;how to check port usage`, `;find files larger than 100M` | Enter AI mode with `;`/`；` prefix |
+| Built-in Commands | `help`, `clear`, `exit`, `quit` | Shell built-in control commands |
+| Model Switching | `/model gpt-4` | View or switch model |
 
-### Shell 兼容性（PTY）
+### Shell Compatibility (PTY)
 
 ```bash
 aish> ssh user@host
@@ -223,107 +239,107 @@ aish> vim /etc/hosts
 
 ---
 
-## 安全与风险控制
+## Security & Risk Control
 
-AI Shell 仅对 **AI 生成并准备执行** 的命令进行安全评估。
+AI Shell only performs security assessment on **AI-generated and ready-to-execute** commands.
 
-### 风险分级
+### Risk Levels
 
-- **LOW**：默认放行
-- **MEDIUM**：执行前确认
-- **HIGH**：默认阻断
+- **LOW**: Allowed by default
+- **MEDIUM**: Confirmation before execution
+- **HIGH**: Blocked by default
 
-### 安全策略文件路径
+### Security Policy File Path
 
-策略文件按以下顺序解析：
-1. `/etc/aish/security_policy.yaml`（系统级）
-2. `~/.config/aish/security_policy.yaml`（用户级；若不存在会自动生成模板）
+Policy files are resolved in this order:
+1. `/etc/aish/security_policy.yaml` (system-level)
+2. `~/.config/aish/security_policy.yaml` (user-level; auto-generated template if not exists)
 
-### 沙箱预跑（可选，推荐生产启用）
+### Sandbox Pre-run (Optional, Recommended for Production)
 
-默认策略 **未开启** 沙箱预跑。启用方法：
+Default policy has sandbox pre-run **disabled**. To enable:
 
-1) 在安全策略中设置：
+1) Set in security policy:
 
 ```yaml
 global:
   enable_sandbox: true
 ```
 
-2) 启动特权沙箱服务（systemd）：
+2) Start privileged sandbox service (systemd):
 
 ```bash
 sudo systemctl enable --now aish-sandbox.socket
 ```
 
-Socket 默认：`/run/aish/sandbox.sock`。  
-沙箱不可用时，会按策略里的 `sandbox_off_action`（BLOCK/CONFIRM/ALLOW）兜底。
+Default socket: `/run/aish/sandbox.sock`.
+When sandbox is unavailable, it will fallback according to `sandbox_off_action` (BLOCK/CONFIRM/ALLOW) in policy.
 
 ---
 
-## Skills（插件）
+## Skills (Plugins)
 
-Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优先级。
+Skills extend AI's domain knowledge and workflows, supporting hot loading and priority override.
 
-默认扫描目录与优先级：
-- `~/.config/aish/skills/`（或 `$AISH_CONFIG_DIR/skills`）
+Default scan directories and priority:
+- `~/.config/aish/skills/` (or `$AISH_CONFIG_DIR/skills`)
 - `~/.claude/skills/`
 
-打包版本会在首次启动时尝试把系统级技能复制到用户目录（如 `/usr/share/aish/skills`）。
+Packaged versions will attempt to copy system-level skills to user directory on first launch (e.g., `/usr/share/aish/skills`).
 
-更多说明见：`docs/skills-guide.md`
-
----
-
-## 数据与隐私
-
-本项目会在本地存储以下数据（便于排障与可追溯性）：
-
-- **日志**：默认 `~/.config/aish/logs/aish.log`
-- **会话/历史**：默认 `~/.local/share/aish/sessions.db`（SQLite）
-- **大输出 offload**：默认 `~/.local/share/aish/offload/`
-
-建议：
-- 不要把真实 API Key 提交到仓库；优先使用环境变量或密钥管理系统。
-- 生产环境可结合安全策略限制 AI 触达目录范围。
+For more details, see: `docs/skills-guide.md`
 
 ---
 
-## 文档
+## Data & Privacy
 
-- 配置说明：`CONFIGURATION.md`
-- 快速入门：`QUICKSTART.md`
-- Skills 使用：`docs/skills-guide.md`
-- 命令纠错机制：`docs/command-interaction-correction.md`
+This project stores the following data locally (for troubleshooting and traceability):
 
----
+- **Logs**: Default `~/.config/aish/logs/aish.log`
+- **Sessions/History**: Default `~/.local/share/aish/sessions.db` (SQLite)
+- **Large Output Offload**: Default `~/.local/share/aish/offload/`
 
-## 社区与支持
-
-| 链接 | 说明 |
-|------|------|
-| [官方网站](https://aishell.ai) | 项目官网与更多信息 |
-| [GitHub 仓库](https://github.com/AI-Shell-Team/aish/) | 源码与问题反馈 |
-| [GitHub Issues](https://github.com/AI-Shell-Team/aish/issues) | Bug 报告 |
-| [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) | 社区讨论 |
+Recommendations:
+- Don't commit real API keys to repository; prefer environment variables or secret management systems.
+- Production environments can combine security policies to limit AI-accessible directory scope.
 
 ---
 
-## 开发与测试
+## Documentation
+
+- Configuration Guide: `CONFIGURATION.md`
+- Quick Start: `QUICKSTART.md`
+- Skills Usage: `docs/skills-guide.md`
+- Command Correction Mechanism: `docs/command-interaction-correction.md`
+
+---
+
+## Community & Support
+
+| Link | Description |
+|------|-------------|
+| [Official Website](https://aishell.ai) | Project homepage and more information |
+| [GitHub Repository](https://github.com/AI-Shell-Team/aish/) | Source code and issue tracking |
+| [GitHub Issues](https://github.com/AI-Shell-Team/aish/issues) | Bug reports |
+| [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) | Community discussions |
+
+---
+
+## Development & Testing
 
 ```bash
-uv sync 
+uv sync
 uv run aish
 uv run pytest
 ```
 
 ---
 
-## 贡献
+## Contributing
 
 `CONTRIBUTING.md`
 ---
 
-## 许可证
+## License
 
-`LICENSE`（Apache 2.0）
+`LICENSE` (Apache 2.0)

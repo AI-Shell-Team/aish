@@ -1,0 +1,369 @@
+name: Auto response
+
+on:
+  issues:
+    types: [opened, edited, labeled]
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  auto-response:
+    permissions:
+      issues: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Handle labeled items and comments
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Auto-response rules for labels prefixed with "r:"
+            const rules = [
+              {
+                label: "r: support",
+                close: true,
+                message:
+                  "Please use [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) for support questions. " +
+                  "You can also check the documentation at https://github.com/AI-Shell-Team/aish/blob/main/README.md",
+              },
+              {
+                label: "r: duplicate",
+                close: true,
+                message:
+                  "This issue has been marked as a duplicate. Please continue the discussion in the linked issue.",
+              },
+              {
+                label: "r: wontfix",
+                close: true,
+                message:
+                  "This issue has been marked as \"wontfix\". " +
+                  "This means we have reviewed the issue and decided not to implement the requested feature or fix. " +
+                  "Thank you for your understanding.",
+              },
+              {
+                label: "r: question",
+                close: true,
+                message:
+                  "This appears to be a question rather than a bug report or feature request. " +
+                  "Please use [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) for questions.",
+              },
+            ];
+
+            const mentionRegex = /@([A-Za-z0-9-]+)/g;
+            const bugSubtypeLabelSpecs = {
+              regression: {
+                color: "D93F0B",
+                description: "Behavior that previously worked and now fails",
+              },
+              "bug:crash": {
+                color: "B60205",
+                description: "Process/app exits unexpectedly or hangs",
+              },
+              "bug:behavior": {
+                color: "D73A4A",
+                description: "Incorrect behavior without a crash",
+              },
+              "bug:security": {
+                color: "d93f0b",
+                description: "Security vulnerability",
+              },
+            };
+            const bugTypeToLabel = {
+              "Regression (worked before, now fails)": "regression",
+              "Crash (process/app exits or hangs)": "bug:crash",
+              "Behavior bug (incorrect output/state without crash)": "bug:behavior",
+              "Security issue": "bug:security",
+            };
+            const bugSubtypeLabels = Object.keys(bugSubtypeLabelSpecs);
+
+            const extractIssueFormValue = (body, field) => {
+              if (!body) {
+                return "";
+              }
+              const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              const regex = new RegExp(
+                `(?:^|\\n)###\\s+${escapedField}\\s*\\n([\\s\\S]*?)(?=\\n###\\s+|$)`,
+                "i",
+              );
+              const match = body.match(regex);
+              if (!match) {
+                return "";
+              }
+              for (const line of match[1].split("\n")) {
+                const trimmed = line.trim();
+                if (trimmed) {
+                  return trimmed;
+                }
+              }
+              return "";
+            };
+
+            const ensureLabelExists = async (name, color, description) => {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                });
+              } catch (error) {
+                if (error?.status !== 404) {
+                  throw error;
+                }
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color,
+                  description,
+                });
+              }
+            };
+
+            const syncBugSubtypeLabel = async (issue, labelSet) => {
+              if (!labelSet.has("bug")) {
+                return;
+              }
+
+              const selectedBugType = extractIssueFormValue(issue.body ?? "", "Bug type");
+              const targetLabel = bugTypeToLabel[selectedBugType];
+              if (!targetLabel) {
+                return;
+              }
+
+              const targetSpec = bugSubtypeLabelSpecs[targetLabel];
+              await ensureLabelExists(targetLabel, targetSpec.color, targetSpec.description);
+
+              for (const subtypeLabel of bugSubtypeLabels) {
+                if (subtypeLabel === targetLabel) {
+                  continue;
+                }
+                if (!labelSet.has(subtypeLabel)) {
+                  continue;
+                }
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    name: subtypeLabel,
+                  });
+                  labelSet.delete(subtypeLabel);
+                } catch (error) {
+                  if (error?.status !== 404) {
+                    throw error;
+                  }
+                }
+              }
+
+              if (!labelSet.has(targetLabel)) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: [targetLabel],
+                });
+                labelSet.add(targetLabel);
+              }
+            };
+
+            const triggerLabel = "trigger-response";
+            const target = context.payload.issue ?? context.payload.pull_request;
+            if (!target) {
+              return;
+            }
+
+            const labelSet = new Set(
+              (target.labels ?? [])
+                .map((label) => (typeof label === "string" ? label : label?.name))
+                .filter((name) => typeof name === "string"),
+            );
+
+            const issue = context.payload.issue;
+            const pullRequest = context.payload.pull_request;
+            const comment = context.payload.comment;
+
+            // Handle comments
+            if (comment) {
+              const authorLogin = comment.user?.login ?? "";
+              if (comment.user?.type === "Bot" || authorLogin.endsWith("[bot]")) {
+                return;
+              }
+
+              const commentBody = comment.body ?? "";
+              const responses = [];
+
+              // Check for spam mentions (more than 2 maintainer mentions)
+              const mentions = (commentBody.match(mentionRegex) || []).length;
+              if (mentions > 2) {
+                responses.push(
+                  "Please avoid spamming mentions. Be patient, or use [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) for help."
+                );
+              }
+
+              if (responses.length > 0) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: target.number,
+                  body: responses.join("\n\n"),
+                });
+              }
+              return;
+            }
+
+            // Handle issues
+            if (issue) {
+              const action = context.payload.action;
+              if (action === "opened" || action === "edited") {
+                const issueText = `${issue.title ?? ""}\n${issue.body ?? ""}`.trim();
+                const authorLogin = issue.user?.login ?? "";
+
+                // Check for spam mentions in issue
+                const mentions = (issueText.match(mentionRegex) || []).length;
+                if (mentions > 2 && authorLogin !== context.repo.owner) {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: issue.number,
+                    body: "Please avoid spamming mentions in issues. Be concise and specific about the problem.",
+                  });
+                }
+
+                await syncBugSubtypeLabel(issue, labelSet);
+              }
+
+              // Auto-add security label for security-related titles
+              const title = issue.title ?? "";
+              if (title.toLowerCase().includes("security") && !labelSet.has("security")) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  labels: ["security"],
+                });
+                labelSet.add("security");
+              }
+            }
+
+            // Handle trigger label
+            const hasTriggerLabel = labelSet.has(triggerLabel);
+            if (hasTriggerLabel) {
+              labelSet.delete(triggerLabel);
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: target.number,
+                  name: triggerLabel,
+                });
+              } catch (error) {
+                if (error?.status !== 404) {
+                  throw error;
+                }
+              }
+            }
+
+            const isLabelEvent = context.payload.action === "labeled";
+            if (!hasTriggerLabel && !isLabelEvent) {
+              return;
+            }
+
+            // Handle invalid/dirty labels
+            const invalidLabel = "invalid";
+            const dirtyLabel = "dirty";
+            const noisyPrMessage =
+              "Closing this PR because it looks dirty (too many unrelated or unexpected changes). " +
+              "Please recreate the PR from a clean branch.";
+
+            if (pullRequest) {
+              if (labelSet.has(dirtyLabel)) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pullRequest.number,
+                  body: noisyPrMessage,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pullRequest.number,
+                  state: "closed",
+                });
+                return;
+              }
+              const labelCount = labelSet.size;
+              if (labelCount > 20) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pullRequest.number,
+                  body: noisyPrMessage,
+                });
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pullRequest.number,
+                  state: "closed",
+                });
+                return;
+              }
+              if (labelSet.has(invalidLabel)) {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pullRequest.number,
+                  state: "closed",
+                });
+                return;
+              }
+            }
+
+            if (issue && labelSet.has(invalidLabel)) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: "closed",
+                state_reason: "not_planned",
+              });
+              return;
+            }
+
+            // Handle auto-response rules
+            const rule = rules.find((item) => labelSet.has(item.label));
+            if (!rule) {
+              return;
+            }
+
+            const issueNumber = target.number;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: rule.message,
+            });
+
+            if (rule.close) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                state: "closed",
+                state_reason: "not_planned",
+              });
+            }
+
+            if (rule.lock) {
+              await github.rest.issues.lock({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                lock_reason: rule.lockReason ?? "resolved",
+              });
+            }

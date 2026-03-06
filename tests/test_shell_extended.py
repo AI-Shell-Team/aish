@@ -2,27 +2,23 @@
 Extended comprehensive tests for Shell functionality
 """
 
-import pytest
-import tempfile
-import os
 import asyncio
 import json
-from unittest.mock import Mock, patch, AsyncMock, MagicMock
+import os
+import tempfile
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
-from aish.shell import (
-    AIShell,
-    CommandStatus,
-    CommandResult,
-    QuotedPathCompleter,
-    make_shell_completer,
-)
+import pytest
+
 from aish.config import ConfigModel
-from aish.llm import LLMEventType, LLMCallbackResult
 from aish.context_manager import MemoryType
-from aish.skills import SkillManager
+from aish.llm import LLMCallbackResult, LLMEventType
 from aish.security.security_manager import SecurityDecision
 from aish.security.security_policy import RiskLevel
+from aish.shell import (AIShell, CommandResult, CommandStatus,
+                        QuotedPathCompleter, make_shell_completer)
+from aish.skills import SkillManager
 
 
 def make_decision(*, allow: bool, require_confirmation: bool) -> SecurityDecision:
@@ -159,8 +155,12 @@ class TestAIShellExtended:
         self.shell.config_manager = Mock()
 
         with (
-            patch("aish.shell.to_thread.run_sync", new_callable=AsyncMock) as mock_run_sync,
-            patch.object(self.shell.history_manager, "add_entry", new_callable=AsyncMock),
+            patch(
+                "aish.shell.to_thread.run_sync", new_callable=AsyncMock
+            ) as mock_run_sync,
+            patch.object(
+                self.shell.history_manager, "add_entry", new_callable=AsyncMock
+            ),
         ):
             mock_run_sync.return_value = ConfigModel(model="openai/gpt-4o", api_key="k")
 
@@ -213,8 +213,10 @@ class TestAIShellExtended:
         original_dir = os.getcwd()
 
         try:
-            with tempfile.TemporaryDirectory() as temp_dir1, \
-                 tempfile.TemporaryDirectory() as temp_dir2:
+            with (
+                tempfile.TemporaryDirectory() as temp_dir1,
+                tempfile.TemporaryDirectory() as temp_dir2,
+            ):
 
                 # Push two directories
                 await self.shell.handle_pushd_command(f"pushd {temp_dir1}")
@@ -277,9 +279,11 @@ class TestAIShellExtended:
         original_dir = os.getcwd()
 
         try:
-            with tempfile.TemporaryDirectory() as temp_dir1, \
-                 tempfile.TemporaryDirectory() as temp_dir2, \
-                 tempfile.TemporaryDirectory() as temp_dir3:
+            with (
+                tempfile.TemporaryDirectory() as temp_dir1,
+                tempfile.TemporaryDirectory() as temp_dir2,
+                tempfile.TemporaryDirectory() as temp_dir3,
+            ):
 
                 # Push multiple directories
                 await self.shell.handle_pushd_command(f"pushd {temp_dir1}")
@@ -313,8 +317,7 @@ class TestAIShellExtended:
             # Should show error message
             mock_print.assert_called()
             has_error = any(
-                "empty" in str(call).lower()
-                or "no directories" in str(call).lower()
+                "empty" in str(call).lower() or "no directories" in str(call).lower()
                 for call in mock_print.call_args_list
             )
             assert has_error
@@ -334,7 +337,9 @@ class TestAIShellExtended:
                 CommandStatus.SUCCESS, 0, "Hello World", ""
             )
 
-            result = await self.shell.execute_command_with_security("echo 'Hello World'")
+            result = await self.shell.execute_command_with_security(
+                "echo 'Hello World'"
+            )
 
             assert result.status == CommandStatus.SUCCESS
             assert result.stdout == "Hello World"
@@ -353,9 +358,7 @@ class TestAIShellExtended:
                 "_get_shell_command_confirmation",
                 return_value=LLMCallbackResult.APPROVE,
             ),
-            patch.object(
-                self.shell, "execute_command_with_pty"
-            ) as mock_exec,
+            patch.object(self.shell, "execute_command_with_pty") as mock_exec,
         ):
             mock_exec.return_value = CommandResult(
                 CommandStatus.SUCCESS, 0, "Command executed", ""
@@ -478,10 +481,8 @@ class TestAIShellExtended:
             with patch.object(self.shell.console, "print") as mock_print:
                 await self.shell.ask_oracle("Test question")
 
-                # Should print error message
                 error_printed = any(
-                    "error" in str(call).lower()
-                    for call in mock_print.call_args_list
+                    "error" in str(call).lower() for call in mock_print.call_args_list
                 )
                 assert error_printed
 
@@ -497,10 +498,7 @@ class TestAIShellExtended:
         self.shell.llm_session.event_callback = test_callback
 
         # Emit a test event
-        self.shell.llm_session.emit_event(
-            LLMEventType.OP_START,
-            {"test": "data"}
-        )
+        self.shell.llm_session.emit_event(LLMEventType.OP_START, {"test": "data"})
 
         assert len(callback_calls) == 1
         assert callback_calls[0].event_type == LLMEventType.OP_START
@@ -517,7 +515,9 @@ class TestAIShellExtended:
         ]
 
         for input_text, expected_handler in test_cases:
-            with patch.object(self.shell, "handle_ai_command", new_callable=AsyncMock) as mock_ai:
+            with patch.object(
+                self.shell, "handle_ai_command", new_callable=AsyncMock
+            ) as mock_ai:
                 await self.shell.process_input(input_text)
 
                 if expected_handler == "ai_command":
@@ -550,7 +550,10 @@ class TestAIShellExtended:
     async def test_run_main_loop_mock(self):
         """Test main shell loop with mocking"""
         with patch.object(self.shell, "get_user_input", side_effect=["help", "exit"]):
-            with patch.object(self.shell, "process_input", new_callable=AsyncMock) as mock_process:
+            with patch.object(
+                self.shell, "process_input", new_callable=AsyncMock
+            ) as mock_process:
+
                 async def process_side_effect(user_input):
                     if user_input.strip() in {"exit", "quit"}:
                         self.shell.running = False
@@ -576,10 +579,7 @@ class TestAIShellExtended:
     def test_context_integration(self):
         """Test context manager integration"""
         # Add some context - use new compact format
-        self.shell.context_manager.add_memory(
-            MemoryType.SHELL,
-            "$ ls -la → ✓"
-        )
+        self.shell.context_manager.add_memory(MemoryType.SHELL, "$ ls -la → ✓")
 
         # Verify context is available using new API
         messages = self.shell.context_manager.as_messages()
@@ -593,7 +593,7 @@ class TestAIShellExtended:
         json_command = {
             "type": "long_running_command",
             "command": "top",
-            "description": "System monitor"
+            "description": "System monitor",
         }
 
         with patch.object(
@@ -603,7 +603,9 @@ class TestAIShellExtended:
 
             with (
                 patch.object(self.shell.console, "print") as mock_print,
-                patch.object(self.shell.session, "prompt_async", new_callable=AsyncMock) as mock_prompt,
+                patch.object(
+                    self.shell.session, "prompt_async", new_callable=AsyncMock
+                ) as mock_prompt,
             ):
                 mock_prompt.return_value = "n"
                 await self.shell.handle_ai_command("Show me system processes")
@@ -615,9 +617,21 @@ class TestAIShellExtended:
     async def test_long_running_command_detection(self):
         """Test detection and handling of long-running commands"""
         long_running_commands = [
-            {"type": "long_running_command", "command": "top", "description": "monitor"},
-            {"type": "long_running_command", "command": "vim file.txt", "description": "editor"},
-            {"type": "long_running_command", "command": "mysql -u root", "description": "database"},
+            {
+                "type": "long_running_command",
+                "command": "top",
+                "description": "monitor",
+            },
+            {
+                "type": "long_running_command",
+                "command": "vim file.txt",
+                "description": "editor",
+            },
+            {
+                "type": "long_running_command",
+                "command": "mysql -u root",
+                "description": "database",
+            },
         ]
 
         for cmd_json in long_running_commands:
@@ -649,6 +663,26 @@ class TestAIShellExtended:
                 # Should handle invalid JSON gracefully
                 mock_print.assert_called()
 
+    @pytest.mark.asyncio
+    async def test_handle_ai_command_jsondecodeerror_shows_friendly_hint(self):
+        """JSON decoding errors should show guidance without raw decoder text."""
+        with patch.object(
+            self.shell.llm_session, "process_input", new_callable=AsyncMock
+        ) as mock_llm:
+            mock_llm.side_effect = json.JSONDecodeError(
+                "Unterminated string starting at", '{"code":"echo /tmp', 8
+            )
+
+            with patch.object(self.shell.console, "print") as mock_print:
+                await self.shell.handle_ai_command("Test question")
+
+                printed = "\n".join(str(call) for call in mock_print.call_args_list)
+                assert (
+                    "请求失败，请重试" in printed
+                    or "Request failed, please retry" in printed
+                )
+                assert "Unterminated string starting at" not in printed
+
 
 class TestQuotedPathCompleter:
     """Test QuotedPathCompleter functionality"""
@@ -665,8 +699,9 @@ class TestQuotedPathCompleter:
 
     def test_completion_quoting_logic(self):
         """Test path quoting logic with real file system"""
-        import tempfile
         import os
+        import tempfile
+
         from prompt_toolkit.document import Document
 
         # Create a temporary directory with test files
@@ -677,9 +712,9 @@ class TestQuotedPathCompleter:
             os.chdir(temp_dir)
 
             # Create test files
-            with open("normal_file.txt", 'w') as f:
+            with open("normal_file.txt", "w") as f:
                 f.write("test")
-            with open("file with spaces.txt", 'w') as f:
+            with open("file with spaces.txt", "w") as f:
                 f.write("test")
 
             # Test normal file completion
@@ -692,7 +727,10 @@ class TestQuotedPathCompleter:
             normal_completions = [c for c in completions if "normal_file.txt" in c.text]
             assert len(normal_completions) >= 1
             # Check that the completion doesn't have quotes
-            assert "'" not in normal_completions[0].text and '"' not in normal_completions[0].text
+            assert (
+                "'" not in normal_completions[0].text
+                and '"' not in normal_completions[0].text
+            )
 
             # Test file with spaces completion
             document = Document("file with")
@@ -700,14 +738,17 @@ class TestQuotedPathCompleter:
 
             assert len(completions) >= 1
             # Files with spaces should be quoted
-            space_completions = [c for c in completions if "file with spaces.txt" in c.text]
+            space_completions = [
+                c for c in completions if "file with spaces.txt" in c.text
+            ]
             assert len(space_completions) >= 1
             # Check that the completion has quotes
-            assert ("'" in space_completions[0].text or '"' in space_completions[0].text)
+            assert "'" in space_completions[0].text or '"' in space_completions[0].text
 
         finally:
             os.chdir(original_cwd)
             import shutil
+
             shutil.rmtree(temp_dir)
 
 
@@ -755,7 +796,9 @@ class TestShellEventIntegration:
 
             async def mock_process_with_events(*args, **kwargs):
                 # Simulate events during processing
-                self.shell.llm_session.emit_event(LLMEventType.GENERATION_START, {"prompt": "test"})
+                self.shell.llm_session.emit_event(
+                    LLMEventType.GENERATION_START, {"prompt": "test"}
+                )
                 self.shell.llm_session.emit_event(
                     LLMEventType.GENERATION_END, {"response_received": True}
                 )
@@ -796,6 +839,7 @@ class TestShellEventIntegration:
 
     def test_event_callback_error_handling(self):
         """Test error handling in event callbacks"""
+
         def failing_callback(event):
             if event.event_type == LLMEventType.OP_START:
                 raise Exception("Callback error")
@@ -805,8 +849,7 @@ class TestShellEventIntegration:
 
         # Should not crash when callback fails
         result = self.shell.llm_session.emit_event(
-            LLMEventType.OP_START,
-            {"test": "data"}
+            LLMEventType.OP_START, {"test": "data"}
         )
 
         # Should return default result
@@ -833,6 +876,7 @@ class TestPwdOptions:
         """pwd 默认显示逻辑路径"""
         with tempfile.TemporaryDirectory() as temp_dir:
             from pathlib import Path
+
             # Create actual directory and symlink
             actual_dir = Path(temp_dir) / "actual_dir"
             actual_dir.mkdir()
@@ -863,6 +907,7 @@ class TestPwdOptions:
         """pwd -P 显示物理路径"""
         with tempfile.TemporaryDirectory() as temp_dir:
             from pathlib import Path
+
             # Create actual directory and symlink
             actual_dir = Path(temp_dir) / "actual_dir"
             actual_dir.mkdir()
@@ -882,7 +927,10 @@ class TestPwdOptions:
                     # Should print the physical path (resolving symlink)
                     calls = [str(call) for call in mock_print.call_args_list]
                     # Physical path should be the actual directory
-                    assert any(str(actual_dir) in call or "actual_dir" in call for call in calls)
+                    assert any(
+                        str(actual_dir) in call or "actual_dir" in call
+                        for call in calls
+                    )
 
             except OSError:
                 # Skip test on systems that don't support symlinks

@@ -59,10 +59,15 @@ class ShellInputRouter:
             return InputRoute(intent=InputIntent.SPECIAL_COMMAND, command_name=text)
 
         if text == "history" or text.startswith("history "):
-            return InputRoute(intent=InputIntent.BUILTIN_COMMAND, command_name="history")
+            return InputRoute(
+                intent=InputIntent.BUILTIN_COMMAND, command_name="history"
+            )
 
         first = text.split()[0] if text.split() else ""
-        if first and any(text == name or text.startswith(name + " ") for name in self.QUICK_BUILTIN_PREFIXES):
+        if first and any(
+            text == name or text.startswith(name + " ")
+            for name in self.QUICK_BUILTIN_PREFIXES
+        ):
             return InputRoute(intent=InputIntent.BUILTIN_COMMAND, command_name=first)
 
         try:

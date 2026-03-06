@@ -1,32 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Optional
 import json
+import logging
 import os
 import pwd
-import subprocess
 import socket
 import struct
+import subprocess
 import sys
 import threading
 import time
-import logging
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
 
-from .sandbox import (
-    SandboxUnavailableError,
-    DEFAULT_SANDBOX_SOCKET_PATH,
-    strip_sudo_prefix,
-)
+from ..logging_utils import (add_context_filter,
+                             build_sandboxd_rotating_file_handler,
+                             init_sandboxd_logging, set_session_uuid)
+from .sandbox import (DEFAULT_SANDBOX_SOCKET_PATH, SandboxUnavailableError,
+                      strip_sudo_prefix)
 from .sandbox_types import FsChange, SandboxResult
-from ..logging_utils import (
-    build_sandboxd_rotating_file_handler,
-    add_context_filter,
-    init_sandboxd_logging,
-    set_session_uuid,
-)
 
 _SANDBOX_LOG_FILE = "sandbox.log"
 _SANDBOX_LOG_DIR = Path(".config") / "aish" / "logs"
@@ -81,7 +75,11 @@ def _summarize_changes(changes: Any) -> tuple[int, int, int, int, list[str]]:
         elif kind == "deleted":
             deleted += 1
 
-        if len(samples) < _CHANGES_SAMPLE_MAX and isinstance(kind, str) and isinstance(path, str):
+        if (
+            len(samples) < _CHANGES_SAMPLE_MAX
+            and isinstance(kind, str)
+            and isinstance(path, str)
+        ):
             # Keep it short and structured.
             samples.append(f"{kind}:{path}")
 
@@ -140,7 +138,11 @@ def _format_log_message(
             file_changes_display = "none"
         else:
             file_changes_display = str(changes_count)
-            if changes_created is not None or changes_modified is not None or changes_deleted is not None:
+            if (
+                changes_created is not None
+                or changes_modified is not None
+                or changes_deleted is not None
+            ):
                 file_changes_display = (
                     f"{changes_count} (created:{int(changes_created or 0)}, "
                     f"modified:{int(changes_modified or 0)}, deleted:{int(changes_deleted or 0)})"
@@ -182,7 +184,9 @@ def _format_log_message(
             lines.append(f"    > {line}")
 
     if changes_sample:
-        lines.append(f"  ChangeSample: {json.dumps(changes_sample, ensure_ascii=False)}")
+        lines.append(
+            f"  ChangeSample: {json.dumps(changes_sample, ensure_ascii=False)}"
+        )
     if simulate_ms is not None or duration_ms is not None:
         timing_bits: list[str] = []
         if simulate_ms is not None:
@@ -257,7 +261,9 @@ class SandboxDaemon:
         # session id; generate a stable id for this daemon instance.
         self._session_uuid = uuid.uuid4().hex[:8]
         set_session_uuid(self._session_uuid)
-        self._logger = init_sandboxd_logging(log_path=None, level=logging.INFO, also_stderr=True)
+        self._logger = init_sandboxd_logging(
+            log_path=None, level=logging.INFO, also_stderr=True
+        )
         self._log_lock = threading.Lock()
         self._file_handlers: dict[int, logging.Handler] = {}
         self._file_handler_order: list[int] = []
@@ -286,7 +292,9 @@ class SandboxDaemon:
                 conn, _addr = sock.accept()
             except OSError:
                 continue
-            t = threading.Thread(target=self._handle_connection, args=(conn,), daemon=True)
+            t = threading.Thread(
+                target=self._handle_connection, args=(conn,), daemon=True
+            )
             t.start()
 
     def stop(self) -> None:
@@ -333,7 +341,15 @@ class SandboxDaemon:
                     simulate_ms=None,
                     duration_ms=_elapsed_ms(start_ts),
                 )
-                self._send_json(conn, {"id": None, "ok": False, "reason": "bad_request", "error": str(exc)})
+                self._send_json(
+                    conn,
+                    {
+                        "id": None,
+                        "ok": False,
+                        "reason": "bad_request",
+                        "error": str(exc),
+                    },
+                )
                 return
 
             req_id = req.get("id") if isinstance(req, dict) else None
@@ -354,7 +370,15 @@ class SandboxDaemon:
                     simulate_ms=None,
                     duration_ms=_elapsed_ms(start_ts),
                 )
-                self._send_json(conn, {"id": None, "ok": False, "reason": "bad_request", "error": "missing_id"})
+                self._send_json(
+                    conn,
+                    {
+                        "id": None,
+                        "ok": False,
+                        "reason": "bad_request",
+                        "error": "missing_id",
+                    },
+                )
                 return
 
             client_pid_raw = req.get("client_pid")
@@ -371,7 +395,11 @@ class SandboxDaemon:
             command = req.get("command")
             cwd = req.get("cwd")
             repo_root = req.get("repo_root")
-            if not isinstance(command, str) or not isinstance(cwd, str) or not isinstance(repo_root, str):
+            if (
+                not isinstance(command, str)
+                or not isinstance(cwd, str)
+                or not isinstance(repo_root, str)
+            ):
                 self._log_event(
                     uid=uid,
                     gid=gid,
@@ -388,7 +416,15 @@ class SandboxDaemon:
                     simulate_ms=None,
                     duration_ms=_elapsed_ms(start_ts),
                 )
-                self._send_json(conn, {"id": req_id, "ok": False, "reason": "bad_request", "error": "missing_fields"})
+                self._send_json(
+                    conn,
+                    {
+                        "id": req_id,
+                        "ok": False,
+                        "reason": "bad_request",
+                        "error": "missing_fields",
+                    },
+                )
                 return
 
             run_as: Optional[str] = None
@@ -490,7 +526,9 @@ class SandboxDaemon:
                 )
                 return
 
-            changes_total, c_created, c_modified, c_deleted, samples = _summarize_changes(result.changes or [])
+            changes_total, c_created, c_modified, c_deleted, samples = (
+                _summarize_changes(result.changes or [])
+            )
             exit_code_int = int(result.exit_code)
             stderr_full = result.stderr or ""
             reason = None if exit_code_int == 0 else "sandbox_execute_failed"
@@ -517,8 +555,12 @@ class SandboxDaemon:
                 duration_ms=_elapsed_ms(start_ts),
             )
 
-            stdout_limited, stdout_truncated = _truncate_text(result.stdout or "", _IPC_STDIO_MAX_BYTES)
-            stderr_limited, stderr_truncated = _truncate_text(result.stderr or "", _IPC_STDIO_MAX_BYTES)
+            stdout_limited, stdout_truncated = _truncate_text(
+                result.stdout or "", _IPC_STDIO_MAX_BYTES
+            )
+            stderr_limited, stderr_truncated = _truncate_text(
+                result.stderr or "", _IPC_STDIO_MAX_BYTES
+            )
             changes_raw = result.changes or []
             changes_truncated = len(changes_raw) > _IPC_CHANGES_MAX
             changes_limited = changes_raw[:_IPC_CHANGES_MAX]
@@ -535,7 +577,9 @@ class SandboxDaemon:
                         "stdout_truncated": stdout_truncated,
                         "stderr_truncated": stderr_truncated,
                         "changes_truncated": changes_truncated,
-                        "changes": [{"path": c.path, "kind": c.kind} for c in changes_limited],
+                        "changes": [
+                            {"path": c.path, "kind": c.kind} for c in changes_limited
+                        ],
                     },
                 },
             )
@@ -670,7 +714,9 @@ class SandboxDaemon:
         rr = Path(repo_root).resolve()
         wd = Path(cwd).resolve()
         if not rr.is_absolute() or not wd.is_absolute():
-            raise SandboxUnavailableError("invalid_paths", details="repo_root/cwd must be absolute")
+            raise SandboxUnavailableError(
+                "invalid_paths", details="repo_root/cwd must be absolute"
+            )
 
         sim_uid: Optional[int] = uid if uid >= 0 else None
         sim_gid: Optional[int] = gid if gid >= 0 else None
@@ -681,7 +727,9 @@ class SandboxDaemon:
         stripped_cmd, sudo_detected, ok = strip_sudo_prefix(command)
         if sudo_detected:
             if not ok:
-                raise SandboxUnavailableError("sandbox_execute_failed", details="missing_command")
+                raise SandboxUnavailableError(
+                    "sandbox_execute_failed", details="missing_command"
+                )
             command = stripped_cmd
             sim_uid = None
             sim_gid = None
@@ -721,9 +769,13 @@ class SandboxDaemon:
             details = f"timeout_s={timeout_s}" if timeout_s is not None else "timeout"
             raise SandboxUnavailableError("sandbox_timeout", details=details) from exc
         except FileNotFoundError as exc:
-            raise SandboxUnavailableError("command_not_found", details="unshare") from exc
+            raise SandboxUnavailableError(
+                "command_not_found", details="unshare"
+            ) from exc
         except OSError as exc:
-            raise SandboxUnavailableError("sandbox_unavailable", details=str(exc)) from exc
+            raise SandboxUnavailableError(
+                "sandbox_unavailable", details=str(exc)
+            ) from exc
 
         stdout_text = (proc.stdout or "").strip()
         if not stdout_text:
@@ -736,10 +788,14 @@ class SandboxDaemon:
             resp = json.loads(line)
         except Exception as exc:
             detail = f"invalid_worker_json: {line[:200]}"
-            raise SandboxUnavailableError("sandbox_execute_failed", details=detail) from exc
+            raise SandboxUnavailableError(
+                "sandbox_execute_failed", details=detail
+            ) from exc
 
         if not isinstance(resp, dict):
-            raise SandboxUnavailableError("sandbox_execute_failed", details="worker_response_not_object")
+            raise SandboxUnavailableError(
+                "sandbox_execute_failed", details="worker_response_not_object"
+            )
 
         if resp.get("ok") is not True:
             reason = str(resp.get("reason") or "sandbox_execute_failed")
@@ -748,7 +804,9 @@ class SandboxDaemon:
 
         result_obj = resp.get("result")
         if not isinstance(result_obj, dict):
-            raise SandboxUnavailableError("sandbox_execute_failed", details="worker_missing_result")
+            raise SandboxUnavailableError(
+                "sandbox_execute_failed", details="worker_missing_result"
+            )
 
         changes_raw = result_obj.get("changes")
         changes: list[FsChange] = []

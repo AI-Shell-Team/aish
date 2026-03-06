@@ -8,15 +8,11 @@ The handlers are designed to be used by both:
 - BashTool (for AI-generated commands)
 """
 
-from aish.builtin.handlers import BuiltinHandlers, BuiltinResult, DirectoryStack
-from aish.builtin.registry import (
-    BuiltinRegistry,
-    STATE_MODIFYING_COMMANDS,
-    PTY_REQUIRING_COMMANDS,
-    REJECTED_COMMANDS,
-    ALL_BUILTIN_COMMANDS,
-    COMMAND_DESCRIPTIONS,
-)
+from aish.builtin.handlers import (BuiltinHandlers, BuiltinResult,
+                                   DirectoryStack)
+from aish.builtin.registry import (ALL_BUILTIN_COMMANDS, COMMAND_DESCRIPTIONS,
+                                   PTY_REQUIRING_COMMANDS, REJECTED_COMMANDS,
+                                   STATE_MODIFYING_COMMANDS, BuiltinRegistry)
 
 __all__ = [
     "BuiltinHandlers",

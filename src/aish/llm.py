@@ -1,40 +1,34 @@
-import anyio
 import importlib
 import json
 import logging
 import threading
-from typing import Optional, Callable
-import uuid
 import time
-from enum import Enum
+import uuid
 from dataclasses import dataclass
+from enum import Enum
+from typing import Callable, Optional
 
+import anyio
+
+from aish.agents import SystemDiagnoseAgent
+from aish.cancellation import CancellationReason, CancellationToken
 from aish.config import ConfigModel
 from aish.context_manager import ContextManager, MemoryType
+from aish.exception import (AuthenticationError, ContextWindowExceededError,
+                            InvalidRequestError, LiteLLMError, RateLimitError,
+                            ServiceUnavailableError)
+from aish.exception import TimeoutError as LiteLLMTimeoutError
+from aish.exception import (handle_litellm_exception, is_litellm_exception,
+                            redact_secrets)
+from aish.i18n import t
+from aish.interruption import ShellState
+from aish.litellm_loader import load_litellm
+from aish.prompts import PromptManager
 from aish.skills import SkillManager
 from aish.tools.base import ToolBase
 from aish.tools.code_exec import BashTool, PythonTool
 from aish.tools.fs_tools import EditFileTool, ReadFileTool, WriteFileTool
 from aish.tools.result import ToolResult
-from aish.cancellation import CancellationToken, CancellationReason
-from aish.interruption import ShellState
-from aish.agents import SystemDiagnoseAgent
-from aish.prompts import PromptManager
-from aish.i18n import t
-from aish.litellm_loader import load_litellm
-from aish.exception import (
-    is_litellm_exception,
-    handle_litellm_exception,
-    LiteLLMError,
-    RateLimitError,
-    InvalidRequestError,
-    AuthenticationError,
-    TimeoutError as LiteLLMTimeoutError,
-    ServiceUnavailableError,
-    ContextWindowExceededError,
-    redact_secrets,
-)
-
 from aish.tools.skill import SkillTool, render_skills_reminder_text
 
 logger = logging.getLogger("aish.llm")
@@ -353,6 +347,7 @@ class LLMSession:
             self.write_file_tool = WriteFileTool()
             self.edit_file_tool = EditFileTool()
             from aish.tools.ask_user import AskUserTool
+
             self.ask_user_tool = AskUserTool(request_choice=self.request_user_choice)
             self.skill_tool = SkillTool(skills=self.skill_manager.to_skill_infos())
             self.system_diagnose_agent = SystemDiagnoseAgent(
@@ -497,10 +492,14 @@ class LLMSession:
 
                     with self._sync_init_lock:
                         self._initialized = True
-                    logger.info("LLM client initialized successfully in background thread")
+                    logger.info(
+                        "LLM client initialized successfully in background thread"
+                    )
 
                 except Exception as e:
-                    logger.warning(f"LLM background initialization failed: {e}, will retry on first use")
+                    logger.warning(
+                        f"LLM background initialization failed: {e}, will retry on first use"
+                    )
                 finally:
                     # 通知主线程导入完成（无论成功或失败）
                     self._init_thread_event.set()
@@ -547,7 +546,9 @@ class LLMSession:
         # 如果有后台线程正在初始化，等待它完成
         if self._init_thread_event is not None and not self._init_thread_event.is_set():
             # 等待后台线程完成（使用 to_thread.run_sync 在主线程中等待）
-            await anyio.to_thread.run_sync(self._wait_for_init_complete, abandon_on_cancel=True)
+            await anyio.to_thread.run_sync(
+                self._wait_for_init_complete, abandon_on_cancel=True
+            )
 
         # 等待后检查是否真的初始化成功
         if self._initialized:
@@ -559,7 +560,9 @@ class LLMSession:
                 return
             # 同步初始化（在主线程中）
             try:
-                await anyio.to_thread.run_sync(self._sync_initialize, abandon_on_cancel=True)
+                await anyio.to_thread.run_sync(
+                    self._sync_initialize, abandon_on_cancel=True
+                )
             except anyio.get_cancelled_exc_class():
                 # 用户取消，重新抛出让上层处理
                 raise
@@ -567,7 +570,9 @@ class LLMSession:
                 logger.error(f"LLM initialization failed: {e}")
                 raise
 
-    async def _ensure_initialized_with_retry(self, max_retries: int = 5, retry_delay: float = 0.5):
+    async def _ensure_initialized_with_retry(
+        self, max_retries: int = 5, retry_delay: float = 0.5
+    ):
         """
         确保在首次使用 AI 前 litellm 已成功初始化。
         使用重试机制处理 litellm 内部的循环导入问题。
@@ -589,13 +594,19 @@ class LLMSession:
                     # 尝试调用 litellm 的一个函数来验证模块已完全加载
                     # 这会触发任何潜在的循环导入问题
                     import importlib
-                    importlib.import_module('litellm.utils')
+
+                    importlib.import_module("litellm.utils")
                     return
                 else:
-                    last_error = RuntimeError("litellm module is None after initialization")
+                    last_error = RuntimeError(
+                        "litellm module is None after initialization"
+                    )
             except ImportError as e:
                 # 处理循环导入错误
-                if "partially initialized" in str(e) or "circular import" in str(e).lower():
+                if (
+                    "partially initialized" in str(e)
+                    or "circular import" in str(e).lower()
+                ):
                     last_error = e
                     logger.warning(
                         f"LiteLLM circular import detected (attempt {attempt + 1}/{max_retries}), "
@@ -857,6 +868,7 @@ class LLMSession:
 
             confirmation_info: dict = {}
             security_analysis: dict = {}
+            security_decision: dict = {}
             suppress_security_panels = False
 
             if tool_name == "bash_exec" and arg is not None:
@@ -867,9 +879,15 @@ class LLMSession:
                         if isinstance(confirmation_info, dict)
                         else {}
                     )
+                    security_decision = (
+                        confirmation_info.get("security_decision", {})
+                        if isinstance(confirmation_info, dict)
+                        else {}
+                    )
                 except Exception:
                     confirmation_info = {}
                     security_analysis = {}
+                    security_decision = {}
 
                 # 1) fail-open when sandbox is unavailable (cannot assess risks)
                 if (
@@ -883,6 +901,12 @@ class LLMSession:
                 if callable(self.is_command_approved) and self.is_command_approved(arg):
                     need_confirm = False
                     suppress_security_panels = True
+
+                if (
+                    isinstance(security_decision, dict)
+                    and security_decision.get("allow") is False
+                ):
+                    need_confirm = False
 
             # 在沙箱评估后检查是否被取消
             # 如果被取消，直接返回 CANCEL，不继续执行
@@ -923,10 +947,13 @@ class LLMSession:
                         if isinstance(sandbox_info, dict)
                         else ""
                     )
+                    fallback_rule_matched = bool(
+                        security_analysis.get("fallback_rule_matched")
+                    ) if isinstance(security_analysis, dict) else False
                     skip_confirmation_panel = sandbox_reason in {
                         "sandbox_disabled",
                         "sandbox_disabled_by_policy",
-                    }
+                    } and not fallback_rule_matched
                     risk_level = str(
                         security_analysis.get("risk_level", "UNKNOWN")
                     ).upper()
@@ -952,6 +979,32 @@ class LLMSession:
                 except Exception:
                     # 不影响工具执行；提示面板失败时静默跳过
                     pass
+
+            if (
+                tool_name == "bash_exec"
+                and isinstance(security_decision, dict)
+                and security_decision.get("allow") is False
+            ):
+                reasons = (
+                    security_analysis.get("reasons", [])
+                    if isinstance(security_analysis, dict)
+                    else []
+                )
+                reason_text = ", ".join(str(reason) for reason in reasons[:5] if reason)
+                blocked_msg = (
+                    t("security.command_blocked_with_reason", reason=reason_text)
+                    if reason_text
+                    else t("security.command_blocked")
+                )
+                return (
+                    LLMCallbackResult.CONTINUE,
+                    ToolResult(
+                        ok=False,
+                        output=blocked_msg,
+                        code=126,
+                        meta={"kind": "security_blocked", "reasons": reasons},
+                    ),
+                )
 
             if need_confirm:
                 # Prepare confirmation data with security information
@@ -1069,9 +1122,7 @@ class LLMSession:
         return {
             "role": "user",
             "content": (
-                "<system-reminder>\n"
-                f"{skills_reminder_text}\n"
-                "</system-reminder>"
+                "<system-reminder>\n" f"{skills_reminder_text}\n" "</system-reminder>"
             ),
         }
 
@@ -1140,6 +1191,7 @@ class LLMSession:
         for tool_call in tool_calls:
             # Cancellation is handled structurally by CancelScope
             tool_name = tool_call["function"]["name"]
+            # TODO: For malformed/truncated tool arguments, add a model-side retry flow.
             tool_args = json.loads(tool_call["function"]["arguments"])
 
             goon, tool_result = await self.pre_execute_tool(tool_name, tool_args)
@@ -1163,8 +1215,7 @@ class LLMSession:
                     and tool_result.meta.get("kind") == "security_blocked"
                 ):
                     tool_call_cancelled = True
-                    # 给用户一个明确、可理解的终止信息（保持与现有终端提示风格一致）。
-                    output = t("errors.security_blocked_task")
+                    output = ""
                     break
 
                 # If ask_user pauses due to cancellation/unavailable, stop executing
@@ -1313,7 +1364,10 @@ class LLMSession:
                     # Cancellation is handled structurally by CancelScope
                     with anyio.fail_after(300):  # 5 minute timeout
                         # 检查取消令牌，在开始 LLM 请求前
-                        if self.cancellation_token and self.cancellation_token.is_cancelled():
+                        if (
+                            self.cancellation_token
+                            and self.cancellation_token.is_cancelled()
+                        ):
                             raise anyio.get_cancelled_exc_class()
 
                         acompletion = self._get_acompletion()
@@ -1340,68 +1394,62 @@ class LLMSession:
 
                             async for chunk in response:
                                 try:
-                                        stream_chunks.append(chunk)
-                                        choice, delta = _stream_get_choice_delta(chunk)
+                                    stream_chunks.append(chunk)
+                                    choice, delta = _stream_get_choice_delta(chunk)
 
-                                        # Best-effort reasoning extraction (provider-dependent).
+                                    # Best-effort reasoning extraction (provider-dependent).
+                                    reasoning_delta = _stream_get_delta_value(
+                                        delta, "reasoning_content"
+                                    )
+                                    if reasoning_delta is None:
                                         reasoning_delta = _stream_get_delta_value(
-                                            delta, "reasoning_content"
+                                            delta, "reasoning"
                                         )
-                                        if reasoning_delta is None:
-                                            reasoning_delta = _stream_get_delta_value(
-                                                delta, "reasoning"
+                                    if reasoning_delta:
+                                        reasoning_acc += str(reasoning_delta)
+                                        events.emit_reasoning_delta(
+                                            delta=str(reasoning_delta),
+                                            accumulated=reasoning_acc,
+                                        )
+
+                                    content_delta = _stream_get_delta_value(
+                                        delta, "content"
+                                    )
+                                    if content_delta:
+                                        content_acc += str(content_delta)
+
+                                    tool_calls_delta = _stream_get_delta_value(
+                                        delta, "tool_calls"
+                                    )
+                                    if tool_calls_delta:
+                                        tool_calls_seen = True
+
+                                    function_call_delta = _stream_get_delta_value(
+                                        delta, "function_call"
+                                    )
+                                    if function_call_delta and not tool_calls_delta:
+                                        tool_calls_seen = True
+
+                                    if tool_calls_seen:
+                                        if content_acc and not content_preview_started:
+                                            content_preview_started = True
+                                            events.emit_content_delta(
+                                                delta=content_acc,
+                                                accumulated=content_acc,
+                                                is_final=False,
                                             )
-                                        if reasoning_delta:
-                                            reasoning_acc += str(reasoning_delta)
-                                            events.emit_reasoning_delta(
-                                                delta=str(reasoning_delta),
-                                                accumulated=reasoning_acc,
+                                        elif content_preview_started and content_delta:
+                                            events.emit_content_delta(
+                                                delta=str(content_delta),
+                                                accumulated=content_acc,
+                                                is_final=False,
                                             )
 
-                                        content_delta = _stream_get_delta_value(
-                                            delta, "content"
-                                        )
-                                        if content_delta:
-                                            content_acc += str(content_delta)
-
-                                        tool_calls_delta = _stream_get_delta_value(
-                                            delta, "tool_calls"
-                                        )
-                                        if tool_calls_delta:
-                                            tool_calls_seen = True
-
-                                        function_call_delta = _stream_get_delta_value(
-                                            delta, "function_call"
-                                        )
-                                        if function_call_delta and not tool_calls_delta:
-                                            tool_calls_seen = True
-
-                                        if tool_calls_seen:
-                                            if (
-                                                content_acc
-                                                and not content_preview_started
-                                            ):
-                                                content_preview_started = True
-                                                events.emit_content_delta(
-                                                    delta=content_acc,
-                                                    accumulated=content_acc,
-                                                    is_final=False,
-                                                )
-                                            elif (
-                                                content_preview_started
-                                                and content_delta
-                                            ):
-                                                events.emit_content_delta(
-                                                    delta=str(content_delta),
-                                                    accumulated=content_acc,
-                                                    is_final=False,
-                                                )
-
-                                        finish_reason = (
-                                            choice.get("finish_reason")
-                                            if isinstance(choice, dict)
-                                            else getattr(choice, "finish_reason", None)
-                                        )
+                                    finish_reason = (
+                                        choice.get("finish_reason")
+                                        if isinstance(choice, dict)
+                                        else getattr(choice, "finish_reason", None)
+                                    )
                                 except (
                                     AttributeError,
                                     IndexError,
@@ -1423,7 +1471,9 @@ class LLMSession:
                                     litellm = self._get_litellm()
                                     combined_response = None
                                     if litellm is not None:
-                                        stream_chunk_builder = self._get_stream_chunk_builder()
+                                        stream_chunk_builder = (
+                                            self._get_stream_chunk_builder()
+                                        )
                                         if stream_chunk_builder is not None:
                                             combined_response = stream_chunk_builder(
                                                 chunks=stream_chunks, messages=messages
@@ -1490,7 +1540,9 @@ class LLMSession:
                             error_message=friendly,
                             error_details=redact_secrets(str(e)),
                         )
-                        events.emit_generation_end(status="error", error_message=friendly)
+                        events.emit_generation_end(
+                            status="error", error_message=friendly
+                        )
                     else:
                         events.emit_error(
                             error_type="completion_error",
@@ -1640,49 +1692,49 @@ class LLMSession:
                 generation_error_message = None
 
                 async for chunk in response:
-                        # Check for cancellation at the start of each iteration
-                        if (
-                            self.cancellation_token
-                            and self.cancellation_token.is_cancelled()
-                        ):
-                            generation_status = "cancelled"
-                            generation_error_message = "User cancelled"
-                            break
+                    # Check for cancellation at the start of each iteration
+                    if (
+                        self.cancellation_token
+                        and self.cancellation_token.is_cancelled()
+                    ):
+                        generation_status = "cancelled"
+                        generation_error_message = "User cancelled"
+                        break
+                    try:
+                        # Best-effort reasoning extraction (provider-dependent).
+                        reasoning_delta = None
                         try:
-                            # Best-effort reasoning extraction (provider-dependent).
-                            reasoning_delta = None
+                            reasoning_delta = chunk.choices[0].delta.reasoning_content  # type: ignore[attr-defined]
+                        except Exception:
                             try:
-                                reasoning_delta = chunk.choices[0].delta.reasoning_content  # type: ignore[attr-defined]
+                                reasoning_delta = chunk.choices[0].delta.reasoning  # type: ignore[attr-defined]
                             except Exception:
-                                try:
-                                    reasoning_delta = chunk.choices[0].delta.reasoning  # type: ignore[attr-defined]
-                                except Exception:
-                                    reasoning_delta = None
+                                reasoning_delta = None
 
-                            if reasoning_delta:
-                                reasoning_acc += str(reasoning_delta)
-                                events.emit_reasoning_delta(
-                                    delta=str(reasoning_delta),
-                                    accumulated=reasoning_acc,
-                                )
-
-                            content = chunk.choices[0].delta.content  # type: ignore
-                            if content:
-                                result += content
-
-                            try:
-                                finish_reason = chunk.choices[0].finish_reason  # type: ignore[attr-defined]
-                            except Exception:
-                                pass
-                        except (AttributeError, IndexError, Exception) as e:
-                            events.emit_error(
-                                error_type="streaming_error",
-                                error_message=f"Error processing stream: {e}",
-                                error_details=str(e),
+                        if reasoning_delta:
+                            reasoning_acc += str(reasoning_delta)
+                            events.emit_reasoning_delta(
+                                delta=str(reasoning_delta),
+                                accumulated=reasoning_acc,
                             )
-                            generation_status = "error"
-                            generation_error_message = str(e)
-                            break
+
+                        content = chunk.choices[0].delta.content  # type: ignore
+                        if content:
+                            result += content
+
+                        try:
+                            finish_reason = chunk.choices[0].finish_reason  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    except (AttributeError, IndexError, Exception) as e:
+                        events.emit_error(
+                            error_type="streaming_error",
+                            error_message=f"Error processing stream: {e}",
+                            error_details=str(e),
+                        )
+                        generation_status = "error"
+                        generation_error_message = str(e)
+                        break
 
                 events.emit_reasoning_end()
 
@@ -1750,15 +1802,16 @@ class LLMSession:
 
         # Fast Langfuse cleanup with aggressive timeout
         try:
-            from langfuse import Langfuse
             import threading
 
+            from langfuse import Langfuse
+
             langfuse = Langfuse()
-            
+
             # Try to flush pending data first (with timeout)
             flush_timeout = 0.3  # 300ms for flush
             flush_success = False
-            
+
             def flush_with_timeout():
                 nonlocal flush_success
                 try:
@@ -1766,15 +1819,15 @@ class LLMSession:
                     flush_success = True
                 except Exception:
                     pass
-            
+
             flush_thread = threading.Thread(target=flush_with_timeout, daemon=True)
             flush_thread.start()
             flush_thread.join(timeout=flush_timeout)
-            
+
             # Quick shutdown with aggressive timeout
             shutdown_timeout = 0.2  # 200ms for shutdown
             shutdown_success = False
-            
+
             def shutdown_with_timeout():
                 nonlocal shutdown_success
                 try:
@@ -1782,18 +1835,20 @@ class LLMSession:
                     shutdown_success = True
                 except Exception:
                     pass
-            
-            shutdown_thread = threading.Thread(target=shutdown_with_timeout, daemon=True)
+
+            shutdown_thread = threading.Thread(
+                target=shutdown_with_timeout, daemon=True
+            )
             shutdown_thread.start()
             shutdown_thread.join(timeout=shutdown_timeout)
-            
+
             if flush_success and shutdown_success:
                 logger.info("Langfuse cleanup completed successfully")
             elif flush_success:
                 logger.warning("Langfuse flush completed, shutdown timed out")
             else:
                 logger.warning("Langfuse cleanup timed out, forcing exit")
-                    
+
         except Exception:
             logger.exception("Langfuse cleanup error")
             pass  # Ignore all langfuse-related errors to ensure fast exit

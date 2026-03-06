@@ -8,16 +8,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.console import Group, RenderableType
+from rich import box
 from rich.cells import cell_len
+from rich.console import Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
-from rich import box
 
 from . import __version__
 from .config import ConfigModel
 from .i18n import t
-
 
 _LOGO_RAW_LINES: list[str] = [
     " █████╗ ██╗███████╗██╗  ██╗",
@@ -84,7 +83,9 @@ def build_welcome_renderable(config: ConfigModel) -> RenderableType:
 
     meta = _get_welcome_meta(config)
 
-    logo_lines: list[RenderableType] = [Text(line, no_wrap=True) for line in _LOGO_RAW_LINES]
+    logo_lines: list[RenderableType] = [
+        Text(line, no_wrap=True) for line in _LOGO_RAW_LINES
+    ]
 
     header_text = t("shell.welcome2.header", version=meta.version)
     skills_count = getattr(config, "skills_count", None)
@@ -111,11 +112,14 @@ def build_welcome_renderable(config: ConfigModel) -> RenderableType:
     quick_1_prefix = f" • {t('shell.welcome2.quick_start.item1_prefix')}"
     quick_2_prefix = f" • {t('shell.welcome2.quick_start.item2_prefix')}"
     quick_3_prefix = f" • {t('shell.welcome2.quick_start.item3_prefix')}"
-    content_start = max(
-        cell_len(quick_1_prefix),
-        cell_len(quick_2_prefix),
-        cell_len(quick_3_prefix),
-    ) + 1
+    content_start = (
+        max(
+            cell_len(quick_1_prefix),
+            cell_len(quick_2_prefix),
+            cell_len(quick_3_prefix),
+        )
+        + 1
+    )
 
     quick_1 = Text(quick_1_prefix)
     quick_1.append(" " * max(content_start - cell_len(quick_1_prefix), 0))

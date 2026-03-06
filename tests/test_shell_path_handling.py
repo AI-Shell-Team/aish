@@ -2,14 +2,15 @@
 Tests for AI shell's own command handling with paths containing spaces and special characters.
 """
 
-import pytest
-import tempfile
 import os
-from unittest.mock import patch, MagicMock
-import anyio
+import tempfile
+from unittest.mock import MagicMock, patch
 
-from aish.shell import AIShell
+import anyio
+import pytest
+
 from aish.config import ConfigModel
+from aish.shell import AIShell
 from aish.skills import SkillManager
 
 
@@ -42,7 +43,7 @@ class TestShellPathHandling:
                 # Should show tip and change directory
                 mock_console.print.assert_any_call(
                     f'💡 [yellow]Tip: Use quotes for paths with spaces: cd "{test_dir}"[/yellow]',
-                    style='green',
+                    style="green",
                 )
 
                 # Verify directory changed
@@ -87,7 +88,7 @@ class TestShellPathHandling:
                 # Should show tip and change directory
                 mock_console.print.assert_any_call(
                     f'💡 [yellow]Tip: Use quotes for paths with spaces: pushd "{test_dir}"[/yellow]',
-                    style='green',
+                    style="green",
                 )
 
                 # Verify directory changed and stack updated
@@ -202,6 +203,7 @@ class TestCdOptions:
         """cd 默认使用 -L 模式，跟随符号链接"""
         with tempfile.TemporaryDirectory() as temp_dir:
             from pathlib import Path
+
             # Create actual directory and symlink
             actual_dir = Path(temp_dir) / "actual_dir"
             actual_dir.mkdir()
@@ -227,6 +229,7 @@ class TestCdOptions:
         """cd -P 解析符号链接"""
         with tempfile.TemporaryDirectory() as temp_dir:
             from pathlib import Path
+
             # Create actual directory and symlink
             actual_dir = Path(temp_dir) / "actual_dir"
             actual_dir.mkdir()
@@ -242,7 +245,9 @@ class TestCdOptions:
                 # PWD should show the physical path (resolving symlink)
                 pwd = os.environ.get("PWD", "")
                 # In physical mode, PWD should be the real path
-                assert str(actual_dir) in pwd or os.path.samefile(os.getcwd(), actual_dir)
+                assert str(actual_dir) in pwd or os.path.samefile(
+                    os.getcwd(), actual_dir
+                )
 
             except OSError:
                 # Skip test on systems that don't support symlinks
@@ -256,7 +261,8 @@ class TestCdOptions:
 
             # Should show error about invalid option
             error_calls = [
-                call for call in mock_console.print.call_args_list
+                call
+                for call in mock_console.print.call_args_list
                 if "invalid option" in str(call).lower()
             ]
             assert len(error_calls) > 0

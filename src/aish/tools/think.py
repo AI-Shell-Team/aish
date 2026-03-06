@@ -1,5 +1,6 @@
-from aish.tools.base import ToolBase
 from textwrap import dedent
+
+from aish.tools.base import ToolBase
 
 THINK_DESCRIPTION = """"
 Use this tool to think about something. It will not obtain new information or change anything, 

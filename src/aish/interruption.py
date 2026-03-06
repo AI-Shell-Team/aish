@@ -8,35 +8,37 @@
 4. 命令执行状态 - 中断命令
 """
 
-import time
 import threading
-from enum import Enum
+import time
 from dataclasses import dataclass
-from typing import Optional, Callable
+from enum import Enum
+from typing import Callable, Optional
 
 
 class ShellState(Enum):
     """Shell 状态枚举"""
-    NORMAL = "normal"                    # 普通空闲状态
-    INPUTTING = "inputting"              # 用户正在输入
-    EXIT_PENDING = "exit_pending"        # 退出待确认（Ctrl+C 窗口期）
-    CLEAR_PENDING = "clear_pending"      # 清空输入待确认（Esc 窗口期）
+
+    NORMAL = "normal"  # 普通空闲状态
+    INPUTTING = "inputting"  # 用户正在输入
+    EXIT_PENDING = "exit_pending"  # 退出待确认（Ctrl+C 窗口期）
+    CLEAR_PENDING = "clear_pending"  # 清空输入待确认（Esc 窗口期）
     CORRECT_PENDING = "correct_pending"  # 纠错待确认（命令执行失败后）
 
     # AI 执行状态
-    AI_THINKING = "ai_thinking"          # AI 推理中
-    SANDBOX_EVAL = "sandbox_eval"        # 沙箱评估中
-    COMMAND_EXEC = "command_exec"        # 命令执行中
+    AI_THINKING = "ai_thinking"  # AI 推理中
+    SANDBOX_EVAL = "sandbox_eval"  # 沙箱评估中
+    COMMAND_EXEC = "command_exec"  # 命令执行中
 
 
 class InterruptAction(Enum):
     """中断动作枚举"""
-    NONE = "none"                        # 无动作
-    CLEAR_INPUT = "clear_input"          # 清空输入
-    REQUEST_EXIT = "request_exit"        # 请求退出（进入确认窗口）
-    CONFIRM_EXIT = "confirm_exit"        # 确认退出
-    CANCEL_PENDING = "cancel_pending"    # 取消待确认状态
-    INTERRUPT_AI = "interrupt_ai"        # 中断 AI
+
+    NONE = "none"  # 无动作
+    CLEAR_INPUT = "clear_input"  # 清空输入
+    REQUEST_EXIT = "request_exit"  # 请求退出（进入确认窗口）
+    CONFIRM_EXIT = "confirm_exit"  # 确认退出
+    CANCEL_PENDING = "cancel_pending"  # 取消待确认状态
+    INTERRUPT_AI = "interrupt_ai"  # 中断 AI
     INTERRUPT_SANDBOX = "interrupt_sandbox"  # 中断沙箱
     INTERRUPT_COMMAND = "interrupt_command"  # 中断命令执行（等待完成）
 
@@ -44,8 +46,9 @@ class InterruptAction(Enum):
 @dataclass
 class PromptConfig:
     """瞬时提示配置"""
-    message: str                         # 提示消息（纯文本，不含颜色代码）
-    window_seconds: float = 2.0          # 确认窗口时长（秒）
+
+    message: str  # 提示消息（纯文本，不含颜色代码）
+    window_seconds: float = 2.0  # 确认窗口时长（秒）
 
 
 class InterruptionManager:
@@ -96,9 +99,17 @@ class InterruptionManager:
             self._state_start_time = time.time()
 
             # 保存最后的 AI 执行状态（用于显示取消消息）
-            if new_state in (ShellState.AI_THINKING, ShellState.SANDBOX_EVAL, ShellState.COMMAND_EXEC):
+            if new_state in (
+                ShellState.AI_THINKING,
+                ShellState.SANDBOX_EVAL,
+                ShellState.COMMAND_EXEC,
+            ):
                 self._last_ai_state = new_state
-            elif new_state == ShellState.NORMAL and old_state in (ShellState.AI_THINKING, ShellState.SANDBOX_EVAL, ShellState.COMMAND_EXEC):
+            elif new_state == ShellState.NORMAL and old_state in (
+                ShellState.AI_THINKING,
+                ShellState.SANDBOX_EVAL,
+                ShellState.COMMAND_EXEC,
+            ):
                 # 从 AI 执行状态恢复到 NORMAL 时，保留 _last_ai_state
                 pass
 
@@ -134,7 +145,9 @@ class InterruptionManager:
                 return None
             # 检查提示是否超时
             if self._prompt_start_time is not None:
-                if (time.time() - self._prompt_start_time) >= self._current_prompt.window_seconds:
+                if (
+                    time.time() - self._prompt_start_time
+                ) >= self._current_prompt.window_seconds:
                     # 提示超时，清除提示并恢复状态
                     self.clear_prompt()
                     self.set_state(ShellState.NORMAL)
@@ -173,7 +186,9 @@ class InterruptionManager:
                 return None
             # 检查提示是否超时
             if self._prompt_start_time is not None:
-                if (time.time() - self._prompt_start_time) >= self._current_prompt.window_seconds:
+                if (
+                    time.time() - self._prompt_start_time
+                ) >= self._current_prompt.window_seconds:
                     self.clear_prompt()
                     self.set_state(ShellState.NORMAL)
                     return None
@@ -254,10 +269,12 @@ class InterruptionManager:
         elif current_state in (ShellState.NORMAL, ShellState.CLEAR_PENDING):
             # 进入退出确认窗口
             self.set_state(ShellState.EXIT_PENDING)
-            self.show_prompt(PromptConfig(
-                message="press Ctrl+C again to exit",
-                window_seconds=self.EXIT_WINDOW
-            ))
+            self.show_prompt(
+                PromptConfig(
+                    message="press Ctrl+C again to exit",
+                    window_seconds=self.EXIT_WINDOW,
+                )
+            )
             return InterruptAction.REQUEST_EXIT
 
         return InterruptAction.NONE
@@ -287,13 +304,18 @@ class InterruptionManager:
             return InterruptAction.NONE
 
         # 有输入内容时的处理（首次按 Esc）
-        if current_state in (ShellState.NORMAL, ShellState.INPUTTING, ShellState.EXIT_PENDING):
+        if current_state in (
+            ShellState.NORMAL,
+            ShellState.INPUTTING,
+            ShellState.EXIT_PENDING,
+        ):
             # 进入清空确认窗口
             self.set_state(ShellState.CLEAR_PENDING)
-            self.show_prompt(PromptConfig(
-                message="press esc again to clear",
-                window_seconds=self.CLEAR_WINDOW
-            ))
+            self.show_prompt(
+                PromptConfig(
+                    message="press esc again to clear", window_seconds=self.CLEAR_WINDOW
+                )
+            )
             return InterruptAction.CANCEL_PENDING
 
         return InterruptAction.NONE
@@ -317,7 +339,9 @@ class InterruptionManager:
 
     # ===== AI 执行期间的中断 =====
 
-    def handle_ai_interrupt(self, save_input: bool = False, input_text: str = "") -> InterruptAction:
+    def handle_ai_interrupt(
+        self, save_input: bool = False, input_text: str = ""
+    ) -> InterruptAction:
         """
         处理 AI 执行期间的 Ctrl+C 中断
 

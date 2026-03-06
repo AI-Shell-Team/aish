@@ -1,8 +1,8 @@
-from aish.tools.base import ToolBase
-from aish.tools.result import ToolResult
-
 from pathlib import Path
 from typing import ClassVar
+
+from aish.tools.base import ToolBase
+from aish.tools.result import ToolResult
 
 
 # TODO: support images
@@ -41,9 +41,7 @@ class ReadFileTool(ToolBase):
             },
         )
 
-    def __call__(
-        self, file_path: str, offset: int = 1, limit: int = 200
-    ) -> ToolResult:
+    def __call__(self, file_path: str, offset: int = 1, limit: int = 200) -> ToolResult:
         try:
             result_lines = []
             total_lines = 0
@@ -133,9 +131,7 @@ class ReadFileTool(ToolBase):
             return ToolResult(ok=True, output=output)
 
         except FileNotFoundError:
-            return ToolResult(
-                ok=False, output=f"Error: File '{file_path}' not found"
-            )
+            return ToolResult(ok=False, output=f"Error: File '{file_path}' not found")
         except PermissionError:
             return ToolResult(
                 ok=False,
@@ -275,9 +271,7 @@ Usage:
             if new_string == old_string:
                 return ToolResult(
                     ok=False,
-                    output=(
-                        "Error: new_string must be different from old_string"
-                    ),
+                    output=("Error: new_string must be different from old_string"),
                 )
 
             path = Path(file_path)

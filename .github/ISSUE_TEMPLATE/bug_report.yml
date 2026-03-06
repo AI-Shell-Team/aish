@@ -1,0 +1,134 @@
+name: Bug report
+description: Report defects, including regressions, crashes, and behavior bugs.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing this report. Keep it concise, reproducible, and evidence-based.
+  - type: dropdown
+    id: bug_type
+    attributes:
+      label: Bug type
+      description: Choose the category that best matches this report.
+      options:
+        - Regression (worked before, now fails)
+        - Crash (process exits or hangs)
+        - Behavior bug (incorrect output/state without crash)
+        - Security issue
+        - Sandbox/Isolation issue
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-sentence statement of what is broken.
+      placeholder: After upgrading to <version>, AI command execution fails with error <...>
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Provide the shortest deterministic repro path.
+      placeholder: |
+        1. Install AISH: <install method>
+        2. Configure model: <model/provider>
+        3. Start: `aish` or `aish run`
+        4. Enter AI mode: `; <your prompt>`
+        5. Observe error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen if the bug does not exist.
+      placeholder: AISH generates and executes the correct command, or asks for confirmation.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead, including user-visible errors.
+      placeholder: Command fails with error: <error message or traceback>
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: AISH version
+      description: Exact version/build tested.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: OS and version where this occurs.
+      placeholder: Ubuntu 24.04 / Debian 12 / Arch Linux / Rocky Linux 9
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      description: How AISH was installed.
+      options:
+        - deb package
+        - built from source (PyInstaller)
+        - uv run
+        - python -m aish
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: AI Model / Provider
+      description: Which AI model and provider you are using.
+      placeholder: e.g., openai/gpt-4o / deepseek-chat / claude-3.5-sonnet via OpenRouter
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Relevant configuration (redact API keys!).
+      placeholder: |
+        Model: ...
+        API base: ...
+        Security policy: (default/custom)
+        Sandbox: (enabled/disabled)
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and evidence
+      description: Include redacted logs (~/.config/aish/logs/aish.log), screenshots, or traceback.
+      render: shell
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and severity
+      description: |
+        Explain who is affected, how severe it is, how often it happens, and the practical consequence.
+        Include:
+        - Affected users/scenarios
+        - Severity (annoying, blocks workflow, data risk, security issue, etc.)
+        - Frequency (always/intermittent/edge case)
+        - Consequence (cannot use AISH, wrong commands executed, crash, etc.)
+      placeholder: |
+        Affected: Users on <OS> with <model>
+        Severity: High (blocks core functionality)
+        Frequency: 100% repro
+        Consequence: Cannot use AI mode
+  - type: textarea
+    id: additional_information
+    attributes:
+      label: Additional information
+      description: Add any context that helps triage but does not fit above. If this is a regression, include the last known good and first known bad versions.
+      placeholder: Config snippet (redacted), workaround, related issues...

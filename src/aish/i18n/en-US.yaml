@@ -28,14 +28,22 @@ cli:
 
   setup:
     step_provider: "Step 1/3: Choose provider"
+    step_provider_endpoint: "Step 1.5/3: Choose endpoint"
+    step_zai_endpoint: "Step 1.5/3: Choose Z.AI endpoint"
     step_key: "Step 2/3: Enter API key"
     step_model: "Step 3/3: Choose model"
     provider_header: "Choose a provider (type to filter)"
     provider_filter_prompt: "Filter: "
     provider_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to cancel."
     provider_selected_label: "Provider"
+    provider_endpoint_selected_label: "Endpoint"
+    zai_endpoint_selected_label: "Z.AI Endpoint"
+    provider_endpoint_header: "Choose {provider} API endpoint"
+    zai_endpoint_header: "Choose Z.AI API endpoint"
     model_selected_label: "Model"
     provider_column: "Provider"
+    zai_endpoint_column: "Z.AI Endpoint"
+    provider_endpoint_column: "Endpoint"
     provider_note_column: "Notes"
     provider_custom_note: "OpenAI-compatible"
     provider_preset_base: "Preset API Base"
@@ -59,6 +67,8 @@ cli:
     model_prompt: "Model name (type 'back' to change provider)"
     model_hint_openrouter: "OpenRouter requires a provider prefix (e.g. openai/gpt-4o). If omitted, we'll default to openai/."
     model_hint_custom: "Custom provider is OpenAI-compatible. If you omit a prefix, we'll save as openai/<model>."
+    model_hint_zai: "Recommended: {default}. Available: glm-5, glm-4.7, glm-4.7-flash, glm-4.7-flashx"
+    model_hint_provider: "Recommended: {default}"
     model_list_found: "Found {count} models from provider"
     model_list_unavailable: "Model list unavailable; please enter manually"
     model_filtering: "Filtering models by tool-call support"
@@ -220,9 +230,12 @@ shell:
       content_preview: "Content Preview"
       fallback_hint: "Note"
       risk_level: "Risk Level"
+      matched_rule: "Matched Rule"
+      matched_paths: "Matched Paths"
       reasons: "Reasons"
       alternatives: "Alternatives"
       impact: "Impact"
+      confirm_message: "Confirmation Message"
       no_additional_info: "No additional information provided."
 
     fallback:
@@ -249,6 +262,7 @@ shell:
     potential_error: "🚀 Potential issue detected: {reason}, attempting to resolve..."
     llm_error_title: "❌ LLM Request Failed"
     llm_error_details_title: "Debug Details"
+    tool_args_json_invalid_hint: "❌ Request failed, please retry."
 
   prompt:
     confirm_execute: "?Execute this command? [y/n]:"
@@ -307,12 +321,17 @@ shell:
     done_diagnose: "  └─ ✅ Diagnosis done"
 
 security:
+  sandbox_off_action:
+    allow: "Allow"
+    confirm: "Require confirmation"
+    block: "Block"
+
   sandbox_unavailable:
     title: "⚠️ Sandbox Unavailable"
     line1: "Sandbox is unavailable; command risk cannot be evaluated."
-    line2: "Subsequent AI-generated commands will use command+path fallback mode."
+    line2: "Subsequent AI-generated commands will be handled as: {action}."
     policy_line1: "Sandbox is disabled by policy; no sandbox run was performed."
-    policy_line2: "AI-generated commands will use command+path fallback mode."
+    policy_line2: "AI-generated commands will be handled as: {action}."
     reason: "Reason: {reason}"
     error: "Error: {error}"
     root_required: "Sandbox requires root privileges"
@@ -323,18 +342,13 @@ security:
   low_risk_notice: "Security notice: {reason}"
 
   risk_reason:
-    sandbox_disabled_by_policy: "Sandbox is disabled by policy; file changes cannot be inspected for risk evaluation."
-    sandbox_disabled: "Sandbox is not enabled or configured off; file changes cannot be inspected for risk evaluation."
-    cwd_outside_repo_root: "Current working directory {cwd} is outside sandbox root {root}; relative-path side effects cannot be reliably evaluated."
-    sandbox_unavailable: "Sandbox initialization/execution failed; file changes cannot be inspected for risk evaluation."
-    sandbox_exception: "Sandbox execution error; file changes cannot be inspected for risk evaluation."
-    sandbox_failed: "Sandbox failed; file changes cannot be inspected for risk evaluation."
-    command_fallback_matched: "Command+path fallback is active; matched {count} rule hits."
-    command_fallback_dangerous_command: "Matched built-in dangerous command pattern; blocked as high risk."
-    command_fallback_invalid_rule_matched: "Matched {count} invalid rules; elevated to medium risk for conservative handling."
-    command_fallback_unmatched: "Paths were extracted from command text but no fallback rule matched; treated as low risk."
-    command_fallback_not_targeted: "Command did not match blacklist trigger conditions; treated as low risk."
-    command_fallback_no_path: "No explicit absolute path detected in command; treated as low risk."
+    sandbox_disabled_by_policy: "Sandbox is disabled by policy; file changes cannot be inspected for risk evaluation. Action: {action}."
+    sandbox_disabled: "Sandbox is not enabled or configured off; file changes cannot be inspected for risk evaluation. Action: {action}."
+    cwd_outside_repo_root: "Current working directory {cwd} is outside sandbox root {root}; relative-path side effects cannot be reliably evaluated. Action: {action}."
+    sandbox_unavailable: "Sandbox initialization/execution failed; file changes cannot be inspected for risk evaluation. Action: {action}."
+    sandbox_exception: "Sandbox execution error; file changes cannot be inspected for risk evaluation. Action: {action}."
+    sandbox_failed: "Sandbox failed; file changes cannot be inspected for risk evaluation. Action: {action}."
+    policy_fallback_rule_match: "With sandbox disabled by policy, command {command} matched {count} fallback-rule paths; handling as {risk} risk."
 
   ai_risk:
     no_fs_changes: "Sandbox detected no file writes or deletions."
@@ -614,7 +628,7 @@ help:
 
 errors:
   litellm_not_installed: "litellm module is not installed"
-  security_blocked_task: "Task not completed. This operation was blocked due to security restrictions."
+  security_blocked_task: "Task not completed. This operation was blocked due to system security restrictions."
   llm:
     auth: "Authentication failed. Please check your API key."
     rate_limit: "Rate limit exceeded. Please retry later."

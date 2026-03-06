@@ -2,12 +2,13 @@
 Configuration management for AI Shell
 """
 
-from pathlib import Path
-from typing import Any, Optional, TypedDict, cast
 import os
+import shutil
 import sys
 import tempfile
-import shutil
+from pathlib import Path
+from typing import Any, Optional, TypedDict, cast
+
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -176,20 +177,20 @@ class ConfigModel(BaseModel):
     max_llm_messages: int = Field(
         default=50,
         gt=0,
-        description="Maximum number of LLM conversation messages to keep in context"
+        description="Maximum number of LLM conversation messages to keep in context",
     )
     max_shell_messages: int = Field(
         default=20,
         gt=0,
-        description="Maximum number of shell history entries to keep in context"
+        description="Maximum number of shell history entries to keep in context",
     )
     context_token_budget: Optional[int] = Field(
         default=None,
-        description="Optional token budget limit for context (e.g., 4000). If None, only message count limits apply"
+        description="Optional token budget limit for context (e.g., 4000). If None, only message count limits apply",
     )
     enable_token_estimation: bool = Field(
         default=True,
-        description="Enable tiktoken-based token estimation for context trimming"
+        description="Enable tiktoken-based token estimation for context trimming",
     )
     bash_output_offload: BashOutputOffloadSettings = Field(
         default_factory=BashOutputOffloadSettings,
@@ -215,9 +216,7 @@ class ConfigModel(BaseModel):
 
     @field_validator("tool_arg_preview", mode="before")
     @classmethod
-    def normalize_tool_arg_preview(
-        cls, v: Any
-    ) -> dict[str, ToolArgPreviewSettings]:
+    def normalize_tool_arg_preview(cls, v: Any) -> dict[str, ToolArgPreviewSettings]:
         if not isinstance(v, dict):
             v = {}
 
@@ -237,7 +236,9 @@ class ConfigModel(BaseModel):
         if "final_answer" not in normalized:
             final_settings = dict(base)
             final_settings["enabled"] = True
-            normalized["final_answer"] = ToolArgPreviewSettings.model_validate(final_settings)
+            normalized["final_answer"] = ToolArgPreviewSettings.model_validate(
+                final_settings
+            )
 
         return normalized
 
@@ -270,7 +271,9 @@ class Config:
                 # Detect pytest by presence in sys.modules (more reliable than env vars).
                 # Note: pytest itself may not be imported as "pytest"; internal modules use "_pytest".
                 is_pytest = any(
-                    name == "pytest" or name.startswith("pytest.") or name.startswith("_pytest")
+                    name == "pytest"
+                    or name.startswith("pytest.")
+                    or name.startswith("_pytest")
                     for name in sys.modules
                 )
                 if is_pytest:
@@ -303,7 +306,9 @@ class Config:
                 # Migrate sessions.duckdb to sessions.db
                 if isinstance(config_data, dict):
                     session_db_path = config_data.get("session_db_path", "")
-                    if isinstance(session_db_path, str) and session_db_path.endswith("sessions.duckdb"):
+                    if isinstance(session_db_path, str) and session_db_path.endswith(
+                        "sessions.duckdb"
+                    ):
                         # Replace sessions.duckdb with sessions.db
                         new_path = str(Path(session_db_path).with_name("sessions.db"))
                         config_data["session_db_path"] = new_path
@@ -395,8 +400,8 @@ class Config:
         ]
 
         # Check for PyInstaller bundle location (sys._MEIPPASS)
-        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-            meipass_skills = Path(sys._MEIPASS) / 'aish' / 'skills'
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            meipass_skills = Path(sys._MEIPASS) / "aish" / "skills"
             if meipass_skills.is_dir():
                 system_skills_locations.insert(0, meipass_skills)
 

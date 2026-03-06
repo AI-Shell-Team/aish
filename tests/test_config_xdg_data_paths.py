@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from aish.config import ConfigModel, get_default_aish_data_dir, get_default_session_db_path
+from aish.config import (ConfigModel, get_default_aish_data_dir,
+                         get_default_session_db_path)
 
 
 def test_default_data_dir_uses_xdg_data_home(monkeypatch, tmp_path: Path):
@@ -44,8 +45,16 @@ def test_config_model_terminal_resize_mode_default():
 
 
 def test_config_model_terminal_resize_mode_supported_values():
-    assert ConfigModel(model="test-model", terminal_resize_mode="pty_only").terminal_resize_mode == "pty_only"
-    assert ConfigModel(model="test-model", terminal_resize_mode="off").terminal_resize_mode == "off"
+    assert (
+        ConfigModel(
+            model="test-model", terminal_resize_mode="pty_only"
+        ).terminal_resize_mode
+        == "pty_only"
+    )
+    assert (
+        ConfigModel(model="test-model", terminal_resize_mode="off").terminal_resize_mode
+        == "off"
+    )
 
 
 def test_config_model_terminal_resize_mode_invalid_falls_back_to_full():

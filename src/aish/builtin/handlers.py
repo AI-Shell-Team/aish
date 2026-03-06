@@ -7,12 +7,13 @@ Handlers are designed to be used by both AIShell (user commands) and BashTool (A
 import os
 import shlex
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import List, Optional
 
 
 @dataclass
 class BuiltinResult:
     """Result of executing a built-in command."""
+
     success: bool
     output: str
     error: str = ""
@@ -64,7 +65,9 @@ class BuiltinHandlers:
     """
 
     @staticmethod
-    def handle_cd(command: str, cwd: str, directory_stack: DirectoryStack) -> BuiltinResult:
+    def handle_cd(
+        command: str, cwd: str, directory_stack: DirectoryStack
+    ) -> BuiltinResult:
         """Handle cd command to change working directory.
 
         Supports options:
@@ -269,7 +272,9 @@ class BuiltinHandlers:
         )
 
     @staticmethod
-    def handle_pushd(command: str, cwd: str, directory_stack: DirectoryStack) -> BuiltinResult:
+    def handle_pushd(
+        command: str, cwd: str, directory_stack: DirectoryStack
+    ) -> BuiltinResult:
         """Handle pushd command to push directory onto stack."""
         try:
             parts = shlex.split(command)
@@ -370,7 +375,9 @@ class BuiltinHandlers:
             )
 
     @staticmethod
-    def handle_popd(command: str, cwd: str, directory_stack: DirectoryStack) -> BuiltinResult:
+    def handle_popd(
+        command: str, cwd: str, directory_stack: DirectoryStack
+    ) -> BuiltinResult:
         """Handle popd command to pop directory from stack."""
         if directory_stack.is_empty():
             return BuiltinResult(
@@ -404,7 +411,9 @@ class BuiltinHandlers:
             )
 
     @staticmethod
-    def handle_export(command: str, get_exported_vars_func, set_var_func, remove_export_func) -> BuiltinResult:
+    def handle_export(
+        command: str, get_exported_vars_func, set_var_func, remove_export_func
+    ) -> BuiltinResult:
         """Handle export command.
 
         Args:
@@ -479,7 +488,7 @@ class BuiltinHandlers:
                     display_value = value
                     if len(value) > 100:
                         display_value = value[:100] + "..."
-                    lines.append(f"declare -x {key}=\"{display_value}\"")
+                    lines.append(f'declare -x {key}="{display_value}"')
 
                 return BuiltinResult(
                     success=True,
@@ -525,7 +534,7 @@ class BuiltinHandlers:
                     display_value = value
                     if len(value) > 100:
                         display_value = value[:100] + "..."
-                    lines.append(f"declare -x {key}=\"{display_value}\"")
+                    lines.append(f'declare -x {key}="{display_value}"')
 
                 return BuiltinResult(
                     success=True,
@@ -545,8 +554,9 @@ class BuiltinHandlers:
                     value = value.strip()
 
                     # Remove possible quotes
-                    if (value.startswith('"') and value.endswith('"')) or \
-                       (value.startswith("'") and value.endswith("'")):
+                    if (value.startswith('"') and value.endswith('"')) or (
+                        value.startswith("'") and value.endswith("'")
+                    ):
                         value = value[1:-1]
 
                     env_vars_to_set[key] = value
@@ -679,7 +689,9 @@ class BuiltinHandlers:
             )
 
     @staticmethod
-    def handle_dirs(command: str, cwd: str, directory_stack: DirectoryStack) -> BuiltinResult:
+    def handle_dirs(
+        command: str, cwd: str, directory_stack: DirectoryStack
+    ) -> BuiltinResult:
         """Handle dirs command to show directory stack."""
         parts = shlex.split(command)
 
@@ -787,7 +799,7 @@ class BuiltinHandlers:
         # Determine path based on mode
         if logical_mode:
             # Logical mode: prefer PWD environment variable, fallback to cwd parameter
-            path = os_module.environ.get('PWD', cwd)
+            path = os_module.environ.get("PWD", cwd)
         else:
             # Physical mode: resolve all symlinks in cwd
             path = os_module.path.realpath(cwd)

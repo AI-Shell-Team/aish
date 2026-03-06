@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from enum import Enum
 import re
+from enum import Enum
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
-
+from pydantic import (AliasChoices, BaseModel, ConfigDict, Field,
+                      field_validator)
 
 _SKILL_NAME_RE = re.compile(
     r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,62}[a-z0-9]$|^[a-z0-9]$"

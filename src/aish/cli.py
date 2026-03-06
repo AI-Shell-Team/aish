@@ -1,26 +1,24 @@
 """CLI entry point for AI Shell."""
 
-import anyio
 import os
 import sys
 from typing import Optional
 
+import anyio
 import typer
+import yaml
 from rich.console import Console
 from rich.panel import Panel
-import yaml
 
-from .shell import AIShell
 from .config import Config, ConfigModel
-from .skills import SkillManager
 from .i18n import t
 from .i18n.typer import I18nTyperCommand, I18nTyperGroup
 from .logging_utils import init_logging
-from .wizard.setup_wizard import (
-    needs_interactive_setup,
-    run_interactive_setup,
-    run_live_tool_support_check_debug,
-)
+from .shell import AIShell
+from .skills import SkillManager
+from .wizard.setup_wizard import (needs_interactive_setup,
+                                  run_interactive_setup,
+                                  run_live_tool_support_check_debug)
 
 app = typer.Typer(
     name="aish",
@@ -47,6 +45,7 @@ def _load_raw_yaml_config(config_file: str | os.PathLike[str]) -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
 
 def get_effective_config(
     config: Config,

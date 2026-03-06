@@ -29,7 +29,9 @@ class _StaticCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         for value in self.values:
-            yield Completion(text=value, start_position=-len(document.text_before_cursor))
+            yield Completion(
+                text=value, start_position=-len(document.text_before_cursor)
+            )
 
 
 def test_sync_pty_resize_no_change_skips_ioctl_and_sigwinch():

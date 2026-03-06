@@ -8,12 +8,12 @@ __all__ = ["AIShell", "main"]
 
 
 def __getattr__(name: str):
-	if name == "AIShell":
-		from .shell import AIShell as _AIShell
+    if name == "AIShell":
+        from .shell import AIShell as _AIShell
 
-		return _AIShell
-	if name == "main":
-		from .cli import main as _main
+        return _AIShell
+    if name == "main":
+        from .cli import main as _main
 
-		return _main
-	raise AttributeError(name)
+        return _main
+    raise AttributeError(name)

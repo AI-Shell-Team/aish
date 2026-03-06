@@ -1,0 +1,125 @@
+# Labeler configuration for aish
+# Auto-labels PRs based on changed files
+
+"core":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/*.py"
+          - "src/aish/__init__.py"
+
+"pty":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/shell_enhanced/**"
+          - "src/aish/shell.py"
+          - "src/aish/offload/**"
+
+"agent":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/agents.py"
+          - "src/aish/llm.py"
+          - "src/aish/prompts.py"
+          - "src/aish/command.py"
+
+"skills":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/skills/**"
+          - "src/aish/tools/skill.py"
+          - "debian/skills/**"
+          - "docs/skills-guide.md"
+
+"tools":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/tools/**"
+
+"security":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/security/**"
+          - "tests/security/**"
+          - "security_policy.yaml"
+          - "docs/*security*.md"
+
+"sandbox":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/sandboxd.py"
+          - "src/aish/security/sandbox*.py"
+          - "tests/security/sandbox/**"
+          - "docs/*sandbox*.md"
+
+"config":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/config.py"
+          - "src/aish/wizard/**"
+          - "CONFIGURATION.md"
+
+"cli":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/cli.py"
+          - "src/aish/help_manager.py"
+          - "src/aish/welcome_screen.py"
+          - "main.py"
+
+"i18n":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/i18n/**"
+          - "tests/test_i18n_*.py"
+
+"docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "*.md"
+          - "README*.md"
+          - "QUICKSTART.md"
+          - "CONFIGURATION.md"
+
+"packaging":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "packaging/**"
+          - "aish.spec"
+          - "build.sh"
+          - "Makefile"
+          - "debian/**"
+          - "main.py"
+
+"tests":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/**"
+          - "test_*.py"
+          - "*_test.py"
+          - "conftest.py"
+
+"ci-cd":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - ".gitignore"
+
+"dependencies":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "pyproject.toml"
+          - "uv.lock"
+
+"observability":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/logging_utils.py"
+          - "src/aish/session_store.py"
+          - "tests/test_litellm_langfuse.py"
+          - "docs/*langfuse*.md"
+
+"builtin":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/aish/builtin/**"

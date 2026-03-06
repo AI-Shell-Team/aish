@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
 import argparse
 import os
 import sys
+from pathlib import Path
 
-from aish.security.sandbox_daemon import SandboxDaemon, SandboxDaemonConfig, DEFAULT_SANDBOX_SOCKET_PATH
+from aish.security.sandbox_daemon import (DEFAULT_SANDBOX_SOCKET_PATH,
+                                          SandboxDaemon, SandboxDaemonConfig)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="aish-sandboxd", description="Privileged sandbox daemon for aish")
+    parser = argparse.ArgumentParser(
+        prog="aish-sandboxd", description="Privileged sandbox daemon for aish"
+    )
     parser.add_argument(
         "--socket-path",
         default=str(DEFAULT_SANDBOX_SOCKET_PATH),

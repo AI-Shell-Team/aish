@@ -7,15 +7,16 @@ This module implements the test requirements from Step 6:
 3. End-to-end: run a dummy query via outer LLMSession; verify nested agent executes and returns
 """
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from aish.tools.final_answer import FinalAnswer
+import pytest
+
 from aish.agents import SystemDiagnoseAgent
 from aish.config import ConfigModel
 from aish.llm import LLMSession
 from aish.skills import SkillManager
 from aish.tools.code_exec import BashTool
+from aish.tools.final_answer import FinalAnswer
 from aish.tools.fs_tools import ReadFileTool, WriteFileTool
 
 

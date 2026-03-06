@@ -1,12 +1,14 @@
 """测试统一 Bash 执行器"""
-import pytest
+
 import os
 import sys
 
-sys.path.insert(0, 'src')
+import pytest
 
-from aish.tools.bash_executor import UnifiedBashExecutor
+sys.path.insert(0, "src")
+
 from aish.env_manager import EnvironmentManager
+from aish.tools.bash_executor import UnifiedBashExecutor
 
 
 class TestUnifiedBashExecutor:
@@ -70,9 +72,7 @@ class TestUnifiedBashExecutor:
         """测试 ; 分隔的 exit（关键测试！）"""
         original_cwd = os.getcwd()
 
-        success, stdout, stderr, retcode, changes = executor.execute(
-            "cd /tmp; exit 0"
-        )
+        success, stdout, stderr, retcode, changes = executor.execute("cd /tmp; exit 0")
 
         assert retcode == 0
         assert changes["cwd_changed"] is True
@@ -112,7 +112,9 @@ class TestUnifiedBashExecutor:
 
     def test_invalid_utf8_output_does_not_crash(self, executor):
         """测试非 UTF-8 输出不会触发解码异常"""
-        success, stdout, stderr, retcode, changes = executor.execute("printf '\\xE8\\xFF'")
+        success, stdout, stderr, retcode, changes = executor.execute(
+            "printf '\\xE8\\xFF'"
+        )
 
         # 命令应执行成功，且输出经过容错解码
         assert retcode == 0

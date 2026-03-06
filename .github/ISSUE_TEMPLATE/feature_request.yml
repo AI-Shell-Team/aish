@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose a new capability or product improvement.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us evaluate this request with concrete use cases and tradeoffs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One-line statement of the requested capability.
+      placeholder: Add support for streaming responses in AI mode.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What user pain this solves and why current behavior is insufficient.
+      placeholder: Long AI responses cause users to think the shell is frozen; no feedback during generation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: Desired behavior/API/UX with as much specificity as possible.
+      placeholder: Stream tokens as they arrive from the LLM provider, displaying in real-time.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches considered and why they are weaker.
+      placeholder: Show a spinner animation is simpler but doesn't show content progress.
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: |
+        Explain who is affected, severity/urgency, how often this pain occurs, and practical consequences.
+        Include:
+        - Affected users/scenarios
+        - Severity (annoying, blocks workflow, etc.)
+        - Frequency (always/intermittent/edge case)
+        - Consequence (delays, errors, extra manual work, etc.)
+      placeholder: |
+        Affected: All users running long AI commands
+        Severity: Medium
+        Frequency: Daily
+        Consequence: Poor UX, perceived hangs
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence/examples
+      description: Prior art, links, screenshots, logs, or metrics.
+      placeholder: Other AI shells that do this, sample implementation, etc.
+  - type: textarea
+    id: additional_information
+    attributes:
+      label: Additional information
+      description: Extra context, constraints, or references not covered above.
+      placeholder: Must maintain compatibility with all LLM providers, etc.

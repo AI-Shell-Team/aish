@@ -6,21 +6,23 @@ import sys
 import termios
 import threading
 import time
-from typing import Optional, Any
+from typing import Any, Optional
 
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from rich.panel import Panel
-from prompt_toolkit.layout.controls import FormattedTextControl, BufferControl
 
 from ..cancellation import CancellationReason
 from ..i18n import t
 from ..interruption import InterruptAction, PromptConfig, ShellState
 from ..llm import LLMCallbackResult, LLMEvent
 
-
 # Maximum recursion depth to prevent infinite loops
 _MAX_RECURSION_DEPTH = 10
 
-async def get_user_input(shell: Any, prompt_text: Optional[str] = None, _recursion_depth: int = 0) -> str:
+
+async def get_user_input(
+    shell: Any, prompt_text: Optional[str] = None, _recursion_depth: int = 0
+) -> str:
     """Get user input with the configured prompt.
 
     Args:
@@ -36,16 +38,19 @@ async def get_user_input(shell: Any, prompt_text: Optional[str] = None, _recursi
     """
     # Prevent infinite recursion
     if _recursion_depth >= _MAX_RECURSION_DEPTH:
-        raise RuntimeError(f"Maximum input recursion depth ({_MAX_RECURSION_DEPTH}) exceeded")
+        raise RuntimeError(
+            f"Maximum input recursion depth ({_MAX_RECURSION_DEPTH}) exceeded"
+        )
 
     self = shell
-    from prompt_toolkit.keys import Keys
-    from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.document import Document
-    from prompt_toolkit.buffer import Buffer
-    from prompt_toolkit.filters import Condition
     import threading
     import time
+
+    from prompt_toolkit.buffer import Buffer
+    from prompt_toolkit.document import Document
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
 
     # 获取基本提示文本
     base_prompt = prompt_text or self.get_prompt()
@@ -73,7 +78,11 @@ async def get_user_input(shell: Any, prompt_text: Optional[str] = None, _recursi
 
     # 设置初始状态（仅在非确认状态下设置）
     current_state = self.interruption_manager.state
-    if current_state not in (ShellState.CLEAR_PENDING, ShellState.EXIT_PENDING, ShellState.CORRECT_PENDING):
+    if current_state not in (
+        ShellState.CLEAR_PENDING,
+        ShellState.EXIT_PENDING,
+        ShellState.CORRECT_PENDING,
+    ):
         if default_text:
             self.interruption_manager.set_state(ShellState.INPUTTING)
         else:
@@ -87,8 +96,9 @@ async def get_user_input(shell: Any, prompt_text: Optional[str] = None, _recursi
     correction_triggered = [False]
 
     # 创建 callable rprompt - 同时显示状态消息和 AI 提示
-    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.application import get_app_or_none
+    from prompt_toolkit.formatted_text import HTML
+
     def get_rprompt():
         # 优先显示状态消息
         msg = self.interruption_manager.get_prompt_message()
@@ -382,17 +392,18 @@ def handle_ask_user_required(shell: Any, event: LLMEvent) -> LLMCallbackResult:
 
     selected_value: str | None = None
     try:
+        from functools import partial
+
         from prompt_toolkit import Application
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
         from prompt_toolkit.key_binding.defaults import load_key_bindings
-        from prompt_toolkit.layout import HSplit, Layout, Window, VSplit
+        from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.containers import Float, FloatContainer
         from prompt_toolkit.layout.dimension import D
         from prompt_toolkit.styles import Style
         from prompt_toolkit.utils import get_cwidth
         from prompt_toolkit.widgets import Box, RadioList
-        from prompt_toolkit.layout.containers import FloatContainer, Float
-        from functools import partial
 
         # Flush any pending key presses (e.g., the Enter used to submit the last prompt)
         # to avoid instantly selecting/exiting the dialog.
@@ -425,7 +436,11 @@ def handle_ask_user_required(shell: Any, event: LLMEvent) -> LLMCallbackResult:
 
         @kb.add("enter", eager=True)
         def _select(event):
-            if allow_custom_input and custom_buffer is not None and custom_input_field is not None:
+            if (
+                allow_custom_input
+                and custom_buffer is not None
+                and custom_input_field is not None
+            ):
                 if event.app.layout.has_focus(custom_input_field):
                     text_value = (custom_buffer.text or "").strip()
                     if text_value:
@@ -439,6 +454,7 @@ def handle_ask_user_required(shell: Any, event: LLMEvent) -> LLMCallbackResult:
             event.app.exit(result=radio_list.current_value)
 
         if allow_cancel:
+
             @kb.add("escape", eager=True)
             def _cancel(event):
                 event.app.exit(result=None)
@@ -656,6 +672,7 @@ def handle_ask_user_required(shell: Any, event: LLMEvent) -> LLMCallbackResult:
 
         resize_stop_event = threading.Event()
         if self._is_ui_resize_enabled():
+
             def _watch_ask_user_resize() -> None:
                 last_size = self._read_terminal_size()
                 while not resize_stop_event.is_set():
@@ -718,7 +735,9 @@ def display_security_panel(shell: Any, data: dict, panel_mode: str = "confirm") 
         if not isinstance(analysis, dict):
             return True
         sandbox_info = analysis.get("sandbox")
-        return not (isinstance(sandbox_info, dict) and sandbox_info.get("enabled") is False)
+        return not (
+            isinstance(sandbox_info, dict) and sandbox_info.get("enabled") is False
+        )
 
     def _risk_level_value(analysis: object) -> str:
         if not isinstance(analysis, dict):
@@ -729,10 +748,10 @@ def display_security_panel(shell: Any, data: dict, panel_mode: str = "confirm") 
     sandbox_reason = _sandbox_reason_value(security_analysis)
     risk_level = _risk_level_value(security_analysis)
     risk_level_upper = risk_level.upper()
-    analysis_mode = (
-        str(security_analysis.get("mode", ""))
+    fallback_rule_matched = bool(
+        security_analysis.get("fallback_rule_matched")
         if isinstance(security_analysis, dict)
-        else ""
+        else False
     )
 
     # UX: for low-risk notices, do not show the security panel at all.
@@ -770,7 +789,7 @@ def display_security_panel(shell: Any, data: dict, panel_mode: str = "confirm") 
         panel_mode == "confirm"
         and security_analysis
         and not sandbox_enabled
-        and analysis_mode != "command_fallback"
+        and not fallback_rule_matched
     ):
         if sandbox_reason == "sandbox_execute_failed":
             hint = t("shell.security.fallback.sandbox_execute_failed")
@@ -780,7 +799,9 @@ def display_security_panel(shell: Any, data: dict, panel_mode: str = "confirm") 
             hint = t("shell.security.fallback.sandbox_ipc_timeout")
         else:
             hint = t("shell.security.fallback.generic")
-        content.append(f"[bold]{t('shell.security.label.fallback_hint')}:[/bold] {hint}")
+        content.append(
+            f"[bold]{t('shell.security.label.fallback_hint')}:[/bold] {hint}"
+        )
 
     # For non-bash tools (e.g. write_file), tool-specific confirmation info is carried
     # in generic fields like tool_args/content_preview/content_length.
@@ -809,7 +830,7 @@ def display_security_panel(shell: Any, data: dict, panel_mode: str = "confirm") 
                     f"[bold]{t('shell.security.label.content_preview')}:[/bold] {content_preview}"
                 )
 
-    if security_analysis and sandbox_enabled:
+    if security_analysis and (sandbox_enabled or fallback_rule_matched):
         is_low_risk = risk_level_upper == "LOW"
         show_risk_details = is_blocked or (not is_low_risk)
 
@@ -928,8 +949,7 @@ def get_user_confirmation(
         # 瞬时提示会在 handle_processing_cancelled 中显示
         # 触发全局取消，中断 AI 操作
         self.llm_session.cancellation_token.cancel(
-            CancellationReason.USER_INTERRUPT,
-            "User cancelled during tool confirmation"
+            CancellationReason.USER_INTERRUPT, "User cancelled during tool confirmation"
         )
         return LLMCallbackResult.CANCEL
     except EOFError:

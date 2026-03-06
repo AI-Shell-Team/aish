@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
 import json
 import sys
+from pathlib import Path
+from typing import Any
 
 from .sandbox import SandboxConfig, SandboxExecutor, SandboxUnavailableError
 
@@ -25,7 +25,9 @@ def main() -> int:
         return 0
 
     if not isinstance(req, dict):
-        print(json.dumps(_error("bad_request", "request_not_object"), ensure_ascii=False))
+        print(
+            json.dumps(_error("bad_request", "request_not_object"), ensure_ascii=False)
+        )
         return 0
 
     command = req.get("command")
@@ -35,7 +37,11 @@ def main() -> int:
     sim_gid = req.get("sim_gid")
     timeout_s = req.get("timeout_s")
 
-    if not isinstance(command, str) or not isinstance(cwd, str) or not isinstance(repo_root, str):
+    if (
+        not isinstance(command, str)
+        or not isinstance(cwd, str)
+        or not isinstance(repo_root, str)
+    ):
         print(json.dumps(_error("bad_request", "missing_fields"), ensure_ascii=False))
         return 0
 
@@ -63,7 +69,9 @@ def main() -> int:
                 "exit_code": int(result.exit_code),
                 "stdout": result.stdout or "",
                 "stderr": result.stderr or "",
-                "changes": [{"path": c.path, "kind": c.kind} for c in (result.changes or [])],
+                "changes": [
+                    {"path": c.path, "kind": c.kind} for c in (result.changes or [])
+                ],
             },
         }
         print(json.dumps(resp, ensure_ascii=False))
@@ -71,7 +79,12 @@ def main() -> int:
         detail = exc.details or str(exc)
         print(json.dumps(_error(exc.reason, str(detail)), ensure_ascii=False))
     except Exception as exc:
-        print(json.dumps(_error("server_error", f"{type(exc).__name__}: {exc}"), ensure_ascii=False))
+        print(
+            json.dumps(
+                _error("server_error", f"{type(exc).__name__}: {exc}"),
+                ensure_ascii=False,
+            )
+        )
 
     return 0
 

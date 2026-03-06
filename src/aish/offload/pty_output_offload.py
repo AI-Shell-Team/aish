@@ -88,7 +88,11 @@ class PtyOutputOffload:
         self.session_uuid = session_uuid
         self.cwd = cwd
         self.keep_len = keep_len
-        self.base_dir = Path(base_dir).expanduser() if base_dir else (get_default_aish_data_dir() / "offload")
+        self.base_dir = (
+            Path(base_dir).expanduser()
+            if base_dir
+            else (get_default_aish_data_dir() / "offload")
+        )
 
         self._now = dt.datetime.now()
         self._pid = os.getpid()
@@ -362,7 +366,9 @@ class PtyOutputOffload:
         except Exception:
             return
 
-    def finalize(self, *, stdout_tail: bytes, stderr_tail: bytes, return_code: int) -> PtyOutputOffloadResult:
+    def finalize(
+        self, *, stdout_tail: bytes, stderr_tail: bytes, return_code: int
+    ) -> PtyOutputOffloadResult:
         self._append_tail(stream_name="stdout", tail=stdout_tail)
         self._append_tail(stream_name="stderr", tail=stderr_tail)
         self._close_handles()

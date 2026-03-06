@@ -69,7 +69,9 @@ def _write_text_file(path: Path, content: str) -> None:
 
 
 def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
-    _write_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    _write_text_file(
+        path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    )
 
 
 @dataclass(slots=True)
@@ -119,7 +121,11 @@ def render_bash_output(
     exec_id = _build_exec_id(now, pid, seq)
     uid = _build_uid(command, now, pid, seq)
 
-    base_dir = Path(settings.base_dir).expanduser() if settings.base_dir else _default_offload_base_dir()
+    base_dir = (
+        Path(settings.base_dir).expanduser()
+        if settings.base_dir
+        else _default_offload_base_dir()
+    )
     session_dir = base_dir / _safe_session_dir_name(session_uuid)
     exec_dir = session_dir / exec_id
 

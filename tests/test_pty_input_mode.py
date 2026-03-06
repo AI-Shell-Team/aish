@@ -29,7 +29,10 @@ def test_build_passthrough_stdin_termios_disables_translations():
     assert (new_settings[0] & _opt("INLCR")) == 0
     assert (new_settings[0] & _opt("IGNCR")) == 0
     assert (new_settings[1] & termios.OPOST) == 0
-    assert (new_settings[3] & (termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)) == 0
+    assert (
+        new_settings[3]
+        & (termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
+    ) == 0
     assert new_settings[6][termios.VMIN] == 1
     assert new_settings[6][termios.VTIME] == 0
 

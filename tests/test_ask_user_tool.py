@@ -119,7 +119,7 @@ async def test_handle_tool_calls_ask_user_user_input_required_breaks(monkeypatch
         {
             "id": "call_2",
             "type": "function",
-            "function": {"name": "bash_exec", "arguments": "{\"code\":\"echo hi\"}"},
+            "function": {"name": "bash_exec", "arguments": '{"code":"echo hi"}'},
         },
     ]
 
@@ -135,7 +135,9 @@ async def test_handle_tool_calls_ask_user_user_input_required_breaks(monkeypatch
             )
         raise AssertionError("should not execute tool calls after ask_user pause")
 
-    with patch.object(session, "pre_execute_tool", new=AsyncMock(side_effect=fake_pre_execute_tool)):
+    with patch.object(
+        session, "pre_execute_tool", new=AsyncMock(side_effect=fake_pre_execute_tool)
+    ):
         tool_call_cancelled, output, _messages = await session._handle_tool_calls(
             tool_calls=tool_calls,
             context_manager=context_manager,
@@ -145,3 +147,44 @@ async def test_handle_tool_calls_ask_user_user_input_required_breaks(monkeypatch
 
     assert tool_call_cancelled is True
     assert output == "paused"
+
+
+@pytest.mark.anyio
+async def test_pre_execute_tool_emits_blocked_panel_for_policy_fallback_rule(monkeypatch):
+    config = ConfigModel(model="test-model", api_key="test-key")
+    session = LLMSession(config=config, skill_manager=SkillManager())
+
+    class _DummyBashTool:
+        description = "dummy bash"
+        called = False
+
+        def need_confirm_before_exec(self, _arg):
+            return False
+
+        def get_confirmation_info(self, arg):
+            return {
+                "command": arg,
+                "security_decision": {"allow": False, "require_confirmation": False},
+                "security_analysis": {
+                    "risk_level": "HIGH",
+                    "sandbox": {"enabled": False, "reason": "sandbox_disabled_by_policy"},
+                    "fallback_rule_matched": True,
+                    "reasons": ["系统配置目录，误修改会导致严重故障"],
+                },
+            }
+
+        async def __call__(self, code: str):
+            self.called = True
+            return ToolResult(ok=False, output=code)
+
+    session.tools["bash_exec"] = _DummyBashTool()
+    emitted: list[tuple[object, dict]] = []
+    monkeypatch.setattr(session, "emit_event", lambda event_type, data=None: emitted.append((event_type, data or {})))
+
+    goon, _result = await session.pre_execute_tool("bash_exec", {"code": "sudo rm /etc/aish/123"})
+
+    assert goon == LLMCallbackResult.CONTINUE
+    assert emitted
+    assert emitted[0][1].get("panel_mode") == "blocked"
+    assert _result.meta.get("kind") == "security_blocked"
+    assert session.tools["bash_exec"].called is False

@@ -1,9 +1,9 @@
 from pathlib import Path
-from typing import Dict
 from string import Template
+from typing import Dict
 
 try:
-    from importlib.resources import files, as_file
+    from importlib.resources import as_file, files
 except ImportError:
     # Python < 3.9 compatibility - this would require adding importlib_resources as dependency
     # For now, fall back to filesystem only

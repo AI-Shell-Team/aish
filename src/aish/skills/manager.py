@@ -12,7 +12,6 @@ import yaml
 from .models import Skill, SkillList, SkillMetadataInfo, SkillSource
 from .validator import SkillValidationError, validate_frontmatter
 
-
 # Regex to extract YAML frontmatter from markdown files
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 

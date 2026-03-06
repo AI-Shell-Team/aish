@@ -10,8 +10,8 @@ import anyio
 from ..builtin import BuiltinRegistry
 from ..command import CommandDispatcher
 from ..i18n import t
-from .shell_types import CommandStatus
 from ..tools.bash_executor import UnifiedBashExecutor
+from .shell_types import CommandStatus
 
 if TYPE_CHECKING:
     from ..shell import AIShell
@@ -55,7 +55,9 @@ class ShellCommandService:
                         for i, part in enumerate(parts):
                             part = part.strip()
                             if part:
-                                self.shell.console.print(f"   {i + 1}. {part}", style="cyan")
+                                self.shell.console.print(
+                                    f"   {i + 1}. {part}", style="cyan"
+                                )
                         break
                 return
 
@@ -222,7 +224,9 @@ class ShellCommandService:
                         )
                         return
                     if result.status == CommandStatus.ERROR:
-                        await self.shell.handle_command_error(user_input, stdout, stderr)
+                        await self.shell.handle_command_error(
+                            user_input, stdout, stderr
+                        )
                         return
                     # 许多正常命令（如 dd、grep -v 等）会输出信息到 stderr，但这不代表执行失败
                 finally:

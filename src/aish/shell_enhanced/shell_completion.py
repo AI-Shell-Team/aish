@@ -9,10 +9,11 @@ import subprocess
 from typing import Optional
 
 from prompt_toolkit.application import run_in_terminal
-from prompt_toolkit.completion import Completion, Completer, NestedCompleter
+from prompt_toolkit.completion import Completer, Completion, NestedCompleter
 from prompt_toolkit.document import Document
 
 from ..skills import SkillManager
+
 
 class QuotedPathCompleter(Completer):
     """Custom path completer that automatically quotes paths with spaces or special characters."""
@@ -40,21 +41,20 @@ class QuotedPathCompleter(Completer):
         try:
             # If input is empty, list current directory
             if not text.strip():
-                items = os.listdir('.')
-                dir_path = '.'
-                file_prefix = ''
-                input_prefix = ''  # No prefix in input
+                items = os.listdir(".")
+                dir_path = "."
+                file_prefix = ""
+                input_prefix = ""  # No prefix in input
             else:
                 # Handle tilde expansion
                 expanded_path = text
-                input_prefix = ''  # Track the path prefix from input
+                input_prefix = ""  # Track the path prefix from input
 
                 # Check if input already contains expanded home path
                 # If so, don't try to convert back to ~ format
-                home_dir = os.path.expanduser('~')
+                home_dir = os.path.expanduser("~")
                 input_contains_expanded_home = (
-                    text.startswith(home_dir + '/') or
-                    text == home_dir
+                    text.startswith(home_dir + "/") or text == home_dir
                 )
 
                 if input_contains_expanded_home:
@@ -65,16 +65,16 @@ class QuotedPathCompleter(Completer):
                     file_prefix = os.path.basename(text)
 
                     # Extract input prefix (everything before the last /)
-                    if '/' in text:
-                        last_slash = text.rfind('/')
-                        input_prefix = text[:last_slash + 1]
-                        file_prefix = text[last_slash + 1:]
+                    if "/" in text:
+                        last_slash = text.rfind("/")
+                        input_prefix = text[: last_slash + 1]
+                        file_prefix = text[last_slash + 1 :]
                     else:
-                        input_prefix = ''
+                        input_prefix = ""
 
                     # If no directory part, use current directory
                     if not dir_path:
-                        dir_path = '.'
+                        dir_path = "."
                         file_prefix = text
 
                     # List files
@@ -92,13 +92,17 @@ class QuotedPathCompleter(Completer):
                         # Build completion text preserving expanded path
                         if input_prefix:
                             completion_text = input_prefix + item
-                        elif dir_path and dir_path != '.':
+                        elif dir_path and dir_path != ".":
                             completion_text = os.path.join(dir_path, item)
                         else:
                             completion_text = item
 
                         # Check if directory
-                        full_path = os.path.join(dir_path, item) if dir_path and dir_path != '.' else item
+                        full_path = (
+                            os.path.join(dir_path, item)
+                            if dir_path and dir_path != "."
+                            else item
+                        )
                         is_dir = os.path.isdir(full_path)
 
                         # If only_dirs is True and this is not a directory, skip it
@@ -107,8 +111,8 @@ class QuotedPathCompleter(Completer):
 
                         if is_dir:
                             # Display only the filename (like bash), not the full path
-                            display_text = item + '/'
-                            completion_text = completion_text + '/'
+                            display_text = item + "/"
+                            completion_text = completion_text + "/"
                         else:
                             # Display only the filename (like bash), not the full path
                             display_text = item
@@ -127,7 +131,9 @@ class QuotedPathCompleter(Completer):
                             start_pos = -len(text) if text else 0
 
                         # Yield completion
-                        if " " in completion_text or any(c in completion_text for c in "\"'$`\\(){}[]?*;|&<>"):
+                        if " " in completion_text or any(
+                            c in completion_text for c in "\"'$`\\(){}[]?*;|&<>"
+                        ):
                             quoted_text = shlex.quote(completion_text)
                             yield Completion(
                                 text=quoted_text,
@@ -149,17 +155,17 @@ class QuotedPathCompleter(Completer):
                 # Extract the path prefix from original text (before expansion)
                 # For example: "./get" -> input_prefix="./", file_prefix="get"
                 # For "~/.confi" -> input_prefix="~/", file_prefix=".confi"
-                if '/' in text:
+                if "/" in text:
                     # Find the last slash position
-                    last_slash = text.rfind('/')
-                    input_prefix = text[:last_slash + 1]  # Include the slash
-                    file_prefix = text[last_slash + 1:]
+                    last_slash = text.rfind("/")
+                    input_prefix = text[: last_slash + 1]  # Include the slash
+                    file_prefix = text[last_slash + 1 :]
                 else:
                     # No path prefix (current directory)
-                    input_prefix = ''
+                    input_prefix = ""
                     file_prefix = text
 
-                if text.startswith('~'):
+                if text.startswith("~"):
                     # Expand tilde to user home directory
                     expanded_path = os.path.expanduser(text)
                 elif input_contains_expanded_home:
@@ -173,7 +179,7 @@ class QuotedPathCompleter(Completer):
 
                 # If no directory part, use current directory
                 if not dir_path:
-                    dir_path = '.'
+                    dir_path = "."
                     expanded_path = text
 
                 # List files in directory
@@ -194,19 +200,25 @@ class QuotedPathCompleter(Completer):
                     # Preserve the input path prefix (e.g., "./", "~/")
                     # This is critical for ~ paths to avoid toggle
                     completion_text = input_prefix + item
-                elif dir_path and dir_path != '.':
+                elif dir_path and dir_path != ".":
                     completion_text = os.path.join(dir_path, item)
                 else:
                     completion_text = item
 
                 # Determine full path for checking if it's a directory
-                if text.startswith('~'):
-                    if dir_path == os.path.expanduser('~'):
-                        full_path = os.path.join(os.path.expanduser('~'), item)
+                if text.startswith("~"):
+                    if dir_path == os.path.expanduser("~"):
+                        full_path = os.path.join(os.path.expanduser("~"), item)
                     else:
-                        full_path = os.path.join(dir_path, item) if dir_path != '.' else item
+                        full_path = (
+                            os.path.join(dir_path, item) if dir_path != "." else item
+                        )
                 else:
-                    full_path = os.path.join(dir_path, item) if dir_path and dir_path != '.' else item
+                    full_path = (
+                        os.path.join(dir_path, item)
+                        if dir_path and dir_path != "."
+                        else item
+                    )
 
                 # Check if it's a directory
                 is_dir = os.path.isdir(full_path)
@@ -217,8 +229,8 @@ class QuotedPathCompleter(Completer):
 
                 if is_dir:
                     # Display only the filename (like bash), not the full path
-                    display_text = item + '/'
-                    completion_text = completion_text + '/'
+                    display_text = item + "/"
+                    completion_text = completion_text + "/"
                 else:
                     # Display only the filename (like bash), not the full path
                     display_text = item
@@ -237,9 +249,10 @@ class QuotedPathCompleter(Completer):
                     # No prefix, replace entire input
                     start_pos = -len(text) if text else 0
 
-
                 # Check if quotes are needed
-                if " " in completion_text or any(c in completion_text for c in "\"'$`\\(){}[]?*;|&<>"):
+                if " " in completion_text or any(
+                    c in completion_text for c in "\"'$`\\(){}[]?*;|&<>"
+                ):
                     quoted_text = shlex.quote(completion_text)
                     yield Completion(
                         text=quoted_text,
@@ -310,7 +323,12 @@ class ModeAwareCompleter(Completer):
     # Threshold below which completions are shown directly without requiring second Tab
     SMALL_COMPLETION_THRESHOLD = 30
 
-    def __init__(self, ai_completer: Completer, shell_completer: Completer, ai_prefix_marks: set[str]):
+    def __init__(
+        self,
+        ai_completer: Completer,
+        shell_completer: Completer,
+        ai_prefix_marks: set[str],
+    ):
         self.ai_completer = ai_completer
         self.shell_completer = shell_completer
         self.ai_prefix_marks = ai_prefix_marks
@@ -398,14 +416,18 @@ class ModeAwareCompleter(Completer):
         if self._is_ai_mode(document):
             # AI mode: use original completer behavior
             found = False
-            for completion in self.ai_completer.get_completions(document, complete_event):
+            for completion in self.ai_completer.get_completions(
+                document, complete_event
+            ):
                 found = True
                 yield completion
             if found:
                 return
 
         # Shell mode: bash-style completion
-        completions = list(self.shell_completer.get_completions(document, complete_event))
+        completions = list(
+            self.shell_completer.get_completions(document, complete_event)
+        )
 
         if not completions:
             # Reset completion state when no matches
@@ -424,7 +446,10 @@ class ModeAwareCompleter(Completer):
 
         # Calculate common prefix
         import os
-        common_prefix = os.path.commonprefix(completion_texts) if completion_texts else ""
+
+        common_prefix = (
+            os.path.commonprefix(completion_texts) if completion_texts else ""
+        )
 
         # Get the text that would be replaced (start_position is negative, so we use abs)
         start_pos = abs(completions[0].start_position)
@@ -438,8 +463,9 @@ class ModeAwareCompleter(Completer):
             # 1. Text is the same (user didn't type anything new, just pressed Tab again)
             # 2. Text is an extension (via completion from previous Tab)
             # and completion count hasn't changed
-            if (len(completions) == count and
-                (text == base_text or (text.startswith(base_text) and text != base_text))):
+            if len(completions) == count and (
+                text == base_text or (text.startswith(base_text) and text != base_text)
+            ):
                 is_second_tab = True
 
         if is_second_tab:
@@ -449,7 +475,7 @@ class ModeAwareCompleter(Completer):
             items = []
             for c in completions:
                 display = c.display
-                plain_text = ''
+                plain_text = ""
                 try:
                     for item in display:
                         if isinstance(item, tuple) and len(item) == 2:
@@ -469,7 +495,11 @@ class ModeAwareCompleter(Completer):
             return
 
         # Check if we can do common prefix completion
-        if common_prefix and common_prefix != current_input and common_prefix.startswith(current_input):
+        if (
+            common_prefix
+            and common_prefix != current_input
+            and common_prefix.startswith(current_input)
+        ):
             # There's a common prefix that extends the current input
             # Complete to the common prefix and save state for next Tab
             # Save the base text (current input before completion)
@@ -486,7 +516,7 @@ class ModeAwareCompleter(Completer):
         items = []
         for c in completions:
             display = c.display
-            plain_text = ''
+            plain_text = ""
             try:
                 for item in display:
                     if isinstance(item, tuple) and len(item) == 2:
@@ -514,9 +544,13 @@ class ModeAwareCompleter(Completer):
         else:
             # For medium-sized lists, show a hint that another Tab will show all
             import sys
+
             def _print():
-                sys.stdout.write(f"\n{len(items)} completions (Press Tab again to show)\n")
+                sys.stdout.write(
+                    f"\n{len(items)} completions (Press Tab again to show)\n"
+                )
                 sys.stdout.flush()
+
             try:
                 run_in_terminal(_print)
             except Exception:
@@ -529,7 +563,9 @@ class ModeAwareCompleter(Completer):
 
         def _print():
             # Print message with newline
-            sys.stdout.write(f"\nDisplay all {count} possibilities? (Press Tab again to show)\n")
+            sys.stdout.write(
+                f"\nDisplay all {count} possibilities? (Press Tab again to show)\n"
+            )
             sys.stdout.flush()
 
         try:
@@ -540,12 +576,13 @@ class ModeAwareCompleter(Completer):
     def _print_with_pager(self, items: list[str]) -> None:
         """Print items using a pager (like more) for large lists."""
         import subprocess
-        import tempfile
         import sys
+        import tempfile
 
         def _print():
             # Build columnated output
             import shutil
+
             terminal_width = shutil.get_terminal_size().columns
             max_width = max((len(item) for item in items), default=0)
             col_width = max_width + 2
@@ -565,7 +602,7 @@ class ModeAwareCompleter(Completer):
             output = "\n".join(lines)
 
             # Try to use pager (more or less)
-            pager = os.environ.get('PAGER', 'more')
+            pager = os.environ.get("PAGER", "more")
             try:
                 # Use subprocess to run pager
                 process = subprocess.Popen(
@@ -573,7 +610,7 @@ class ModeAwareCompleter(Completer):
                     stdin=subprocess.PIPE,
                     stdout=sys.stdout,
                     stderr=sys.stderr,
-                    text=True
+                    text=True,
                 )
                 process.communicate(input=output)
                 process.wait()
@@ -600,11 +637,14 @@ def make_shell_completer():
         def _get_commands(self):
             """Get all executable commands from PATH"""
             import time
+
             current_time = time.time()
 
             # Cache for 5 seconds to avoid frequent PATH scanning
-            if (self._cached_commands is None or
-                current_time - self._last_cache_time > 5):
+            if (
+                self._cached_commands is None
+                or current_time - self._last_cache_time > 5
+            ):
 
                 try:
                     path_dirs = os.getenv("PATH", "").split(os.pathsep)
@@ -618,8 +658,9 @@ def make_shell_completer():
                             if os.access(path_dir, os.R_OK):
                                 for entry in os.listdir(path_dir):
                                     entry_path = os.path.join(path_dir, entry)
-                                    if (os.path.isfile(entry_path) and
-                                        os.access(entry_path, os.X_OK)):
+                                    if os.path.isfile(entry_path) and os.access(
+                                        entry_path, os.X_OK
+                                    ):
                                         commands.add(entry)
                         except (OSError, PermissionError):
                             continue
@@ -635,7 +676,7 @@ def make_shell_completer():
             text = document.text_before_cursor.strip()
 
             # If input contains space, it means it's a parameter, don't provide command completion
-            if ' ' in text:
+            if " " in text:
                 return
 
             # Get all commands
@@ -648,13 +689,13 @@ def make_shell_completer():
                         text=command,
                         start_position=-len(text),
                         display=command,
-                        display_meta="executable"
+                        display_meta="executable",
                     )
 
     # Create smart command argument completer that can extract command arguments and provide file completion
     class SmartArgumentCompleter(Completer):
         # Commands that only accept directories
-        DIR_ONLY_COMMANDS = {'cd', 'pushd', 'rmdir'}
+        DIR_ONLY_COMMANDS = {"cd", "pushd", "rmdir"}
 
         def __init__(self, path_completer, command_completer=None):
             self.path_completer = path_completer
@@ -662,7 +703,7 @@ def make_shell_completer():
 
         def _is_dir_only_command(self, command):
             """Check if the command only accepts directory arguments."""
-            cmd_base = command.split('/')[-1]  # Handle paths like '/usr/bin/git'
+            cmd_base = command.split("/")[-1]  # Handle paths like '/usr/bin/git'
             return cmd_base in self.DIR_ONLY_COMMANDS
 
         def _strip_sudo_prefix(self, text, parts):
@@ -672,7 +713,7 @@ def make_shell_completer():
 
             sudo_count = 0
             original_parts = list(parts)
-            while parts and parts[0] == 'sudo':
+            while parts and parts[0] == "sudo":
                 sudo_count += 1
                 parts = parts[1:]
 
@@ -682,6 +723,7 @@ def make_shell_completer():
             # Calculate the stripped text by removing sudo prefixes
             # Find the position after all sudo prefixes and their following spaces
             import shlex
+
             try:
                 # Use shlex.split to find the end position of each sudo token
                 i = 0
@@ -694,7 +736,7 @@ def make_shell_completer():
                 # Remove sudo tokens
                 while tokens_removed < sudo_count and i < len(text):
                     # Check if current position starts with 'sudo'
-                    if text[i:i+4] == 'sudo':
+                    if text[i : i + 4] == "sudo":
                         i += 4  # Skip 'sudo'
                         tokens_removed += 1
                         # Skip spaces after sudo
@@ -719,19 +761,21 @@ def make_shell_completer():
                 # Get command name from full document text
                 full_text = document.text
                 import shlex
+
                 try:
                     cmd_parts = shlex.split(full_text)
-                    command_name = cmd_parts[0] if cmd_parts else ''
+                    command_name = cmd_parts[0] if cmd_parts else ""
                     only_dirs = self._is_dir_only_command(command_name)
                 except Exception:
                     only_dirs = False
 
                 # List all files in current directory
                 import os
+
                 try:
-                    items = sorted(os.listdir('.'))
+                    items = sorted(os.listdir("."))
                     for item in items:
-                        full_path = os.path.join('.', item)
+                        full_path = os.path.join(".", item)
                         is_dir = os.path.isdir(full_path)
 
                         # If only_dirs is True and this is not a directory, skip it
@@ -739,15 +783,18 @@ def make_shell_completer():
                             continue
 
                         if is_dir:
-                            display_text = item + '/'
-                            completion_text = item + '/'
+                            display_text = item + "/"
+                            completion_text = item + "/"
                         else:
                             display_text = item
                             completion_text = item
 
                         # Check if quotes are needed
-                        if " " in completion_text or any(c in completion_text for c in "\"'$`\\(){}[]?*;|&<>"):
+                        if " " in completion_text or any(
+                            c in completion_text for c in "\"'$`\\(){}[]?*;|&<>"
+                        ):
                             import shlex
+
                             quoted_text = shlex.quote(completion_text)
                             yield Completion(
                                 text=quoted_text,
@@ -768,6 +815,7 @@ def make_shell_completer():
 
             # Parse command and arguments, properly handle options
             import shlex
+
             try:
                 parts = shlex.split(text)
             except ValueError:
@@ -778,7 +826,9 @@ def make_shell_completer():
                 return
 
             # Strip sudo prefix for completion
-            stripped_text, stripped_parts, sudo_count = self._strip_sudo_prefix(text, list(parts))
+            stripped_text, stripped_parts, sudo_count = self._strip_sudo_prefix(
+                text, list(parts)
+            )
 
             # If sudo was stripped, use stripped parts for completion logic
             if sudo_count > 0:
@@ -786,11 +836,13 @@ def make_shell_completer():
                 text = stripped_text
 
             # Check if we're at first argument position (command name)
-            if len(parts) == 1 and not text.endswith(' '):
+            if len(parts) == 1 and not text.endswith(" "):
                 # If sudo was stripped, provide command completion for the actual command
                 if sudo_count > 0 and self.command_completer:
                     arg_document = Document(text=text, cursor_position=len(text))
-                    for completion in self.command_completer.get_completions(arg_document, complete_event):
+                    for completion in self.command_completer.get_completions(
+                        arg_document, complete_event
+                    ):
                         yield Completion(
                             text=completion.text,
                             start_position=-len(text),
@@ -802,7 +854,9 @@ def make_shell_completer():
                 # Otherwise, provide file completion
                 arg_document = Document(text=text, cursor_position=len(text))
                 only_dirs = self._is_dir_only_command(parts[0]) if parts else False
-                for completion in self.path_completer.get_completions(arg_document, complete_event, only_dirs=only_dirs):
+                for completion in self.path_completer.get_completions(
+                    arg_document, complete_event, only_dirs=only_dirs
+                ):
                     yield Completion(
                         text=completion.text,
                         start_position=-len(text),
@@ -832,12 +886,12 @@ def make_shell_completer():
                         in_quotes = False
                         quote_char = None
                         current_part += char
-                    elif char == ' ' and not in_quotes:
+                    elif char == " " and not in_quotes:
                         if current_part:
                             parsed_parts.append(current_part)
                             current_part = ""
                         # Skip spaces
-                        while i + 1 < len(text) and text[i + 1] == ' ':
+                        while i + 1 < len(text) and text[i + 1] == " ":
                             i += 1
                     else:
                         current_part += char
@@ -847,8 +901,8 @@ def make_shell_completer():
                     parsed_parts.append(current_part)
 
                 # If text ends with space, add empty parameter to indicate new parameter start
-                if text.endswith(' '):
-                    parsed_parts.append('')
+                if text.endswith(" "):
+                    parsed_parts.append("")
 
                 # Find current argument to complete (last non-empty argument)
                 current_arg = ""
@@ -865,11 +919,15 @@ def make_shell_completer():
                     if not current_arg.strip():
                         arg_document = Document(text=".", cursor_position=1)
                     else:
-                        arg_document = Document(text=current_arg, cursor_position=len(current_arg))
+                        arg_document = Document(
+                            text=current_arg, cursor_position=len(current_arg)
+                        )
 
                     # Use path completer to provide completions for current argument
                     only_dirs = self._is_dir_only_command(parts[0]) if parts else False
-                    for completion in self.path_completer.get_completions(arg_document, complete_event, only_dirs=only_dirs):
+                    for completion in self.path_completer.get_completions(
+                        arg_document, complete_event, only_dirs=only_dirs
+                    ):
                         # Calculate correct start_position
                         if len(parsed_parts) == 1:
                             # Only one argument, replace entire input
@@ -886,22 +944,26 @@ def make_shell_completer():
                         )
             except Exception:
                 # If parsing fails, fallback to simple method
-                first_space_pos = text.find(' ')
+                first_space_pos = text.find(" ")
                 if first_space_pos == -1:
                     arg_document = Document(text=text, cursor_position=len(text))
                     start_pos = -len(text)
                 else:
-                    arg_text = text[first_space_pos + 1:]
+                    arg_text = text[first_space_pos + 1 :]
                     if not arg_text.strip():
                         arg_document = Document(text=".", cursor_position=1)
                     else:
-                        arg_document = Document(text=arg_text, cursor_position=len(arg_text))
+                        arg_document = Document(
+                            text=arg_text, cursor_position=len(arg_text)
+                        )
                     start_pos = -(len(text) - first_space_pos - 1)
 
                 # Get command name for only_dirs check
                 command_name = text[:first_space_pos] if first_space_pos != -1 else text
                 only_dirs = self._is_dir_only_command(command_name)
-                for completion in self.path_completer.get_completions(arg_document, complete_event, only_dirs=only_dirs):
+                for completion in self.path_completer.get_completions(
+                    arg_document, complete_event, only_dirs=only_dirs
+                ):
                     yield Completion(
                         text=completion.text,
                         start_position=start_pos,
@@ -915,9 +977,9 @@ def make_shell_completer():
     # Create nested completer for specific built-in commands
     nested = NestedCompleter.from_nested_dict(
         {
-            "cd": dir_only_comp,      # cd should only complete directories
-            "pushd": dir_only_comp,   # pushd should only complete directories
-            "rmdir": dir_only_comp,   # rmdir should only complete directories
+            "cd": dir_only_comp,  # cd should only complete directories
+            "pushd": dir_only_comp,  # pushd should only complete directories
+            "rmdir": dir_only_comp,  # rmdir should only complete directories
             "ls": path_comp,
             "popd": None,
             "dirs": None,
@@ -942,9 +1004,11 @@ def make_shell_completer():
             text_stripped = text.strip()
 
             # If input doesn't contain space, check if it's a complete command
-            if ' ' not in text_stripped:
+            if " " not in text_stripped:
                 # First try built-in command completion
-                nested_completions = list(self.nested_completer.get_completions(document, complete_event))
+                nested_completions = list(
+                    self.nested_completer.get_completions(document, complete_event)
+                )
 
                 # If there are built-in command completions, use them
                 if nested_completions:
@@ -955,30 +1019,38 @@ def make_shell_completer():
 
                 # Check if the input exactly matches a command in PATH
                 # If so, only provide file completion (for command arguments)
-                command_completions = list(self.command_completer.get_completions(document, complete_event))
+                command_completions = list(
+                    self.command_completer.get_completions(document, complete_event)
+                )
 
                 # Check if input text exactly matches any command
                 exact_command_match = any(
-                    c.text == text_stripped or c.text == text_stripped + '/'
+                    c.text == text_stripped or c.text == text_stripped + "/"
                     for c in command_completions
                 )
 
                 if exact_command_match:
                     # Input is a complete command, provide file completion only
                     # Use empty document to show ALL files in current directory (like bash)
-                    empty_document = Document(text='', cursor_position=0)
-                    for completion in self.argument_completer.get_completions(empty_document, complete_event):
+                    empty_document = Document(text="", cursor_position=0)
+                    for completion in self.argument_completer.get_completions(
+                        empty_document, complete_event
+                    ):
                         yield completion
                 else:
                     # Input is incomplete, provide command completion
                     for completion in command_completions:
                         yield completion
                     # Also provide file completion for partial command names
-                    for completion in self.argument_completer.get_completions(document, complete_event):
+                    for completion in self.argument_completer.get_completions(
+                        document, complete_event
+                    ):
                         yield completion
             else:
                 # If contains space, try nested completer
-                nested_completions = list(self.nested_completer.get_completions(document, complete_event))
+                nested_completions = list(
+                    self.nested_completer.get_completions(document, complete_event)
+                )
 
                 # If nested completer has results, use them first
                 if nested_completions:
@@ -986,11 +1058,15 @@ def make_shell_completer():
                         yield completion
                 else:
                     # Otherwise use smart argument completer
-                    for completion in self.argument_completer.get_completions(document, complete_event):
+                    for completion in self.argument_completer.get_completions(
+                        document, complete_event
+                    ):
                         yield completion
 
     # Create various completers
     command_completer = CommandCompleter()
     argument_completer = SmartArgumentCompleter(path_comp, command_completer)
-    smart_completer = SmartMergedCompleter(nested, argument_completer, command_completer)
+    smart_completer = SmartMergedCompleter(
+        nested, argument_completer, command_completer
+    )
     return smart_completer

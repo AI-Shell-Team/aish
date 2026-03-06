@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 
 from aish.tools.result import ToolResult
 
+
 class ToolBase(BaseModel):
     model_config = ConfigDict(extra="allow")
 

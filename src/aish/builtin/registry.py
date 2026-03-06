@@ -4,9 +4,10 @@ This module provides a registry of built-in commands that cannot be executed
 with subprocess.run because they require shell state manipulation or PTY.
 """
 
-from typing import Set, Dict, Optional, Callable
-from aish.builtin.handlers import BuiltinHandlers, BuiltinResult, DirectoryStack
+from typing import Callable, Dict, Optional, Set
 
+from aish.builtin.handlers import (BuiltinHandlers, BuiltinResult,
+                                   DirectoryStack)
 
 # Commands that modify shell state and need special handling
 # Also includes commands that are shell built-ins (not executable via subprocess)
@@ -127,9 +128,9 @@ class BuiltinRegistry:
             True if the command is a built-in that requires special handling
         """
         return (
-            BuiltinRegistry.is_state_modifying_command(command) or
-            BuiltinRegistry.is_pty_requiring_command(command) or
-            BuiltinRegistry.is_rejected_command(command)
+            BuiltinRegistry.is_state_modifying_command(command)
+            or BuiltinRegistry.is_pty_requiring_command(command)
+            or BuiltinRegistry.is_rejected_command(command)
         )
 
     @staticmethod
@@ -229,7 +230,9 @@ class BuiltinRegistry:
 
 
 # Pre-built command sets for easy access
-ALL_BUILTIN_COMMANDS = STATE_MODIFYING_COMMANDS | PTY_REQUIRING_COMMANDS | REJECTED_COMMANDS
+ALL_BUILTIN_COMMANDS = (
+    STATE_MODIFYING_COMMANDS | PTY_REQUIRING_COMMANDS | REJECTED_COMMANDS
+)
 
 # Command description for help messages
 COMMAND_DESCRIPTIONS: Dict[str, str] = {

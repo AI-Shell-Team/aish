@@ -2,19 +2,20 @@
 Test AI Shell functionality
 """
 
-import json
-import pytest
-from unittest.mock import patch, AsyncMock, Mock
-import anyio
 import getpass
+import json
 from contextlib import nullcontext
+from unittest.mock import AsyncMock, Mock, patch
 
-from aish.shell import AIShell
+import anyio
+import pytest
+
 from aish.config import ConfigModel
-from aish.skills import SkillManager
 from aish.context_manager import MemoryType
 from aish.security.security_manager import SecurityDecision
 from aish.security.security_policy import RiskLevel
+from aish.shell import AIShell
+from aish.skills import SkillManager
 from aish.wizard.types import ConnectivityResult, ToolSupportResult
 
 
@@ -92,7 +93,9 @@ class TestAIShell:
         with patch.object(shell.console, "print") as mock_print:
             await shell.handle_model_command("/model")
 
-        assert any("test-model" in str(call.args[0]) for call in mock_print.call_args_list)
+        assert any(
+            "test-model" in str(call.args[0]) for call in mock_print.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_model_command_switch_success(self):
@@ -457,7 +460,9 @@ class TestAIShell:
                             assert offload_payload["meta_path"] == "/tmp/meta.json"
 
     @pytest.mark.asyncio
-    async def test_process_input_regular_command_success_with_stderr_no_error_detect(self):
+    async def test_process_input_regular_command_success_with_stderr_no_error_detect(
+        self,
+    ):
         """Successful command with stderr should NOT trigger error detection.
         Many commands (dd, grep -v, etc.) output to stderr for progress, not errors."""
         config = ConfigModel(model="test-model")
@@ -486,7 +491,10 @@ class TestAIShell:
                                 0,
                                 "ok",
                                 "one two three four",  # stderr with >3 words
-                                offload={"status": "inline", "reason": "below_threshold"},
+                                offload={
+                                    "status": "inline",
+                                    "reason": "below_threshold",
+                                },
                             )
 
                             await shell.process_input("ls")
@@ -502,7 +510,9 @@ class TestAIShell:
         """When command detection LLM fails, user input should still be processed as AI question."""
         config = ConfigModel(model="test-model")
         shell = make_shell(config)
-        shell._command_detection_llm_failed = True  # Simulate LLM failure during command detection
+        shell._command_detection_llm_failed = (
+            True  # Simulate LLM failure during command detection
+        )
 
         with patch.object(
             shell, "is_command_request", new_callable=AsyncMock
@@ -571,7 +581,9 @@ class TestAIShell:
                     pass
 
     @pytest.mark.asyncio
-    async def test_process_input_compound_state_modifying_command_adds_shell_context(self):
+    async def test_process_input_compound_state_modifying_command_adds_shell_context(
+        self,
+    ):
         """Compound commands in UnifiedBashExecutor path should be recorded to SHELL context."""
         config = ConfigModel(model="test-model")
         shell = make_shell(config)

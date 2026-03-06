@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import yaml
 
-from dataclasses import dataclass
-
 from ..i18n import get_ui_locale
-
-from .security_policy import PolicyRule, RiskLevel, SecurityPolicy
-from .security_policy import InvalidFallbackRule, PolicyValidationIssue
+from .security_policy import (PolicyRule, RiskLevel, SandboxOffAction,
+                              SecurityPolicy)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +34,8 @@ _EMPTY_POLICY_TEMPLATE_ZH = """# -AI-Shell Security Policy
 #   - default_risk_level: 未命中任何 rules 时的默认风险等级。
 #     可选值通常为：LOW | MEDIUM | HIGH（具体以实现侧枚举为准）。
 #   - enable_sandbox: 是否启用沙箱预跑/受控执行（如实现侧支持，可映射到对应开关）。
+#   - sandbox_off_action: 当沙箱关闭/不可用/执行失败时，无法根据 rules 评估命令的实际文件变更，
+#     将使用该动作作为兜底决策：BLOCK=阻断，CONFIRM=确认，ALLOW=直接放行。
 #
 # - rules: 规则列表（自上而下匹配，命中第一条即生效）
 #   每条规则字段：
@@ -70,60 +70,38 @@ global:
     # 是否开启沙箱预跑（若当前实现已支持，可映射到现有 enable_sandbox 逻辑）
     enable_sandbox: false
 
+    # 沙箱关闭/失败时的兜底动作（BLOCK=阻断，CONFIRM=确认，ALLOW=直接放行）
+    sandbox_off_action: ALLOW
+
 # 规则列表：从上到下匹配，第一条命中生效
 rules:
-        # ===== 高风险：系统核心目录 =====
+    # ===== 高风险：系统核心目录，禁止 AI 修改 =====
     - id: H-001
-            name: "核心系统目录保护"
-            path:
-                - "/boot/**"
-                - "/etc/**"
-                - "/bin/**"
-                - "/sbin/**"
-                - "/usr/**"
-                - "/lib/**"
-                - "/lib64/**"
-                - "/var/lib/**"
+      name: "系统配置目录保护"
+      path: ["/etc/**"]
       operations: [WRITE, DELETE]
       risk: HIGH
-            reason: "核心系统目录变更可能导致系统异常或不可用"
+      reason: "系统配置目录，误修改会导致严重故障"
       suggestion: |
-                如确需修改系统核心目录，建议人工确认后手动执行。
+        如确需修改 /etc 下文件，建议由人工完成变更并使用变更管理/备份策略。
 
-        # ===== 高风险：账号/提权关键文件 =====
-        - id: H-002
-            name: "账号/提权文件保护"
-            path:
-                - "/etc/passwd"
-                - "/etc/shadow"
-                - "/etc/gshadow"
-                - "/etc/sudoers"
-                - "/etc/sudoers.d/**"
-            operations: [WRITE, DELETE]
-            risk: HIGH
-            reason: "账号/权限文件被修改会造成提权或无法登录"
 
-        # ===== 中风险：用户/业务数据目录 =====
+    # ===== 中风险： /home目录 =====
     - id: M-001
-            name: "用户/业务数据确认"
-            path:
-                - "/home/**"
-                - "/data/**"
-                - "/root/**"
+      name: "家目录保护"
+      path: ["/home/**"]
       operations: [WRITE, DELETE]
       risk: MEDIUM
-            reason: "用户/业务数据变更需人工确认"
-            confirm_message: "将修改/删除用户或业务数据，是否继续？"
+      reason: "测试目录"
+      confirm_message: "将对 /home/ 下文件执行写入/删除操作，是否继续？"
 
-        # ===== 低风险：临时目录 =====
+    # ===== 低风险：工作区 =====
     - id: L-001
-            name: "临时目录放行"
-            path:
-                - "/tmp/**"
-                - "/var/tmp/**"
+      name: "临时区可写"
+      path: ["/tmp/**"]
       operations: [WRITE, DELETE]
       risk: LOW
-            reason: "临时目录允许自动变更"
+      reason: "临时区代码和项目文件，允许 AI 修改"
 """
 
 
@@ -133,6 +111,8 @@ _EMPTY_POLICY_TEMPLATE_EN = """# -AI-Shell Security Policy
 #   - default_risk_level: default risk level when no rules match.
 #     Common values: LOW | MEDIUM | HIGH (see the implementation enum).
 #   - enable_sandbox: enable sandbox pre-run/controlled execution (if supported by the implementation).
+#   - sandbox_off_action: when sandbox is disabled/unavailable/failed, rules cannot be evaluated (no file change list).
+#     This action is used as a fallback decision: BLOCK, CONFIRM, ALLOW.
 #
 # - rules: rule list (top-down match; first match wins)
 #   Fields:
@@ -167,65 +147,47 @@ global:
     # Enable sandbox pre-run (if supported)
     enable_sandbox: false
 
+    # Fallback action when sandbox is unavailable (BLOCK, CONFIRM, ALLOW)
+    sandbox_off_action: ALLOW
+
 # Rules: top-down match, first match wins
 rules:
-        # ===== High risk: core system directories =====
+    # ===== High risk: critical system directories =====
     - id: H-001
-            name: "Protect core system directories"
-            path:
-                - "/boot/**"
-                - "/etc/**"
-                - "/bin/**"
-                - "/sbin/**"
-                - "/usr/**"
-                - "/lib/**"
-                - "/lib64/**"
-                - "/var/lib/**"
+      name: "Protect system configuration"
+      path: ["/etc/**"]
       operations: [WRITE, DELETE]
       risk: HIGH
-            reason: "Changes in core system directories may cause system instability or failure"
+      reason: "System configuration directory; incorrect changes may cause serious failures"
       suggestion: |
-                If you must modify core system directories, confirm manually before execution.
+        If you must modify files under /etc, do it manually and use change management and backups.
 
-        # ===== High risk: account/privilege files =====
-        - id: H-002
-            name: "Protect account and privilege files"
-            path:
-                - "/etc/passwd"
-                - "/etc/shadow"
-                - "/etc/gshadow"
-                - "/etc/sudoers"
-                - "/etc/sudoers.d/**"
-            operations: [WRITE, DELETE]
-            risk: HIGH
-            reason: "Modifying account/privilege files may cause escalation or lockout"
 
-        # ===== Medium risk: user/business data directories =====
+    # ===== Medium risk: user home directories =====
     - id: M-001
-            name: "Confirm user/business data changes"
-            path:
-                - "/home/**"
-                - "/data/**"
-                - "/root/**"
+      name: "Protect home directories"
+      path: ["/home/**"]
       operations: [WRITE, DELETE]
       risk: MEDIUM
-            reason: "Changes to user/business data require confirmation"
-            confirm_message: "This will modify/delete user or business data. Continue?"
+      reason: "User data directory"
+      confirm_message: "This will write/delete files under /home/. Continue?"
 
-        # ===== Low risk: temporary directories =====
+    # ===== Low risk: temporary directories =====
     - id: L-001
-            name: "Allow temporary directories"
-            path:
-                - "/tmp/**"
-                - "/var/tmp/**"
+      name: "Allow temporary directories"
+      path: ["/tmp/**"]
       operations: [WRITE, DELETE]
       risk: LOW
-            reason: "Temporary directories allow automatic changes"
+      reason: "Temporary directory; allow AI to modify files"
 """
 
 
 def _get_empty_policy_template() -> str:
-        return _EMPTY_POLICY_TEMPLATE_ZH if get_ui_locale() == "zh-CN" else _EMPTY_POLICY_TEMPLATE_EN
+    return (
+        _EMPTY_POLICY_TEMPLATE_ZH
+        if get_ui_locale() == "zh-CN"
+        else _EMPTY_POLICY_TEMPLATE_EN
+    )
 
 
 def _ensure_user_policy_template(path: Path) -> None:
@@ -305,16 +267,6 @@ def _parse_risk(value: Any, default: RiskLevel = RiskLevel.LOW) -> RiskLevel:
         return default
 
 
-def _parse_risk_strict(value: Any) -> tuple[RiskLevel | None, str | None]:
-    if value is None:
-        return None, "missing"
-    normalized = str(value).upper()
-    try:
-        return RiskLevel(normalized), None
-    except Exception:
-        return None, normalized
-
-
 def _ensure_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -327,55 +279,40 @@ def _upper_ops(ops: Iterable[Any]) -> set[str]:
     return {str(op).upper() for op in ops if op is not None}
 
 
-def _parse_v2_rules(
-    raw_rules: list[dict[str, Any]],
-) -> tuple[list[PolicyRule], list[PolicyValidationIssue], list[InvalidFallbackRule]]:
-    rules: list[PolicyRule] = []
-    issues: list[PolicyValidationIssue] = []
-    invalid_fallback_rules: list[InvalidFallbackRule] = []
+def _normalize_commands(commands: Iterable[Any]) -> set[str]:
+    normalized: set[str] = set()
+    for command in commands:
+        if command is None:
+            continue
+        text = str(command).strip()
+        if not text:
+            continue
+        normalized.add(text)
+    return normalized
 
-    for index, item in enumerate(raw_rules):
-        rule_id = f"rule[{index}]"
+
+def _parse_v2_rules(raw_rules: list[dict[str, Any]]) -> list[PolicyRule]:
+    rules: list[PolicyRule] = []
+
+    for item in raw_rules:
         try:
             patterns = [str(p) for p in _ensure_list(item.get("path")) if p is not None]
             if not patterns:
                 continue
 
-            maybe_rule_id = item.get("id")
-            if maybe_rule_id is not None:
-                rule_id = str(maybe_rule_id)
-
-            risk, risk_error = _parse_risk_strict(item.get("risk"))
+            risk = _parse_risk(item.get("risk"), default=RiskLevel.LOW)
             operations = _upper_ops(_ensure_list(item.get("operations")))
-            exclude = [str(p) for p in _ensure_list(item.get("exclude")) if p is not None]
+            command_list = _normalize_commands(_ensure_list(item.get("command_list")))
+            exclude = [
+                str(p) for p in _ensure_list(item.get("exclude")) if p is not None
+            ]
+
+            rule_id = item.get("id")
             name = item.get("name")
             reason = item.get("reason")
             confirm_message = item.get("confirm_message")
             suggestion = item.get("suggestion")
         except Exception:
-            continue
-
-        if risk is None:
-            raw_value = item.get("risk")
-            issue = PolicyValidationIssue(
-                rule_id=rule_id,
-                field="risk",
-                value="" if raw_value is None else str(raw_value),
-                message=(
-                    "risk is required"
-                    if risk_error == "missing"
-                    else "invalid risk enum"
-                ),
-            )
-            issues.append(issue)
-            for pattern in patterns:
-                invalid_fallback_rules.append(
-                    InvalidFallbackRule(
-                        pattern=pattern,
-                        rule_id=rule_id,
-                        exclude=exclude or None,
-                    )
-                )
             continue
 
         # v2 规则以 risk + operations 为核心。
@@ -387,16 +324,19 @@ def _parse_v2_rules(
                     risk=risk,
                     description=None,
                     operations=operations or None,
+                    command_list=command_list or None,
                     exclude=exclude or None,
-                    rule_id=rule_id,
+                    rule_id=str(rule_id) if rule_id is not None else None,
                     name=str(name) if name is not None else None,
                     reason=str(reason) if reason is not None else None,
-                    confirm_message=str(confirm_message) if confirm_message is not None else None,
+                    confirm_message=(
+                        str(confirm_message) if confirm_message is not None else None
+                    ),
                     suggestion=str(suggestion) if suggestion is not None else None,
                 )
             )
 
-    return rules, issues, invalid_fallback_rules
+    return rules
 
 
 def load_security_policy(config_path: Optional[Path] = None) -> SecurityPolicy:
@@ -423,21 +363,60 @@ def load_security_policy(config_path: Optional[Path] = None) -> SecurityPolicy:
         global_cfg.get("default_risk_level") if isinstance(global_cfg, dict) else None,
         default=RiskLevel.LOW,
     )
-    raw_enable_sandbox = global_cfg.get("enable_sandbox") if isinstance(global_cfg, dict) else None
+    raw_enable_sandbox = (
+        global_cfg.get("enable_sandbox") if isinstance(global_cfg, dict) else None
+    )
     if raw_enable_sandbox is None:
         enable_sandbox = False
     elif isinstance(raw_enable_sandbox, bool):
         enable_sandbox = raw_enable_sandbox
     else:
         enable_sandbox = False
-        _LOGGER.warning("security_policy: enable_sandbox must be boolean; treating as false")
+        _LOGGER.warning(
+            "security_policy: enable_sandbox must be boolean; treating as false"
+        )
+
+    raw_off_action = (
+        global_cfg.get("sandbox_off_action") if isinstance(global_cfg, dict) else None
+    )
+    if raw_off_action is None:
+        sandbox_off_action = SandboxOffAction.ALLOW
+    else:
+        try:
+            sandbox_off_action = SandboxOffAction(str(raw_off_action).upper())
+        except Exception:
+            sandbox_off_action = SandboxOffAction.ALLOW
+            _LOGGER.warning(
+                "security_policy: invalid sandbox_off_action; falling back to ALLOW"
+            )
+
+    # Backward compatibility: support the old key sandbox_fallback_risk (LOW/MEDIUM/HIGH)
+    # and map it to sandbox_off_action (ALLOW/CONFIRM/BLOCK).
+    if (
+        isinstance(global_cfg, dict)
+        and global_cfg.get("sandbox_off_action") is None
+        and global_cfg.get("sandbox_fallback_risk") is not None
+    ):
+        legacy_risk = _parse_risk(
+            global_cfg.get("sandbox_fallback_risk"), default=RiskLevel.MEDIUM
+        )
+        if legacy_risk == RiskLevel.HIGH:
+            sandbox_off_action = SandboxOffAction.BLOCK
+        elif legacy_risk == RiskLevel.MEDIUM:
+            sandbox_off_action = SandboxOffAction.CONFIRM
+        else:
+            sandbox_off_action = SandboxOffAction.ALLOW
 
     audit_cfg_raw = data.get("audit") if isinstance(data.get("audit"), dict) else {}
     audit_cfg = AuditConfig(
-        enabled=_as_bool(audit_cfg_raw.get("enabled") if isinstance(audit_cfg_raw, dict) else None, default=False),
+        enabled=_as_bool(
+            audit_cfg_raw.get("enabled") if isinstance(audit_cfg_raw, dict) else None,
+            default=False,
+        ),
         log_path=(
             str(audit_cfg_raw.get("log_path"))
-            if isinstance(audit_cfg_raw, dict) and audit_cfg_raw.get("log_path") is not None
+            if isinstance(audit_cfg_raw, dict)
+            and audit_cfg_raw.get("log_path") is not None
             else None
         ),
     )
@@ -451,24 +430,13 @@ def load_security_policy(config_path: Optional[Path] = None) -> SecurityPolicy:
 
     # 仅支持 v2：忽略未携带 path 的旧规则形态。
     v2_items = [r for r in raw_rules if isinstance(r, dict) and ("path" in r)]
-    parsed_rules, validation_issues, invalid_fallback_rules = _parse_v2_rules(v2_items)
-    rules.extend(parsed_rules)
-
-    for issue in validation_issues:
-        _LOGGER.warning(
-            "security_policy: invalid rule ignored: rule_id=%s field=%s value=%s reason=%s",
-            issue.rule_id,
-            issue.field,
-            issue.value,
-            issue.message,
-        )
+    rules.extend(_parse_v2_rules(v2_items))
 
     return SecurityPolicy(
         enable_sandbox=enable_sandbox,
         rules=rules,
+        sandbox_off_action=sandbox_off_action,
         default_risk_level=default_risk,
         audit_enabled=audit_cfg.enabled,
         audit_log_path=audit_cfg.log_path,
-        validation_issues=validation_issues,
-        invalid_fallback_rules=invalid_fallback_rules,
     )

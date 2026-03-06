@@ -1,5 +1,6 @@
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from aish.config import ConfigModel
 from aish.context_manager import ContextManager
@@ -31,7 +32,9 @@ async def test_completion_non_stream_emits_op_and_generation_events():
         }
 
     with patch.object(session, "_get_acompletion", return_value=fake_acompletion):
-        result = await session.completion(prompt="hi", system_message="sys", stream=False)
+        result = await session.completion(
+            prompt="hi", system_message="sys", stream=False
+        )
 
     assert result == "hello"
 
@@ -174,7 +177,9 @@ async def test_process_input_tool_call_content_is_marked_non_final():
         patch.object(session, "_get_acompletion", return_value=fake_acompletion),
         patch.object(session, "_trim_messages", side_effect=lambda msgs: msgs),
         patch.object(session, "_get_tools_spec", return_value=[]),
-        patch.object(session, "_handle_tool_calls", new_callable=AsyncMock) as mock_tool,
+        patch.object(
+            session, "_handle_tool_calls", new_callable=AsyncMock
+        ) as mock_tool,
     ):
         mock_tool.return_value = (True, "", [])
         result = await session.process_input(

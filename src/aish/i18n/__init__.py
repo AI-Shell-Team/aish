@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -51,7 +51,11 @@ def get_ui_locale() -> str:
 def _load_yaml_resource(filename: str) -> dict[str, Any]:
     try:
         package = __name__  # aish.i18n
-        text = importlib_resources.files(package).joinpath(filename).read_text(encoding="utf-8")
+        text = (
+            importlib_resources.files(package)
+            .joinpath(filename)
+            .read_text(encoding="utf-8")
+        )
     except Exception:
         # Fallback: empty dict rather than crashing UI
         return {}

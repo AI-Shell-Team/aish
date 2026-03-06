@@ -2,11 +2,12 @@
 Help Manager for AI Shell - Unified help system for built-in commands
 """
 
-from typing import Dict, Optional
-from rich.console import Console
-from rich.panel import Panel
-from rich.markdown import Markdown
 from textwrap import dedent
+from typing import Dict, Optional
+
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
 
 from .i18n import get_value, t
 
@@ -83,7 +84,9 @@ class HelpManager:
 
             # Notes
             if help_info.get("notes"):
-                content_parts.append(f"\n**{t('help.labels.notes')}:** {help_info['notes']}")
+                content_parts.append(
+                    f"\n**{t('help.labels.notes')}:** {help_info['notes']}"
+                )
 
             content = "\n".join(content_parts)
 

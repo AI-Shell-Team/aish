@@ -92,13 +92,13 @@ class SkillTool(ToolBase):
     # TODO: implement the skill tool
     def __call__(self, skill_name: str, *args, **kwargs) -> ToolResult:
         if not skill_name or not skill_name.strip():
-            return ToolResult(
-                ok=False, output="Error: skill_name is required"
-            )
+            return ToolResult(ok=False, output="Error: skill_name is required")
 
         available_skills = {skill.name for skill in self.skills}
         if skill_name not in available_skills:
-            available = ", ".join(sorted(available_skills)) if available_skills else "none"
+            available = (
+                ", ".join(sorted(available_skills)) if available_skills else "none"
+            )
             return ToolResult(
                 ok=False,
                 output=f"Error: Unknown skill: {skill_name}. Available skills: {available}",

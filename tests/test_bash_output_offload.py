@@ -216,5 +216,6 @@ async def test_bash_exec_logs_when_output_offload_failed(caplog, tmp_path: Path)
         await tool("echo test")
 
     assert any(
-        "bash_exec output offload failed:" in record.message for record in caplog.records
+        "bash_exec output offload failed:" in record.message
+        for record in caplog.records
     )

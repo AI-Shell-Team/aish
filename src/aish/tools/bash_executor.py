@@ -13,17 +13,12 @@ import os
 import subprocess
 import sys
 import termios
-from typing import Dict, Tuple, Optional, Any
+from typing import Any, Dict, Optional, Tuple
 
-from .shell_state_capture import (
-    wrap_command_with_state_capture,
-    create_state_file,
-    get_current_state,
-    parse_state_file,
-    detect_changes,
-    apply_changes,
-    cleanup_state_file,
-)
+from .shell_state_capture import (apply_changes, cleanup_state_file,
+                                  create_state_file, detect_changes,
+                                  get_current_state, parse_state_file,
+                                  wrap_command_with_state_capture)
 
 
 class UnifiedBashExecutor:
@@ -52,7 +47,9 @@ class UnifiedBashExecutor:
         new_settings[0] &= ~iflag_mask
         new_settings[1] &= ~termios.OPOST
         new_settings[2] |= termios.CS8
-        new_settings[3] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
+        new_settings[3] &= ~(
+            termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG
+        )
         new_settings[6][termios.VMIN] = 1
         new_settings[6][termios.VTIME] = 0
         return new_settings
@@ -63,7 +60,7 @@ class UnifiedBashExecutor:
         source: str = "ai",
         timeout: int = 30,
         use_pty: bool = False,
-        cancel_event: Optional[Any] = None
+        cancel_event: Optional[Any] = None,
     ) -> Tuple[bool, str, str, int, Dict]:
         """
         Execute command and detect state changes.
@@ -125,7 +122,7 @@ class UnifiedBashExecutor:
         state_file: str,
         cwd: str,
         env_vars: Dict[str, str],
-        timeout: int
+        timeout: int,
     ) -> Tuple[bool, str, str, int]:
         """Normal execution using subprocess.run."""
         wrapped_command = wrap_command_with_state_capture(command, state_file)
@@ -134,7 +131,7 @@ class UnifiedBashExecutor:
             result = subprocess.run(
                 wrapped_command,
                 shell=True,
-                executable='/bin/bash',
+                executable="/bin/bash",
                 capture_output=True,
                 text=False,
                 timeout=timeout,
@@ -145,12 +142,7 @@ class UnifiedBashExecutor:
             stdout = (result.stdout or b"").decode("utf-8", errors="replace")
             stderr = (result.stderr or b"").decode("utf-8", errors="replace")
 
-            return (
-                result.returncode == 0,
-                stdout,
-                stderr,
-                result.returncode
-            )
+            return (result.returncode == 0, stdout, stderr, result.returncode)
 
         except subprocess.TimeoutExpired:
             return False, "", "Command execution timed out", -1
@@ -163,7 +155,7 @@ class UnifiedBashExecutor:
         state_file: str,
         cwd: str,
         env_vars: Dict[str, str],
-        cancel_event: Optional[Any]
+        cancel_event: Optional[Any],
     ) -> Tuple[bool, str, str, int]:
         """PTY execution for interactive commands."""
         import pty
@@ -190,6 +182,7 @@ class UnifiedBashExecutor:
 
             # Set non-blocking mode
             import fcntl
+
             flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
             fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
@@ -208,7 +201,7 @@ class UnifiedBashExecutor:
             process = subprocess.Popen(
                 wrapped_command,
                 shell=True,
-                executable='/bin/bash',
+                executable="/bin/bash",
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd,  # PTY merges stderr
@@ -244,7 +237,12 @@ class UnifiedBashExecutor:
                             os.killpg(process.pid, signal.SIGKILL)
                         except (OSError, ProcessLookupError):
                             pass
-                    return False, stdout_buffer.decode("utf-8", errors="replace"), "", -1
+                    return (
+                        False,
+                        stdout_buffer.decode("utf-8", errors="replace"),
+                        "",
+                        -1,
+                    )
 
                 # Build read list
                 read_list = []
@@ -293,7 +291,7 @@ class UnifiedBashExecutor:
                 returncode == 0,
                 stdout_buffer.decode("utf-8", errors="replace"),
                 "",
-                returncode
+                returncode,
             )
 
         except Exception as e:
@@ -316,19 +314,24 @@ class UnifiedBashExecutor:
                 except OSError:
                     pass
 
-    def _record_history(self, command: str, source: str, returncode: int, stdout: str, stderr: str):
+    def _record_history(
+        self, command: str, source: str, returncode: int, stdout: str, stderr: str
+    ):
         """Record command to history (async)."""
         try:
             import asyncio
+
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.create_task(self.history_manager.add_entry(
-                    command=command,
-                    source=source,
-                    returncode=returncode,
-                    stdout=stdout,
-                    stderr=stderr
-                ))
+                asyncio.create_task(
+                    self.history_manager.add_entry(
+                        command=command,
+                        source=source,
+                        returncode=returncode,
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                )
         except Exception:
             # If async not available, skip history recording
             pass

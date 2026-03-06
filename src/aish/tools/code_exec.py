@@ -3,18 +3,19 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional, ClassVar
-from aish.config import BashOutputOffloadSettings
-from aish.tools.base import ToolBase
-from aish.tools.result import ToolResult
-from aish.tools.bash_executor import UnifiedBashExecutor
-from aish.offload import render_bash_output
-from aish.i18n import t
-from aish.security.security_manager import SimpleSecurityManager, SecurityDecision
-from aish.history_manager import HistoryManager
-from aish.interruption import InterruptionManager, ShellState
-from aish.builtin import BuiltinRegistry
+from typing import ClassVar, Optional
 
+from aish.builtin import BuiltinRegistry
+from aish.config import BashOutputOffloadSettings
+from aish.history_manager import HistoryManager
+from aish.i18n import t
+from aish.interruption import InterruptionManager, ShellState
+from aish.offload import render_bash_output
+from aish.security.security_manager import (SecurityDecision,
+                                            SimpleSecurityManager)
+from aish.tools.base import ToolBase
+from aish.tools.bash_executor import UnifiedBashExecutor
+from aish.tools.result import ToolResult
 
 DISPLAY_MAX_LINES = 2
 DISPLAY_ELLIPSIS = " ..."
@@ -76,7 +77,9 @@ class PythonTool(ToolBase):
             if python_output:
                 # 如果输出太长，截断但保留关键信息
                 if len(python_output) > 1000:
-                    python_output = python_output[:1000] + "...\n[Output truncated due to length]"
+                    python_output = (
+                        python_output[:1000] + "...\n[Output truncated due to length]"
+                    )
                 return ToolResult(ok=True, output=python_output)
             else:
                 return ToolResult(
@@ -247,6 +250,10 @@ class BashTool(ToolBase):
         return {
             "command": command,
             "security_analysis": analysis_data,
+            "security_decision": {
+                "allow": bool(decision.allow),
+                "require_confirmation": bool(decision.require_confirmation),
+            },
         }
 
     async def __call__(self, code: str) -> ToolResult:
@@ -265,11 +272,13 @@ class BashTool(ToolBase):
             # 高风险命令被拦截，返回错误信息给AI
             analysis = decision.analysis or {}
             reasons = analysis.get("reasons") or []
-            reason_text = ', '.join(reasons[:5])
+            reason_text = ", ".join(reasons[:5])
             if reason_text:
-                    blocked_msg = t("security.command_blocked_with_reason", reason=reason_text)
+                blocked_msg = t(
+                    "security.command_blocked_with_reason", reason=reason_text
+                )
             else:
-                    blocked_msg = t("security.command_blocked")
+                blocked_msg = t("security.command_blocked")
             blocked_output = _build_bash_tagged_result(
                 stdout="",
                 stderr=blocked_msg,
@@ -301,8 +310,7 @@ class BashTool(ToolBase):
 
         # 使用统一执行器执行命令（自动检测状态变化）
         success, stdout, stderr, returncode, changes = self.executor.execute(
-            code,
-            source="ai"
+            code, source="ai"
         )
 
         # 恢复状态
@@ -313,15 +321,18 @@ class BashTool(ToolBase):
         if self.history_manager:
             try:
                 import asyncio
+
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    asyncio.create_task(self.history_manager.add_entry(
-                        command=code,
-                        source="ai",
-                        returncode=returncode,
-                        stdout=stdout,
-                        stderr=stderr
-                    ))
+                    asyncio.create_task(
+                        self.history_manager.add_entry(
+                            command=code,
+                            source="ai",
+                            returncode=returncode,
+                            stdout=stdout,
+                            stderr=stderr,
+                        )
+                    )
             except Exception:
                 pass
 

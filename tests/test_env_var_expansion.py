@@ -2,12 +2,14 @@
 Tests for environment variable expansion in command handling.
 """
 
-import pytest
-import os
-import subprocess
-import pty
-import termios
 import fcntl
+import os
+import pty
+import subprocess
+import termios
+
+import pytest
+
 from aish.utils import escape_command_with_paths
 
 
@@ -65,7 +67,7 @@ class TestEnvVarExpansion:
 
     def test_actual_bash_expansion_unquoted(self):
         """Test that bash actually expands unquoted variables through PTY."""
-        os.environ['TEST_VAR'] = 'test_value'
+        os.environ["TEST_VAR"] = "test_value"
 
         # Use PTY to simulate actual shell execution
         master_fd, slave_fd = pty.openpty()
@@ -80,17 +82,17 @@ class TestEnvVarExpansion:
         process = subprocess.Popen(
             "echo $TEST_VAR",
             shell=True,
-            executable='/bin/bash',
+            executable="/bin/bash",
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=subprocess.PIPE,
             preexec_fn=preexec_setup,
-            env=os.environ.copy()
+            env=os.environ.copy(),
         )
 
         os.close(slave_fd)
 
-        output = b''
+        output = b""
         while True:
             try:
                 data = os.read(master_fd, 1024)
@@ -103,12 +105,12 @@ class TestEnvVarExpansion:
         os.close(master_fd)
         process.wait()
 
-        result = output.decode().replace('\r\n', '\n').strip()
+        result = output.decode().replace("\r\n", "\n").strip()
         assert result == "test_value"
 
     def test_actual_bash_expansion_double_quoted(self):
         """Test that bash expands double-quoted variables through PTY."""
-        os.environ['TEST_VAR2'] = 'another_value'
+        os.environ["TEST_VAR2"] = "another_value"
 
         master_fd, slave_fd = pty.openpty()
 
@@ -122,17 +124,17 @@ class TestEnvVarExpansion:
         process = subprocess.Popen(
             'echo "$TEST_VAR2"',
             shell=True,
-            executable='/bin/bash',
+            executable="/bin/bash",
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=subprocess.PIPE,
             preexec_fn=preexec_setup,
-            env=os.environ.copy()
+            env=os.environ.copy(),
         )
 
         os.close(slave_fd)
 
-        output = b''
+        output = b""
         while True:
             try:
                 data = os.read(master_fd, 1024)
@@ -145,7 +147,7 @@ class TestEnvVarExpansion:
         os.close(master_fd)
         process.wait()
 
-        result = output.decode().replace('\r\n', '\n').strip()
+        result = output.decode().replace("\r\n", "\n").strip()
         assert result == "another_value"
 
 

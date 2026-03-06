@@ -17,14 +17,13 @@ Usage:
 
 import os
 import tempfile
-from typing import Dict, Any, Optional
-
+from typing import Any, Dict, Optional
 
 # Environment variables to ignore when detecting changes
 IGNORED_ENV_VARS = {
-    "_",                    # Python private variable
-    "SHLVL",                # Shell nesting level (changes with each execution)
-    "MEMORY_PRESSURE_WATCH", # System auto variable
+    "_",  # Python private variable
+    "SHLVL",  # Shell nesting level (changes with each execution)
+    "MEMORY_PRESSURE_WATCH",  # System auto variable
 }
 
 
@@ -63,7 +62,7 @@ def create_state_file() -> str:
     Returns:
         Path to the created temporary file
     """
-    fd, path = tempfile.mkstemp(prefix='aish_state_')
+    fd, path = tempfile.mkstemp(prefix="aish_state_")
     os.close(fd)
     return path
 
@@ -93,7 +92,8 @@ def get_current_state(env_vars: Optional[Dict[str, str]] = None) -> Dict[str, An
         env_vars = dict(os.environ)
 
     filtered_env = {
-        k: v for k, v in env_vars.items()
+        k: v
+        for k, v in env_vars.items()
         if not k.startswith("_") and k not in IGNORED_ENV_VARS
     }
     return {
@@ -112,30 +112,32 @@ def parse_state_file(state_file: str) -> Dict[str, Any]:
         Dictionary with 'pwd' and 'env' keys
     """
     try:
-        with open(state_file, 'r') as f:
+        with open(state_file, "r") as f:
             content = f.read()
     except Exception:
         return {"pwd": None, "env": {}}
 
     state = {"pwd": None, "env": {}}
 
-    for line in content.split('\n'):
+    for line in content.split("\n"):
         if not line:
             continue
 
-        if line.startswith('PWD_AISH_MARKER:'):
+        if line.startswith("PWD_AISH_MARKER:"):
             # Remove "PWD_AISH_MARKER:" prefix (16 characters)
             state["pwd"] = line[16:]
-        elif '=' in line:
-            key, value = line.split('=', 1)
+        elif "=" in line:
+            key, value = line.split("=", 1)
             # Filter ignored variables
-            if not key.startswith('_') and key not in IGNORED_ENV_VARS:
+            if not key.startswith("_") and key not in IGNORED_ENV_VARS:
                 state["env"][key] = value
 
     return state
 
 
-def detect_changes(old_state: Dict[str, Any], new_state: Dict[str, Any]) -> Dict[str, Any]:
+def detect_changes(
+    old_state: Dict[str, Any], new_state: Dict[str, Any]
+) -> Dict[str, Any]:
     """Detect changes between old and new shell states.
 
     Args:
@@ -169,7 +171,7 @@ def detect_changes(old_state: Dict[str, Any], new_state: Dict[str, Any]) -> Dict
     if new_state.get("pwd"):
         changes["old_cwd"] = old_state.get("pwd")
         changes["new_cwd"] = new_state["pwd"]
-        changes["cwd_changed"] = (old_state.get("pwd") != new_state["pwd"])
+        changes["cwd_changed"] = old_state.get("pwd") != new_state["pwd"]
 
     # Detect environment variable changes
     old_env = old_state.get("env", {})
@@ -225,14 +227,18 @@ class StateCaptureContext:
             ctx.apply()
     """
 
-    def __init__(self, env_manager: Optional[Any] = None, env_vars: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        env_manager: Optional[Any] = None,
+        env_vars: Optional[Dict[str, str]] = None,
+    ):
         self.env_manager = env_manager
         self.env_vars = env_vars
         self.state_file: Optional[str] = None
         self.old_state: Optional[Dict[str, Any]] = None
         self.changes: Optional[Dict[str, Any]] = None
 
-    def __enter__(self) -> 'StateCaptureContext':
+    def __enter__(self) -> "StateCaptureContext":
         self.state_file = create_state_file()
         self.old_state = get_current_state(self.env_vars)
         return self

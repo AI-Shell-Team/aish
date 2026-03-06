@@ -14,6 +14,7 @@ import pytest
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "src"))
 
+
 def _missing_env_vars(required_vars: list[str]) -> list[str]:
     return [var for var in required_vars if not os.getenv(var)]
 
@@ -115,9 +116,10 @@ async def _runshell_integration() -> str:
     print("=" * 50)
 
     try:
-        from aish.llm import LLMSession
         from aish.config import ConfigModel
+        from aish.llm import LLMSession
         from aish.skills import SkillManager
+
         config = ConfigModel(
             model="gpt-3.5-turbo", api_key=os.getenv("OPENAI_API_KEY"), api_base=None
         )

@@ -34,7 +34,9 @@ def test_collect_fs_changes_reports_mode_delta_for_file_and_dir(tmp_path: Path) 
     (upperdir / "d").chmod(0o700)
 
     executor = _make_executor(repo_root=repo_root)
-    changes = executor._collect_fs_changes(lowerdir=lowerdir, upperdir=upperdir, repo_root=repo_root)
+    changes = executor._collect_fs_changes(
+        lowerdir=lowerdir, upperdir=upperdir, repo_root=repo_root
+    )
 
     by_pk = {(c.path, c.kind): c for c in changes}
     assert ("lower/a.txt", "modified") in by_pk
@@ -44,7 +46,9 @@ def test_collect_fs_changes_reports_mode_delta_for_file_and_dir(tmp_path: Path) 
     assert by_pk[("lower/d", "modified")].detail == {"mode": "755->700"}
 
 
-def test_collect_fs_changes_expands_non_empty_dir_deletion_from_whiteout(tmp_path: Path) -> None:
+def test_collect_fs_changes_expands_non_empty_dir_deletion_from_whiteout(
+    tmp_path: Path,
+) -> None:
     repo_root = tmp_path / "repo"
     lowerdir = repo_root / "lower"
     upperdir = repo_root / "upper"
@@ -59,9 +63,13 @@ def test_collect_fs_changes_expands_non_empty_dir_deletion_from_whiteout(tmp_pat
     (upperdir / ".wh.docs").write_text("", encoding="utf-8")
 
     executor = _make_executor(repo_root=repo_root)
-    changes = executor._collect_fs_changes(lowerdir=lowerdir, upperdir=upperdir, repo_root=repo_root)
+    changes = executor._collect_fs_changes(
+        lowerdir=lowerdir, upperdir=upperdir, repo_root=repo_root
+    )
 
-    deleted = {path for path, kind in _changes_by_path_and_kind(changes) if kind == "deleted"}
+    deleted = {
+        path for path, kind in _changes_by_path_and_kind(changes) if kind == "deleted"
+    }
     assert "lower/docs" in deleted
     assert "lower/docs/a.txt" in deleted
     assert "lower/docs/sub/b.txt" in deleted
@@ -92,7 +100,9 @@ def test_collect_fs_changes_adds_missing_lower_files_for_opaque_dir(
     monkeypatch.setattr("os.getxattr", fake_getxattr)
 
     executor = _make_executor(repo_root=repo_root)
-    changes = executor._collect_fs_changes(lowerdir=lowerdir, upperdir=upperdir, repo_root=repo_root)
+    changes = executor._collect_fs_changes(
+        lowerdir=lowerdir, upperdir=upperdir, repo_root=repo_root
+    )
 
     by_pk = {(c.path, c.kind): c for c in changes}
     assert ("lower/data/keep.txt", "modified") in by_pk

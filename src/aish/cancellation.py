@@ -5,10 +5,11 @@ This module provides a hierarchical cancellation mechanism that allows
 parent operations to cancel child operations cleanly.
 """
 
-import anyio
 import threading
-from typing import Optional, Callable
 from enum import Enum
+from typing import Callable, Optional
+
+import anyio
 
 
 class CancellationReason(Enum):

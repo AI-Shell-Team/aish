@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+
 @dataclass
 class FsChange:
     """单个文件系统变更记录。

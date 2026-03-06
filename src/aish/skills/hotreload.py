@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import asyncio
 from pathlib import Path
 from typing import Callable
 
@@ -213,7 +213,7 @@ class SkillHotReloadService:
         ):
             if rebuild_event.is_set():
                 return
-            
+
             if self._stop_event.is_set():
                 return
 
@@ -290,7 +290,7 @@ class SkillHotReloadService:
         ):
             if rebuild_event.is_set():
                 return
-            
+
             if self._stop_event.is_set():
                 return
             changed_path = None

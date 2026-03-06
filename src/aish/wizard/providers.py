@@ -6,13 +6,8 @@ from typing import Optional
 
 from ..i18n import t
 from ..litellm_loader import load_litellm
-from .constants import (
-    _PROVIDER_ALIASES,
-    _PROVIDER_BASES,
-    _PROVIDER_ENV_KEYS,
-    _PROVIDER_LABELS,
-    _PROVIDER_PRIORITY,
-)
+from .constants import (_PROVIDER_ALIASES, _PROVIDER_BASES, _PROVIDER_ENV_KEYS,
+                        _PROVIDER_LABELS, _PROVIDER_PRIORITY)
 from .helpers import _is_valid_url, _looks_like_api_base, _matches_filter_query
 from .types import ProviderOption
 
@@ -30,7 +25,9 @@ def _with_api_base(provider: ProviderOption, api_base: Optional[str]) -> Provide
     )
 
 
-def _probe_model_for_provider(provider: ProviderOption, model_hint: Optional[str]) -> str:
+def _probe_model_for_provider(
+    provider: ProviderOption, model_hint: Optional[str]
+) -> str:
     if model_hint:
         if "/" in model_hint:
             return model_hint

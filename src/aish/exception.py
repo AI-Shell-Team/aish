@@ -32,33 +32,45 @@ class LiteLLMError(Exception):
 
 class RateLimitError(LiteLLMError):
     """Raised when the API rate limit is exceeded."""
+
     pass
 
 
 class InvalidRequestError(LiteLLMError):
     """Raised when the request is invalid (e.g., bad model name, malformed input)."""
+
     pass
 
 
 class AuthenticationError(LiteLLMError):
     """Raised when API key or authentication fails."""
+
     pass
+
 
 class TimeoutError(LiteLLMError):
     """Raised when the request times out."""
+
     pass
+
 
 class ServiceUnavailableError(LiteLLMError):
     """Raised when the service is temporarily unavailable."""
+
     pass
+
 
 class ContextWindowExceededError(LiteLLMError):
     """Raised when the input exceeds the model's context window."""
+
     pass
+
 
 class UnknownLiteLLMError(LiteLLMError):
     """Fallback for any unhandled LiteLLM exceptions."""
+
     pass
+
 
 LITELLM_EXCEPTION_NAMES: set[str] = {
     "RateLimitError",
@@ -88,6 +100,7 @@ def redact_secrets(text: str) -> str:
         return text
     result = text
     for pat in _SENSITIVE_PATTERNS:
+
         def _repl(m: re.Match[str]) -> str:
             # Patterns that capture a prefix (group 1) keep the prefix.
             if m.lastindex and m.lastindex >= 1:

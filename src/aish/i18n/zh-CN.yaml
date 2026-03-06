@@ -28,14 +28,22 @@ cli:
 
   setup:
     step_provider: "步骤 1/3：选择 Provider"
+    step_provider_endpoint: "步骤 1.5/3：选择端点"
+    step_zai_endpoint: "步骤 1.5/3：选择 Z.AI 端点"
     step_key: "步骤 2/3：填写 API Key"
     step_model: "步骤 3/3：选择模型"
     provider_header: "选择 Provider"
     provider_filter_prompt: "过滤："
     provider_filter_hint: "输入关键词实时过滤，↑/↓ 选择，回车确认，Esc 取消"
     provider_selected_label: "Provider"
+    provider_endpoint_selected_label: "端点"
+    zai_endpoint_selected_label: "Z.AI 端点"
+    provider_endpoint_header: "选择 {provider} API 端点"
+    zai_endpoint_header: "选择 Z.AI API 端点"
     model_selected_label: "Model"
     provider_column: "Provider"
+    zai_endpoint_column: "Z.AI 端点"
+    provider_endpoint_column: "端点"
     provider_note_column: "备注"
     provider_custom_note: "OpenAI-compatible"
     provider_preset_base: "预设 API Base"
@@ -59,6 +67,8 @@ cli:
     model_prompt: "模型名称（输入 back 返回选择 Provider）"
     model_hint_openrouter: "OpenRouter 需要 provider 前缀（如 openai/gpt-4o）。未带前缀将默认使用 openai/。"
     model_hint_custom: "自定义 Provider 按 OpenAI-Compatible 处理，未带前缀将保存为 openai/<model>。"
+    model_hint_zai: "推荐模型：{default}。可用模型：glm-5, glm-4.7, glm-4.7-flash, glm-4.7-flashx"
+    model_hint_provider: "推荐模型：{default}"
     model_list_found: "从 Provider 获取到 {count} 个模型"
     model_list_unavailable: "模型列表不可用，请手动输入"
     model_filtering: "正在过滤支持工具调用的模型"
@@ -220,9 +230,12 @@ shell:
       content_preview: "内容预览"
       fallback_hint: "提示"
       risk_level: "风险等级"
+      matched_rule: "命中规则"
+      matched_paths: "命中路径"
       reasons: "原因"
       alternatives: "替代方案"
       impact: "影响"
+      confirm_message: "确认提示"
       no_additional_info: "未提供更多信息。"
 
     fallback:
@@ -249,6 +262,7 @@ shell:
     potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
     llm_error_title: "❌ 大模型请求失败"
     llm_error_details_title: "调试详情"
+    tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
 
   prompt:
     confirm_execute: "?是否执行此命令? [y/n]: "
@@ -307,12 +321,17 @@ shell:
     done_diagnose: "  └─ ✅ 诊断完成"
 
 security:
+  sandbox_off_action:
+    allow: "直接放行"
+    confirm: "需要确认"
+    block: "阻断"
+
   sandbox_unavailable:
     title: "⚠️ 沙箱不可用"
     line1: "检测到沙箱不可用，无法评估命令风险。"
-    line2: "后续 AI 生成命令将进入“命令+路径兜底模式”处理。"
+    line2: "后续 AI 生成命令将按“{action}”处理。"
     policy_line1: "沙箱已按策略关闭，未执行沙箱预跑。"
-    policy_line2: "后续 AI 命令将进入“命令+路径兜底模式”处理。"
+    policy_line2: "后续 AI 命令将按“{action}”处理。"
     reason: "原因：{reason}"
     error: "错误：{error}"
     root_required: "沙箱需要 root 权限"
@@ -323,18 +342,13 @@ security:
   low_risk_notice: "安全提示：{reason}"
 
   risk_reason:
-    sandbox_disabled_by_policy: "策略配置已关闭沙箱，无法获取文件变更信息进行风险评估。"
-    sandbox_disabled: "沙箱未启用或配置为关闭，无法获取文件变更信息进行风险评估。"
-    cwd_outside_repo_root: "当前工作目录 {cwd} 不在沙箱根目录 {root} 下，无法可靠评估相对路径副作用。"
-    sandbox_unavailable: "沙箱构建/执行失败，未能获取文件变更信息进行风险评估。"
-    sandbox_exception: "沙箱执行异常，未能获取文件变更信息进行风险评估。"
-    sandbox_failed: "沙箱执行失败，未能获取文件变更信息进行风险评估。"
-    command_fallback_matched: "已启用命令+路径兜底，命中规则 {count} 条。"
-    command_fallback_dangerous_command: "命中内置高危命令模式，已按高风险阻断。"
-    command_fallback_invalid_rule_matched: "检测到命中失效规则 {count} 条，已按保守策略提升为中风险。"
-    command_fallback_unmatched: "已提取到命令路径，但未命中任何兜底规则；按低风险处理。"
-    command_fallback_not_targeted: "命令未命中黑名单触发条件；按低风险处理。"
-    command_fallback_no_path: "命令中未识别到显式绝对路径；按低风险处理。"
+    sandbox_disabled_by_policy: "策略配置已关闭沙箱，无法获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_disabled: "沙箱未启用或配置为关闭，无法获取文件变更信息进行风险评估；将按“{action}”处理。"
+    cwd_outside_repo_root: "当前工作目录 {cwd} 不在沙箱根目录 {root} 下，无法可靠评估相对路径副作用；将按“{action}”处理。"
+    sandbox_unavailable: "沙箱构建/执行失败，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_exception: "沙箱执行异常，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_failed: "沙箱执行失败，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
+    policy_fallback_rule_match: "沙箱按策略关闭时，命令 {command} 命中了 {count} 条兜底规则路径；按 {risk} 风险处理。"
 
   ai_risk:
     no_fs_changes: "沙箱执行未检测到任何文件写入或删除。"
@@ -614,7 +628,7 @@ help:
 
 errors:
   litellm_not_installed: "litellm 模块未安装"
-  security_blocked_task: "任务未完成。由于安全限制，该操作已被阻断。"
+  security_blocked_task: "任务未完成。由于系统安全限制，该操作已被阻断。"
   llm:
     auth: "认证失败：请检查 API_Key 是否正确。"
     rate_limit: "请求过于频繁：已触发限流，请稍后重试。"

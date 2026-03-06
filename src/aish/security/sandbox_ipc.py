@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Optional
 import json
 import os
 import socket
 import uuid
+from pathlib import Path
+from typing import Any, Optional
 
-from .sandbox import SandboxUnavailableError, DEFAULT_SANDBOX_SOCKET_PATH
-from .sandbox_types import SandboxResult, FsChange
+from .sandbox import DEFAULT_SANDBOX_SOCKET_PATH, SandboxUnavailableError
+from .sandbox_types import FsChange, SandboxResult
 
 
 class SandboxIpcClient:
-    def __init__(self, socket_path: Path = DEFAULT_SANDBOX_SOCKET_PATH, *, timeout_s: float = 60.0) -> None:
+    def __init__(
+        self,
+        socket_path: Path = DEFAULT_SANDBOX_SOCKET_PATH,
+        *,
+        timeout_s: float = 60.0,
+    ) -> None:
         self._socket_path = Path(socket_path)
         self._timeout_s = float(timeout_s)
 
@@ -46,24 +51,36 @@ class SandboxIpcClient:
                         break
                     buf += chunk
                     if len(buf) > 8 * 1024 * 1024:
-                        raise SandboxUnavailableError("sandbox_ipc_protocol_error", details="response_too_large")
+                        raise SandboxUnavailableError(
+                            "sandbox_ipc_protocol_error", details="response_too_large"
+                        )
 
         except socket.timeout as exc:
-            raise SandboxUnavailableError("sandbox_ipc_timeout", details=str(exc)) from exc
+            raise SandboxUnavailableError(
+                "sandbox_ipc_timeout", details=str(exc)
+            ) from exc
         except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
-            raise SandboxUnavailableError("sandbox_ipc_unavailable", details=str(exc)) from exc
+            raise SandboxUnavailableError(
+                "sandbox_ipc_unavailable", details=str(exc)
+            ) from exc
 
         if not buf:
-            raise SandboxUnavailableError("sandbox_ipc_protocol_error", details="empty_response")
+            raise SandboxUnavailableError(
+                "sandbox_ipc_protocol_error", details="empty_response"
+            )
 
         line = buf.split(b"\n", 1)[0]
         try:
             resp = json.loads(line.decode("utf-8", errors="replace"))
         except Exception as exc:
-            raise SandboxUnavailableError("sandbox_ipc_protocol_error", details="invalid_json") from exc
+            raise SandboxUnavailableError(
+                "sandbox_ipc_protocol_error", details="invalid_json"
+            ) from exc
 
         if not isinstance(resp, dict) or resp.get("id") != request_id:
-            raise SandboxUnavailableError("sandbox_ipc_protocol_error", details="id_mismatch")
+            raise SandboxUnavailableError(
+                "sandbox_ipc_protocol_error", details="id_mismatch"
+            )
 
         if resp.get("ok") is not True:
             reason = resp.get("reason")
@@ -75,7 +92,9 @@ class SandboxIpcClient:
 
         result_obj = resp.get("result")
         if not isinstance(result_obj, dict):
-            raise SandboxUnavailableError("sandbox_ipc_protocol_error", details="missing_result")
+            raise SandboxUnavailableError(
+                "sandbox_ipc_protocol_error", details="missing_result"
+            )
 
         changes_raw = result_obj.get("changes")
         changes: list[FsChange] = []
@@ -136,5 +155,9 @@ class SandboxSecurityIpc:
             return None
 
         effective_cwd = (cwd or self._repo_root).resolve()
-        sandbox_result = self._client.simulate(command=command, cwd=effective_cwd, repo_root=self._repo_root)
-        return SandboxSecurityResult(command=command, cwd=effective_cwd, sandbox=sandbox_result)
+        sandbox_result = self._client.simulate(
+            command=command, cwd=effective_cwd, repo_root=self._repo_root
+        )
+        return SandboxSecurityResult(
+            command=command, cwd=effective_cwd, sandbox=sandbox_result
+        )

@@ -1,7 +1,7 @@
-import os
-import subprocess
-import shlex
 import json
+import os
+import shlex
+import subprocess
 from pathlib import Path
 
 from aish.config import ConfigModel
@@ -34,10 +34,10 @@ def _is_wildcard_pattern(pattern: str) -> bool:
         # But careful: \\ should become \, then \[ should become [ (no longer escaped)
         i = 0
         while i < len(s):
-            if s[i] == '\\':
+            if s[i] == "\\":
                 # Skip the escaped character
                 i += 2
-            elif s[i] in '*?[':
+            elif s[i] in "*?[":
                 return True
             else:
                 i += 1
@@ -47,7 +47,7 @@ def _is_wildcard_pattern(pattern: str) -> bool:
 
     # Check for brace expansion patterns: {a,b,c} or {start..end}
     # Examples: file.{txt,log}, test{1..5}, image{,.png}
-    has_brace_expansion = bool(re.search(r'(?<!\\\\)\{[^{}]*(?<!\\\\)\}', pattern))
+    has_brace_expansion = bool(re.search(r"(?<!\\\\)\{[^{}]*(?<!\\\\)\}", pattern))
 
     if not has_wildcards and not has_brace_expansion:
         return False
@@ -164,14 +164,18 @@ def get_basic_env_info() -> str:
     if sudo_user:
         sudo_uid = os.getenv("SUDO_UID")
         sudo_gid = os.getenv("SUDO_GID")
-        info_parts.append(f"Sudo Origin: SUDO_USER={sudo_user}, SUDO_UID={sudo_uid}, SUDO_GID={sudo_gid}")
+        info_parts.append(
+            f"Sudo Origin: SUDO_USER={sudo_user}, SUDO_UID={sudo_uid}, SUDO_GID={sudo_gid}"
+        )
 
     # 4. 依赖完整性检查（LD_LIBRARY_PATH）
     ld_library_path = os.getenv("LD_LIBRARY_PATH", "")
     if ld_library_path:
         info_parts.append(f"Library Path: LD_LIBRARY_PATH={ld_library_path}")
     else:
-        info_parts.append("Library Path: LD_LIBRARY_PATH=(not set, using system defaults)")
+        info_parts.append(
+            "Library Path: LD_LIBRARY_PATH=(not set, using system defaults)"
+        )
 
     return "\n".join(info_parts)
 
@@ -284,7 +288,7 @@ def _check_if_part_was_quoted(original_cmd: str, part: str) -> bool:
         # Pattern: quote + part + quote
         # Need to escape special regex characters in part
         escaped_part = re.escape(part)
-        pattern = f'{quote}{escaped_part}{quote}'
+        pattern = f"{quote}{escaped_part}{quote}"
         if re.search(pattern, original_cmd):
             return True
 

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import List, Optional
 
-from .sandbox_types import FsChange, SandboxResult
-
 from ..i18n import t
+from .sandbox_types import FsChange, SandboxResult
 
 
 class RiskLevel(str, Enum):
@@ -24,6 +23,14 @@ class RiskLevel(str, Enum):
     HIGH = "HIGH"
 
 
+class SandboxOffAction(str, Enum):
+    """沙箱关闭、不可用或执行失败时所采用的处理动作。"""
+
+    ALLOW = "ALLOW"  # 直接放行
+    CONFIRM = "CONFIRM"  # 强制确认
+    BLOCK = "BLOCK"  # 直接阻断
+
+
 @dataclass
 class PolicyRule:
     """单条路径风险规则。
@@ -36,27 +43,13 @@ class PolicyRule:
     description: Optional[str] = None
 
     operations: Optional[set[str]] = None
+    command_list: Optional[set[str]] = None
     exclude: Optional[list[str]] = None
     rule_id: Optional[str] = None
     name: Optional[str] = None
     reason: Optional[str] = None
     confirm_message: Optional[str] = None
     suggestion: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class PolicyValidationIssue:
-    rule_id: str
-    field: str
-    value: str
-    message: str
-
-
-@dataclass(frozen=True)
-class InvalidFallbackRule:
-    pattern: str
-    rule_id: str
-    exclude: list[str] | None = None
 
 
 @dataclass
@@ -67,11 +60,14 @@ class SecurityPolicy:
     enable_sandbox: bool
     rules: List[PolicyRule]
 
+    # 当沙箱关闭、不可用或执行失败时，无法获取命令的文件变更列表以匹配安全规则。
+    # 此时将依据 sandbox_off_action 配置决定执行阻断、确认还是直接放行。
+    # 默认为放行
+    sandbox_off_action: SandboxOffAction = SandboxOffAction.ALLOW
+
     default_risk_level: RiskLevel = RiskLevel.LOW
     audit_enabled: bool = False
     audit_log_path: Optional[str] = None
-    validation_issues: list[PolicyValidationIssue] = field(default_factory=list)
-    invalid_fallback_rules: list[InvalidFallbackRule] = field(default_factory=list)
 
     @staticmethod
     def default() -> "SecurityPolicy":
@@ -161,7 +157,9 @@ class AiRiskEngine:
             return path
         return "/" + path.lstrip("/")
 
-    def assess(self, command: str, sandbox_result: SandboxResult) -> AiRiskAssessment:  # noqa: ARG002
+    def assess(
+        self, command: str, sandbox_result: SandboxResult
+    ) -> AiRiskAssessment:  # noqa: ARG002
         """根据沙箱执行结果和策略评估本次 AI 命令的风险等级。"""
 
         changes = sandbox_result.changes or []
@@ -235,8 +233,6 @@ class AiRiskEngine:
 __all__ = [
     "RiskLevel",
     "PolicyRule",
-    "PolicyValidationIssue",
-    "InvalidFallbackRule",
     "SecurityPolicy",
     "load_policy",
     "AiRiskAssessment",

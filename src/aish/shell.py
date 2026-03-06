@@ -2,88 +2,68 @@
 
 from __future__ import annotations
 
-import anyio
 import datetime as dt
-from anyio import to_thread
-from contextlib import contextmanager
+import fcntl
+import getpass
 import json
 import logging
 import os
+import pty
+import re
+import select
+import shlex
+import signal
 import subprocess
 import sys
-import pty
-import select
 import termios
-from textwrap import dedent
-import signal
-import shlex
-import re
-import fcntl
 import threading
 import time
-import getpass
 import uuid
-from pathlib import Path
-from typing import Any, Optional
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
+from textwrap import dedent
+from typing import Any, Optional
 
-from rich.console import Console
-from rich.panel import Panel
-from rich.markdown import Markdown
-from rich.live import Live
-from rich.text import Text
+import anyio
+from anyio import to_thread
 from prompt_toolkit import PromptSession
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.document import Document
-from prompt_toolkit.completion import (
-    NestedCompleter,
-    Completion,
-    Completer,
-)
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.layout.controls import FormattedTextControl, BufferControl
+from prompt_toolkit.completion import Completer, Completion, NestedCompleter
+from prompt_toolkit.document import Document
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from rich.console import Console
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.text import Text
 
-from .command import CommandDispatcher
-from .config import (
-    Config,
-    ConfigModel,
-    ToolArgPreviewSettings,
-    get_default_session_db_path,
-)
-from .llm import LLMSession, LLMEvent, LLMEventType, LLMCallbackResult
-from .prompts import PromptManager
-from .context_manager import ContextManager, MemoryType
-from .security.security_manager import SimpleSecurityManager
-from .skills import SkillManager
-from .skills.hotreload import SkillHotReloadService
-from .logging_utils import set_session_uuid
-from .utils import (
-    get_output_language,
-    get_current_env_info,
-    get_or_fetch_static_env_info,
-)
+from .builtin import (BuiltinHandlers, BuiltinRegistry, BuiltinResult,
+                      DirectoryStack)
 from .cancellation import CancellationReason
-from .history_manager import HistoryManager
+from .command import CommandDispatcher
+from .config import (Config, ConfigModel, ToolArgPreviewSettings,
+                     get_default_session_db_path)
+from .context_manager import ContextManager, MemoryType
 from .env_manager import EnvironmentManager
 from .help_manager import HelpManager
-from .interruption import (
-    InterruptionManager,
-    ShellState,
-    InterruptAction,
-    PromptConfig,
-
-)
-from .builtin import (
-    BuiltinHandlers,
-    BuiltinResult,
-    DirectoryStack,
-    BuiltinRegistry,
-)
-from .session_store import SessionRecord, SessionStore
+from .history_manager import HistoryManager
 from .i18n import t
+from .interruption import (InterruptAction, InterruptionManager, PromptConfig,
+                           ShellState)
+from .llm import LLMCallbackResult, LLMEvent, LLMEventType, LLMSession
+from .logging_utils import set_session_uuid
 from .offload.pty_output_offload import PtyOutputOffload
+from .prompts import PromptManager
+from .security.security_manager import SimpleSecurityManager
+from .session_store import SessionRecord, SessionStore
+from .skills import SkillManager
+from .skills.hotreload import SkillHotReloadService
+from .utils import (get_current_env_info, get_or_fetch_static_env_info,
+                    get_output_language)
 from .welcome_screen import build_welcome_renderable
 
 
@@ -116,35 +96,33 @@ def _build_passthrough_stdin_termios(settings: list[Any]) -> list[Any]:
     return new_settings
 
 
-
-from .shell_enhanced.shell_completion import (
-    QuotedPathCompleter,
-    SkillReferenceCompleter,
-    ModeAwareCompleter,
-    make_shell_completer,
-    _SKILL_REF_EXTRACT_RE,
-)
-from .shell_enhanced.shell_input_router import ShellInputRouter
-from .shell_enhanced.shell_command_service import ShellCommandService
 from .shell_enhanced.shell_actions import build_default_actions
+from .shell_enhanced.shell_command_service import ShellCommandService
+from .shell_enhanced.shell_completion import (_SKILL_REF_EXTRACT_RE,
+                                              ModeAwareCompleter,
+                                              QuotedPathCompleter,
+                                              SkillReferenceCompleter,
+                                              make_shell_completer)
+from .shell_enhanced.shell_input_router import ShellInputRouter
 from .shell_enhanced.shell_llm_events import LLMEventRouter
-from .shell_enhanced.shell_prompt_io import (
-    get_user_input as _prompt_get_user_input,
-    handle_tool_confirmation_required as _prompt_handle_tool_confirmation_required,
-    handle_ask_user_required as _prompt_handle_ask_user_required,
-    display_security_panel as _prompt_display_security_panel,
-    get_user_confirmation as _prompt_get_user_confirmation,
-)
-from .shell_enhanced.shell_types import (
-    CommandStatus,
-    CommandResult,
-    InputIntent,
-    ActionContext,
-    ActionOutcome,
-)
-from .shell_enhanced.shell_pty_executor import (
-    execute_command_with_pty as _execute_command_with_pty_impl,
-)
+from .shell_enhanced.shell_prompt_io import \
+    display_security_panel as _prompt_display_security_panel
+from .shell_enhanced.shell_prompt_io import \
+    get_user_confirmation as _prompt_get_user_confirmation
+from .shell_enhanced.shell_prompt_io import \
+    get_user_input as _prompt_get_user_input
+from .shell_enhanced.shell_prompt_io import \
+    handle_ask_user_required as _prompt_handle_ask_user_required
+from .shell_enhanced.shell_prompt_io import \
+    handle_tool_confirmation_required as \
+    _prompt_handle_tool_confirmation_required
+from .shell_enhanced.shell_pty_executor import \
+    execute_command_with_pty as _execute_command_with_pty_impl
+from .shell_enhanced.shell_types import (ActionContext, ActionOutcome,
+                                         CommandResult, CommandStatus,
+                                         InputIntent)
+
+
 class AIShell:
     """AI-enhanced shell with LLM integration and PTY support"""
 
@@ -163,9 +141,10 @@ class AIShell:
     #     "؟",  # Urdu Question Mark (same as Arabic)
     # }
     SEMICOLON_MARKS = {
-        ";",   # Latin Semicolon (U+003B)
+        ";",  # Latin Semicolon (U+003B)
         "；",  # Fullwidth Semicolon (U+FF1B) - Chinese, Japanese, Korean
     }
+
     def __init__(
         self,
         config: ConfigModel,
@@ -181,8 +160,7 @@ class AIShell:
         # Use a smaller debounce (200ms) to avoid long cleanup delays on exit
         # caused by watchfiles.awatch taking time to cancel during debounce sleep.
         self._skill_hotreload_service = SkillHotReloadService(
-            skill_manager=skill_manager,
-            debounce_ms=200
+            skill_manager=skill_manager, debounce_ms=200
         )
 
         # Create a new persisted session record for each shell start.
@@ -261,11 +239,11 @@ class AIShell:
         self.prompt_manager = PromptManager()
         self.command_dispatcher = CommandDispatcher()
         self.context_manager = ContextManager(
-            max_llm_messages=getattr(config, 'max_llm_messages', 50),
-            max_shell_messages=getattr(config, 'max_shell_messages', 20),
-            token_budget=getattr(config, 'context_token_budget', None),
+            max_llm_messages=getattr(config, "max_llm_messages", 50),
+            max_shell_messages=getattr(config, "max_shell_messages", 20),
+            token_budget=getattr(config, "context_token_budget", None),
             model=config.model,
-            enable_token_estimation=getattr(config, 'enable_token_estimation', True),
+            enable_token_estimation=getattr(config, "enable_token_estimation", True),
         )
 
         # Flag to track if we're currently processing input
@@ -307,7 +285,9 @@ class AIShell:
         self._pending_error_correction: Optional[dict] = None
 
         # Pre-load system info (static info from cache if available)
-        self.uname_info, self.os_info, self.basic_env_info = get_or_fetch_static_env_info()
+        self.uname_info, self.os_info, self.basic_env_info = (
+            get_or_fetch_static_env_info()
+        )
         self.output_language = get_output_language(config)
 
         # Dynamic environment info - fetch and add to context on startup
@@ -316,28 +296,28 @@ class AIShell:
 
         # Add initial current_env_info to context (like command execution result)
         env_entry = f"[system information] {self.current_env_info}"
-        self.context_manager.add_memory(MemoryType.LLM, {"role": "user", "content": env_entry})
+        self.context_manager.add_memory(
+            MemoryType.LLM, {"role": "user", "content": env_entry}
+        )
 
         # Cache system knowledge
         self.context_manager.add_memory(
-            MemoryType.KNOWLEDGE,
-            {"key": "system_info", "value": self.uname_info}
+            MemoryType.KNOWLEDGE, {"key": "system_info", "value": self.uname_info}
+        )
+        self.context_manager.add_memory(
+            MemoryType.KNOWLEDGE, {"key": "os_info", "value": self.os_info}
         )
         self.context_manager.add_memory(
             MemoryType.KNOWLEDGE,
-            {"key": "os_info", "value": self.os_info}
+            {"key": "output_language", "value": self.output_language},
         )
         self.context_manager.add_memory(
             MemoryType.KNOWLEDGE,
-            {"key": "output_language", "value": self.output_language}
+            {"key": "basic_env_info", "value": self.basic_env_info},
         )
         self.context_manager.add_memory(
             MemoryType.KNOWLEDGE,
-            {"key": "basic_env_info", "value": self.basic_env_info}
-        )
-        self.context_manager.add_memory(
-            MemoryType.KNOWLEDGE,
-            {"key": "current_env_info", "value": self.current_env_info}
+            {"key": "current_env_info", "value": self.current_env_info},
         )
 
         # Initialize LiteLLM
@@ -547,7 +527,9 @@ class AIShell:
         prompt_style = getattr(self.config, "prompt_style", "🚀")
         return f"{prompt_style} {os.path.basename(cwd)} > "
 
-    async def get_user_input(self, prompt_text: Optional[str] = None, _recursion_depth: int = 0) -> str:
+    async def get_user_input(
+        self, prompt_text: Optional[str] = None, _recursion_depth: int = 0
+    ) -> str:
         """Get user input with the configured prompt.
 
         Args:
@@ -625,7 +607,9 @@ class AIShell:
         prefix = " ".join([f"use {name} skill to do this." for name in refs])
         return f"{prefix}\n\n{text}"
 
-    async def _get_multiline_input(self, initial_prompt: str, first_line: str, ai_mode: bool = True) -> str:
+    async def _get_multiline_input(
+        self, initial_prompt: str, first_line: str, ai_mode: bool = True
+    ) -> str:
         """Get multiline input with backslash continuation support.
 
         Args:
@@ -642,15 +626,17 @@ class AIShell:
         lines = [first_line]
 
         # Check if first line ends with backslash for continuation
-        while lines[-1].endswith('\\'):
+        while lines[-1].endswith("\\"):
             # Remove the trailing backslash
             lines[-1] = lines[-1][:-1].rstrip()
 
             # Show continuation prompt and get next line
-            continuation_line = await self.session.prompt_async('... ', handle_sigint=False)
+            continuation_line = await self.session.prompt_async(
+                "... ", handle_sigint=False
+            )
             if not continuation_line:
                 # Empty line on continuation still adds to lines
-                lines.append('')
+                lines.append("")
             else:
                 lines.append(continuation_line)
 
@@ -658,9 +644,9 @@ class AIShell:
         # AI mode: use newlines to preserve prompt structure
         # Command mode: use spaces like fish-shell
         if ai_mode:
-            return '\n'.join(lines)
+            return "\n".join(lines)
         else:
-            return ' '.join(line for line in lines if line)
+            return " ".join(line for line in lines if line)
 
     def setup_llm(self):
         """Setup LiteLLM configuration"""
@@ -674,15 +660,20 @@ class AIShell:
         """Execute a command with PTY support and enhanced error handling."""
         return await _execute_command_with_pty_impl(self, command)
 
-    async def execute_command_with_security(self, command: str, record_history: bool = True) -> CommandResult:
+    async def execute_command_with_security(
+        self, command: str, record_history: bool = True
+    ) -> CommandResult:
         """Execute a shell command with security checks (AI commands only)."""
         try:
             # Check for state-modifying built-in commands first
             # These need special handling and cannot be executed with subprocess
             from aish.builtin import BuiltinRegistry, BuiltinResult
+
             if BuiltinRegistry.is_state_modifying_command(command):
                 # Handle built-in commands directly
-                return await self._execute_builtin_command(command, record_history=record_history)
+                return await self._execute_builtin_command(
+                    command, record_history=record_history
+                )
 
             # Exact-match allowlist: skip confirmation for previously approved commands.
             if self._is_command_approved(command):
@@ -778,10 +769,12 @@ class AIShell:
                 offload={"status": "inline", "reason": "execute_command_exception"},
             )
 
-    async def _execute_builtin_command(self, command: str, record_history: bool = True) -> CommandResult:
+    async def _execute_builtin_command(
+        self, command: str, record_history: bool = True
+    ) -> CommandResult:
         """Execute a built-in command (cd, pushd, popd, export, unset, dirs, pwd, history)."""
-        from aish.tools.bash_executor import UnifiedBashExecutor
         from aish.builtin import BuiltinHandlers, BuiltinRegistry
+        from aish.tools.bash_executor import UnifiedBashExecutor
 
         cmd_parts = command.strip().split()
         if not cmd_parts:
@@ -802,9 +795,7 @@ class AIShell:
                 record_history=record_history,
             )
             status = (
-                CommandStatus.SUCCESS
-                if result_returncode == 0
-                else CommandStatus.ERROR
+                CommandStatus.SUCCESS if result_returncode == 0 else CommandStatus.ERROR
             )
             return CommandResult(
                 status=status,
@@ -818,7 +809,9 @@ class AIShell:
         if cmd_name in ("pushd", "popd", "dirs"):
             cwd = os.getcwd()
             if cmd_name == "pushd":
-                result = BuiltinHandlers.handle_pushd(command, cwd, self.directory_stack)
+                result = BuiltinHandlers.handle_pushd(
+                    command, cwd, self.directory_stack
+                )
             elif cmd_name == "popd":
                 result = BuiltinHandlers.handle_popd(command, cwd, self.directory_stack)
             else:  # dirs
@@ -839,7 +832,7 @@ class AIShell:
                     source="user",
                     returncode=result.returncode,
                     stdout=result.output if result.success else "",
-                    stderr=result.error if not result.success else ""
+                    stderr=result.error if not result.success else "",
                 )
 
             # 转换为 CommandResult
@@ -856,13 +849,12 @@ class AIShell:
         executor = UnifiedBashExecutor(
             env_manager=self.env_manager,
             # 不传递 history_manager，避免重复记录历史
-            history_manager=None
+            history_manager=None,
         )
 
         # 执行命令（自动捕获状态）- 同步方法，不需要 await
         success, stdout, stderr, returncode, changes = executor.execute(
-            command,
-            source="user"
+            command, source="user"
         )
 
         # 手动添加历史记录
@@ -872,7 +864,7 @@ class AIShell:
                 source="user",
                 returncode=returncode,
                 stdout=stdout,
-                stderr=stderr
+                stderr=stderr,
             )
 
         # 转换为 CommandResult
@@ -908,12 +900,17 @@ class AIShell:
                 **kwargs,
             )
             return output
+        except json.JSONDecodeError:
+            raise
         except Exception as e:
             self.console.print(
                 t("shell.error.execution_error", error=str(e)),
                 style="red",
             )
             return ""
+
+    def _show_tool_args_json_error_hint(self) -> None:
+        self.console.print(t("shell.error.tool_args_json_invalid_hint"), style="red")
 
     async def handle_ai_command(self, question: str):
         """Handle AI question command"""
@@ -926,7 +923,7 @@ class AIShell:
             source="user",
             returncode=None,  # AI requests don't have return codes
             stdout=None,
-            stderr=None
+            stderr=None,
         )
 
         try:
@@ -940,8 +937,12 @@ class AIShell:
             # 检查动态环境信息是否有变化
             new_current_env_info = get_current_env_info()
             if new_current_env_info != self._last_current_env_info:
-                env_entry = f"[Reminder: the system information updated] {new_current_env_info}"
-                self.context_manager.add_memory(MemoryType.LLM, {"role": "user", "content": env_entry})
+                env_entry = (
+                    f"[Reminder: the system information updated] {new_current_env_info}"
+                )
+                self.context_manager.add_memory(
+                    MemoryType.LLM, {"role": "user", "content": env_entry}
+                )
                 self._last_current_env_info = new_current_env_info
                 self.current_env_info = new_current_env_info
 
@@ -994,6 +995,10 @@ class AIShell:
             self.handle_processing_cancelled()
             # 恢复正常状态
             self.interruption_manager.set_state(ShellState.NORMAL)
+        except json.JSONDecodeError:
+            self.operation_in_progress = False
+            self.interruption_manager.set_state(ShellState.NORMAL)
+            self._show_tool_args_json_error_hint()
 
     async def process_ai_response(self, response: str, border_style: str = "green"):
         # self.console.print(f"process_ai_response: {response}")
@@ -1036,7 +1041,9 @@ class AIShell:
                 # 标志：是否正常完成（非取消）
                 completed_normally = True
                 try:
-                    response = await self.ask_oracle_fast(dedent(prompt), system_message)
+                    response = await self.ask_oracle_fast(
+                        dedent(prompt), system_message
+                    )
                     if len(response) > 0:
                         json_cmd = self.try_parse_json_output(response)
                         if json_cmd and json_cmd.get("type") == "error_detect":
@@ -1048,7 +1055,9 @@ class AIShell:
                                 t("shell.error.potential_error", reason=reason),
                                 style="bold red",
                             )
-                            await self.handle_command_error(command, stdout, stderr, reason)
+                            await self.handle_command_error(
+                                command, stdout, stderr, reason
+                            )
                 except anyio.get_cancelled_exc_class():
                     # 被取消
                     completed_normally = False
@@ -1082,7 +1091,7 @@ class AIShell:
         self.interruption_manager.show_prompt(
             PromptConfig(
                 message=t("shell.error_correction.press_semicolon_hint"),
-                window_seconds=60.0  # Long timeout
+                window_seconds=60.0,  # Long timeout
             )
         )
 
@@ -1200,7 +1209,9 @@ class AIShell:
 
         # Display output
         if result.success:
-            self.console.print(result.output, style="green" if result.returncode == 0 else "cyan")
+            self.console.print(
+                result.output, style="green" if result.returncode == 0 else "cyan"
+            )
             await self.history_manager.add_entry(
                 command=user_input,
                 source="user",
@@ -1211,7 +1222,9 @@ class AIShell:
         else:
             self.console.print(f"❌ {result.error}", style="red")
             if "no such file or directory" in result.error:
-                self._suggest_similar_directories(user_input.split()[-1] if len(user_input.split()) > 1 else "~")
+                self._suggest_similar_directories(
+                    user_input.split()[-1] if len(user_input.split()) > 1 else "~"
+                )
             # Trigger error correction for built-in command failures
             await self.handle_command_error(user_input, "", result.error)
 
@@ -1220,7 +1233,7 @@ class AIShell:
             user_input,
             result.returncode,
             result.output if result.success else "",
-            result.error if not result.success else ""
+            result.error if not result.success else "",
         )
 
     def _suggest_similar_directories(self, target_dir: str):
@@ -1289,7 +1302,7 @@ class AIShell:
             user_input,
             result.returncode,
             result.output if result.success else "",
-            result.error if not result.success else ""
+            result.error if not result.success else "",
         )
 
     async def handle_popd_command(self, user_input: str):
@@ -1326,7 +1339,7 @@ class AIShell:
             user_input,
             result.returncode,
             result.output if result.success else "",
-            result.error if not result.success else ""
+            result.error if not result.success else "",
         )
 
     async def handle_dirs_command(self, user_input: str):
@@ -1354,7 +1367,7 @@ class AIShell:
             user_input,
             result.returncode,
             result.output if result.success else "",
-            result.error if not result.success else ""
+            result.error if not result.success else "",
         )
 
     async def handle_setup_command(self, user_input: str) -> None:
@@ -1373,8 +1386,11 @@ class AIShell:
             self.console.print(message, style="red")
             self.add_to_history(user_input, 1, "", message)
             await self.history_manager.add_entry(
-                command=user_input, source="user",
-                returncode=1, stdout="", stderr=message,
+                command=user_input,
+                source="user",
+                returncode=1,
+                stdout="",
+                stderr=message,
             )
             return
 
@@ -1389,8 +1405,11 @@ class AIShell:
             self.console.print(message, style="yellow")
             self.add_to_history(user_input, 0, message, "")
             await self.history_manager.add_entry(
-                command=user_input, source="user",
-                returncode=0, stdout=message, stderr="",
+                command=user_input,
+                source="user",
+                returncode=0,
+                stdout=message,
+                stderr="",
             )
             return
 
@@ -1415,8 +1434,11 @@ class AIShell:
         self.console.print(message, style="green")
         self.add_to_history(user_input, 0, message, "")
         await self.history_manager.add_entry(
-            command=user_input, source="user",
-            returncode=0, stdout=message, stderr="",
+            command=user_input,
+            source="user",
+            returncode=0,
+            stdout=message,
+            stderr="",
         )
 
     async def handle_model_command(self, user_input: str) -> None:
@@ -1475,10 +1497,9 @@ class AIShell:
             )
             return
 
-        self.console.print(
-            t("shell.model.switching", model=new_model), style="dim"
-        )
-        from aish.wizard.verification import build_failure_reason, run_verification_async
+        self.console.print(t("shell.model.switching", model=new_model), style="dim")
+        from aish.wizard.verification import (build_failure_reason,
+                                              run_verification_async)
 
         connectivity, tool_support = await run_verification_async(
             model=new_model,
@@ -1521,7 +1542,10 @@ class AIShell:
         record_history: bool = True,
     ) -> tuple[int, str]:
         """Handle history command to show command history with bash-like options"""
-        def add_shell_history(command: str, returncode: int, stdout: str, stderr: str) -> None:
+
+        def add_shell_history(
+            command: str, returncode: int, stdout: str, stderr: str
+        ) -> None:
             if record_history:
                 self.add_to_history(command, returncode, stdout, stderr)
 
@@ -1599,8 +1623,12 @@ class AIShell:
             if clear_history:
                 current_session_id = self.history_manager.get_session_uuid()
                 if await self.history_manager.delete_session(current_session_id):
-                    self.console.print("📚 Current session history cleared", style="green")
-                    add_shell_history(user_input, 0, "Current session history cleared", "")
+                    self.console.print(
+                        "📚 Current session history cleared", style="green"
+                    )
+                    add_shell_history(
+                        user_input, 0, "Current session history cleared", ""
+                    )
                     await add_persistent_history(
                         user_input,
                         0,
@@ -1639,8 +1667,12 @@ class AIShell:
                     delete_offset = 1
 
                 if await self.history_manager.delete_entry_by_index(delete_offset):
-                    self.console.print(f"📚 Deleted history entry {delete_offset}", style="green")
-                    add_shell_history(user_input, 0, f"Deleted entry {delete_offset}", "")
+                    self.console.print(
+                        f"📚 Deleted history entry {delete_offset}", style="green"
+                    )
+                    add_shell_history(
+                        user_input, 0, f"Deleted entry {delete_offset}", ""
+                    )
                     await add_persistent_history(
                         user_input,
                         0,
@@ -1648,7 +1680,9 @@ class AIShell:
                         "",
                     )
                 else:
-                    error_msg = f"history: {delete_offset}: history position out of range"
+                    error_msg = (
+                        f"history: {delete_offset}: history position out of range"
+                    )
                     self.console.print(f"❌ {error_msg}", style="red")
                     add_shell_history(user_input, 1, "", error_msg)
                     await add_persistent_history(user_input, 1, "", error_msg)
@@ -1665,9 +1699,13 @@ class AIShell:
             )
 
             if not history_entries:
-                self.console.print("📚 No command history found for current session", style="yellow")
+                self.console.print(
+                    "📚 No command history found for current session", style="yellow"
+                )
                 add_shell_history(user_input, 0, "No command history found", "")
-                await add_persistent_history(user_input, 0, "No command history found", "")
+                await add_persistent_history(
+                    user_input, 0, "No command history found", ""
+                )
                 return 0, ""
 
             # Display history with enhanced formatting
@@ -1681,7 +1719,9 @@ class AIShell:
                 display_line = entry.to_display_string()
                 self.console.print(f"  {i:4d}  {display_line}", style="cyan")
 
-            history_info = f"Showing {len(history_entries)} commands from current session"
+            history_info = (
+                f"Showing {len(history_entries)} commands from current session"
+            )
             add_shell_history(user_input, 0, history_info, "")
             await add_persistent_history(user_input, 0, history_info, "")
             return 0, ""
@@ -1736,7 +1776,7 @@ class AIShell:
                         source="user",
                         returncode=1,
                         stdout="",
-                        stderr=error_msg
+                        stderr=error_msg,
                     )
                     # Trigger error correction for built-in command failures
                     await self.handle_command_error(user_input, "", error_msg)
@@ -1753,27 +1793,31 @@ class AIShell:
 
             # Handle function export (not supported)
             if export_function:
-                self.console.print("⚠️  Function export is not supported in AI Shell", style="yellow")
+                self.console.print(
+                    "⚠️  Function export is not supported in AI Shell", style="yellow"
+                )
                 self.add_to_history(user_input, 0, "Function export not supported", "")
                 await self.history_manager.add_entry(
                     command=user_input,
                     source="user",
                     returncode=0,
                     stdout="Function export not supported",
-                    stderr=""
+                    stderr="",
                 )
                 return
 
             # Display exported variables
             if show_all or (len(parts) == 1):
                 self._display_exported_env_vars()
-                self.add_to_history(user_input, 0, "Displayed exported environment variables", "")
+                self.add_to_history(
+                    user_input, 0, "Displayed exported environment variables", ""
+                )
                 await self.history_manager.add_entry(
                     command=user_input,
                     source="user",
                     returncode=0,
                     stdout="Displayed exported environment variables",
-                    stderr=""
+                    stderr="",
                 )
                 return
 
@@ -1788,7 +1832,7 @@ class AIShell:
                         source="user",
                         returncode=1,
                         stdout="",
-                        stderr=error_msg
+                        stderr=error_msg,
                     )
                     return
 
@@ -1796,17 +1840,24 @@ class AIShell:
                 for var_name in var_assignments:
                     if self.env_manager.remove_export(var_name):
                         success_count += 1
-                        self.console.print(f"✅ Removed export attribute from {var_name}", style="green")
+                        self.console.print(
+                            f"✅ Removed export attribute from {var_name}",
+                            style="green",
+                        )
                     else:
-                        self.console.print(f"ℹ️  Variable {var_name} not found", style="yellow")
+                        self.console.print(
+                            f"ℹ️  Variable {var_name} not found", style="yellow"
+                        )
 
-                self.add_to_history(user_input, 0, f"Removed export from {success_count} variables", "")
+                self.add_to_history(
+                    user_input, 0, f"Removed export from {success_count} variables", ""
+                )
                 await self.history_manager.add_entry(
                     command=user_input,
                     source="user",
                     returncode=0,
                     stdout=f"Removed export from {success_count} variables",
-                    stderr=""
+                    stderr="",
                 )
                 return
 
@@ -1814,13 +1865,15 @@ class AIShell:
             if not var_assignments:
                 # No arguments, display exported variables
                 self._display_exported_env_vars()
-                self.add_to_history(user_input, 0, "Displayed exported environment variables", "")
+                self.add_to_history(
+                    user_input, 0, "Displayed exported environment variables", ""
+                )
                 await self.history_manager.add_entry(
                     command=user_input,
                     source="user",
                     returncode=0,
                     stdout="Displayed exported environment variables",
-                    stderr=""
+                    stderr="",
                 )
                 return
 
@@ -1834,14 +1887,17 @@ class AIShell:
                     value = value.strip()
 
                     # Remove possible quotes
-                    if (value.startswith('"') and value.endswith('"')) or \
-                       (value.startswith("'") and value.endswith("'")):
+                    if (value.startswith('"') and value.endswith('"')) or (
+                        value.startswith("'") and value.endswith("'")
+                    ):
                         value = value[1:-1]
 
                     # Set and export environment variable
                     if self.env_manager.set_var(key, value, export=True):
                         success_count += 1
-                        self.console.print(f"✅ Set and exported {key}={value}", style="green")
+                        self.console.print(
+                            f"✅ Set and exported {key}={value}", style="green"
+                        )
                     else:
                         self.console.print(f"❌ Failed to set {key}", style="red")
                 else:
@@ -1851,17 +1907,22 @@ class AIShell:
                         success_count += 1
                         self.console.print(f"✅ Exported {assignment}", style="green")
                     else:
-                        self.console.print(f"ℹ️  Variable {assignment} not found, creating with empty value", style="yellow")
+                        self.console.print(
+                            f"ℹ️  Variable {assignment} not found, creating with empty value",
+                            style="yellow",
+                        )
                         self.env_manager.set_var(assignment, "", export=True)
                         success_count += 1
 
-            self.add_to_history(user_input, 0, f"Processed {success_count} variable assignments", "")
+            self.add_to_history(
+                user_input, 0, f"Processed {success_count} variable assignments", ""
+            )
             await self.history_manager.add_entry(
                 command=user_input,
                 source="user",
                 returncode=0,
                 stdout=f"Processed {success_count} variable assignments",
-                stderr=""
+                stderr="",
             )
 
         except Exception as e:
@@ -1873,7 +1934,7 @@ class AIShell:
                 source="user",
                 returncode=1,
                 stdout="",
-                stderr=error_msg
+                stderr=error_msg,
             )
 
     def _display_exported_env_vars(self):
@@ -1890,7 +1951,7 @@ class AIShell:
             if len(value) > 100:
                 display_value = value[:100] + "..."
             # Use bash declare -x format
-            self.console.print(f"declare -x {key}=\"{display_value}\"", style="white")
+            self.console.print(f'declare -x {key}="{display_value}"', style="white")
 
     async def handle_unset_command(self, user_input: str):
         """Handle unset command with bash-compatible options"""
@@ -1932,7 +1993,7 @@ class AIShell:
                         source="user",
                         returncode=1,
                         stdout="",
-                        stderr=error_msg
+                        stderr=error_msg,
                     )
                     # Trigger error correction for built-in command failures
                     await self.handle_command_error(user_input, "", error_msg)
@@ -1957,33 +2018,40 @@ class AIShell:
                     source="user",
                     returncode=1,
                     stdout="",
-                    stderr=error_msg
+                    stderr=error_msg,
                 )
                 return
 
             # Handle function unset (not supported)
             if unset_func:
-                self.console.print("⚠️  Function unset is not supported in AI Shell", style="yellow")
+                self.console.print(
+                    "⚠️  Function unset is not supported in AI Shell", style="yellow"
+                )
                 self.add_to_history(user_input, 0, "Function unset not supported", "")
                 await self.history_manager.add_entry(
                     command=user_input,
                     source="user",
                     returncode=0,
                     stdout="Function unset not supported",
-                    stderr=""
+                    stderr="",
                 )
                 return
 
             # Handle name reference unset (not supported)
             if unset_ref:
-                self.console.print("⚠️  Name reference unset is not supported in AI Shell", style="yellow")
-                self.add_to_history(user_input, 0, "Name reference unset not supported", "")
+                self.console.print(
+                    "⚠️  Name reference unset is not supported in AI Shell",
+                    style="yellow",
+                )
+                self.add_to_history(
+                    user_input, 0, "Name reference unset not supported", ""
+                )
                 await self.history_manager.add_entry(
                     command=user_input,
                     source="user",
                     returncode=0,
                     stdout="Name reference unset not supported",
-                    stderr=""
+                    stderr="",
                 )
                 return
 
@@ -1998,7 +2066,9 @@ class AIShell:
                 else:
                     not_found_count += 1
                     # Variable doesn't exist, but not considered an error (consistent with bash)
-                    self.console.print(f"ℹ️  Variable {var_name} not found", style="yellow")
+                    self.console.print(
+                        f"ℹ️  Variable {var_name} not found", style="yellow"
+                    )
 
             summary = f"Unset {success_count} variables"
             if not_found_count > 0:
@@ -2010,7 +2080,7 @@ class AIShell:
                 source="user",
                 returncode=0,
                 stdout=summary,
-                stderr=""
+                stderr="",
             )
 
         except Exception as e:
@@ -2022,7 +2092,7 @@ class AIShell:
                 source="user",
                 returncode=1,
                 stdout="",
-                stderr=error_msg
+                stderr=error_msg,
             )
 
     async def handle_pwd_command(self, user_input: str):
@@ -2054,7 +2124,7 @@ class AIShell:
                     source="user",
                     returncode=1,
                     stdout="",
-                    stderr=error_msg
+                    stderr=error_msg,
                 )
                 # Trigger error correction for built-in command failures
                 await self.handle_command_error(user_input, "", error_msg)
@@ -2069,7 +2139,7 @@ class AIShell:
         # Get the appropriate path
         if show_logical:
             # Show logical path (respecting symlinks)
-            current_path = os.environ.get('PWD', os.getcwd())
+            current_path = os.environ.get("PWD", os.getcwd())
         else:
             # Show physical path (resolving symlinks)
             current_path = os.getcwd()
@@ -2082,7 +2152,7 @@ class AIShell:
             source="user",
             returncode=0,
             stdout=current_path,
-            stderr=""
+            stderr="",
         )
 
         self.add_to_history(user_input, 0, f"Current directory: {current_path}", "")
@@ -2141,7 +2211,11 @@ class AIShell:
 
     async def handle_json_command(self, json_cmd: dict):
         # "<Interrupted received.>"
-        if self.interruption_manager.state in (ShellState.AI_THINKING, ShellState.SANDBOX_EVAL, ShellState.COMMAND_EXEC):
+        if self.interruption_manager.state in (
+            ShellState.AI_THINKING,
+            ShellState.SANDBOX_EVAL,
+            ShellState.COMMAND_EXEC,
+        ):
             self.interruption_manager.set_state(ShellState.NORMAL)
 
         if json_cmd.get("type") == "long_running_command":
@@ -2173,12 +2247,16 @@ class AIShell:
 
             try:
                 confirm = (
-                    await self.session.prompt_async(
-                        t("shell.prompt.confirm_execute"),
-                        handle_sigint=False,
-                        key_bindings=kb,
+                    (
+                        await self.session.prompt_async(
+                            t("shell.prompt.confirm_execute"),
+                            handle_sigint=False,
+                            key_bindings=kb,
+                        )
                     )
-                ).strip().lower()
+                    .strip()
+                    .lower()
+                )
 
                 if confirm in ["y", "yes", "是", "是的"]:
                     self._remember_approved_command(command)
@@ -2187,7 +2265,9 @@ class AIShell:
                         self._current_op_scope = scope
                         self.operation_in_progress = True
                         try:
-                            result = await self.execute_command_with_security(command, record_history=False)
+                            result = await self.execute_command_with_security(
+                                command, record_history=False
+                            )
                             returncode, stdout, stderr = result.to_tuple()
                             self.add_to_history(
                                 command,
@@ -2201,7 +2281,7 @@ class AIShell:
                                 source="ai",
                                 returncode=returncode,
                                 stdout=stdout,
-                                stderr=stderr
+                                stderr=stderr,
                             )
                             if returncode != 0:
                                 await self.handle_command_error(command, stdout, stderr)
@@ -2343,9 +2423,28 @@ class AIShell:
     def _has_shell_operators(self, user_input: str) -> bool:
         """Check if input contains shell operators that suggest it's a command"""
         shell_operators = [
-            '&&', '||', '|', '>', '>>', '<', '<<', '<<<',
-            '&', ';', ';;', ';&', ';;&', '|&', '>&', '<&',
-            '2>', '2>>', '1>', '1>>', '&>', '&>>'
+            "&&",
+            "||",
+            "|",
+            ">",
+            ">>",
+            "<",
+            "<<",
+            "<<<",
+            "&",
+            ";",
+            ";;",
+            ";&",
+            ";;&",
+            "|&",
+            ">&",
+            "<&",
+            "2>",
+            "2>>",
+            "1>",
+            "1>>",
+            "&>",
+            "&>>",
         ]
 
         # Check for any shell operators
@@ -2354,11 +2453,13 @@ class AIShell:
                 return True
 
         # Check for command substitution
-        if ('$(' in user_input and ')' in user_input) or '`' in user_input:
+        if ("$(" in user_input and ")" in user_input) or "`" in user_input:
             return True
 
         # Check for process substitution
-        if ('<(' in user_input and ')' in user_input) or ('>(' in user_input and ')' in user_input):
+        if ("<(" in user_input and ")" in user_input) or (
+            ">(" in user_input and ")" in user_input
+        ):
             return True
 
         return False
@@ -2486,7 +2587,9 @@ class AIShell:
             self._reasoning_lines.append(self._reasoning_partial)
             self._reasoning_partial = segment
             if len(self._reasoning_lines) > self._reasoning_max_lines:
-                self._reasoning_lines = self._reasoning_lines[-self._reasoning_max_lines :]
+                self._reasoning_lines = self._reasoning_lines[
+                    -self._reasoning_max_lines :
+                ]
 
         all_lines = list(self._reasoning_lines)
         if self._reasoning_partial:
@@ -2518,7 +2621,9 @@ class AIShell:
 
         if trimmed_lines:
             thinking_label = t("shell.status.thinking")
-            display_text = "\n".join([f"{spinner_char} {thinking_label}", *trimmed_lines])
+            display_text = "\n".join(
+                [f"{spinner_char} {thinking_label}", *trimmed_lines]
+            )
         else:
             thinking_label = t("shell.status.thinking")
             display_text = f"{spinner_char} {thinking_label}..."
@@ -2642,7 +2747,10 @@ class AIShell:
                 summary["error_message"] = self._truncate_log_value(
                     data.get("error_message")
                 )
-        elif event.event_type in (LLMEventType.REASONING_START, LLMEventType.REASONING_END):
+        elif event.event_type in (
+            LLMEventType.REASONING_START,
+            LLMEventType.REASONING_END,
+        ):
             summary["turn_id"] = data.get("turn_id")
             summary["generation_id"] = data.get("generation_id")
 
@@ -2798,7 +2906,9 @@ class AIShell:
             base_text = t("shell.status.processing")
             if event.data and event.data.get("source") == "system_diagnose_agent":
                 base_text = t("shell.status.system_analyzing")
-                update_text = f"  {update_text}" if update_text else t("shell.status.analyzing")
+                update_text = (
+                    f"  {update_text}" if update_text else t("shell.status.analyzing")
+                )
 
             # Update animation text without restarting the thread.
             self._start_animation(
@@ -2817,9 +2927,7 @@ class AIShell:
             self.current_live.stop()
             self.current_live = None
 
-    def _get_tool_arg_preview_settings(
-        self, tool_name: str
-    ) -> ToolArgPreviewSettings:
+    def _get_tool_arg_preview_settings(self, tool_name: str) -> ToolArgPreviewSettings:
         raw_config = getattr(self.config, "tool_arg_preview", None)
         if isinstance(raw_config, dict):
             settings = raw_config.get(tool_name) or raw_config.get("default")
@@ -2827,9 +2935,7 @@ class AIShell:
                 return settings
         return ToolArgPreviewSettings()
 
-    def _truncate_tool_text(
-        self, text: str, settings: ToolArgPreviewSettings
-    ) -> str:
+    def _truncate_tool_text(self, text: str, settings: ToolArgPreviewSettings) -> str:
         max_lines = settings.max_lines
         max_chars = settings.max_chars
 
@@ -2881,9 +2987,7 @@ class AIShell:
         if tool_name == "write_file" and isinstance(tool_args, dict):
             display_args = dict(tool_args)
             display_args.pop("content", None)
-            return self._format_tool_arg_value(
-                display_args, ToolArgPreviewSettings()
-            )
+            return self._format_tool_arg_value(display_args, ToolArgPreviewSettings())
         settings = self._get_tool_arg_preview_settings(tool_name)
         if not settings.enabled:
             if isinstance(tool_args, dict) and len(tool_args) == 1:
@@ -3012,11 +3116,17 @@ class AIShell:
             self.current_live = None
 
         # 检查是否为工具确认被拒绝（用户输入 N），如果是则不显示取消消息
-        is_tool_denied = event and event.data and event.data.get("reason") == "tool_cancelled"
+        is_tool_denied = (
+            event and event.data and event.data.get("reason") == "tool_cancelled"
+        )
 
         # Show cancellation message with appropriate formatting
         if not is_tool_denied:
-            if event and event.data and event.data.get("source") == "system_diagnose_agent":
+            if (
+                event
+                and event.data
+                and event.data.get("source") == "system_diagnose_agent"
+            ):
                 self.console.print(t("shell.diagnose_cancelled"), style="yellow")
             else:
                 # 优先使用最后的 AI 执行状态
@@ -3027,10 +3137,15 @@ class AIShell:
                     self.console.print("<Interrupted received.>", style="dim")
                 elif last_ai_state == ShellState.SANDBOX_EVAL:
                     # 沙箱评估阶段：显示瞬时提示
-                    self.console.print("<Stopping... finalizing current task.>", style="dim")
+                    self.console.print(
+                        "<Stopping... finalizing current task.>", style="dim"
+                    )
                 elif last_ai_state == ShellState.COMMAND_EXEC:
                     # 命令执行阶段：显示瞬时提示
-                    self.console.print("<Stopping... finishing current task (this may take a moment)>", style="dim")
+                    self.console.print(
+                        "<Stopping... finishing current task (this may take a moment)>",
+                        style="dim",
+                    )
                 # 移除 else 分支，不显示通用的 "❌ 操作已取消" 消息
                 # 只通过事件系统显示瞬时提示
 
@@ -3042,8 +3157,7 @@ class AIShell:
         # 取消 LLM 操作
         # 瞬时提示会在 handle_processing_cancelled 中根据状态显示
         self.llm_session.cancellation_token.cancel(
-            CancellationReason.USER_INTERRUPT,
-            "User pressed Ctrl+C"
+            CancellationReason.USER_INTERRUPT, "User pressed Ctrl+C"
         )
 
     def handle_tool_confirmation_required(self, event: LLMEvent) -> LLMCallbackResult:
@@ -3136,8 +3250,10 @@ class AIShell:
 
                                 # Check for semicolon key press for error correction
                                 # Only if there's pending error correction
-                                if (self._pending_error_correction and
-                                    first_input == "__CORRECT_SEMICOLON__"):
+                                if (
+                                    self._pending_error_correction
+                                    and first_input == "__CORRECT_SEMICOLON__"
+                                ):
                                     await self._execute_error_correction()
                                     continue
 
@@ -3148,8 +3264,10 @@ class AIShell:
                                 break
 
                             # Check if AI mode (starts with ?) or line ends with backslash for continuation
-                            is_ai_mode = self.starts_with_question_mark(first_input.strip())
-                            needs_continuation = first_input.rstrip().endswith('\\')
+                            is_ai_mode = self.starts_with_question_mark(
+                                first_input.strip()
+                            )
+                            needs_continuation = first_input.rstrip().endswith("\\")
 
                             if is_ai_mode or needs_continuation:
                                 # Use multiline input for AI mode or backslash continuation
@@ -3190,7 +3308,9 @@ class AIShell:
                                 self.handle_processing_cancelled()
                                 continue
                         except Exception as e:
-                            self.console.print(f"💥 Unexpected error: {str(e)}", style="red")
+                            self.console.print(
+                                f"💥 Unexpected error: {str(e)}", style="red"
+                            )
                             continue
 
                 # 在任务组中同时运行信号处理器和主循环

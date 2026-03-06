@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from .models import SkillMetadata
 
-
 _ALLOWED_FRONTMATTER_KEYS = {
     "name",
     "description",

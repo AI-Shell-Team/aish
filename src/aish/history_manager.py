@@ -14,6 +14,7 @@ import anyio
 @dataclass(slots=True)
 class HistoryEntry:
     """Represents a single history entry"""
+
     command: str
     timestamp: dt.datetime
     source: str  # "user" or "ai"
@@ -147,6 +148,7 @@ class HistoryManager:
         except Exception as e:
             # Log error for debugging (minimal output)
             import sys
+
             print(f"[HistoryManager] Failed to add entry: {e}", file=sys.stderr)
             return False
 
@@ -278,7 +280,9 @@ class HistoryManager:
         )
         self._conn.commit()
 
-    async def delete_entry_by_index(self, index: int, session_uuid: Optional[str] = None) -> bool:
+    async def delete_entry_by_index(
+        self, index: int, session_uuid: Optional[str] = None
+    ) -> bool:
         """
         Delete a history entry by its display index within a session.
 
@@ -330,14 +334,22 @@ class HistoryManager:
             ).fetchone()[0]
 
             import sys
+
             if verify == 0:
-                print(f"[HistoryManager] Deleted: id={db_id}, cmd={command[:30]}", file=sys.stderr)
+                print(
+                    f"[HistoryManager] Deleted: id={db_id}, cmd={command[:30]}",
+                    file=sys.stderr,
+                )
                 return True
             else:
-                print(f"[HistoryManager] ERROR: Deletion failed for id={db_id}", file=sys.stderr)
+                print(
+                    f"[HistoryManager] ERROR: Deletion failed for id={db_id}",
+                    file=sys.stderr,
+                )
                 return False
 
         import sys
+
         print(f"[HistoryManager] Entry {index} not found", file=sys.stderr)
         return False
 

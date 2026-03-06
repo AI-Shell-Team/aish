@@ -1,6 +1,7 @@
 """Tests for CLI functionality."""
 
 from unittest.mock import Mock, patch
+
 from typer.testing import CliRunner
 
 from aish.cli import app, run
@@ -182,7 +183,9 @@ class TestCLI:
         """Setup command exits successfully when interactive setup returns config."""
         mock_config = Mock()
         mock_config_class.return_value = mock_config
-        mock_run_interactive_setup.return_value = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_run_interactive_setup.return_value = ConfigModel(
+            model="openai/gpt-4o", api_key="k"
+        )
 
         result = self.runner.invoke(app, ["setup"])
 
@@ -192,7 +195,9 @@ class TestCLI:
 
     @patch("aish.cli.Config")
     @patch("aish.cli.run_interactive_setup", return_value=None)
-    def test_setup_command_cancelled(self, mock_run_interactive_setup, mock_config_class):
+    def test_setup_command_cancelled(
+        self, mock_run_interactive_setup, mock_config_class
+    ):
         """Setup command returns non-zero when interactive setup is cancelled."""
         mock_config = Mock()
         mock_config_class.return_value = mock_config

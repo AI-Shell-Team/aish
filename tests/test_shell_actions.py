@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from aish.shell_enhanced.shell_actions import build_default_actions
 from aish.shell_enhanced.shell_types import ActionContext, InputIntent

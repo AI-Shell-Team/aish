@@ -14,7 +14,8 @@ from typing import Optional
 
 import anyio
 from rich.console import Console
-from rich.progress import Progress, ProgressColumn, SpinnerColumn, Task, TextColumn
+from rich.progress import (Progress, ProgressColumn, SpinnerColumn, Task,
+                           TextColumn)
 from rich.text import Text
 
 from ..i18n import t
@@ -188,7 +189,8 @@ def _quick_static_check(litellm, model: str) -> Optional[bool]:
                     params_set = set()
                 if params_set:
                     supports_params = bool(
-                        {"tools", "tool_choice", "functions", "function_call"} & params_set
+                        {"tools", "tool_choice", "functions", "function_call"}
+                        & params_set
                     )
     except Exception:
         pass
@@ -277,9 +279,7 @@ async def _check_tool_support(
             },
         }
     ]
-    messages = [
-        {"role": "user", "content": "Call the ping tool with no arguments."}
-    ]
+    messages = [{"role": "user", "content": "Call the ping tool with no arguments."}]
 
     def _parse(response: object, *, strict: bool) -> ToolSupportResult:
         msg = _coerce_response_message(response)

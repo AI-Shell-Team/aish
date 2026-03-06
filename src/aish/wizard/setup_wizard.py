@@ -9,67 +9,41 @@ import os
 import shutil
 import sys
 from typing import Optional
-from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import anyio
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import (Progress, SpinnerColumn, TextColumn,
+                           TimeElapsedColumn)
 from rich.table import Table
-from rich import box
 
 from ..config import Config, ConfigModel
 from ..i18n import t
 from ..litellm_loader import load_litellm, preload_litellm
-from .constants import _STATIC_FILTER_SKIP_PROVIDERS
-from .helpers import (
-    _ask_value,
-    _display_width,
-    _is_blank,
-    _is_valid_url,
-    _mask_secret,
-    _matches_filter_query,
-    _prompt_secret_with_mask,
-    _sanitize_filter_input,
-)
-from .providers import (
-    _filter_provider_options,
-    _get_provider_options,
-    _maybe_resolve_api_base,
-    _provider_note,
-    _with_api_base,
-)
-from .types import (
-    ConnectivityResult,
-    ProviderOption,
-    ToolSupportResult,
-)
-from .verification import (
-    _check_tool_support,
-    _quick_static_check,
-    _status_text,
-    build_failure_reason,
-    run_verification,
-)
-
+from .constants import (_AI_GATEWAY_DEFAULT_MODEL, _HUGGINGFACE_DEFAULT_MODEL,
+                        _KILOCODE_DEFAULT_MODEL, _MISTRAL_DEFAULT_MODEL,
+                        _OLLAMA_DEFAULT_MODEL, _QIANFAN_MODELS,
+                        _QWEN_DEFAULT_MODEL, _STATIC_FILTER_SKIP_PROVIDERS,
+                        _TOGETHER_DEFAULT_MODEL, _VLLM_DEFAULT_MODEL,
+                        _XAI_DEFAULT_MODEL)
+from .helpers import (_ask_value, _display_width, _is_blank, _is_valid_url,
+                      _mask_secret, _matches_filter_query,
+                      _prompt_secret_with_mask, _sanitize_filter_input)
+from .provider_helpers import (get_default_model_for_endpoint,
+                               get_provider_endpoints, get_provider_models,
+                               has_multi_endpoints)
+from .providers import (_filter_provider_options, _get_provider_options,
+                        _maybe_resolve_api_base, _provider_note,
+                        _with_api_base)
+from .types import ConnectivityResult, ProviderOption, ToolSupportResult
+from .verification import (_check_tool_support, _quick_static_check,
+                           _status_text, build_failure_reason,
+                           run_verification)
 
 console = Console()
-
-
-def _render_provider_table(options: list[ProviderOption]) -> None:
-    table = Table(
-        box=box.SIMPLE_HEAVY,
-        show_lines=False,
-    )
-    table.add_column("#", style="cyan", no_wrap=True)
-    table.add_column(t("cli.setup.provider_column"), style="bold")
-    table.add_column(t("cli.setup.provider_note_column"), style="dim")
-
-    for idx, provider in enumerate(options, start=1):
-        table.add_row(str(idx), provider.label, _provider_note(provider))
-
-    console.print(table)
 
 
 def _resolve_list_viewport(total: int, selected_index: int) -> tuple[int, int]:
@@ -115,8 +89,9 @@ def _select_provider_realtime(
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window, VSplit
-        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+        from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.controls import (BufferControl,
+                                                    FormattedTextControl)
         from prompt_toolkit.styles import Style
     except Exception:
         return _REALTIME_UNAVAILABLE
@@ -309,34 +284,9 @@ def _select_provider() -> Optional[ProviderOption]:
     if selected is None:
         return None
     if selected is _REALTIME_UNAVAILABLE:
-        console.print(
-            Panel(
-                t("cli.setup.provider_header"),
-                title=t("cli.setup.step_provider"),
-                border_style="blue",
-            )
-        )
-        filtered = providers
-        while True:
-            _render_provider_table(filtered)
-            choice = _ask_value(t("cli.setup.prompt_select")).strip()
-            if not choice:
-                filtered = providers
-                continue
-            lowered = choice.lower()
-            if lowered in {"q", "quit"}:
-                return None
-            if lowered.isdigit():
-                idx = int(lowered) - 1
-                if 0 <= idx < len(filtered):
-                    selected = filtered[idx]
-                    break
-                console.print(t("cli.setup.invalid_choice"), style="red")
-                continue
-            filtered = _filter_provider_options(providers, lowered)
-            if not filtered:
-                console.print(t("cli.setup.filter_no_results"), style="yellow")
-                filtered = providers
+        console.print("[yellow]Interactive selection requires prompt_toolkit.[/yellow]")
+        console.print("[yellow]Please install: pip install prompt_toolkit[/yellow]")
+        return None
 
     if not isinstance(selected, ProviderOption):
         return None
@@ -350,11 +300,231 @@ def _select_provider() -> Optional[ProviderOption]:
             border_style="blue",
         )
     )
-    console.print(f"{t('cli.setup.provider_selected_label')}: {selected.label}{selected_suffix}")
+    console.print(
+        f"{t('cli.setup.provider_selected_label')}: {selected.label}{selected_suffix}"
+    )
 
     if selected.requires_api_base:
         return _prompt_custom_provider()
+
+    # Special handling for providers with multiple endpoints
+    if has_multi_endpoints(selected.key):
+        return _select_provider_endpoint(selected)
+
     return selected
+
+
+def _select_provider_endpoint(
+    base_provider: ProviderOption,
+) -> Optional[ProviderOption]:
+    """Show endpoint selection for providers with multiple endpoints."""
+    from .provider_helpers import ProviderEndpointInfo
+
+    endpoints = get_provider_endpoints(base_provider.key)
+
+    selected = _select_endpoint_realtime(base_provider.key, endpoints)
+    if selected is None:
+        return None
+    if selected is _REALTIME_UNAVAILABLE:
+        console.print("[yellow]Interactive selection requires prompt_toolkit.[/yellow]")
+        return None
+
+    console.print(
+        Panel(
+            t("cli.setup.provider_endpoint_header", provider=base_provider.label),
+            title=t("cli.setup.step_provider_endpoint"),
+            border_style="blue",
+        )
+    )
+    console.print(
+        f"{t('cli.setup.provider_endpoint_selected_label')}: {selected.label}"
+    )
+    # Return a new ProviderOption with the endpoint's api_base
+    return ProviderOption(
+        key=selected.key,
+        label=f"{base_provider.label} - {selected.label}",
+        api_base=selected.api_base,
+        env_key=base_provider.env_key,
+        allow_custom_model=True,
+        requires_api_base=False,
+    )
+
+
+def _select_endpoint_realtime(
+    provider_key: str,
+    endpoints: list[ProviderEndpointInfo],
+) -> ProviderEndpointInfo | None | object:
+    """Realtime filtered selection for provider endpoints."""
+    try:
+        from prompt_toolkit import Application
+        from prompt_toolkit.buffer import Buffer
+        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.controls import (BufferControl,
+                                                    FormattedTextControl)
+        from prompt_toolkit.styles import Style
+    except Exception:
+        return _REALTIME_UNAVAILABLE
+
+    filtered: list[ProviderEndpointInfo] = endpoints
+    selected_index = 0
+
+    def get_filtered() -> list[ProviderEndpointInfo]:
+        text = buffer.text
+        if not text.strip():
+            return endpoints
+        return [
+            ep
+            for ep in endpoints
+            if _matches_filter_query(text, [ep.label, ep.key, ep.hint])
+        ]
+
+    def render_list() -> list[tuple[str, str]]:
+        nonlocal filtered
+        filtered = get_filtered()
+        if not filtered:
+            return [("class:warning", t("cli.setup.filter_no_results"))]
+
+        if selected_index >= len(filtered):
+            return [("class:warning", t("cli.setup.filter_no_results"))]
+
+        start, end = _resolve_list_viewport(len(filtered), selected_index)
+        lines: list[tuple[str, str]] = []
+        if start > 0:
+            lines.append(("class:hint", f"..."))
+            lines.append(("", "\n"))
+
+        for idx in range(start, end):
+            endpoint = filtered[idx]
+            style = "class:selected" if idx == selected_index else ""
+            lines.append((style, f"{idx + 1}. {endpoint.label}  [{endpoint.hint}]"))
+            if idx < end - 1:
+                lines.append(("", "\n"))
+
+        if end < len(filtered):
+            lines.append(("", "\n"))
+            lines.append(("class:hint", f"..."))
+        return lines
+
+    app_ref: dict[str, Application | None] = {"app": None}
+
+    def handle_text_change(_):
+        nonlocal selected_index
+        selected_index = 0
+        if app_ref["app"] is not None:
+            app_ref["app"].invalidate()
+
+    buffer = Buffer(on_text_changed=handle_text_change)
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _move_up(event):
+        nonlocal selected_index
+        if filtered:
+            selected_index = max(0, selected_index - 1)
+            event.app.invalidate()
+
+    @kb.add("down")
+    def _move_down(event):
+        nonlocal selected_index
+        if filtered:
+            selected_index = min(len(filtered) - 1, selected_index + 1)
+            event.app.invalidate()
+
+    @kb.add("enter")
+    def _select(event):
+        if not filtered:
+            return
+        event.app.exit(result=filtered[selected_index])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _cancel(event):
+        event.app.exit(result=None)
+
+    style = Style.from_dict(
+        {
+            "selected": "reverse",
+            "warning": "yellow",
+            "hint": "ansibrightblack",
+        }
+    )
+
+    filter_label = t("cli.setup.provider_filter_prompt")
+    filter_label_text = f"{filter_label} "
+    header_panel = ANSI(
+        _render_panel_ansi(
+            Panel(
+                t("cli.setup.provider_endpoint_header", provider=provider_key.upper()),
+                title=t("cli.setup.step_provider_endpoint"),
+                border_style="blue",
+            )
+        )
+    )
+    hint_text = t("cli.setup.provider_filter_hint")
+
+    def render_filter_status() -> str:
+        query = _sanitize_filter_input(buffer.text).strip()
+        count = len(get_filtered())
+        if not query:
+            return f"{count} items"
+        return f"{query} ({count} matches)"
+
+    layout = Layout(
+        HSplit(
+            [
+                Window(
+                    content=FormattedTextControl(header_panel),
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+                Window(
+                    content=FormattedTextControl(render_filter_status),
+                    style="class:hint",
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+                VSplit(
+                    [
+                        Window(
+                            content=FormattedTextControl(lambda: filter_label_text),
+                            width=_display_width(filter_label_text),
+                        ),
+                        Window(
+                            height=1,
+                            content=BufferControl(buffer=buffer),
+                        ),
+                    ]
+                ),
+                Window(
+                    content=FormattedTextControl(render_list),
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+                Window(
+                    content=FormattedTextControl(lambda: hint_text),
+                    style="class:hint",
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+            ]
+        )
+    )
+
+    app = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+        erase_when_done=True,
+    )
+    app_ref["app"] = app
+    return app.run()
 
 
 def _prompt_api_key(env_key: Optional[str]) -> Optional[str]:
@@ -416,8 +586,9 @@ def _prompt_url_with_inline_validation(
         from prompt_toolkit import Application
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window, VSplit
-        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+        from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.controls import (BufferControl,
+                                                    FormattedTextControl)
         from prompt_toolkit.styles import Style
 
         error_text = ""
@@ -488,7 +659,9 @@ def _prompt_url_with_inline_validation(
             )
         )
 
-        app = Application(layout=layout, key_bindings=kb, style=style, full_screen=False)
+        app = Application(
+            layout=layout, key_bindings=kb, style=style, full_screen=False
+        )
         app_ref["app"] = app
         return app.run()
     except Exception:
@@ -525,6 +698,25 @@ def _normalize_model_for_provider(value: str, provider: ProviderOption) -> str:
         return _normalize_custom_model(value)
     if provider.key == "openrouter" and "/" not in value:
         return _normalize_custom_model(value)
+
+    # Special handling for multi-endpoint providers
+    # Check if the provider key is an endpoint key (contains hyphen)
+    is_endpoint_key = (
+        provider.key
+        and "-" in provider.key
+        and any(
+            provider.key.startswith(prefix)
+            for prefix in ["zai-", "minimax-", "moonshot-"]
+        )
+    )
+
+    if is_endpoint_key and "/" not in value:
+        # MiniMax uses Anthropic-compatible API, others use OpenAI-compatible
+        if provider.key.startswith("minimax"):
+            return f"anthropic/{value.strip()}"
+        # Z.AI and Moonshot use OpenAI-compatible API
+        return f"openai/{value.strip()}"
+
     if "/" not in value and provider.key:
         return f"{provider.key}/{value.strip()}"
     return value.strip()
@@ -568,9 +760,43 @@ def _extract_models_from_payload(payload: object) -> list[str]:
     return unique
 
 
-def _fetch_models_from_api_base(
-    api_base: str, api_key: Optional[str]
-) -> list[str]:
+def _fetch_ollama_models(api_base: str) -> list[str]:
+    """Fetch models from Ollama /api/tags endpoint."""
+    if not api_base:
+        return []
+    base = api_base.rstrip("/").replace("/v1", "")
+    url = f"{base}/api/tags"
+
+    headers = {"Accept": "application/json"}
+
+    try:
+        request = Request(url, headers=headers)
+        with urlopen(request, timeout=5) as response:
+            raw = response.read()
+        try:
+            payload = json.loads(raw.decode("utf-8", errors="ignore"))
+        except json.JSONDecodeError:
+            return []
+        # Ollama returns {"models": [{"name": "model:tag"}, ...]}
+        if isinstance(payload, dict) and "models" in payload:
+            models = payload["models"]
+            if isinstance(models, list):
+                # Extract model names (remove tag suffix if present)
+                result = []
+                for model in models:
+                    name = model.get("name", "")
+                    if name:
+                        # Remove tag suffix (e.g., "llama3.2:latest" -> "llama3.2")
+                        if ":" in name:
+                            name = name.split(":")[0]
+                        result.append(name)
+                return result
+        return []
+    except (HTTPError, URLError, TimeoutError, ValueError):
+        return []
+
+
+def _fetch_models_from_api_base(api_base: str, api_key: Optional[str]) -> list[str]:
     if not api_base:
         return []
     base = api_base.rstrip("/")
@@ -610,6 +836,49 @@ def _fetch_models_from_api_base(
 def _get_models_for_provider(
     provider: ProviderOption, api_key: Optional[str]
 ) -> list[str]:
+    # Special handling for multi-endpoint providers: use predefined model list
+    # Extract base provider key from endpoint key (e.g., "minimax-global" -> "minimax")
+    if "-" in provider.key:
+        base_provider = provider.key.split("-")[0]
+        if has_multi_endpoints(base_provider):
+            return get_provider_models(base_provider)
+
+    if has_multi_endpoints(provider.key):
+        return get_provider_models(provider.key)
+
+    # Providers with predefined model lists (no multi-endpoint but need special handling)
+    predefined_list_providers = {
+        "qianfan",
+        "mistral",
+        "together",
+        "huggingface",
+        "qwen",
+        "xai",
+        "kilocode",
+    }
+    if provider.key in predefined_list_providers:
+        return get_provider_models(provider.key)
+
+    # Vercel AI Gateway is a proxy, no predefined models
+    if provider.key == "ai_gateway":
+        return []
+
+    # Ollama: try to fetch from /api/tags endpoint, fallback to predefined list
+    if provider.key == "ollama":
+        if provider.api_base:
+            models = _fetch_ollama_models(provider.api_base)
+            if models:
+                return models
+        return get_provider_models("ollama")
+
+    # vLLM: try to fetch from /models endpoint, fallback to predefined list
+    if provider.key == "vllm":
+        if provider.api_base:
+            models = _fetch_models_from_api_base(provider.api_base, api_key)
+            if models:
+                return models
+        return get_provider_models("vllm")
+
     if provider.key == "custom":
         if provider.api_base:
             return _fetch_models_from_api_base(provider.api_base, api_key)
@@ -678,8 +947,9 @@ def _select_model_realtime(
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window, VSplit
-        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+        from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+        from prompt_toolkit.layout.controls import (BufferControl,
+                                                    FormattedTextControl)
         from prompt_toolkit.styles import Style
     except Exception:
         return _REALTIME_UNAVAILABLE
@@ -693,11 +963,7 @@ def _select_model_realtime(
         if not text.strip():
             matches = models
         else:
-            matches = [
-                item
-                for item in models
-                if _matches_filter_query(text, [item])
-            ]
+            matches = [item for item in models if _matches_filter_query(text, [item])]
         return [_CUSTOM_MODEL_ENTRY, *matches]
 
     def render_list() -> list[tuple[str, str]]:
@@ -784,7 +1050,9 @@ def _select_model_realtime(
 
     filter_label = t("cli.setup.model_filter_prompt")
     filter_label_text = f"{filter_label} "
-    header_panel = ANSI(_render_panel_ansi(Panel(header, title=title, border_style="blue")))
+    header_panel = ANSI(
+        _render_panel_ansi(Panel(header, title=title, border_style="blue"))
+    )
     hint_text = t("cli.setup.model_filter_hint")
 
     def render_filter_status() -> str:
@@ -900,6 +1168,44 @@ def _prompt_model(provider: ProviderOption, api_key: Optional[str]) -> Optional[
             console.print(t("cli.setup.model_hint_openrouter"), style="dim")
         if provider.key == "custom":
             console.print(t("cli.setup.model_hint_custom"), style="dim")
+        # Add hint for multi-endpoint providers
+        if has_multi_endpoints(provider.key):
+            # Try to get default model from endpoint key
+            default_model = ""
+            if provider.key and "/" not in provider.key:
+                # This is a base provider (like "zai"), not an endpoint key
+                # Get the first endpoint's default model
+                endpoints = get_provider_endpoints(provider.key)
+                if endpoints:
+                    default_model = endpoints[0].default_model
+            if default_model:
+                console.print(
+                    t("cli.setup.model_hint_provider", default=default_model),
+                    style="dim",
+                )
+        # Add hint for providers with predefined models
+        predefined_model_hints = {
+            "qianfan": _QIANFAN_MODELS[0] if _QIANFAN_MODELS else "deepseek-v3.2",
+            "ollama": _OLLAMA_DEFAULT_MODEL,
+            "vllm": _VLLM_DEFAULT_MODEL,
+            "mistral": _MISTRAL_DEFAULT_MODEL,
+            "together": _TOGETHER_DEFAULT_MODEL,
+            "huggingface": _HUGGINGFACE_DEFAULT_MODEL,
+            "qwen": _QWEN_DEFAULT_MODEL,
+            "xai": _XAI_DEFAULT_MODEL,
+            "kilocode": _KILOCODE_DEFAULT_MODEL,
+        }
+        if provider.key in predefined_model_hints:
+            console.print(
+                t(
+                    "cli.setup.model_hint_provider",
+                    default=predefined_model_hints[provider.key],
+                ),
+                style="dim",
+            )
+        # Vercel AI Gateway is a proxy, no default model
+        if provider.key == "ai_gateway":
+            console.print(t("cli.setup.model_hint_custom"), style="dim")
 
         value = _normalize_model_input(_ask_value(t("cli.setup.model_prompt")))
         if not value:
@@ -922,17 +1228,111 @@ def _prompt_model(provider: ProviderOption, api_key: Optional[str]) -> Optional[
 
 
 def _prompt_setup_action(options: list[tuple[str, str]]) -> str:
-    console.print()
-    console.print(t("cli.setup.action_header"))
-    for idx, (_, label) in enumerate(options, start=1):
-        console.print(f"{idx}. {label}")
-    while True:
-        choice = _ask_value(t("cli.setup.action_prompt")).strip()
-        if choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(options):
-                return options[idx][0]
-        console.print(t("cli.setup.invalid_choice"), style="red")
+    """Prompt user to select an action using arrow keys."""
+    return _select_action_realtime(options)
+
+
+def _select_action_realtime(options: list[tuple[str, str]]) -> str:
+    """Select an action from a list using arrow keys."""
+    try:
+        from prompt_toolkit import Application
+        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
+    except Exception:
+        # Fallback to simple prompt selection
+        console.print()
+        console.print(t("cli.setup.action_header"))
+        for idx, (_, label) in enumerate(options, start=1):
+            console.print(f"{idx}. {label}")
+        while True:
+            choice = _ask_value(t("cli.setup.action_prompt")).strip()
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(options):
+                    return options[idx][0]
+            console.print(t("cli.setup.invalid_choice"), style="red")
+
+    selected_index = 0
+    header_text = t("cli.setup.action_header")
+
+    def render_list() -> list[tuple[str, str]]:
+        lines: list[tuple[str, str]] = []
+        for idx, (_, label) in enumerate(options):
+            style = "class:selected" if idx == selected_index else ""
+            lines.append((style, f"  {label}  "))
+            if idx < len(options) - 1:
+                lines.append(("", "\n"))
+        return lines
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _move_up(event):
+        nonlocal selected_index
+        selected_index = max(0, selected_index - 1)
+        event.app.invalidate()
+
+    @kb.add("down")
+    def _move_down(event):
+        nonlocal selected_index
+        selected_index = min(len(options) - 1, selected_index + 1)
+        event.app.invalidate()
+
+    @kb.add("enter")
+    def _select(event):
+        event.app.exit(result=options[selected_index][0])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _cancel(event):
+        # Default to first option (usually exit or continue)
+        event.app.exit(result=options[0][0])
+
+    style = Style.from_dict(
+        {
+            "selected": "reverse",
+            "hint": "ansibrightblack",
+        }
+    )
+
+    hint_text = t("cli.ask_user.hint_select")
+
+    layout = Layout(
+        HSplit(
+            [
+                Window(
+                    content=FormattedTextControl(lambda: header_text),
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+                Window(
+                    content=FormattedTextControl(render_list),
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+                Window(
+                    content=FormattedTextControl(lambda: hint_text),
+                    style="class:hint",
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                    always_hide_cursor=True,
+                ),
+            ]
+        )
+    )
+
+    app = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+        erase_when_done=True,
+    )
+    return app.run()
 
 
 def _persist_setup_config(
@@ -989,7 +1389,10 @@ def _interactive_setup(config: Config) -> Optional[ConfigModel]:
             if not connectivity.ok:
                 failure_reason = build_failure_reason(connectivity, tool_support)
                 console.print(
-                    t("cli.setup.verify_simple_failed_with_reason", reason=failure_reason),
+                    t(
+                        "cli.setup.verify_simple_failed_with_reason",
+                        reason=failure_reason,
+                    ),
                     style="red",
                 )
                 action = _prompt_setup_action(
@@ -1040,7 +1443,10 @@ def _interactive_setup(config: Config) -> Optional[ConfigModel]:
             failure_reason = build_failure_reason(connectivity, tool_support)
             if tool_support.supports is False:
                 console.print(
-                    t("cli.setup.verify_simple_failed_with_reason", reason=failure_reason),
+                    t(
+                        "cli.setup.verify_simple_failed_with_reason",
+                        reason=failure_reason,
+                    ),
                     style="red",
                 )
                 action = _prompt_setup_action(
@@ -1112,9 +1518,7 @@ def run_live_tool_support_check_debug(
     litellm = load_litellm()
     if litellm is None:
         console.print(t("cli.setup.litellm_missing"), style="red")
-        return ToolSupportResult(
-            supports=None, error=t("cli.setup.litellm_missing")
-        )
+        return ToolSupportResult(supports=None, error=t("cli.setup.litellm_missing"))
 
     console.print(
         Panel(

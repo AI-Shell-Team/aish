@@ -113,12 +113,13 @@ class ContextManager:
         # Auto-trim if limits exceeded
         self._auto_trim()
 
-
     def _auto_trim(self):
         """Automatically trim memories based on limits."""
         # Count memories by type
         llm_count = sum(1 for m in self.memories if m["memory_type"] == MemoryType.LLM)
-        shell_count = sum(1 for m in self.memories if m["memory_type"] == MemoryType.SHELL)
+        shell_count = sum(
+            1 for m in self.memories if m["memory_type"] == MemoryType.SHELL
+        )
 
         # Trim LLM messages if over limit
         if llm_count > self.max_llm_messages:
@@ -145,8 +146,11 @@ class ContextManager:
             if memory["memory_type"] == memory_type and removed < count:
                 # Preserve system messages in LLM type
                 content = memory["content"]
-                if (memory_type == MemoryType.LLM and
-                    isinstance(content, dict) and content.get("role") == "system"):
+                if (
+                    memory_type == MemoryType.LLM
+                    and isinstance(content, dict)
+                    and content.get("role") == "system"
+                ):
                     new_memories.append(memory)
                     continue
 
@@ -164,8 +168,11 @@ class ContextManager:
             for i, memory in enumerate(self.memories):
                 content = memory["content"]
                 # Preserve system messages in LLM memories
-                if (memory["memory_type"] == MemoryType.LLM and
-                    isinstance(content, dict) and content.get("role") == "system"):
+                if (
+                    memory["memory_type"] == MemoryType.LLM
+                    and isinstance(content, dict)
+                    and content.get("role") == "system"
+                ):
                     continue
                 self.memories.pop(i)
                 removed = True
@@ -201,7 +208,9 @@ class ContextManager:
     def get_context_size(self) -> dict[str, int]:
         """Get context statistics."""
         llm_count = sum(1 for m in self.memories if m["memory_type"] == MemoryType.LLM)
-        shell_count = sum(1 for m in self.memories if m["memory_type"] == MemoryType.SHELL)
+        shell_count = sum(
+            1 for m in self.memories if m["memory_type"] == MemoryType.SHELL
+        )
         knowledge_count = len(self.knowledge_cache)
         token_count = self.estimate_tokens()
 
@@ -233,9 +242,12 @@ class ContextManager:
         """
         if len(self.memories) > max_messages:
             # Keep the most recent messages, preserving system messages
-            system_messages = [m for m in self.memories if
-                             isinstance(m["content"], dict) and
-                             m["content"].get("role") == "system"]
+            system_messages = [
+                m
+                for m in self.memories
+                if isinstance(m["content"], dict)
+                and m["content"].get("role") == "system"
+            ]
             other_messages = [m for m in self.memories if m not in system_messages]
 
             # Keep system + most recent others
@@ -251,13 +263,12 @@ class ContextManager:
 
         # Add knowledge as system context if available
         if self.knowledge_cache:
-            knowledge_summary = "\n".join([
-                f"{k}: {v}" for k, v in self.knowledge_cache.items()
-            ])
-            messages.append({
-                "role": "system",
-                "content": f"System Context:\n{knowledge_summary}"
-            })
+            knowledge_summary = "\n".join(
+                [f"{k}: {v}" for k, v in self.knowledge_cache.items()]
+            )
+            messages.append(
+                {"role": "system", "content": f"System Context:\n{knowledge_summary}"}
+            )
 
         for memory in self.memories:
             if memory["memory_type"] == MemoryType.LLM:

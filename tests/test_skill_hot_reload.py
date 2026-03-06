@@ -47,7 +47,8 @@ def _extract_skills_reminders(messages: list[dict]) -> list[tuple[int, str]]:
             continue
         if (
             "<system-reminder>" in content
-            and "The following skills are available for use with the Skill tool:" in content
+            and "The following skills are available for use with the Skill tool:"
+            in content
         ):
             results.append((idx, content))
     if not results:
@@ -410,11 +411,12 @@ async def test_process_input_keeps_skills_reminder_across_tool_rounds(
         patch.object(session, "_get_acompletion", return_value=fake_acompletion),
         patch.object(session, "_trim_messages", side_effect=lambda msgs: msgs),
         patch.object(session, "_get_tools_spec", return_value=[]),
-        patch.object(session, "_handle_tool_calls", new_callable=AsyncMock) as mock_tool,
+        patch.object(
+            session, "_handle_tool_calls", new_callable=AsyncMock
+        ) as mock_tool,
     ):
-        async def _fake_handle_tool_calls(
-            tool_calls, cm, system_message, output
-        ):
+
+        async def _fake_handle_tool_calls(tool_calls, cm, system_message, output):
             return (
                 False,
                 "",
@@ -438,7 +440,8 @@ async def test_process_input_keeps_skills_reminder_across_tool_rounds(
                 msg.get("role") == "user"
                 and isinstance(content, str)
                 and "<system-reminder>" in content
-                and "The following skills are available for use with the Skill tool:" in content
+                and "The following skills are available for use with the Skill tool:"
+                in content
             ):
                 reminder_count += 1
                 assert "- my-skill: v1" in content
@@ -606,7 +609,9 @@ async def test_skill_hotreload_invalidates_when_root_removed(tmp_path, monkeypat
 
 
 @pytest.mark.anyio
-async def test_skill_hotreload_invalidates_when_pending_root_changes(tmp_path, monkeypatch):
+async def test_skill_hotreload_invalidates_when_pending_root_changes(
+    tmp_path, monkeypatch
+):
     home = tmp_path / "home"
     home.mkdir()
     config_dir = tmp_path / "config"

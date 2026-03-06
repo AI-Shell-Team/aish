@@ -52,7 +52,9 @@ class SpecialCommandAction(_BaseAction):
 
 class BuiltinQuickAction(_BaseAction):
     async def execute(self, ctx: ActionContext) -> ActionOutcome:
-        handled = await self.command_service.handle_quick_builtin_command(ctx.stripped_input)
+        handled = await self.command_service.handle_quick_builtin_command(
+            ctx.stripped_input
+        )
         return ActionOutcome(handled=handled)
 
 

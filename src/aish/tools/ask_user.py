@@ -245,7 +245,11 @@ class AskUserTool(ToolBase):
             }
             return ToolResult(ok=True, output=json.dumps(payload, ensure_ascii=False))
 
-        reason = "cancelled" if status == "cancelled" else ("unavailable" if status == "unavailable" else "error")
+        reason = (
+            "cancelled"
+            if status == "cancelled"
+            else ("unavailable" if status == "unavailable" else "error")
+        )
         pause_text = self._build_pause_message(
             prompt=prompt,
             options=normalized_options,

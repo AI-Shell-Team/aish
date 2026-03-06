@@ -19,15 +19,10 @@ from anyio import to_thread
 
 from ..i18n import t
 from ..offload.pty_output_offload import PtyOutputOffload
-from ..tools.shell_state_capture import (
-    wrap_command_with_state_capture,
-    create_state_file,
-    get_current_state,
-    parse_state_file,
-    detect_changes,
-    apply_changes,
-    cleanup_state_file,
-)
+from ..tools.shell_state_capture import (apply_changes, cleanup_state_file,
+                                         create_state_file, detect_changes,
+                                         get_current_state, parse_state_file,
+                                         wrap_command_with_state_capture)
 from .shell_types import CommandResult, CommandStatus
 
 
@@ -85,7 +80,9 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
 
     # State capture setup for cd/export support in compound commands
     state_file = create_state_file()
-    env_vars = self.env_manager.get_exported_vars() if self.env_manager else dict(os.environ)
+    env_vars = (
+        self.env_manager.get_exported_vars() if self.env_manager else dict(os.environ)
+    )
     old_state = get_current_state(env_vars)
 
     def build_pty_offload_payload(
@@ -185,7 +182,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
 
         # 首先处理管道（管道优先级最高）
         # 管道会连接命令的输出到下一个命令的输入
-        pipe_parts = re.split(r'\s*\|\s*', command)
+        pipe_parts = re.split(r"\s*\|\s*", command)
         if len(pipe_parts) > 1:
             # 取管道的最后一部分
             command = pipe_parts[-1]
@@ -193,7 +190,9 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
         # 然后处理其他命令分隔符（按顺序执行）
         # 顺序：;  > /  >> /  < /  && /  || /  &
         # 需要正确处理重定向，避免被重定向的文件名被误认为是命令
-        separators_pattern = r'\s*;|\s*&&|\s*\|\||\s*&(?!\d)|(?<!\d)>|(?<!\d)>>|(?<!\d)<|<<'
+        separators_pattern = (
+            r"\s*;|\s*&&|\s*\|\||\s*&(?!\d)|(?<!\d)>|(?<!\d)>>|(?<!\d)<|<<"
+        )
 
         parts = re.split(separators_pattern, command)
         if not parts:
@@ -213,7 +212,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
                     return cmd_name
 
                 # 如果正则匹配失败，使用简单的 split
-                cmd_name = part.split()[0].strip().lower() if part.split() else ''
+                cmd_name = part.split()[0].strip().lower() if part.split() else ""
                 if cmd_name:
                     cmd_name = os.path.basename(cmd_name)
                     return cmd_name
@@ -298,23 +297,23 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
 
             if last_cmd:
                 # Pagers that need TTY for user input
-                if last_cmd in ['more', 'less', 'most', 'pg', 'view', 'ssh']:
+                if last_cmd in ["more", "less", "most", "pg", "view", "ssh"]:
                     needs_script = True
                 # Commands that spawn interactive shells needing proper TTY for prompt display
                 # sudo su, su, sudo -i, etc. spawn shells that need full TTY environment
                 # to properly display prompts like bash PS1
-                elif last_cmd in ['su', 'sudo']:
+                elif last_cmd in ["su", "sudo"]:
                     # Check if this is sudo/su with shell operations (su, sudo su, sudo -i, etc.)
                     # These commands spawn interactive shells that need proper TTY
                     cmd_parts = command.strip().split()
                     if len(cmd_parts) >= 2:
                         # su commands: su, su -, su user, su - user
-                        if last_cmd == 'su':
+                        if last_cmd == "su":
                             needs_script = True
                         # sudo with shell flag or user switch: sudo -i, sudo su, sudo -u user
-                        elif last_cmd == 'sudo':
+                        elif last_cmd == "sudo":
                             second_cmd = cmd_parts[1].lower()
-                            if second_cmd in ['-i', 'su', '-u', '-s']:
+                            if second_cmd in ["-i", "su", "-u", "-s"]:
                                 needs_script = True
 
             if needs_script:
@@ -323,6 +322,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
                 # This ensures the pager has proper terminal access for user input
                 # Use shlex.quote to properly escape the command for shell
                 import shlex
+
                 # Use /dev/null as typescript file to avoid permission issues
                 # script command tries to create 'typescript' file by default
                 safe_command = f"script -q -c {shlex.quote(safe_command)} /dev/null"
@@ -330,7 +330,9 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
             # Identify session-type commands that need Ctrl+C forwarding instead of SIGINT
             # These commands maintain an interactive session where Ctrl+C should be forwarded
             # to the remote end, not used to kill the local process
-            is_session_command = last_cmd in ['ssh', 'telnet', 'nc', 'netcat'] if last_cmd else False
+            is_session_command = (
+                last_cmd in ["ssh", "telnet", "nc", "netcat"] if last_cmd else False
+            )
 
             # Wrap command with state capture for cd/export support in compound commands
             safe_command = wrap_command_with_state_capture(safe_command, state_file)
@@ -339,7 +341,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
             process = subprocess.Popen(
                 safe_command,
                 shell=True,
-                executable='/bin/bash',
+                executable="/bin/bash",
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=stderr_write,  # Use pipe for stderr
@@ -526,7 +528,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
                                 # For session commands (ssh, telnet, etc.), forward the character
                                 # directly instead of sending SIGINT, so the remote end can handle it
                                 # For regular commands, send SIGINT to the process group
-                                if b'\x03' in data:
+                                if b"\x03" in data:
                                     if is_session_command:
                                         # Forward Ctrl+C character directly for session commands
                                         # This allows ssh/telnet to pass Ctrl+C to the remote shell
@@ -606,9 +608,13 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
 
             # Ensure prompt starts on a fresh line if command didn't end with newline
             try:
-                had_output = (last_stdout_byte is not None) or (last_stderr_byte is not None)
+                had_output = (last_stdout_byte is not None) or (
+                    last_stderr_byte is not None
+                )
                 if had_output:
-                    if (last_stdout_byte not in (b"\n", b"\r")) and (last_stderr_byte not in (b"\n", b"\r")):
+                    if (last_stdout_byte not in (b"\n", b"\r")) and (
+                        last_stderr_byte not in (b"\n", b"\r")
+                    ):
                         os.write(sys.stdout.fileno(), b"\n")
                         sys.stdout.flush()
             except Exception:
@@ -674,20 +680,24 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
                 command_lower = command.lower().strip()
                 is_likely_pager = (
                     # Git commands that default to pager
-                    command_lower.startswith('git log') or
-                    command_lower.startswith('git diff') or
-                    command_lower.startswith('git show') or
-                    command_lower.startswith('git blame') or
+                    command_lower.startswith("git log")
+                    or command_lower.startswith("git diff")
+                    or command_lower.startswith("git show")
+                    or command_lower.startswith("git blame")
+                    or
                     # Direct pager commands
-                    command_lower.startswith('less ') or
-                    command_lower.startswith('more ') or
-                    command_lower == 'less' or
-                    command_lower == 'more' or
+                    command_lower.startswith("less ")
+                    or command_lower.startswith("more ")
+                    or command_lower == "less"
+                    or command_lower == "more"
+                    or
                     # Man pages
-                    command_lower.startswith('man ') or
-                    command_lower == 'man'
+                    command_lower.startswith("man ")
+                    or command_lower == "man"
                 )
-                status = CommandStatus.SUCCESS if is_likely_pager else CommandStatus.ERROR
+                status = (
+                    CommandStatus.SUCCESS if is_likely_pager else CommandStatus.ERROR
+                )
             else:
                 status = CommandStatus.ERROR
 
@@ -766,9 +776,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
     cancel_event = threading.Event()
     # Bridge business cancellation into PTY runner
     try:
-        self.llm_session.cancellation_token.add_cancellation_callback(
-            cancel_event.set
-        )
+        self.llm_session.cancellation_token.add_cancellation_callback(cancel_event.set)
     except Exception:
         pass
 

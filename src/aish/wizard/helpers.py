@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 
-
 console = Console()
 
 
@@ -79,7 +78,9 @@ def _prompt_secret_with_mask(prompt_text: str) -> Optional[str]:
 def _normalize_filter_tokens(query: str) -> list[str]:
     normalized = []
     for chunk in query.lower().split():
-        token = "".join(char for char in chunk if char.isalnum() or char in {"/", "_", "-", "."})
+        token = "".join(
+            char for char in chunk if char.isalnum() or char in {"/", "_", "-", "."}
+        )
         if token:
             normalized.append(token)
     return normalized
