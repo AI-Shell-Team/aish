@@ -114,11 +114,37 @@ aish> ;explain this command: tar -czf a.tgz ./dir
 
 ## Installation
 
-### Debian/Ubuntu Distributions
+### Pre-built Packages (Recommended)
+
+#### Debian/Ubuntu (.deb)
 
 ```bash
+# Install using dpkg
 sudo dpkg -i aish_<version>_<arch>.deb
+
+# Or using apt
+sudo apt install ./aish_<version>_<arch>.deb
 ```
+
+#### RHEL/Fedora/CentOS (.rpm)
+
+```bash
+# Install using rpm
+sudo rpm -ivh aish-<version>-<release>.x86_64.rpm
+
+# Or using dnf
+sudo dnf install ./aish-<version>-<release>.x86_64.rpm
+```
+
+#### Alpine Linux (.apk)
+
+```bash
+sudo apk add --allow-untrusted aish_<version>_<arch>.apk
+```
+
+### Build from Source
+
+If you prefer to build the packages yourself, see [NFPM Quick Start Guide](NFPM_QUICKSTART.md).
 
 ### Run from Source (Development/Trial)
 
