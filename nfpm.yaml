@@ -1,0 +1,171 @@
+# NFPM configuration for AI Shell
+# https://nfpm.goreleaser.com/
+#
+# Usage:
+#   1. Build binaries first: make build-binary
+#   2. Generate package: nfpm pkg -f nfpm.yaml -p deb (or rpm, apk)
+#
+# Environment variables:
+#   VERSION: Override version (default: from pyproject.toml or git)
+#   RELEASE: Package release number (default: 1)
+
+name: aish
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: ${RELEASE:-1}
+epoch: 1
+
+section: utils
+priority: optional
+maintainer: AI Shell Maintainers <maintainers@example.com>
+description: |
+  AI Shell- A shell with built-in LLM capabilities
+  
+  AI Shell is an interactive shell with built-in LLM capabilities.
+  This package ships prebuilt PyInstaller binaries for the main CLI and the
+  privileged sandbox daemon, along with the default security policy, bundled
+  skills, and systemd unit files.
+vendor: AI Shell
+homepage: https://github.com/AI-Shell-Team/aish
+license: MIT
+
+changelog: CHANGELOG.md
+
+scripts:
+  postinstall: debian/aish.postinst
+  postremove: debian/aish.postrm
+
+contents:
+  # Main binaries
+  - src: dist/aish
+    dst: /usr/bin/aish
+    mode: 0755
+    
+  - src: dist/aish-sandbox
+    dst: /usr/bin/aish-sandbox
+    mode: 0755
+    
+  # Configuration files
+  - src: config/security_policy.yaml
+    dst: /etc/aish/security_policy.yaml
+    mode: 0644
+    type: config
+    
+  # Systemd service files
+  - src: debian/aish-sandbox.service
+    dst: /lib/systemd/system/aish-sandbox.service
+    mode: 0644
+    
+  - src: debian/aish-sandbox.socket
+    dst: /lib/systemd/system/aish-sandbox.socket
+    mode: 0644
+    
+  # Documentation
+  - src: docs/skills-guide.md
+    dst: /usr/share/doc/aish/skills-guide.md
+    mode: 0644
+    doc_files: true
+    
+  # Skills directory
+  - src: debian/skills/*
+    dst: /usr/share/aish/skills/
+    mode: 0755
+
+overrides:
+  deb:
+    scripts:
+      postinstall: debian/aish.postinst
+      postremove: debian/aish.postrm
+    contents:
+      - src: dist/aish
+        dst: /usr/bin/aish
+        mode: 0755
+      - src: dist/aish-sandbox
+        dst: /usr/bin/aish-sandbox
+        mode: 0755
+      - src: config/security_policy.yaml
+        dst: /etc/aish/security_policy.yaml
+        mode: 0644
+        type: config
+      - src: debian/aish-sandbox.service
+        dst: /lib/systemd/system/aish-sandbox.service
+        mode: 0644
+      - src: debian/aish-sandbox.socket
+        dst: /lib/systemd/system/aish-sandbox.socket
+        mode: 0644
+      - src: docs/skills-guide.md
+        dst: /usr/share/doc/aish/skills-guide.md
+        mode: 0644
+      - src: debian/skills/*
+        dst: /usr/share/aish/skills/
+        mode: 0755
+    dependencies:
+      - bubblewrap
+      - util-linux
+    recommends:
+      - systemd
+      
+  rpm:
+    scripts:
+      postinstall: debian/aish.postinst
+      postremove: debian/aish.postrm
+    contents:
+      - src: dist/aish
+        dst: /usr/bin/aish
+        mode: 0755
+      - src: dist/aish-sandbox
+        dst: /usr/bin/aish-sandbox
+        mode: 0755
+      - src: config/security_policy.yaml
+        dst: /etc/aish/security_policy.yaml
+        mode: 0644
+        type: config
+      - src: debian/aish-sandbox.service
+        dst: /usr/lib/systemd/system/aish-sandbox.service
+        mode: 0644
+      - src: debian/aish-sandbox.socket
+        dst: /usr/lib/systemd/system/aish-sandbox.socket
+        mode: 0644
+      - src: docs/skills-guide.md
+        dst: /usr/share/doc/aish/skills-guide.md
+        mode: 0644
+      - src: debian/skills/*
+        dst: /usr/share/aish/skills/
+        mode: 0755
+    dependencies:
+      - bubblewrap
+      - util-linux
+    recommends:
+      - systemd
+      
+  apk:
+    scripts:
+      postinstall: debian/aish.postinst
+      postremove: debian/aish.postrm
+    contents:
+      - src: dist/aish
+        dst: /usr/bin/aish
+        mode: 0755
+      - src: dist/aish-sandbox
+        dst: /usr/bin/aish-sandbox
+        mode: 0755
+      - src: config/security_policy.yaml
+        dst: /etc/aish/security_policy.yaml
+        mode: 0644
+        type: config
+      - src: debian/aish-sandbox.service
+        dst: /lib/systemd/system/aish-sandbox.service
+        mode: 0644
+      - src: debian/aish-sandbox.socket
+        dst: /lib/systemd/system/aish-sandbox.socket
+        mode: 0644
+      - src: docs/skills-guide.md
+        dst: /usr/share/doc/aish/skills-guide.md
+        mode: 0644
+      - src: debian/skills/*
+        dst: /usr/share/aish/skills/
+        mode: 0755
+    dependencies:
+      - bubblewrap
+      - util-linux

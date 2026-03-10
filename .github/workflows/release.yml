@@ -1,0 +1,87 @@
+name: Build Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.2.3
+  workflow_dispatch:
+    inputs:
+      version:
+       description: 'Version to build (e.g., 1.2.3)'
+        required: false
+      release:
+       description: 'Package release number'
+        required: false
+       default: '1'
+
+jobs:
+  build-packages:
+    runs-on: ubuntu-latest
+    
+    steps:
+      -name: Checkout code
+        uses: actions/checkout@v4
+        
+      -name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      -name: Install uv
+        uses: astral-sh/setup-uv@v3
+        
+      -name: Sync dependencies
+        run: uv sync
+        
+      -name: Install nfpm
+        run: pip install nfpm
+        
+      -name: Get version from tag or input
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+           VERSION=${GITHUB_REF#refs/tags/v}
+          else
+           VERSION="${{ github.event.inputs.version }}"
+          fi
+         echo "version=$VERSION" >> $GITHUB_OUTPUT
+         echo "Built version: $VERSION"
+          
+      -name: Build binaries
+        run: make build-binary
+        env:
+          PYTHON_VERSION: '3.10'
+          
+      -name: Build.deb package
+        run: make nfpm-deb
+        env:
+         VERSION: ${{ steps.get_version.outputs.version }}
+          RELEASE: ${{ github.event.inputs.release || '1' }}
+          
+      -name: Build .rpm package
+        run: make nfpm-rpm
+        env:
+         VERSION: ${{ steps.get_version.outputs.version }}
+          RELEASE: ${{ github.event.inputs.release || '1' }}
+          
+      -name: Build .apk package
+        run: make nfpm-apk
+        env:
+         VERSION: ${{ steps.get_version.outputs.version }}
+          RELEASE: ${{ github.event.inputs.release || '1' }}
+          
+      -name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+         path: releases/
+          retention-days: 30
+          
+      -name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: releases/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

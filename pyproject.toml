@@ -10,6 +10,7 @@ dependencies = [
     "httpx[socks]>=0.24.0",
     "langfuse==2.60.3",
     "litellm==1.74.3",
+    "nfpm>=2.45.0",
     "prompt-toolkit>=3.0.51",
     "pydantic>=2.0.0",
     "python-dotenv>=1.1.1",

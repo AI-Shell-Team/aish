@@ -153,6 +153,7 @@ dependencies = [
     { name = "httpx", extra = ["socks"] },
     { name = "langfuse" },
     { name = "litellm" },
+    { name = "nfpm" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -181,6 +182,7 @@ requires-dist = [
     { name = "httpx", extras = ["socks"], specifier = ">=0.24.0" },
     { name = "langfuse", specifier = "==2.60.3" },
     { name = "litellm", specifier = "==1.74.3" },
+    { name = "nfpm", specifier = ">=2.45.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.51" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-dotenv", specifier = ">=1.1.1" },
@@ -1425,6 +1427,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/6e/371856a3fb9d31ca8dac321cda606860fa4548858c0cc45d9d1d4ca2628b/mypy_extensions-1.1.0.tar.gz", hash = "sha256:52e68efc3284861e772bbcd66823fde5ae21fd2fdb51c62a211403730b916558", size = 6343, upload-time = "2025-04-22T14:54:24.164Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/79/7b/2c79738432f5c924bef5071f933bcc9efd0473bac3b4aa584a6f7c1c8df8/mypy_extensions-1.1.0-py3-none-any.whl", hash = "sha256:1be4cccdb0f2482337c4743e60421de3a356cd97508abadd57d47403e94f5505", size = 4963, upload-time = "2025-04-22T14:54:22.983Z" },
+]
+
+[[package]]
+name = "nfpm"
+version = "2.45.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/ce/31e88ba993851abfe707fc5194db05d2b09aceb9f062cd225f0e7048ea98/nfpm-2.45.0-py3-none-macosx_10_9_x86_64.whl", hash = "sha256:364fd7fc772493194027484a2783b63660928763607c5660d3bb1f1bd9ea88a4", size = 5864868, upload-time = "2026-02-05T04:13:17.941Z" },
+    { url = "https://files.pythonhosted.org/packages/58/d0/4f9a04ff8d65440b01d5d7c642f803beaaea0b1a842eca801ddf215f1395/nfpm-2.45.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:17213b6841b86ca92f8fd7708530ca32aaa505ceefa16bed4d234a594e6614ae", size = 5397486, upload-time = "2026-02-05T04:13:15.052Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/dd/f9d8af95210802b80193f2685c015ba8278525d8d671e40f0837149ced41/nfpm-2.45.0-py3-none-manylinux1_x86_64.musllinux_1_1_x86_64.whl", hash = "sha256:e505cf9060e1aefa5b89190dc6bf8975d9c8583cd553a9e6931c61dbf7202018", size = 5790879, upload-time = "2026-02-05T04:13:12.384Z" },
+    { url = "https://files.pythonhosted.org/packages/d5/e6/13d96ab5a161a269fc5bd985451ac35394a883f2600bcd5e60db80898ba8/nfpm-2.45.0-py3-none-manylinux2014_aarch64.musllinux_1_1_aarch64.whl", hash = "sha256:1259f7067caaeb2915b0cd1cc2c57cf3dfca54dc2b2dd391c493ed9f5771d4f3", size = 5222172, upload-time = "2026-02-05T04:13:20.37Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/b8/ecd686ec7376ac54e3a762df0fb0046e6835d15027a06c2f335c924b1a63/nfpm-2.45.0-py3-none-manylinux2014_ppc64le.musllinux_1_1_ppc64le.whl", hash = "sha256:dddd894226e654084f176e17c669a218df45f950e9ab964eb0b118c065e6a159", size = 5270285, upload-time = "2026-02-05T04:13:25.413Z" },
+    { url = "https://files.pythonhosted.org/packages/27/82/d63999f79d6979f0c15ec9b4adb8f08cd898ed817b4495a95d4d47e99421/nfpm-2.45.0-py3-none-manylinux2014_s390x.musllinux_1_1_s390x.whl", hash = "sha256:a4acbe23463abb580a26c99633f258a8339c33b5655a291714a848d74a486498", size = 5703144, upload-time = "2026-02-05T04:13:23.543Z" },
+    { url = "https://files.pythonhosted.org/packages/44/b7/a70462fc90d481d83421a8aacf55779cbfb6554492247a55226d8f744949/nfpm-2.45.0-py3-none-win_amd64.whl", hash = "sha256:3337c23d81cb75c3703135e2cf705ab78057415225c0c0eb72ae3e22e7456466", size = 5964644, upload-time = "2026-02-05T04:13:09.628Z" },
+    { url = "https://files.pythonhosted.org/packages/82/6f/f971c266bab83161b352586a9c4a9debaa8eb4c71b1b635ec4eb74b4bc96/nfpm-2.45.0-py3-none-win_arm64.whl", hash = "sha256:5b94d05067e967937e32b58e320308a1ec4d80d7dde2cdda1ad5b75558763795", size = 5309485, upload-time = "2026-02-05T04:13:27.923Z" },
 ]
 
 [[package]]
