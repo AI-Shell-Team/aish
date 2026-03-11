@@ -1,7 +1,11 @@
 """CLI entry point for AI Shell."""
 
 import os
+import shutil
+import subprocess
 import sys
+from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 import anyio
@@ -14,6 +18,12 @@ from .config import Config, ConfigModel
 from .i18n import t
 from .i18n.typer import I18nTyperCommand, I18nTyperGroup
 from .logging_utils import init_logging
+from .openai_codex import (OPENAI_CODEX_DEFAULT_CALLBACK_PORT,
+                           OPENAI_CODEX_DEFAULT_MODEL,
+                           OpenAICodexAuthError,
+                           load_openai_codex_auth,
+                           login_openai_codex_with_browser,
+                           login_openai_codex_with_device_code)
 from .shell import AIShell
 from .skills import SkillManager
 from .wizard.setup_wizard import (needs_interactive_setup,
@@ -29,6 +39,16 @@ app = typer.Typer(
 )
 
 console = Console()
+models_app = typer.Typer(help="Manage models and provider auth", cls=I18nTyperGroup)
+models_auth_app = typer.Typer(help="Manage provider login state", cls=I18nTyperGroup)
+models_app.add_typer(models_auth_app, name="auth")
+app.add_typer(models_app, name="models")
+
+
+class OpenAICodexAuthFlow(str, Enum):
+    BROWSER = "browser"
+    DEVICE_CODE = "device-code"
+    CODEX_CLI = "codex-cli"
 
 
 def _load_raw_yaml_config(config_file: str | os.PathLike[str]) -> dict:
@@ -70,6 +90,10 @@ def get_effective_config(
     api_key_env = os.getenv("AISH_API_KEY")
     if api_key_env:
         config_data["api_key"] = api_key_env
+
+    codex_auth_path_env = os.getenv("AISH_CODEX_AUTH_PATH")
+    if codex_auth_path_env:
+        config_data["codex_auth_path"] = codex_auth_path_env
 
     # Override with command line arguments (highest priority)
     if model is not None:
@@ -244,6 +268,296 @@ def setup(
         sys.exit(1)
 
 
+@models_auth_app.command("login", cls=I18nTyperCommand)
+def models_auth_login(
+    provider: str = typer.Option(
+        ...,
+        "--provider",
+        help="Provider id to log in (currently only openai-codex).",
+    ),
+    model: str = typer.Option(
+        OPENAI_CODEX_DEFAULT_MODEL,
+        "--model",
+        help="Default OpenAI Codex model to store in config after login.",
+    ),
+    set_default: bool = typer.Option(
+        True,
+        "--set-default/--no-set-default",
+        help="Update the config model to the OpenAI Codex model after login.",
+    ),
+    auth_flow: OpenAICodexAuthFlow = typer.Option(
+        OpenAICodexAuthFlow.BROWSER,
+        "--auth-flow",
+        help="Auth flow to use: browser, device-code, or codex-cli.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force/--no-force",
+        help="Force a fresh OpenAI Codex login even if local auth already exists.",
+    ),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help="Open the browser automatically for browser auth.",
+    ),
+    callback_port: int = typer.Option(
+        OPENAI_CODEX_DEFAULT_CALLBACK_PORT,
+        "--callback-port",
+        min=0,
+        max=65535,
+        help="Local callback port for browser auth. Use 0 for an ephemeral port.",
+    ),
+    config_file: Optional[str] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help=t("cli.option.config"),
+    ),
+):
+    normalized_provider = provider.strip().lower().replace("_", "-")
+    if normalized_provider != "openai-codex":
+        console.print(
+            "Only `--provider openai-codex` is supported right now.",
+            style="red",
+        )
+        raise typer.Exit(1)
+
+    try:
+        config = Config(config_file_path=config_file)
+    except FileNotFoundError as exc:
+        console.print(t("cli.startup.config_file_error", error=str(exc)), style="red")
+        console.print(t("cli.startup.config_file_hint"), style="dim")
+        raise typer.Exit(1) from exc
+
+    auth_path = getattr(config.model_config, "codex_auth_path", None)
+    auth_state = None
+    if not force:
+        try:
+            auth_state = load_openai_codex_auth(auth_path)
+        except OpenAICodexAuthError:
+            auth_state = None
+
+    if auth_state is None:
+        try:
+            if auth_flow == OpenAICodexAuthFlow.BROWSER:
+                auth_state = login_openai_codex_with_browser(
+                    auth_path=auth_path,
+                    open_browser=open_browser,
+                    callback_port=callback_port,
+                    notify=lambda message: console.print(message, style="dim"),
+                )
+            elif auth_flow == OpenAICodexAuthFlow.DEVICE_CODE:
+                auth_state = login_openai_codex_with_device_code(
+                    auth_path=auth_path,
+                    notify=lambda message: console.print(message, style="dim"),
+                )
+            else:
+                codex_bin = shutil.which("codex")
+                if not codex_bin:
+                    console.print(
+                        "The `codex` CLI is not installed. Install `@openai/codex` or use "
+                        "`--auth-flow browser` / `--auth-flow device-code`.",
+                        style="red",
+                    )
+                    raise typer.Exit(1)
+
+                try:
+                    subprocess.run([codex_bin, "login"], check=True)
+                except subprocess.CalledProcessError as exc:
+                    console.print(
+                        f"`codex login` failed with exit code {exc.returncode}.",
+                        style="red",
+                    )
+                    raise typer.Exit(exc.returncode or 1) from exc
+                except KeyboardInterrupt as exc:
+                    raise typer.Exit(1) from exc
+
+                auth_state = load_openai_codex_auth(auth_path)
+        except OpenAICodexAuthError as exc:
+            console.print(str(exc), style="red")
+            raise typer.Exit(1) from exc
+
+    config_data = config.model_config.model_dump()
+    config_data["codex_auth_path"] = str(auth_state.auth_path)
+    if set_default:
+        config_data["model"] = f"openai-codex/{model.strip() or OPENAI_CODEX_DEFAULT_MODEL}"
+        config_data["api_key"] = None
+    config.config_model = ConfigModel.model_validate(config_data)
+    config.save_config()
+
+    console.print(
+        f"OpenAI Codex auth ready: {auth_state.auth_path}",
+        style="green",
+    )
+    if set_default:
+        console.print(f"Default model set to {config.config_model.model}", style="green")
+    else:
+        console.print(
+            f"OpenAI Codex model available: openai-codex/{model.strip() or OPENAI_CODEX_DEFAULT_MODEL}",
+            style="dim",
+        )
+
+
+@models_app.command("usage", help="Show token usage and quota information")
+def models_usage():
+    """Display current token usage and quota."""
+    config = Config()
+    model = config.model_config.model
+    api_key = config.model_config.api_key
+    api_base = config.model_config.api_base
+    
+    console.print(f"[bold]Current Model:[/bold] {model}")
+    if api_base:
+        console.print(f"[bold]API Base:[/bold] {api_base}")
+    console.print("")
+    
+    # Provider detection and usage URLs
+    PROVIDER_INFO = {
+        "openai-codex": {"name": "OpenAI Codex", "url": "https://codex.ai/settings", "oauth": True},
+        "openai": {"name": "OpenAI", "url": "https://platform.openai.com/usage"},
+        "anthropic": {"name": "Anthropic", "url": "https://console.anthropic.com/usage"},
+        "deepseek": {"name": "DeepSeek", "url": "https://platform.deepseek.com/usage"},
+        "gemini": {"name": "Google Gemini", "url": "https://aistudio.google.com/app/usage"},
+        "google": {"name": "Google", "url": "https://aistudio.google.com/app/usage"},
+        "minimax": {"name": "MiniMax", "url": "https://platform.minimaxi.com/usage"},
+        "moonshot": {"name": "Moonshot AI", "url": "https://platform.moonshot.cn/usage"},
+        "zai": {"name": "Z.AI", "url": "https://platform.z.ai/usage"},
+        "openrouter": {"name": "OpenRouter", "url": "https://openrouter.ai/settings"},
+        "azure": {"name": "Azure", "url": "https://azure.microsoft.com/en-us/pricing/details/cognitive-services/openai-service/"},
+        "qianfan": {"name": "Baidu Qianfan", "url": "https://console.bce.baidu.com/qianfan/"},
+        "ollama": {"name": "Ollama", "url": "http://localhost:11434"},
+        "vllm": {"name": "vLLM", "url": "Local instance"},
+        "mistral": {"name": "Mistral AI", "url": "https://console.mistral.ai/usage"},
+        "together": {"name": "Together AI", "url": "https://api.together.xyz/settings/usage"},
+        "huggingface": {"name": "HuggingFace", "url": "https://huggingface.co/settings/usage"},
+        "qwen": {"name": "Qwen", "url": "https://dashscope.console.aliyun.com/usage"},
+        "xai": {"name": "xAI (Grok)", "url": "https://console.x.ai/usage"},
+        "kilocode": {"name": "Kilo Gateway", "url": "https://dashboard.kilocode.ai/usage"},
+        "ai_gateway": {"name": "Vercel AI Gateway", "url": "https://vercel.com/dashboard/ai-gateway"},
+    }
+    
+    # Detect provider from model name
+    provider = "unknown"
+    model_lower = model.lower()
+    
+    # Check model string for provider hints
+    if "openai-codex" in model_lower:
+        provider = "openai-codex"
+    elif "gpt" in model_lower or model_lower.startswith("openai/"):
+        provider = "openai"
+    elif "claude" in model_lower or "anthropic" in model_lower:
+        provider = "anthropic"
+    elif "deepseek" in model_lower:
+        provider = "deepseek"
+    elif "gemini" in model_lower or "google" in model_lower:
+        provider = "gemini"
+    elif "minimax" in model_lower:
+        provider = "minimax"
+    elif "moonshot" in model_lower:
+        provider = "moonshot"
+    elif "z.ai" in model_lower or model_lower.startswith("zai"):
+        provider = "zai"
+    elif "openrouter" in model_lower or model_lower.startswith("openrouter"):
+        provider = "openrouter"
+    elif "azure" in model_lower:
+        provider = "azure"
+    elif "qianfan" in model_lower or "wenxin" in model_lower:
+        provider = "qianfan"
+    elif "ollama" in model_lower:
+        provider = "ollama"
+    elif "vllm" in model_lower:
+        provider = "vllm"
+    elif "mistral" in model_lower:
+        provider = "mistral"
+    elif "together" in model_lower:
+        provider = "together"
+    elif "huggingface" in model_lower or "hf" in model_lower:
+        provider = "huggingface"
+    elif "qwen" in model_lower or "dashscope" in model_lower:
+        provider = "qwen"
+    elif "grok" in model_lower or "xai" in model_lower:
+        provider = "xai"
+    elif "kilocode" in model_lower:
+        provider = "kilocode"
+    
+    # Show provider-specific info and try to fetch usage
+    if provider == "openai-codex":
+        if config.model_config.codex_auth_path:
+            codex_auth_path = Path(config.model_config.codex_auth_path)
+            if codex_auth_path.exists():
+                import json
+                try:
+                    with open(codex_auth_path) as f:
+                        auth_data = json.load(f)
+                    console.print("[bold]OpenAI Codex:[/bold] Authenticated ✓", style="green")
+                    if 'expires_at' in auth_data:
+                        from datetime import datetime
+                        exp = datetime.fromisoformat(auth_data['expires_at'].replace('Z', '+00:00'))
+                        console.print(f"  Expires: {exp.strftime('%Y-%m-%d %H:%M:%S')}")
+                except Exception as e:
+                    console.print(f"[dim]Could not read auth: {e}[/dim]")
+            else:
+                console.print("[bold]OpenAI Codex:[/bold] Not configured", style="yellow")
+        else:
+            console.print("[bold]OpenAI Codex:[/bold] Not configured", style="yellow")
+    else:
+        if api_key:
+            masked_key = api_key[:8] + "..." + api_key[-4:] if len(api_key) > 12 else "***"
+            console.print(f"[bold]{PROVIDER_INFO.get(provider, {}).get('name', provider.title())}:[/bold] API Key configured ({masked_key})", style="green")
+            
+            # Try to fetch actual usage from providers
+            try:
+                import httpx
+                
+                if provider == "openai":
+                    # OpenAI usage API
+                    resp = httpx.get(
+                        "https://api.openai.com/v1/usage", 
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        timeout=5.0
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get("data"):
+                            latest = data["data"][-1]
+                            console.print(f"  Usage: {latest.get('n_tokens_used', 'N/A'):,} tokens this month")
+                
+                elif provider == "deepseek":
+                    # DeepSeek usage API
+                    resp = httpx.get(
+                        "https://api.deepseek.com/v1/usage",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        timeout=5.0
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        console.print(f"  Usage: {data.get('total_tokens', 'N/A'):,} total tokens")
+                
+                elif provider == "openrouter":
+                    # OpenRouter credits API
+                    resp = httpx.get(
+                        "https://openrouter.ai/api/v1/credits",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        timeout=5.0
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        credits = data.get("data", {}).get("credits", 0)
+                        console.print(f"  Credits: ${credits:.2f} USD")
+                        
+            except Exception as e:
+                pass  # Silently skip if API call fails
+        else:
+            console.print(f"[bold]{PROVIDER_INFO.get(provider, {}).get('name', provider.title())}:[/bold] No API key", style="yellow")
+    
+    console.print("")
+    console.print("[bold]Usage Dashboard:[/bold]", style="dim")
+    for pid, info in PROVIDER_INFO.items():
+        if api_base and "local" in info.get("url", "").lower():
+            continue  # Skip local providers if using custom base
+        console.print(f"  {info['name']}: {info['url']}", style="dim")
+
+
 @app.command(help=t("cli.check_tool_support_command_help"), cls=I18nTyperCommand)
 def check_tool_support(
     model: str = typer.Option(
@@ -359,6 +673,12 @@ aish run
 
 # Check Langfuse configuration
 aish check-langfuse
+
+# Log into OpenAI Codex account auth
+aish models auth login --provider openai-codex
+
+# Use built-in device-code auth on headless servers
+aish models auth login --provider openai-codex --auth-flow device-code
 
 # Use config file
 cat > ~/.config/aish/config.yaml << EOF
