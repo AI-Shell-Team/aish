@@ -1,5 +1,6 @@
 """Tests for CLI functionality."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -8,7 +9,13 @@ from typer.testing import CliRunner
 from aish.cli import app, run
 from aish.config import ConfigModel
 from aish.i18n import t
-from aish.openai_codex import OpenAICodexAuthError
+from aish.providers.interface import ProviderAuthConfig
+from aish.providers.openai_codex import OpenAICodexAuthError
+
+
+@dataclass
+class _FakeAuthState:
+    auth_path: Path
 
 
 class TestCLI:
@@ -212,7 +219,7 @@ class TestCLI:
         mock_run_interactive_setup.assert_called_once_with(mock_config)
 
     @patch("aish.cli.Config")
-    @patch("aish.cli.load_openai_codex_auth")
+    @patch("aish.providers.openai_codex.load_openai_codex_auth")
     def test_models_auth_login_sets_default_openai_codex_model(
         self, mock_load_openai_codex_auth, mock_config_class
     ):
@@ -236,7 +243,7 @@ class TestCLI:
         mock_config.save_config.assert_called_once()
 
     @patch("aish.cli.Config")
-    @patch("aish.cli.load_openai_codex_auth")
+    @patch("aish.providers.openai_codex.load_openai_codex_auth")
     def test_models_auth_login_without_default_keeps_existing_api_key(
         self, mock_load_openai_codex_auth, mock_config_class
     ):
@@ -267,8 +274,8 @@ class TestCLI:
         mock_config.save_config.assert_called_once()
 
     @patch("aish.cli.Config")
-    @patch("aish.cli.login_openai_codex_with_browser")
-    @patch("aish.cli.load_openai_codex_auth")
+    @patch("aish.providers.openai_codex.login_openai_codex_with_browser")
+    @patch("aish.providers.openai_codex.load_openai_codex_auth")
     def test_models_auth_login_uses_builtin_browser_flow_by_default(
         self,
         mock_load_openai_codex_auth,
@@ -300,8 +307,8 @@ class TestCLI:
         assert mock_login_browser.call_args.kwargs["auth_path"] is None
 
     @patch("aish.cli.Config")
-    @patch("aish.cli.login_openai_codex_with_device_code")
-    @patch("aish.cli.load_openai_codex_auth")
+    @patch("aish.providers.openai_codex.login_openai_codex_with_device_code")
+    @patch("aish.providers.openai_codex.load_openai_codex_auth")
     def test_models_auth_login_supports_device_code_flow(
         self,
         mock_load_openai_codex_auth,
@@ -332,3 +339,49 @@ class TestCLI:
 
         assert result.exit_code == 0
         mock_login_device_code.assert_called_once()
+
+    def test_models_auth_login_rejects_unknown_provider(self):
+        result = self.runner.invoke(
+            app,
+            ["models", "auth", "login", "--provider", "github-copilot"],
+        )
+
+        assert result.exit_code == 1
+        assert "Unsupported provider `github-copilot`" in result.output
+
+    @patch("aish.cli.Config")
+    @patch("aish.cli.get_provider_by_id")
+    def test_models_auth_login_dispatches_through_provider_contract(
+        self,
+        mock_get_provider_by_id,
+        mock_config_class,
+    ):
+        mock_config = Mock()
+        mock_config.model_config = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config_class.return_value = mock_config
+
+        load_auth_state = Mock(side_effect=RuntimeError("missing"))
+        login_with_browser = Mock(return_value=_FakeAuthState(Path("/tmp/fake-auth.json")))
+        fake_provider = Mock(
+            provider_id="fake-provider",
+            model_prefix="fake-provider",
+            display_name="Fake Provider",
+            auth_config=ProviderAuthConfig(
+                auth_path_config_key="codex_auth_path",
+                default_model="model-x",
+                load_auth_state=load_auth_state,
+                login_handlers={"browser": login_with_browser},
+            ),
+        )
+        mock_get_provider_by_id.return_value = fake_provider
+
+        result = self.runner.invoke(
+            app,
+            ["models", "auth", "login", "--provider", "fake-provider"],
+        )
+
+        assert result.exit_code == 0
+        load_auth_state.assert_called_once_with(None)
+        login_with_browser.assert_called_once()
+        assert mock_config.config_model.model == "fake-provider/model-x"
+        assert mock_config.config_model.codex_auth_path == "/tmp/fake-auth.json"

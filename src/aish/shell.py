@@ -47,8 +47,7 @@ from .interruption import (InterruptionManager, PromptConfig,
                            ShellState)
 from .llm import LLMCallbackResult, LLMEvent, LLMEventType, LLMSession
 from .logging_utils import set_session_uuid
-from .openai_codex import (OpenAICodexAuthError, is_openai_codex_model,
-                           load_openai_codex_auth)
+from .providers.registry import get_provider_for_model
 from .prompts import PromptManager
 from .security.security_manager import SimpleSecurityManager
 from .session_store import SessionRecord, SessionStore
@@ -1522,26 +1521,14 @@ class AIShell:
             return
 
         self.console.print(t("shell.model.switching", model=new_model), style="dim")
-        if is_openai_codex_model(new_model):
-            try:
-                load_openai_codex_auth(getattr(self.config, "codex_auth_path", None))
-            except OpenAICodexAuthError as exc:
-                await report_model_error(str(exc))
-                return
-        else:
-            from aish.wizard.verification import (build_failure_reason,
-                                                  run_verification_async)
-
-            connectivity, tool_support = await run_verification_async(
-                model=new_model,
-                api_base=self.config.api_base,
-                api_key=self.config.api_key,
-            )
-            if not connectivity.ok or tool_support.supports is not True:
-                reason = build_failure_reason(connectivity, tool_support)
-                message = t("shell.model.verify_failed", reason=reason)
-                await report_model_error(message)
-                return
+        provider = get_provider_for_model(new_model)
+        validation_error = await provider.validate_model_switch(
+            model=new_model,
+            config=self.config,
+        )
+        if validation_error:
+            await report_model_error(validation_error)
+            return
 
         self.llm_session.update_model(
             new_model,

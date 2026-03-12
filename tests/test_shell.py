@@ -12,6 +12,7 @@ import pytest
 
 from aish.config import ConfigModel
 from aish.context_manager import MemoryType
+from aish.providers.openai_codex import OPENAI_CODEX_PROVIDER_ADAPTER
 from aish.security.security_manager import SecurityDecision
 from aish.security.security_policy import RiskLevel
 from aish.shell import AIShell
@@ -154,7 +155,11 @@ class TestAIShell:
         shell = make_shell(config)
 
         with (
-            patch("aish.shell.load_openai_codex_auth", return_value=Mock()),
+            patch(
+                "aish.shell.get_provider_for_model",
+                return_value=OPENAI_CODEX_PROVIDER_ADAPTER,
+            ),
+            patch("aish.providers.openai_codex.load_openai_codex_auth", return_value=Mock()),
             patch(
                 "aish.wizard.verification.run_verification_async",
                 new_callable=AsyncMock,
@@ -166,6 +171,22 @@ class TestAIShell:
         assert shell.context_manager.model == "openai-codex/gpt-5.4"
         assert shell.config.model == "openai-codex/gpt-5.4"
         mock_verify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_model_command_uses_provider_contract_for_validation(self):
+        config = ConfigModel(model="test-model", api_key="test-key")
+        shell = make_shell(config)
+        provider = Mock()
+        provider.validate_model_switch = AsyncMock(return_value=None)
+
+        with patch("aish.shell.get_provider_for_model", return_value=provider):
+            await shell.handle_model_command("/model custom-provider/model-x")
+
+        provider.validate_model_switch.assert_awaited_once_with(
+            model="custom-provider/model-x",
+            config=shell.config,
+        )
+        assert shell.llm_session.model == "custom-provider/model-x"
 
     def test_init_creates_session_record(self, tmp_path):
         """Each shell start should create a new persisted session record."""

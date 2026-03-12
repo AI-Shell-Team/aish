@@ -22,7 +22,7 @@ from rich.table import Table
 from ..config import Config, ConfigModel
 from ..i18n import t
 from ..litellm_loader import load_litellm, preload_litellm
-from ..openai_codex import is_openai_codex_model
+from ..providers.openai_codex import is_openai_codex_model
 from .constants import (_HUGGINGFACE_DEFAULT_MODEL,
                         _KILOCODE_DEFAULT_MODEL, _MISTRAL_DEFAULT_MODEL,
                         _OLLAMA_DEFAULT_MODEL, _QIANFAN_MODELS,

@@ -8,20 +8,20 @@ import pytest
 from aish.config import ConfigModel
 from aish.context_manager import ContextManager
 from aish.llm import LLMSession
-from aish.openai_codex import (_collect_openai_codex_stream_response,
-                               _extract_http_error_message,
-                               OpenAICodexDeviceCode,
-                               OpenAICodexOAuthTokens,
-                               OpenAICodexPkceCodes,
-                               build_openai_codex_authorize_url,
-                               build_openai_codex_request,
-                               convert_openai_codex_response_to_chat_completion,
-                               exchange_openai_codex_code_for_tokens,
-                               load_openai_codex_auth,
-                               persist_openai_codex_tokens,
-                               poll_openai_codex_device_code_authorization,
-                               request_openai_codex_device_code,
-                               resolve_openai_codex_base_url)
+from aish.providers.openai_codex import (_collect_openai_codex_stream_response,
+                                         _extract_http_error_message,
+                                         OpenAICodexDeviceCode,
+                                         OpenAICodexOAuthTokens,
+                                         OpenAICodexPkceCodes,
+                                         build_openai_codex_authorize_url,
+                                         build_openai_codex_request,
+                                         convert_openai_codex_response_to_chat_completion,
+                                         exchange_openai_codex_code_for_tokens,
+                                         load_openai_codex_auth,
+                                         persist_openai_codex_tokens,
+                                         poll_openai_codex_device_code_authorization,
+                                         request_openai_codex_device_code,
+                                         resolve_openai_codex_base_url)
 from aish.skills import SkillManager
 
 
@@ -225,6 +225,14 @@ def test_exchange_openai_codex_code_for_tokens_uses_form_post():
     assert tokens.refresh_token == "refresh-token-123"
 
 
+def test_openai_codex_token_alias_supports_optional_standard_fields():
+    tokens = OpenAICodexOAuthTokens(access_token="access-token-123")
+
+    assert tokens.access_token == "access-token-123"
+    assert tokens.refresh_token is None
+    assert tokens.id_token is None
+
+
 def test_extract_http_error_message_simplifies_cloudflare_html():
     response = httpx.Response(
         403,
@@ -379,10 +387,10 @@ async def test_create_openai_codex_chat_completion_accepts_sse_without_content_t
     real_async_client = httpx.AsyncClient
 
     with patch(
-        "aish.openai_codex.httpx.AsyncClient",
+        "aish.providers.openai_codex.httpx.AsyncClient",
         side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
     ):
-        from aish.openai_codex import create_openai_codex_chat_completion
+        from aish.providers.openai_codex import create_openai_codex_chat_completion
 
         result = await create_openai_codex_chat_completion(
             model="openai-codex/gpt-5.4",
@@ -445,7 +453,7 @@ async def test_process_input_uses_openai_codex_path_when_stream_requested():
         ),
         patch.object(session, "_get_tools_spec", return_value=[]),
         patch(
-            "aish.llm.create_openai_codex_chat_completion",
+            "aish.providers.openai_codex.create_openai_codex_chat_completion",
             new=AsyncMock(
                 return_value={
                     "choices": [

@@ -1,8 +1,6 @@
 """CLI entry point for AI Shell."""
 
 import os
-import shutil
-import subprocess
 import sys
 from enum import Enum
 from typing import Optional
@@ -17,12 +15,8 @@ from .config import Config, ConfigModel
 from .i18n import t
 from .i18n.typer import I18nTyperCommand, I18nTyperGroup
 from .logging_utils import init_logging
-from .openai_codex import (OPENAI_CODEX_DEFAULT_CALLBACK_PORT,
-                           OPENAI_CODEX_DEFAULT_MODEL,
-                           OpenAICodexAuthError,
-                           load_openai_codex_auth,
-                           login_openai_codex_with_browser,
-                           login_openai_codex_with_device_code)
+from .providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
+from .providers.registry import get_provider_by_id, list_auth_capable_provider_ids
 from .shell import AIShell
 from .skills import SkillManager
 from .wizard.setup_wizard import (needs_interactive_setup,
@@ -44,7 +38,7 @@ models_app.add_typer(models_auth_app, name="auth")
 app.add_typer(models_app, name="models")
 
 
-class OpenAICodexAuthFlow(str, Enum):
+class ProviderAuthFlow(str, Enum):
     BROWSER = "browser"
     DEVICE_CODE = "device-code"
     CODEX_CLI = "codex-cli"
@@ -272,27 +266,27 @@ def models_auth_login(
     provider: str = typer.Option(
         ...,
         "--provider",
-        help="Provider id to log in (currently only openai-codex).",
+        help="Provider id to log in (for example: openai-codex).",
     ),
     model: str = typer.Option(
-        OPENAI_CODEX_DEFAULT_MODEL,
+        "",
         "--model",
-        help="Default OpenAI Codex model to store in config after login.",
+        help="Default provider model to store in config after login.",
     ),
     set_default: bool = typer.Option(
         True,
         "--set-default/--no-set-default",
-        help="Update the config model to the OpenAI Codex model after login.",
+        help="Update the config model to the provider model after login.",
     ),
-    auth_flow: OpenAICodexAuthFlow = typer.Option(
-        OpenAICodexAuthFlow.BROWSER,
+    auth_flow: ProviderAuthFlow = typer.Option(
+        ProviderAuthFlow.BROWSER,
         "--auth-flow",
         help="Auth flow to use: browser, device-code, or codex-cli.",
     ),
     force: bool = typer.Option(
         False,
         "--force/--no-force",
-        help="Force a fresh OpenAI Codex login even if local auth already exists.",
+        help="Force a fresh provider login even if local auth already exists.",
     ),
     open_browser: bool = typer.Option(
         True,
@@ -314,12 +308,15 @@ def models_auth_login(
     ),
 ):
     normalized_provider = provider.strip().lower().replace("_", "-")
-    if normalized_provider != "openai-codex":
+    resolved_provider = get_provider_by_id(normalized_provider)
+    auth_config = None if resolved_provider is None else resolved_provider.auth_config
+    if resolved_provider is None or auth_config is None:
+        supported = ", ".join(sorted(list_auth_capable_provider_ids()))
         console.print(
-            "Only `--provider openai-codex` is supported right now.",
+            f"Unsupported provider `{normalized_provider}`. Supported providers: {supported}.",
             style="red",
         )
-        raise typer.Exit(1)
+        raise SystemExit(1)
 
     try:
         config = Config(config_file_path=config_file)
@@ -328,71 +325,55 @@ def models_auth_login(
         console.print(t("cli.startup.config_file_hint"), style="dim")
         raise typer.Exit(1) from exc
 
-    auth_path = getattr(config.model_config, "codex_auth_path", None)
+    auth_path = getattr(config.model_config, auth_config.auth_path_config_key, None)
     auth_state = None
     if not force:
         try:
-            auth_state = load_openai_codex_auth(auth_path)
-        except OpenAICodexAuthError:
+            auth_state = auth_config.load_auth_state(auth_path)
+        except Exception:
             auth_state = None
 
     if auth_state is None:
         try:
-            if auth_flow == OpenAICodexAuthFlow.BROWSER:
-                auth_state = login_openai_codex_with_browser(
-                    auth_path=auth_path,
-                    open_browser=open_browser,
-                    callback_port=callback_port,
-                    notify=lambda message: console.print(message, style="dim"),
+            login_handler = auth_config.get_login_handler(auth_flow.value)
+            if login_handler is None:
+                console.print(
+                    f"Auth flow `{auth_flow.value}` is not supported for {resolved_provider.display_name}.",
+                    style="red",
                 )
-            elif auth_flow == OpenAICodexAuthFlow.DEVICE_CODE:
-                auth_state = login_openai_codex_with_device_code(
-                    auth_path=auth_path,
-                    notify=lambda message: console.print(message, style="dim"),
-                )
-            else:
-                codex_bin = shutil.which("codex")
-                if not codex_bin:
-                    console.print(
-                        "The `codex` CLI is not installed. Install `@openai/codex` or use "
-                        "`--auth-flow browser` / `--auth-flow device-code`.",
-                        style="red",
-                    )
-                    raise typer.Exit(1)
+                raise SystemExit(1)
 
-                try:
-                    subprocess.run([codex_bin, "login"], check=True)
-                except subprocess.CalledProcessError as exc:
-                    console.print(
-                        f"`codex login` failed with exit code {exc.returncode}.",
-                        style="red",
-                    )
-                    raise typer.Exit(exc.returncode or 1) from exc
-                except KeyboardInterrupt as exc:
-                    raise typer.Exit(1) from exc
-
-                auth_state = load_openai_codex_auth(auth_path)
-        except OpenAICodexAuthError as exc:
+            handler_kwargs = {
+                "auth_path": auth_path,
+                "notify": lambda message: console.print(message, style="dim"),
+            }
+            if auth_flow == ProviderAuthFlow.BROWSER:
+                handler_kwargs["open_browser"] = open_browser
+                handler_kwargs["callback_port"] = callback_port
+            auth_state = login_handler(**handler_kwargs)
+        except Exception as exc:
             console.print(str(exc), style="red")
             raise typer.Exit(1) from exc
 
     config_data = config.model_config.model_dump()
-    config_data["codex_auth_path"] = str(auth_state.auth_path)
+    config_data[auth_config.auth_path_config_key] = str(auth_state.auth_path)
     if set_default:
-        config_data["model"] = f"openai-codex/{model.strip() or OPENAI_CODEX_DEFAULT_MODEL}"
+        config_data["model"] = (
+            f"{resolved_provider.model_prefix}/{model.strip() or auth_config.default_model}"
+        )
         config_data["api_key"] = None
     config.config_model = ConfigModel.model_validate(config_data)
     config.save_config()
 
     console.print(
-        f"OpenAI Codex auth ready: {auth_state.auth_path}",
+        f"{resolved_provider.display_name} auth ready: {auth_state.auth_path}",
         style="green",
     )
     if set_default:
         console.print(f"Default model set to {config.config_model.model}", style="green")
     else:
         console.print(
-            f"OpenAI Codex model available: openai-codex/{model.strip() or OPENAI_CODEX_DEFAULT_MODEL}",
+            f"{resolved_provider.display_name} model available: {resolved_provider.model_prefix}/{model.strip() or auth_config.default_model}",
             style="dim",
         )
 

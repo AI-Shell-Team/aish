@@ -17,8 +17,7 @@ from aish.exception import is_litellm_exception, redact_secrets
 from aish.i18n import t
 from aish.interruption import ShellState
 from aish.litellm_loader import load_litellm
-from aish.openai_codex import (create_openai_codex_chat_completion,
-                               is_openai_codex_model)
+from aish.providers.registry import get_provider_for_model
 from aish.prompts import PromptManager
 from aish.skills import SkillManager
 from aish.tools.base import ToolBase
@@ -447,8 +446,8 @@ class LLMSession:
             self._stream_chunk_builder_func = litellm.stream_chunk_builder
         return self._stream_chunk_builder_func
 
-    def _uses_openai_codex(self) -> bool:
-        return is_openai_codex_model(self.model)
+    def _get_model_provider(self):
+        return get_provider_for_model(self.model)
 
     async def _create_completion_response(
         self,
@@ -459,24 +458,18 @@ class LLMSession:
         tool_choice: str = "auto",
         **kwargs,
     ):
-        if self._uses_openai_codex():
-            return await create_openai_codex_chat_completion(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
-                api_base=self.api_base,
-                auth_path=getattr(self.config, "codex_auth_path", None),
-                timeout=float(kwargs.get("timeout", 300)),
-            )
-
-        acompletion = self._get_acompletion()
-        return await acompletion(
+        provider = self._get_model_provider()
+        acompletion = self._get_acompletion() if provider.uses_litellm else None
+        return await provider.create_completion(
             model=self.model,
+            config=self.config,
             api_base=self.api_base,
             api_key=self.api_key,
             messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
             stream=stream,
+            fallback_completion=acompletion,
             **kwargs,
         )
 
@@ -504,7 +497,7 @@ class LLMSession:
 
     async def _background_initialize(self):
         """后台初始化 litellm 模块，使用独立线程避免阻塞事件循环"""
-        if self._uses_openai_codex():
+        if not self._get_model_provider().uses_litellm:
             return
 
         async with self._init_lock:
@@ -571,7 +564,7 @@ class LLMSession:
 
     async def _ensure_initialized(self):
         """确保 litellm 已初始化，等待后台初始化完成"""
-        if self._uses_openai_codex():
+        if not self._get_model_provider().uses_litellm:
             return
 
         # 如果已经初始化完成，直接返回
@@ -616,7 +609,7 @@ class LLMSession:
             max_retries: 最大重试次数，默认 5 次
             retry_delay: 重试间隔（秒），默认 0.5 秒
         """
-        if self._uses_openai_codex() or self._initialized:
+        if not self._get_model_provider().uses_litellm or self._initialized:
             return
 
         last_error = None
@@ -1107,7 +1100,7 @@ class LLMSession:
 
     def _trim_messages(self, messages: list[dict]) -> list[dict]:
         """Trim messages to keep under token limit"""
-        if self._uses_openai_codex():
+        if not self._get_model_provider().should_trim_messages:
             return messages
         old_size = len(messages)
         trim_messages = self._get_trim_messages()
@@ -1364,7 +1357,7 @@ class LLMSession:
                         stream = bool(merged_kwargs.pop("stream"))
                     except Exception:
                         merged_kwargs.pop("stream")
-                actual_stream = stream and not self._uses_openai_codex()
+                actual_stream = stream and self._get_model_provider().supports_streaming
 
                 events.emit_generation_start(
                     generation_type=generation_type, stream=actual_stream
@@ -1684,7 +1677,7 @@ class LLMSession:
         elif langfuse_metadata:
             merged_kwargs["metadata"] = langfuse_metadata
 
-        actual_stream = stream and not self._uses_openai_codex()
+        actual_stream = stream and self._get_model_provider().supports_streaming
         events.emit_generation_start(
             generation_type=generation_type, stream=actual_stream
         )
