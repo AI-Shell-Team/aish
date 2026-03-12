@@ -46,8 +46,8 @@ Welcome to make Shell smarter!
 - `make prepare-release-files VERSION=X.Y.Z [DATE=YYYY-MM-DD]` updates `pyproject.toml`, `src/aish/__init__.py`, and moves the current `CHANGELOG.md` `Unreleased` section into a dated release section.
 - `Release PR` is the manual workflow that creates or updates a `release/vX.Y.Z` branch, updates version files, promotes the `CHANGELOG.md` `Unreleased` section into the target release section, and opens a PR against `main`.
 - `Release Preparation` is the single manual preflight workflow after the release PR is merged: it validates the target stable version, generates a release summary, builds dry-run bundles, and runs install smoke checks before publication.
-- `Release` is only responsible for validating the published tag, passing a single release boundary checkpoint, building release bundles, and uploading assets to GitHub Releases.
-- If you want approval before production publishing, attach the `release-gate` job in `.github/workflows/release.yml` to a protected GitHub Environment in repository settings.
+- `Release` is only responsible for validating the published tag, waiting on the protected `release` environment approval gate, building release bundles, and uploading assets to GitHub Releases.
+- Configure the GitHub Environment named `release` with required reviewers if you want manual approval before production publishing.
 
 ## Python Code Style
 

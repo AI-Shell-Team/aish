@@ -37,6 +37,7 @@ jobs:
     name: Release boundary checkpoint
     needs: release-meta
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - name: Confirm release payload
         run: |
