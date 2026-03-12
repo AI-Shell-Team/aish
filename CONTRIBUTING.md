@@ -38,6 +38,17 @@ Welcome to make Shell smarter!
 - Describe what & why in your PR description
 - **Include screenshots** — one showing the problem/before, one showing the fix/after (for UI or visual changes)
 
+## CI and Release Workflows
+
+- Code PRs run lint, tests, and cross-platform smoke checks.
+- Packaging-related PRs additionally run Linux bundle build and install smoke checks.
+- `Release Metadata` is the shared release action that normalizes stable version inputs, validates repository version state, and uploads both markdown and JSON metadata artifacts.
+- `make prepare-release-files VERSION=X.Y.Z [DATE=YYYY-MM-DD]` updates `pyproject.toml`, `src/aish/__init__.py`, and moves the current `CHANGELOG.md` `Unreleased` section into a dated release section.
+- `Release PR` is the manual workflow that creates or updates a `release/vX.Y.Z` branch, updates version files, promotes the `CHANGELOG.md` `Unreleased` section into the target release section, and opens a PR against `main`.
+- `Release Preparation` is the single manual preflight workflow after the release PR is merged: it validates the target stable version, generates a release summary, builds dry-run bundles, and runs install smoke checks before publication.
+- `Release` is only responsible for validating the published tag, passing a single release boundary checkpoint, building release bundles, and uploading assets to GitHub Releases.
+- If you want approval before production publishing, attach the `release-gate` job in `.github/workflows/release.yml` to a protected GitHub Environment in repository settings.
+
 ## Python Code Style
 
 The project uses **Black** (formatting) and **isort** (import sorting). When writing code:

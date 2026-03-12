@@ -2,6 +2,9 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   push:
     branches:
       - main
@@ -15,13 +18,54 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   UV_CACHE_DIR: .uv-cache
 
 jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || steps.default.outputs.code }}
+      packaging: ${{ github.event_name == 'pull_request' && steps.filter.outputs.packaging || steps.default.outputs.packaging }}
+    steps:
+      - name: Default to full validation outside PRs
+        id: default
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "code=true" >> "$GITHUB_OUTPUT"
+          echo "packaging=true" >> "$GITHUB_OUTPUT"
+
+      - name: Classify pull request changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            code:
+              - 'src/**'
+              - 'tests/**'
+              - 'main.py'
+              - 'pyproject.toml'
+              - 'Makefile'
+              - 'build.sh'
+              - '.github/workflows/ci.yml'
+            packaging:
+              - 'packaging/**'
+              - 'debian/**'
+              - 'config/**'
+              - 'aish.spec'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/release-pr.yml'
+              - '.github/workflows/release-preparation.yml'
+
   lint-test:
     name: Lint and test
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
     container:
       image: rockylinux:8
@@ -57,7 +101,10 @@ jobs:
 
   cross-platform-smoke:
     name: Cross-platform smoke (${{ matrix.os }})
-    needs: lint-test
+    needs:
+      - changes
+      - lint-test
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +137,7 @@ jobs:
 
   build-bundle:
     name: Build bundle (${{ matrix.arch }})
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +148,7 @@ jobs:
             runs_on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs_on }}
     needs:
+      - changes
       - lint-test
       - cross-platform-smoke
     container:

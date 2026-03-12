@@ -1,0 +1,148 @@
+name: Release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Target stable release version, for example 0.1.1"
+        required: true
+        type: string
+      release_date:
+        description: "Release date for CHANGELOG.md, defaults to today when empty"
+        required: false
+        default: ""
+        type: string
+      base_branch:
+        description: "Base branch that the release PR should target"
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-pr-${{ github.event.inputs.version }}
+  cancel-in-progress: true
+
+jobs:
+  release-pr:
+    name: Create or update release PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Update release files
+        run: |
+          args=(--version "${{ github.event.inputs.version }}")
+          if [ -n "${{ github.event.inputs.release_date }}" ]; then
+            args+=(--date "${{ github.event.inputs.release_date }}")
+          fi
+          python3 packaging/scripts/update_release_files.py "${args[@]}"
+
+      - name: Generate release PR body
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+          BASE_BRANCH: ${{ github.event.inputs.base_branch }}
+        run: |
+          heading=$(grep -E "^## \[$VERSION\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" CHANGELOG.md | head -n1 || true)
+          if [ -z "$heading" ]; then
+            echo "Could not find release section for version $VERSION in CHANGELOG.md" >&2
+            exit 1
+          fi
+
+          release_date=$(printf '%s\n' "$heading" | sed -E 's/^## \[[^]]+\]( - )?//')
+          if [ -z "$release_date" ] || [ "$release_date" = "$heading" ]; then
+            release_date="TBD"
+          fi
+
+          previous_stable_tag=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "v$VERSION" | sort -V | tail -n1 || true)
+
+          awk -v version="$VERSION" '
+            $0 ~ "^## \\\\[" version "\\\\]( - .*)?$" { capture=1; next }
+            /^## \[/ && capture { exit }
+            capture { print }
+          ' CHANGELOG.md | sed '/^$/N;/^\n$/D' > release-pr-notes.md
+
+          if [ ! -s release-pr-notes.md ]; then
+            echo "Release section for version $VERSION is empty" >&2
+            exit 1
+          fi
+
+          {
+            echo "# Release $VERSION"
+            echo
+            echo "This PR prepares v$VERSION for release on \`$BASE_BRANCH\`."
+            echo
+            echo "## Release Context"
+            echo
+            echo "- Target tag: \`v$VERSION\`"
+            echo "- Release date: \`$release_date\`"
+            if [ -n "$previous_stable_tag" ]; then
+              echo "- Previous stable tag: \`$previous_stable_tag\`"
+            fi
+            echo
+            echo "## Changelog"
+            echo
+            cat release-pr-notes.md
+            echo
+            echo "## Next Steps"
+            echo
+            echo "- [ ] Review the changelog entries for \`v$VERSION\`."
+            echo "- [ ] Merge this PR into \`$BASE_BRANCH\`."
+            echo "- [ ] Run the Release Preparation workflow with version \`$VERSION\`."
+            echo "- [ ] Publish the GitHub Release \`v$VERSION\` after preparation passes."
+          } > release-pr-body.md
+
+      - name: Create or update pull request
+        id: create-pr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: release/v${{ github.event.inputs.version }}
+          base: ${{ github.event.inputs.base_branch }}
+          commit-message: 'release: prepare v${{ github.event.inputs.version }}'
+          title: 'release: v${{ github.event.inputs.version }}'
+          body-path: release-pr-body.md
+          delete-branch: true
+          add-paths: |
+            CHANGELOG.md
+            pyproject.toml
+            src/aish/__init__.py
+
+      - name: Write job summary
+        env:
+          PR_NUMBER: ${{ steps.create-pr.outputs.pull-request-number }}
+          PR_URL: ${{ steps.create-pr.outputs.pull-request-url }}
+          PR_OPERATION: ${{ steps.create-pr.outputs.pull-request-operation }}
+          VERSION: ${{ github.event.inputs.version }}
+          BASE_BRANCH: ${{ github.event.inputs.base_branch }}
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          # Release PR Result
+
+          - Version: ${VERSION}
+          - Base branch: ${BASE_BRANCH}
+          - Operation: ${PR_OPERATION:-none}
+          EOF
+
+          if [ -n "${PR_URL}" ]; then
+            cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          - Pull request: ${PR_URL}
+
+          Next: merge the release PR, then run the Release Preparation workflow with version ${VERSION}.
+          EOF
+          else
+            cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+
+          No pull request was created. This usually means the requested version already exists or there were no file changes to commit.
+          EOF
+          fi

@@ -1,0 +1,59 @@
+name: Release Metadata
+description: Validate release metadata and emit normalized outputs plus summary artifacts
+
+inputs:
+  version:
+    description: Stable release version or tag to validate against repository metadata
+    required: true
+  artifact_prefix:
+    description: Prefix used for uploaded release metadata artifacts
+    required: false
+    default: release-metadata
+
+outputs:
+  version:
+    description: Normalized release version
+    value: ${{ steps.metadata.outputs.version }}
+  tag:
+    description: Normalized git tag
+    value: ${{ steps.metadata.outputs.tag }}
+  pyproject_version:
+    description: Version from pyproject.toml
+    value: ${{ steps.metadata.outputs.pyproject_version }}
+  runtime_version:
+    description: Runtime version from src/aish/__init__.py
+    value: ${{ steps.metadata.outputs.runtime_version }}
+  previous_stable_tag:
+    description: Most recent stable git tag
+    value: ${{ steps.metadata.outputs.previous_stable_tag }}
+  release_notes:
+    description: Unreleased changelog notes
+    value: ${{ steps.metadata.outputs.release_notes }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate repository release metadata
+      id: metadata
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        python3 packaging/scripts/release_metadata.py \
+          --expected-version "$INPUT_VERSION" \
+          --github-output "$GITHUB_OUTPUT" \
+          --summary-file release-metadata-summary.md \
+          --json-file release-metadata.json
+
+    - name: Upload release metadata artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact_prefix }}-${{ steps.metadata.outputs.version }}
+        path: |
+          release-metadata-summary.md
+          release-metadata.json
+
+    - name: Write job summary
+      shell: bash
+      run: |
+        cat release-metadata-summary.md >> "$GITHUB_STEP_SUMMARY"

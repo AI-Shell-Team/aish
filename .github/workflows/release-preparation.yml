@@ -1,15 +1,19 @@
-name: Release
+name: Release Preparation
 
 on:
-  release:
-    types:
-      - published
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Target stable release version, for example 0.1.1"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
-env:
-  UV_CACHE_DIR: .uv-cache
+concurrency:
+  group: release-preparation-${{ github.event.inputs.version }}
+  cancel-in-progress: true
 
 jobs:
   release-meta:
@@ -30,25 +34,35 @@ jobs:
         id: metadata
         uses: ./.github/actions/release-metadata
         with:
-          version: ${{ github.event.release.tag_name }}
-          artifact_prefix: release
+          version: ${{ github.event.inputs.version }}
+          artifact_prefix: release-preparation
 
-  release-gate:
-    name: Release boundary checkpoint
+  prepare-release:
+    name: Summarize release preparation output
     needs: release-meta
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ needs.release-meta.outputs.version }}
+      tag: ${{ needs.release-meta.outputs.tag }}
+      previous_stable_tag: ${{ needs.release-meta.outputs.previous_stable_tag }}
     steps:
-      - name: Confirm release payload
+      - name: Write job summary
         run: |
-          echo "Release ${RELEASE_TAG} is ready for bundle publishing."
-        env:
-          RELEASE_TAG: ${{ needs.release-meta.outputs.tag }}
+          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          # Release Preparation Ready
 
-  build-release-packages:
-    name: Build release bundle (${{ matrix.arch }})
-    needs:
-      - release-meta
-      - release-gate
+          - Version: ${{ needs.release-meta.outputs.version }}
+          - Tag: ${{ needs.release-meta.outputs.tag }}
+          - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
+
+          ## Unreleased Notes
+
+          ${{ needs.release-meta.outputs.release_notes }}
+          EOF
+
+  dry-run-package-validation:
+    name: Dry-run package validation (${{ matrix.arch }})
+    needs: release-meta
     strategy:
       fail-fast: false
       matrix:
@@ -71,7 +85,7 @@ jobs:
       - name: Set up build environment
         run: ./packaging/scripts/setup-ci-env.sh
 
-      - name: Build release bundle
+      - name: Build bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/${{ matrix.arch }}"
@@ -99,25 +113,29 @@ jobs:
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
           grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
 
-      - name: Upload assets to release
-        uses: softprops/action-gh-release@v2
+      - name: Upload dry-run artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: artifacts/${{ matrix.arch }}/*
+          name: release-preparation-aish-linux-${{ matrix.arch }}
+          path: artifacts/${{ matrix.arch }}/*
+          if-no-files-found: error
 
-  release-summary:
-    name: Summarize published release
+  release-preparation-summary:
+    name: Summarize release preparation validation
     needs:
       - release-meta
-      - build-release-packages
+      - prepare-release
+      - dry-run-package-validation
     runs-on: ubuntu-latest
     steps:
-      - name: Write job summary
+      - name: Write final summary
         run: |
           cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          # Release Assets Published
+          # Release Preparation Complete
 
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
+          - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
-          Release metadata artifacts and bundle assets were uploaded successfully.
+          Release metadata artifacts and dry-run bundle artifacts have been uploaded for review.
           EOF
