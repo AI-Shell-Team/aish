@@ -80,8 +80,11 @@ class OAuthBrowserCallbackResult:
 
 
 class OAuthPkceLike(Protocol):
-    code_verifier: str
-    code_challenge: str
+    @property
+    def code_verifier(self) -> str: ...
+
+    @property
+    def code_challenge(self) -> str: ...
 
 
 class OAuthDeviceCodeLike(Protocol):

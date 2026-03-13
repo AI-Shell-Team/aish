@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TypeAlias
 from urllib.parse import urlsplit
 
 import httpx
@@ -86,8 +86,8 @@ class OpenAICodexAuthState:
         return int(time.time()) >= (self.expires_at - leeway_seconds)
 
 
-OpenAICodexPkceCodes = OAuthPkceCodes
-OpenAICodexOAuthTokens = OAuthTokens
+OpenAICodexPkceCodes: TypeAlias = OAuthPkceCodes
+OpenAICodexOAuthTokens: TypeAlias = OAuthTokens
 
 
 @dataclass
