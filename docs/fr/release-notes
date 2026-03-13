@@ -1,0 +1,89 @@
+Langue : français (French)
+
+Notes de version d’AI Shell (aish)
+
+## v0.1.0 (Première version) — 2026-03-06
+AI Shell est un shell alimenté par l’IA pour le travail quotidien au terminal. Il apporte Q&R, explications, suggestions et dépannage directement dans le terminal sans changer vos habitudes de ligne de commande, tout en fournissant des mécanismes de confirmation et de blocage basés sur des politiques de sécurité et la disponibilité du sandbox pour réduire le risque d’opérations accidentelles.
+
+### I. Aperçu de la version
+
+- **Assistant IA intégré au terminal** : dans aish, vous pouvez lancer des requêtes IA directement en tapant `;`. Cela vous permet de poser des questions, expliquer des commandes, demander des solutions et utiliser des outils pour accomplir des tâches sans quitter la ligne de commande.
+- **Intégration multi‑modèles et multi‑fournisseurs** : basé sur LiteLLM, il prend en charge une variété de fournisseurs de modèles grand public et permet une configuration personnalisée de l’API Base.
+- **Mécanismes de sécurité pour les opérations IA** : fournit une évaluation des niveaux de risque et une confirmation/un blocage pour les commandes et modifications déclenchées par l’IA, selon les capacités du sandbox.
+- **Mécanisme de Skills (extensible et rechargement à chaud)** : prend en charge le chargement des Skills depuis des répertoires spécifiés et leur rechargement à chaud pendant l’exécution.
+
+### II. Fonctions et capacités principales
+
+#### 1. Interaction terminal et collaboration IA
+
+- **Shell REPL interactif** : les commandes standard s’exécutent normalement avec prise en charge PTY complète et compatibilité avec les programmes interactifs courants.
+- **Mode IA** : une entrée commençant par `;` (ou le caractère chinois pleine largeur `；`) déclenche une requête IA. Dans une conversation, vous pouvez combiner l’usage d’outils pour exécuter des commandes, lire ou modifier des fichiers, et dépanner des problèmes.
+- **UI du terminal** : basée sur Rich, avec prise en charge de la sortie en flux, des indicateurs de réflexion, et de l’interruption Ctrl+C avec récupération d’entrée pour les conversations ou tâches longues.
+- **Capacités de diagnostic système** : inclut des workflows de diagnostic intégrés pour l’analyse de logs et les scénarios de dépannage, et peut produire des conclusions et des suggestions structurées avec l’aide des outils et Skills.
+
+#### 2. Invocation d’outils et opérations sur fichiers/code
+
+- **Suite d’appels d’outils (intégrée pour l’IA)** : `bash_exec`, `python_exec`, `read_file`, `write_file`, `edit_file`, `ask_user`, `system_diagnose_agent`, `skill`.
+  - `bash_exec` : exécute des commandes shell non interactives.
+  - `python_exec` : exécute du code Python.
+  - `read_file` : lit le contenu des fichiers.
+  - `write_file` : écrase le contenu des fichiers.
+  - `edit_file` : modifie des fichiers via remplacement de chaînes.
+  - `ask_user` : interrompt l’exécution pour demander des options ou une entrée utilisateur.
+  - `system_diagnose_agent` : un agent de diagnostic.
+  - `skill` : invoque un Skill.
+
+- **Capacités d’opérations multi‑fichiers** : prend en charge la lecture et la modification de plusieurs fichiers pour effectuer des changements en lot, et peut vérifier ces changements en exécutant des commandes, y compris des tests, via `bash_exec`.
+- **Compatibilité des commandes intégrées** : fournit une gestion dédiée des commandes qui modifient l’état du shell : `cd`, `pushd`, `popd`, `export`, `unset`, `dirs`, `pwd`, `history`.
+
+#### 3. Mécanisme d’extension des Skills et rechargement à chaud
+
+- **Configuration et chargement des Skills** : prend en charge le chargement des Skills depuis les répertoires utilisateur `~/.config/aish/skills/` (ou `$AISH_CONFIG_DIR/skills`) et `~/.claude/skills/`. En cas de conflit de noms, les Skills du répertoire utilisateur sont prioritaires.
+- **Métadonnées et permissions des Skills** : utilise un front matter YAML dans `SKILL.md` pour décrire les capacités, `allowed_tools` et les métadonnées associées.
+- **Rechargement à chaud** : surveille les répertoires de Skills pendant l’exécution. Les Skills ajoutés, supprimés ou modifiés prennent effet automatiquement au prochain rafraîchissement de la liste d’outils ou à l’invocation d’un Skill (rechargement paresseux), sans redémarrage.
+- **Déport des grandes sorties** : si la sortie de `bash_exec` dépasse un seuil, elle est écrite sur disque et seul un aperçu est affiché, avec le chemin vers le fichier de sortie complet. En mode PTY, un nombre limité d’octets est conservé et l’excédent est écrit dans un fichier de déport. Le seuil et le répertoire sont configurables.
+
+#### 4. Sécurité et contrôle des risques
+
+- **Détection de sécurité des commandes IA** : les commandes et modifications déclenchées par l’IA sont évaluées par niveau de risque (`LOW` / `MEDIUM` / `HIGH`), avec des raisons explicables pour chaque correspondance.
+- **Mécanisme de confirmation et de blocage** : lorsque le sandbox est disponible ou qu’une règle de politique correspond, les actions à risque `MEDIUM` nécessitent une confirmation et les actions `HIGH` sont bloquées. Si le sandbox est indisponible, le comportement se rabat sur la règle `sandbox_off_action`, qui peut autoriser, demander une confirmation ou bloquer l’action.
+- **Sandbox et politiques** : le sandbox est privilégié pour l’analyse des risques. S’il est indisponible, des actions de repli définies dans les politiques de sécurité s’appliquent, comme demander une confirmation ou bloquer l’action.
+  - Politique système : `/etc/aish/security_policy.yaml`
+  - Politique utilisateur : `~/.config/aish/security_policy.yaml` (un modèle est généré automatiquement s’il n’existe pas)
+  - L’activation du service sandbox est recommandée pour une protection complète.
+
+- **Liste blanche optionnelle** : permet de pré‑approuver des commandes IA spécifiques, effectif uniquement lorsque le sandbox est disponible, afin de réduire les confirmations répétées.
+
+### III. Observabilité et configuration
+
+- **Système de configuration** : prend en charge les fichiers de configuration, les variables d’environnement et les arguments de ligne de commande. La priorité est : arguments de ligne de commande > variables d’environnement > fichiers de configuration. La langue de sortie peut être configurée ou auto‑détectée.
+- **Configuration interactive et changement de modèle** : au premier lancement, un assistant guide l’utilisateur dans le choix du fournisseur/modèle et la vérification des tool calls. `/setup` permet de reconfigurer, et `/model <name>` valide et bascule le modèle.
+- **Observabilité (optionnelle)** : Langfuse peut être activé pour l’observabilité et le traçage des LLM. Désactivé par défaut.
+- **Historique et persistance des sessions** : l’historique des commandes et des requêtes IA est écrit dans SQLite en mode WAL, permettant des requêtes inter‑sessions. Le chemin de la base peut être configuré via `session_db_path`.
+
+### IV. Limitations connues et plans futurs
+
+- **Tâches longues et grandes sorties** : la sortie générée par des commandes longues ou à résultat volumineux peut dépasser la limite de contexte du modèle et ne pas être traitée en entier. Dans ce cas, il est recommandé d’exécuter ces commandes directement dans le shell.
+- **Rognage du contexte et budget** : prise en charge de `max_llm_messages`, `max_shell_messages` et d’un `context_token_budget` optionnel. Le contexte est automatiquement rogné lorsque les limites sont dépassées.
+- **Indisponibilité du sandbox** : si le sandbox est indisponible, les capacités de sécurité sont fortement réduites.
+
+- **Améliorations planifiées** :
+  - Meilleur support des tâches longues
+  - Amélioration du rendu et de l’interaction du terminal, avec de meilleures performances pour les grands contextes
+  - Raffinement continu des fonctionnalités et de la sécurité à partir des retours utilisateurs
+  - Meilleure gestion des erreurs du sandbox
+  - Exécution et extensibilité des Skills améliorées
+
+### V. Compatibilité
+
+- Principalement destiné aux environnements de terminal interactifs Linux.
+- Environnement d’exécution : Python 3.10+.
+- Vérifié sur :
+  - Deepin V25
+  - Ubuntu 24.04
+
+Les capacités du sandbox et l’expérience d’interaction peuvent varier selon les plateformes et distributions.
+
+### VI. Communauté
+
+- Rejoignez notre [Discord](https://discord.com/invite/Pw2mjZt3) pour échanger avec d’autres utilisateurs et développeurs.

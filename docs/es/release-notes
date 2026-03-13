@@ -1,0 +1,89 @@
+Idioma: español (Spanish)
+
+Notas de versión de AI Shell (aish)
+
+## v0.1.0 (Lanzamiento inicial) — 2026-03-06
+AI Shell es un shell impulsado por IA para el trabajo diario en el terminal. Lleva preguntas y respuestas, explicaciones, sugerencias y resolución de problemas directamente al terminal sin cambiar tus hábitos actuales de línea de comandos, y además ofrece mecanismos de confirmación y bloqueo basados en políticas de seguridad y disponibilidad del sandbox para reducir el riesgo de operaciones accidentales.
+
+### I. Resumen de la versión
+
+- **Asistente de IA integrado en el terminal**: en aish, puedes iniciar solicitudes de IA directamente escribiendo `;`. Esto te permite hacer preguntas, explicar comandos, pedir soluciones y usar herramientas para completar tareas sin salir de la línea de comandos.
+- **Integración multi‑modelo y multi‑proveedor**: construido sobre LiteLLM, admite una variedad de proveedores de modelos principales y permite configuración personalizada de la API Base.
+- **Mecanismos de seguridad para operaciones de IA**: proporciona evaluación de nivel de riesgo y confirmación/bloqueo para comandos y cambios activados por IA, según las capacidades del sandbox.
+- **Mecanismo de Skills (extensible y con recarga en caliente)**: admite cargar Skills desde directorios especificados y recargarlas en caliente durante la ejecución.
+
+### II. Funciones y capacidades principales
+
+#### 1. Interacción con el terminal y colaboración con IA
+
+- **Shell REPL interactivo**: los comandos estándar se ejecutan normalmente con compatibilidad PTY completa y con programas interactivos comunes.
+- **Modo IA**: una entrada que comienza con `;` (o el carácter chino de ancho completo `；`) activa una solicitud de IA. En una conversación, puedes combinar el uso de herramientas para ejecutar comandos, leer o editar archivos y solucionar problemas.
+- **UI del terminal**: basada en Rich, con soporte para salida en streaming, indicadores de pensamiento e interrupción con Ctrl+C con recuperación de entrada para conversaciones o tareas largas.
+- **Capacidades de diagnóstico del sistema**: incluye flujos de trabajo de diagnóstico integrados para análisis de logs y escenarios de resolución de problemas, y puede producir conclusiones y sugerencias estructuradas con la ayuda de herramientas y Skills.
+
+#### 2. Invocación de herramientas y operaciones de archivos/código
+
+- **Conjunto de tool calls (integrado para IA)**: `bash_exec`, `python_exec`, `read_file`, `write_file`, `edit_file`, `ask_user`, `system_diagnose_agent`, `skill`.
+  - `bash_exec`: ejecuta comandos de shell no interactivos.
+  - `python_exec`: ejecuta código Python.
+  - `read_file`: lee el contenido de archivos.
+  - `write_file`: sobrescribe el contenido de archivos.
+  - `edit_file`: edita archivos mediante reemplazo de cadenas.
+  - `ask_user`: interrumpe la ejecución para solicitar opciones o entrada del usuario.
+  - `system_diagnose_agent`: un agente de diagnóstico.
+  - `skill`: invoca un Skill.
+
+- **Capacidades de operación entre archivos**: admite leer y editar múltiples archivos para completar cambios por lotes, y puede verificar esos cambios ejecutando comandos, incluidas pruebas, mediante `bash_exec`.
+- **Compatibilidad de comandos integrados**: proporciona manejo dedicado para comandos que modifican el estado del shell: `cd`, `pushd`, `popd`, `export`, `unset`, `dirs`, `pwd`, `history`.
+
+#### 3. Mecanismo de extensión de Skills y recarga en caliente
+
+- **Configuración y carga de Skills**: admite cargar Skills desde los directorios de usuario `~/.config/aish/skills/` (o `$AISH_CONFIG_DIR/skills`) y `~/.claude/skills/`. Si hay conflictos de nombres, los Skills del directorio de usuario tienen prioridad.
+- **Metadatos y permisos de Skills**: usa front matter YAML en `SKILL.md` para describir capacidades, `allowed_tools` y metadatos relacionados.
+- **Recarga en caliente**: supervisa los directorios de Skills durante la ejecución. Los Skills añadidos, eliminados o modificados surten efecto automáticamente en la siguiente construcción de la lista de herramientas o invocación de Skills (recarga perezosa), sin necesidad de reiniciar.
+- **Descarga de salida grande**: si la salida de `bash_exec` excede un umbral, se escribe en disco y solo se muestra una vista previa, junto con la ruta al archivo de salida completo. En modo PTY, se conserva un número limitado de bytes y el excedente se escribe en un archivo de offload. Tanto el umbral como el directorio son configurables.
+
+#### 4. Seguridad y control de riesgos
+
+- **Detección de seguridad de comandos de IA**: los comandos y cambios activados por IA se evalúan por nivel de riesgo (`LOW` / `MEDIUM` / `HIGH`), con razones explicables para cada coincidencia.
+- **Mecanismo de confirmación y bloqueo**: cuando el sandbox está disponible o se cumple una regla de política, las acciones de riesgo `MEDIUM` requieren confirmación y las de riesgo `HIGH` se bloquean. Si el sandbox no está disponible, el manejo recurre a la regla `sandbox_off_action`, que puede permitir, requerir confirmación o bloquear la acción.
+- **Sandbox y políticas**: el sandbox es preferido para el análisis de riesgos. Si no está disponible, se aplican acciones alternativas definidas en las políticas de seguridad, como requerir confirmación o bloquear la acción.
+  - Política a nivel sistema: `/etc/aish/security_policy.yaml`
+  - Política a nivel usuario: `~/.config/aish/security_policy.yaml` (se genera una plantilla automáticamente si no existe)
+  - Se recomienda habilitar el servicio de sandbox para una protección completa.
+
+- **Lista blanca opcional**: admite preaprobar comandos de IA específicos, efectivo solo cuando el sandbox está disponible, para reducir confirmaciones repetidas.
+
+### III. Observabilidad y configuración
+
+- **Sistema de configuración**: admite archivos de configuración, variables de entorno y argumentos de línea de comandos en conjunto. La prioridad es: argumentos de línea de comandos > variables de entorno > archivos de configuración. El idioma de salida puede configurarse o detectarse automáticamente.
+- **Configuración interactiva y cambio de modelo**: en el primer inicio, un asistente guía al usuario para seleccionar proveedor/modelo y verificar tool calls. `/setup` permite reconfigurar, y `/model <name>` valida y cambia el modelo.
+- **Observabilidad (opcional)**: Langfuse puede habilitarse para observabilidad y trazado de LLM. Está deshabilitado por defecto.
+- **Historial y persistencia de sesiones**: el historial de comandos y solicitudes de IA se escribe en SQLite en modo WAL, permitiendo consultas entre sesiones. La ruta de la base de datos puede configurarse mediante `session_db_path`.
+
+### IV. Limitaciones conocidas y planes futuros
+
+- **Tareas de larga duración y grandes salidas**: la salida generada por comandos de larga duración o con grandes resultados puede superar el límite de contexto del modelo y no procesarse por completo. En esos casos, se recomienda que los usuarios ejecuten esos comandos directamente en el shell.
+- **Recorte de contexto y presupuesto**: admite configurar `max_llm_messages`, `max_shell_messages` y un `context_token_budget` opcional. El contexto se recorta automáticamente cuando se exceden los límites.
+- **Indisponibilidad del sandbox**: si el sandbox no está disponible, las capacidades de seguridad se reducen significativamente.
+
+- **Mejoras planificadas**:
+  - Mejor soporte para tareas de larga duración
+  - Mejoras en el renderizado e interacción del terminal, con mejor rendimiento para contextos grandes
+  - Refinamiento continuo de funcionalidad y seguridad según comentarios de usuarios
+  - Mejora del manejo de errores del sandbox
+  - Mejora de ejecución y extensibilidad de Skills
+
+### V. Compatibilidad
+
+- Principalmente destinado a entornos de terminal interactivos en Linux.
+- Entorno de ejecución: Python 3.10+.
+- Verificado en:
+  - Deepin V25
+  - Ubuntu 24.04
+
+Las capacidades del sandbox y la experiencia de interacción pueden variar según la plataforma y la distribución.
+
+### VI. Comunidad
+
+- Únete a nuestro [Discord](https://discord.com/invite/Pw2mjZt3) para conectar con otros usuarios y desarrolladores.

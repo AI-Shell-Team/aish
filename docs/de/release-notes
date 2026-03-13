@@ -1,0 +1,89 @@
+Sprache: Deutsch (German)
+
+AI Shell (aish) Versionshinweise
+
+## v0.1.0 (Erstveröffentlichung) — 2026-03-06
+AI Shell ist eine KI-gestützte Shell für die tägliche Terminalarbeit. Sie bringt Q&A, Erklärungen, Vorschläge und Troubleshooting direkt ins Terminal, ohne deine bestehenden Kommandozeilen-Gewohnheiten zu ändern, und bietet zugleich Sicherheitsbestätigungen sowie Blockierungsmechanismen basierend auf Sicherheitsrichtlinien und Sandbox-Verfügbarkeit, um das Risiko unbeabsichtigter Operationen zu reduzieren.
+
+### I. Versionsüberblick
+
+- **Integrierter Terminal-KI-Assistent**: In aish kannst du KI-Anfragen direkt durch Eingabe von `;` starten. Damit kannst du Fragen stellen, Befehle erklären lassen, Lösungen anfordern und Tools nutzen, um Aufgaben zu erledigen, ohne die Kommandozeile zu verlassen.
+- **Multi-Model-/Multi-Provider-Integration**: Auf LiteLLM aufgebaut, unterstützt es eine Vielzahl gängiger Modellanbieter und erlaubt eine benutzerdefinierte API-Base-Konfiguration.
+- **Sicherheitsmechanismen für KI-Operationen**: Bietet Risikostufenbewertung und Bestätigung/Blockierung für KI-ausgelöste Befehle und Änderungen, abhängig von Sandbox-Fähigkeiten.
+- **Skills-Mechanismus (erweiterbar und hot-reloadbar)**: Unterstützt das Laden von Skills aus angegebenen Verzeichnissen und deren Hot-Reload während der Laufzeit.
+
+### II. Kernfunktionen und Fähigkeiten
+
+#### 1. Terminalinteraktion und KI-Zusammenarbeit
+
+- **Interaktive REPL-Shell**: Standardbefehle laufen normal mit vollständiger PTY-Unterstützung und Kompatibilität zu gängigen interaktiven Programmen.
+- **KI-Modus**: Eingaben, die mit `;` (oder dem chinesischen Vollbreiten-`；`) beginnen, lösen eine KI-Anfrage aus. Innerhalb einer Konversation kannst du Tool-Nutzung kombinieren, um Befehle auszuführen, Dateien zu lesen oder zu bearbeiten und Probleme zu beheben.
+- **Terminal-UI**: Auf Rich aufgebaut, mit Unterstützung für Streaming-Ausgabe, Denk-Indikatoren und Ctrl+C-Unterbrechung mit Eingabewiederherstellung bei langen Gesprächen oder Aufgaben.
+- **Systemdiagnosefähigkeiten**: Enthält integrierte Diagnose-Workflows für Log-Analyse und Troubleshooting-Szenarien und kann mit Hilfe von Tools und Skills strukturierte Schlussfolgerungen und Vorschläge erzeugen.
+
+#### 2. Tool-Aufrufe und Datei-/Code-Operationen
+
+- **Tool-Call-Suite (für KI eingebaut)**: `bash_exec`, `python_exec`, `read_file`, `write_file`, `edit_file`, `ask_user`, `system_diagnose_agent`, `skill`.
+  - `bash_exec`: Führt nicht-interaktive Shell-Befehle aus.
+  - `python_exec`: Führt Python-Code aus.
+  - `read_file`: Liest Dateiinhalte.
+  - `write_file`: Überschreibt Dateiinhalte.
+  - `edit_file`: Bearbeitet Dateien durch String-Ersetzung.
+  - `ask_user`: Unterbricht die Ausführung, um den Benutzer nach Optionen oder Eingaben zu fragen.
+  - `system_diagnose_agent`: Ein Diagnose-Agent.
+  - `skill`: Ruft einen Skill auf.
+
+- **Übergreifende Dateioperationen**: Unterstützt das Lesen und Bearbeiten mehrerer Dateien für Batch-Änderungen und kann diese Änderungen durch Ausführen von Befehlen, einschließlich Tests, über `bash_exec` verifizieren.
+- **Kompatibilität mit eingebauten Befehlen**: Bietet spezielle Behandlung für Befehle, die den Shell-Zustand ändern: `cd`, `pushd`, `popd`, `export`, `unset`, `dirs`, `pwd`, `history`.
+
+#### 3. Skill-Erweiterungsmechanismus und Hot Reloading
+
+- **Skill-Konfiguration und Laden**: Unterstützt das Laden von Skills aus den Benutzerverzeichnissen `~/.config/aish/skills/` (oder `$AISH_CONFIG_DIR/skills`) und `~/.claude/skills/`. Bei Namenskonflikten haben Skills im Benutzerverzeichnis Vorrang.
+- **Skill-Metadaten und Berechtigungen**: Verwendet YAML-Frontmatter in `SKILL.md`, um Fähigkeiten, `allowed_tools` und zugehörige Metadaten zu beschreiben.
+- **Hot Reloading**: Überwacht Skill-Verzeichnisse zur Laufzeit. Hinzugefügte, entfernte oder geänderte Skills werden beim nächsten Tool-Listenaufbau oder Skill-Aufruf automatisch wirksam (Lazy Reload), ohne Neustart.
+- **Offloading großer Ausgaben**: Wenn die Ausgabe von `bash_exec` einen Schwellwert überschreitet, wird sie auf die Festplatte geschrieben und nur eine Vorschau gezeigt, zusammen mit dem Pfad zur vollständigen Ausgabedatei. Im PTY-Modus wird eine begrenzte Anzahl von Bytes beibehalten und der Überschuss in eine Offload-Datei geschrieben. Schwellwert und Verzeichnis sind konfigurierbar.
+
+#### 4. Sicherheit und Risikokontrolle
+
+- **Sicherheitsprüfung von KI-Befehlen**: KI-ausgelöste Befehle und Änderungen werden nach Risikostufe (`LOW` / `MEDIUM` / `HIGH`) bewertet, mit erklärbaren Gründen für jede Einstufung.
+- **Bestätigungs- und Blockierungsmechanismus**: Wenn die Sandbox verfügbar ist oder eine Richtlinienregel greift, erfordern `MEDIUM`-Risikoaktionen eine Bestätigung und `HIGH`-Risikoaktionen werden blockiert. Ist die Sandbox nicht verfügbar, greift die `sandbox_off_action`-Regel, die die Aktion zulassen, eine Bestätigung verlangen oder blockieren kann.
+- **Sandbox und Richtlinien**: Die Sandbox wird für die Risikoanalyse bevorzugt. Ist sie nicht verfügbar, werden stattdessen Fallback-Aktionen aus Sicherheitsrichtlinien angewendet, z. B. Bestätigung verlangen oder die Aktion blockieren.
+  - Systemweite Richtlinie: `/etc/aish/security_policy.yaml`
+  - Benutzer-Richtlinie: `~/.config/aish/security_policy.yaml` (eine Vorlage wird automatisch erzeugt, falls sie nicht existiert)
+  - Die Aktivierung des Sandbox-Services wird für vollen Schutz empfohlen.
+
+- **Optionale Whitelist**: Unterstützt das Vorab-Genehmigen bestimmter KI-Befehle, wirksam nur bei verfügbarer Sandbox, um wiederholte Bestätigungen zu reduzieren.
+
+### III. Observability und Konfiguration
+
+- **Konfigurationssystem**: Unterstützt Konfigurationsdateien, Umgebungsvariablen und Kommandozeilenargumente gemeinsam. Priorität: Kommandozeilenargumente > Umgebungsvariablen > Konfigurationsdateien. Die Ausgabesprache kann konfiguriert oder automatisch erkannt werden.
+- **Interaktive Konfiguration und Modellwechsel**: Beim ersten Start führt ein Assistent durch die Auswahl von Provider/Modell und die Prüfung von Tool-Calls. `/setup` erlaubt die Neukonfiguration, und `/model <name>` validiert und wechselt das Modell.
+- **Observability (optional)**: Langfuse kann für LLM-Observability und Tracing aktiviert werden. Standardmäßig deaktiviert.
+- **Verlauf und Sitzungspersistenz**: Befehls- und KI-Anfrageverlauf werden im SQLite-WAL-Modus gespeichert und unterstützen sitzungsübergreifende Abfragen. Der Datenbankpfad kann über `session_db_path` konfiguriert werden.
+
+### IV. Bekannte Einschränkungen und Zukunftspläne
+
+- **Langlaufende Aufgaben und große Ausgaben**: Ausgaben von langlaufenden Befehlen oder Befehlen mit großen Ergebnissen können das Kontextlimit des Modells überschreiten und möglicherweise nicht vollständig verarbeitet werden. In solchen Fällen wird empfohlen, diese Befehle direkt in der Shell auszuführen.
+- **Kontextkürzung und Budget**: Unterstützt die Konfiguration von `max_llm_messages`, `max_shell_messages` und einem optionalen `context_token_budget`. Der Kontext wird automatisch gekürzt, wenn Grenzen überschritten werden.
+- **Nicht verfügbare Sandbox**: Wenn die Sandbox nicht verfügbar ist, sind die Sicherheitsfunktionen deutlich reduziert.
+
+- **Geplante Verbesserungen**:
+  - Bessere Unterstützung für langlaufende Aufgaben
+  - Verbesserte Terminaldarstellung und Interaktion, mit besserer Performance bei großen Kontexten
+  - Laufende Verfeinerung von Funktionalität und Sicherheit basierend auf Nutzerfeedback
+  - Verbesserte Fehlerbehandlung der Sandbox
+  - Erweiterte Skill-Ausführung und Erweiterbarkeit
+
+### V. Kompatibilität
+
+- Primär für interaktive Linux-Terminalumgebungen gedacht.
+- Laufzeitumgebung: Python 3.10+.
+- Verifiziert auf:
+  - Deepin V25
+  - Ubuntu 24.04
+
+Sandbox-Fähigkeiten und Interaktionserlebnis können je nach Plattform und Distribution variieren.
+
+### VI. Community
+
+- Tritt unserem [Discord](https://discord.com/invite/Pw2mjZt3) bei, um dich mit anderen Nutzern und Entwicklern zu vernetzen.
