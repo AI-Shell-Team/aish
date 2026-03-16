@@ -481,7 +481,7 @@ class TestSetupWizardFreeKeyHelpers:
         finally:
             # Restore - try to import package again
             try:
-                from aish_freekey import request_free_api_key as _pkg_func
+                from aish_freekey import request_free_api_key as _pkg_func  # noqa: F401
                 setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
             except ImportError:
                 pass
@@ -513,7 +513,7 @@ class TestSetupWizardFreeKeyHelpers:
         finally:
             # Restore
             try:
-                from aish_freekey import register_free_key_with_retry as _pkg_func
+                from aish_freekey import register_free_key_with_retry as _pkg_func  # noqa: F401
                 setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
             except ImportError:
                 pass
@@ -544,7 +544,7 @@ class TestSetupWizardFreeKeyHelpers:
         finally:
             # Restore
             try:
-                from aish_freekey import register_free_key_with_retry as _pkg_func
+                from aish_freekey import register_free_key_with_retry as _pkg_func  # noqa: F401
                 setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
             except ImportError:
                 pass
@@ -573,7 +573,7 @@ class TestSetupWizardFreeKeyHelpers:
         finally:
             # Restore
             try:
-                from aish_freekey import register_free_key_with_retry as _pkg_func
+                from aish_freekey import register_free_key_with_retry as _pkg_func  # noqa: F401
                 setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
             except ImportError:
                 pass
@@ -599,7 +599,7 @@ class TestSetupWizardFreeKeyHelpers:
         finally:
             # Restore
             try:
-                from aish_freekey import register_free_key_with_retry as _pkg_func
+                from aish_freekey import register_free_key_with_retry as _pkg_func  # noqa: F401
                 setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
             except ImportError:
                 pass

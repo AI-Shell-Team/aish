@@ -133,8 +133,6 @@ _HAS_FREEKEY_PYTHON_PACKAGE = False
 # Try Python package first
 try:
     from aish_freekey import (
-        FALLBACK_MANUAL_SETUP as _pkg_fallback,
-        RegisterResult as _pkg_register_result,
         detect_geo_location as _pkg_detect_geo_location,
         extract_free_key_info as _pkg_extract_free_key_info,
         generate_device_fingerprint as _pkg_generate_device_fingerprint,
@@ -263,7 +261,7 @@ def request_free_api_key(
 
 
 # End of Free API Key Module
-from .helpers import (
+from .helpers import (  # noqa: E402
     _ask_value,
     _display_width,
     _is_blank,
@@ -273,21 +271,21 @@ from .helpers import (
     _prompt_secret_with_mask,
     _sanitize_filter_input,
 )
-from .provider_helpers import (
+from .provider_helpers import (  # noqa: E402
     ProviderEndpointInfo,
     get_provider_endpoints,
     get_provider_models,
     has_multi_endpoints,
 )
-from .providers import (
+from .providers import (  # noqa: E402
     _filter_provider_options,
     _get_provider_options,
     _maybe_resolve_api_base,
     _provider_note,
     _with_api_base,
 )
-from .types import ProviderOption, ToolSupportResult
-from .verification import (
+from .types import ProviderOption, ToolSupportResult  # noqa: E402
+from .verification import (  # noqa: E402
     _check_tool_support,
     _quick_static_check,
     _status_text,
@@ -1738,6 +1736,7 @@ def _interactive_setup(config: Config) -> Optional[ConfigModel]:
             if free_result is FALLBACK_MANUAL_SETUP:
                 setup_mode = "manual"
             else:
+                assert isinstance(free_result, tuple)
                 api_key, api_base, model = free_result
                 provider = ProviderOption(
                     key="custom",
