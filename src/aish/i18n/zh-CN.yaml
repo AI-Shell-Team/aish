@@ -13,6 +13,21 @@ cli:
     api_base: "大模型服务的 API Base（也可通过 AISH_API_BASE 或配置文件设置）。"
     verbose: "启用更详细的日志输出（也可通过 AISH_VERBOSE 或配置文件设置）。"
     config: "配置文件路径（默认：~/.config/aish/config.yaml）。"
+    tui: "启用 TUI（终端用户界面）模式。"
+
+  models:
+    help: "管理模型与 Provider 认证"
+    auth:
+      help: "管理 Provider 登录状态"
+      login_command_help: "登录 Provider 并在本地保存认证信息"
+      option:
+        provider: "要登录的 Provider ID（例如：openai-codex）。"
+        model: "登录后写入配置文件的默认 Provider 模型。"
+        set_default: "登录成功后，将配置中的模型更新为该 Provider 模型。"
+        auth_flow: "要使用的认证方式：browser、device-code 或 codex-cli。"
+        force: "即使本地已有认证信息，也强制重新登录。"
+        open_browser: "在浏览器认证流程中自动打开浏览器。"
+        callback_port: "浏览器认证使用的本地回调端口。传 0 表示使用临时端口。"
 
   config_prompt:
     title: "配置"

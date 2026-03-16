@@ -13,6 +13,21 @@ cli:
     api_base: "API base URL for the LLM provider (can also be set via AISH_API_BASE or config file)."
     verbose: "Enable verbose logging (can also be set via AISH_VERBOSE or config file)."
     config: "Path to configuration file (default: ~/.config/aish/config.yaml)."
+    tui: "Enable TUI (Terminal User Interface) mode."
+
+  models:
+    help: "Manage models and provider authentication"
+    auth:
+      help: "Manage provider login state"
+      login_command_help: "Log in to a provider and store auth locally"
+      option:
+        provider: "Provider id to log in (for example: openai-codex)."
+        model: "Default provider model to store in config after login."
+        set_default: "Update the config model to the provider model after login."
+        auth_flow: "Auth flow to use: browser, device-code, or codex-cli."
+        force: "Force a fresh provider login even if local auth already exists."
+        open_browser: "Open the browser automatically for browser auth."
+        callback_port: "Local callback port for browser auth. Use 0 for an ephemeral port."
 
   config_prompt:
     title: "Configuration"

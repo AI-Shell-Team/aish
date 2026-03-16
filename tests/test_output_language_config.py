@@ -10,21 +10,16 @@ import pytest
 import yaml
 
 from aish.config import Config, ConfigModel
+from aish.i18n import reset_i18n_for_tests
+from aish.utils import get_output_language_from_locale
 
 
 def test_output_language_from_config():
     """Test output language is correctly read from config"""
-    # Test with Chinese
-    config_data = {"model": "test-model", "output_language": "Chinese"}
-
-    config_model = ConfigModel.model_validate(config_data)
-    assert config_model.output_language == "Chinese"
-
-    # Test with English
-    config_data = {"model": "test-model", "output_language": "English"}
-
-    config_model = ConfigModel.model_validate(config_data)
-    assert config_model.output_language == "English"
+    for language in ["Chinese", "English", "German", "French", "Spanish", "Japanese"]:
+        config_data = {"model": "test-model", "output_language": language}
+        config_model = ConfigModel.model_validate(config_data)
+        assert config_model.output_language == language
 
     # Test with None (should use auto-detection)
     config_data = {"model": "test-model", "output_language": None}
@@ -50,8 +45,8 @@ def test_config_methods():
         assert config.get_output_language() == "Chinese"
 
         # Test set method
-        config.set_output_language("English")
-        assert config.get_output_language() == "English"
+        config.set_output_language("German")
+        assert config.get_output_language() == "German"
 
         # Test setting to None
         config.set_output_language(None)
@@ -87,33 +82,26 @@ def test_shell_output_language_logic():
 
 def test_locale_detection():
     """Test locale-based language detection"""
-
-    class MockShell:
-        def get_output_language_from_locale(self) -> str:
-            locale = os.getenv("LANG", "zh_CN.UTF-8")
-            lang = locale.split(".")[0]
-            if lang.startswith("zh"):
-                return "Chinese"
-            else:
-                return "English"
-
-    mock_shell = MockShell()
-
-    # Test with Chinese locale
     original_lang = os.environ.get("LANG")
     try:
-        os.environ["LANG"] = "zh_CN.UTF-8"
-        assert mock_shell.get_output_language_from_locale() == "Chinese"
-
-        os.environ["LANG"] = "en_US.UTF-8"
-        assert mock_shell.get_output_language_from_locale() == "English"
-
+        for locale, expected in [
+            ("zh_CN.UTF-8", "Chinese"),
+            ("en_US.UTF-8", "English"),
+            ("de_DE.UTF-8", "German"),
+            ("fr_FR.UTF-8", "French"),
+            ("es_ES.UTF-8", "Spanish"),
+            ("ja_JP.UTF-8", "Japanese"),
+            ("it_IT.UTF-8", "English"),
+        ]:
+            os.environ["LANG"] = locale
+            reset_i18n_for_tests()
+            assert get_output_language_from_locale() == expected
     finally:
-        # Restore original locale
         if original_lang:
             os.environ["LANG"] = original_lang
         elif "LANG" in os.environ:
             del os.environ["LANG"]
+        reset_i18n_for_tests()
 
 
 if __name__ == "__main__":

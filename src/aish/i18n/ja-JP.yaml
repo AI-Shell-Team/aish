@@ -1,0 +1,108 @@
+cli:
+  app_help: "AI Shell - LLM 機能を内蔵したシェル"
+  help_option_help: "このメッセージを表示して終了します。"
+  run_command_help: "AI Shell を起動します"
+  info_command_help: "AI Shell の情報を表示します"
+  check_langfuse_command_help: "Langfuse 設定を確認します"
+  setup_command_help: "対話セットアップを実行して終了します"
+  check_tool_support_command_help: "ツール呼び出し対応のライブ確認をデバッグします"
+
+  option:
+    model: "使用する LLM モデルです。AISH_MODEL または設定ファイルでも指定できます。"
+    api_key: "LLM プロバイダーの API キーです。AISH_API_KEY または各プロバイダーの環境変数でも指定できます。"
+    api_base: "LLM プロバイダーの API ベース URL です。AISH_API_BASE または設定ファイルでも指定できます。"
+    config: "設定ファイルのパスです。既定値: ~/.config/aish/config.yaml。"
+    tui: "TUI モードを有効にします。"
+
+  models:
+    help: "モデルとプロバイダー認証を管理します"
+    auth:
+      help: "プロバイダーのログイン状態を管理します"
+      login_command_help: "プロバイダーにログインし、認証情報をローカルに保存します"
+      option:
+        provider: "ログインするプロバイダー ID です。例: openai-codex。"
+        model: "ログイン後に設定へ保存する既定のプロバイダーモデルです。"
+        set_default: "ログイン後に設定のモデルをプロバイダーモデルへ更新します。"
+        auth_flow: "使用する認証フローです。browser、device-code、codex-cli から選択します。"
+        force: "ローカル認証が存在していても新しいログインを強制します。"
+        open_browser: "browser 認証でブラウザーを自動的に開きます。"
+        callback_port: "browser 認証で使うローカルコールバックポートです。0 を指定すると一時ポートを使います。"
+
+  startup:
+    goodbye: "終了します。"
+    config_file_error: "設定ファイルエラー: {error}"
+    config_file_hint: "有効な設定ファイルのパスを指定するには --config を使用してください。"
+
+  langfuse:
+    incomplete: "Langfuse の設定が不完全です"
+    missing: "不足: {var}"
+    complete: "Langfuse の設定は完全です"
+    script_failed: "Langfuse 確認スクリプトの実行に失敗しました: {error}"
+    script_not_found: "check_langfuse.py スクリプトが見つかりません"
+    run_from_root: "このコマンドはプロジェクトルートで実行してください"
+
+  parse_errors:
+    title: "エラー"
+    help_hint: "詳細は --help を使用してください。"
+    option_requires_argument: "オプション {option} には引数が必要です。"
+    no_such_option: "不明なオプション: {option}"
+    missing_parameter: "不足しているパラメーター: {param}"
+    invalid_value_for_option: "{option} の値が無効です: {reason}"
+    generic: "無効な引数です: {message}"
+
+shell:
+  command_cancelled: "コマンドはキャンセルされました"
+
+  error:
+    execution_error: "実行中にエラーが発生しました: {error}"
+
+  security:
+    title:
+      blocked: "セキュリティによりブロック: {tool}"
+      notice: "セキュリティ通知: {tool}"
+      confirm: "確認が必要です: {tool}"
+    label:
+      description: "説明"
+      command: "コマンド"
+      target: "対象"
+      content_preview: "内容プレビュー"
+      fallback_hint: "補足"
+      risk_level: "リスクレベル"
+      matched_rule: "一致したルール"
+      matched_paths: "一致したパス"
+      reasons: "理由"
+      alternatives: "代替案"
+      impact: "影響"
+      confirm_message: "確認メッセージ"
+      no_additional_info: "追加情報はありません。"
+    fallback:
+      sandbox_execute_failed: "コマンドの事前実行に失敗したため、リスクを評価できません。実行前に確認してください。"
+      sandbox_timeout: "コマンドの事前実行がタイムアウトしたため、リスクを評価できません。実行前に確認してください。"
+      sandbox_ipc_timeout: "コマンド事前評価の待機がタイムアウトしました。実行前に確認してください。"
+      generic: "コマンドのリスク評価を完了できませんでした。実行前に確認してください。"
+
+help:
+  labels:
+    usage: "使い方"
+    options: "オプション"
+    examples: "例"
+    notes: "補足"
+    brief_usage: "使い方: {usage}"
+
+  general:
+    title: "AI Shell ヘルプ"
+    markdown: |-
+      ## 利用可能なコマンド:
+
+      ### 一般コマンド
+      - `help` - このヘルプを表示します
+      - `clear` - 画面を消去します
+      - `exit` - シェルを終了します
+      - `/model [model]` - モデルを表示または切り替えます
+      - `/setup` - API 設定を再構成します
+
+      ### AI コマンド
+      - `; <質問>` - AI アシスタントに質問します
+
+      ### ヘルプの表示
+      各コマンドの詳細は `<command> --help` または `<command> -h` を使用してください。

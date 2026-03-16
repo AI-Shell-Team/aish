@@ -1,0 +1,108 @@
+cli:
+  app_help: "AI Shell - Eine Shell mit integrierten LLM-Funktionen"
+  help_option_help: "Diese Meldung anzeigen und beenden."
+  run_command_help: "AI Shell starten"
+  info_command_help: "Informationen zu AI Shell anzeigen"
+  check_langfuse_command_help: "Langfuse-Konfiguration prüfen"
+  setup_command_help: "Interaktive Einrichtung ausführen und beenden"
+  check_tool_support_command_help: "Live-Prüfung der Tool-Call-Unterstützung debuggen"
+
+  option:
+    model: "Zu verwendendes LLM-Modell (kann auch über AISH_MODEL oder die Konfigurationsdatei gesetzt werden)."
+    api_key: "API-Schlüssel für den LLM-Anbieter (kann auch über AISH_API_KEY oder Provider-Umgebungsvariablen gesetzt werden)."
+    api_base: "API-Basis-URL für den LLM-Anbieter (kann auch über AISH_API_BASE oder die Konfigurationsdatei gesetzt werden)."
+    config: "Pfad zur Konfigurationsdatei (Standard: ~/.config/aish/config.yaml)."
+    tui: "TUI-Modus (Terminal User Interface) aktivieren."
+
+  models:
+    help: "Modelle und Provider-Authentifizierung verwalten"
+    auth:
+      help: "Anmeldestatus des Providers verwalten"
+      login_command_help: "Bei einem Provider anmelden und Auth lokal speichern"
+      option:
+        provider: "Provider-ID für die Anmeldung (zum Beispiel: openai-codex)."
+        model: "Standardmodell des Providers, das nach der Anmeldung in der Konfiguration gespeichert wird."
+        set_default: "Das Konfigurationsmodell nach der Anmeldung auf das Providermodell aktualisieren."
+        auth_flow: "Zu verwendender Auth-Flow: browser, device-code oder codex-cli."
+        force: "Erzwingt eine neue Anmeldung, auch wenn lokal bereits Auth-Daten vorhanden sind."
+        open_browser: "Den Browser für browser-basierte Anmeldung automatisch öffnen."
+        callback_port: "Lokaler Callback-Port für browser-basierte Anmeldung. 0 verwendet einen temporären Port."
+
+  startup:
+    goodbye: "Auf Wiedersehen!"
+    config_file_error: "Fehler in der Konfigurationsdatei: {error}"
+    config_file_hint: "Verwenden Sie --config, um einen gültigen Pfad zur Konfigurationsdatei anzugeben."
+
+  langfuse:
+    incomplete: "Langfuse-Konfiguration ist unvollständig"
+    missing: "Fehlt: {var}"
+    complete: "Langfuse-Konfiguration ist vollständig"
+    script_failed: "Langfuse-Prüfskript fehlgeschlagen: {error}"
+    script_not_found: "check_langfuse.py-Skript nicht gefunden"
+    run_from_root: "Bitte führen Sie diesen Befehl im Projektwurzelverzeichnis aus"
+
+  parse_errors:
+    title: "Fehler"
+    help_hint: "Verwenden Sie --help für weitere Informationen."
+    option_requires_argument: "Option {option} erfordert ein Argument."
+    no_such_option: "Unbekannte Option: {option}"
+    missing_parameter: "Fehlender Parameter: {param}"
+    invalid_value_for_option: "Ungültiger Wert für {option}: {reason}"
+    generic: "Ungültige Argumente: {message}"
+
+shell:
+  command_cancelled: "Befehl abgebrochen"
+
+  error:
+    execution_error: "Fehler bei der Ausführung: {error}"
+
+  security:
+    title:
+      blocked: "Sicherheitsblockierung: {tool}"
+      notice: "Sicherheitshinweis: {tool}"
+      confirm: "Bestätigung erforderlich: {tool}"
+    label:
+      description: "Beschreibung"
+      command: "Befehl"
+      target: "Ziel"
+      content_preview: "Inhaltsvorschau"
+      fallback_hint: "Hinweis"
+      risk_level: "Risikostufe"
+      matched_rule: "Zugeordnete Regel"
+      matched_paths: "Zugeordnete Pfade"
+      reasons: "Gründe"
+      alternatives: "Alternativen"
+      impact: "Auswirkung"
+      confirm_message: "Bestätigungsmeldung"
+      no_additional_info: "Keine zusätzlichen Informationen verfügbar."
+    fallback:
+      sandbox_execute_failed: "Die Vorabausführung des Befehls ist fehlgeschlagen, daher kann das Risiko nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
+      sandbox_timeout: "Die Vorabausführung des Befehls hat das Zeitlimit überschritten, daher kann das Risiko nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
+      sandbox_ipc_timeout: "Zeitüberschreitung beim Warten auf die Vorabprüfung des Befehls. Bitte vor der echten Ausführung bestätigen."
+      generic: "Die Risikobewertung des Befehls konnte nicht abgeschlossen werden. Bitte vor der echten Ausführung bestätigen."
+
+help:
+  labels:
+    usage: "Verwendung"
+    options: "Optionen"
+    examples: "Beispiele"
+    notes: "Hinweise"
+    brief_usage: "Verwendung: {usage}"
+
+  general:
+    title: "AI Shell Hilfe"
+    markdown: |-
+      ## Verfuegbare Befehle:
+
+      ### Allgemeine Befehle
+      - `help` - Diese Hilfe anzeigen
+      - `clear` - Bildschirm leeren
+      - `exit` - Shell beenden
+      - `/model [Modell]` - Modell anzeigen oder wechseln
+      - `/setup` - API-Einstellungen erneut konfigurieren
+
+      ### KI-Befehle
+      - `; <Frage>` - Dem KI-Assistenten eine Frage stellen
+
+      ### Weitere Hilfe
+      Verwenden Sie `<Befehl> --help` oder `<Befehl> -h`, um Detailhilfe fuer einen Befehl anzuzeigen.

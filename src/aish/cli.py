@@ -32,8 +32,8 @@ app = typer.Typer(
 )
 
 console = Console()
-models_app = typer.Typer(help="Manage models and provider auth", cls=I18nTyperGroup)
-models_auth_app = typer.Typer(help="Manage provider login state", cls=I18nTyperGroup)
+models_app = typer.Typer(help=t("cli.models.help"), cls=I18nTyperGroup)
+models_auth_app = typer.Typer(help=t("cli.models.auth.help"), cls=I18nTyperGroup)
 models_app.add_typer(models_auth_app, name="auth")
 app.add_typer(models_app, name="models")
 
@@ -167,7 +167,7 @@ def run(
     tui: bool = typer.Option(
         False,
         "--tui",
-        help="Enable TUI (Terminal User Interface) mode",
+        help=t("cli.option.tui"),
     ),
 ):
     """Run the AI Shell"""
@@ -261,44 +261,48 @@ def setup(
         sys.exit(1)
 
 
-@models_auth_app.command("login", cls=I18nTyperCommand)
+@models_auth_app.command(
+    "login",
+    help=t("cli.models.auth.login_command_help"),
+    cls=I18nTyperCommand,
+)
 def models_auth_login(
     provider: str = typer.Option(
         ...,
         "--provider",
-        help="Provider id to log in (for example: openai-codex).",
+        help=t("cli.models.auth.option.provider"),
     ),
     model: str = typer.Option(
         "",
         "--model",
-        help="Default provider model to store in config after login.",
+        help=t("cli.models.auth.option.model"),
     ),
     set_default: bool = typer.Option(
         True,
         "--set-default/--no-set-default",
-        help="Update the config model to the provider model after login.",
+        help=t("cli.models.auth.option.set_default"),
     ),
     auth_flow: ProviderAuthFlow = typer.Option(
         ProviderAuthFlow.BROWSER,
         "--auth-flow",
-        help="Auth flow to use: browser, device-code, or codex-cli.",
+        help=t("cli.models.auth.option.auth_flow"),
     ),
     force: bool = typer.Option(
         False,
         "--force/--no-force",
-        help="Force a fresh provider login even if local auth already exists.",
+        help=t("cli.models.auth.option.force"),
     ),
     open_browser: bool = typer.Option(
         True,
         "--open-browser/--no-open-browser",
-        help="Open the browser automatically for browser auth.",
+        help=t("cli.models.auth.option.open_browser"),
     ),
     callback_port: int = typer.Option(
         OPENAI_CODEX_DEFAULT_CALLBACK_PORT,
         "--callback-port",
         min=0,
         max=65535,
-        help="Local callback port for browser auth. Use 0 for an ephemeral port.",
+        help=t("cli.models.auth.option.callback_port"),
     ),
     config_file: Optional[str] = typer.Option(
         None,

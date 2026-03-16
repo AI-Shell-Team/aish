@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from aish.config import ConfigModel
+from aish.i18n import get_ui_locale
 
 # 环境信息缓存文件路径
 ENV_CACHE_FILE = Path.home() / ".config" / "aish" / "env_cache.json"
@@ -72,12 +73,14 @@ def get_output_language(config: ConfigModel) -> str:
 
 def get_output_language_from_locale() -> str:
     """Get the output language from the locale"""
-    locale = os.getenv("LANG", "zh_CN.UTF-8")
-    lang = locale.split(".")[0]
-    if lang.startswith("zh"):
-        return "Chinese"
-    else:
-        return "English"
+    return {
+        "zh-CN": "Chinese",
+        "en-US": "English",
+        "de-DE": "German",
+        "fr-FR": "French",
+        "es-ES": "Spanish",
+        "ja-JP": "Japanese",
+    }.get(get_ui_locale(), "English")
 
 
 def get_system_info(command: str) -> str:

@@ -1,0 +1,108 @@
+cli:
+  app_help: "AI Shell - Una shell con capacidades LLM integradas"
+  help_option_help: "Muestra este mensaje y termina."
+  run_command_help: "Iniciar AI Shell"
+  info_command_help: "Mostrar informacion sobre AI Shell"
+  check_langfuse_command_help: "Comprobar la configuracion de Langfuse"
+  setup_command_help: "Ejecutar la configuracion interactiva y salir"
+  check_tool_support_command_help: "Depurar la verificacion en vivo del soporte de llamadas a herramientas"
+
+  option:
+    model: "Modelo LLM que se usara (tambien puede definirse mediante AISH_MODEL o el archivo de configuracion)."
+    api_key: "Clave API del proveedor LLM (tambien puede definirse mediante AISH_API_KEY o variables de entorno del proveedor)."
+    api_base: "URL base de API del proveedor LLM (tambien puede definirse mediante AISH_API_BASE o el archivo de configuracion)."
+    config: "Ruta del archivo de configuracion (predeterminado: ~/.config/aish/config.yaml)."
+    tui: "Habilitar el modo TUI (interfaz de usuario en terminal)."
+
+  models:
+    help: "Administrar modelos y autenticacion de proveedores"
+    auth:
+      help: "Administrar el estado de inicio de sesion del proveedor"
+      login_command_help: "Iniciar sesion en un proveedor y guardar la autenticacion localmente"
+      option:
+        provider: "Identificador del proveedor para iniciar sesion (por ejemplo: openai-codex)."
+        model: "Modelo predeterminado del proveedor que se guardara en la configuracion tras iniciar sesion."
+        set_default: "Actualizar el modelo de la configuracion con el modelo del proveedor despues del inicio de sesion."
+        auth_flow: "Flujo de autenticacion que se usara: browser, device-code o codex-cli."
+        force: "Forzar un nuevo inicio de sesion aunque ya exista autenticacion local."
+        open_browser: "Abrir automaticamente el navegador para la autenticacion por browser."
+        callback_port: "Puerto local de retorno para la autenticacion por browser. Use 0 para un puerto efimero."
+
+  startup:
+    goodbye: "Adios!"
+    config_file_error: "Error en el archivo de configuracion: {error}"
+    config_file_hint: "Use --config para indicar una ruta valida del archivo de configuracion."
+
+  langfuse:
+    incomplete: "La configuracion de Langfuse esta incompleta"
+    missing: "Falta: {var}"
+    complete: "La configuracion de Langfuse esta completa"
+    script_failed: "Fallo el script de comprobacion de Langfuse: {error}"
+    script_not_found: "No se encontro el script check_langfuse.py"
+    run_from_root: "Asegurese de ejecutar este comando desde la raiz del proyecto"
+
+  parse_errors:
+    title: "Error"
+    help_hint: "Use --help para mas informacion."
+    option_requires_argument: "La opcion {option} requiere un argumento."
+    no_such_option: "Opcion desconocida: {option}"
+    missing_parameter: "Falta el parametro: {param}"
+    invalid_value_for_option: "Valor no valido para {option}: {reason}"
+    generic: "Argumentos no validos: {message}"
+
+shell:
+  command_cancelled: "Comando cancelado"
+
+  error:
+    execution_error: "Error durante la ejecucion: {error}"
+
+  security:
+    title:
+      blocked: "Bloqueo de seguridad: {tool}"
+      notice: "Aviso de seguridad: {tool}"
+      confirm: "Se requiere confirmacion: {tool}"
+    label:
+      description: "Descripcion"
+      command: "Comando"
+      target: "Objetivo"
+      content_preview: "Vista previa del contenido"
+      fallback_hint: "Nota"
+      risk_level: "Nivel de riesgo"
+      matched_rule: "Regla coincidente"
+      matched_paths: "Rutas coincidentes"
+      reasons: "Motivos"
+      alternatives: "Alternativas"
+      impact: "Impacto"
+      confirm_message: "Mensaje de confirmacion"
+      no_additional_info: "No hay informacion adicional disponible."
+    fallback:
+      sandbox_execute_failed: "La preejecucion del comando fallo, por lo que no se puede evaluar el riesgo. Confirme antes de la ejecucion real."
+      sandbox_timeout: "La preejecucion del comando excedio el tiempo limite, por lo que no se puede evaluar el riesgo. Confirme antes de la ejecucion real."
+      sandbox_ipc_timeout: "Se agoto el tiempo de espera de la preevaluacion del comando. Confirme antes de la ejecucion real."
+      generic: "No se pudo completar la evaluacion de riesgo del comando. Confirme antes de la ejecucion real."
+
+help:
+  labels:
+    usage: "Uso"
+    options: "Opciones"
+    examples: "Ejemplos"
+    notes: "Notas"
+    brief_usage: "Uso: {usage}"
+
+  general:
+    title: "Ayuda de AI Shell"
+    markdown: |-
+      ## Comandos disponibles:
+
+      ### Comandos generales
+      - `help` - Mostrar esta ayuda
+      - `clear` - Limpiar la pantalla
+      - `exit` - Salir de la shell
+      - `/model [modelo]` - Mostrar o cambiar el modelo
+      - `/setup` - Reconfigurar los ajustes de API
+
+      ### Comandos de IA
+      - `; <pregunta>` - Hacer una pregunta al asistente de IA
+
+      ### Obtener ayuda
+      Use `<comando> --help` o `<comando> -h` para ver la ayuda detallada de cualquier comando.

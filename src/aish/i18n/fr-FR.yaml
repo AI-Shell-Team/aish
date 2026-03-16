@@ -1,0 +1,108 @@
+cli:
+  app_help: "AI Shell - Un shell avec des capacites LLM integrees"
+  help_option_help: "Afficher ce message et quitter."
+  run_command_help: "Lancer AI Shell"
+  info_command_help: "Afficher les informations sur AI Shell"
+  check_langfuse_command_help: "Verifier la configuration Langfuse"
+  setup_command_help: "Executer la configuration interactive puis quitter"
+  check_tool_support_command_help: "Diagnostiquer la verification en direct du support des appels d'outils"
+
+  option:
+    model: "Modele LLM a utiliser (peut aussi etre defini via AISH_MODEL ou le fichier de configuration)."
+    api_key: "Cle API du fournisseur LLM (peut aussi etre definie via AISH_API_KEY ou les variables d'environnement du fournisseur)."
+    api_base: "URL de base API du fournisseur LLM (peut aussi etre definie via AISH_API_BASE ou le fichier de configuration)."
+    config: "Chemin du fichier de configuration (par defaut : ~/.config/aish/config.yaml)."
+    tui: "Activer le mode TUI (interface terminale)."
+
+  models:
+    help: "Gerer les modeles et l'authentification des fournisseurs"
+    auth:
+      help: "Gerer l'etat de connexion du fournisseur"
+      login_command_help: "Se connecter a un fournisseur et enregistrer l'authentification localement"
+      option:
+        provider: "Identifiant du fournisseur a utiliser pour la connexion (par exemple : openai-codex)."
+        model: "Modele fournisseur par defaut a enregistrer dans la configuration apres connexion."
+        set_default: "Mettre a jour le modele de configuration avec le modele du fournisseur apres connexion."
+        auth_flow: "Flux d'authentification a utiliser : browser, device-code ou codex-cli."
+        force: "Forcer une nouvelle connexion meme si une authentification locale existe deja."
+        open_browser: "Ouvrir automatiquement le navigateur pour l'authentification via browser."
+        callback_port: "Port local de rappel pour l'authentification via browser. Utilisez 0 pour un port ephemere."
+
+  startup:
+    goodbye: "Au revoir !"
+    config_file_error: "Erreur du fichier de configuration : {error}"
+    config_file_hint: "Utilisez --config pour indiquer un chemin de fichier de configuration valide."
+
+  langfuse:
+    incomplete: "La configuration Langfuse est incomplete"
+    missing: "Manquant : {var}"
+    complete: "La configuration Langfuse est complete"
+    script_failed: "Echec du script de verification Langfuse : {error}"
+    script_not_found: "Script check_langfuse.py introuvable"
+    run_from_root: "Veuillez executer cette commande depuis la racine du projet"
+
+  parse_errors:
+    title: "Erreur"
+    help_hint: "Utilisez --help pour plus d'informations."
+    option_requires_argument: "L'option {option} requiert un argument."
+    no_such_option: "Option inconnue : {option}"
+    missing_parameter: "Parametre manquant : {param}"
+    invalid_value_for_option: "Valeur invalide pour {option} : {reason}"
+    generic: "Arguments invalides : {message}"
+
+shell:
+  command_cancelled: "Commande annulee"
+
+  error:
+    execution_error: "Erreur pendant l'execution : {error}"
+
+  security:
+    title:
+      blocked: "Blocage de securite : {tool}"
+      notice: "Alerte de securite : {tool}"
+      confirm: "Confirmation requise : {tool}"
+    label:
+      description: "Description"
+      command: "Commande"
+      target: "Cible"
+      content_preview: "Apercu du contenu"
+      fallback_hint: "Note"
+      risk_level: "Niveau de risque"
+      matched_rule: "Regle correspondante"
+      matched_paths: "Chemins correspondants"
+      reasons: "Raisons"
+      alternatives: "Alternatives"
+      impact: "Impact"
+      confirm_message: "Message de confirmation"
+      no_additional_info: "Aucune information supplementaire disponible."
+    fallback:
+      sandbox_execute_failed: "La pre-execution de la commande a echoue, le risque ne peut donc pas etre evalue. Veuillez confirmer avant l'execution reelle."
+      sandbox_timeout: "La pre-execution de la commande a expire, le risque ne peut donc pas etre evalue. Veuillez confirmer avant l'execution reelle."
+      sandbox_ipc_timeout: "Le delai d'attente de la pre-evaluation de la commande a expire. Veuillez confirmer avant l'execution reelle."
+      generic: "L'evaluation du risque de la commande n'a pas pu etre effectuee. Veuillez confirmer avant l'execution reelle."
+
+help:
+  labels:
+    usage: "Utilisation"
+    options: "Options"
+    examples: "Exemples"
+    notes: "Notes"
+    brief_usage: "Utilisation : {usage}"
+
+  general:
+    title: "Aide AI Shell"
+    markdown: |-
+      ## Commandes disponibles :
+
+      ### Commandes generales
+      - `help` - Afficher cette aide
+      - `clear` - Effacer l'ecran
+      - `exit` - Quitter le shell
+      - `/model [modele]` - Afficher ou changer de modele
+      - `/setup` - Reconfigurer les parametres API
+
+      ### Commandes IA
+      - `; <question>` - Poser une question a l'assistant IA
+
+      ### Obtenir de l'aide
+      Utilisez `<commande> --help` ou `<commande> -h` pour afficher l'aide detaillee d'une commande.
