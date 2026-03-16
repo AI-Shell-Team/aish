@@ -27,11 +27,43 @@ cli:
       no_spaces: "API key must not contain spaces."
 
   setup:
+    entry_title: "Initial setup"
+    entry_header: "Choose how you want to configure your API access."
+    step_free_key: "Free key setup"
     step_provider: "Step 1/3: Choose provider"
     step_provider_endpoint: "Step 1.5/3: Choose endpoint"
     step_zai_endpoint: "Step 1.5/3: Choose Z.AI endpoint"
     step_key: "Step 2/3: Enter API key"
     step_model: "Step 3/3: Choose model"
+    free_key_header: "Get a free API key using this device fingerprint."
+    free_key_detecting_location: "Detecting service region..."
+    free_key_location_detected: "Detected region: {location}"
+    free_key_location_cn: "Regional"
+    free_key_location_overseas: "Global"
+    free_key_registering: "Registering free API key..."
+    free_key_success: "Free API key acquired"
+    free_key_missing_key: "Registration succeeded but no API key was returned"
+    free_key_already_registered: "This device has already registered a free key"
+    free_key_fingerprint_failed: "Unable to collect device information for fingerprint"
+    free_key_failed_with_reason: "Free API key registration failed: {reason}"
+    free_key_provider_label: "Free API"
+    free_key_privacy_title: "Privacy Notice"
+    free_key_privacy_notice: |
+      To provide the free API Key service, we need to collect the following device information:
+
+      • Device fingerprint (a hash generated from hardware info like MAC address, disk serial number, motherboard serial number, etc.)
+      • Your service region (for optimal server assignment)
+
+      Purpose:
+      • Device fingerprint is used to prevent abuse, ensuring each device can only obtain one free key
+      • Service region is used to assign you the nearest server node
+
+      We promise:
+      • No personal identity information will be collected
+      • Device fingerprint is an irreversible hash, original hardware info cannot be recovered
+      • Data is used solely for this service and will not be shared with third parties
+    free_key_quota_exhausted: "Free quota exhausted"
+    free_key_quota_exhausted_hint: "Your free API Key quota has been exhausted. Please configure your own API Key to continue."
     provider_header: "Choose a provider (type to filter)"
     provider_filter_prompt: "Filter: "
     provider_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to cancel."
@@ -121,9 +153,16 @@ cli:
     action_retry_model: "Choose another model"
     action_retry_api_base: "Re-enter API Base"
     action_retry_api_key: "Re-enter API Key"
+    action_retry_free_key: "Retry free key registration"
+    action_fallback_manual: "Switch to manual setup"
+    action_use_existing_key: "Use existing key"
+    action_use_free_key: "Use free API key"
+    action_manual_setup: "Manual provider setup"
     action_change_provider: "Change provider"
     action_continue: "Continue anyway (not recommended)"
     action_exit: "Exit setup"
+    action_agree: "Agree and continue"
+    action_disagree: "Disagree"
     retry_api_base_prompt: "Enter API Base (type back to return)"
     retry_api_base_prompt_with_current: "Enter API Base (current: {current}, type back to return)"
     retry_api_base_required: "API Base is required"
@@ -263,6 +302,9 @@ shell:
     llm_error_title: "❌ LLM Request Failed"
     llm_error_details_title: "Debug Details"
     tool_args_json_invalid_hint: "❌ Request failed, please retry."
+
+  hint:
+    run_setup: "Type /setup to reconfigure your API Key"
 
   prompt:
     confirm_execute: "?Execute this command? [y/n]:"

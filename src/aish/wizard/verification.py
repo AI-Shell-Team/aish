@@ -14,8 +14,7 @@ from typing import Optional
 
 import anyio
 from rich.console import Console
-from rich.progress import (Progress, ProgressColumn, SpinnerColumn, Task,
-                           TextColumn)
+from rich.progress import Progress, ProgressColumn, SpinnerColumn, Task, TextColumn
 from rich.text import Text
 
 from ..i18n import t

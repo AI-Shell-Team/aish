@@ -6,8 +6,11 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
-from typing import Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -15,32 +18,282 @@ import anyio
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import (Progress, SpinnerColumn, TextColumn,
-                           TimeElapsedColumn)
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from ..config import Config, ConfigModel
 from ..i18n import t
 from ..litellm_loader import load_litellm, preload_litellm
 from ..providers.openai_codex import is_openai_codex_model
-from .constants import (_HUGGINGFACE_DEFAULT_MODEL,
-                        _KILOCODE_DEFAULT_MODEL, _MISTRAL_DEFAULT_MODEL,
-                        _OLLAMA_DEFAULT_MODEL, _QIANFAN_MODELS,
-                        _QWEN_DEFAULT_MODEL, _STATIC_FILTER_SKIP_PROVIDERS,
-                        _TOGETHER_DEFAULT_MODEL, _VLLM_DEFAULT_MODEL,
-                        _XAI_DEFAULT_MODEL)
-from .helpers import (_ask_value, _display_width, _is_blank, _is_valid_url,
-                      _mask_secret, _matches_filter_query,
-                      _prompt_secret_with_mask, _sanitize_filter_input)
-from .provider_helpers import (ProviderEndpointInfo, get_provider_endpoints,
-                               get_provider_models, has_multi_endpoints)
-from .providers import (_filter_provider_options, _get_provider_options,
-                        _maybe_resolve_api_base, _provider_note,
-                        _with_api_base)
+from .constants import (
+    _HUGGINGFACE_DEFAULT_MODEL,
+    _KILOCODE_DEFAULT_MODEL,
+    _MISTRAL_DEFAULT_MODEL,
+    _OLLAMA_DEFAULT_MODEL,
+    _QIANFAN_MODELS,
+    _QWEN_DEFAULT_MODEL,
+    _STATIC_FILTER_SKIP_PROVIDERS,
+    _TOGETHER_DEFAULT_MODEL,
+    _VLLM_DEFAULT_MODEL,
+    _XAI_DEFAULT_MODEL,
+)
+
+# ============================================================================
+# Free API Key Module - supports both Python package and standalone binary
+# ============================================================================
+
+# Sentinel for fallback to manual setup
+FALLBACK_MANUAL_SETUP = object()
+
+
+@dataclass
+class RegisterResult:
+    """Result of free key registration attempt."""
+    success: bool = False
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    model: Optional[str] = None
+    error_message: Optional[str] = None
+    already_registered: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RegisterResult":
+        return cls(
+            success=data.get("success", False),
+            api_key=data.get("api_key"),
+            api_base=data.get("api_base"),
+            model=data.get("model"),
+            error_message=data.get("error_message"),
+            already_registered=data.get("already_registered", False),
+        )
+
+
+def _find_freekey_binary() -> Optional[str]:
+    """Find the standalone aish_freekey binary.
+
+    Searches in:
+    1. PATH environment
+    2. ~/.local/bin/
+    3. /usr/local/bin/
+
+    Returns:
+        Path to binary if found, None otherwise
+    """
+    binary_name = "aish_freekey_bin"
+    if sys.platform == "win32":
+        binary_name += ".exe"
+
+    # 1. Check PATH
+    binary = shutil.which(binary_name)
+    if binary:
+        return binary
+
+    # 2. Check common installation locations
+    common_paths = [
+        Path.home() / ".local" / "bin" / binary_name,
+        Path("/usr/local/bin") / binary_name,
+    ]
+
+    for path in common_paths:
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+
+    return None
+
+
+def _run_binary(binary_path: str, command: str, *args: str) -> str:
+    """Run the binary and return stdout."""
+    try:
+        result = subprocess.run(
+            [binary_path, command, *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _run_binary_json(binary_path: str, command: str, *args: str) -> dict:
+    """Run the binary and return JSON result."""
+    output = _run_binary(binary_path, command, *args)
+    if not output:
+        return {}
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        return {}
+
+
+# Module-level: detect if free key functionality is available
+_FREEKEY_BINARY_PATH: Optional[str] = None
+_HAS_FREEKEY_PYTHON_PACKAGE = False
+
+# Try Python package first
+try:
+    from aish_freekey import (
+        FALLBACK_MANUAL_SETUP as _pkg_fallback,
+        RegisterResult as _pkg_register_result,
+        detect_geo_location as _pkg_detect_geo_location,
+        extract_free_key_info as _pkg_extract_free_key_info,
+        generate_device_fingerprint as _pkg_generate_device_fingerprint,
+        get_default_config_for_location as _pkg_get_default_config_for_location,
+        register_free_key_with_retry as _pkg_register_free_key_with_retry,
+        request_free_api_key as _pkg_request_free_api_key,
+    )
+    _HAS_FREEKEY_PYTHON_PACKAGE = True
+except ImportError:
+    pass
+
+# If no Python package, try standalone binary
+if not _HAS_FREEKEY_PYTHON_PACKAGE:
+    _FREEKEY_BINARY_PATH = _find_freekey_binary()
+
+# Module is available if either Python package or binary is found
+HAS_FREE_KEY_MODULE = _HAS_FREEKEY_PYTHON_PACKAGE or (_FREEKEY_BINARY_PATH is not None)
+
+
+# Provide unified interface functions
+def generate_device_fingerprint() -> str:
+    """Generate a SHA256 fingerprint from device hardware information."""
+    if _HAS_FREEKEY_PYTHON_PACKAGE:
+        return _pkg_generate_device_fingerprint()
+    if _FREEKEY_BINARY_PATH:
+        return _run_binary(_FREEKEY_BINARY_PATH, "fp")
+    return ""
+
+
+def detect_geo_location() -> str:
+    """Detect if user is in China (cn) or overseas."""
+    if _HAS_FREEKEY_PYTHON_PACKAGE:
+        return _pkg_detect_geo_location()
+    if _FREEKEY_BINARY_PATH:
+        result = _run_binary_json(_FREEKEY_BINARY_PATH, "loc")
+        return result.get("location", "cn")
+    return "cn"
+
+
+def extract_free_key_info(
+    payload: dict,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extract API key, API base, and model from the registration response."""
+    if _HAS_FREEKEY_PYTHON_PACKAGE:
+        return _pkg_extract_free_key_info(payload)
+
+    # Inline implementation for binary mode
+    if not isinstance(payload, dict):
+        return (None, None, None)
+
+    api_key = payload.get("apikey") or payload.get("api_key")
+    if not isinstance(api_key, str) or not api_key.strip():
+        return (None, None, None)
+    api_key = api_key.strip()
+
+    api_base = payload.get("api_base") or payload.get("api_base_url")
+    if isinstance(api_base, str):
+        api_base = api_base.strip() or None
+    else:
+        api_base = None
+
+    model = payload.get("model")
+    if isinstance(model, str):
+        model = model.strip() or None
+    else:
+        model = None
+
+    return (api_key, api_base, model)
+
+
+def get_default_config_for_location(location: str) -> Tuple[Optional[str], Optional[str]]:
+    """Get default api_base and model for a location.
+
+    Returns (None, None) when using binary mode - the binary/server will provide
+    the appropriate values.
+    """
+    if _HAS_FREEKEY_PYTHON_PACKAGE:
+        return _pkg_get_default_config_for_location(location)
+
+    # Binary mode: server will provide api_base and model
+    return (None, None)
+
+
+def register_free_key_with_retry(
+    location: Optional[str] = None,
+) -> RegisterResult | object:
+    """Register a free API key."""
+    if _HAS_FREEKEY_PYTHON_PACKAGE:
+        result = _pkg_register_free_key_with_retry(location)
+        # Convert package RegisterResult to our RegisterResult
+        if hasattr(result, 'success'):
+            return RegisterResult(
+                success=result.success,
+                api_key=getattr(result, 'api_key', None),
+                api_base=getattr(result, 'api_base', None),
+                model=getattr(result, 'model', None),
+                error_message=getattr(result, 'error_message', None),
+                already_registered=getattr(result, 'already_registered', False),
+            )
+        return result
+
+    if _FREEKEY_BINARY_PATH:
+        result = _run_binary_json(_FREEKEY_BINARY_PATH, "reg")
+        if not result:
+            return RegisterResult(
+                success=False,
+                error_message="Failed to communicate with registration service",
+            )
+        return RegisterResult.from_dict(result)
+
+    return FALLBACK_MANUAL_SETUP
+
+
+def request_free_api_key(
+    fingerprint: str,
+    quota: int = 2000000,
+    location: str = "cn",
+) -> dict:
+    """Request a free API key from the registration server.
+
+    Note: This function is deprecated. Use register_free_key_with_retry instead.
+    """
+    if _HAS_FREEKEY_PYTHON_PACKAGE:
+        return _pkg_request_free_api_key(fingerprint, quota, location)
+    return {"status": "error", "message": "Use register_free_key_with_retry instead"}
+
+
+# End of Free API Key Module
+from .helpers import (
+    _ask_value,
+    _display_width,
+    _is_blank,
+    _is_valid_url,
+    _mask_secret,
+    _matches_filter_query,
+    _prompt_secret_with_mask,
+    _sanitize_filter_input,
+)
+from .provider_helpers import (
+    ProviderEndpointInfo,
+    get_provider_endpoints,
+    get_provider_models,
+    has_multi_endpoints,
+)
+from .providers import (
+    _filter_provider_options,
+    _get_provider_options,
+    _maybe_resolve_api_base,
+    _provider_note,
+    _with_api_base,
+)
 from .types import ProviderOption, ToolSupportResult
-from .verification import (_check_tool_support, _quick_static_check,
-                           _status_text, build_failure_reason,
-                           run_verification)
+from .verification import (
+    _check_tool_support,
+    _quick_static_check,
+    _status_text,
+    build_failure_reason,
+    run_verification,
+)
 
 console = Console()
 
@@ -89,8 +342,7 @@ def _select_provider_realtime(
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-        from prompt_toolkit.layout.controls import (BufferControl,
-                                                    FormattedTextControl)
+        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.styles import Style
     except Exception:
         return _REALTIME_UNAVAILABLE
@@ -359,8 +611,7 @@ def _select_endpoint_realtime(
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-        from prompt_toolkit.layout.controls import (BufferControl,
-                                                    FormattedTextControl)
+        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.styles import Style
     except Exception:
         return _REALTIME_UNAVAILABLE
@@ -585,8 +836,7 @@ def _prompt_url_with_inline_validation(
         from prompt_toolkit.buffer import Buffer
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-        from prompt_toolkit.layout.controls import (BufferControl,
-                                                    FormattedTextControl)
+        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.styles import Style
 
         error_text = ""
@@ -946,8 +1196,7 @@ def _select_model_realtime(
         from prompt_toolkit.formatted_text import ANSI
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-        from prompt_toolkit.layout.controls import (BufferControl,
-                                                    FormattedTextControl)
+        from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
         from prompt_toolkit.styles import Style
     except Exception:
         return _REALTIME_UNAVAILABLE
@@ -1225,6 +1474,123 @@ def _prompt_model(provider: ProviderOption, api_key: Optional[str]) -> Optional[
         return normalized
 
 
+def _prompt_setup_entry_mode() -> str:
+    """Prompt user to choose between free key setup or manual setup.
+
+    Returns 'free_key', 'manual', or 'exit'.
+    When aish_freekey module is not available, directly returns 'manual'.
+    """
+    if not HAS_FREE_KEY_MODULE:
+        return "manual"
+
+    console.print(
+        Panel(
+            t("cli.setup.entry_header"),
+            title=t("cli.setup.entry_title"),
+            border_style="blue",
+        )
+    )
+    return _prompt_setup_action(
+        [
+            ("free_key", t("cli.setup.action_use_free_key")),
+            ("manual", t("cli.setup.action_manual_setup")),
+            ("exit", t("cli.setup.action_exit")),
+        ]
+    )
+
+
+def _handle_free_key_registration() -> tuple[str, str, str] | object | None:
+    """Handle free key registration flow with UI.
+
+    Returns:
+        tuple[str, str, str]: (api_key, api_base, model) on success
+        FALLBACK_MANUAL_SETUP: user chose to fallback to manual setup
+        None: user cancelled
+    """
+    if not HAS_FREE_KEY_MODULE:
+        return FALLBACK_MANUAL_SETUP
+
+    while True:
+        console.print(
+            Panel(
+                t("cli.setup.free_key_header"),
+                title=t("cli.setup.step_free_key"),
+                border_style="blue",
+            )
+        )
+
+        # Show privacy notice and get user consent
+        console.print(
+            Panel(
+                t("cli.setup.free_key_privacy_notice"),
+                title=t("cli.setup.free_key_privacy_title"),
+                border_style="yellow",
+            )
+        )
+
+        consent = _prompt_setup_action(
+            [
+                ("agree", t("cli.setup.action_agree")),
+                ("disagree", t("cli.setup.action_disagree")),
+            ]
+        )
+
+        if consent == "disagree":
+            return None  # Return to entry selection
+
+        # Detect geo location
+        console.print(t("cli.setup.free_key_detecting_location"), style="dim")
+        location = detect_geo_location()
+        if location == "cn":
+            location_display = t("cli.setup.free_key_location_cn")
+        elif location == "overseas":
+            location_display = t("cli.setup.free_key_location_overseas")
+        else:
+            location_display = location
+        console.print(
+            t("cli.setup.free_key_location_detected", location=location_display),
+            style="dim",
+        )
+
+        console.print(t("cli.setup.free_key_registering"), style="dim")
+
+        # Call the private module's registration function
+        result = register_free_key_with_retry(location=location)
+
+        # Handle fallback sentinel
+        if result is FALLBACK_MANUAL_SETUP:
+            return FALLBACK_MANUAL_SETUP
+
+        # Handle RegisterResult
+        if result.success:
+            console.print(t("cli.setup.free_key_success"), style="green")
+            if result.already_registered:
+                console.print(
+                    t("cli.setup.free_key_already_registered"),
+                    style="yellow",
+                )
+            return (result.api_key, result.api_base, result.model)
+
+        # Handle failure
+        failure_reason = result.error_message or t("cli.setup.verify_failed_unknown")
+        console.print(
+            t("cli.setup.free_key_failed_with_reason", reason=failure_reason),
+            style="red",
+        )
+        action = _prompt_setup_action(
+            [
+                ("retry", t("cli.setup.action_retry_free_key")),
+                ("manual", t("cli.setup.action_fallback_manual")),
+                ("exit", t("cli.setup.action_exit")),
+            ]
+        )
+        if action == "retry":
+            continue
+        if action == "manual":
+            return FALLBACK_MANUAL_SETUP
+        return None
+
+
 def _prompt_setup_action(options: list[tuple[str, str]]) -> str:
     """Prompt user to select an action using arrow keys."""
     return _select_action_realtime(options)
@@ -1355,16 +1721,103 @@ def _interactive_setup(config: Config) -> Optional[ConfigModel]:
     preload_litellm()
 
     while True:
-        provider = _select_provider()
-        if provider is None:
+        provider: Optional[ProviderOption] = None
+        api_key: Optional[str] = None
+
+        # Prompt user to choose setup mode
+        setup_mode = _prompt_setup_entry_mode()
+        if setup_mode == "exit":
             console.print(t("cli.setup.cancelled"), style="yellow")
             return None
 
-        api_key = _prompt_api_key(provider.env_key)
-        if api_key is None:
+        if setup_mode == "free_key":
+            free_result = _handle_free_key_registration()
+            if free_result is None:
+                console.print(t("cli.setup.cancelled"), style="yellow")
+                return None
+            if free_result is FALLBACK_MANUAL_SETUP:
+                setup_mode = "manual"
+            else:
+                api_key, api_base, model = free_result
+                provider = ProviderOption(
+                    key="custom",
+                    label=t("cli.setup.free_key_provider_label"),
+                    api_base=api_base,
+                    env_key=None,
+                    requires_api_base=False,
+                )
+                provider = _maybe_resolve_api_base(provider, api_key=api_key)
+
+                # For free key, use the server-provided model directly
+                # Skip the model selection step and proceed to verification
+                if model:
+                    console.print(
+                        t("cli.setup.model_saved_as", model=model),
+                        style="dim",
+                    )
+                    # Proceed directly to verification with the server-provided model
+                    provider = _maybe_resolve_api_base(
+                        provider,
+                        api_key=api_key,
+                        model_hint=model,
+                    )
+
+                    connectivity, tool_support = run_verification(
+                        model=model,
+                        api_base=provider.api_base,
+                        api_key=api_key,
+                    )
+
+                    if connectivity.ok and tool_support.supports:
+                        console.print(t("cli.setup.verify_simple_success"), style="green")
+                        _persist_setup_config(
+                            config=config,
+                            api_base=provider.api_base,
+                            api_key=api_key,
+                            model=model,
+                        )
+                        return config.model_config
+                    else:
+                        failure_reason = build_failure_reason(
+                            connectivity, tool_support
+                        )
+                        console.print(
+                            t(
+                                "cli.setup.verify_simple_failed_with_reason",
+                                reason=failure_reason,
+                            ),
+                            style="red",
+                        )
+                        action = _prompt_setup_action(
+                            [
+                                ("retry", t("cli.setup.action_retry_free_key")),
+                                ("manual", t("cli.setup.action_fallback_manual")),
+                                ("exit", t("cli.setup.action_exit")),
+                            ]
+                        )
+                        if action == "retry":
+                            continue
+                        if action == "manual":
+                            setup_mode = "manual"
+                        else:
+                            console.print(t("cli.setup.cancelled"), style="yellow")
+                            return None
+
+        if setup_mode == "manual":
+            provider = _select_provider()
+            if provider is None:
+                console.print(t("cli.setup.cancelled"), style="yellow")
+                return None
+
+            api_key = _prompt_api_key(provider.env_key)
+            if api_key is None:
+                console.print(t("cli.setup.cancelled"), style="yellow")
+                return None
+            provider = _maybe_resolve_api_base(provider, api_key=api_key)
+
+        if provider is None or api_key is None:
             console.print(t("cli.setup.cancelled"), style="yellow")
             return None
-        provider = _maybe_resolve_api_base(provider, api_key=api_key)
 
         while True:
             model = _prompt_model(provider, api_key)

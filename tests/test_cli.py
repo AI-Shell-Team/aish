@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from aish.cli import app, run
@@ -16,6 +17,15 @@ from aish.providers.openai_codex import OpenAICodexAuthError
 @dataclass
 class _FakeAuthState:
     auth_path: Path
+
+
+def _has_free_key_module() -> bool:
+    """Check if free key functionality is available (binary or Python package)."""
+    try:
+        from aish.wizard.setup_wizard import HAS_FREE_KEY_MODULE
+        return HAS_FREE_KEY_MODULE
+    except ImportError:
+        return False
 
 
 class TestCLI:
@@ -385,3 +395,211 @@ class TestCLI:
         login_with_browser.assert_called_once()
         assert mock_config.config_model.model == "fake-provider/model-x"
         assert mock_config.config_model.codex_auth_path == "/tmp/fake-auth.json"
+
+
+@pytest.mark.skipif(
+    not _has_free_key_module(),
+    reason="Free key module not available - these tests require the binary or Python package",
+)
+class TestSetupWizardFreeKeyHelpers:
+    """Tests for free API key registration helper functions.
+
+    Note: These tests require the aish_freekey binary or Python package.
+    They will be skipped if neither is available.
+    """
+
+    def test_extract_free_key_info_from_data_payload(self):
+        """Test extracting API key and base from a successful response."""
+        from aish.wizard.setup_wizard import extract_free_key_info
+
+        payload = {
+            "status": "success",
+            "apikey": "  test-key  ",
+            "api_base": " https://example.com/v1 ",
+        }
+
+        api_key, api_base, model = extract_free_key_info(payload)
+
+        assert api_key == "test-key"
+        assert api_base == "https://example.com/v1"
+
+    def test_extract_free_key_info_from_fixed_payload(self):
+        """Test extracting API key when only apikey is present."""
+        from aish.wizard.setup_wizard import extract_free_key_info
+
+        payload = {
+            "status": "success",
+            "apikey": "k-123",
+        }
+
+        api_key, api_base, model = extract_free_key_info(payload)
+
+        assert api_key == "k-123"
+        assert api_base is None
+
+    def test_extract_free_key_info_from_non_fixed_payload(self):
+        """Test that api_key field (different from apikey) is also accepted."""
+        from aish.wizard.setup_wizard import extract_free_key_info
+
+        payload = {
+            "status": "success",
+            "api_key": "legacy-field",
+        }
+
+        api_key, api_base, model = extract_free_key_info(payload)
+
+        # The implementation supports both 'apikey' and 'api_key'
+        assert api_key == "legacy-field"
+        assert api_base is None
+
+    def test_extract_free_key_info_empty_apikey(self):
+        """Test that empty apikey returns None."""
+        from aish.wizard.setup_wizard import extract_free_key_info
+
+        payload = {
+            "status": "success",
+            "apikey": "   ",
+        }
+
+        api_key, api_base, model = extract_free_key_info(payload)
+
+        assert api_key is None
+        assert api_base is None
+
+    def test_request_free_api_key_returns_stub(self):
+        """Test request_free_api_key returns stub message (Go binary handles actual requests)."""
+        import aish.wizard.setup_wizard as setup_module
+
+        # Force binary mode
+        setup_module._HAS_FREEKEY_PYTHON_PACKAGE = False
+        setup_module._FREEKEY_BINARY_PATH = "/fake/path"
+
+        try:
+            result = setup_module.request_free_api_key("fingerprint")
+            assert result["status"] == "error"
+            assert "Use register_free_key_with_retry" in result["message"]
+        finally:
+            # Restore - try to import package again
+            try:
+                from aish_freekey import request_free_api_key as _pkg_func
+                setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
+            except ImportError:
+                pass
+
+    def test_register_free_key_with_retry_success(self, monkeypatch):
+        """Test successful free key registration in binary mode."""
+        import aish.wizard.setup_wizard as setup_module
+
+        # Force binary mode
+        setup_module._HAS_FREEKEY_PYTHON_PACKAGE = False
+        setup_module._FREEKEY_BINARY_PATH = "/fake/path/aish_freekey_bin"
+
+        # Mock the binary JSON response
+        def mock_run_binary_json(binary_path, cmd, *args):
+            return {
+                "success": True,
+                "api_key": "free-key",
+                "api_base": "https://free.example.com/v1",
+                "model": "test-model",
+            }
+
+        monkeypatch.setattr(setup_module, "_run_binary_json", mock_run_binary_json)
+
+        try:
+            result = setup_module.register_free_key_with_retry()
+            assert result.success is True
+            assert result.api_key == "free-key"
+            assert result.api_base == "https://free.example.com/v1"
+        finally:
+            # Restore
+            try:
+                from aish_freekey import register_free_key_with_retry as _pkg_func
+                setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
+            except ImportError:
+                pass
+
+    def test_register_free_key_with_retry_default_api_base(self, monkeypatch):
+        """Test free key registration uses default API base when not returned."""
+        import aish.wizard.setup_wizard as setup_module
+
+        # Force binary mode
+        setup_module._HAS_FREEKEY_PYTHON_PACKAGE = False
+        setup_module._FREEKEY_BINARY_PATH = "/fake/path/aish_freekey_bin"
+
+        # Mock the binary JSON response (no api_base returned)
+        def mock_run_binary_json(binary_path, cmd, *args):
+            return {
+                "success": True,
+                "api_key": "free-key",
+                "api_base": "",
+                "model": "",
+            }
+
+        monkeypatch.setattr(setup_module, "_run_binary_json", mock_run_binary_json)
+
+        try:
+            result = setup_module.register_free_key_with_retry(location="cn")
+            assert result.success is True
+            assert result.api_key == "free-key"
+        finally:
+            # Restore
+            try:
+                from aish_freekey import register_free_key_with_retry as _pkg_func
+                setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
+            except ImportError:
+                pass
+
+    def test_register_free_key_with_retry_failure(self, monkeypatch):
+        """Test registration failure in binary mode."""
+        import aish.wizard.setup_wizard as setup_module
+
+        # Force binary mode
+        setup_module._HAS_FREEKEY_PYTHON_PACKAGE = False
+        setup_module._FREEKEY_BINARY_PATH = "/fake/path/aish_freekey_bin"
+
+        # Mock the binary JSON response for failure
+        def mock_run_binary_json(binary_path, cmd, *args):
+            return {
+                "success": False,
+                "error_message": "Registration failed",
+            }
+
+        monkeypatch.setattr(setup_module, "_run_binary_json", mock_run_binary_json)
+
+        try:
+            result = setup_module.register_free_key_with_retry()
+            assert result.success is False
+            assert result.error_message == "Registration failed"
+        finally:
+            # Restore
+            try:
+                from aish_freekey import register_free_key_with_retry as _pkg_func
+                setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
+            except ImportError:
+                pass
+
+    def test_register_free_key_with_retry_empty_response(self, monkeypatch):
+        """Test registration with empty response in binary mode."""
+        import aish.wizard.setup_wizard as setup_module
+
+        # Force binary mode
+        setup_module._HAS_FREEKEY_PYTHON_PACKAGE = False
+        setup_module._FREEKEY_BINARY_PATH = "/fake/path/aish_freekey_bin"
+
+        # Mock empty response from binary
+        def mock_run_binary_json(binary_path, cmd, *args):
+            return {}
+
+        monkeypatch.setattr(setup_module, "_run_binary_json", mock_run_binary_json)
+
+        try:
+            result = setup_module.register_free_key_with_retry()
+            assert result.success is False
+            assert "Failed to communicate" in result.error_message
+        finally:
+            # Restore
+            try:
+                from aish_freekey import register_free_key_with_retry as _pkg_func
+                setup_module._HAS_FREEKEY_PYTHON_PACKAGE = True
+            except ImportError:
+                pass

@@ -27,11 +27,43 @@ cli:
       no_spaces: "API Key 不能包含空格。"
 
   setup:
+    entry_title: "初始化配置"
+    entry_header: "请选择 API 接入方式。"
+    step_free_key: "免费 Key 配置"
     step_provider: "步骤 1/3：选择 Provider"
     step_provider_endpoint: "步骤 1.5/3：选择端点"
     step_zai_endpoint: "步骤 1.5/3：选择 Z.AI 端点"
     step_key: "步骤 2/3：填写 API Key"
     step_model: "步骤 3/3：选择模型"
+    free_key_header: "通过本机设备指纹获取免费 API Key。"
+    free_key_detecting_location: "正在检测服务区域..."
+    free_key_location_detected: "检测到区域：{location}"
+    free_key_location_cn: "国内节点"
+    free_key_location_overseas: "国际节点"
+    free_key_registering: "正在注册免费 API Key..."
+    free_key_success: "已获取免费 API Key"
+    free_key_missing_key: "注册成功，但服务端未返回 API Key"
+    free_key_already_registered: "该设备已注册过免费Key"
+    free_key_fingerprint_failed: "无法采集设备信息，指纹生成失败"
+    free_key_failed_with_reason: "免费 API Key 注册失败：{reason}"
+    free_key_provider_label: "免费 API"
+    free_key_privacy_title: "隐私声明"
+    free_key_privacy_notice: |
+      为了提供免费 API Key 服务，我们需要收集以下设备信息：
+
+      • 设备指纹（基于 MAC 地址、磁盘序列号、主板序列号等硬件信息生成的哈希值）
+      • 服务区域（用于分配最近的服务节点）
+
+      用途说明：
+      • 设备指纹用于防止滥用，确保每个设备只能获取一次免费 Key
+      • 服务区域用于为您分配最近的服务节点
+
+      我们承诺：
+      • 不会收集任何个人身份信息
+      • 设备指纹为不可逆的哈希值，无法还原原始硬件信息
+      • 数据仅用于本服务，不会与第三方共享
+    free_key_quota_exhausted: "免费额度已用完"
+    free_key_quota_exhausted_hint: "您的免费 API Key 额度已耗尽，请配置您自己的 API Key 继续使用。"
     provider_header: "选择 Provider"
     provider_filter_prompt: "过滤："
     provider_filter_hint: "输入关键词实时过滤，↑/↓ 选择，回车确认，Esc 取消"
@@ -121,9 +153,16 @@ cli:
     action_retry_model: "重新选择模型"
     action_retry_api_base: "重新输入 API Base"
     action_retry_api_key: "重新输入 API Key"
+    action_retry_free_key: "重试免费 Key 注册"
+    action_fallback_manual: "切换到手动配置"
+    action_use_existing_key: "使用已有的 Key"
+    action_use_free_key: "使用免费 API Key"
+    action_manual_setup: "手动配置 Provider"
     action_change_provider: "更换 Provider"
     action_continue: "继续保存（不推荐）"
     action_exit: "退出配置"
+    action_agree: "同意并继续"
+    action_disagree: "不同意"
     retry_api_base_prompt: "请输入 API Base（输入 back 返回）"
     retry_api_base_prompt_with_current: "请输入 API Base（当前：{current}，输入 back 返回）"
     retry_api_base_required: "API Base 不能为空"
@@ -263,6 +302,9 @@ shell:
     llm_error_title: "❌ 大模型请求失败"
     llm_error_details_title: "调试详情"
     tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
+
+  hint:
+    run_setup: "输入 /setup 重新配置 API Key"
 
   prompt:
     confirm_execute: "?是否执行此命令? [y/n]: "

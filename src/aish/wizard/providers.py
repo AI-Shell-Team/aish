@@ -6,8 +6,13 @@ from typing import Optional
 
 from ..i18n import t
 from ..litellm_loader import load_litellm
-from .constants import (_PROVIDER_ALIASES, _PROVIDER_BASES, _PROVIDER_ENV_KEYS,
-                        _PROVIDER_LABELS, _PROVIDER_PRIORITY)
+from .constants import (
+    _PROVIDER_ALIASES,
+    _PROVIDER_BASES,
+    _PROVIDER_ENV_KEYS,
+    _PROVIDER_LABELS,
+    _PROVIDER_PRIORITY,
+)
 from .helpers import _is_valid_url, _looks_like_api_base, _matches_filter_query
 from .types import ProviderOption
 

@@ -3094,6 +3094,13 @@ class AIShell:
         error_type = event.data.get("error_type", "general")
         error_details = event.data.get("error_details")
 
+        # Check for quota/rate limit errors
+        error_lower = str(error_message).lower()
+        quota_exhausted = any(
+            keyword in error_lower
+            for keyword in ["rate limit", "quota", "insufficient", "429", "exceeded"]
+        )
+
         if error_type == "streaming_error":
             self.console.print(f"❌ Streaming Error: {error_message}", style="red")
         elif error_type == "litellm_error":
@@ -3111,6 +3118,19 @@ class AIShell:
                         title=t("shell.error.llm_error_details_title"),
                         border_style="dim",
                     )
+                )
+            # Show quota exhausted hint
+            if quota_exhausted:
+                self.console.print(
+                    Panel(
+                        t("cli.setup.free_key_quota_exhausted_hint"),
+                        title=t("cli.setup.free_key_quota_exhausted"),
+                        border_style="yellow",
+                    )
+                )
+                self.console.print(
+                    f"💡 {t('shell.hint.run_setup')}",
+                    style="dim"
                 )
         else:
             self.console.print(f"❌ Error: {error_message}", style="red")
