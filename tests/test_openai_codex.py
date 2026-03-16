@@ -470,6 +470,66 @@ async def test_create_openai_codex_chat_completion_retries_transient_backend_fai
 
 
 @pytest.mark.anyio
+async def test_create_openai_codex_chat_completion_does_not_retry_refresh_failures(
+    tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    id_token = _make_jwt(
+        {
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct_123"},
+        }
+    )
+    persist_openai_codex_tokens(
+        auth_path,
+        tokens=OpenAICodexOAuthTokens(
+            id_token=id_token,
+            access_token=_make_jwt({"exp": 2_000_000_000}),
+            refresh_token="refresh_123",
+        ),
+    )
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            401,
+            headers={"content-type": "application/json"},
+            json={"error": {"message": "unauthorized"}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    with (
+        patch(
+            "aish.providers.openai_codex.httpx.AsyncClient",
+            side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
+        ),
+        patch(
+            "aish.providers.openai_codex.refresh_openai_codex_auth",
+            new=AsyncMock(
+                side_effect=OpenAICodexAuthError(
+                    "OpenAI Codex returned invalid JSON."
+                )
+            ),
+        ) as mock_refresh,
+    ):
+        from aish.providers.openai_codex import create_openai_codex_chat_completion
+
+        with pytest.raises(OpenAICodexAuthError, match="returned invalid JSON"):
+            await create_openai_codex_chat_completion(
+                model="openai-codex/gpt-5.4",
+                messages=[{"role": "user", "content": "你好"}],
+                auth_path=auth_path,
+            )
+
+    assert attempts == 1
+    assert mock_refresh.await_count == 1
+
+
+@pytest.mark.anyio
 async def test_create_openai_codex_chat_completion_retries_transport_errors_up_to_five_attempts(
     tmp_path,
 ):

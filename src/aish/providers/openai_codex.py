@@ -71,6 +71,10 @@ class OpenAICodexAuthError(RuntimeError):
     pass
 
 
+class _OpenAICodexRetryableRequestError(OpenAICodexAuthError):
+    pass
+
+
 @dataclass
 class OpenAICodexAuthState:
     auth_path: Path
@@ -768,23 +772,32 @@ async def create_openai_codex_chat_completion(
                     if response.is_error:
                         await response.aread()
                         detail = _extract_http_error_message(response)
-                        raise OpenAICodexAuthError(
+                        message = (
                             f"OpenAI Codex request failed: {response.status_code} {detail}"
                         )
+                        raise _build_openai_codex_request_error(message)
 
                     content_type = _coerce_str(response.headers.get("content-type")).lower()
                     if not content_type or "text/event-stream" in content_type:
-                        payload = await _collect_openai_codex_stream_response(response)
+                        try:
+                            payload = await _collect_openai_codex_stream_response(response)
+                        except OpenAICodexAuthError as exc:
+                            raise _build_openai_codex_request_error(str(exc)) from exc
                     else:
                         raw_body = await response.aread()
                         body_text = raw_body.decode("utf-8", errors="replace")
                         if _looks_like_sse_text(body_text):
-                            payload = _collect_openai_codex_stream_text(body_text)
+                            try:
+                                payload = _collect_openai_codex_stream_text(body_text)
+                            except OpenAICodexAuthError as exc:
+                                raise _build_openai_codex_request_error(
+                                    str(exc)
+                                ) from exc
                         else:
                             try:
                                 payload = json.loads(body_text)
                             except Exception as exc:
-                                raise OpenAICodexAuthError(
+                                raise _OpenAICodexRetryableRequestError(
                                     "OpenAI Codex returned invalid JSON."
                                 ) from exc
                     return convert_openai_codex_response_to_chat_completion(payload)
@@ -793,13 +806,10 @@ async def create_openai_codex_chat_completion(
                 if attempt + 1 >= OPENAI_CODEX_MAX_REQUEST_ATTEMPTS:
                     break
                 continue
-            except OpenAICodexAuthError as exc:
-                if (
-                    attempt + 1 < OPENAI_CODEX_MAX_REQUEST_ATTEMPTS
-                    and _is_retryable_openai_codex_failure_message(str(exc))
-                ):
-                    continue
-                raise
+            except _OpenAICodexRetryableRequestError:
+                if attempt + 1 >= OPENAI_CODEX_MAX_REQUEST_ATTEMPTS:
+                    raise
+                continue
 
     if last_transport_error is not None:
         raise OpenAICodexAuthError(
@@ -1077,6 +1087,12 @@ def _is_retryable_openai_codex_failure_message(message: str) -> bool:
         "returned an incomplete response",
     )
     return any(marker in lowered for marker in retryable_markers)
+
+
+def _build_openai_codex_request_error(message: str) -> OpenAICodexAuthError:
+    if _is_retryable_openai_codex_failure_message(message):
+        return _OpenAICodexRetryableRequestError(message)
+    return OpenAICodexAuthError(message)
 
 
 def _format_oauth_callback_error(
