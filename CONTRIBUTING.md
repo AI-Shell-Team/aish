@@ -43,7 +43,7 @@ Welcome to make Shell smarter!
 - Code PRs run lint, tests, and cross-platform smoke checks.
 - Packaging-related PRs additionally run Linux bundle build and install smoke checks.
 - `Release Metadata` is the shared release action that normalizes stable version inputs, validates repository version state, and uploads both markdown and JSON metadata artifacts.
-- `make prepare-release-files VERSION=X.Y.Z [DATE=YYYY-MM-DD]` updates `pyproject.toml`, `src/aish/__init__.py`, and moves the current `CHANGELOG.md` `Unreleased` section into a dated release section.
+- `make prepare-release-files VERSION=X.Y.Z [DATE=YYYY-MM-DD]` updates `pyproject.toml`, `src/aish/__init__.py`, `uv.lock`, and inserts a dated release section at the top of `CHANGELOG.md`.
 - Prepare release files locally in a normal PR, merge that PR into `main`, then run `Release Preparation` as the preflight validation for the target stable version.
 - `Release Preparation` validates the target stable version, generates a release summary from the versioned changelog section, builds dry-run bundles, and runs install smoke checks before publication.
 - `Release` is triggered by pushing a stable tag `vX.Y.Z`. It validates the tag against repository metadata, verifies that the tagged commit is on `main`, waits on the protected `release` environment approval gate, creates the GitHub Release entry with generated notes, and uploads bundle assets.

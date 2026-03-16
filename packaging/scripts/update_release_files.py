@@ -11,36 +11,14 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 PYPROJECT_PATH = ROOT_DIR / "pyproject.toml"
 RUNTIME_VERSION_PATH = ROOT_DIR / "src" / "aish" / "__init__.py"
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
+UV_LOCK_PATH = ROOT_DIR / "uv.lock"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 PYPROJECT_VERSION_RE = re.compile(r'^(version\s*=\s*")([^"]+)("\s*)$', re.MULTILINE)
 RUNTIME_VERSION_RE = re.compile(r'^(__version__\s*=\s*")([^"]+)("\s*)$', re.MULTILINE)
-UNRELEASED_SECTION_RE = re.compile(
-    r"(?ms)^## \[Unreleased\]\n(?P<body>.*?)(?=^## \[|\Z)"
+UV_LOCK_VERSION_RE = re.compile(
+    r'(?ms)^(\[\[package\]\]\nname\s*=\s*"aish"\nversion\s*=\s*")([^"]+)("\s*$)'
 )
-
-UNRELEASED_TEMPLATE = """### Added
-
-- TBD
-
-### Changed
-
-- TBD
-
-### Deprecated
-
-- TBD
-
-### Removed
-
-- TBD
-
-### Fixed
-
-- TBD
-
-### Security
-
-- TBD"""
+CHANGELOG_SECTION_RE = re.compile(r"^## \[", re.MULTILINE)
 
 
 def _replace_single(pattern: re.Pattern[str], text: str, replacement_value: str) -> str:
@@ -65,27 +43,28 @@ def _update_runtime_version(version: str) -> None:
     RUNTIME_VERSION_PATH.write_text(updated, encoding="utf-8")
 
 
+def _update_uv_lock(version: str) -> None:
+    if not UV_LOCK_PATH.exists():
+        return
+
+    original = UV_LOCK_PATH.read_text(encoding="utf-8")
+    updated = _replace_single(UV_LOCK_VERSION_RE, original, version)
+    UV_LOCK_PATH.write_text(updated, encoding="utf-8")
+
+
 def _update_changelog(version: str, release_date: str) -> None:
     original = CHANGELOG_PATH.read_text(encoding="utf-8")
     if f"## [{version}] - {release_date}" in original or f"## [{version}]" in original:
         raise ValueError(f"Changelog already contains a section for version {version}")
 
-    match = UNRELEASED_SECTION_RE.search(original)
+    new_section = f"## [{version}] - {release_date}\n\n"
+    match = CHANGELOG_SECTION_RE.search(original)
     if match is None:
-        raise ValueError("Could not find the [Unreleased] section in CHANGELOG.md")
+        separator = "" if original.endswith("\n\n") else "\n\n"
+        updated = f"{original.rstrip()}{separator}{new_section}"
+    else:
+        updated = f"{original[:match.start()]}{new_section}{original[match.start():]}"
 
-    unreleased_body = match.group("body").strip("\n")
-    if not unreleased_body.strip():
-        unreleased_body = UNRELEASED_TEMPLATE
-
-    replacement = (
-        "## [Unreleased]\n\n"
-        f"{UNRELEASED_TEMPLATE}\n\n"
-        f"## [{version}] - {release_date}\n\n"
-        f"{unreleased_body}\n"
-    )
-
-    updated = original[: match.start()] + replacement + original[match.end() :]
     CHANGELOG_PATH.write_text(updated, encoding="utf-8")
 
 
@@ -94,6 +73,7 @@ def update_release_files(version: str, release_date: str) -> None:
         raise ValueError(f"Invalid version '{version}'. Expected format: X.Y.Z")
     _update_pyproject(version)
     _update_runtime_version(version)
+    _update_uv_lock(version)
     _update_changelog(version, release_date)
 
 

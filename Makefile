@@ -26,7 +26,7 @@ help:
 	@echo "  make build          Build Python wheel"
 	@echo "  make build-binary   Build standalone binaries"
 	@echo "  make build-bundle   Build release bundle archive"
-	@echo "  make prepare-release-files VERSION=X.Y.Z [DATE=YYYY-MM-DD]"
+	@echo "  make prepare-release-files VERSION=X.Y.Z [DATE=YYYY-MM-DD]  Update release versions and add a changelog section"
 	@echo "  make install        Install built artifacts into DESTDIR/PREFIX"
 	@echo "  make clean          Clean build artifacts"
 

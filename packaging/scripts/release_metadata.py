@@ -67,7 +67,14 @@ def _extract_changelog_section(section_name: str) -> str:
 def _extract_release_notes(version: str | None) -> str:
     if version:
         return _extract_changelog_section(version)
-    return _extract_changelog_section("Unreleased")
+
+    lines = CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
+    for line in lines:
+        match = re.match(r"^## \[(\d+\.\d+\.\d+)\]", line)
+        if match:
+            return _extract_changelog_section(match.group(1))
+
+    raise ValueError(f"Could not find any versioned changelog sections in {CHANGELOG_PATH}")
 
 
 def _normalize_version(raw_version: str) -> str:

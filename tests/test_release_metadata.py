@@ -17,12 +17,6 @@ def test_extract_release_notes_uses_versioned_section(tmp_path, monkeypatch):
     changelog.write_text(
         """# Changelog
 
-## [Unreleased]
-
-### Added
-
-- Future change
-
 ## [0.1.1] - 2026-03-13
 
 ### Added
@@ -36,12 +30,12 @@ def test_extract_release_notes_uses_versioned_section(tmp_path, monkeypatch):
     assert release_metadata._extract_release_notes("0.1.1") == "### Added\n\n- Stable release note"
 
 
-def test_extract_release_notes_uses_unreleased_without_expected_version(tmp_path, monkeypatch):
+def test_extract_release_notes_uses_latest_version_without_expected_version(tmp_path, monkeypatch):
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(
         """# Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-03-13
 
 ### Fixed
 

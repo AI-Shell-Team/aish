@@ -27,7 +27,7 @@ outputs:
     description: Most recent stable git tag
     value: ${{ steps.metadata.outputs.previous_stable_tag }}
   release_notes:
-    description: Unreleased changelog notes
+    description: Release changelog notes
     value: ${{ steps.metadata.outputs.release_notes }}
 
 runs:
