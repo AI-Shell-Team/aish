@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from aish.security.security_policy import SecurityPolicy
 from aish.security.sandbox import SandboxUnavailableError
 from aish.security.sandbox import SandboxSecurity
 from aish.security.sandbox_ipc import SandboxIpcClient, SandboxSecurityIpc
@@ -89,9 +90,11 @@ def test_sandbox_ipc_error_response(tmp_path: Path):
 
 def test_security_manager_prefers_ipc_for_root_when_enabled(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("aish.security.security_manager.os.geteuid", lambda: 0)
+    policy = SecurityPolicy(enable_sandbox=True, rules=[])
 
     manager = SimpleSecurityManager(
         repo_root=tmp_path,
+        policy=policy,
         use_privileged_sandbox=True,
         privileged_sandbox_socket=tmp_path / "sandbox.sock",
     )
@@ -101,9 +104,11 @@ def test_security_manager_prefers_ipc_for_root_when_enabled(monkeypatch, tmp_pat
 
 def test_security_manager_uses_local_sandbox_when_privileged_disabled(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("aish.security.security_manager.os.geteuid", lambda: 0)
+    policy = SecurityPolicy(enable_sandbox=True, rules=[])
 
     manager = SimpleSecurityManager(
         repo_root=tmp_path,
+        policy=policy,
         use_privileged_sandbox=False,
     )
 
