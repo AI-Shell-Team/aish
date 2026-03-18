@@ -18,6 +18,9 @@ Empower the Shell to think. Evolve Operations.
 
 **A Real AI Shell: Complete PTY + Configurable Security & Risk Control**
 
+If you find AISH helpful, feel free to give it a ⭐ Star to help more people discover the project
+
+
 </div>
 
 ---
