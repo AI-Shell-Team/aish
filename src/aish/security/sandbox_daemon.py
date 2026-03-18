@@ -31,6 +31,23 @@ _IPC_CHANGES_MAX = 10_000
 _LOG_DETAIL_MAX_CHARS = 4096
 
 
+def _build_worker_command() -> list[str]:
+    worker_cmd = [
+        "unshare",
+        "--mount",
+        "--propagation",
+        "private",
+        "--",
+        sys.executable,
+    ]
+    if getattr(sys, "frozen", False):
+        worker_cmd.append("--sandbox-worker")
+        return worker_cmd
+
+    worker_cmd.extend(["-m", "aish.security.sandbox_worker"])
+    return worker_cmd
+
+
 def _elapsed_ms(start_ts: float) -> int:
     return int((time.monotonic() - start_ts) * 1000)
 
@@ -743,16 +760,7 @@ class SandboxDaemon:
             "timeout_s": timeout_s,
         }
 
-        worker_cmd = [
-            "unshare",
-            "--mount",
-            "--propagation",
-            "private",
-            "--",
-            sys.executable,
-            "-m",
-            "aish.security.sandbox_worker",
-        ]
+        worker_cmd = _build_worker_command()
         exec_timeout: Optional[float] = None
         if timeout_s is not None:
             exec_timeout = float(timeout_s) + 10.0

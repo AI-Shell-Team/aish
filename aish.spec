@@ -201,6 +201,7 @@ a_sandbox = Analysis(
     datas=[],
     hiddenimports=[
         'aish.security.sandbox_daemon',
+        'aish.security.sandbox_worker',
     ],
     hookspath=[],
     hooksconfig={},

@@ -2,16 +2,53 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from aish.security.sandbox import SandboxUnavailableError
+from aish.security import sandbox_daemon
 from aish.security.sandbox_daemon import SandboxDaemon, SandboxDaemonConfig
 
 
 def _make_daemon() -> SandboxDaemon:
     return SandboxDaemon(SandboxDaemonConfig(socket_path=Path("/tmp/aish-test.sock")))
+
+
+def test_build_worker_command_uses_module_entrypoint(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+
+    cmd = sandbox_daemon._build_worker_command()
+
+    assert cmd == [
+        "unshare",
+        "--mount",
+        "--propagation",
+        "private",
+        "--",
+        "/usr/bin/python3",
+        "-m",
+        "aish.security.sandbox_worker",
+    ]
+
+
+def test_build_worker_command_uses_internal_entrypoint_when_frozen(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/aish-sandbox")
+
+    cmd = sandbox_daemon._build_worker_command()
+
+    assert cmd == [
+        "unshare",
+        "--mount",
+        "--propagation",
+        "private",
+        "--",
+        "/usr/bin/aish-sandbox",
+        "--sandbox-worker",
+    ]
 
 
 def test_simulate_for_user_uses_unshare_worker(monkeypatch):

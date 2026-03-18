@@ -14,12 +14,22 @@ def main(argv: list[str] | None = None) -> int:
         prog="aish-sandboxd", description="Privileged sandbox daemon for aish"
     )
     parser.add_argument(
+        "--sandbox-worker",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--socket-path",
         default=str(DEFAULT_SANDBOX_SOCKET_PATH),
         help="Unix domain socket path (ignored when systemd socket activation is used)",
     )
 
     args = parser.parse_args(argv)
+
+    if args.sandbox_worker:
+        from aish.security import sandbox_worker
+
+        return sandbox_worker.main()
 
     if os.geteuid() != 0:
         print("aish-sandboxd must run as root", file=sys.stderr)
