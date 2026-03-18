@@ -11,25 +11,11 @@ cli:
     model: "LLM model to use (can also be set via AISH_MODEL or config file)."
     api_key: "API key for the LLM provider (can also be set via AISH_API_KEY or provider env vars)."
     api_base: "API base URL for the LLM provider (can also be set via AISH_API_BASE or config file)."
-    verbose: "Enable verbose logging (can also be set via AISH_VERBOSE or config file)."
     config: "Path to configuration file (default: ~/.config/aish/config.yaml)."
-
-  config_prompt:
-    title: "Configuration"
-    header: "Enter your LLM connection settings (required)."
-    api_base: "API Base"
-    api_key: "API Key"
-    model: "Model"
-    error:
-      required: "This field is required. Please try again."
-      invalid_url: "Invalid URL. Please enter a full http/https URL."
-      too_long: "Input is too long. Please shorten it and try again."
-      no_spaces: "API key must not contain spaces."
 
   setup:
     step_provider: "Step 1/3: Choose provider"
     step_provider_endpoint: "Step 1.5/3: Choose endpoint"
-    step_zai_endpoint: "Step 1.5/3: Choose Z.AI endpoint"
     step_key: "Step 2/3: Enter API key"
     step_model: "Step 3/3: Choose model"
     provider_header: "Choose a provider (type to filter)"
@@ -37,18 +23,10 @@ cli:
     provider_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to cancel."
     provider_selected_label: "Provider"
     provider_endpoint_selected_label: "Endpoint"
-    zai_endpoint_selected_label: "Z.AI Endpoint"
     provider_endpoint_header: "Choose {provider} API endpoint"
-    zai_endpoint_header: "Choose Z.AI API endpoint"
     model_selected_label: "Model"
-    provider_column: "Provider"
-    zai_endpoint_column: "Z.AI Endpoint"
-    provider_endpoint_column: "Endpoint"
-    provider_note_column: "Notes"
     provider_custom_note: "OpenAI-compatible"
     provider_preset_base: "Preset API Base"
-    provider_custom_title: "Custom Provider"
-    provider_custom_header: "Enter the API base for a custom provider."
     custom_api_base_title: "API Base URL"
     custom_api_base_header: "Enter API Base URL."
     provider_custom_api_base: "API Base URL"
@@ -67,46 +45,28 @@ cli:
     model_prompt: "Model name (type 'back' to change provider)"
     model_hint_openrouter: "OpenRouter requires a provider prefix (e.g. openai/gpt-4o). If omitted, we'll default to openai/."
     model_hint_custom: "Custom provider is OpenAI-compatible. If you omit a prefix, we'll save as openai/<model>."
-    model_hint_zai: "Recommended: {default}. Available: glm-5, glm-4.7, glm-4.7-flash, glm-4.7-flashx"
     model_hint_provider: "Recommended: {default}"
-    model_list_found: "Found {count} models from provider"
     model_list_unavailable: "Model list unavailable; please enter manually"
     model_filtering: "Filtering models by tool-call support"
     model_filter_result: "Filtered to {count} tool-call capable models"
     model_filter_empty: "No models passed the tool-call filter; showing full list"
     model_filter_prompt: "Filter: "
     model_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to go back. Select Custom to enter manually."
-    model_column: "Model"
-    model_saved_as: "Saved as"
-    model_no_results: "No models available (use custom entry)"
     model_custom_option: "Custom model..."
-    model_custom_prompt: "Custom model name"
     model_custom_required: "Model name is required"
     model_custom_saved_as: "Will be saved as: {model}"
     verify_title: "Verification"
     verify_header: "Verifying tool-call support..."
-    verify_hint: "Tip: press Ctrl+C to stop live verification (setup continues)"
-    verify_simple_in_progress: "Verifying..."
     verify_connectivity_in_progress: "Checking connectivity..."
     verify_tool_in_progress: "Checking tool support..."
     verify_static_no_tool_support: "Model does not support tool calling (static check)"
     verify_simple_success: "Verification successful"
-    verify_simple_failed: "Verification failed"
     verify_simple_failed_with_reason: "Verification failed: {reason}"
     verify_failed_unknown: "unknown error"
-    verify_static: "Capability check (litellm)"
-    verify_probe_basic: "Basic probe (connectivity + auth)"
-    verify_live: "Live verification (tool-call ping)"
-    verify_static_label: "Static check"
-    verify_probe_basic_label: "Basic probe"
     verify_live_label: "Live check"
-    verify_params_label: "Supported params"
-    verify_probe_basic_detail: "Basic probe details"
     verify_live_detail: "Details"
     verify_timeout: "Live verification timed out"
     verify_cancelled: "Live verification cancelled"
-    verify_probe_failed: "Basic probe failed: {error}"
-    verify_no_tool_call: "No tool call returned"
     verify_no_tool_call_required: "No tool call returned (required mode)"
     verify_no_tool_call_auto: "Model did not call tool (auto mode)"
     debug_request_title: "Live request ({mode})"
@@ -127,8 +87,6 @@ cli:
     retry_api_base_prompt: "Enter API Base (type back to return)"
     retry_api_base_prompt_with_current: "Enter API Base (current: {current}, type back to return)"
     retry_api_base_required: "API Base is required"
-    tool_unsupported_title: "Tool calls unsupported"
-    tool_unsupported: "This model/endpoint does not support tool calls. Agentic tools in aish will not work."
     saved: "Configuration saved"
     saved_with_warning: "Configuration saved (tool-call not verified)"
     non_interactive: "Non-interactive environment; setup cannot run"
@@ -136,30 +94,13 @@ cli:
     required_cancelled: "Required configuration missing; exiting"
 
   startup:
-    config_loaded: "🔧 Configuration loaded:"
     label:
-      config_file: "   Config file"
-      security_policy: "   Security policy"
-      model: "   Model"
-      api_key: "   API Key"
-      api_base: "   API Base"
-      verbose: "   Verbose"
-      langfuse: "   Langfuse"
       skills: "   Skills"
-    api_key_present: "✓"
-    api_key_missing: "✗"
-    no_api_key_warning: "Warning: No API key detected"
     goodbye: "👋 Goodbye!"
     config_file_error: "❌ Config file error: {error}"
     config_file_hint: "💡 Use --config to specify a valid config file path"
-    security_policy_not_found: "Security policy not found (Using default policy)"
-    skills_loaded: "{label}: #{count} loaded"
-    value:
-      enabled: "Enabled"
-      disabled: "Disabled"
 
   langfuse:
-    disabled: "   Langfuse integration is disabled"
     incomplete: "⚠️  Langfuse configuration is incomplete"
     missing: "   Missing: {var}"
     complete: "✅ Langfuse configuration is complete"
@@ -169,7 +110,6 @@ cli:
 
   parse_errors:
     title: "Error"
-    help_hint: "Use --help for more information."
     option_requires_argument: "Option {option} requires an argument."
     no_such_option: "No such option: {option}"
     missing_parameter: "Missing parameter: {param}"
@@ -177,28 +117,10 @@ cli:
     generic: "Invalid arguments: {message}"
 
 shell:
-  welcome_title: "🚀 AI Shell"
-  welcome_markdown: |
-    Welcome to the AI Shell! A true shell with full PTY support and built-in LLM capabilities.
-
-    ## Key Features:
-    - 🔧 **Full Shell Compatibility**: Run any binary program with complete PTY support
-    - 🤖 **AI Integration**: Built-in LLM assistant for help and suggestions
-    - 📊 **Rich Output**: Beautiful terminal interface with Rich library
-    - 📝 **Smart History**: Command history integrated with AI context
-
-    ## Quick Start:
-    - Use any shell command normally: `ls`, `top`, `vim`, `ssh`, etc.
-    - Ask AI questions: Start with ; (e.g., `; how to find large files`)
-    - Type `help` for more information
-
-    Start your enhanced shell experience now!
-
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(type /model to switch)"
     label:
-      version: "version"
       model: "model"
       config: "config"
     quick_start:
@@ -276,11 +198,6 @@ shell:
     switch_same: "Model unchanged: {model}"
     switch_success: "Switched to model: {model}"
     verify_failed: "Model validation failed: {reason}"
-    verify_unavailable: "Model validation unavailable; please check installation or restart"
-    verify_no_tool_reason: "Model does not support tool calls"
-    verify_unknown: "Unable to confirm tool-call support"
-    verify_provider_error: "Unable to resolve provider; use provider/model format (e.g., deepseek/deepseek-chat)"
-    verify_model_not_found: "Model not found or unavailable ({model})"
 
   setup:
     no_config_manager: "Cannot reconfigure: configuration manager unavailable"
@@ -289,10 +206,7 @@ shell:
 
   ask_user:
     title: "Select an option"
-    ok: "OK"
-    cancel: "Use default later"
     custom_label: "Custom:"
-    custom_prompt: "Type your own value:"
     hint_select: "↑/↓ to move • Enter to confirm • Esc to cancel"
     hint_custom: "Type to input custom value • Enter to confirm • Tab to options • Esc to cancel"
     paused:
@@ -303,9 +217,7 @@ shell:
       custom_input: "You can also reply with any custom value."
       how_to: "Reply with an option value (or number), or type `; continue with default` (default: {default})."
 
-  command_interrupted: "\n❌ Command execution interrupted"
   diagnose_cancelled: "  └─ ❌ System diagnosis cancelled"
-  operation_cancelled: "❌ Operation cancelled"
 
   status:
     thinking: "Thinking"
@@ -338,8 +250,6 @@ security:
     ipc_unavailable: "Cannot connect to sandbox service (aish-sandbox.socket not running or not installed)"
     ipc_failed: "Sandbox service execution failed (aish-sandbox)"
     sandbox_execute_failed: "Cannot evaluate command risk; please confirm before executing"
-
-  low_risk_notice: "Security notice: {reason}"
 
   risk_reason:
     sandbox_disabled_by_policy: "Sandbox is disabled by policy; file changes cannot be inspected for risk evaluation. Action: {action}."
@@ -628,12 +538,3 @@ help:
 
 errors:
   litellm_not_installed: "litellm module is not installed"
-  security_blocked_task: "Task not completed. This operation was blocked due to system security restrictions."
-  llm:
-    auth: "Authentication failed. Please check your API key."
-    rate_limit: "Rate limit exceeded. Please retry later."
-    invalid_request: "Invalid request. Check model name, API base, and request parameters."
-    timeout: "Request timed out. Check network and retry."
-    service_unavailable: "Service unavailable. Retry later or switch model/provider."
-    context_length: "Context too long. Reduce input or clear history."
-    unknown: "LLM request failed: {message}"
