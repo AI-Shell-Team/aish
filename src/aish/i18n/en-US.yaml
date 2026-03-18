@@ -64,6 +64,8 @@ cli:
       • Data is used solely for this service and will not be shared with third parties
     free_key_quota_exhausted: "Free quota exhausted"
     free_key_quota_exhausted_hint: "Your free API Key quota has been exhausted. Please configure your own API Key to continue."
+    free_key_service_unavailable: "Service temporarily unavailable"
+    free_key_service_unavailable_hint: "Server resources have reached the limit or the service is temporarily unavailable. Please contact the administrator to increase the quota, or configure your own API Key to continue."
     provider_header: "Choose a provider (type to filter)"
     provider_filter_prompt: "Filter: "
     provider_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to cancel."

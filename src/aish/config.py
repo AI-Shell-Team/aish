@@ -253,6 +253,11 @@ class ConfigModel(BaseModel):
         ),
     )
 
+    is_free_key: bool = Field(
+        default=False,
+        description="Whether the current configuration uses a free API key",
+    )
+
     @field_validator("tool_arg_preview", mode="before")
     @classmethod
     def normalize_tool_arg_preview(cls, v: Any) -> dict[str, ToolArgPreviewSettings]:
@@ -565,6 +570,15 @@ class Config:
     def set_api_key(self, api_key: Optional[str]) -> None:
         """Set the API key"""
         self.config_model.api_key = api_key
+        self.save_config()
+
+    def is_free_key(self) -> bool:
+        """Check if using free API key"""
+        return self.config_model.is_free_key
+
+    def set_is_free_key(self, is_free_key: bool) -> None:
+        """Set whether using free API key"""
+        self.config_model.is_free_key = is_free_key
         self.save_config()
 
     @property

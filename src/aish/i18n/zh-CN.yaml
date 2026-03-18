@@ -64,6 +64,8 @@ cli:
       • 数据仅用于本服务，不会与第三方共享
     free_key_quota_exhausted: "免费额度已用完"
     free_key_quota_exhausted_hint: "您的免费 API Key 额度已耗尽，请配置您自己的 API Key 继续使用。"
+    free_key_service_unavailable: "服务暂时不可用"
+    free_key_service_unavailable_hint: "服务器资源已达上限或服务暂时不可用，请联系管理员增加配额，或配置您自己的 API Key 继续使用。"
     provider_header: "选择 Provider"
     provider_filter_prompt: "过滤："
     provider_filter_hint: "输入关键词实时过滤，↑/↓ 选择，回车确认，Esc 取消"

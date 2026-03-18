@@ -1440,6 +1440,7 @@ class AIShell:
         new_model = new_config.model
         new_api_base = new_config.api_base
         new_api_key = new_config.api_key
+        new_is_free_key = new_config.is_free_key
 
         self.llm_session.update_model(
             new_model,
@@ -1450,6 +1451,7 @@ class AIShell:
         self.config.model = new_model
         self.config.api_base = new_api_base
         self.config.api_key = new_api_key
+        self.config.is_free_key = new_is_free_key
         if self.session_record is not None:
             self.session_record.model = new_model
 
@@ -3094,12 +3096,33 @@ class AIShell:
         error_type = event.data.get("error_type", "general")
         error_details = event.data.get("error_details")
 
-        # Check for quota/rate limit errors
-        error_lower = str(error_message).lower()
-        quota_exhausted = any(
-            keyword in error_lower
-            for keyword in ["rate limit", "quota", "insufficient", "429", "exceeded"]
-        )
+        # Check for quota/rate limit errors (only for free key mode)
+        # self.config is ConfigModel, use .is_free_key attribute
+        is_free_key = getattr(self.config, "is_free_key", False)
+        quota_exhausted = False
+        service_unavailable = False
+        if is_free_key:
+            error_lower = str(error_message).lower()
+            # Check for quota exhaustion (rate limit, quota exceeded)
+            quota_exhausted = any(
+                keyword in error_lower
+                for keyword in [
+                    "rate limit", "quota", "insufficient", "429", "exceeded",
+                    "too many requests"
+                ]
+            )
+            # Check for service unavailability (auth errors, not found, server errors)
+            # These may indicate the free key is invalid or server resources exhausted
+            if not quota_exhausted:
+                service_unavailable = any(
+                    keyword in error_lower
+                    for keyword in [
+                        "401", "403", "404", "500", "502", "503", "504",
+                        "authentication", "unauthorized", "forbidden",
+                        "not found", "internal server error", "bad gateway",
+                        "service unavailable", "gateway timeout"
+                    ]
+                )
 
         if error_type == "streaming_error":
             self.console.print(f"❌ Streaming Error: {error_message}", style="red")
@@ -3125,6 +3148,19 @@ class AIShell:
                     Panel(
                         t("cli.setup.free_key_quota_exhausted_hint"),
                         title=t("cli.setup.free_key_quota_exhausted"),
+                        border_style="yellow",
+                    )
+                )
+                self.console.print(
+                    f"💡 {t('shell.hint.run_setup')}",
+                    style="dim"
+                )
+            # Show service unavailable hint (for free key)
+            elif service_unavailable:
+                self.console.print(
+                    Panel(
+                        t("cli.setup.free_key_service_unavailable_hint"),
+                        title=t("cli.setup.free_key_service_unavailable"),
                         border_style="yellow",
                     )
                 )

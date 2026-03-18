@@ -1503,7 +1503,8 @@ def _handle_free_key_registration() -> tuple[str, str, str] | object | None:
     Returns:
         tuple[str, str, str]: (api_key, api_base, model) on success
         FALLBACK_MANUAL_SETUP: user chose to fallback to manual setup
-        None: user cancelled
+            or disagreed with privacy notice
+        None: user cancelled during registration
     """
     if not HAS_FREE_KEY_MODULE:
         return FALLBACK_MANUAL_SETUP
@@ -1534,7 +1535,7 @@ def _handle_free_key_registration() -> tuple[str, str, str] | object | None:
         )
 
         if consent == "disagree":
-            return None  # Return to entry selection
+            return FALLBACK_MANUAL_SETUP  # Fallback to manual setup
 
         # Detect geo location
         console.print(t("cli.setup.free_key_detecting_location"), style="dim")
@@ -1702,10 +1703,12 @@ def _persist_setup_config(
     api_base: Optional[str],
     api_key: str,
     model: str,
+    is_free_key: bool = False,
 ) -> None:
     config.set_api_base(api_base)
     config.set_api_key(api_key)
     config.set_model(model)
+    config.set_is_free_key(is_free_key)
 
 
 def _interactive_setup(config: Config) -> Optional[ConfigModel]:
@@ -1774,6 +1777,7 @@ def _interactive_setup(config: Config) -> Optional[ConfigModel]:
                             api_base=provider.api_base,
                             api_key=api_key,
                             model=model,
+                            is_free_key=True,
                         )
                         return config.model_config
                     else:
