@@ -33,7 +33,6 @@ cli:
     provider_custom_api_base_required: "API Base is required"
     provider_custom_api_base_invalid: "Invalid API Base URL"
     provider_custom_default: "Custom"
-    prompt_select: "Enter a number, type to filter, or q to quit"
     invalid_choice: "Invalid selection"
     filter_no_results: "No matches. Try again or press Enter to show all."
     api_key_header: "Enter your API key (it will be saved to config)"
@@ -152,12 +151,9 @@ shell:
       content_preview: "Content Preview"
       fallback_hint: "Note"
       risk_level: "Risk Level"
-      matched_rule: "Matched Rule"
-      matched_paths: "Matched Paths"
       reasons: "Reasons"
       alternatives: "Alternatives"
       impact: "Impact"
-      confirm_message: "Confirmation Message"
       no_additional_info: "No additional information provided."
 
     fallback:
@@ -234,9 +230,7 @@ shell:
 
 security:
   sandbox_off_action:
-    allow: "Allow"
     confirm: "Require confirmation"
-    block: "Block"
 
   sandbox_unavailable:
     title: "⚠️ Sandbox Unavailable"

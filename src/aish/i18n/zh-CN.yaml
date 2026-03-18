@@ -33,7 +33,6 @@ cli:
     provider_custom_api_base_required: "API Base 不能为空"
     provider_custom_api_base_invalid: "API Base 无效，请输入完整 URL"
     provider_custom_default: "Custom"
-    prompt_select: "输入序号，或输入关键词过滤，或输入 q 退出"
     invalid_choice: "选择无效，请重试"
     filter_no_results: "没有匹配项，请重新输入或回车显示全部"
     api_key_header: "请输入 API Key（将保存到配置文件）"
@@ -152,12 +151,9 @@ shell:
       content_preview: "内容预览"
       fallback_hint: "提示"
       risk_level: "风险等级"
-      matched_rule: "命中规则"
-      matched_paths: "命中路径"
       reasons: "原因"
       alternatives: "替代方案"
       impact: "影响"
-      confirm_message: "确认提示"
       no_additional_info: "未提供更多信息。"
 
     fallback:
@@ -234,10 +230,7 @@ shell:
 
 security:
   sandbox_off_action:
-    allow: "直接放行"
     confirm: "需要确认"
-    block: "阻断"
-
   sandbox_unavailable:
     title: "⚠️ 沙箱不可用"
     line1: "检测到沙箱不可用，无法评估命令风险。"
@@ -538,12 +531,3 @@ help:
 
 errors:
   litellm_not_installed: "litellm 模块未安装"
-  security_blocked_task: "任务未完成。由于系统安全限制，该操作已被阻断。"
-  llm:
-    auth: "认证失败：请检查 API_Key 是否正确。"
-    rate_limit: "请求过于频繁：已触发限流，请稍后重试。"
-    invalid_request: "请求参数无效：请检查模型名称/接口地址（API Base）以及请求参数。"
-    timeout: "请求超时：请检查网络连接或稍后重试。"
-    service_unavailable: "服务暂不可用：请稍后重试，或更换模型/Provider。"
-    context_length: "上下文过长：请清理对话历史或缩短输入内容。"
-    unknown: "调用大模型失败：{message}"

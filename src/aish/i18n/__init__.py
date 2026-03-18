@@ -16,6 +16,15 @@ _UI_LOCALE: str | None = None
 _MESSAGES: dict[str, Any] | None = None
 _MESSAGES_EN: dict[str, Any] | None = None
 
+_LANG_PREFIX_TO_UI_LOCALE = {
+    "zh": "zh-CN",
+    "de": "de-DE",
+    "es": "es-ES",
+    "fr": "fr-FR",
+    "ja": "ja-JP",
+    "en": "en-US",
+}
+
 
 def _normalize_lang_to_ui_locale(lang_value: str | None) -> str:
     if not lang_value:
@@ -28,10 +37,10 @@ def _normalize_lang_to_ui_locale(lang_value: str | None) -> str:
     # Common formats: zh_CN.UTF-8, en_US.UTF-8, zh_CN, en_US
     main = raw.split(".", 1)[0]
     main = main.split("@", 1)[0]
+    normalized = main.replace("_", "-").lower()
+    lang_prefix = normalized.split("-", 1)[0]
 
-    if main.lower().startswith("zh"):
-        return "zh-CN"
-    return "en-US"
+    return _LANG_PREFIX_TO_UI_LOCALE.get(lang_prefix, "en-US")
 
 
 def get_ui_locale() -> str:
@@ -74,10 +83,12 @@ def _ensure_messages_loaded() -> None:
 
     _MESSAGES_EN = _load_yaml_resource("en-US.yaml")
     ui_locale = get_ui_locale()
-    if ui_locale == "zh-CN":
-        _MESSAGES = _load_yaml_resource("zh-CN.yaml")
-    else:
+    if ui_locale == "en-US":
         _MESSAGES = _MESSAGES_EN
+        return
+
+    localized_messages = _load_yaml_resource(f"{ui_locale}.yaml")
+    _MESSAGES = localized_messages or _MESSAGES_EN
 
 
 def _lookup(messages: dict[str, Any], dotted_key: str) -> str | None:
