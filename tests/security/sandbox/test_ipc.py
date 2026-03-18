@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from aish.security.security_policy import SecurityPolicy
 from aish.security.sandbox import SandboxUnavailableError
-from aish.security.sandbox_ipc import SandboxIpcClient
+from aish.security.sandbox import SandboxSecurity
+from aish.security.sandbox_ipc import SandboxIpcClient, SandboxSecurityIpc
+from aish.security.security_manager import SimpleSecurityManager
 
 
 def _serve_once(sock_path: Path, handler):
@@ -83,3 +86,30 @@ def test_sandbox_ipc_error_response(tmp_path: Path):
     client = SandboxIpcClient(socket_path=sock_path, timeout_s=2.0)
     with pytest.raises(SandboxUnavailableError):
         client.simulate(command="echo ok", cwd=tmp_path, repo_root=tmp_path)
+
+
+def test_security_manager_prefers_ipc_for_root_when_enabled(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("aish.security.security_manager.os.geteuid", lambda: 0)
+    policy = SecurityPolicy(enable_sandbox=True, rules=[])
+
+    manager = SimpleSecurityManager(
+        repo_root=tmp_path,
+        policy=policy,
+        use_privileged_sandbox=True,
+        privileged_sandbox_socket=tmp_path / "sandbox.sock",
+    )
+
+    assert isinstance(manager._sandbox_security, SandboxSecurityIpc)
+
+
+def test_security_manager_uses_local_sandbox_when_privileged_disabled(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("aish.security.security_manager.os.geteuid", lambda: 0)
+    policy = SecurityPolicy(enable_sandbox=True, rules=[])
+
+    manager = SimpleSecurityManager(
+        repo_root=tmp_path,
+        policy=policy,
+        use_privileged_sandbox=False,
+    )
+
+    assert isinstance(manager._sandbox_security, SandboxSecurity)

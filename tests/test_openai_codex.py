@@ -11,6 +11,7 @@ from aish.llm import LLMSession
 from aish.providers.registry import LiteLLMProviderAdapter
 from aish.providers.openai_codex import (_collect_openai_codex_stream_response,
                                          _extract_http_error_message,
+                                         OpenAICodexAuthError,
                                          OpenAICodexDeviceCode,
                                          OpenAICodexOAuthTokens,
                                          OpenAICodexPkceCodes,
@@ -400,6 +401,245 @@ async def test_create_openai_codex_chat_completion_accepts_sse_without_content_t
         )
 
     assert result["choices"][0]["message"]["content"] == "你好"
+
+
+@pytest.mark.anyio
+async def test_create_openai_codex_chat_completion_retries_transient_backend_failure(
+    tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    id_token = _make_jwt(
+        {
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct_123"},
+        }
+    )
+    persist_openai_codex_tokens(
+        auth_path,
+        tokens=OpenAICodexOAuthTokens(
+            id_token=id_token,
+            access_token=_make_jwt({"exp": 2_000_000_000}),
+            refresh_token="refresh_123",
+        ),
+    )
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text=(
+                    "event: response.failed\n"
+                    'data: {"type":"response.failed","response":{"error":{"message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_retry_123 in your message."}}}\n'
+                    "\n"
+                ),
+            )
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'event: response.output_item.done\n'
+                'data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"retry ok"}]}}\n'
+                "\n"
+                'event: response.completed\n'
+                'data: {"type":"response.completed","response":{"id":"resp_retry_ok"}}\n'
+                "\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    with patch(
+        "aish.providers.openai_codex.httpx.AsyncClient",
+        side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
+    ):
+        from aish.providers.openai_codex import create_openai_codex_chat_completion
+
+        result = await create_openai_codex_chat_completion(
+            model="openai-codex/gpt-5.4",
+            messages=[{"role": "user", "content": "你好"}],
+            auth_path=auth_path,
+        )
+
+    assert attempts == 2
+    assert result["choices"][0]["message"]["content"] == "retry ok"
+
+
+@pytest.mark.anyio
+async def test_create_openai_codex_chat_completion_does_not_retry_refresh_failures(
+    tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    id_token = _make_jwt(
+        {
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct_123"},
+        }
+    )
+    persist_openai_codex_tokens(
+        auth_path,
+        tokens=OpenAICodexOAuthTokens(
+            id_token=id_token,
+            access_token=_make_jwt({"exp": 2_000_000_000}),
+            refresh_token="refresh_123",
+        ),
+    )
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            401,
+            headers={"content-type": "application/json"},
+            json={"error": {"message": "unauthorized"}},
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    with (
+        patch(
+            "aish.providers.openai_codex.httpx.AsyncClient",
+            side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
+        ),
+        patch(
+            "aish.providers.openai_codex.refresh_openai_codex_auth",
+            new=AsyncMock(
+                side_effect=OpenAICodexAuthError(
+                    "OpenAI Codex returned invalid JSON."
+                )
+            ),
+        ) as mock_refresh,
+    ):
+        from aish.providers.openai_codex import create_openai_codex_chat_completion
+
+        with pytest.raises(OpenAICodexAuthError, match="returned invalid JSON"):
+            await create_openai_codex_chat_completion(
+                model="openai-codex/gpt-5.4",
+                messages=[{"role": "user", "content": "你好"}],
+                auth_path=auth_path,
+            )
+
+    assert attempts == 1
+    assert mock_refresh.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_create_openai_codex_chat_completion_retries_transport_errors_up_to_five_attempts(
+    tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    id_token = _make_jwt(
+        {
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct_123"},
+        }
+    )
+    persist_openai_codex_tokens(
+        auth_path,
+        tokens=OpenAICodexOAuthTokens(
+            id_token=id_token,
+            access_token=_make_jwt({"exp": 2_000_000_000}),
+            refresh_token="refresh_123",
+        ),
+    )
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 5:
+            raise httpx.ReadTimeout("timed out", request=request)
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'event: response.output_item.done\n'
+                'data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"network recovered"}]}}\n'
+                "\n"
+                'event: response.completed\n'
+                'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n'
+                "\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    with patch(
+        "aish.providers.openai_codex.httpx.AsyncClient",
+        side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
+    ):
+        from aish.providers.openai_codex import create_openai_codex_chat_completion
+
+        result = await create_openai_codex_chat_completion(
+            model="openai-codex/gpt-5.4",
+            messages=[{"role": "user", "content": "你好"}],
+            auth_path=auth_path,
+        )
+
+    assert attempts == 5
+    assert result["choices"][0]["message"]["content"] == "network recovered"
+
+
+@pytest.mark.anyio
+async def test_create_openai_codex_chat_completion_stops_after_five_retryable_failures(
+    tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    id_token = _make_jwt(
+        {
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct_123"},
+        }
+    )
+    persist_openai_codex_tokens(
+        auth_path,
+        tokens=OpenAICodexOAuthTokens(
+            id_token=id_token,
+            access_token=_make_jwt({"exp": 2_000_000_000}),
+            refresh_token="refresh_123",
+        ),
+    )
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                "event: response.failed\n"
+                'data: {"type":"response.failed","response":{"error":{"message":"An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID req_retry_123 in your message."}}}\n'
+                "\n"
+            ),
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    with patch(
+        "aish.providers.openai_codex.httpx.AsyncClient",
+        side_effect=lambda *args, **kwargs: real_async_client(transport=transport),
+    ):
+        from aish.providers.openai_codex import create_openai_codex_chat_completion
+
+        with pytest.raises(OpenAICodexAuthError, match="request ID req_retry_123"):
+            await create_openai_codex_chat_completion(
+                model="openai-codex/gpt-5.4",
+                messages=[{"role": "user", "content": "你好"}],
+                auth_path=auth_path,
+            )
+
+    assert attempts == 5
 
 
 def test_convert_openai_codex_response_to_chat_completion_maps_tool_calls():

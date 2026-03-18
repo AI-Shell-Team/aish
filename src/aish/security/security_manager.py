@@ -78,10 +78,11 @@ class SimpleSecurityManager:
             # 当前不再基于策略推导 bind 白名单：直接使用最小配置。
             # 只读/读写 bind 的缺省行为由 SandboxExecutor 内部处理。
             sandbox_config = SandboxConfig(repo_root=self._repo_root)
-            # 普通用户默认优先使用 root 守护进程（IPC）创建沙箱，避免 overlay mount 权限不足。
-            # 若 IPC 不可用，会在 analyze_command_risk() 里捕获并按原逻辑降级。
+            # 统一优先使用特权沙箱服务（IPC），避免按调用者 uid 分叉出
+            # 本地直连与服务端两套行为路径。若 IPC 不可用，会在
+            # analyze_command_risk() 里捕获并按原逻辑降级。
             socket_path = privileged_sandbox_socket or DEFAULT_SANDBOX_SOCKET_PATH
-            if use_privileged_sandbox and os.geteuid() != 0:
+            if use_privileged_sandbox:
                 self._sandbox_security = SandboxSecurityIpc(
                     repo_root=self._repo_root,
                     enabled=True,

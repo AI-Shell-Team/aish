@@ -46,6 +46,7 @@ OPENAI_CODEX_REFRESH_LEEWAY_SECONDS = 60
 OPENAI_CODEX_DEFAULT_CALLBACK_PORT = 1455
 OPENAI_CODEX_BROWSER_LOGIN_TIMEOUT_SECONDS = 300.0
 OPENAI_CODEX_DEVICE_CODE_TIMEOUT_SECONDS = 900.0
+OPENAI_CODEX_MAX_REQUEST_ATTEMPTS = 5
 
 OPENAI_CODEX_OAUTH_PROVIDER = OAuthProviderSpec(
     provider_id=OPENAI_CODEX_PROVIDER,
@@ -67,6 +68,10 @@ OPENAI_CODEX_OAUTH_PROVIDER = OAuthProviderSpec(
 
 
 class OpenAICodexAuthError(RuntimeError):
+    pass
+
+
+class _OpenAICodexRetryableRequestError(OpenAICodexAuthError):
     pass
 
 
@@ -745,47 +750,73 @@ async def create_openai_codex_chat_completion(
         if auth.needs_refresh() and auth.refresh_token:
             auth = await refresh_openai_codex_auth(auth, client=client)
 
-        for attempt in range(2):
-            async with client.stream(
-                "POST",
-                url,
-                json=request_body,
-                headers=_build_headers(auth),
-            ) as response:
-                if (
-                    response.status_code == httpx.codes.UNAUTHORIZED
-                    and auth.refresh_token
-                    and attempt == 0
-                ):
-                    auth = await refresh_openai_codex_auth(auth, client=client)
-                    continue
-                if response.is_error:
-                    await response.aread()
-                    detail = _extract_http_error_message(response)
-                    raise OpenAICodexAuthError(
-                        f"OpenAI Codex request failed: {response.status_code} {detail}"
-                    )
+        auth_refresh_attempted = False
+        last_transport_error: httpx.TransportError | None = None
 
-                content_type = _coerce_str(response.headers.get("content-type")).lower()
-                if not content_type or "text/event-stream" in content_type:
-                    payload = await _collect_openai_codex_stream_response(response)
-                else:
-                    raw_body = await response.aread()
-                    body_text = raw_body.decode("utf-8", errors="replace")
-                    if _looks_like_sse_text(body_text):
-                        payload = _collect_openai_codex_stream_text(body_text)
-                        return convert_openai_codex_response_to_chat_completion(payload)
-                    try:
-                        payload = json.loads(body_text)
-                    except Exception as exc:
-                        raise OpenAICodexAuthError(
-                            "OpenAI Codex returned invalid JSON."
-                        ) from exc
-                return convert_openai_codex_response_to_chat_completion(payload)
+        for attempt in range(OPENAI_CODEX_MAX_REQUEST_ATTEMPTS):
+            try:
+                async with client.stream(
+                    "POST",
+                    url,
+                    json=request_body,
+                    headers=_build_headers(auth),
+                ) as response:
+                    if (
+                        response.status_code == httpx.codes.UNAUTHORIZED
+                        and auth.refresh_token
+                        and not auth_refresh_attempted
+                    ):
+                        auth_refresh_attempted = True
+                        auth = await refresh_openai_codex_auth(auth, client=client)
+                        continue
+                    if response.is_error:
+                        await response.aread()
+                        detail = _extract_http_error_message(response)
+                        message = (
+                            f"OpenAI Codex request failed: {response.status_code} {detail}"
+                        )
+                        raise _build_openai_codex_request_error(message)
 
-    raise OpenAICodexAuthError(
-        "OpenAI Codex request failed after token refresh."
-    )
+                    content_type = _coerce_str(response.headers.get("content-type")).lower()
+                    if not content_type or "text/event-stream" in content_type:
+                        try:
+                            payload = await _collect_openai_codex_stream_response(response)
+                        except OpenAICodexAuthError as exc:
+                            raise _build_openai_codex_request_error(str(exc)) from exc
+                    else:
+                        raw_body = await response.aread()
+                        body_text = raw_body.decode("utf-8", errors="replace")
+                        if _looks_like_sse_text(body_text):
+                            try:
+                                payload = _collect_openai_codex_stream_text(body_text)
+                            except OpenAICodexAuthError as exc:
+                                raise _build_openai_codex_request_error(
+                                    str(exc)
+                                ) from exc
+                        else:
+                            try:
+                                payload = json.loads(body_text)
+                            except Exception as exc:
+                                raise _OpenAICodexRetryableRequestError(
+                                    "OpenAI Codex returned invalid JSON."
+                                ) from exc
+                    return convert_openai_codex_response_to_chat_completion(payload)
+            except httpx.TransportError as exc:
+                last_transport_error = exc
+                if attempt + 1 >= OPENAI_CODEX_MAX_REQUEST_ATTEMPTS:
+                    break
+                continue
+            except _OpenAICodexRetryableRequestError:
+                if attempt + 1 >= OPENAI_CODEX_MAX_REQUEST_ATTEMPTS:
+                    raise
+                continue
+
+    if last_transport_error is not None:
+        raise OpenAICodexAuthError(
+            f"OpenAI Codex request failed after {OPENAI_CODEX_MAX_REQUEST_ATTEMPTS} attempts: {last_transport_error}"
+        ) from last_transport_error
+
+    raise OpenAICodexAuthError("OpenAI Codex request failed after retries.")
 
 
 def persist_openai_codex_tokens(
@@ -1039,6 +1070,29 @@ def _extract_openai_codex_stream_failure_message(payload: dict[str, Any]) -> str
             if code:
                 return code
     return "OpenAI Codex stream failed."
+
+
+def _is_retryable_openai_codex_failure_message(message: str) -> bool:
+    lowered = message.strip().lower()
+    if not lowered:
+        return False
+    retryable_markers = (
+        "an error occurred while processing your request",
+        "please include the request id",
+        "contact us through our help center",
+        "internal server error",
+        "server_error",
+        "returned invalid json",
+        "stream ended before response.completed",
+        "returned an incomplete response",
+    )
+    return any(marker in lowered for marker in retryable_markers)
+
+
+def _build_openai_codex_request_error(message: str) -> OpenAICodexAuthError:
+    if _is_retryable_openai_codex_failure_message(message):
+        return _OpenAICodexRetryableRequestError(message)
+    return OpenAICodexAuthError(message)
 
 
 def _format_oauth_callback_error(
