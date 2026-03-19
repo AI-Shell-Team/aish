@@ -28,9 +28,7 @@ cli:
     free_key_location_overseas: "Global"
     free_key_registering: "Registering free API key..."
     free_key_success: "Free API key acquired"
-    free_key_missing_key: "Registration succeeded but no API key was returned"
     free_key_already_registered: "This device has already registered a free key"
-    free_key_fingerprint_failed: "Unable to collect device information for fingerprint"
     free_key_failed_with_reason: "Free API key registration failed: {reason}"
     free_key_provider_label: "Free API"
     free_key_privacy_title: "Privacy Notice"
@@ -116,7 +114,6 @@ cli:
     action_retry_api_key: "Re-enter API Key"
     action_retry_free_key: "Retry free key registration"
     action_fallback_manual: "Switch to manual setup"
-    action_use_existing_key: "Use existing key"
     action_use_free_key: "Use free API key"
     action_manual_setup: "Manual provider setup"
     action_change_provider: "Change provider"
@@ -274,7 +271,9 @@ shell:
 
 security:
   sandbox_off_action:
+    allow: "Allow"
     confirm: "Require confirmation"
+    block: "Block"
 
   sandbox_unavailable:
     title: "⚠️ Sandbox Unavailable"

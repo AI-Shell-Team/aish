@@ -220,7 +220,9 @@ shell:
 
 security:
   sandbox_off_action:
+    allow: "Autoriser directement"
     confirm: "Demander confirmation"
+    block: "Bloquer"
   sandbox_unavailable:
     title: "⚠️ Sandbox indisponible"
     line1: "Le sandbox est indisponible ; le risque de la commande ne peut pas etre evalue."

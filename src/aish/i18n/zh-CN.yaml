@@ -28,9 +28,7 @@ cli:
     free_key_location_overseas: "国际节点"
     free_key_registering: "正在注册免费 API Key..."
     free_key_success: "已获取免费 API Key"
-    free_key_missing_key: "注册成功，但服务端未返回 API Key"
     free_key_already_registered: "该设备已注册过免费Key"
-    free_key_fingerprint_failed: "无法采集设备信息，指纹生成失败"
     free_key_failed_with_reason: "免费 API Key 注册失败：{reason}"
     free_key_provider_label: "免费 API"
     free_key_privacy_title: "隐私声明"
@@ -116,7 +114,6 @@ cli:
     action_retry_api_key: "重新输入 API Key"
     action_retry_free_key: "重试免费 Key 注册"
     action_fallback_manual: "切换到手动配置"
-    action_use_existing_key: "使用已有的 Key"
     action_use_free_key: "使用免费 API Key"
     action_manual_setup: "手动配置 Provider"
     action_change_provider: "更换 Provider"
@@ -274,7 +271,9 @@ shell:
 
 security:
   sandbox_off_action:
+    allow: "直接放行"
     confirm: "需要确认"
+    block: "阻断"
   sandbox_unavailable:
     title: "⚠️ 沙箱不可用"
     line1: "检测到沙箱不可用，无法评估命令风险。"
