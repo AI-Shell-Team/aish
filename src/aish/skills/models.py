@@ -119,6 +119,8 @@ class SkillSource(Enum):
     """User skill source, default in $AISH_CONFIG_DIR/skills"""
     CLAUDE = "claude"
     """Claude skill source, default in $HOME/.claude/skills"""
+    BUILTIN = "builtin"
+    """Built-in skills shipped with aish"""
 
 
 class SkillMetadataInfo(SkillMetadata):

@@ -70,9 +70,35 @@ class ShellInputRouter:
         ):
             return InputRoute(intent=InputIntent.BUILTIN_COMMAND, command_name=first)
 
+        # Check for script call before COMMAND_OR_AI
+        if first and self._is_script_call(first):
+            try:
+                cmd_parts = shlex.split(text)
+            except ValueError:
+                cmd_parts = text.split()
+            return InputRoute(
+                intent=InputIntent.SCRIPT_CALL,
+                command_name=first,
+                cmd_parts=cmd_parts,
+            )
+
         try:
             cmd_parts = shlex.split(text)
         except ValueError:
             return InputRoute(intent=InputIntent.COMMAND_OR_AI, parse_error=True)
 
         return InputRoute(intent=InputIntent.COMMAND_OR_AI, cmd_parts=cmd_parts)
+
+    def _is_script_call(self, name: str) -> bool:
+        """Check if the name matches a registered script.
+
+        Args:
+            name: First word of user input.
+
+        Returns:
+            True if it matches a script name.
+        """
+        # Check if script_registry exists and has the script
+        if hasattr(self.shell, "script_registry") and self.shell.script_registry:
+            return self.shell.script_registry.has_script(name)
+        return False

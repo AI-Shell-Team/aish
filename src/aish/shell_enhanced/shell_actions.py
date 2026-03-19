@@ -72,6 +72,18 @@ class CommandOrAIAction(_BaseAction):
         return ActionOutcome(handled=True)
 
 
+class ScriptCallAction(_BaseAction):
+    async def execute(self, ctx: ActionContext) -> ActionOutcome:
+        cmd_parts = ctx.route_data.get("cmd_parts")
+        if not isinstance(cmd_parts, list) or not cmd_parts:
+            return ActionOutcome(handled=False)
+        await self.command_service.handle_script_call(
+            ctx.stripped_input,
+            cmd_parts=cmd_parts,
+        )
+        return ActionOutcome(handled=True)
+
+
 def build_default_actions(
     shell: "AIShell", command_service: "ShellCommandService"
 ) -> dict[InputIntent, ShellAction]:
@@ -82,5 +94,6 @@ def build_default_actions(
         InputIntent.OPERATOR_COMMAND: OperatorCommandAction(shell, command_service),
         InputIntent.SPECIAL_COMMAND: SpecialCommandAction(shell, command_service),
         InputIntent.BUILTIN_COMMAND: BuiltinQuickAction(shell, command_service),
+        InputIntent.SCRIPT_CALL: ScriptCallAction(shell, command_service),
         InputIntent.COMMAND_OR_AI: CommandOrAIAction(shell, command_service),
     }

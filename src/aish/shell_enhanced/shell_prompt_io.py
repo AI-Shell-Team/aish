@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any, Optional
 
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from rich.panel import Panel
 
@@ -330,8 +331,10 @@ async def get_user_input(
                 buffer.insert_text("；")
 
     try:
+        # Wrap prompt in ANSI to properly handle escape sequences from custom prompts
+        formatted_prompt = ANSI(base_prompt)
         result = await self.session.prompt_async(
-            base_prompt,
+            formatted_prompt,
             handle_sigint=False,
             key_bindings=kb,
             bottom_toolbar=get_bottom_toolbar,

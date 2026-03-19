@@ -244,6 +244,10 @@ class ConfigModel(BaseModel):
         default_factory=TUISettings,
         description="TUI mode settings.",
     )
+    enable_scripts: bool = Field(
+        default=True,
+        description="Enable script system (hooks, hot-reload, custom prompts). Set to false to use legacy prompt style.",
+    )
 
     session_db_path: str = Field(
         default_factory=get_default_session_db_path,
@@ -348,6 +352,7 @@ class Config:
                     config_data = yaml.safe_load(f) or {}
 
                 # Migrate sessions.duckdb to sessions.db
+                need_save = False
                 if isinstance(config_data, dict):
                     session_db_path = config_data.get("session_db_path", "")
                     if isinstance(session_db_path, str) and session_db_path.endswith(
@@ -356,10 +361,16 @@ class Config:
                         # Replace sessions.duckdb with sessions.db
                         new_path = str(Path(session_db_path).with_name("sessions.db"))
                         config_data["session_db_path"] = new_path
-                        # Save the migrated config
-                        self._save_config_data(config_data)
+                        need_save = True
                     if "verbose" in config_data:
                         config_data.pop("verbose", None)
+                        need_save = True
+                    # Add enable_scripts if missing (new field migration)
+                    if "enable_scripts" not in config_data:
+                        config_data["enable_scripts"] = True
+                        need_save = True
+
+                    if need_save:
                         self._save_config_data(config_data)
 
                 return ConfigModel.model_validate(config_data)

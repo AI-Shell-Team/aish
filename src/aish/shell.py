@@ -356,6 +356,96 @@ class AIShell:
         self._command_service = ShellCommandService(self)
         self._actions = build_default_actions(self, self._command_service)
 
+        # Initialize script system (only if enabled)
+        if self.config.enable_scripts:
+            from .scripts import ScriptExecutor, ScriptHotReloadService, ScriptRegistry
+            from .scripts.hooks import HookManager
+
+            self.logger.debug("Initializing script system")
+
+            self.script_registry = ScriptRegistry()
+            self.script_executor = ScriptExecutor(
+                llm_session=self.llm_session,
+                env_manager=self.env_manager,
+            )
+            self.hook_manager = HookManager(self.script_registry, self.script_executor)
+
+            # Initialize script hot reload service
+            self._script_hotreload_service = ScriptHotReloadService(
+                script_registry=self.script_registry, debounce_ms=200
+            )
+            # Start the hot reload service
+            self._script_hotreload_service.start()
+
+            # Load scripts on startup
+            try:
+                self.script_registry.load_all_scripts()
+                script_count = len(self.script_registry.list_scripts())
+                if script_count > 0:
+                    self.logger.debug("Loaded %d scripts", script_count)
+            except Exception as e:
+                self.logger.warning("Failed to load scripts: %s", e)
+
+            # Initialize default prompt template
+            self._init_prompt_template()
+
+    def _init_prompt_template(self) -> None:
+        """Initialize default prompt template if not exists."""
+        import shutil
+
+        # Skip for custom config or pytest
+        if getattr(self.config, "is_custom_config", False):
+            return
+
+        is_pytest = any(
+            name == "pytest" or name.startswith("pytest.") or name.startswith("_pytest")
+            for name in sys.modules
+        )
+        if is_pytest:
+            return
+
+        # User hooks directory
+        user_hooks_dir = Path.home() / ".config" / "aish" / "scripts" / "hooks"
+        user_prompt = user_hooks_dir / "aish_prompt.aish"
+
+        # Skip if user already has a prompt
+        if user_prompt.exists():
+            return
+
+        # Find template in package
+        template_path = None
+
+        # Check for development location
+        dev_template = Path(__file__).parent / "scripts" / "templates" / "aish_prompt.aish"
+        if dev_template.exists():
+            template_path = dev_template
+
+        # Check for PyInstaller bundle
+        if not template_path and getattr(sys, "frozen", False):
+            if hasattr(sys, "_MEIPASS"):
+                bundle_template = Path(sys._MEIPASS) / "aish" / "scripts" / "templates" / "aish_prompt.aish"
+                if bundle_template.exists():
+                    template_path = bundle_template
+
+        # Check for system install locations
+        if not template_path:
+            for sys_path in [
+                Path("/usr/share/aish/scripts/templates/aish_prompt.aish"),
+                Path("/usr/local/share/aish/scripts/templates/aish_prompt.aish"),
+            ]:
+                if sys_path.exists():
+                    template_path = sys_path
+                    break
+
+        # Copy template if found
+        if template_path:
+            try:
+                user_hooks_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(template_path, user_prompt)
+                self.logger.debug("Installed default prompt template to %s", user_prompt)
+            except (OSError, IOError) as e:
+                self.logger.debug("Could not install prompt template: %s", e)
+
     def _resolve_terminal_resize_mode(self) -> str:
         mode = str(getattr(self.config, "terminal_resize_mode", "full")).strip().lower()
         if mode in {"full", "pty_only", "off"}:
@@ -547,8 +637,133 @@ class AIShell:
         if self._tui_app is not None:
             self._tui_app.set_cwd(cwd)
 
-        prompt_style = getattr(self.config, "prompt_style", "🚀")
-        return f"{prompt_style} {os.path.basename(cwd)} > "
+        # Legacy mode: simple prompt when scripts disabled
+        if not getattr(self.config, "enable_scripts", True):
+            prompt_style = getattr(self.config, "prompt_style", "🚀")
+            return f"{prompt_style} {os.path.basename(cwd)} > "
+
+        # Try custom prompt hook first
+        if hasattr(self, "hook_manager") and self.hook_manager:
+            custom_prompt = self.hook_manager.run_prompt_hook()
+            if custom_prompt:
+                return custom_prompt
+
+        # Fallback: enhanced default prompt with git info
+        return self._build_default_prompt(cwd)
+
+    def _build_default_prompt(self, cwd: str) -> str:
+        """Build default prompt with compact colorful style.
+
+        Args:
+            cwd: Current working directory.
+
+        Returns:
+            Default prompt string with path, git status, and colors.
+        """
+        import subprocess
+
+        # ANSI colors
+        R, D = "\033[0m", "\033[2m"
+        G, Y, RD, BL, M, C = "\033[32m", "\033[33m", "\033[31m", "\033[34m", "\033[35m", "\033[36m"
+
+        # Abbreviate path
+        home = os.path.expanduser("~")
+        display_path = cwd
+        if cwd.startswith(home):
+            display_path = "~" + cwd[len(home) :]
+
+        # Shorten middle directories
+        parts = display_path.split("/")
+        if len(parts) > 1:
+            abbreviated = parts[0]  # ~
+            for i, part in enumerate(parts[1:-1], 1):
+                if part:
+                    abbreviated += "/" + part[0]
+            abbreviated += "/" + parts[-1]
+            display_path = abbreviated
+
+        p = f":{BL}{display_path}{R}"
+
+        # Git status
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                capture_output=True,
+                text=True,
+                cwd=cwd,
+                timeout=0.3,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "true":
+                # Branch
+                result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd,
+                    timeout=0.3,
+                )
+                branch = result.stdout.strip() or "HEAD"
+                p += f"|{M}{branch}{R}"
+
+                # Status
+                result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd,
+                    timeout=0.5,
+                )
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
+                    staged = sum(1 for line in lines if line and line[0] in "MADRC")
+                    modified = sum(1 for line in lines if line and line[1] in "MD")
+                    untracked = sum(1 for line in lines if line.startswith("??"))
+
+                    # Status indicator color
+                    if staged > 0:
+                        p += f"{Y}●{R} {Y}+{staged}{R}"
+                    elif modified > 0:
+                        p += f"{RD}●{R} {RD}~{modified}{R}"
+                    elif untracked > 0:
+                        p += f"{C}●{R} {D}?{untracked}{R}"
+                    else:
+                        p += f"{G}●{R}"
+
+                # Ahead/behind
+                result = subprocess.run(
+                    ["git", "rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+                    capture_output=True,
+                    text=True,
+                    cwd=cwd,
+                    timeout=0.3,
+                )
+                if result.returncode == 0:
+                    parts = result.stdout.strip().split()
+                    if len(parts) == 2:
+                        behind, ahead = parts
+                        if ahead != "0":
+                            p += f" {C}↑{ahead}{R}"
+                        if behind != "0":
+                            p += f" {C}↓{behind}{R}"
+
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            pass
+
+        # Virtual env
+        venv = os.environ.get("VIRTUAL_ENV")
+        if venv and not venv.endswith("/aish/.venv") and "/aish/.venv/" not in venv:
+            p += f" {C}🐍{R}"
+        elif os.environ.get("CONDA_DEFAULT_ENV"):
+            p += f" {C}🐍{R}"
+
+        # Prompt symbol
+        exit_code = os.environ.get("?", "0")
+        if exit_code != "0":
+            p += f" {RD}➜➜{R} "
+        else:
+            p += f" {G}➜{R} "
+
+        return p
 
     async def get_user_input(
         self, prompt_text: Optional[str] = None, _recursion_depth: int = 0
@@ -572,6 +787,10 @@ class AIShell:
 
     def _exit_shell(self) -> None:
         """Exit entrypoint: finalize UI and print goodbye on a clean line."""
+        # Stop script hot reload service
+        if hasattr(self, "_script_hotreload_service"):
+            self._script_hotreload_service.stop()
+
         # Ensure any live/streaming UI is finalized before exit message.
         self._stop_animation()
         self._reset_reasoning_state()
@@ -2533,6 +2752,13 @@ class AIShell:
                 self.skill_manager.reload_if_dirty()
             except Exception:
                 pass
+
+            # Lazy script reload: reload scripts if invalidated
+            if hasattr(self, "script_registry"):
+                try:
+                    self.script_registry.reload_if_dirty()
+                except Exception:
+                    pass
 
             ctx = ActionContext(
                 raw_input=user_input,

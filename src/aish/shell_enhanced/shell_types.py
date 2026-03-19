@@ -42,6 +42,7 @@ class InputIntent(Enum):
     OPERATOR_COMMAND = "operator_command"
     SPECIAL_COMMAND = "special_command"
     BUILTIN_COMMAND = "builtin_command"
+    SCRIPT_CALL = "script_call"  # User script invocation
     COMMAND_OR_AI = "command_or_ai"
 
 

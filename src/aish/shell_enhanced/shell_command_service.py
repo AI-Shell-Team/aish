@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 from typing import TYPE_CHECKING, Any
 
@@ -227,13 +228,77 @@ class ShellCommandService:
                             user_input, stdout, stderr
                         )
                         return
-                    # 许多正常命令（如 dd、grep -v 等）会输出信息到 stderr，但这不代表执行失败
+                    # Many normal commands output to stderr but don't fail
                 finally:
                     self.shell.operation_in_progress = False
                     self.shell._current_op_scope = None
             return
 
         # is_command_request() returned False - treat as AI question
-        # Note: Even if _command_detection_llm_failed is True, we should still
-        # try handle_ai_command rather than ignoring user input completely.
         await self.shell.handle_ai_command(user_input)
+
+    async def handle_script_call(
+        self,
+        user_input: str,
+        cmd_parts: list[str],
+    ) -> None:
+        """Handle script execution.
+
+        Args:
+            user_input: Full user input string.
+            cmd_parts: Parsed command parts (first element is script name).
+        """
+        script_name = cmd_parts[0]
+        script_args = cmd_parts[1:]
+
+        script = self.shell.script_registry.get_script(script_name)
+        if not script:
+            # Fallback to normal command handling
+            await self.handle_command_or_ai(
+                user_input, cmd_parts=cmd_parts, parse_error=False
+            )
+            return
+
+        # Execute the script
+        result = await self.shell.script_executor.execute(
+            script,
+            args=script_args,
+        )
+
+        # Apply state changes
+        if result.new_cwd:
+            try:
+                os.chdir(result.new_cwd)
+                self.shell.env_manager.set_var("PWD", result.new_cwd)
+                self.shell.env_manager.set_var(
+                    "OLDPWD", os.environ.get("PWD", result.new_cwd)
+                )
+            except OSError as e:
+                self.shell.console.print(
+                    f"❌ Failed to change directory: {e}", style="red"
+                )
+
+        if result.env_changes:
+            for key, value in result.env_changes.items():
+                self.shell.env_manager.set_var(key, value)
+
+        # Record history
+        self.add_shell_context_entry(
+            user_input,
+            result.returncode if result.success else 1,
+            result.output,
+            result.error,
+        )
+        await self.shell.history_manager.add_entry(
+            command=user_input,
+            source="user",
+            returncode=result.returncode if result.success else 1,
+            stdout=result.output,
+            stderr=result.error,
+        )
+
+        # Display output
+        if result.output:
+            self.shell.console.print(result.output.rstrip("\n"))
+        if result.error:
+            self.shell.console.print(f"❌ {result.error.rstrip(chr(10))}", style="red")

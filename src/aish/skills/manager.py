@@ -148,7 +148,18 @@ class SkillManager:
         """Return expected skill root directories regardless of existence."""
         roots: list[tuple[SkillSource, Path]] = []
 
-        # 1. USER: $AISH_CONFIG_DIR/skills or ~/.config/aish/skills
+        # 1. BUILTIN: Built-in skills shipped with aish
+        # Use package location to find builtin_skills directory
+        try:
+            import aish
+            package_dir = Path(aish.__file__).parent
+            builtin_skills_dir = package_dir / "builtin_skills"
+            if builtin_skills_dir.is_dir():
+                roots.append((SkillSource.BUILTIN, builtin_skills_dir))
+        except Exception:
+            pass
+
+        # 2. USER: $AISH_CONFIG_DIR/skills or ~/.config/aish/skills
         config_dir = os.environ.get("AISH_CONFIG_DIR")
         if config_dir:
             user_skills_dir = Path(config_dir) / "skills"
@@ -156,7 +167,7 @@ class SkillManager:
             user_skills_dir = Path.home() / ".config" / "aish" / "skills"
         roots.append((SkillSource.USER, user_skills_dir))
 
-        # 2. CLAUDE: $HOME/.claude/skills
+        # 3. CLAUDE: $HOME/.claude/skills
         claude_skills_dir = Path.home() / ".claude" / "skills"
         roots.append((SkillSource.CLAUDE, claude_skills_dir))
 
