@@ -456,6 +456,9 @@ class AIShell:
                 user_hooks_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(template_path, user_prompt)
                 self.logger.debug("Installed default prompt template to %s", user_prompt)
+                # Reload scripts so the new prompt is immediately available
+                if hasattr(self, "script_registry"):
+                    self.script_registry.load_all_scripts()
             except (OSError, IOError) as e:
                 self.logger.debug("Could not install prompt template: %s", e)
 
@@ -771,9 +774,8 @@ class AIShell:
         elif os.environ.get("CONDA_DEFAULT_ENV"):
             p += f" {C}🐍{R}"
 
-        # Prompt symbol
-        exit_code = os.environ.get("?", "0")
-        if exit_code != "0":
+        # Prompt symbol - use internal exit code for reliability
+        if self._last_exit_code != 0:
             p += f" {RD}➜➜{R} "
         else:
             p += f" {G}➜{R} "
