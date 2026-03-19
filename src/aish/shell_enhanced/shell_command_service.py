@@ -268,11 +268,11 @@ class ShellCommandService:
         # Apply state changes
         if result.new_cwd:
             try:
+                # Cache current working directory before changing
+                old_pwd = os.getcwd()
                 os.chdir(result.new_cwd)
                 self.shell.env_manager.set_var("PWD", result.new_cwd)
-                self.shell.env_manager.set_var(
-                    "OLDPWD", os.environ.get("PWD", result.new_cwd)
-                )
+                self.shell.env_manager.set_var("OLDPWD", old_pwd)
             except OSError as e:
                 self.shell.console.print(
                     f"❌ Failed to change directory: {e}", style="red"

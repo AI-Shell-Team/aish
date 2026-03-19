@@ -43,8 +43,11 @@ class HookManager:
         """Get hook script for an event."""
         return self.registry.get_script(f"aish_{event}")
 
-    def run_prompt_hook(self) -> str:
+    def run_prompt_hook(self, last_exit_code: int = 0) -> str:
         """Run the prompt hook to get custom prompt string.
+
+        Args:
+            last_exit_code: Exit code from the last command.
 
         Returns:
             Custom prompt string, or empty string if no hook.
@@ -53,7 +56,7 @@ class HookManager:
         if not hook:
             return ""
 
-        env = self._build_prompt_env()
+        env = self._build_prompt_env(last_exit_code)
         result = self.executor.execute_sync(hook, args=[], env=env)
 
         if result.success and result.output:
@@ -63,12 +66,16 @@ class HookManager:
 
         return ""
 
-    def _build_prompt_env(self) -> dict[str, str]:
-        """Build environment variables for prompt hook."""
+    def _build_prompt_env(self, last_exit_code: int = 0) -> dict[str, str]:
+        """Build environment variables for prompt hook.
+
+        Args:
+            last_exit_code: Exit code from the last command.
+        """
         env = dict(os.environ)
         cwd = os.getcwd()
         env["AISH_CWD"] = cwd
-        env["AISH_EXIT_CODE"] = os.environ.get("?", "0")
+        env["AISH_EXIT_CODE"] = str(last_exit_code)
 
         # Git status detection
         try:
@@ -143,11 +150,24 @@ class HookManager:
 
 
 def build_prompt_from_script(
-    registry: ScriptRegistry, executor: ScriptExecutor, default_prompt: str = "🚀"
+    registry: ScriptRegistry,
+    executor: ScriptExecutor,
+    default_prompt: str = "🚀",
+    last_exit_code: int = 0,
 ) -> str:
-    """Build shell prompt using hook script if available."""
+    """Build shell prompt using hook script if available.
+
+    Args:
+        registry: ScriptRegistry to look up hook scripts.
+        executor: ScriptExecutor to run hook scripts.
+        default_prompt: Default prompt string if no hook.
+        last_exit_code: Exit code from the last command.
+
+    Returns:
+        Custom prompt string or default prompt.
+    """
     hook_manager = HookManager(registry, executor)
-    custom_prompt = hook_manager.run_prompt_hook()
+    custom_prompt = hook_manager.run_prompt_hook(last_exit_code=last_exit_code)
     if custom_prompt:
         return custom_prompt
     return f"{default_prompt} {os.path.basename(os.getcwd())} > "

@@ -281,6 +281,9 @@ class AIShell:
         # Pending error correction info (set when command fails)
         self._pending_error_correction: Optional[dict] = None
 
+        # Last command exit code for prompt hooks
+        self._last_exit_code: int = 0
+
         # Pre-load system info (static info from cache if available)
         self.uname_info, self.os_info, self.basic_env_info = (
             get_or_fetch_static_env_info()
@@ -404,8 +407,18 @@ class AIShell:
         if is_pytest:
             return
 
-        # User hooks directory
-        user_hooks_dir = Path.home() / ".config" / "aish" / "scripts" / "hooks"
+        # User hooks directory - use config_dir if available, fallback to default
+        if self.config_manager and hasattr(self.config_manager, "config_dir"):
+            base_config_dir = self.config_manager.config_dir
+        else:
+            # Fallback: check XDG_CONFIG_HOME or use default
+            xdg_config = os.environ.get("XDG_CONFIG_HOME")
+            if xdg_config:
+                base_config_dir = Path(xdg_config) / "aish"
+            else:
+                base_config_dir = Path.home() / ".config" / "aish"
+
+        user_hooks_dir = base_config_dir / "scripts" / "hooks"
         user_prompt = user_hooks_dir / "aish_prompt.aish"
 
         # Skip if user already has a prompt
@@ -644,7 +657,9 @@ class AIShell:
 
         # Try custom prompt hook first
         if hasattr(self, "hook_manager") and self.hook_manager:
-            custom_prompt = self.hook_manager.run_prompt_hook()
+            custom_prompt = self.hook_manager.run_prompt_hook(
+                last_exit_code=self._last_exit_code
+            )
             if custom_prompt:
                 return custom_prompt
 
@@ -2583,6 +2598,9 @@ class AIShell:
         offload: dict[str, Any] | None = None,
     ):
         """Add shell execution context for LLM with output previews and offload hints."""
+        # Update last exit code for prompt hooks
+        self._last_exit_code = returncode
+
         preview_bytes = self._get_shell_preview_bytes()
         stdout_preview, stdout_truncated = self._truncate_utf8_preview(
             stdout or "",

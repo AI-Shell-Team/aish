@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,10 @@ class ScriptRegistry:
         self._invalidate_seq = 0
         self._loaded_seq = 0
         self._scripts_version = 0
+        # Cache for system command checks to avoid repeated shutil.which calls
+        self._system_cmd_cache: dict[str, bool] = {}
+        # Track already-warned scripts to avoid duplicate warnings
+        self._warned_scripts: set[str] = set()
 
     @property
     def scripts_version(self) -> int:
@@ -69,6 +74,10 @@ class ScriptRegistry:
             self._scripts = scripts
             self._loaded_seq = target_seq
             self._scripts_version += 1
+            self._warned_scripts.clear()
+
+        # Check for conflicts with system commands
+        self._check_script_conflicts(scripts)
 
         logger.debug(
             "Reloaded %d scripts (version %d)", len(scripts), self._scripts_version
@@ -90,7 +99,43 @@ class ScriptRegistry:
             self._scripts = scripts
             self._loaded_seq = target_seq
             self._scripts_version += 1
-            return dict(self._scripts)
+            self._warned_scripts.clear()
+
+        # Check for conflicts with system commands
+        self._check_script_conflicts(scripts)
+
+        return dict(self._scripts)
+
+    def _check_script_conflicts(self, scripts: dict[str, Script]) -> None:
+        """Check if any scripts shadow system commands and log warnings.
+
+        Args:
+            scripts: Dictionary of loaded scripts.
+        """
+        for name in scripts:
+            if name in self._warned_scripts:
+                continue
+            if self._is_system_command(name):
+                logger.warning(
+                    "Script '%s' shadows a system command. "
+                    "Consider renaming to avoid confusion (e.g., 'my_%s').",
+                    name,
+                    name,
+                )
+                self._warned_scripts.add(name)
+
+    def _is_system_command(self, name: str) -> bool:
+        """Check if a command exists in system PATH.
+
+        Args:
+            name: Command name to check.
+
+        Returns:
+            True if command exists in PATH.
+        """
+        if name not in self._system_cmd_cache:
+            self._system_cmd_cache[name] = shutil.which(name) is not None
+        return self._system_cmd_cache[name]
 
     def has_script(self, name: str) -> bool:
         """Check if a script exists by name.

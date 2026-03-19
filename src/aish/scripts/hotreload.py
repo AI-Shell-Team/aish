@@ -65,9 +65,21 @@ class ScriptHotReloadService:
         """Main watch loop running in background thread."""
         scripts_dir = self.script_registry.get_scripts_dir()
 
+        # If directory doesn't exist, wait for it to be created
+        # instead of immediately returning
         if not scripts_dir.exists():
-            logger.debug("Scripts directory does not exist: %s", scripts_dir)
-            return
+            logger.debug(
+                "Scripts directory does not exist: %s, waiting for creation",
+                scripts_dir,
+            )
+            # Poll for directory creation with 1 second intervals
+            while not self._stop_event.is_set() and not scripts_dir.exists():
+                self._stop_event.wait(1.0)
+
+            if self._stop_event.is_set():
+                return
+
+            logger.debug("Scripts directory now exists: %s", scripts_dir)
 
         # Check if watchfiles is available
         try:
