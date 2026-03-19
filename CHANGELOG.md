@@ -7,6 +7,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-03-19
+
+### Added
+
+- Added shell prompt scripting support with built-in templates, examples, and hot reload so prompts can be customized without modifying core code.
+- Added full localized interface coverage for German, Spanish, French, Japanese, and Chinese alongside the existing English experience.
+
+### Changed
+
+- Changed the setup wizard to better guide provider configuration with clearer loading feedback during key assignment and verification.
+- Changed assistant response rendering to use a more compact message box layout for long replies in the terminal UI.
+
+### Fixed
+
+- Fixed transient OpenAI Codex request failures by retrying temporary upstream errors during provider requests.
+- Fixed sandbox startup and IPC routing so sandboxed execution remains reliable in both normal and frozen binary environments.
+- Fixed missing localized labels for sandbox approval actions in non-English interfaces.
+
 ## [0.1.2] - 2026-03-14
 
 ### Added
@@ -46,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed Linux bundle smoke tests to match the installer layout used by release artifacts.
 - Fixed startup welcome screen rendering regressions.
 - Fixed official website redirection failures.
+
 ## [0.1.0] - 2025-12-29
 
 ### Added
