@@ -60,7 +60,7 @@ class HookManager:
         result = self.executor.execute_sync(hook, args=[], env=env)
 
         if result.success and result.output:
-            return result.output.strip()
+            return result.output
         if result.error:
             logger.warning("Prompt hook failed: %s", result.error)
 

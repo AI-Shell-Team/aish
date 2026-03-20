@@ -404,6 +404,22 @@ class TestHookManager:
             prompt = manager.run_prompt_hook()
             assert "custom" in prompt
 
+    def test_run_prompt_hook_preserves_trailing_space(self) -> None:
+        """Prompt hook should preserve trailing space for cursor separation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "aish_prompt.aish").write_text(
+                'printf "prompt > "', encoding="utf-8"
+            )
+
+            registry = ScriptRegistry(scripts_dir=Path(tmpdir))
+            registry.load_all_scripts()
+
+            executor = ScriptExecutor()
+            manager = HookManager(registry, executor)
+
+            prompt = manager.run_prompt_hook()
+            assert prompt == "prompt > "
+
 
 class TestScriptHotReloadService:
     """Tests for script hot reload service."""

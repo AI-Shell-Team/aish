@@ -140,7 +140,7 @@ class ScriptExecutor:
                 timeout=timeout,
             )
 
-            output = result.stdout.strip()
+            output = result.stdout.rstrip("\r\n")
             error = result.stderr.strip() if result.returncode != 0 else ""
 
             # Parse state changes from output
