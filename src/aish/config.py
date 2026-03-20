@@ -311,26 +311,33 @@ class Config:
             self.config_dir = self.config_file.parent
         else:
             # Use default config file path
-            xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
-            if xdg_config_home:
-                base_dir = Path(xdg_config_home).expanduser()
+            # Priority: AISH_CONFIG_DIR > XDG_CONFIG_HOME > ~/.config
+            aish_config_dir = os.environ.get("AISH_CONFIG_DIR")
+            if aish_config_dir:
+                # AISH_CONFIG_DIR points directly to the aish config directory
+                self.config_dir = Path(aish_config_dir).expanduser()
+                self.config_file = self.config_dir / "config.yaml"
             else:
-                # Tests should never touch real user config under $HOME.
-                # Detect pytest by presence in sys.modules (more reliable than env vars).
-                # Note: pytest itself may not be imported as "pytest"; internal modules use "_pytest".
-                is_pytest = any(
-                    name == "pytest"
-                    or name.startswith("pytest.")
-                    or name.startswith("_pytest")
-                    for name in sys.modules
-                )
-                if is_pytest:
-                    base_dir = Path(tempfile.gettempdir()) / "aish-test-config"
+                xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+                if xdg_config_home:
+                    base_dir = Path(xdg_config_home).expanduser()
                 else:
-                    base_dir = Path.home() / ".config"
+                    # Tests should never touch real user config under $HOME.
+                    # Detect pytest by presence in sys.modules (more reliable than env vars).
+                    # Note: pytest itself may not be imported as "pytest"; internal modules use "_pytest".
+                    is_pytest = any(
+                        name == "pytest"
+                        or name.startswith("pytest.")
+                        or name.startswith("_pytest")
+                        for name in sys.modules
+                    )
+                    if is_pytest:
+                        base_dir = Path(tempfile.gettempdir()) / "aish-test-config"
+                    else:
+                        base_dir = Path.home() / ".config"
 
-            self.config_dir = base_dir / "aish"
-            self.config_file = self.config_dir / "config.yaml"
+                self.config_dir = base_dir / "aish"
+                self.config_file = self.config_dir / "config.yaml"
 
         self.history_file = self.config_dir / "history"
 
