@@ -91,6 +91,15 @@ install:
 		install -d "$(DESTDIR)$(DATADIR)"; \
 		cp -a debian/skills "$(DESTDIR)$(DATADIR)/"; \
 	fi
+	@if [ -d src/aish/scripts/prompts ]; then \
+		install -d "$(DESTDIR)$(DATADIR)/prompts"; \
+		install -m 0644 src/aish/scripts/prompts/*.aish "$(DESTDIR)$(DATADIR)/prompts/"; \
+		install -m 0644 src/aish/scripts/prompts/THEMES.md "$(DESTDIR)$(DATADIR)/prompts/"; \
+	fi
+	@if [ -d src/aish/scripts/templates ]; then \
+		install -d "$(DESTDIR)$(DATADIR)/scripts/templates"; \
+		install -m 0644 src/aish/scripts/templates/*.aish "$(DESTDIR)$(DATADIR)/scripts/templates/"; \
+	fi
 
 clean:
 	@echo "🧹 Cleaning build artifacts..."
