@@ -344,7 +344,10 @@ class LLMSession:
             from aish.tools.ask_user import AskUserTool
 
             self.ask_user_tool = AskUserTool(request_choice=self.request_user_choice)
-            self.skill_tool = SkillTool(skills=self.skill_manager.to_skill_infos())
+            self.skill_tool = SkillTool(
+                skill_manager=self.skill_manager,
+                prompt_manager=self.prompt_manager,
+            )
             self.system_diagnose_agent = SystemDiagnoseAgent(
                 config=config,
                 model_id=self.model,
@@ -1111,19 +1114,13 @@ class LLMSession:
         return new_messages
 
     def _sync_skill_tool_from_manager_if_needed(self) -> None:
-        """Keep the `skill` tool's metadata in sync with the current skill snapshot."""
+        """Invalidate cached tools spec when the skill snapshot changes."""
         current_version = self.skill_manager.skills_version
         if current_version == self._skills_version_for_tools:
             return
 
         self._skills_version_for_tools = current_version
-
-        tool = self.tools.get("skill")
-        if tool is not None and hasattr(tool, "skills"):
-            try:
-                tool.skills = self.skill_manager.to_skill_infos()
-            except Exception:
-                pass
+        self._tools_spec = None
 
     def _build_skills_reminder_message(self) -> Optional[dict]:
         """Build a skills reminder message from current loaded skills snapshot."""
@@ -1210,7 +1207,6 @@ class LLMSession:
 
             goon, tool_result = await self.pre_execute_tool(tool_name, tool_args)
             if goon == LLMCallbackResult.APPROVE:
-                # 正常处理：发送工具响应
                 rendered_result = tool_result.render_for_llm()
                 tool_msg = {
                     "role": "tool",
@@ -1220,72 +1216,18 @@ class LLMSession:
                 }
                 context_manager.add_memory(MemoryType.LLM, tool_msg)
 
-                # 如果工具被安全系统阻断（例如高风险删除），应立刻终止本轮工具链。
-                # 否则模型可能继续尝试“逐个删除/换命令/先 ls 再 rm”等替代动作。
-                if (
-                    tool_name == "bash_exec"
-                    and not tool_result.ok
-                    and isinstance(tool_result.meta, dict)
-                    and tool_result.meta.get("kind") == "security_blocked"
-                ):
+                for ctx_msg in tool_result.context_messages:
+                    context_manager.add_memory(MemoryType.LLM, ctx_msg)
+
+                session_output = self.tools[tool_name].get_session_output(tool_result)
+                if session_output is not None:
+                    output = session_output
+
+                if tool_result.stop_tool_chain:
                     tool_call_cancelled = True
-                    output = ""
+                    if session_output is None:
+                        output = tool_result.output
                     break
-
-                # If ask_user pauses due to cancellation/unavailable, stop executing
-                # remaining tool calls in this turn and ask the user how to proceed.
-                if (
-                    tool_name == "ask_user"
-                    and not tool_result.ok
-                    and isinstance(tool_result.meta, dict)
-                    and tool_result.meta.get("kind") == "user_input_required"
-                ):
-                    tool_call_cancelled = True
-                    output = tool_result.output
-                    break
-
-                if tool_name == "system_diagnose_agent":
-                    output = rendered_result
-                elif tool_result.ok and tool_name == "skill":
-                    skill_name = tool_args.get("skill_name")
-                    skill_args = tool_args.get("args")
-                    try:
-                        self.skill_manager.reload_if_dirty()
-                    except Exception:
-                        pass
-
-                    the_skill = self.skill_manager.get_skill(str(skill_name or ""))
-                    if the_skill is None:
-                        context_manager.add_memory(
-                            MemoryType.LLM,
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"Error: Skill '{skill_name}' is not available. "
-                                    "Continue the task without using that skill."
-                                ),
-                            },
-                        )
-                    else:
-                        skill_prompt = self.prompt_manager.substitute_template(
-                            "skill",
-                            base_dir=the_skill.base_dir,
-                            skill_content=the_skill.content,
-                            skill_args=skill_args,
-                        ).strip()
-
-                        context_manager.add_memory(
-                            MemoryType.LLM,
-                            {"role": "user", "content": skill_prompt},
-                        )
-
-                elif tool_result.ok:
-                    # user_msg = {
-                    #     "role": "user",
-                    #     "content": "check if the task finished, if not, you can continue to explore, or give a conclusion. ",
-                    # }
-                    # context_manager.add_memory(MemoryType.LLM, user_msg)
-                    pass
             else:
                 tool_call_cancelled = True
                 rendered_result = tool_result.render_for_llm()

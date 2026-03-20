@@ -165,7 +165,7 @@ class PlanAgent(ToolBase):
             "bash_exec": BashTool(history_manager=self.history_manager),
             "read_file": ReadFileTool(),
             "finalize_plan": FinalizePlanTool(),
-            "skill": SkillTool(skills=self.skill_manager.to_skill_infos()),
+            "skill": SkillTool(skill_manager=self.skill_manager, prompt_manager=self.prompt_manager),
             "final_answer": FinalAnswer(),
         }
 
@@ -485,7 +485,7 @@ To pause/stop: Use Ctrl+C or close the application."""
             "step_skip": StepSkipTool(),
             "step_failed": StepFailedTool(),
             "plan_complete": PlanCompleteTool(),
-            "skill": SkillTool(skills=self.skill_manager.to_skill_infos()),
+            "skill": SkillTool(skill_manager=self.skill_manager, prompt_manager=self.prompt_manager),
             "final_answer": FinalAnswer(),
         }
 

@@ -89,6 +89,9 @@ class SystemDiagnoseAgent(ToolBase):
             return anyio.run(async_wrapper)
         return async_wrapper()
 
+    def get_session_output(self, result) -> str | None:
+        return result.render_for_llm()
+
     def _create_react_system_prompt(self) -> str:
         """Generate a ReAct-style system prompt for diagnostics."""
         base_prompt = self.prompt_manager.substitute_template(
@@ -145,7 +148,7 @@ When ready, use the final_answer tool to deliver your final diagnostic conclusio
             "write_file": WriteFileTool(),
             "edit_file": EditFileTool(),
             "final_answer": FinalAnswer(),
-            "skill": SkillTool(skills=self.skill_manager.to_skill_infos()),
+            "skill": SkillTool(skill_manager=self.skill_manager, prompt_manager=self.prompt_manager),
         }
 
         context_manager = ContextManager()

@@ -132,6 +132,7 @@ async def test_handle_tool_calls_ask_user_user_input_required_breaks(monkeypatch
                     ok=False,
                     output="paused",
                     meta={"kind": "user_input_required", "reason": "cancelled"},
+                    stop_tool_chain=True,
                 ),
             )
         raise AssertionError("should not execute tool calls after ask_user pause")
@@ -148,6 +149,87 @@ async def test_handle_tool_calls_ask_user_user_input_required_breaks(monkeypatch
 
     assert tool_call_cancelled is True
     assert output == "paused"
+
+
+@pytest.mark.anyio
+async def test_handle_tool_calls_system_diagnose_agent_sets_session_output():
+    config = ConfigModel(model="test-model", api_key="test-key")
+    session = LLMSession(config=config, skill_manager=SkillManager())
+    context_manager = ContextManager()
+
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "system_diagnose_agent",
+                "arguments": '{"query":"check logs"}',
+            },
+        }
+    ]
+
+    async def fake_pre_execute_tool(tool_name, _tool_args):
+        assert tool_name == "system_diagnose_agent"
+        return (
+            LLMCallbackResult.APPROVE,
+            ToolResult(ok=True, output="diagnostic result"),
+        )
+
+    with patch.object(
+        session, "pre_execute_tool", new=AsyncMock(side_effect=fake_pre_execute_tool)
+    ):
+        tool_call_cancelled, output, _messages = await session._handle_tool_calls(
+            tool_calls=tool_calls,
+            context_manager=context_manager,
+            system_message=None,
+            output="",
+        )
+
+    assert tool_call_cancelled is False
+    assert output == "diagnostic result"
+
+
+@pytest.mark.anyio
+async def test_handle_tool_calls_bash_security_blocked_clears_session_output():
+    config = ConfigModel(model="test-model", api_key="test-key")
+    session = LLMSession(config=config, skill_manager=SkillManager())
+    context_manager = ContextManager()
+
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "bash_exec",
+                "arguments": '{"code":"rm -rf /tmp/x"}',
+            },
+        }
+    ]
+
+    async def fake_pre_execute_tool(tool_name, _tool_args):
+        assert tool_name == "bash_exec"
+        return (
+            LLMCallbackResult.APPROVE,
+            ToolResult(
+                ok=False,
+                output="<stderr>blocked</stderr>",
+                meta={"kind": "security_blocked"},
+                stop_tool_chain=True,
+            ),
+        )
+
+    with patch.object(
+        session, "pre_execute_tool", new=AsyncMock(side_effect=fake_pre_execute_tool)
+    ):
+        tool_call_cancelled, output, _messages = await session._handle_tool_calls(
+            tool_calls=tool_calls,
+            context_manager=context_manager,
+            system_message=None,
+            output="",
+        )
+
+    assert tool_call_cancelled is True
+    assert output == ""
 
 
 @pytest.mark.anyio

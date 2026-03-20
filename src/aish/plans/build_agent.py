@@ -170,7 +170,7 @@ class BuildAgent(ToolBase):
             "step_skip": StepSkipTool(),
             "step_failed": StepFailedTool(),
             "plan_complete": PlanCompleteTool(),
-            "skill": SkillTool(skills=self.skill_manager.to_skill_infos()),
+            "skill": SkillTool(skill_manager=self.skill_manager, prompt_manager=self.prompt_manager),
             "final_answer": FinalAnswer(),
         }
 

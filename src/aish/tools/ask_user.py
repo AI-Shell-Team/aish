@@ -203,6 +203,7 @@ class AskUserTool(ToolBase):
                     "default": default_value,
                     "options": normalized_options,
                 },
+                stop_tool_chain=True,
             )
 
         try:
@@ -277,4 +278,5 @@ class AskUserTool(ToolBase):
                 "default": default_value,
                 "options": normalized_options,
             },
+            stop_tool_chain=True,
         )

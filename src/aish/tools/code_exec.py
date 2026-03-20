@@ -254,6 +254,11 @@ class BashTool(ToolBase):
             },
         }
 
+    def get_session_output(self, result: ToolResult) -> str | None:
+        if result.meta.get("kind") == "security_blocked":
+            return ""
+        return None
+
     async def __call__(self, code: str) -> ToolResult:
         """Execute bash command with unified state detection"""
         # 在真正执行命令前，检查是否不允许执行（HIGH 风险）
@@ -288,6 +293,7 @@ class BashTool(ToolBase):
                 output=blocked_output,
                 code=126,
                 meta={"kind": "security_blocked", "reasons": reasons},
+                stop_tool_chain=True,
             )
 
         # Check for rejected commands first (e.g., exit, logout)

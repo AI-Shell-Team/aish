@@ -1,8 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from pydantic import Field
 
-from aish.skills.models import SkillMetadataInfo
 from aish.tools.base import ToolBase
 from aish.tools.result import ToolResult
+
+if TYPE_CHECKING:
+    from aish.skills.models import SkillMetadataInfo
 
 DESCRIPTION_TEMPLATE = """
 Execute a skill within the main conversation
@@ -48,9 +54,14 @@ def render_skills_reminder_text(skills: list[SkillMetadataInfo]) -> str:
 
 
 class SkillTool(ToolBase):
-    skills: list[SkillMetadataInfo] = Field(default_factory=list)
+    skill_manager: Any = Field(default=None, exclude=True)
+    prompt_manager: Any = Field(default=None, exclude=True)
 
-    def __init__(self, skills: list[SkillMetadataInfo]):
+    def __init__(
+        self,
+        skill_manager: Any,
+        prompt_manager: Any,
+    ):
         super().__init__(
             name="skill",
             description="",
@@ -69,7 +80,8 @@ class SkillTool(ToolBase):
                 "required": ["skill_name"],
             },
         )
-        self.skills = list(skills)
+        self.skill_manager = skill_manager
+        self.prompt_manager = prompt_manager
         self._refresh_metadata()
 
     def _refresh_metadata(self) -> None:
@@ -89,18 +101,49 @@ class SkillTool(ToolBase):
             },
         }
 
-    # TODO: implement the skill tool
-    def __call__(self, skill_name: str, *args, **kwargs) -> ToolResult:
+    def _available_skill_names(self) -> str:
+        try:
+            infos = self.skill_manager.to_skill_infos()
+            return ", ".join(sorted(s.name for s in infos)) or "none"
+        except Exception:
+            return "none"
+
+    def __call__(self, skill_name: str, args: str = "", **kwargs) -> ToolResult:
         if not skill_name or not skill_name.strip():
             return ToolResult(ok=False, output="Error: skill_name is required")
 
-        available_skills = {skill.name for skill in self.skills}
-        if skill_name not in available_skills:
-            available = (
-                ", ".join(sorted(available_skills)) if available_skills else "none"
-            )
+        skill_name = skill_name.strip()
+
+        try:
+            self.skill_manager.reload_if_dirty()
+        except Exception:
+            pass
+
+        the_skill = self.skill_manager.get_skill(skill_name)
+        if the_skill is None:
             return ToolResult(
                 ok=False,
-                output=f"Error: Unknown skill: {skill_name}. Available skills: {available}",
+                output=f"Error: Unknown skill: {skill_name}. Available skills: {self._available_skill_names()}",
+                context_messages=[
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Error: Skill '{skill_name}' is not available. "
+                            "Continue the task without using that skill."
+                        ),
+                    }
+                ],
             )
-        return ToolResult(ok=True, output=f"Launching skill: {skill_name}")
+
+        skill_prompt = self.prompt_manager.substitute_template(
+            "skill",
+            base_dir=the_skill.base_dir,
+            skill_content=the_skill.content,
+            skill_args=args,
+        ).strip()
+
+        return ToolResult(
+            ok=True,
+            output=f"Skill '{skill_name}' loaded successfully.",
+            context_messages=[{"role": "user", "content": skill_prompt}],
+        )

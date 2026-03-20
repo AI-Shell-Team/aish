@@ -32,6 +32,10 @@ class ToolBase(BaseModel):
         """Get additional information for confirmation dialog"""
         return {}
 
+    def get_session_output(self, result: ToolResult) -> str | None:
+        """Optionally expose a tool result as the session's fallback output."""
+        return None
+
     @abstractmethod
     def __call__(
         self, *args: Any, **kwargs: Any
