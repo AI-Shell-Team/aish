@@ -46,6 +46,21 @@ from .constants import (
 FALLBACK_MANUAL_SETUP = object()
 
 
+def _sanitize_input(value: Optional[str]) -> Optional[str]:
+    """Sanitize input by taking only the first line and trimming whitespace.
+
+    This prevents issues when users copy-paste values that contain trailing
+    newlines or other control characters.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    # Split on first newline and take only the first part
+    first_line = value.split("\n")[0].split("\r")[0]
+    return first_line.strip() if first_line.strip() else None
+
+
 @dataclass
 class RegisterResult:
     """Result of free key registration attempt."""
@@ -184,21 +199,12 @@ def extract_free_key_info(
         return (None, None, None)
 
     api_key = payload.get("apikey") or payload.get("api_key")
-    if not isinstance(api_key, str) or not api_key.strip():
+    api_key = _sanitize_input(api_key)
+    if not api_key:
         return (None, None, None)
-    api_key = api_key.strip()
 
-    api_base = payload.get("api_base") or payload.get("api_base_url")
-    if isinstance(api_base, str):
-        api_base = api_base.strip() or None
-    else:
-        api_base = None
-
-    model = payload.get("model")
-    if isinstance(model, str):
-        model = model.strip() or None
-    else:
-        model = None
+    api_base = _sanitize_input(payload.get("api_base") or payload.get("api_base_url"))
+    model = _sanitize_input(payload.get("model"))
 
     return (api_key, api_base, model)
 
@@ -802,9 +808,9 @@ def _prompt_api_key(env_key: Optional[str]) -> Optional[str]:
             return None
         if value is None:
             return None
-        value = value.strip()
+        value = _sanitize_input(value)
         if not value and env_value:
-            value = env_value.strip()
+            value = _sanitize_input(env_value)
         if value:
             return value
         console.print(t("cli.setup.api_key_required"), style="red")
@@ -914,7 +920,9 @@ def _prompt_url_with_inline_validation(
         pass
 
     while True:
-        value = _ask_value(label).strip()
+        value = _sanitize_input(_ask_value(label))
+        if value is None:
+            value = ""
         if allow_back and value.lower() in {"b", "back"}:
             return None
         if not value:
@@ -927,7 +935,7 @@ def _prompt_url_with_inline_validation(
 
 
 def _normalize_custom_model(value: str) -> str:
-    value = value.strip()
+    value = _sanitize_input(value) or ""
     if not value:
         return ""
     if "/" in value:
@@ -956,16 +964,19 @@ def _normalize_model_for_provider(value: str, provider: ProviderOption) -> str:
         )
     )
 
-    if is_endpoint_key and "/" not in value:
+    # Sanitize the value first
+    sanitized = _sanitize_input(value) or ""
+
+    if is_endpoint_key and "/" not in sanitized:
         # MiniMax uses Anthropic-compatible API, others use OpenAI-compatible
         if provider.key.startswith("minimax"):
-            return f"anthropic/{value.strip()}"
+            return f"anthropic/{sanitized}"
         # Z.AI and Moonshot use OpenAI-compatible API
-        return f"openai/{value.strip()}"
+        return f"openai/{sanitized}"
 
-    if "/" not in value and provider.key:
-        return f"{provider.key}/{value.strip()}"
-    return value.strip()
+    if "/" not in sanitized and provider.key:
+        return f"{provider.key}/{sanitized}"
+    return sanitized
 
 
 def _extract_models_from_payload(payload: object) -> list[str]:
@@ -1753,10 +1764,10 @@ def _interactive_setup(config: Config) -> Optional[ConfigModel]:
                 # For free key, use the server-provided model directly
                 # Skip the model selection step and proceed to verification
                 if model:
-                    console.print(
-                        t("cli.setup.model_saved_as", model=model),
-                        style="dim",
-                    )
+                    # console.print(
+                    #     t("cli.setup.model_saved_as", model=model),
+                    #     style="dim",
+                    # )
                     # Proceed directly to verification with the server-provided model
                     provider = _maybe_resolve_api_base(
                         provider,

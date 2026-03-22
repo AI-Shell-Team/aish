@@ -298,6 +298,30 @@ class ConfigModel(BaseModel):
             return mode
         return "full"
 
+    @field_validator("api_base", "api_key", mode="before")
+    @classmethod
+    def sanitize_optional_string_fields(cls, v: Any) -> Optional[str]:
+        """Sanitize optional URL and key fields by taking first line and trimming."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            return v
+        # Split on first newline and take only the first part
+        first_line = v.split("\n")[0].split("\r")[0]
+        return first_line.strip() if first_line.strip() else None
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def sanitize_model_field(cls, v: Any) -> str:
+        """Sanitize model field by taking first line and trimming."""
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            return str(v)
+        # Split on first newline and take only the first part
+        first_line = v.split("\n")[0].split("\r")[0]
+        return first_line.strip()
+
 
 class Config:
     """Configuration manager for AI Shell"""
