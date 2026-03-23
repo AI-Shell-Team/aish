@@ -41,6 +41,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `model` | string | `""` | LLM 模型名称 | 必填 |
 | `api_base` | string/null | `null` | 自定义 API 基础 URL | 可选 |
 | `api_key` | string/null | `null` | API 密钥 | 可选，推荐用环境变量 |
+| `codex_auth_path` | string/null | `null` | OpenAI Codex 认证文件路径 | 可选 |
 | `temperature` | float | `0.7` | 生成温度 | 0.0 ≤ 值 ≤ 2.0 |
 | `max_tokens` | integer | `1000` | 最大令牌数 | 值 > 0 |
 
@@ -143,6 +144,7 @@ tool_arg_preview:
 model: ""
 api_base: null
 api_key: null
+codex_auth_path: null
 
 # 生成参数
 temperature: 0.7
@@ -207,6 +209,29 @@ tool_arg_preview:
 | `AISH_MODEL` | 覆盖默认模型 | `model` |
 | `AISH_API_BASE` | 覆盖 API 基础 URL | `api_base` |
 | `AISH_API_KEY` | 覆盖 API 密钥 | `api_key` |
+| `AISH_CODEX_AUTH_PATH` | 覆盖 OpenAI Codex 认证文件路径 | `codex_auth_path` |
+
+## 模型认证与状态查看
+
+OpenAI Codex 认证可以通过内置命令完成：
+
+```bash
+aish models auth --provider openai-codex
+```
+
+如果在无图形界面的环境中使用，可以切换到 device-code 流程：
+
+```bash
+aish models auth --provider openai-codex --auth-flow device-code
+```
+
+查看当前模型对应的 provider、认证状态以及 dashboard 入口：
+
+```bash
+aish models usage
+```
+
+`aish models usage` 会优先显示 provider 自有认证状态，例如 OpenAI Codex 的本地 OAuth 认证文件；对于基于 API Key 的 provider，它会显示当前是否已在配置文件或 provider 环境变量中配置凭证，并给出对应的 dashboard 地址。
 
 ### API 密钥（LiteLLM 支持）
 

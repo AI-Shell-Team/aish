@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from aish.cli import app, run
 from aish.config import ConfigModel
 from aish.i18n import t
-from aish.providers.interface import ProviderAuthConfig
+from aish.providers.interface import ProviderAuthConfig, ProviderMetadata, ProviderUsageStatus
 from aish.providers.openai_codex import OpenAICodexAuthError
 
 
@@ -230,12 +230,13 @@ class TestCLI:
 
     @patch("aish.cli.Config")
     @patch("aish.providers.openai_codex.load_openai_codex_auth")
-    def test_models_auth_login_sets_default_openai_codex_model(
+    def test_models_auth_sets_default_openai_codex_model(
         self, mock_load_openai_codex_auth, mock_config_class
     ):
-        """Codex auth login should persist auth path and default model."""
+        """Direct Codex auth should persist auth path and default model."""
         mock_config = Mock()
-        mock_config.model_config = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.config_model = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.model_config = mock_config.config_model
         mock_config_class.return_value = mock_config
         mock_load_openai_codex_auth.return_value = Mock(
             auth_path=Path("/tmp/codex-auth.json")
@@ -243,7 +244,7 @@ class TestCLI:
 
         result = self.runner.invoke(
             app,
-            ["models", "auth", "login", "--provider", "openai-codex"],
+            ["models", "auth", "--provider", "openai-codex"],
         )
 
         assert result.exit_code == 0
@@ -254,12 +255,13 @@ class TestCLI:
 
     @patch("aish.cli.Config")
     @patch("aish.providers.openai_codex.load_openai_codex_auth")
-    def test_models_auth_login_without_default_keeps_existing_api_key(
+    def test_models_auth_without_default_keeps_existing_api_key(
         self, mock_load_openai_codex_auth, mock_config_class
     ):
-        """Codex auth login should not clear the current provider config when not switching defaults."""
+        """Direct auth should not clear the current provider config when not switching defaults."""
         mock_config = Mock()
-        mock_config.model_config = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.config_model = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.model_config = mock_config.config_model
         mock_config_class.return_value = mock_config
         mock_load_openai_codex_auth.return_value = Mock(
             auth_path=Path("/tmp/codex-auth.json")
@@ -270,7 +272,6 @@ class TestCLI:
             [
                 "models",
                 "auth",
-                "login",
                 "--provider",
                 "openai-codex",
                 "--no-set-default",
@@ -286,15 +287,16 @@ class TestCLI:
     @patch("aish.cli.Config")
     @patch("aish.providers.openai_codex.login_openai_codex_with_browser")
     @patch("aish.providers.openai_codex.load_openai_codex_auth")
-    def test_models_auth_login_uses_builtin_browser_flow_by_default(
+    def test_models_auth_uses_builtin_browser_flow_by_default(
         self,
         mock_load_openai_codex_auth,
         mock_login_browser,
         mock_config_class,
     ):
-        """Codex auth login should use the built-in browser flow by default."""
+        """Direct auth should use the built-in browser flow by default."""
         mock_config = Mock()
-        mock_config.model_config = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.config_model = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.model_config = mock_config.config_model
         mock_config_class.return_value = mock_config
         mock_load_openai_codex_auth.side_effect = OpenAICodexAuthError("missing")
         mock_login_browser.return_value = Mock(auth_path=Path("/tmp/codex-auth.json"))
@@ -304,7 +306,6 @@ class TestCLI:
             [
                 "models",
                 "auth",
-                "login",
                 "--provider",
                 "openai-codex",
                 "--no-open-browser",
@@ -319,15 +320,16 @@ class TestCLI:
     @patch("aish.cli.Config")
     @patch("aish.providers.openai_codex.login_openai_codex_with_device_code")
     @patch("aish.providers.openai_codex.load_openai_codex_auth")
-    def test_models_auth_login_supports_device_code_flow(
+    def test_models_auth_supports_device_code_flow(
         self,
         mock_load_openai_codex_auth,
         mock_login_device_code,
         mock_config_class,
     ):
-        """Codex auth login should support the built-in device-code flow."""
+        """Direct auth should support the built-in device-code flow."""
         mock_config = Mock()
-        mock_config.model_config = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.config_model = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.model_config = mock_config.config_model
         mock_config_class.return_value = mock_config
         mock_load_openai_codex_auth.side_effect = OpenAICodexAuthError("missing")
         mock_login_device_code.return_value = Mock(
@@ -339,7 +341,6 @@ class TestCLI:
             [
                 "models",
                 "auth",
-                "login",
                 "--provider",
                 "openai-codex",
                 "--auth-flow",
@@ -350,24 +351,117 @@ class TestCLI:
         assert result.exit_code == 0
         mock_login_device_code.assert_called_once()
 
-    def test_models_auth_login_rejects_unknown_provider(self):
+    def test_models_auth_rejects_unknown_provider(self):
         result = self.runner.invoke(
             app,
-            ["models", "auth", "login", "--provider", "github-copilot"],
+            ["models", "auth", "--provider", "github-copilot"],
         )
 
         assert result.exit_code == 1
-        assert "Unsupported provider `github-copilot`" in result.output
+        assert (
+            t(
+                "cli.models.auth.unsupported_provider",
+                provider="github-copilot",
+                supported="openai-codex",
+            )
+            in result.output
+        )
+
+    @patch("aish.cli.Config")
+    @patch("aish.cli.list_auth_capable_provider_ids", return_value=("fake-provider", "openai-codex"))
+    def test_models_auth_without_provider_shows_prompt(
+        self,
+        _mock_list_auth_capable_provider_ids,
+        mock_config_class,
+    ):
+        mock_config = Mock()
+        mock_config.config_model = ConfigModel(model="openai-codex/gpt-5.4")
+        mock_config.model_config = mock_config.config_model
+        mock_config_class.return_value = mock_config
+
+        result = self.runner.invoke(app, ["models", "auth"])
+        normalized_output = " ".join(result.output.split())
+
+        assert result.exit_code == 1
+        assert " ".join(
+            t(
+                "cli.models.auth.provider_required",
+                providers="fake-provider, openai-codex",
+            ).split()
+        ) in normalized_output
+        assert "fake-provider" in result.output
+        assert "openai-codex" in result.output
+        assert "aish models auth --provider openai-codex" in result.output
+
+    def test_models_auth_provider_without_value_shows_example(self):
+        result = self.runner.invoke(app, ["models", "auth", "--provider"])
+
+        assert result.exit_code == 2
+        assert t("cli.parse_errors.option_requires_argument", option="--provider") in result.output
+        assert "aish models auth --provider openai-codex" in result.output
+
+    def test_models_auth_login_provider_without_value_shows_example(self):
+        result = self.runner.invoke(app, ["models", "auth", "login", "--provider"])
+
+        assert result.exit_code == 2
+        assert t("cli.parse_errors.option_requires_argument", option="--provider") in result.output
+        assert "aish models auth --provider openai-codex" in result.output
+
+    def test_models_auth_help_omits_hidden_command_usage(self):
+        result = self.runner.invoke(app, ["models", "auth", "--help"])
+
+        assert result.exit_code == 0
+        assert "Usage: aish models auth [OPTIONS]" in result.output
+        assert "COMMAND [ARGS]..." not in result.output
 
     @patch("aish.cli.Config")
     @patch("aish.cli.get_provider_by_id")
-    def test_models_auth_login_dispatches_through_provider_contract(
+    def test_models_auth_dispatches_through_provider_contract(
         self,
         mock_get_provider_by_id,
         mock_config_class,
     ):
         mock_config = Mock()
-        mock_config.model_config = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.config_model = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.model_config = mock_config.config_model
+        mock_config_class.return_value = mock_config
+
+        load_auth_state = Mock(side_effect=RuntimeError("missing"))
+        login_with_browser = Mock(return_value=_FakeAuthState(Path("/tmp/fake-auth.json")))
+        fake_provider = Mock(
+            provider_id="fake-provider",
+            model_prefix="fake-provider",
+            display_name="Fake Provider",
+            auth_config=ProviderAuthConfig(
+                auth_path_config_key="codex_auth_path",
+                default_model="model-x",
+                load_auth_state=load_auth_state,
+                login_handlers={"browser": login_with_browser},
+            ),
+        )
+        mock_get_provider_by_id.return_value = fake_provider
+
+        result = self.runner.invoke(
+            app,
+            ["models", "auth", "--provider", "fake-provider"],
+        )
+
+        assert result.exit_code == 0
+        load_auth_state.assert_called_once_with(None)
+        login_with_browser.assert_called_once()
+        assert mock_config.config_model.model == "fake-provider/model-x"
+        assert mock_config.config_model.codex_auth_path == "/tmp/fake-auth.json"
+
+    @patch("aish.cli.Config")
+    @patch("aish.cli.get_provider_by_id")
+    def test_models_auth_login_alias_shows_deprecation_hint(
+        self,
+        mock_get_provider_by_id,
+        mock_config_class,
+    ):
+        mock_config = Mock()
+        mock_config.config_model = ConfigModel(model="openai/gpt-4o", api_key="k")
+        mock_config.model_config = mock_config.config_model
         mock_config_class.return_value = mock_config
 
         load_auth_state = Mock(side_effect=RuntimeError("missing"))
@@ -391,10 +485,83 @@ class TestCLI:
         )
 
         assert result.exit_code == 0
-        load_auth_state.assert_called_once_with(None)
-        login_with_browser.assert_called_once()
+        assert t("cli.models.auth.deprecated_login_hint") in result.output
         assert mock_config.config_model.model == "fake-provider/model-x"
-        assert mock_config.config_model.codex_auth_path == "/tmp/fake-auth.json"
+
+    @patch("aish.cli.Config")
+    @patch("aish.cli.resolve_provider_metadata")
+    @patch("aish.cli.get_provider_for_model")
+    def test_models_usage_shows_provider_owned_auth_status(
+        self,
+        mock_get_provider_for_model,
+        mock_resolve_provider_metadata,
+        mock_config_class,
+    ):
+        mock_config = Mock()
+        mock_config.model_config = ConfigModel(model="openai-codex/gpt-5.4")
+        mock_config_class.return_value = mock_config
+        mock_get_provider_for_model.return_value = Mock(
+            get_usage_status=Mock(
+                return_value=ProviderUsageStatus(
+                    summary=t("cli.models_usage.authenticated"),
+                    style="green",
+                    details=(
+                        t("cli.models_usage.auth_file", path="/tmp/codex-auth.json"),
+                    ),
+                )
+            )
+        )
+        mock_resolve_provider_metadata.return_value = ProviderMetadata(
+            provider_id="openai-codex",
+            display_name="OpenAI Codex",
+            dashboard_url="https://codex.ai/settings",
+        )
+
+        result = self.runner.invoke(app, ["models", "usage"])
+
+        assert result.exit_code == 0
+        assert f"{t('cli.models_usage.current_model')}:" in result.output
+        assert "openai-codex/gpt-5.4" in result.output
+        assert "OpenAI Codex" in result.output
+        assert t("cli.models_usage.authenticated") in result.output
+        assert "https://codex.ai/settings" in result.output
+
+    @patch("aish.cli.Config")
+    @patch("aish.cli.resolve_provider_metadata")
+    @patch("aish.cli.get_provider_for_model")
+    @patch("aish.cli.os.getenv")
+    def test_models_usage_reports_provider_env_api_key(
+        self,
+        mock_getenv,
+        mock_get_provider_for_model,
+        mock_resolve_provider_metadata,
+        mock_config_class,
+    ):
+        mock_config = Mock()
+        mock_config.model_config = ConfigModel(model="openai/gpt-4o")
+        mock_config_class.return_value = mock_config
+        mock_get_provider_for_model.return_value = Mock(get_usage_status=Mock(return_value=None))
+        mock_resolve_provider_metadata.return_value = ProviderMetadata(
+            provider_id="openai",
+            display_name="OpenAI",
+            dashboard_url="https://platform.openai.com/usage",
+            api_key_env_var="OPENAI_API_KEY",
+        )
+        mock_getenv.side_effect = lambda key, default=None: {
+            "AISH_MODEL": None,
+            "AISH_API_BASE": None,
+            "AISH_API_KEY": None,
+            "AISH_CODEX_AUTH_PATH": None,
+            "OPENAI_API_KEY": "sk-test-secret",
+        }.get(key, default)
+
+        result = self.runner.invoke(app, ["models", "usage"])
+
+        assert result.exit_code == 0
+        assert "OpenAI" in result.output
+        assert t("cli.models_usage.api_key_from_env", env_var="OPENAI_API_KEY") in result.output
+        assert "sk-t...cret" in result.output
+        assert "https://platform.openai.com/usage" in result.output
 
 
 @pytest.mark.skipif(

@@ -7,6 +7,54 @@ cli:
   setup_command_help: "运行交互式配置并退出"
   check_tool_support_command_help: "调试 tool-call 在线验证"
 
+  models:
+    help: "管理模型与 Provider 认证"
+    usage_command_help: "显示当前 Provider 状态与用量面板信息"
+    auth:
+      help: "对 Provider 执行认证"
+      login_command_help: "已废弃的兼容别名，请改用 `aish models auth`。"
+      option:
+        provider: "要认证的 Provider id（例如：openai-codex）。"
+        model: "认证成功后写入配置的默认 Provider 模型。"
+        set_default: "认证成功后，将配置中的 model 更新为该 Provider 模型。"
+        auth_flow: "要使用的认证流程：browser、device-code 或 codex-cli。"
+        force: "即使本地已有认证状态，也强制重新登录。"
+        open_browser: "在浏览器认证流程中自动打开浏览器。"
+        callback_port: "浏览器认证使用的本地回调端口。设为 0 表示使用临时端口。"
+      unsupported_provider: "不支持的 Provider `{provider}`。当前支持：{supported}。"
+      no_supported_provider: "当前构建中没有可认证的 Provider。"
+      provider_required: "请先通过 --provider 指定要认证的 Provider。当前可认证的 Provider 有：{providers}。"
+      provider_required_example: "示例：{command}"
+      unsupported_auth_flow: "{provider} 不支持认证流程 `{auth_flow}`。"
+      deprecated_login_hint: "`aish models auth login` 已废弃，请改用 `aish models auth`。"
+      auth_ready: "{provider} 已完成认证：{auth_path}"
+      default_model_set: "默认模型已设置为 {model}"
+      model_available: "{provider} 已可用模型：{model}"
+
+  models_usage:
+    current_model: "当前模型"
+    provider: "Provider"
+    api_base: "API Base"
+    status: "状态"
+    dashboard: "面板"
+    dashboard_unavailable: "无可用面板地址"
+    unknown_provider: "未知 Provider"
+    authenticated: "已认证"
+    not_authenticated: "未认证"
+    auth_file: "认证文件：{path}"
+    expires_at: "过期时间：{timestamp}"
+    api_key_configured: "已配置 API Key"
+    api_key_from_env: "已通过 {env_var} 配置"
+    api_key_masked: "凭证：{masked}"
+    not_configured: "未配置凭证"
+    api_key_hint: "请设置 {env_var}，或在配置文件中填写 api_key。"
+
+  openai_codex:
+    auth_not_found: "未找到 OpenAI Codex 认证信息。请先运行 `aish models auth --provider openai-codex`。"
+    auth_read_failed: "读取 Codex 认证文件失败：{path}"
+    auth_missing_tokens: "Codex 认证文件中缺少 ChatGPT OAuth tokens。请重新运行 `aish models auth --provider openai-codex`。"
+    auth_incomplete: "Codex 认证信息不完整。请重新运行 `aish models auth --provider openai-codex`。"
+
   option:
     model: "要使用的模型（也可通过 AISH_MODEL 或配置文件设置）。"
     api_key: "大模型服务的 API Key（也可通过 AISH_API_KEY 或各厂商环境变量设置）。"
@@ -147,11 +195,17 @@ cli:
 
   parse_errors:
     title: "错误"
+    missing_command: "缺少子命令。"
+    missing_command_hint: "可用命令：{commands}。运行 {help_command} 查看用法。"
+    try_help_hint: "运行 {help_command} 查看用法。"
+    missing_option: "缺少必填选项：{option}。"
     option_requires_argument: "选项 {option} 需要一个参数。"
     no_such_option: "未知选项：{option}"
     missing_parameter: "缺少参数：{param}"
     invalid_value_for_option: "选项 {option} 的值无效：{reason}"
     generic: "参数错误：{message}"
+    models_auth:
+      provider_example: "示例：{command}"
 
 shell:
   welcome2:

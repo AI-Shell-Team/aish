@@ -13,6 +13,21 @@ class AuthStateLike(Protocol):
 
 
 @dataclass(frozen=True)
+class ProviderMetadata:
+    provider_id: str
+    display_name: str
+    dashboard_url: str | None = None
+    api_key_env_var: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderUsageStatus:
+    summary: str
+    style: str = "dim"
+    details: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProviderAuthConfig:
     auth_path_config_key: str
     default_model: str
@@ -49,7 +64,12 @@ class ProviderContract(Protocol):
     @property
     def auth_config(self) -> ProviderAuthConfig | None: ...
 
+    @property
+    def metadata(self) -> ProviderMetadata: ...
+
     def matches_model(self, model: str | None) -> bool: ...
+
+    def get_usage_status(self, config: ConfigModel) -> ProviderUsageStatus | None: ...
 
     async def create_completion(
         self,

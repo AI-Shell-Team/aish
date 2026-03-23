@@ -7,6 +7,54 @@ cli:
   setup_command_help: "Run interactive setup and exit"
   check_tool_support_command_help: "Debug live tool-call support check"
 
+  models:
+    help: "Manage models and provider auth"
+    usage_command_help: "Show provider status and usage dashboard information"
+    auth:
+      help: "Authenticate with a provider"
+      login_command_help: "Deprecated alias for `aish models auth`."
+      option:
+        provider: "Provider id to authenticate (for example: openai-codex)."
+        model: "Default provider model to store in config after authentication."
+        set_default: "Update the config model to the provider model after authentication."
+        auth_flow: "Auth flow to use: browser, device-code, or codex-cli."
+        force: "Force a fresh provider login even if local auth already exists."
+        open_browser: "Open the browser automatically for browser auth."
+        callback_port: "Local callback port for browser auth. Use 0 for an ephemeral port."
+      unsupported_provider: "Unsupported provider `{provider}`. Supported providers: {supported}."
+      no_supported_provider: "No auth-capable provider is available in the current build."
+      provider_required: "Please specify which provider to authenticate. Available auth-capable providers: {providers}."
+      provider_required_example: "Example: {command}"
+      unsupported_auth_flow: "Auth flow `{auth_flow}` is not supported for {provider}."
+      deprecated_login_hint: "`aish models auth login` is deprecated. Use `aish models auth` instead."
+      auth_ready: "{provider} auth ready: {auth_path}"
+      default_model_set: "Default model set to {model}"
+      model_available: "{provider} model available: {model}"
+
+  models_usage:
+    current_model: "Current model"
+    provider: "Provider"
+    api_base: "API base"
+    status: "Status"
+    dashboard: "Dashboard"
+    dashboard_unavailable: "No dashboard available"
+    unknown_provider: "Unknown Provider"
+    authenticated: "Authenticated"
+    not_authenticated: "Not authenticated"
+    auth_file: "Auth file: {path}"
+    expires_at: "Expires: {timestamp}"
+    api_key_configured: "API key configured"
+    api_key_from_env: "Configured via {env_var}"
+    api_key_masked: "Credential: {masked}"
+    not_configured: "No credentials configured"
+    api_key_hint: "Set {env_var} or configure api_key in your config file."
+
+  openai_codex:
+    auth_not_found: "OpenAI Codex auth not found. Run `aish models auth --provider openai-codex` first."
+    auth_read_failed: "Failed to read Codex auth file: {path}"
+    auth_missing_tokens: "Codex auth file does not contain ChatGPT OAuth tokens. Re-run `aish models auth --provider openai-codex`."
+    auth_incomplete: "Codex auth is incomplete. Re-run `aish models auth --provider openai-codex`."
+
   option:
     model: "LLM model to use (can also be set via AISH_MODEL or config file)."
     api_key: "API key for the LLM provider (can also be set via AISH_API_KEY or provider env vars)."
@@ -147,11 +195,17 @@ cli:
 
   parse_errors:
     title: "Error"
+    missing_command: "A subcommand is required."
+    missing_command_hint: "Available commands: {commands}. Run {help_command} to see usage."
+    try_help_hint: "Run {help_command} to see usage."
+    missing_option: "Missing required option: {option}."
     option_requires_argument: "Option {option} requires an argument."
     no_such_option: "No such option: {option}"
     missing_parameter: "Missing parameter: {param}"
     invalid_value_for_option: "Invalid value for {option}: {reason}"
     generic: "Invalid arguments: {message}"
+    models_auth:
+      provider_example: "Example: {command}"
 
 shell:
   welcome2:

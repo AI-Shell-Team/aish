@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ..i18n import t
 from .oauth import (OAuthPkceCodes, OAuthProviderSpec, OAuthTokens,
                     build_authorize_url as build_oauth_authorize_url,
                     exchange_authorization_code_for_tokens,
@@ -22,7 +23,7 @@ from .oauth import (OAuthPkceCodes, OAuthProviderSpec, OAuthTokens,
                     generate_state as generate_oauth_state,
                     login_with_browser as login_with_oauth_browser,
                     login_with_device_code as login_with_oauth_device_code)
-from .interface import ProviderAuthConfig
+from .interface import ProviderAuthConfig, ProviderMetadata, ProviderUsageStatus
 
 OPENAI_CODEX_PROVIDER = "openai-codex"
 OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.4"
@@ -160,21 +161,18 @@ def load_openai_codex_auth(
 ) -> OpenAICodexAuthState:
     path = resolve_openai_codex_auth_path(auth_path)
     if not path.exists():
-        raise OpenAICodexAuthError(
-            "OpenAI Codex auth not found. Run `aish models auth login --provider openai-codex` first."
-        )
+        raise OpenAICodexAuthError(t("cli.openai_codex.auth_not_found"))
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        raise OpenAICodexAuthError(f"Failed to read Codex auth file: {path}") from exc
+        raise OpenAICodexAuthError(
+            t("cli.openai_codex.auth_read_failed", path=path)
+        ) from exc
 
     tokens = payload.get("tokens")
     if not isinstance(tokens, dict):
-        raise OpenAICodexAuthError(
-            "Codex auth file does not contain ChatGPT OAuth tokens. Re-run "
-            "`aish models auth login --provider openai-codex`."
-        )
+        raise OpenAICodexAuthError(t("cli.openai_codex.auth_missing_tokens"))
 
     access_token = _coerce_str(tokens.get("access_token"))
     refresh_token = _coerce_str(tokens.get("refresh_token")) or None
@@ -187,9 +185,7 @@ def load_openai_codex_auth(
         or _extract_account_id_from_claims(access_token_claims)
     )
     if not access_token or not account_id:
-        raise OpenAICodexAuthError(
-            "Codex auth is incomplete. Re-run `aish models auth login --provider openai-codex`."
-        )
+        raise OpenAICodexAuthError(t("cli.openai_codex.auth_incomplete"))
 
     expires_at = _coerce_int(access_token_claims.get("exp")) or _coerce_int(
         id_token_claims.get("exp")
@@ -510,7 +506,7 @@ async def refresh_openai_codex_auth(
     if not auth.refresh_token:
         raise OpenAICodexAuthError(
             "OpenAI Codex session expired and no refresh token is available. "
-            "Re-run `aish models auth login --provider openai-codex`."
+            "Re-run `aish models auth --provider openai-codex`."
         )
 
     owns_client = client is None
@@ -538,7 +534,7 @@ async def refresh_openai_codex_auth(
     if response.status_code == httpx.codes.UNAUTHORIZED:
         raise OpenAICodexAuthError(
             "OpenAI Codex session is no longer valid. Re-run "
-            "`aish models auth login --provider openai-codex`."
+            "`aish models auth --provider openai-codex`."
         )
     if response.is_error:
         raise OpenAICodexAuthError(
@@ -1316,6 +1312,11 @@ class OpenAICodexProviderAdapter:
     uses_litellm = False
     supports_streaming = False
     should_trim_messages = False
+    metadata = ProviderMetadata(
+        provider_id=OPENAI_CODEX_PROVIDER,
+        display_name=OPENAI_CODEX_OAUTH_PROVIDER.display_name,
+        dashboard_url="https://codex.ai/settings",
+    )
     auth_config = ProviderAuthConfig(
         auth_path_config_key="codex_auth_path",
         default_model=OPENAI_CODEX_DEFAULT_MODEL,
@@ -1333,6 +1334,35 @@ class OpenAICodexProviderAdapter:
 
     def matches_model(self, model: str | None) -> bool:
         return is_openai_codex_model(model)
+
+    def get_usage_status(self, config) -> ProviderUsageStatus | None:
+        try:
+            auth_state = load_openai_codex_auth(
+                getattr(config, self.auth_config.auth_path_config_key, None)
+            )
+        except OpenAICodexAuthError as exc:
+            return ProviderUsageStatus(
+                summary=t("cli.models_usage.not_authenticated"),
+                style="yellow",
+                details=(str(exc),),
+            )
+
+        details: list[str] = [
+            t("cli.models_usage.auth_file", path=auth_state.auth_path)
+        ]
+        if auth_state.expires_at is not None:
+            expires_at = datetime.fromtimestamp(auth_state.expires_at, tz=timezone.utc)
+            details.append(
+                t(
+                    "cli.models_usage.expires_at",
+                    timestamp=expires_at.isoformat().replace('+00:00', 'Z'),
+                )
+            )
+        return ProviderUsageStatus(
+            summary=t("cli.models_usage.authenticated"),
+            style="green",
+            details=tuple(details),
+        )
 
     async def create_completion(
         self,

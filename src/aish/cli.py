@@ -16,7 +16,9 @@ from .i18n import t
 from .i18n.typer import I18nTyperCommand, I18nTyperGroup
 from .logging_utils import init_logging
 from .providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
-from .providers.registry import get_provider_by_id, list_auth_capable_provider_ids
+from .providers.registry import (get_provider_by_id, get_provider_for_model,
+                                 list_auth_capable_provider_ids,
+                                 resolve_provider_metadata)
 from .shell import AIShell
 from .skills import SkillManager
 from .wizard.setup_wizard import (needs_interactive_setup,
@@ -32,8 +34,12 @@ app = typer.Typer(
 )
 
 console = Console()
-models_app = typer.Typer(help="Manage models and provider auth", cls=I18nTyperGroup)
-models_auth_app = typer.Typer(help="Manage provider login state", cls=I18nTyperGroup)
+models_app = typer.Typer(help=t("cli.models.help"), cls=I18nTyperGroup)
+models_auth_app = typer.Typer(
+    help=t("cli.models.auth.help"),
+    cls=I18nTyperGroup,
+    invoke_without_command=True,
+)
 models_app.add_typer(models_auth_app, name="auth")
 app.add_typer(models_app, name="models")
 
@@ -42,6 +48,165 @@ class ProviderAuthFlow(str, Enum):
     BROWSER = "browser"
     DEVICE_CODE = "device-code"
     CODEX_CLI = "codex-cli"
+
+
+def _mask_secret(secret: str) -> str:
+    trimmed = secret.strip()
+    if len(trimmed) <= 8:
+        return "*" * len(trimmed)
+    return f"{trimmed[:4]}...{trimmed[-4:]}"
+
+
+def _normalize_provider_id(provider: str | None) -> str | None:
+    trimmed = (provider or "").strip()
+    if not trimmed:
+        return None
+    return trimmed.lower().replace("_", "-")
+
+
+def _load_cli_config_or_exit(config_file: Optional[str]) -> Config:
+    try:
+        return Config(config_file_path=config_file)
+    except FileNotFoundError as exc:
+        console.print(t("cli.startup.config_file_error", error=str(exc)), style="red")
+        console.print(t("cli.startup.config_file_hint"), style="dim")
+        raise SystemExit(1) from exc
+
+
+def _resolve_models_auth_provider(
+    *,
+    provider: str | None,
+):
+    normalized_provider = _normalize_provider_id(provider)
+    if normalized_provider is not None:
+        resolved_provider = get_provider_by_id(normalized_provider)
+        auth_config = None if resolved_provider is None else resolved_provider.auth_config
+        if resolved_provider is None or auth_config is None:
+            supported = ", ".join(sorted(list_auth_capable_provider_ids())) or "-"
+            console.print(
+                t(
+                    "cli.models.auth.unsupported_provider",
+                    provider=normalized_provider,
+                    supported=supported,
+                ),
+                style="red",
+            )
+            raise SystemExit(1)
+        return resolved_provider, False
+
+    auth_capable_provider_ids = tuple(sorted(list_auth_capable_provider_ids()))
+    if not auth_capable_provider_ids:
+        console.print(t("cli.models.auth.no_supported_provider"), style="red")
+        raise SystemExit(1)
+
+    console.print(
+        t(
+            "cli.models.auth.provider_required",
+            providers=", ".join(auth_capable_provider_ids),
+        ),
+        style="red",
+    )
+    console.print(
+        t(
+            "cli.models.auth.provider_required_example",
+            command="aish models auth --provider openai-codex",
+        ),
+        style="dim",
+    )
+    raise SystemExit(1)
+
+
+def _run_models_auth(
+    *,
+    provider: str | None,
+    model: str,
+    set_default: bool,
+    auth_flow: ProviderAuthFlow,
+    force: bool,
+    open_browser: bool,
+    callback_port: int,
+    config_file: Optional[str],
+    show_deprecation_notice: bool,
+) -> None:
+    if show_deprecation_notice:
+        console.print(t("cli.models.auth.deprecated_login_hint"), style="yellow")
+
+    config = _load_cli_config_or_exit(config_file)
+    resolved_provider, _ = _resolve_models_auth_provider(
+        provider=provider,
+    )
+    auth_config = resolved_provider.auth_config
+    if auth_config is None:
+        console.print(t("cli.models.auth.no_supported_provider"), style="red")
+        raise SystemExit(1)
+
+    auth_path = getattr(config.config_model, auth_config.auth_path_config_key, None)
+    auth_state = None
+    if not force:
+        try:
+            auth_state = auth_config.load_auth_state(auth_path)
+        except Exception:
+            auth_state = None
+
+    if auth_state is None:
+        try:
+            login_handler = auth_config.get_login_handler(auth_flow.value)
+            if login_handler is None:
+                console.print(
+                    t(
+                        "cli.models.auth.unsupported_auth_flow",
+                        auth_flow=auth_flow.value,
+                        provider=resolved_provider.display_name,
+                    ),
+                    style="red",
+                )
+                raise SystemExit(1)
+
+            handler_kwargs = {
+                "auth_path": auth_path,
+                "notify": lambda message: console.print(message, style="dim"),
+            }
+            if auth_flow == ProviderAuthFlow.BROWSER:
+                handler_kwargs["open_browser"] = open_browser
+                handler_kwargs["callback_port"] = callback_port
+            auth_state = login_handler(**handler_kwargs)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            console.print(str(exc), style="red")
+            raise SystemExit(1) from exc
+
+    resolved_model = model.strip() or auth_config.default_model
+    config_data = config.config_model.model_dump()
+    config_data[auth_config.auth_path_config_key] = str(auth_state.auth_path)
+    if set_default:
+        config_data["model"] = f"{resolved_provider.model_prefix}/{resolved_model}"
+        config_data["api_key"] = None
+    config.config_model = ConfigModel.model_validate(config_data)
+    config.save_config()
+
+    console.print(
+        t(
+            "cli.models.auth.auth_ready",
+            provider=resolved_provider.display_name,
+            auth_path=str(auth_state.auth_path),
+        ),
+        style="green",
+    )
+    if set_default:
+        console.print(
+            t("cli.models.auth.default_model_set", model=config.config_model.model),
+            style="green",
+        )
+    else:
+        console.print(
+            t(
+                "cli.models.auth.model_available",
+                provider=resolved_provider.display_name,
+                model=f"{resolved_provider.model_prefix}/{resolved_model}",
+            ),
+            style="dim",
+        )
 
 
 def _load_raw_yaml_config(config_file: str | os.PathLike[str]) -> dict:
@@ -261,44 +426,45 @@ def setup(
         sys.exit(1)
 
 
-@models_auth_app.command("login", cls=I18nTyperCommand)
-def models_auth_login(
-    provider: str = typer.Option(
-        ...,
+@models_auth_app.callback(invoke_without_command=True)
+def models_auth(
+    ctx: typer.Context,
+    provider: Optional[str] = typer.Option(
+        None,
         "--provider",
-        help="Provider id to log in (for example: openai-codex).",
+        help=t("cli.models.auth.option.provider"),
     ),
     model: str = typer.Option(
         "",
         "--model",
-        help="Default provider model to store in config after login.",
+        help=t("cli.models.auth.option.model"),
     ),
     set_default: bool = typer.Option(
         True,
         "--set-default/--no-set-default",
-        help="Update the config model to the provider model after login.",
+        help=t("cli.models.auth.option.set_default"),
     ),
     auth_flow: ProviderAuthFlow = typer.Option(
         ProviderAuthFlow.BROWSER,
         "--auth-flow",
-        help="Auth flow to use: browser, device-code, or codex-cli.",
+        help=t("cli.models.auth.option.auth_flow"),
     ),
     force: bool = typer.Option(
         False,
         "--force/--no-force",
-        help="Force a fresh provider login even if local auth already exists.",
+        help=t("cli.models.auth.option.force"),
     ),
     open_browser: bool = typer.Option(
         True,
         "--open-browser/--no-open-browser",
-        help="Open the browser automatically for browser auth.",
+        help=t("cli.models.auth.option.open_browser"),
     ),
     callback_port: int = typer.Option(
         OPENAI_CODEX_DEFAULT_CALLBACK_PORT,
         "--callback-port",
         min=0,
         max=65535,
-        help="Local callback port for browser auth. Use 0 for an ephemeral port.",
+        help=t("cli.models.auth.option.callback_port"),
     ),
     config_file: Optional[str] = typer.Option(
         None,
@@ -307,17 +473,94 @@ def models_auth_login(
         help=t("cli.option.config"),
     ),
 ):
-    normalized_provider = provider.strip().lower().replace("_", "-")
-    resolved_provider = get_provider_by_id(normalized_provider)
-    auth_config = None if resolved_provider is None else resolved_provider.auth_config
-    if resolved_provider is None or auth_config is None:
-        supported = ", ".join(sorted(list_auth_capable_provider_ids()))
-        console.print(
-            f"Unsupported provider `{normalized_provider}`. Supported providers: {supported}.",
-            style="red",
-        )
-        raise SystemExit(1)
+    if ctx.invoked_subcommand is not None:
+        return
+    _run_models_auth(
+        provider=provider,
+        model=model,
+        set_default=set_default,
+        auth_flow=auth_flow,
+        force=force,
+        open_browser=open_browser,
+        callback_port=callback_port,
+        config_file=config_file,
+        show_deprecation_notice=False,
+    )
 
+
+@models_auth_app.command(
+    "login",
+    cls=I18nTyperCommand,
+    help=t("cli.models.auth.login_command_help"),
+    hidden=True,
+)
+def models_auth_login(
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help=t("cli.models.auth.option.provider"),
+    ),
+    model: str = typer.Option(
+        "",
+        "--model",
+        help=t("cli.models.auth.option.model"),
+    ),
+    set_default: bool = typer.Option(
+        True,
+        "--set-default/--no-set-default",
+        help=t("cli.models.auth.option.set_default"),
+    ),
+    auth_flow: ProviderAuthFlow = typer.Option(
+        ProviderAuthFlow.BROWSER,
+        "--auth-flow",
+        help=t("cli.models.auth.option.auth_flow"),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force/--no-force",
+        help=t("cli.models.auth.option.force"),
+    ),
+    open_browser: bool = typer.Option(
+        True,
+        "--open-browser/--no-open-browser",
+        help=t("cli.models.auth.option.open_browser"),
+    ),
+    callback_port: int = typer.Option(
+        OPENAI_CODEX_DEFAULT_CALLBACK_PORT,
+        "--callback-port",
+        min=0,
+        max=65535,
+        help=t("cli.models.auth.option.callback_port"),
+    ),
+    config_file: Optional[str] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help=t("cli.option.config"),
+    ),
+):
+    _run_models_auth(
+        provider=provider,
+        model=model,
+        set_default=set_default,
+        auth_flow=auth_flow,
+        force=force,
+        open_browser=open_browser,
+        callback_port=callback_port,
+        config_file=config_file,
+        show_deprecation_notice=True,
+    )
+
+
+@models_app.command("usage", help=t("cli.models.usage_command_help"))
+def models_usage(
+    config_file: Optional[str] = typer.Option(
+        None,
+        "--config",
+        "-c",
+        help=t("cli.option.config"),
+    ),
+):
     try:
         config = Config(config_file_path=config_file)
     except FileNotFoundError as exc:
@@ -325,55 +568,65 @@ def models_auth_login(
         console.print(t("cli.startup.config_file_hint"), style="dim")
         raise typer.Exit(1) from exc
 
-    auth_path = getattr(config.model_config, auth_config.auth_path_config_key, None)
-    auth_state = None
-    if not force:
-        try:
-            auth_state = auth_config.load_auth_state(auth_path)
-        except Exception:
-            auth_state = None
-
-    if auth_state is None:
-        try:
-            login_handler = auth_config.get_login_handler(auth_flow.value)
-            if login_handler is None:
-                console.print(
-                    f"Auth flow `{auth_flow.value}` is not supported for {resolved_provider.display_name}.",
-                    style="red",
-                )
-                raise SystemExit(1)
-
-            handler_kwargs = {
-                "auth_path": auth_path,
-                "notify": lambda message: console.print(message, style="dim"),
-            }
-            if auth_flow == ProviderAuthFlow.BROWSER:
-                handler_kwargs["open_browser"] = open_browser
-                handler_kwargs["callback_port"] = callback_port
-            auth_state = login_handler(**handler_kwargs)
-        except Exception as exc:
-            console.print(str(exc), style="red")
-            raise typer.Exit(1) from exc
-
-    config_data = config.model_config.model_dump()
-    config_data[auth_config.auth_path_config_key] = str(auth_state.auth_path)
-    if set_default:
-        config_data["model"] = (
-            f"{resolved_provider.model_prefix}/{model.strip() or auth_config.default_model}"
-        )
-        config_data["api_key"] = None
-    config.config_model = ConfigModel.model_validate(config_data)
-    config.save_config()
+    effective_config = get_effective_config(config)
+    provider = get_provider_for_model(effective_config.model)
+    metadata = resolve_provider_metadata(effective_config.model, effective_config.api_base)
+    status = provider.get_usage_status(effective_config)
 
     console.print(
-        f"{resolved_provider.display_name} auth ready: {auth_state.auth_path}",
-        style="green",
+        f"[bold]{t('cli.models_usage.current_model')}:[/bold] {effective_config.model or '-'}"
     )
-    if set_default:
-        console.print(f"Default model set to {config.config_model.model}", style="green")
+    console.print(
+        f"[bold]{t('cli.models_usage.provider')}:[/bold] {metadata.display_name}"
+    )
+    if effective_config.api_base:
+        console.print(
+            f"[bold]{t('cli.models_usage.api_base')}:[/bold] {effective_config.api_base}"
+        )
+
+    if status is not None:
+        console.print(
+            f"[bold]{t('cli.models_usage.status')}:[/bold] [{status.style}]{status.summary}[/{status.style}]"
+        )
+        for detail in status.details:
+            console.print(f"  {detail}", style="dim")
+    else:
+        api_key = effective_config.api_key
+        api_key_env_var = metadata.api_key_env_var
+        api_key_env_value = None if api_key else (os.getenv(api_key_env_var) if api_key_env_var else None)
+        if api_key:
+            console.print(
+                f"[bold]{t('cli.models_usage.status')}:[/bold] [green]{t('cli.models_usage.api_key_configured')}[/green]"
+            )
+            console.print(
+                f"  {t('cli.models_usage.api_key_masked', masked=_mask_secret(api_key))}",
+                style="dim",
+            )
+        elif api_key_env_value:
+            console.print(
+                f"[bold]{t('cli.models_usage.status')}:[/bold] [green]{t('cli.models_usage.api_key_from_env', env_var=api_key_env_var)}[/green]"
+            )
+            console.print(
+                f"  {t('cli.models_usage.api_key_masked', masked=_mask_secret(api_key_env_value))}",
+                style="dim",
+            )
+        else:
+            console.print(
+                f"[bold]{t('cli.models_usage.status')}:[/bold] [yellow]{t('cli.models_usage.not_configured')}[/yellow]"
+            )
+            if api_key_env_var:
+                console.print(
+                    f"  {t('cli.models_usage.api_key_hint', env_var=api_key_env_var)}",
+                    style="dim",
+                )
+
+    if metadata.dashboard_url:
+        console.print(
+            f"[bold]{t('cli.models_usage.dashboard')}:[/bold] {metadata.dashboard_url}"
+        )
     else:
         console.print(
-            f"{resolved_provider.display_name} model available: {resolved_provider.model_prefix}/{model.strip() or auth_config.default_model}",
+            f"[bold]{t('cli.models_usage.dashboard')}:[/bold] {t('cli.models_usage.dashboard_unavailable')}",
             style="dim",
         )
 
@@ -495,10 +748,10 @@ aish run
 aish check-langfuse
 
 # Log into OpenAI Codex account auth
-aish models auth login --provider openai-codex
+aish models auth --provider openai-codex
 
 # Use built-in device-code auth on headless servers
-aish models auth login --provider openai-codex --auth-flow device-code
+aish models auth --provider openai-codex --auth-flow device-code
 
 # Use config file
 cat > ~/.config/aish/config.yaml << EOF
