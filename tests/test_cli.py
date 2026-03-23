@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from unittest.mock import Mock, patch
 
 import pytest
@@ -17,6 +18,13 @@ from aish.providers.openai_codex import OpenAICodexAuthError
 @dataclass
 class _FakeAuthState:
     auth_path: Path
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 def _has_free_key_module() -> bool:
@@ -409,10 +417,11 @@ class TestCLI:
 
     def test_models_auth_help_omits_hidden_command_usage(self):
         result = self.runner.invoke(app, ["models", "auth", "--help"])
+        plain_output = _strip_ansi(result.output)
 
         assert result.exit_code == 0
-        assert "Usage: aish models auth [OPTIONS]" in result.output
-        assert "COMMAND [ARGS]..." not in result.output
+        assert "Usage: aish models auth [OPTIONS]" in plain_output
+        assert "COMMAND [ARGS]..." not in plain_output
 
     @patch("aish.cli.Config")
     @patch("aish.cli.get_provider_by_id")
