@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 
@@ -37,3 +38,12 @@ class SandboxResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     changes_truncated: bool = False
+
+
+@dataclass
+class SandboxSecurityResult:
+    """Shared sandbox execution result for main-process callers."""
+
+    command: str
+    cwd: Path
+    sandbox: SandboxResult

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
-from .sandbox_types import FsChange, SandboxResult
+from .sandbox_types import FsChange, SandboxResult, SandboxSecurityResult
 
 _MOUNTINFO_ESC_RE = re.compile(r"\\([0-7]{3})")
 
@@ -945,95 +945,11 @@ class SandboxExecutor:
         )
 
 
-# ---------------------------------------------------------------------------
-# 高层封装：SandboxSecurity
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SandboxSecurityResult:
-    """综合沙箱执行 + （未来的）风险评估后的结果。
-
-    当前阶段仅包含 SandboxResult，本身不再直接耦合旧的 RiskEngine。
-    """
-
-    command: str
-    cwd: Path
-    sandbox: SandboxResult
-
-
-class SandboxSecurity:
-    """高层封装：给定命令和 cwd，执行沙箱并返回 SandboxResult。
-
-    注意：
-    - 默认情况下仅使用 repo_root 构造一个最小 SandboxConfig；
-    - 上层安全管理模块可以根据 SecurityPolicy 计算出更精细的
-      SandboxConfig 并通过 ``config`` 参数传入，以实现基于规则的
-      只读/读写挂载白名单控制。
-    """
-
-    def __init__(
-        self,
-        repo_root: Path,
-        enabled: bool = True,
-        config: Optional[SandboxConfig] = None,
-    ) -> None:
-        self._repo_root = repo_root.resolve()
-        self._enabled = enabled
-        self._warned_unavailable = False
-
-        effective_config = config or SandboxConfig(repo_root=self._repo_root)
-        self._executor = SandboxExecutor(effective_config)
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    def set_enabled(self, enabled: bool) -> None:
-        self._enabled = enabled
-
-    def run(
-        self, command: str, cwd: Optional[Path] = None
-    ) -> Optional[SandboxSecurityResult]:
-        """在沙箱中执行命令并返回结果。
-
-        如果未启用（enabled=False），则返回 None。
-        """
-
-        if not self._enabled:
-            return None
-
-        cwd = (cwd or self._repo_root).resolve()
-        stripped_command, sudo_detected, ok = strip_sudo_prefix(command)
-        if sudo_detected:
-            if not ok:
-                raise SandboxUnavailableError(
-                    "sandbox_execute_failed", details="missing_command"
-                )
-            command = stripped_command
-        try:
-            sandbox_result = self._executor.simulate(command, cwd=cwd)
-        except SandboxUnavailableError:
-            # Disable sandbox for the rest of this process/session to avoid
-            # repeated mount/bwrap failures flooding stderr.
-            self._enabled = False
-            # UI 提示由上层安全管理器统一处理（Rich Panel）。
-            self._warned_unavailable = True
-            raise
-
-        return SandboxSecurityResult(
-            command=command,
-            cwd=cwd,
-            sandbox=sandbox_result,
-        )
-
-
 __all__ = [
     "FsChange",
     "SandboxResult",
     "SandboxConfig",
     "SandboxExecutor",
-    "SandboxSecurity",
     "SandboxSecurityResult",
     "SandboxUnavailableError",
 ]

@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import aish.security.security_manager as sm
-from aish.security.sandbox import SandboxSecurityResult, strip_sudo_prefix
-from aish.security.sandbox_types import SandboxResult
+from aish.security.sandbox import strip_sudo_prefix
+from aish.security.sandbox_types import SandboxResult, SandboxSecurityResult
 from aish.security.security_manager import SimpleSecurityManager
 
 
@@ -45,7 +45,6 @@ def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(
 
     manager = SimpleSecurityManager(
         repo_root=tmp_path,
-        use_privileged_sandbox=False,
     )
     manager._sandbox_security = DummySandbox()  # type: ignore[attr-defined]
 

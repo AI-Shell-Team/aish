@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .sandbox import DEFAULT_SANDBOX_SOCKET_PATH, SandboxUnavailableError
-from .sandbox_types import FsChange, SandboxResult
+from .sandbox_types import FsChange, SandboxResult, SandboxSecurityResult
 
 
 class SandboxIpcClient:
@@ -126,7 +126,7 @@ class SandboxIpcClient:
 
 
 class SandboxSecurityIpc:
-    """A SandboxSecurity-compatible wrapper that delegates simulate() to a privileged daemon via IPC."""
+    """Main-process sandbox runner that delegates execution to the privileged daemon via IPC."""
 
     def __init__(
         self,
@@ -148,9 +148,7 @@ class SandboxSecurityIpc:
         self._enabled = enabled
 
     def run(self, command: str, cwd: Optional[Path] = None):
-        # Keep return type aligned with SandboxSecurity.run() to minimize caller changes.
-        from .sandbox import SandboxSecurityResult
-
+        # Keep the shared SandboxSecurityResult contract for callers.
         if not self._enabled:
             return None
 

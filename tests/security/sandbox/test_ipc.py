@@ -9,7 +9,6 @@ import pytest
 
 from aish.security.security_policy import SecurityPolicy
 from aish.security.sandbox import SandboxUnavailableError
-from aish.security.sandbox import SandboxSecurity
 from aish.security.sandbox_ipc import SandboxIpcClient, SandboxSecurityIpc
 from aish.security.security_manager import SimpleSecurityManager
 
@@ -88,28 +87,59 @@ def test_sandbox_ipc_error_response(tmp_path: Path):
         client.simulate(command="echo ok", cwd=tmp_path, repo_root=tmp_path)
 
 
-def test_security_manager_prefers_ipc_for_root_when_enabled(monkeypatch, tmp_path: Path):
+def test_sandbox_ipc_protocol_error_on_invalid_json(tmp_path: Path):
+    sock_path = tmp_path / "sandbox.sock"
+
+    if sock_path.exists():
+        sock_path.unlink()
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sock_path))
+    srv.listen(1)
+
+    def run():
+        try:
+            conn, _ = srv.accept()
+        except Exception:
+            return
+        with conn:
+            _ = conn.recv(4096)
+            conn.sendall(b"not-json\n")
+        srv.close()
+
+    threading.Thread(target=run, daemon=True).start()
+
+    client = SandboxIpcClient(socket_path=sock_path, timeout_s=2.0)
+    with pytest.raises(SandboxUnavailableError) as exc_info:
+        client.simulate(command="echo ok", cwd=tmp_path, repo_root=tmp_path)
+
+    assert exc_info.value.reason == "sandbox_ipc_protocol_error"
+
+
+def test_security_manager_uses_ipc_when_enabled(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("aish.security.security_manager.os.geteuid", lambda: 0)
     policy = SecurityPolicy(enable_sandbox=True, rules=[])
 
     manager = SimpleSecurityManager(
         repo_root=tmp_path,
         policy=policy,
-        use_privileged_sandbox=True,
         privileged_sandbox_socket=tmp_path / "sandbox.sock",
     )
 
     assert isinstance(manager._sandbox_security, SandboxSecurityIpc)
 
 
-def test_security_manager_uses_local_sandbox_when_privileged_disabled(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr("aish.security.security_manager.os.geteuid", lambda: 0)
+def test_security_manager_uses_fallback_when_ipc_is_unavailable(tmp_path: Path):
     policy = SecurityPolicy(enable_sandbox=True, rules=[])
 
     manager = SimpleSecurityManager(
         repo_root=tmp_path,
         policy=policy,
-        use_privileged_sandbox=False,
+        privileged_sandbox_socket=tmp_path / "missing.sock",
     )
 
-    assert isinstance(manager._sandbox_security, SandboxSecurity)
+    decision = manager.decide("echo hi", is_ai_command=True, cwd=tmp_path)
+
+    assert decision.allow is True
+    assert decision.require_confirmation is False
+    assert decision.analysis.get("sandbox", {}).get("reason") == "sandbox_ipc_unavailable"

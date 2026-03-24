@@ -5,8 +5,8 @@ from pathlib import Path
 
 from rich.console import Console
 
-from aish.security.sandbox import SandboxSecurityResult
-from aish.security.sandbox_types import SandboxResult
+from aish.security.sandbox import SandboxUnavailableError
+from aish.security.sandbox_types import SandboxResult, SandboxSecurityResult
 from aish.security.security_config import load_security_policy
 from aish.security.security_manager import SimpleSecurityManager
 from aish.security.security_policy import PolicyRule, RiskLevel, SandboxOffAction, SecurityPolicy
@@ -237,7 +237,11 @@ def test_fallback_rule_does_not_affect_enabled_sandbox_flow(tmp_path: Path):
         ],
         sandbox_off_action=SandboxOffAction.ALLOW,
     )
-    mgr = SimpleSecurityManager(policy=policy, console=_quiet_console(), repo_root=tmp_path, use_privileged_sandbox=False)
+    mgr = SimpleSecurityManager(
+        policy=policy,
+        console=_quiet_console(),
+        repo_root=tmp_path,
+    )
     mgr._sandbox_security = DummySandbox()  # type: ignore[attr-defined]
 
     decision = mgr.decide("bash -lc 'rm -rf /etc'", is_ai_command=True, cwd=tmp_path)
@@ -246,3 +250,113 @@ def test_fallback_rule_does_not_affect_enabled_sandbox_flow(tmp_path: Path):
     assert decision.require_confirmation is False
     assert decision.analysis.get("sandbox", {}).get("enabled") is True
     assert decision.analysis.get("fallback_rule_matched") is None
+
+
+def test_ipc_unavailable_still_runs_fallback_rule_match(tmp_path: Path):
+    policy = SecurityPolicy(
+        enable_sandbox=True,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(
+        policy=policy,
+        console=_quiet_console(),
+        repo_root=tmp_path,
+        privileged_sandbox_socket=tmp_path / "missing.sock",
+    )
+
+    decision = mgr.decide("bash -lc 'rm -rf /etc'", is_ai_command=True, cwd=tmp_path)
+
+    assert decision.allow is False
+    assert decision.require_confirmation is False
+    assert decision.analysis.get("fallback_rule_matched") is True
+    assert decision.analysis.get("sandbox", {}).get("reason") == "sandbox_ipc_unavailable"
+
+
+def test_sandbox_execute_failed_skips_fallback_rule_and_requires_confirmation(
+    tmp_path: Path,
+):
+    class DummySandbox:
+        enabled = True
+
+        def run(self, command: str, cwd: Path | None = None) -> SandboxSecurityResult:
+            return SandboxSecurityResult(
+                command=command,
+                cwd=(cwd or tmp_path),
+                sandbox=SandboxResult(exit_code=7, stdout="", stderr="boom", changes=[]),
+            )
+
+    policy = SecurityPolicy(
+        enable_sandbox=True,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(
+        policy=policy,
+        console=_quiet_console(),
+        repo_root=tmp_path,
+    )
+    mgr._sandbox_security = DummySandbox()  # type: ignore[attr-defined]
+
+    decision = mgr.decide("bash -lc 'rm -rf /etc'", is_ai_command=True, cwd=tmp_path)
+
+    assert decision.allow is True
+    assert decision.require_confirmation is True
+    assert decision.analysis.get("fallback_rule_matched") is None
+    assert decision.analysis.get("sandbox", {}).get("reason") == "sandbox_execute_failed"
+
+
+def test_sandbox_ipc_protocol_error_skips_fallback_rule_and_requires_confirmation(
+    tmp_path: Path,
+):
+    class DummySandbox:
+        enabled = True
+
+        def run(self, command: str, cwd: Path | None = None) -> SandboxSecurityResult:
+            raise SandboxUnavailableError(
+                "sandbox_ipc_protocol_error",
+                details="invalid_json",
+            )
+
+    policy = SecurityPolicy(
+        enable_sandbox=True,
+        rules=[
+            PolicyRule(
+                pattern="/etc/**",
+                risk=RiskLevel.HIGH,
+                operations={"DELETE"},
+                command_list={"rm"},
+                rule_id="H-001",
+            )
+        ],
+        sandbox_off_action=SandboxOffAction.ALLOW,
+    )
+    mgr = SimpleSecurityManager(
+        policy=policy,
+        console=_quiet_console(),
+        repo_root=tmp_path,
+    )
+    mgr._sandbox_security = DummySandbox()  # type: ignore[attr-defined]
+
+    decision = mgr.decide("bash -lc 'rm -rf /etc'", is_ai_command=True, cwd=tmp_path)
+
+    assert decision.allow is True
+    assert decision.require_confirmation is True
+    assert decision.analysis.get("fallback_rule_matched") is None
+    assert decision.analysis.get("sandbox", {}).get("reason") == "sandbox_ipc_protocol_error"
