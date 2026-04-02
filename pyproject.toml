@@ -85,6 +85,7 @@ norecursedirs = [
 markers = [
     "asyncio: tests using pytest-asyncio",
     "anyio: tests using pytest-anyio",
+    "live_smoke: opt-in live smoke tests that use real provider credentials",
 ]
 
 [tool.mypy]

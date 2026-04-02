@@ -4,7 +4,39 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-VERSION="${VERSION:-${1:-0.1.0}}"
+load_project_version() {
+  python3 - "$ROOT_DIR/pyproject.toml" <<'PY'
+from __future__ import annotations
+
+import re
+import sys
+
+
+pyproject_path = sys.argv[1]
+in_project_section = False
+
+with open(pyproject_path, encoding="utf-8") as handle:
+    for raw_line in handle:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            in_project_section = line == "[project]"
+            continue
+        if in_project_section:
+            match = re.match(r'^version\s*=\s*"([^"]+)"\s*$', line)
+            if match:
+                print(match.group(1))
+                raise SystemExit(0)
+
+raise SystemExit(f"Could not find project.version in {pyproject_path}")
+PY
+}
+
+VERSION="${VERSION:-${1:-}}"
+if [[ -z "$VERSION" ]]; then
+  VERSION="$(load_project_version)"
+fi
 ARCH="${ARCH:-${2:-$(uname -m)}}"
 PLATFORM="${PLATFORM:-${4:-linux}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${3:-dist/release}}"

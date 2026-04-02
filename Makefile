@@ -1,4 +1,4 @@
-.PHONY: help deps dev test lint format build build-binary build-bundle prepare-release-files install clean
+.PHONY: help deps dev test test-live-smoke lint format build build-binary build-bundle prepare-release-files install clean
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -19,6 +19,7 @@ help:
 	@echo "  make deps           Install project dependencies"
 	@echo "  make dev            Install dev dependencies"
 	@echo "  make test           Run tests"
+	@echo "  make test-live-smoke Run opt-in live smoke tests"
 	@echo "  make lint           Run linting"
 	@echo "  make format         Format code"
 	@echo ""
@@ -41,6 +42,10 @@ dev:
 test:
 	@echo "🧪 Running tests..."
 	uv run --group dev python -m pytest tests/ -v
+
+test-live-smoke:
+	@echo "🧪 Running live smoke tests..."
+	uv run --group dev python -m pytest tests/live_smoke/ -v -m live_smoke --run-live-smoke
 
 lint:
 	@echo "🔍 Running linting..."

@@ -1,0 +1,95 @@
+name: Live Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to validate
+        required: false
+        default: main
+        type: string
+
+concurrency:
+  group: "live-smoke-${{ github.workflow }}-${{ inputs.ref || github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_CACHE_DIR: .uv-cache
+
+jobs:
+  live-smoke:
+    name: Run live smoke tests
+    runs-on: ubuntu-latest
+    environment:
+      name: live-smoke
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync development dependencies
+        run: uv sync --group dev
+
+      - name: Validate live smoke secrets
+        env:
+          AISH_LIVE_SMOKE_API_KEY: ${{ secrets.AISH_LIVE_SMOKE_API_KEY }}
+          AISH_LIVE_SMOKE_MODEL: ${{ secrets.AISH_LIVE_SMOKE_MODEL }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${AISH_LIVE_SMOKE_MODEL}" ]]; then
+            echo "Missing required secret: AISH_LIVE_SMOKE_MODEL" >&2
+            exit 1
+          fi
+
+          if [[ -z "${AISH_LIVE_SMOKE_API_KEY}" ]]; then
+            echo "Missing required secret: AISH_LIVE_SMOKE_API_KEY" >&2
+            exit 1
+          fi
+
+      - name: Run live smoke tests
+        env:
+          AISH_LIVE_SMOKE_API_BASE: ${{ secrets.AISH_LIVE_SMOKE_API_BASE }}
+          AISH_LIVE_SMOKE_API_KEY: ${{ secrets.AISH_LIVE_SMOKE_API_KEY }}
+          AISH_LIVE_SMOKE_MODEL: ${{ secrets.AISH_LIVE_SMOKE_MODEL }}
+        run: |
+          set -euo pipefail
+          uv run --group dev python -m pytest tests/live_smoke -v -m live_smoke --run-live-smoke --basetemp build/pytest-live-smoke
+
+      - name: Upload live smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: live-smoke-diagnostics-${{ github.run_id }}
+          path: build/pytest-live-smoke
+          if-no-files-found: ignore
+
+      - name: Write workflow summary
+        if: always()
+        env:
+          LIVE_MODEL: ${{ secrets.AISH_LIVE_SMOKE_MODEL }}
+        run: |
+          cat <<EOF >> "$GITHUB_STEP_SUMMARY"
+          # Live Smoke Summary
+
+          - Ref: ${{ inputs.ref }}
+          - Model: ${LIVE_MODEL:-<missing>}
+          - Diagnostics artifact: live-smoke-diagnostics-${{ github.run_id }}
+
+          This workflow runs the opt-in pytest live smoke suite with real provider credentials from the protected \`live-smoke\` environment.
+          EOF
