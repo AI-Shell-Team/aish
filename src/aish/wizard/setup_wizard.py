@@ -292,6 +292,7 @@ from .providers import (  # noqa: E402
 )
 from .types import ProviderOption, ToolSupportResult  # noqa: E402
 from .verification import (  # noqa: E402
+    TOOL_CHECK_TIMEOUT,
     _check_tool_support,
     _quick_static_check,
     _status_text,
@@ -2003,7 +2004,7 @@ def run_live_tool_support_check_debug(
             model,
             api_base,
             api_key,
-            8.0,
+            TOOL_CHECK_TIMEOUT,
             True,
         )
     except KeyboardInterrupt:

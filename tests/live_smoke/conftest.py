@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import pytest
 import yaml
@@ -53,6 +53,7 @@ class LiveSmokeChatResult:
     exitstatus: int | None
     signalstatus: int | None
     duration_seconds: float
+    expected_token_seen: bool = False
 
 
 _SHELL_PROMPT_PATTERNS = (
@@ -61,9 +62,59 @@ _SHELL_PROMPT_PATTERNS = (
     re.compile(r"> "),
 )
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_CONFIRMATION_PROMPTS = (
+    "Your choice (default: n):",
+    "你的选择（默认：n）：",
+)
+
 
 def _expect_shell_prompt(child: Any) -> None:
     child.expect(list(_SHELL_PROMPT_PATTERNS))
+
+
+def _strip_terminal_control(text: str) -> str:
+    stripped = _ANSI_ESCAPE_RE.sub("", text)
+    return stripped.replace("\r", "")
+
+
+def _workspace_prompt_text(workspace: Path) -> str:
+    return f"{workspace} > "
+
+
+def _transcript_ends_with_prompt(text: str, prompt_text: str) -> bool:
+    return text.rstrip("\n").endswith(prompt_text.rstrip())
+
+
+def _write_config_file(
+    *,
+    config_file: Path,
+    model: str,
+    api_key: str,
+    api_base: str | None,
+) -> Path:
+    config_data = {
+        "api_key": api_key,
+        "enable_scripts": False,
+        "max_tokens": 32,
+        "model": model,
+        "prompt_theme": "default",
+        "temperature": 0,
+    }
+    if api_base:
+        config_data["api_base"] = api_base
+
+    config_file.write_text(yaml.safe_dump(config_data, sort_keys=True), encoding="utf-8")
+    return config_file
+
+
+def _close_shell(child: Any, timeout: float = 5.0) -> None:
+    pexpect = pytest.importorskip("pexpect")
+    try:
+        child.sendcontrol("d")
+        child.expect(pexpect.EOF, timeout=timeout)
+    except pexpect.TIMEOUT:
+        child.close(force=True)
 
 
 def _env_summary(env: dict[str, str]) -> dict[str, str]:
@@ -127,6 +178,8 @@ def live_smoke_env(live_smoke_paths: LiveSmokePaths) -> dict[str, str]:
     env.update(
         {
             "HOME": str(live_smoke_paths.home),
+            "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8",
             "PYTHONPATH": os.pathsep.join(pythonpath_parts),
             "PYTHONUNBUFFERED": "1",
             "TERM": env.get("TERM", "xterm-256color"),
@@ -160,25 +213,18 @@ def live_smoke_config_file(
     config_dir = live_smoke_paths.xdg_config_home / "aish"
     config_dir.mkdir(parents=True, exist_ok=True)
     config_file = config_dir / "config.yaml"
-    config_data = {
-        "api_key": live_smoke_provider_config.api_key,
-        "enable_scripts": False,
-        "max_tokens": 32,
-        "model": live_smoke_provider_config.model,
-        "prompt_theme": "default",
-        "temperature": 0,
-    }
-    if live_smoke_provider_config.api_base:
-        config_data["api_base"] = live_smoke_provider_config.api_base
-
-    config_file.write_text(yaml.safe_dump(config_data, sort_keys=True), encoding="utf-8")
-    return config_file
+    return _write_config_file(
+        config_file=config_file,
+        model=live_smoke_provider_config.model,
+        api_key=live_smoke_provider_config.api_key,
+        api_base=live_smoke_provider_config.api_base,
+    )
 
 
 @pytest.fixture
 def live_smoke_artifacts(
     request: pytest.FixtureRequest, live_smoke_paths: LiveSmokePaths
-) -> list[dict[str, Any]]:
+) -> Iterator[list[dict[str, Any]]]:
     artifacts: list[dict[str, Any]] = []
     yield artifacts
 
@@ -248,7 +294,14 @@ def live_smoke_chat_runner(
 ):
     pexpect = pytest.importorskip("pexpect")
 
-    def _run(*, prompt: str, expected_token: str, timeout: float = 90.0) -> LiveSmokeChatResult:
+    def _run(
+        *,
+        prompt: str,
+        expected_token: str | None = None,
+        timeout: float = 90.0,
+        auto_approve: bool = False,
+        expected_file: Path | None = None,
+    ) -> LiveSmokeChatResult:
         argv = [
             sys.executable,
             "-m",
@@ -268,39 +321,98 @@ def live_smoke_chat_runner(
             timeout=timeout,
         )
         child.logfile = transcript
+        expected_token_seen = False
+        failure_message: str | None = None
+        prompt_text = _workspace_prompt_text(live_smoke_paths.workspace)
+        result: LiveSmokeChatResult | None = None
 
         try:
             _expect_shell_prompt(child)
             child.sendline(f";{prompt}")
-            child.expect(expected_token)
-            _expect_shell_prompt(child)
-            child.sendline("exit")
-            child.expect(pexpect.EOF)
+
+            deadline = time.monotonic() + timeout
+            approvals_sent = 0
+            prompt_echo_len = len(_strip_terminal_control(transcript.getvalue()))
+
+            while True:
+                remaining = max(deadline - time.monotonic(), 0.1)
+                match_index = child.expect(
+                    [pexpect.EOF, pexpect.TIMEOUT],
+                    timeout=min(remaining, 0.5),
+                )
+                eof_reached = match_index == 0
+
+                normalized = _strip_terminal_control(transcript.getvalue())
+                post_submit = normalized[prompt_echo_len:]
+
+                if expected_token and expected_token in post_submit:
+                    expected_token_seen = True
+
+                confirmation_count = sum(
+                    post_submit.count(prompt_text)
+                    for prompt_text in _CONFIRMATION_PROMPTS
+                )
+                if confirmation_count > approvals_sent:
+                    if not auto_approve:
+                        raise AssertionError(
+                            "encountered command confirmation prompt but auto_approve is disabled"
+                        )
+                    child.sendline("y")
+                    approvals_sent = confirmation_count
+                    continue
+
+                token_ready = expected_token is None or expected_token_seen
+                file_ready = expected_file is None or expected_file.exists()
+                if token_ready and file_ready:
+                    break
+
+                prompt_returned = _transcript_ends_with_prompt(post_submit, prompt_text)
+                if prompt_returned or eof_reached:
+                    raise AssertionError(
+                        "shell returned to prompt before expected task outcome was observed"
+                    )
+
+                if time.monotonic() >= deadline:
+                    raise pexpect.TIMEOUT("Timeout exceeded.")
+
+        except BaseException as exc:
+            failure_message = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
+            if child.isalive():
+                try:
+                    _close_shell(child)
+                except Exception:
+                    child.close(force=True)
             child.close(force=True)
 
-        duration_seconds = time.monotonic() - start
-        result = LiveSmokeChatResult(
-            argv=argv,
-            cwd=str(live_smoke_paths.workspace),
-            transcript=transcript.getvalue(),
-            exitstatus=child.exitstatus,
-            signalstatus=child.signalstatus,
-            duration_seconds=duration_seconds,
-        )
-        live_smoke_artifacts.append(
-            {
-                "type": "chat",
-                "argv": argv,
-                "cwd": str(live_smoke_paths.workspace),
-                "duration_seconds": duration_seconds,
-                "env_summary": _env_summary(live_smoke_env),
-                "config_file": str(live_smoke_config_file),
-                "transcript": result.transcript,
-                "exitstatus": result.exitstatus,
-                "signalstatus": result.signalstatus,
-            }
-        )
+            duration_seconds = time.monotonic() - start
+            result = LiveSmokeChatResult(
+                argv=argv,
+                cwd=str(live_smoke_paths.workspace),
+                transcript=transcript.getvalue(),
+                exitstatus=child.exitstatus,
+                signalstatus=child.signalstatus,
+                duration_seconds=duration_seconds,
+                expected_token_seen=expected_token_seen,
+            )
+            live_smoke_artifacts.append(
+                {
+                    "type": "chat",
+                    "argv": argv,
+                    "cwd": str(live_smoke_paths.workspace),
+                    "duration_seconds": duration_seconds,
+                    "env_summary": _env_summary(live_smoke_env),
+                    "config_file": str(live_smoke_config_file),
+                    "transcript": result.transcript,
+                    "exitstatus": result.exitstatus,
+                    "signalstatus": result.signalstatus,
+                    "expected_token_seen": result.expected_token_seen,
+                    "failure_message": failure_message,
+                }
+            )
+
+        assert result is not None
         return result
 
     return _run
