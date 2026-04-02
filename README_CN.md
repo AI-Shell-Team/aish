@@ -325,6 +325,7 @@ Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优
 | [GitHub Issues](https://github.com/AI-Shell-Team/aish/issues) | Bug 报告 |
 | [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) | 社区讨论 |
 | [Discord](https://discord.com/invite/Pw2mjZt3) | 加入社区 |
+| [LINUX DO 社区](https://linux.do) | 友链 |
 
 
 > 如果 AISH 对你有帮助，欢迎给项目点一个 Star ⭐  

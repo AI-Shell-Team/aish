@@ -330,6 +330,7 @@ Recommendations:
 | [GitHub Issues](https://github.com/AI-Shell-Team/aish/issues) | Bug reports |
 | [GitHub Discussions](https://github.com/AI-Shell-Team/aish/discussions) | Community discussions |
 | [Discord](https://discord.com/invite/Pw2mjZt3) | Join the community |
+| [LINUX DO](https://linux.do) | Community friend link |
 
 
 > If you find AISH helpful, please consider giving us a Star ⭐
