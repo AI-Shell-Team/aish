@@ -94,7 +94,6 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]):
 
 @pytest.fixture
 def live_smoke_paths(tmp_path: Path) -> LiveSmokePaths:
-    repo_root = Path(__file__).resolve().parents[2]
     root = tmp_path / "live-smoke"
     home = root / "home"
     xdg_config_home = root / "xdg-config"
