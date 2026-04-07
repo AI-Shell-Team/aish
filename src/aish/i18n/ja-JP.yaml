@@ -176,6 +176,7 @@ shell:
     pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
     potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
     llm_error_title: "❌ LLM リクエストに失敗しました"
+    llm_error_message: "エラー: {error}"
     llm_error_details_title: "デバッグ詳細"
     tool_args_json_invalid_hint: "❌ リクエストに失敗しました。再試行してください。"
   prompt:

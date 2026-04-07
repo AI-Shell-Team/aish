@@ -176,6 +176,7 @@ shell:
     pty_decode_error: "Error al decodificar la salida PTY: {error}"
     potential_error: "🚀 Posible problema detectado: {reason}; intentando resolverlo..."
     llm_error_title: "❌ Falló la solicitud al LLM"
+    llm_error_message: "Error: {error}"
     llm_error_details_title: "Detalles de depuración"
     tool_args_json_invalid_hint: "❌ La solicitud falló; inténtalo de nuevo."
   prompt:

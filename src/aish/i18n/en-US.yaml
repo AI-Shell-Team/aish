@@ -277,6 +277,7 @@ shell:
     pty_decode_error: "Caught PTY output decode error: {error}"
     potential_error: "🚀 Potential issue detected: {reason}, attempting to resolve..."
     llm_error_title: "❌ LLM Request Failed"
+    llm_error_message: "Error: {error}"
     llm_error_details_title: "Debug Details"
     tool_args_json_invalid_hint: "❌ Request failed, please retry."
 

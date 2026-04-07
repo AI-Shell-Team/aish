@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 from unittest.mock import Mock
@@ -243,6 +244,71 @@ def test_handle_thinking_start_adds_blank_line_when_not_at_line_start(monkeypatc
 
     shell.console.print.assert_called_once_with()
     assert shell._at_line_start is True
+
+
+def test_handle_error_event_uses_rich_style_output():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._last_streaming_accumulated = "pending"
+    shell.current_live = None
+
+    PTYAIShell.handle_error_event(
+        shell,
+        Mock(data={"error_message": "InternalServerError: Connection error."}),
+    )
+
+    shell.console.print.assert_called_once_with(
+        t("shell.error.llm_error_message", error="InternalServerError: Connection error."),
+        style="red",
+    )
+    shell._finalize_content_preview.assert_called_once_with()
+    shell._reset_reasoning_state.assert_called_once_with()
+    assert shell._last_streaming_accumulated == ""
+
+
+def test_restart_notification_uses_rich_style_output(monkeypatch):
+    class _FakePTY:
+        def __init__(self, *args, **kwargs):
+            self.started = False
+            self.stopped = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr("aish.shell.runtime.app.PTYManager", _FakePTY)
+    monkeypatch.setattr(
+        "aish.shell.runtime.app.shutil.get_terminal_size",
+        lambda fallback=None: os.terminal_size((80, 24)),
+    )
+    monkeypatch.setattr("aish.shell.runtime.app.time.sleep", lambda _: None)
+
+    shell = object.__new__(PTYAIShell)
+    shell.llm_session = Mock()
+    shell.llm_session.bash_tool = Mock()
+    shell.llm_session.bash_tool.pty_manager = None
+    shell._ai_handler = None
+    shell._output_processor = None
+    shell._pty_manager = Mock()
+    shell._backend_control_buffer = b""
+    shell._backend_session_ready = False
+    shell._shell_phase = "running"
+    shell._pending_command_seq = 1
+    shell._pending_command_text = "pwd"
+    shell._current_cwd = "/tmp"
+    shell.console = Mock()
+    shell._restore_terminal = Mock()
+
+    result = PTYAIShell._restart_pty(shell)
+
+    assert result is True
+    shell.console.print.assert_called_once_with(
+        "[Shell restarted - previous session exited]", style="yellow"
+    )
 
 
 def test_output_processor_prints_error_hint_when_command_fails(capsys):

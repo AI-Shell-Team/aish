@@ -517,7 +517,7 @@ class PTYAIShell:
     def handle_error_event(self, event) -> None:
         self._finalize_content_preview()
         error_msg = event.data.get("error_message", "Unknown error")
-        self.console.print(f"\033[31m错误: {error_msg}\033[0m")
+        self.console.print(t("shell.error.llm_error_message", error=error_msg), style="red")
 
         self._reset_reasoning_state()
         self._last_streaming_accumulated = ""
@@ -1627,9 +1627,7 @@ class PTYAIShell:
 
             # Notify user
             self._restore_terminal()
-            self.console.print(
-                "\033[33m[Shell restarted - previous session exited]\033[0m"
-            )
+            self.console.print("[Shell restarted - previous session exited]", style="yellow")
             sys.stdout.flush()
 
             return True
