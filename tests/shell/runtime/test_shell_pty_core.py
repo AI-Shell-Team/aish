@@ -259,7 +259,8 @@ def test_handle_error_event_uses_rich_style_output():
     )
 
     shell.console.print.assert_called_once_with(
-        "错误: InternalServerError: Connection error.", style="red"
+        t("shell.error.llm_error_message", error="InternalServerError: Connection error."),
+        style="red",
     )
     shell._finalize_content_preview.assert_called_once_with()
     shell._reset_reasoning_state.assert_called_once_with()

@@ -176,6 +176,7 @@ shell:
     pty_decode_error: "Erreur de decodage de sortie PTY detectee : {error}"
     potential_error: "🚀 Probleme potentiel detecte : {reason}, tentative de resolution..."
     llm_error_title: "❌ Echec de la requete LLM"
+    llm_error_message: "Erreur : {error}"
     llm_error_details_title: "Details de debogage"
     tool_args_json_invalid_hint: "❌ La requete a echoue, veuillez reessayer."
   prompt:

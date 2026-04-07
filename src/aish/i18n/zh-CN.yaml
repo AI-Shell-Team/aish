@@ -277,6 +277,7 @@ shell:
     pty_decode_error: "捕获 pty 输出解码错误: {error}"
     potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
     llm_error_title: "❌ 大模型请求失败"
+    llm_error_message: "错误: {error}"
     llm_error_details_title: "调试详情"
     tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
 

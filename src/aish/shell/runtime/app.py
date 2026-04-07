@@ -517,7 +517,7 @@ class PTYAIShell:
     def handle_error_event(self, event) -> None:
         self._finalize_content_preview()
         error_msg = event.data.get("error_message", "Unknown error")
-        self.console.print(f"错误: {error_msg}", style="red")
+        self.console.print(t("shell.error.llm_error_message", error=error_msg), style="red")
 
         self._reset_reasoning_state()
         self._last_streaming_accumulated = ""

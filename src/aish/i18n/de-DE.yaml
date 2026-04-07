@@ -176,6 +176,7 @@ shell:
     pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"
     potential_error: "🚀 Mögliches Problem erkannt: {reason}, Lösung wird versucht..."
     llm_error_title: "❌ LLM-Anfrage fehlgeschlagen"
+    llm_error_message: "Fehler: {error}"
     llm_error_details_title: "Debug-Details"
     tool_args_json_invalid_hint: "❌ Anfrage fehlgeschlagen, bitte erneut versuchen."
   prompt:
