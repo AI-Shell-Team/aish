@@ -1,9 +1,25 @@
-"""LLM package entrypoint.
+"""LLM package entrypoint."""
 
-This package is the long-term home for model session, providers, and prompt
-integration. The implementation currently re-exports from compatibility
-modules while the wider tree is migrated.
-"""
+from .providers.registry import (
+	get_provider_by_id as get_provider_by_id,
+	get_provider_for_model as get_provider_for_model,
+)
+from .session import (
+	LLMCallbackResult,
+	LLMEvent,
+	LLMEventType,
+	LLMSession,
+	ToolDispatchOutcome,
+	ToolDispatchStatus,
+)
 
-from .session import *
-from .providers.registry import get_provider_by_id, get_provider_for_model
+__all__ = [
+	"LLMCallbackResult",
+	"LLMEvent",
+	"LLMEventType",
+	"LLMSession",
+	"ToolDispatchOutcome",
+	"ToolDispatchStatus",
+	"get_provider_by_id",
+	"get_provider_for_model",
+]

@@ -15,16 +15,16 @@ from .i18n import t
 from .i18n.typer import I18nTyperCommand, I18nTyperGroup
 from .llm.providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
 from .llm.providers.registry import (
-    get_provider_by_id,
-    get_provider_for_model,
-    list_auth_capable_provider_ids,
-    resolve_provider_metadata,
+    get_provider_by_id as get_provider_by_id,
+    get_provider_for_model as get_provider_for_model,
+    list_auth_capable_provider_ids as list_auth_capable_provider_ids,
+    resolve_provider_metadata as resolve_provider_metadata,
 )
 from .state.logging import init_logging
 from .skills import SkillManager
 from .wizard.setup_wizard import (
-    needs_interactive_setup,
-    run_interactive_setup,
+    needs_interactive_setup as needs_interactive_setup,
+    run_interactive_setup as run_interactive_setup,
     run_live_tool_support_check_debug,
 )
 
