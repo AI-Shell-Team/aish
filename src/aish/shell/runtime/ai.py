@@ -9,7 +9,7 @@ import re
 import sys
 from typing import TYPE_CHECKING, Optional
 
-from ...context_manager import ContextManager, MemoryType
+from ...state import ContextManager, MemoryType
 
 from ...i18n import t
 from ...prompts import PromptManager
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from ...llm import LLMSession
-    from ...pty import PTYManager
+    from ...terminal.pty import PTYManager
     from ...skills import SkillManager
     from .app import PTYAIShell
     from ..ui.interaction import PTYUserInteraction
@@ -314,7 +314,7 @@ class AIHandler:
         Handles input buffer save, state transitions, temporary SIGINT
         handler, async execution with cancellation, and cleanup.
         """
-        from ...interruption import ShellState
+        from ..interruption import ShellState
 
         self.llm_session.reset_cancellation_token()
         shell._user_requested_exit = False

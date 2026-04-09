@@ -4,13 +4,13 @@ This directory contains example scripts for learning purposes.
 
 ## Built-in Prompt Themes
 
-For production-ready prompt themes, see the `../prompts/` directory:
+For production-ready prompt themes, see the `../themes/` directory:
 
 - **powerline.aish** - Colorful segment-based prompt
 - **minimal.aish** - Clean, emoji-based prompt
 - **developer.aish** - Feature-rich two-line prompt
 
-See `../prompts/THEMES.md` for details.
+See `../themes/THEMES.md` for details.
 
 ## Creating Custom Scripts
 
@@ -43,4 +43,4 @@ echo "🚀 $dir > "
 
 ### Available Variables
 
-See `../prompts/THEMES.md` for the full list of environment variables.
+See `../themes/THEMES.md` for the full list of environment variables.

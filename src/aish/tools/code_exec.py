@@ -5,13 +5,14 @@ import sys
 from pathlib import Path
 from typing import ClassVar, Optional
 
-from aish.builtin import BuiltinRegistry
+from aish.shell.commands import BuiltinRegistry
 from aish.config import BashOutputOffloadSettings
 from aish.i18n import t
-from aish.interruption import ShellState
+from aish.shell.interruption import ShellState
 from aish.offload import render_bash_output
 from aish.security.security_manager import (SecurityDecision,
                                             SimpleSecurityManager)
+from aish.state import MemoryType
 from aish.tools.base import (ToolBase, ToolExecutionContext, ToolPanelSpec,
                              ToolPreflightAction, ToolPreflightResult)
 from aish.tools.bash_executor import UnifiedBashExecutor
@@ -219,8 +220,6 @@ class BashTool(ToolBase):
         self, command: str, returncode: int, stdout: str, stderr: str
     ) -> None:
         """Add command execution result to LLM context."""
-        from aish.context_manager import MemoryType
-
         # Get preview bytes from config (default to 1024 if not configured)
         preview_bytes = 1024
         if self.offload_settings and hasattr(self.offload_settings, "preview_bytes"):

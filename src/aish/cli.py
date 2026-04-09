@@ -13,15 +13,20 @@ from rich.panel import Panel
 from .config import Config, ConfigModel
 from .i18n import t
 from .i18n.typer import I18nTyperCommand, I18nTyperGroup
-from .logging_utils import init_logging
-from .providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
-from .providers.registry import (get_provider_by_id, get_provider_for_model,
-                                 list_auth_capable_provider_ids,
-                                 resolve_provider_metadata)
+from .llm.providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
+from .llm.providers.registry import (
+    get_provider_by_id,
+    get_provider_for_model,
+    list_auth_capable_provider_ids,
+    resolve_provider_metadata,
+)
+from .state.logging import init_logging
 from .skills import SkillManager
-from .wizard.setup_wizard import (needs_interactive_setup,
-                                  run_interactive_setup,
-                                  run_live_tool_support_check_debug)
+from .wizard.setup_wizard import (
+    needs_interactive_setup,
+    run_interactive_setup,
+    run_live_tool_support_check_debug,
+)
 
 app = typer.Typer(
     name="aish",
@@ -48,6 +53,12 @@ class ProviderAuthFlow(str, Enum):
     CODEX_CLI = "codex-cli"
 
 
+def _cli_module():
+    import aish.cli as cli_module
+
+    return cli_module
+
+
 def _mask_secret(secret: str) -> str:
     trimmed = secret.strip()
     if len(trimmed) <= 8:
@@ -63,8 +74,10 @@ def _normalize_provider_id(provider: str | None) -> str | None:
 
 
 def _load_cli_config_or_exit(config_file: Optional[str]) -> Config:
+    cli_module = _cli_module()
+
     try:
-        return Config(config_file_path=config_file)
+        return cli_module.Config(config_file_path=config_file)
     except FileNotFoundError as exc:
         console.print(t("cli.startup.config_file_error", error=str(exc)), style="red")
         console.print(t("cli.startup.config_file_hint"), style="dim")
@@ -75,12 +88,13 @@ def _resolve_models_auth_provider(
     *,
     provider: str | None,
 ):
-    normalized_provider = _normalize_provider_id(provider)
+    cli_module = _cli_module()
+    normalized_provider = cli_module._normalize_provider_id(provider)
     if normalized_provider is not None:
-        resolved_provider = get_provider_by_id(normalized_provider)
+        resolved_provider = cli_module.get_provider_by_id(normalized_provider)
         auth_config = None if resolved_provider is None else resolved_provider.auth_config
         if resolved_provider is None or auth_config is None:
-            supported = ", ".join(sorted(list_auth_capable_provider_ids())) or "-"
+            supported = ", ".join(sorted(cli_module.list_auth_capable_provider_ids())) or "-"
             console.print(
                 t(
                     "cli.models.auth.unsupported_provider",
@@ -92,7 +106,7 @@ def _resolve_models_auth_provider(
             raise SystemExit(1)
         return resolved_provider, False
 
-    auth_capable_provider_ids = tuple(sorted(list_auth_capable_provider_ids()))
+    auth_capable_provider_ids = tuple(sorted(cli_module.list_auth_capable_provider_ids()))
     if not auth_capable_provider_ids:
         console.print(t("cli.models.auth.no_supported_provider"), style="red")
         raise SystemExit(1)
@@ -126,11 +140,13 @@ def _run_models_auth(
     config_file: Optional[str],
     show_deprecation_notice: bool,
 ) -> None:
+    cli_module = _cli_module()
+
     if show_deprecation_notice:
         console.print(t("cli.models.auth.deprecated_login_hint"), style="yellow")
 
-    config = _load_cli_config_or_exit(config_file)
-    resolved_provider, _ = _resolve_models_auth_provider(
+    config = cli_module._load_cli_config_or_exit(config_file)
+    resolved_provider, _ = cli_module._resolve_models_auth_provider(
         provider=provider,
     )
     auth_config = resolved_provider.auth_config
@@ -215,7 +231,6 @@ def _load_raw_yaml_config(config_file: str | os.PathLike[str]) -> dict:
     """
 
     try:
-        # config_file is expected to be a Path-like.
         with open(config_file, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         return data if isinstance(data, dict) else {}
@@ -231,10 +246,8 @@ def get_effective_config(
 ) -> ConfigModel:
     """Get effective configuration with priority: CLI args > env vars > config file"""
 
-    # Start with config file values (copy all fields from the config model)
     config_data = config.model_config.model_dump()
 
-    # Override with environment variables
     model_env = os.getenv("AISH_MODEL")
     if model_env:
         config_data["model"] = model_env
@@ -251,7 +264,6 @@ def get_effective_config(
     if codex_auth_path_env:
         config_data["codex_auth_path"] = codex_auth_path_env
 
-    # Override with command line arguments (highest priority)
     if model is not None:
         config_data["model"] = model
 
@@ -261,7 +273,6 @@ def get_effective_config(
     if api_base is not None:
         config_data["api_base"] = api_base
 
-    # Create and return a new ConfigModel with the effective configuration
     return ConfigModel.model_validate(config_data)
 
 
@@ -273,8 +284,6 @@ def _default(ctx: typer.Context):
     """
 
     if ctx.invoked_subcommand is None:
-        # Call run() with explicit None values so we don't accidentally pass
-        # Typer OptionInfo objects (which only make sense under Click parsing).
         run(model=None, api_key=None, api_base=None, config_file=None)
 
 
@@ -330,32 +339,28 @@ def run(
 ):
     """Run the AI Shell"""
 
-    # Load configuration
+    cli_module = _cli_module()
+
     try:
-        config = Config(config_file_path=config_file)
+        config = cli_module.Config(config_file_path=config_file)
     except FileNotFoundError as e:
         console.print(t("cli.startup.config_file_error", error=str(e)), style="red")
         console.print(t("cli.startup.config_file_hint"), style="dim")
         sys.exit(1)
 
-    raw_config = _load_raw_yaml_config(config.config_file) if config.config_file else {}
-    needs_setup = needs_interactive_setup(raw_config, model, api_key)
-    if needs_setup and run_interactive_setup(config) is None:
+    raw_config = cli_module._load_raw_yaml_config(config.config_file) if config.config_file else {}
+    needs_setup = cli_module.needs_interactive_setup(raw_config, model, api_key)
+    if needs_setup and cli_module.run_interactive_setup(config) is None:
         console.print(t("cli.setup.required_cancelled"), style="red")
         sys.exit(1)
 
-    # Get effective configuration with priority handling
     effective_config = get_effective_config(config, model, api_key, api_base)
 
     init_logging(effective_config)
 
-    # Keep startup output minimal: the interactive shell welcome screen will display
-    # the key fields (version/model/config path) in a structured template.
-    # Inject config file path for welcome rendering (ConfigModel allows extra fields).
     try:
         setattr(effective_config, "config_file", str(config.config_file))
     except Exception:
-        # Best-effort only; welcome screen will fall back to "-".
         pass
 
     skill_manager = SkillManager()
@@ -384,14 +389,16 @@ def setup(
     ),
 ):
     """Run interactive setup and exit."""
+    cli_module = _cli_module()
+
     try:
-        config = Config(config_file_path=config_file)
+        config = cli_module.Config(config_file_path=config_file)
     except FileNotFoundError as e:
         console.print(t("cli.startup.config_file_error", error=str(e)), style="red")
         console.print(t("cli.startup.config_file_hint"), style="dim")
         sys.exit(1)
 
-    result = run_interactive_setup(config)
+    result = cli_module.run_interactive_setup(config)
     if result is None:
         console.print(t("cli.setup.cancelled"), style="yellow")
         sys.exit(1)
@@ -532,16 +539,20 @@ def models_usage(
         help=t("cli.option.config"),
     ),
 ):
+    cli_module = _cli_module()
+
     try:
-        config = Config(config_file_path=config_file)
+        config = cli_module.Config(config_file_path=config_file)
     except FileNotFoundError as exc:
         console.print(t("cli.startup.config_file_error", error=str(exc)), style="red")
         console.print(t("cli.startup.config_file_hint"), style="dim")
         raise typer.Exit(1) from exc
 
     effective_config = get_effective_config(config)
-    provider = get_provider_for_model(effective_config.model)
-    metadata = resolve_provider_metadata(effective_config.model, effective_config.api_base)
+    provider = cli_module.get_provider_for_model(effective_config.model)
+    metadata = cli_module.resolve_provider_metadata(
+        effective_config.model, effective_config.api_base
+    )
     status = provider.get_usage_status(effective_config)
 
     console.print(
@@ -637,10 +648,9 @@ def check_tool_support(
 def check_langfuse():
     """Check Langfuse configuration."""
     import subprocess
-    import sys
     from pathlib import Path
 
-    script_path = Path(__file__).parent.parent.parent / "check_langfuse.py"
+    script_path = Path(__file__).parent.parent / "check_langfuse.py"
 
     if script_path.exists():
         try:

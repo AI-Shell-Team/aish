@@ -18,7 +18,7 @@ from rich.progress import Progress, ProgressColumn, SpinnerColumn, Task, TextCol
 from rich.text import Text
 
 from ..i18n import t
-from ..litellm_loader import load_litellm
+from ..llm.loader import load_litellm
 from .helpers import _mask_secret
 from .types import ConnectivityResult, ToolSupportResult
 

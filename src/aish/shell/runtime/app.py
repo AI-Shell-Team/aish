@@ -23,28 +23,32 @@ from rich.console import Console
 from rich.live import Live
 
 from ...config import Config, ConfigModel, ToolArgPreviewSettings, get_default_session_db_path
-from ...context_manager import ContextManager, MemoryType
-from ...history_manager import HistoryManager
 from ...i18n import t
-from ...logging_utils import set_session_uuid
-from ...providers.registry import get_provider_for_model
-from ...pty.control_protocol import BackendControlEvent
+from ...llm.providers.registry import get_provider_for_model
+from ...terminal.pty.control_protocol import BackendControlEvent
 from ...prompts import PromptManager
-from ...pty import PTYManager
-from ...security.security_manager import SimpleSecurityManager
-from ...session_store import SessionRecord, SessionStore
-from ...skills.hotreload import SkillHotReloadService
-from ...utils import (
+from ...terminal.pty import PTYManager
+from ...state.logging import set_session_uuid
+from ...system_info import (
     get_current_env_info,
     get_or_fetch_static_env_info,
     get_output_language,
 )
-from ...welcome_screen import build_welcome_renderable
+from ...security.security_manager import SimpleSecurityManager
+from ...state import (
+    ContextManager,
+    HistoryManager,
+    MemoryType,
+    SessionRecord,
+    SessionStore,
+)
+from ...skills.hotreload import SkillHotReloadService
 from ...wizard.setup_wizard import run_interactive_setup
 from .ai import AIHandler
 from .events import LLMEventRouter
-from ...builtin import BuiltinRegistry
+from ..commands import BuiltinRegistry
 from ..ui.interaction import PTYUserInteraction
+from ..ui.welcome import build_welcome_renderable
 from .output import OutputProcessor
 from ..ui.editor import ShellPromptController
 from ..ui.prompt_io import display_security_panel, get_user_confirmation, handle_interaction_required
@@ -247,7 +251,7 @@ class PTYAIShell:
         """Create LLMSession with all necessary dependencies."""
         import logging
 
-        from ...interruption import InterruptionManager
+        from ..interruption import InterruptionManager
         from ...llm import LLMSession
 
         logger = logging.getLogger(__name__)
@@ -546,14 +550,14 @@ class PTYAIShell:
         return None
 
     def _on_interrupt_requested(self) -> None:
-        from ...cancellation import CancellationReason
+        from ...state.cancellation import CancellationReason
 
         self.llm_session.cancellation_token.cancel(
             CancellationReason.USER_INTERRUPT, "User pressed Ctrl+C"
         )
 
     def handle_processing_cancelled(self, event=None) -> None:
-        from ...interruption import ShellState
+        from ..interruption import ShellState
 
         self._stop_animation()
         self._reset_reasoning_state()
@@ -867,7 +871,7 @@ class PTYAIShell:
         }
 
     def submit_ai_backend_command(self, command: str) -> bool:
-        from ...interruption import ShellState
+        from ..interruption import ShellState
         from ...llm import LLMCallbackResult
 
         command = command.strip()
@@ -1025,7 +1029,7 @@ class PTYAIShell:
             has_input = bool(self._editing_buffer_text.strip())
             self._editing_buffer_text = ""
 
-            from ...interruption import InterruptAction
+            from ..interruption import InterruptAction
 
             action = self.interruption_manager.handle_ctrl_c(has_input)
 

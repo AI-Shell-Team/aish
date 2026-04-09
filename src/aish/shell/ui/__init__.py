@@ -9,6 +9,7 @@ from .prompt_io import (
     handle_tool_confirmation_required,
     render_interaction_modal,
 )
+from .welcome import build_welcome_renderable
 
 __all__ = [
     "PTYUserInteraction",
@@ -18,4 +19,5 @@ __all__ = [
     "handle_interaction_required",
     "handle_tool_confirmation_required",
     "render_interaction_modal",
+    "build_welcome_renderable",
 ]

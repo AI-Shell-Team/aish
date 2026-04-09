@@ -22,8 +22,8 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from .completion import ShellCompleter
 
 if TYPE_CHECKING:
-    from ...history_manager import HistoryManager
-    from ...interruption import InterruptionManager
+    from ...state import HistoryManager
+    from ..interruption import InterruptionManager
 
 # Cache TTL for theme rendering (seconds). Avoids re-running git commands
 # on every prompt refresh when cwd and exit_code haven't changed.
@@ -181,13 +181,13 @@ class ShellPromptController:
     @staticmethod
     def _find_theme_script(theme: str) -> str:
         """Locate theme script: user dir first, then built-in."""
-        user_path = os.path.expanduser(f"~/.config/aish/prompts/{theme}.aish")
+        user_path = os.path.expanduser(f"~/.config/aish/scripts/themes/{theme}.aish")
         if os.path.isfile(user_path):
             return user_path
         # Built-in theme via importlib.resources (packaging-friendly)
         try:
-            prompts_pkg = importlib.resources.files("aish.scripts.prompts")
-            candidate = prompts_pkg.joinpath(f"{theme}.aish")
+            themes_pkg = importlib.resources.files("aish.scripts.themes")
+            candidate = themes_pkg.joinpath(f"{theme}.aish")
             if hasattr(candidate, "is_file") and candidate.is_file():
                 return str(candidate)
         except (ModuleNotFoundError, TypeError):

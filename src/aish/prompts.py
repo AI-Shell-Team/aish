@@ -57,7 +57,6 @@ class PromptManager:
 
     def _load_from_filesystem(self):
         """Load prompts from filesystem (development mode)"""
-        # Get the directory where this file is located
         current_dir = Path(__file__).parent
         prompts_dir = current_dir / "prompts"
 

@@ -222,7 +222,6 @@ class ConfigModel(BaseModel):
         default=True,
         description="Enable script system (hooks, hot-reload, custom prompts). Set to false to use legacy prompt style.",
     )
-
     session_db_path: str = Field(
         default_factory=get_default_session_db_path,
         description=(
@@ -230,12 +229,10 @@ class ConfigModel(BaseModel):
             "(default: $XDG_DATA_HOME/aish/sessions.db or ~/.local/share/aish/sessions.db)"
         ),
     )
-
     is_free_key: bool = Field(
         default=False,
         description="Whether the current configuration uses a free API key",
     )
-
     memory: MemoryConfig = Field(
         default_factory=MemoryConfig,
         description="Long-term memory configuration",
@@ -285,7 +282,6 @@ class ConfigModel(BaseModel):
             return None
         if not isinstance(v, str):
             return v
-        # Split on first newline and take only the first part
         first_line = v.split("\n")[0].split("\r")[0]
         return first_line.strip() if first_line.strip() else None
 
@@ -297,7 +293,6 @@ class ConfigModel(BaseModel):
             return ""
         if not isinstance(v, str):
             return str(v)
-        # Split on first newline and take only the first part
         first_line = v.split("\n")[0].split("\r")[0]
         return first_line.strip()
 
@@ -309,15 +304,11 @@ class Config:
         self.is_custom_config = config_file_path is not None
 
         if config_file_path:
-            # Use custom config file path
             self.config_file = Path(config_file_path).expanduser().resolve()
             self.config_dir = self.config_file.parent
         else:
-            # Use default config file path
-            # Priority: AISH_CONFIG_DIR > XDG_CONFIG_HOME > ~/.config
             aish_config_dir = os.environ.get("AISH_CONFIG_DIR")
             if aish_config_dir:
-                # AISH_CONFIG_DIR points directly to the aish config directory
                 self.config_dir = Path(aish_config_dir).expanduser()
                 self.config_file = self.config_dir / "config.yaml"
             else:
@@ -325,9 +316,6 @@ class Config:
                 if xdg_config_home:
                     base_dir = Path(xdg_config_home).expanduser()
                 else:
-                    # Tests should never touch real user config under $HOME.
-                    # Detect pytest by presence in sys.modules (more reliable than env vars).
-                    # Note: pytest itself may not be imported as "pytest"; internal modules use "_pytest".
                     is_pytest = any(
                         name == "pytest"
                         or name.startswith("pytest.")
@@ -344,17 +332,11 @@ class Config:
 
         self.history_file = self.config_dir / "history"
 
-        # Create config directory if it doesn't exist (only for default config)
         if not self.is_custom_config:
             self.config_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize default skills directory
         self._init_skills_dir()
-
-        # Initialize default scripts directory
         self._init_scripts_dir()
-
-        # Load or create default configuration
         self.config_model = self._load_config()
 
     def _load_config(self) -> ConfigModel:
@@ -364,29 +346,24 @@ class Config:
                 with open(self.config_file, "r") as f:
                     config_data = yaml.safe_load(f) or {}
 
-                # Migrate sessions.duckdb to sessions.db
                 need_save = False
                 if isinstance(config_data, dict):
                     session_db_path = config_data.get("session_db_path", "")
                     if isinstance(session_db_path, str) and session_db_path.endswith(
                         "sessions.duckdb"
                     ):
-                        # Replace sessions.duckdb with sessions.db
                         new_path = str(Path(session_db_path).with_name("sessions.db"))
                         config_data["session_db_path"] = new_path
                         need_save = True
                     if "verbose" in config_data:
                         config_data.pop("verbose", None)
                         need_save = True
-                    # Add enable_scripts if missing (new field migration)
                     if "enable_scripts" not in config_data:
                         config_data["enable_scripts"] = True
                         need_save = True
-                    # Add prompt_theme if missing (new field migration)
                     if "prompt_theme" not in config_data:
                         config_data["prompt_theme"] = "compact"
                         need_save = True
-                    # Add memory section if missing (new field migration)
                     if "memory" not in config_data:
                         config_data["memory"] = {"enabled": True}
                         need_save = True
@@ -396,7 +373,6 @@ class Config:
 
                 return ConfigModel.model_validate(config_data)
             except (yaml.YAMLError, Exception):
-                # If config is corrupted, create backup and use defaults
                 backup_file = self.config_file.with_suffix(".yaml.backup")
                 try:
                     self.config_file.rename(backup_file)
@@ -404,11 +380,9 @@ class Config:
                     pass
                 return ConfigModel()
 
-        # For custom config files, if file doesn't exist, raise an error
         if self.is_custom_config:
             raise FileNotFoundError(f"Config file not found: {self.config_file}")
 
-        # For default config file, create it if it doesn't exist
         default_config = ConfigModel()
         self._save_config(default_config)
         return default_config
@@ -439,15 +413,10 @@ class Config:
                     indent=2,
                 )
         except IOError:
-            pass  # Silently fail if we can't save config
+            pass
 
     def _init_skills_dir(self) -> None:
-        """Initialize default skills directory from system skills.
-
-        Copies skills from /usr/share/aish/skills to ~/.config/aish/skills.
-        Only copies skills that don't already exist in the user's directory.
-        """
-        # Skip for custom config or pytest
+        """Initialize default skills directory from system skills."""
         if self.is_custom_config:
             return
 
@@ -458,30 +427,24 @@ class Config:
         if is_pytest:
             return
 
-        # User skills directory
         user_skills_dir = self.config_dir / "skills"
 
-        # Create user skills directory if it doesn't exist
         if not user_skills_dir.exists():
             try:
                 user_skills_dir.mkdir(parents=True, exist_ok=True)
             except (OSError, IOError):
-                # Silently fail if we can't create directory
                 return
 
-        # Possible system skills locations
         system_skills_locations = [
-            Path("/usr/share/aish/skills"),  # Debian package install location
-            Path("/usr/local/share/aish/skills"),  # Local install location
+            Path("/usr/share/aish/skills"),
+            Path("/usr/local/share/aish/skills"),
         ]
 
-        # Check for PyInstaller bundle location (sys._MEIPPASS)
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
             meipass_skills = Path(sys._MEIPASS) / "aish" / "skills"
             if meipass_skills.is_dir():
                 system_skills_locations.insert(0, meipass_skills)
 
-        # Find the first existing system skills directory
         source_skills_dir = None
         for location in system_skills_locations:
             if location.is_dir():
@@ -489,10 +452,8 @@ class Config:
                 break
 
         if source_skills_dir is None:
-            # No system skills found, nothing to copy
             return
 
-        # Copy each skill folder only if it doesn't exist in user directory
         for skill_entry in source_skills_dir.iterdir():
             if not skill_entry.is_dir():
                 continue
@@ -500,24 +461,16 @@ class Config:
             skill_name = skill_entry.name
             dest_skill_path = user_skills_dir / skill_name
 
-            # Skip if skill already exists in user directory
             if dest_skill_path.exists():
                 continue
 
             try:
-                # Copy individual skill directory
                 shutil.copytree(skill_entry, dest_skill_path, symlinks=True)
             except (OSError, IOError, shutil.Error):
-                # Silently fail for individual skill, continue with others
                 pass
 
     def _init_scripts_dir(self) -> None:
-        """Initialize default scripts directory from system prompts.
-
-        Copies .aish files from /usr/share/aish/prompts to ~/.config/aish/scripts.
-        Only copies scripts that don't already exist in the user's directory.
-        """
-        # Skip for custom config or pytest
+        """Initialize default script themes from system theme resources."""
         if self.is_custom_config:
             return
 
@@ -528,56 +481,45 @@ class Config:
         if is_pytest:
             return
 
-        # User scripts directory
-        user_scripts_dir = self.config_dir / "scripts"
+        user_scripts_dir = self.config_dir / "scripts" / "themes"
 
-        # Create user scripts directory if it doesn't exist
         if not user_scripts_dir.exists():
             try:
                 user_scripts_dir.mkdir(parents=True, exist_ok=True)
             except (OSError, IOError):
-                # Silently fail if we can't create directory
                 return
 
-        # Possible system prompts locations
-        system_prompts_locations = [
-            Path("/usr/share/aish/prompts"),  # Debian package install location
-            Path("/usr/local/share/aish/prompts"),  # Local install location
+        system_theme_locations = [
+            Path("/usr/share/aish/scripts/themes"),
+            Path("/usr/local/share/aish/scripts/themes"),
         ]
 
-        # Check for PyInstaller bundle location (sys._MEIPASS)
         if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-            meipass_prompts = Path(sys._MEIPASS) / "aish" / "scripts" / "prompts"
-            if meipass_prompts.is_dir():
-                system_prompts_locations.insert(0, meipass_prompts)
+            meipass_themes = Path(sys._MEIPASS) / "aish" / "scripts" / "themes"
+            if meipass_themes.is_dir():
+                system_theme_locations.insert(0, meipass_themes)
 
-        # Find the first existing system prompts directory
-        source_prompts_dir = None
-        for location in system_prompts_locations:
+        source_themes_dir = None
+        for location in system_theme_locations:
             if location.is_dir():
-                source_prompts_dir = location
+                source_themes_dir = location
                 break
 
-        if source_prompts_dir is None:
-            # No system prompts found, nothing to copy
+        if source_themes_dir is None:
             return
 
-        # Copy each .aish file only if it doesn't exist in user directory
-        for prompt_file in source_prompts_dir.iterdir():
-            if not prompt_file.is_file() or not prompt_file.name.endswith(".aish"):
+        for theme_file in source_themes_dir.iterdir():
+            if not theme_file.is_file() or not theme_file.name.endswith(".aish"):
                 continue
 
-            dest_script_path = user_scripts_dir / prompt_file.name
+            dest_script_path = user_scripts_dir / theme_file.name
 
-            # Skip if script already exists in user directory
             if dest_script_path.exists():
                 continue
 
             try:
-                # Copy individual script file
-                shutil.copy2(prompt_file, dest_script_path)
+                shutil.copy2(theme_file, dest_script_path)
             except (OSError, IOError):
-                # Silently fail for individual script, continue with others
                 pass
 
     def save_config(self) -> None:
@@ -618,7 +560,6 @@ class Config:
 
     def set(self, key: str, value) -> None:
         """Set configuration value"""
-        # Always create a new model to ensure validation
         current_data = self.config_model.model_dump()
         current_data[key] = value
         self.config_model = ConfigModel.model_validate(current_data)
@@ -705,12 +646,7 @@ _GLOBAL_CONFIG: Optional[Config] = None
 
 
 def get_global_config() -> Config:
-    """Return a lazily created process-global Config.
-
-    Important: avoid creating Config at import time because it may write to
-    ~/.config/aish (mkdir) which breaks in restricted environments (e.g. systemd
-    services with ProtectHome / read-only homes).
-    """
+    """Return a lazily created process-global Config."""
 
     global _GLOBAL_CONFIG
     if _GLOBAL_CONFIG is None:
@@ -723,5 +659,4 @@ class _LazyConfigProxy:
         return getattr(get_global_config(), name)
 
 
-# Backward-compatible alias: only initializes when actually accessed.
 config = _LazyConfigProxy()

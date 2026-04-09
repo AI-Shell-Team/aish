@@ -8,7 +8,7 @@ from typing import Callable, Iterable, Iterator, Optional
 
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion, PathCompleter
 
-from ...builtin.registry import (
+from ..commands.registry import (
     PTY_REQUIRING_COMMANDS,
     REJECTED_COMMANDS,
     STATE_MODIFYING_COMMANDS,

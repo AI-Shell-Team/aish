@@ -11,9 +11,9 @@ from unittest.mock import call
 from aish.memory.config import MemoryConfig
 from aish.memory.models import MemoryCategory
 from aish.i18n import t
-from aish.pty.command_state import CommandResult, CommandState
-from aish.pty.control_protocol import BackendControlEvent
-from aish.pty.manager import PTYManager
+from aish.terminal.pty.command_state import CommandResult, CommandState
+from aish.terminal.pty.control_protocol import BackendControlEvent
+from aish.terminal.pty.manager import PTYManager
 from aish.shell.runtime.ai import AIHandler
 from aish.shell.runtime.app import PTYAIShell
 from aish.shell.runtime.output import OutputProcessor

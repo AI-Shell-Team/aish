@@ -32,6 +32,11 @@ aish run --config /path/to/my-config.yaml
 aish run --config ~/work/ai-shell-config.yaml
 ```
 
+### 主题脚本目录
+
+- 内置主题脚本资源位于 `src/aish/scripts/themes/`
+- 用户自定义主题脚本位于 `~/.config/aish/scripts/themes/`
+
 ## 完整配置字段说明
 
 ### 基础配置

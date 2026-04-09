@@ -12,14 +12,14 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from rich.panel import Panel
 
-from ...cancellation import CancellationReason
 from ...i18n import t
-from ...interaction import (InteractionAnswer, InteractionAnswerType,
-                            InteractionKind,
-                            InteractionRequest, InteractionResponse,
-                            InteractionStatus,
-                            apply_interaction_response_to_data)
-from ...interruption import InterruptAction, PromptConfig, ShellState
+from ...terminal.interaction import (InteractionAnswer, InteractionAnswerType,
+                                     InteractionKind,
+                                     InteractionRequest, InteractionResponse,
+                                     InteractionStatus,
+                                     apply_interaction_response_to_data)
+from ...state.cancellation import CancellationReason
+from ..interruption import InterruptAction, PromptConfig, ShellState
 from ...llm import LLMCallbackResult, LLMEvent
 
 # Maximum recursion depth to prevent infinite loops

@@ -34,9 +34,9 @@ packages = ["src/aish"]
 include = [
     "src/aish/prompts/*.md",
     "src/aish/i18n/*.yaml",
-    "src/aish/pty/*.sh",
-    "src/aish/scripts/prompts/*.aish",
-    "src/aish/scripts/prompts/*.md",
+    "src/aish/terminal/pty/*.sh",
+    "src/aish/scripts/themes/*.aish",
+    "src/aish/scripts/themes/*.md",
     "src/aish/scripts/templates/*.aish",
 ]
 # 包含文档文件到 wheel 包
@@ -86,6 +86,7 @@ markers = [
     "asyncio: tests using pytest-asyncio",
     "anyio: tests using pytest-anyio",
     "live_smoke: opt-in live smoke tests that use real provider credentials",
+    "timeout: tests with an execution time limit",
 ]
 
 [tool.mypy]

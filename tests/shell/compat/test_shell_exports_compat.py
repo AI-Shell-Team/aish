@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from aish import PTYAIShell, run_shell
-from aish.pty import CommandState, PTYManager
 from aish.shell import CommandResult, CommandStatus
+from aish.terminal.pty import CommandState, PTYManager
 
 
 def test_shell_exports_stable_symbols():

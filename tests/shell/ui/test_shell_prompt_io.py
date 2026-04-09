@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from aish.interaction import AskUserRequestBuilder
+from aish.terminal.interaction import AskUserRequestBuilder
 from aish.llm import LLMCallbackResult, LLMEvent, LLMEventType
 from aish.shell.ui.prompt_io import (
     display_security_panel,

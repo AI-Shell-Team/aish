@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from ..llm import LLMSession
-    from ..env_manager import EnvironmentManager
+    from ..shell.environment import EnvironmentManager
     from .models import Script
 
 logger = logging.getLogger("aish.scripts.executor")

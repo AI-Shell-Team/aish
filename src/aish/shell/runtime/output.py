@@ -7,11 +7,11 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from ...i18n import t
-from ...pty.command_state import CommandResult
-from ...pty.control_protocol import BackendControlEvent
+from ...terminal.pty.command_state import CommandResult
+from ...terminal.pty.control_protocol import BackendControlEvent
 
 if TYPE_CHECKING:
-    from ...pty import PTYManager
+    from ...terminal.pty import PTYManager
     from .app import PTYAIShell
 
 

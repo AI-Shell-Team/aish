@@ -45,7 +45,7 @@ test:
 
 test-live-smoke:
 	@echo "🧪 Running live smoke tests..."
-	uv run --group dev python -m pytest tests/live_smoke/ -v -m live_smoke --run-live-smoke
+	uv run --group dev python -m pytest tests/flows/live_smoke/ -v -m live_smoke --run-live-smoke
 
 lint:
 	@echo "🔍 Running linting..."
@@ -96,10 +96,10 @@ install:
 		install -d "$(DESTDIR)$(DATADIR)"; \
 		cp -a debian/skills "$(DESTDIR)$(DATADIR)/"; \
 	fi
-	@if [ -d src/aish/scripts/prompts ]; then \
-		install -d "$(DESTDIR)$(DATADIR)/prompts"; \
-		install -m 0644 src/aish/scripts/prompts/*.aish "$(DESTDIR)$(DATADIR)/prompts/"; \
-		install -m 0644 src/aish/scripts/prompts/THEMES.md "$(DESTDIR)$(DATADIR)/prompts/"; \
+	@if [ -d src/aish/scripts/themes ]; then \
+		install -d "$(DESTDIR)$(DATADIR)/scripts/themes"; \
+		install -m 0644 src/aish/scripts/themes/*.aish "$(DESTDIR)$(DATADIR)/scripts/themes/"; \
+		install -m 0644 src/aish/scripts/themes/THEMES.md "$(DESTDIR)$(DATADIR)/scripts/themes/"; \
 	fi
 	@if [ -d src/aish/scripts/templates ]; then \
 		install -d "$(DESTDIR)$(DATADIR)/scripts/templates"; \

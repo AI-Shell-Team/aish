@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ..logging_utils import (add_context_filter,
+from ..state.logging import (add_context_filter,
                              build_sandboxd_rotating_file_handler,
                              init_sandboxd_logging, set_session_uuid)
 from .sandbox import (DEFAULT_SANDBOX_SOCKET_PATH, SandboxUnavailableError,

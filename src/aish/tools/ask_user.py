@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from aish.interaction import (
+from aish.terminal.interaction import (
     AskUserRequestBuilder,
     AskUserInteractionAdapter,
     InteractionKind,

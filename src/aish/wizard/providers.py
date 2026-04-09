@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ..i18n import t
-from ..litellm_loader import load_litellm
+from ..llm.loader import load_litellm
 from .constants import (
     _PROVIDER_ALIASES,
     _PROVIDER_BASES,

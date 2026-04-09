@@ -5,8 +5,11 @@ import os
 import sys
 from pathlib import Path
 
-from aish.security.sandbox_daemon import (DEFAULT_SANDBOX_SOCKET_PATH,
-                                          SandboxDaemon, SandboxDaemonConfig)
+from aish.security.sandbox_daemon import (
+    DEFAULT_SANDBOX_SOCKET_PATH,
+    SandboxDaemon,
+    SandboxDaemonConfig,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
