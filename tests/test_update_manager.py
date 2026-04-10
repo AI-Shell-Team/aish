@@ -3,7 +3,8 @@
 import httpx
 import pytest
 from unittest.mock import Mock, patch
-from aish.cli.update_manager import UpdateManager
+from aish import __version__
+from aish.cli.update_manager import UpdateCheckError, UpdateManager
 
 
 @pytest.fixture
@@ -33,7 +34,7 @@ def mock_github_response():
 @pytest.mark.timeout(5)
 def test_get_current_version(update_manager):
     """Test getting current version."""
-    assert update_manager.get_current_version() == "0.2.0"
+    assert update_manager.get_current_version() == __version__
 
 
 @pytest.mark.timeout(5)
@@ -67,14 +68,13 @@ def test_get_latest_release_success(
 @pytest.mark.timeout(5)
 @patch("aish.cli.update_manager.httpx.Client")
 def test_get_latest_release_http_error(mock_client_class, update_manager):
-    """Test handling of HTTP error."""
+    """Test handling of HTTP error raises UpdateCheckError."""
     mock_client_instance = mock_client_class.return_value
     mock_client_instance.get = Mock(side_effect=httpx.HTTPError("Connection error"))
 
     with patch.object(update_manager, "client", mock_client_instance):
-        result = update_manager.get_latest_release()
-
-    assert result is None
+        with pytest.raises(UpdateCheckError, match="Network error"):
+            update_manager.get_latest_release()
 
 
 @pytest.mark.timeout(5)

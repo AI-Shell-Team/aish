@@ -10,6 +10,7 @@ import yaml
 from rich.console import Console
 from rich.panel import Panel
 
+from aish import __version__
 from aish.config import Config, ConfigModel
 from aish.i18n import t
 from aish.i18n.typer import I18nTyperCommand, I18nTyperGroup
@@ -23,7 +24,7 @@ from aish.llm.providers.registry import (
 from aish.state.logging import init_logging
 from aish.skills import SkillManager
 from .uninstall_manager import UninstallManager
-from .update_manager import UpdateManager
+from .update_manager import UpdateCheckError, UpdateManager
 from aish.wizard.setup_wizard import (
     needs_interactive_setup as needs_interactive_setup,
     run_interactive_setup as run_interactive_setup,
@@ -279,11 +280,23 @@ def get_effective_config(
 
 
 @app.callback()
-def _default(ctx: typer.Context):
+def _default(
+    ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Show version and exit.",
+        is_eager=True,
+    ),
+):
     """Default entrypoint.
 
     Running `aish` with no subcommand behaves like `aish run`.
     """
+    if version:
+        print(f"aish {__version__}")
+        raise typer.Exit()
 
     if ctx.invoked_subcommand is None:
         run(model=None, api_key=None, api_base=None, config_file=None)
@@ -414,12 +427,22 @@ def update(
         "-c",
         help=t("cli.update.check_only"),
     ),
+    pre_release: bool = typer.Option(
+        False,
+        "--pre-release",
+        "-p",
+        help=t("cli.update.pre_release"),
+    ),
 ):
     """Update aish to the latest version."""
     with UpdateManager() as manager:
         # Check for updates
         console.print(f"[bold cyan]{t('cli.update.checking')}[/bold cyan]")
-        update_info = manager.check_for_updates()
+        try:
+            update_info = manager.check_for_updates(include_pre_release=pre_release)
+        except UpdateCheckError as e:
+            console.print(f"[red]Update check failed: {e}[/red]")
+            raise typer.Exit(1)
 
         if not update_info:
             console.print(f"[green]{t('cli.update.already_latest')}[/green]")
@@ -495,7 +518,7 @@ def uninstall(
 
     # Uninstall
     console.print(f"[bold cyan]{t('cli.uninstall.uninstalling')}[/bold cyan]")
-    if not manager.uninstall_package(method=method):
+    if not manager.uninstall_package(method=method, purge=purge):
         console.print(f"[red]{t('cli.uninstall.failed')}[/red]")
         raise typer.Exit(1)
 
@@ -503,8 +526,10 @@ def uninstall(
 
     # Purge if requested
     if purge:
-        if manager.purge_data():
-            console.print(f"[green]{t('cli.uninstall.purge_complete')}[/green]")
+        if not manager.purge_data():
+            console.print(f"[red]{t('cli.uninstall.purge_failed')}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]{t('cli.uninstall.purge_complete')}[/green]")
 
 
 @models_auth_app.callback(invoke_without_command=True)

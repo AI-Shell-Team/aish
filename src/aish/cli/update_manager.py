@@ -25,6 +25,11 @@ from rich.progress import (
 
 from aish import __version__
 
+
+class UpdateCheckError(Exception):
+    """Raised when update check fails due to network/API errors."""
+
+
 # Constants
 GITHUB_API_LATEST = "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest"
 GITHUB_API_LIST = "https://api.github.com/repos/AI-Shell-Team/aish/releases"
@@ -122,11 +127,9 @@ class UpdateManager:
                 "assets": data.get("assets", []),
             }
         except httpx.HTTPError as e:
-            self.console.print(f"[red]Failed to fetch release info: {e}[/red]")
-            return None
+            raise UpdateCheckError(f"Network error while checking for updates: {e}") from e
         except Exception as e:
-            self.console.print(f"[red]Unexpected error: {e}[/red]")
-            return None
+            raise UpdateCheckError(f"Unexpected error while checking for updates: {e}") from e
 
     def check_for_updates(self, include_pre_release: bool = False) -> Optional[dict]:
         """Check if there's a newer version available.
@@ -144,9 +147,11 @@ class UpdateManager:
             - html_url: URL to release page
         """
         current = self.get_current_version()
+        # get_latest_release() raises UpdateCheckError on network/API failures;
+        # None is only returned for legitimate "no data" cases (empty list, missing tag)
         release_info = self.get_latest_release(include_pre_release)
 
-        if not release_info:
+        if release_info is None:
             return None
 
         latest_tag = release_info["tag_name"]
@@ -269,6 +274,7 @@ class UpdateManager:
                     tar.extractall(extract_dir, filter="data")
                 except TypeError:
                     # Fallback for Python < 3.12: validate members manually
+                    safe_members = []
                     for member in tar.getmembers():
                         member_path = (extract_dir / member.name).resolve()
                         if not member_path.is_relative_to(extract_dir.resolve()):
@@ -276,7 +282,20 @@ class UpdateManager:
                                 f"[red]Security: path traversal detected: {member.name}[/red]"
                             )
                             return False
-                    tar.extractall(extract_dir)
+                        # Also validate symlink targets
+                        if member.issym():
+                            link_target = (
+                                extract_dir / member.name
+                            ).parent / member.linkname
+                            if not link_target.resolve().is_relative_to(
+                                extract_dir.resolve()
+                            ):
+                                self.console.print(
+                                    f"[red]Security: symlink target escapes extract dir: {member.name} -> {member.linkname}[/red]"
+                                )
+                                return False
+                        safe_members.append(member)
+                    tar.extractall(extract_dir, members=safe_members)
 
             # Find install.sh
             install_scripts = list(extract_dir.rglob("install.sh"))

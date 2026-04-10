@@ -11,6 +11,7 @@ cli:
 
   update:
     check_only: "仅检查更新，不执行安装"
+    pre_release: "包括预发布版本"
     checking: "正在检查更新..."
     current_version: "当前版本: {version}"
     latest_version: "最新版本: {version}"
@@ -38,6 +39,7 @@ cli:
     uninstalling: "正在卸载..."
     uninstall_complete: "卸载完成"
     purge_complete: "配置和数据已清理"
+    purge_failed: "清理配置和数据失败"
     cancelled: "卸载已取消"
     failed: "卸载失败"
 

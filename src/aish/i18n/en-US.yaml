@@ -11,6 +11,7 @@ cli:
 
   update:
     check_only: "Only check for updates, do not install"
+    pre_release: "Include pre-release versions"
     checking: "Checking for updates..."
     current_version: "Current version: {version}"
     latest_version: "Latest version: {version}"
@@ -38,6 +39,7 @@ cli:
     uninstalling: "Uninstalling..."
     uninstall_complete: "Uninstall complete"
     purge_complete: "Configuration and data cleaned"
+    purge_failed: "Failed to purge configuration and data"
     cancelled: "Uninstall cancelled"
     failed: "Uninstall failed"
 
