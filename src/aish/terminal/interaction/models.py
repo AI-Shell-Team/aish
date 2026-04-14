@@ -8,6 +8,7 @@ from typing import Any
 class InteractionKind(str, Enum):
     TEXT_INPUT = "text_input"
     CHOICE_OR_TEXT = "choice_or_text"
+    PLAN_APPROVAL = "plan_approval"
     CONFIRM = "confirm"
 
 

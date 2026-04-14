@@ -173,3 +173,26 @@ class SessionStore:
             (limit,),
         ).fetchall()
         return [self._record_from_row(row) for row in rows]
+
+    def update_session_state(
+        self,
+        session_uuid: str,
+        state_patch: Dict[str, Any],
+    ) -> Optional[SessionRecord]:
+        current = self.get_session(session_uuid)
+        if current is None:
+            return None
+
+        merged_state = dict(current.state)
+        merged_state.update(state_patch)
+        self._conn.execute(
+            """
+            UPDATE sessions
+            SET state = ?
+            WHERE session_uuid = ?
+            """,
+            (self._dump_state(merged_state), session_uuid),
+        )
+        self._conn.commit()
+        current.state = merged_state
+        return current

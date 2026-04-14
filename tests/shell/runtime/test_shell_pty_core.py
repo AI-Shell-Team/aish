@@ -4,16 +4,27 @@ from __future__ import annotations
 
 import os
 import threading
+from types import SimpleNamespace
 
 from unittest.mock import Mock
 from unittest.mock import call
 
+from aish.config import ConfigModel
+from aish.llm import LLMSession
 from aish.memory.config import MemoryConfig
 from aish.memory.models import MemoryCategory
 from aish.i18n import t
+from aish.plan import PlanApprovalStatus, PlanPhase
 from aish.terminal.pty.command_state import CommandResult, CommandState
 from aish.terminal.pty.control_protocol import BackendControlEvent
 from aish.terminal.pty.manager import PTYManager
+from aish.terminal.interaction import (
+    InteractionAnswer,
+    InteractionAnswerType,
+    InteractionResponse,
+    InteractionStatus,
+)
+from aish.skills import SkillManager
 from aish.shell.runtime.ai import AIHandler
 from aish.shell.runtime.app import PTYAIShell
 from aish.shell.runtime.output import OutputProcessor
@@ -118,6 +129,41 @@ def test_ai_handler_skips_prompt_redraw_when_question_is_cancelled():
 
     handler._display_ai_response.assert_not_called()
     shell.submit_backend_command.assert_not_called()
+
+
+def test_ai_handler_runs_pending_followup_after_current_question():
+    handler, shell = _make_ai_handler()
+
+    def _complete_operation(coro, shell, history_entry=None):
+        _ = shell
+        coro.close()
+        if history_entry and history_entry["command"] == "[plan approved] continue implementation":
+            return ("second-response", False)
+        return ("first-response", False)
+
+    handler._execute_ai_operation = Mock(side_effect=_complete_operation)
+    handler._display_ai_response = Mock()
+    handler._auto_retain_memory = Mock()
+    shell.consume_pending_ai_followup = Mock(
+        side_effect=[
+            {
+                "prompt": "Implement the approved plan now.",
+                "history_command": "[plan approved] continue implementation",
+            },
+            None,
+        ]
+    )
+
+    handler.handle_question("hello")
+
+    assert handler._execute_ai_operation.call_count == 2
+    first_history = handler._execute_ai_operation.call_args_list[0].kwargs["history_entry"]
+    second_history = handler._execute_ai_operation.call_args_list[1].kwargs["history_entry"]
+    assert first_history["command"] == "hello"
+    assert second_history["command"] == "[plan approved] continue implementation"
+    handler._display_ai_response.assert_has_calls(
+        [call("first-response"), call("second-response")]
+    )
 
 
 def test_ai_handler_executes_corrected_command_via_security_submission():
@@ -598,6 +644,231 @@ def test_shell_handle_prompt_submission_routes_setup_command_to_special_handler(
     shell.handle_setup_command.assert_called_once_with("/setup")
     shell.handle_model_command.assert_not_called()
     shell.submit_backend_command.assert_not_called()
+
+
+def test_shell_handle_prompt_submission_routes_plan_command_to_special_handler():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = Mock()
+    shell._ai_handler = Mock()
+    shell._prompt_controller = Mock()
+    shell.submit_backend_command = Mock()
+    shell.handle_model_command = Mock()
+    shell.handle_setup_command = Mock()
+    shell.handle_plan_command = Mock()
+
+    PTYAIShell._handle_prompt_submission(shell, "/plan start")
+
+    shell._prompt_controller.remember_command.assert_called_once_with("/plan start")
+    shell.handle_plan_command.assert_called_once_with("/plan start")
+    shell.handle_model_command.assert_not_called()
+    shell.handle_setup_command.assert_not_called()
+    shell.submit_backend_command.assert_not_called()
+
+
+def test_shell_toggle_plan_mode_enters_plan_when_in_shell_mode():
+    shell = object.__new__(PTYAIShell)
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
+    shell.exit_plan_mode = Mock()
+    shell._leave_plan_mode_directly = Mock()
+
+    PTYAIShell.toggle_plan_mode(shell)
+
+    shell.llm_session.begin_new_plan.assert_called_once_with()
+    shell.exit_plan_mode.assert_not_called()
+    shell._leave_plan_mode_directly.assert_not_called()
+
+
+def test_shell_toggle_plan_mode_exits_plan_when_already_planning():
+    shell = object.__new__(PTYAIShell)
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
+    shell.exit_plan_mode = Mock()
+    shell._leave_plan_mode_directly = Mock()
+
+    PTYAIShell.toggle_plan_mode(shell)
+
+    shell._leave_plan_mode_directly.assert_called_once_with()
+    shell.exit_plan_mode.assert_not_called()
+    shell.llm_session.begin_new_plan.assert_not_called()
+
+
+def test_leave_plan_mode_directly_resets_planning_state_without_approval():
+    shell = object.__new__(PTYAIShell)
+    plan_state = Mock()
+    plan_state.phase = PlanPhase.PLANNING.value
+    plan_state.with_updates.return_value = "updated-plan-state"
+    shell.llm_session = Mock(plan_state=plan_state)
+
+    PTYAIShell._leave_plan_mode_directly(shell)
+
+    shell.llm_session.update_plan_state.assert_called_once_with("updated-plan-state")
+    plan_state.with_updates.assert_called_once_with(
+        phase=PlanPhase.NORMAL.value,
+        approval_status=PlanApprovalStatus.DRAFT.value,
+        approved_artifact_path=None,
+        approved_revision=None,
+        approved_artifact_hash=None,
+        approval_feedback_summary=None,
+    )
+
+
+def test_handle_plan_command_exit_leaves_plan_mode_without_approval():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
+    shell.exit_plan_mode = Mock()
+    shell._leave_plan_mode_directly = Mock()
+    shell._record_special_command_result = Mock()
+
+    PTYAIShell.handle_plan_command(shell, "/plan exit")
+
+    shell._leave_plan_mode_directly.assert_called_once_with()
+    shell.exit_plan_mode.assert_not_called()
+    shell.llm_session.begin_new_plan.assert_not_called()
+
+
+def test_handle_plan_command_start_shows_status_when_already_planning():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.llm_session = Mock(
+        plan_state=SimpleNamespace(
+            phase=PlanPhase.PLANNING.value,
+            approval_status=PlanApprovalStatus.DRAFT.value,
+            artifact_path="/tmp/plan.md",
+        )
+    )
+    shell._record_special_command_result = Mock()
+
+    PTYAIShell.handle_plan_command(shell, "/plan start")
+
+    shell.console.print.assert_called_once_with(
+        "mode=plan, approval_status=draft, artifact=/tmp/plan.md"
+    )
+    shell._record_special_command_result.assert_called_once_with(
+        "/plan start",
+        exit_code=0,
+        stdout="mode=plan, approval_status=draft, artifact=/tmp/plan.md",
+        stderr="",
+    )
+
+
+def test_handle_plan_command_exit_in_shell_mode_is_noop_status():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
+    shell._record_special_command_result = Mock()
+
+    PTYAIShell.handle_plan_command(shell, "/plan exit")
+
+    shell.console.print.assert_called_once_with("mode=shell, approval_status=draft, artifact=-")
+    shell.llm_session.begin_new_plan.assert_not_called()
+
+
+def test_handle_tool_execution_end_approves_plan_signal():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.context_manager = Mock()
+    shell.queue_pending_ai_followup = Mock()
+    shell.llm_session = LLMSession(
+        config=ConfigModel(model="test-model", api_key="test-key"),
+        skill_manager=SkillManager(),
+        session_uuid="shell-plan-approve",
+    )
+    shell.llm_session.begin_new_plan()
+    artifact = shell.llm_session.plan_state.artifact
+    assert artifact is not None
+    artifact.write_text("# Plan\n\nApproved", encoding="utf-8")
+    shell.llm_session.request_interaction = lambda request: InteractionResponse(
+        interaction_id="approval-approve",
+        status=InteractionStatus.SUBMITTED,
+        answer=InteractionAnswer(
+            type=InteractionAnswerType.OPTION,
+            value="approve",
+            label="Approve",
+        ),
+    )
+
+    PTYAIShell.handle_tool_execution_end(
+        shell,
+        SimpleNamespace(
+            data={
+                "tool_name": "exit_plan_mode",
+                "result_data": {
+                    "signal": "exit_plan_mode",
+                    "artifact_path": str(artifact),
+                    "artifact_preview": "# Plan\n\nApproved",
+                    "summary": "ready",
+                },
+            }
+        ),
+    )
+
+    assert shell.llm_session.plan_state.phase == PlanPhase.NORMAL.value
+    assert (
+        shell.llm_session.plan_state.approval_status
+        == PlanApprovalStatus.APPROVED.value
+    )
+    assert shell.llm_session.plan_state.approved_artifact_path
+    shell.context_manager.add_memory.assert_called_once()
+    shell.console.print.assert_called_once_with(
+        t("plan.approval.approved"),
+        style="green",
+    )
+    shell.queue_pending_ai_followup.assert_called_once()
+    queued_prompt = shell.queue_pending_ai_followup.call_args.kwargs["prompt"]
+    assert "Implement the approved plan now." in queued_prompt
+    assert str(shell.llm_session.plan_state.approved_artifact_path) in queued_prompt
+
+
+def test_handle_tool_execution_end_keeps_plan_mode_when_changes_requested():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.context_manager = Mock()
+    shell.llm_session = LLMSession(
+        config=ConfigModel(model="test-model", api_key="test-key"),
+        skill_manager=SkillManager(),
+        session_uuid="shell-plan-feedback",
+    )
+    shell.llm_session.begin_new_plan()
+    artifact = shell.llm_session.plan_state.artifact
+    assert artifact is not None
+    artifact.write_text("# Plan\n\nNeeds work", encoding="utf-8")
+    shell.llm_session.request_interaction = lambda request: InteractionResponse(
+        interaction_id="approval-feedback",
+        status=InteractionStatus.SUBMITTED,
+        answer=InteractionAnswer(
+            type=InteractionAnswerType.TEXT,
+            value="Split deployment and validation into separate steps",
+        ),
+    )
+
+    PTYAIShell.handle_tool_execution_end(
+        shell,
+        SimpleNamespace(
+            data={
+                "tool_name": "exit_plan_mode",
+                "result_data": {
+                    "signal": "exit_plan_mode",
+                    "artifact_path": str(artifact),
+                    "artifact_preview": "# Plan\n\nNeeds work",
+                    "summary": "ready",
+                },
+            }
+        ),
+    )
+
+    assert shell.llm_session.plan_state.phase == PlanPhase.PLANNING.value
+    assert (
+        shell.llm_session.plan_state.approval_status
+        == PlanApprovalStatus.CHANGES_REQUESTED.value
+    )
+    assert shell.llm_session.plan_state.approval_feedback_summary == (
+        "Split deployment and validation into separate steps"
+    )
+    shell.context_manager.add_memory.assert_called_once()
+    shell.console.print.assert_called_once_with(
+        t("plan.approval.changes_requested"),
+        style="yellow",
+    )
 
 
 def test_shell_handle_model_command_reports_current_model():

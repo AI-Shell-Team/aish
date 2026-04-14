@@ -633,5 +633,29 @@ help:
         - "/setup --help        # 显示帮助"
       notes: "配置完成后会自动应用新设置，无需重启。取消则保持当前配置不变。"
 
+plan:
+  unavailable: "计划模式不可用，LLM 会话尚未就绪。"
+  approval:
+    title: "计划审批"
+    prompt: "请审阅计划并选择是否批准执行。"
+    option_approve: "批准"
+    option_approve_desc: "批准计划并返回 shell 模式，计划将作为执行上下文。"
+    option_changes: "请求修改"
+    option_changes_desc: "继续留在计划模式并修改计划。"
+    custom_label: "请求修改并附反馈"
+    custom_placeholder: "描述计划中需要修改的内容"
+    section_summary: "摘要"
+    section_artifact: "计划文件"
+    section_preview: "计划预览"
+    hint: "Enter 提交审批 · ↑/↓ 选择 · Tab 或直接输入来请求修改 · Esc 取消"
+    approved: "计划已批准。已返回 shell 模式，批准的计划已作为执行上下文。"
+    changes_requested: "已请求修改计划。继续留在计划模式。"
+    cancelled: "计划审阅已取消。继续留在计划模式。"
+    reminder_approved: "计划已获批准。你已回到 shell 模式，请按照已批准的计划文件 {path} 执行。"
+    reminder_changes: "已请求修改计划。请在绑定的计划文件中修改计划后，再次调用 exit_plan_mode。"
+    reminder_feedback: "反馈：{feedback}"
+  tool:
+    update_artifact: "📋 更新计划：{path}"
+
 errors:
   litellm_not_installed: "litellm 模块未安装"

@@ -27,6 +27,24 @@ def test_shell_prompt_controller_uses_cwd_provider_for_prompt_text():
     assert controller._get_prompt_text() == "/tmp/project"
 
 
+def test_shell_prompt_controller_uses_mode_provider_for_prompt_text():
+    controller = ShellPromptController(mode_provider=lambda: "planning")
+
+    assert controller._get_prompt_mode() == "plan"
+
+
+def test_shell_prompt_controller_default_prompt_includes_mode_label():
+    controller = ShellPromptController(
+        cwd_provider=lambda: "/tmp/project",
+        mode_provider=lambda: "plan",
+    )
+
+    prompt = controller._build_prompt_message()
+
+    assert "plan" in prompt.value
+    assert "/tmp/project" in prompt.value
+
+
 def test_shell_prompt_controller_forwards_custom_prompt_message():
     controller = ShellPromptController()
     controller._session.prompt = Mock(return_value="echo hi")
@@ -38,6 +56,38 @@ def test_shell_prompt_controller_forwards_custom_prompt_message():
     assert controller._session.prompt.call_args.args[0] == "... "
     assert "bottom_toolbar" not in controller._session.prompt.call_args.kwargs
     assert "style" not in controller._session.prompt.call_args.kwargs
+
+
+def test_shell_prompt_controller_uses_dynamic_prompt_callable_by_default():
+    controller = ShellPromptController()
+    controller._session.prompt = Mock(return_value="echo hi")
+
+    result = controller.prompt()
+
+    assert result == "echo hi"
+    controller._session.prompt.assert_called_once()
+    assert controller._session.prompt.call_args.args[0] == controller._build_prompt_message
+
+
+def test_shell_prompt_controller_handle_mode_toggle_calls_handler():
+    toggle_handler = Mock()
+    controller = ShellPromptController(mode_toggle_handler=toggle_handler)
+
+    controller._handle_mode_toggle()
+
+    toggle_handler.assert_called_once_with()
+
+
+def test_shell_prompt_controller_registers_f2_mode_toggle_shortcut():
+    controller = ShellPromptController()
+
+    bindings = {
+        tuple(binding.keys)
+        for binding in controller._build_key_bindings().bindings
+        if binding.handler.__name__ == "_toggle_plan_mode"
+    }
+
+    assert any(str(key) == "Keys.F2" for group in bindings for key in group)
 
 
 def test_shell_prompt_controller_render_theme_preserves_trailing_space(monkeypatch):
@@ -70,6 +120,12 @@ def test_shell_prompt_controller_render_theme_preserves_multiline_prompt_suffix(
     assert controller._render_theme() == "line1\n\x1b[32m❯\x1b[0m "
 
 
+def test_shell_prompt_controller_theme_env_includes_mode():
+    env = ShellPromptController._build_theme_env("/tmp/project", 0, "planning")
+
+    assert env["AISH_MODE"] == "plan"
+
+
 def test_shell_completer_suggests_builtin_and_special_commands():
     completer = ShellCompleter(command_provider=lambda: ["ls", "logout", "pwd"])
 
@@ -82,6 +138,11 @@ def test_shell_completer_suggests_builtin_and_special_commands():
         completer.get_completions(Document(text="pw", cursor_position=2), CompleteEvent(completion_requested=True))
     )
     assert [item.text for item in completions] == ["pwd"]
+
+    completions = list(
+        completer.get_completions(Document(text="/p", cursor_position=2), CompleteEvent(completion_requested=True))
+    )
+    assert [item.text for item in completions] == ["/plan"]
 
 
 def test_shell_completer_completes_directories_for_cd(tmp_path):

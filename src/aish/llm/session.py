@@ -14,6 +14,21 @@ import anyio
 from aish.llm.agents import SystemDiagnoseAgent
 from aish.state.cancellation import CancellationReason, CancellationToken
 from aish.config import ConfigModel
+from aish.plan import (
+    PLAN_ONLY_TOOL_NAMES,
+    PLANNING_VISIBLE_TOOL_NAMES,
+    READ_ONLY_TOOL_NAMES,
+    PlanModeState,
+    PlanPhase,
+    SIDE_EFFECT_TOOL_NAMES,
+    compute_artifact_hash,
+    create_new_plan_state,
+    decode_plan_state,
+    encode_plan_state,
+    ensure_plan_artifact,
+    is_approved_plan_current,
+)
+from aish.plan.tools import ExitPlanModeTool
 from aish.terminal.interaction import (
     InteractionRequest,
     InteractionResponse,
@@ -35,6 +50,8 @@ from aish.tools.base import (
 from aish.tools.code_exec import BashTool, PythonTool
 from aish.tools.fs_tools import EditFileTool, ReadFileTool, WriteFileTool
 from aish.tools.result import ToolResult
+from aish.tools.glob_tool import GlobTool
+from aish.tools.grep_tool import GrepTool
 from aish.tools.skill import SkillTool, render_skills_reminder_text
 
 logger = logging.getLogger("aish.llm")
@@ -119,6 +136,17 @@ def normalize_tool_result(value: object) -> ToolResult:
     if isinstance(value, str):
         return ToolResult(ok=True, output=value)
     return ToolResult(ok=True, output=str(value), meta={"kind": "coerced"})
+
+
+def ensure_plan_artifact_if_needed(
+    plan_state: PlanModeState,
+    session_uuid: str,
+) -> PlanModeState:
+    if plan_state.phase == PlanPhase.NORMAL.value and not plan_state.artifact_path:
+        return plan_state.with_updates(
+            source_session_uuid=plan_state.source_session_uuid or session_uuid
+        )
+    return ensure_plan_artifact(plan_state, session_uuid=session_uuid)
 
 
 def _stream_get_choice_delta(chunk: object) -> tuple[object, object]:
@@ -329,12 +357,25 @@ class LLMSession:
         interruption_manager=None,
         history_manager=None,
         memory_manager=None,
+        session_uuid: str | None = None,
+        session_state: Optional[dict] = None,
+        session_state_updater: Optional[Callable[[dict], None]] = None,
     ):  # noqa: F821
         self.config = config
         self.model = config.model
         self.api_base = config.api_base
         self.api_key = config.api_key
         self.memory_manager = memory_manager
+        self.session_uuid = str(session_uuid or uuid.uuid4())
+        self._session_state_updater = session_state_updater
+        self.plan_state = decode_plan_state(
+            (session_state or {}).get("plan_mode"),
+            default_source_session_uuid=self.session_uuid,
+        )
+        self.plan_state = ensure_plan_artifact_if_needed(
+            self.plan_state,
+            self.session_uuid,
+        )
 
         self.skill_manager = skill_manager
         self.prompt_manager = PromptManager()
@@ -366,12 +407,18 @@ class LLMSession:
             self.read_file_tool = ReadFileTool()
             self.write_file_tool = WriteFileTool()
             self.edit_file_tool = EditFileTool()
+            self.glob_tool = GlobTool()
+            self.grep_tool = GrepTool()
             from aish.tools.ask_user import AskUserTool
 
             self.ask_user_tool = AskUserTool(request_interaction=self.request_interaction)
             self.skill_tool = SkillTool(
                 skill_manager=self.skill_manager,
                 prompt_manager=self.prompt_manager,
+            )
+            self.exit_plan_mode_tool = ExitPlanModeTool(
+                get_plan_state=lambda: self.plan_state,
+                update_plan_state=self.update_plan_state,
             )
             self.system_diagnose_agent = SystemDiagnoseAgent(
                 config=config,
@@ -382,6 +429,7 @@ class LLMSession:
                 parent_event_callback=self.event_callback,
                 cancellation_token=self.cancellation_token.create_child_token(),
                 history_manager=history_manager,
+                plan_state=self.plan_state,
             )
 
             self.tools = {
@@ -390,7 +438,10 @@ class LLMSession:
                 self.read_file_tool.name: self.read_file_tool,
                 self.write_file_tool.name: self.write_file_tool,
                 self.edit_file_tool.name: self.edit_file_tool,
+                self.glob_tool.name: self.glob_tool,
+                self.grep_tool.name: self.grep_tool,
                 self.ask_user_tool.name: self.ask_user_tool,
+                self.exit_plan_mode_tool.name: self.exit_plan_mode_tool,
                 self.system_diagnose_agent.name: self.system_diagnose_agent,
                 self.skill_tool.name: self.skill_tool,
             }
@@ -404,6 +455,9 @@ class LLMSession:
         else:
             # Use the provided tool set
             self.tools = tools_override
+
+        self._apply_phase_tool_policies()
+        self._persist_plan_state()
 
         self._tools_spec: Optional[list[dict]] = None
 
@@ -709,6 +763,7 @@ class LLMSession:
         skill_manager: SkillManager,
         tools: Optional[dict[str, ToolBase]] = None,
         cancellation_token: Optional[CancellationToken] = None,
+        plan_state: PlanModeState | None = None,
     ) -> "LLMSession":
         return LLMSession(
             config=config,
@@ -716,6 +771,207 @@ class LLMSession:
             tools_override=tools,
             event_callback=None,
             cancellation_token=cancellation_token,
+            session_state=encode_plan_state({}, plan_state)
+            if plan_state is not None
+            else None,
+        )
+
+    def _persist_plan_state(self) -> None:
+        if self._session_state_updater is None:
+            return
+        self._session_state_updater(encode_plan_state({}, self.plan_state))
+
+    def update_plan_state(self, next_state: PlanModeState) -> PlanModeState:
+        self.plan_state = ensure_plan_artifact_if_needed(next_state, self.session_uuid)
+        if hasattr(self, "system_diagnose_agent"):
+            self.system_diagnose_agent.plan_state = self.plan_state
+        self._apply_phase_tool_policies()
+        self.refresh_tools_spec()
+        self._persist_plan_state()
+        return self.plan_state
+
+    def set_plan_phase(self, phase: str) -> PlanModeState:
+        return self.update_plan_state(self.plan_state.with_updates(phase=phase))
+
+    def begin_new_plan(self) -> PlanModeState:
+        return self.update_plan_state(
+            create_new_plan_state(session_uuid=self.session_uuid)
+        )
+
+    def _apply_phase_tool_policies(self) -> None:
+        if hasattr(self, "memory_tool"):
+            if self.plan_state.phase == PlanPhase.PLANNING.value:
+                self.memory_tool.set_allowed_actions({"search", "list"})
+            else:
+                self.memory_tool.set_allowed_actions(None)
+
+    def _visible_tool_names(self) -> set[str]:
+        if self.plan_state.phase == PlanPhase.PLANNING.value:
+            visible = set(PLANNING_VISIBLE_TOOL_NAMES)
+            if "memory" not in self.tools:
+                visible.discard("memory")
+            return visible
+        return {name for name in self.tools if name not in PLAN_ONLY_TOOL_NAMES}
+
+    def _bound_plan_artifact_path(self) -> Path | None:
+        artifact = self.plan_state.artifact
+        if artifact is None:
+            return None
+        try:
+            return artifact.expanduser().resolve(strict=False)
+        except Exception:
+            return artifact.expanduser()
+
+    def _is_bound_plan_artifact_write(self, tool_args: dict[str, object]) -> bool:
+        raw_path = tool_args.get("file_path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            return False
+
+        bound_path = self._bound_plan_artifact_path()
+        if bound_path is None:
+            return False
+
+        try:
+            candidate = Path(raw_path).expanduser().resolve(strict=False)
+        except Exception:
+            return False
+        return candidate == bound_path
+
+    def _is_read_only_tool_during_drift(
+        self,
+        tool_name: str,
+        tool_args: dict[str, object],
+    ) -> bool:
+        if tool_name not in READ_ONLY_TOOL_NAMES:
+            return False
+        if tool_name != "memory":
+            return True
+        action = str(tool_args.get("action") or "").strip().lower()
+        return action in {"search", "list"}
+
+    def _plan_runtime_messages(self) -> list[dict]:
+        if self.plan_state.phase == PlanPhase.PLANNING.value:
+            artifact = self.plan_state.artifact_path or "(unbound)"
+            return [
+                {
+                    "role": "user",
+                    "content": (
+                        "<system-reminder>\n"
+                        "Plan mode is active. Your primary goal is to produce a concrete, actionable plan in the bound plan file.\n"
+                        f"Bound plan file: {artifact}\n"
+                        "\n"
+                        "Workflow:\n"
+                        "1. Do targeted research — read only the files directly relevant to the task. Avoid broad exploration.\n"
+                        "2. Write an initial draft into the bound plan file early. It is better to write a rough draft and refine it than to research exhaustively before writing.\n"
+                        "3. Refine the plan as needed based on findings. Update the bound plan file.\n"
+                        "4. When the plan is ready, call exit_plan_mode to present it for user approval.\n"
+                        "\n"
+                        "Constraints:\n"
+                        "- Do not modify workspace files other than the bound plan file.\n"
+                        "- Do not run side-effecting shell or python actions, change git state, or write long-term memory.\n"
+                        "- Do not use ask_user for routine confirmation. Batch uncertainties and ask only when missing information materially blocks planning.\n"
+                        "- Prefer recording assumptions in the plan file instead of interrupting the user.\n"
+                        "</system-reminder>"
+                    ),
+                }
+            ]
+        if self.plan_state.has_approved_plan_context:
+            approved_hash = self.plan_state.approved_artifact_hash or "unapproved"
+            approved_artifact = self.plan_state.approved_artifact
+            artifact_path = str(approved_artifact) if approved_artifact is not None else "(missing)"
+            return [
+                {
+                    "role": "user",
+                    "content": (
+                        "<system-reminder>\n"
+                        f"An approved plan is active while you are in shell mode. Follow the approved plan artifact at {artifact_path}.\n"
+                        f"Approved artifact hash: {approved_hash}\n"
+                        "Do not ignore the approved plan without first returning to plan mode and updating approval.\n"
+                        "</system-reminder>"
+                    ),
+                }
+            ]
+        return []
+
+    def _blocked_in_planning(
+        self,
+        tool_name: str,
+        tool_args: dict,
+    ) -> ToolResult | None:
+        if tool_name not in self._visible_tool_names():
+            return ToolResult(
+                ok=False,
+                output=(
+                    f"Error: tool '{tool_name}' is not available while plan mode is in planning phase"
+                ),
+                meta={"kind": "plan_mode_blocked", "phase": self.plan_state.phase},
+                stop_tool_chain=True,
+            )
+
+        if tool_name in {"write_file", "edit_file"}:
+            if self._is_bound_plan_artifact_write(tool_args):
+                return None
+            artifact = self.plan_state.artifact_path or "(unbound)"
+            return ToolResult(
+                ok=False,
+                output=(
+                    f"Error: tool '{tool_name}' may only modify the bound planning file during plan mode: {artifact}"
+                ),
+                meta={"kind": "plan_mode_blocked", "phase": self.plan_state.phase},
+                stop_tool_chain=True,
+            )
+
+        if tool_name in SIDE_EFFECT_TOOL_NAMES:
+            return ToolResult(
+                ok=False,
+                output=(
+                    f"Error: tool '{tool_name}' is blocked during planning. Only research, ask_user, memory search or list, bound plan file edits, and exit_plan_mode are allowed."
+                ),
+                meta={"kind": "plan_mode_blocked", "phase": self.plan_state.phase},
+                stop_tool_chain=True,
+            )
+
+        if tool_name == "memory":
+            action = str(tool_args.get("action") or "").strip().lower()
+            if action not in {"search", "list"}:
+                return ToolResult(
+                    ok=False,
+                    output=(
+                        f"Error: memory action '{action}' is blocked during planning. Only search and list are allowed."
+                    ),
+                    meta={"kind": "plan_mode_blocked", "phase": self.plan_state.phase},
+                    stop_tool_chain=True,
+                )
+
+        return None
+
+    def _check_execution_plan_drift(self) -> ToolResult | None:
+        if not self.plan_state.has_approved_plan_context:
+            return None
+        if is_approved_plan_current(self.plan_state):
+            return None
+        approved_artifact = self.plan_state.approved_artifact
+        if approved_artifact is None:
+            return ToolResult(
+                ok=False,
+                output="Error: shell mode has no bound approved plan artifact context.",
+                meta={"kind": "plan_mode_blocked", "phase": self.plan_state.phase},
+                stop_tool_chain=True,
+            )
+        current_hash = compute_artifact_hash(approved_artifact)
+        return ToolResult(
+            ok=False,
+            output=(
+                "Error: the approved plan artifact changed after approval. Return to plan mode, update the artifact, and request approval again."
+            ),
+            meta={
+                "kind": "plan_mode_blocked",
+                "phase": self.plan_state.phase,
+                "approved_artifact_path": str(approved_artifact),
+                "approved_artifact_hash": self.plan_state.approved_artifact_hash,
+                "current_artifact_hash": current_hash,
+            },
+            stop_tool_chain=True,
         )
 
     def emit_event(
@@ -946,6 +1202,24 @@ class LLMSession:
                 )
 
             tool = self.tools[tool_name]
+
+            if self.plan_state.phase == PlanPhase.PLANNING.value:
+                blocked = self._blocked_in_planning(tool_name, tool_args)
+                if blocked is not None:
+                    return ToolDispatchOutcome(
+                        status=ToolDispatchStatus.SHORT_CIRCUIT,
+                        result=blocked,
+                    )
+
+            drift = self._check_execution_plan_drift()
+            if drift is not None and not self._is_read_only_tool_during_drift(
+                tool_name, tool_args
+            ):
+                return ToolDispatchOutcome(
+                    status=ToolDispatchStatus.SHORT_CIRCUIT,
+                    result=drift,
+                )
+
             context = ToolExecutionContext(
                 cwd=Path(os.getcwd()).resolve(),
                 cancellation_token=self.cancellation_token,
@@ -1002,6 +1276,19 @@ class LLMSession:
                 )
 
             if preflight.action == ToolPreflightAction.CONFIRM:
+                # Auto-approve writes to the bound plan artifact during
+                # planning mode – these are host-managed files similar to
+                # memory and should not interrupt the user.
+                if (
+                    self.plan_state.phase == PlanPhase.PLANNING.value
+                    and tool_name in {"write_file", "edit_file"}
+                    and self._is_bound_plan_artifact_write(tool_args)
+                ):
+                    return ToolDispatchOutcome(
+                        status=ToolDispatchStatus.EXECUTED,
+                        result=await self.execute_tool(tool, tool_name, tool_args),
+                    )
+
                 confirm_panel = panel or ToolPanelSpec(mode="confirm")
                 goon = self.request_confirmation(
                     LLMEventType.TOOL_CONFIRMATION_REQUIRED,
@@ -1140,13 +1427,19 @@ class LLMSession:
         # Lazy reload: file changes only invalidate; next tool-spec build reloads.
         self._reload_skills_at_safe_point()
         if self._tools_spec is None:
-            self._tools_spec = [t.to_func_spec() for t in self.tools.values()]
+            visible = self._visible_tool_names()
+            self._tools_spec = [
+                t.to_func_spec() for name, t in self.tools.items() if name in visible
+            ]
         return self._tools_spec
 
     # TODO: refresh tools spec when skills are updated, reserved for future use
     def refresh_tools_spec(self) -> list[dict]:
         self._reload_skills_at_safe_point()
-        self._tools_spec = [t.to_func_spec() for t in self.tools.values()]
+        visible = self._visible_tool_names()
+        self._tools_spec = [
+            t.to_func_spec() for name, t in self.tools.items() if name in visible
+        ]
         return self._tools_spec
 
     def _get_messages_with_system(
@@ -1167,16 +1460,17 @@ class LLMSession:
             if messages and messages[0]["role"] == "system":
                 # Merge: keep knowledge context, append system prompt
                 existing = messages[0]["content"]
-                messages[0]["content"] = (
-                    f"{existing}\n\n{effective_system_message}"
-                )
+                messages[0]["content"] = f"{existing}\n\n{effective_system_message}"
             else:
                 messages.insert(
                     0, {"role": "system", "content": effective_system_message}
                 )
         reminder = self._build_skills_reminder_message()
+        runtime_messages = self._plan_runtime_messages()
         if reminder is not None:
-            messages = self._inject_runtime_messages(messages, [reminder])
+            runtime_messages.append(reminder)
+        if runtime_messages:
+            messages = self._inject_runtime_messages(messages, runtime_messages)
         return messages
 
     async def _handle_tool_calls(

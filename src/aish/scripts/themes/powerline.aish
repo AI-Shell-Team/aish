@@ -6,6 +6,10 @@ R=$'\033[0m' B=$'\033[1m'
 BL=$'\033[38;5;39m' G=$'\033[38;5;70m' Y=$'\033[38;5;220m' RD=$'\033[38;5;196m' P=$'\033[38;5;141m'
 
 p="$BL$B $(basename "$AISH_CWD") $R"
+mode="${AISH_MODE:-aish}"
+mode_color="$P"
+[[ "$mode" == "plan" ]] && mode_color="$Y"
+p="$mode_color$B $mode $R|$BL$B $(basename "$AISH_CWD") $R"
 [[ -n "$AISH_VIRTUAL_ENV" ]] && p+="|$P $AISH_VIRTUAL_ENV $R"
 
 if [[ "$AISH_GIT_REPO" == "1" ]]; then

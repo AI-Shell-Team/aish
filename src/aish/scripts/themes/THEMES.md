@@ -82,6 +82,7 @@ cp <aish>/src/aish/scripts/themes/compact.aish ~/.config/aish/scripts/themes/ais
 | `AISH_GIT_AHEAD` | 领先远程提交数 |
 | `AISH_GIT_BEHIND` | 落后远程提交数 |
 | `AISH_VIRTUAL_ENV` | 虚拟环境名称 |
+| `AISH_MODE` | 当前模式，`aish` 或 `plan` |
 
 ---
 

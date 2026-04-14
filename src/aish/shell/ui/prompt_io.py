@@ -395,7 +395,22 @@ def _request_allows_custom_input(request: Any) -> bool:
     return request.kind in (
         InteractionKind.CHOICE_OR_TEXT,
         InteractionKind.TEXT_INPUT,
+        InteractionKind.PLAN_APPROVAL,
     )
+
+
+def _truncate_modal_block(text: str, *, max_lines: int = 14, max_chars: int = 2400) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+
+    if len(normalized) > max_chars:
+        normalized = normalized[: max_chars - 1].rstrip() + "…"
+
+    lines = normalized.splitlines()
+    if len(lines) > max_lines:
+        return "\n".join(lines[:max_lines]).rstrip() + "\n…"
+    return normalized
 
 
 def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
@@ -411,6 +426,8 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
     if request.custom is not None:
         label_text = request.custom.label
         custom_prompt = request.custom.placeholder
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    is_plan_approval = request.kind == InteractionKind.PLAN_APPROVAL
 
     values = [(item["value"], item["label"]) for item in options]
     description_by_value = {
@@ -523,16 +540,6 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
             _activate_custom_input(event)
 
         @kb.add(
-            "s-tab",
-            eager=True,
-            filter=Condition(lambda: _is_custom_selected() and bool(values)),
-        )
-        def _focus_options(event):
-            state["custom_active"] = False
-            _sync_focus(event)
-            event.app.invalidate()
-
-        @kb.add(
             "<any>",
             eager=True,
             filter=Condition(
@@ -571,10 +578,47 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
                 event.app.exit(result=None)
 
         prompt_window = Window(
-            content=FormattedTextControl(text=prompt),
+            content=FormattedTextControl(
+                text=(
+                    str(metadata.get("prompt") or prompt).strip() or prompt
+                    if is_plan_approval
+                    else prompt
+                ),
+                style="class:prompt",
+            ),
             wrap_lines=True,
             dont_extend_height=True,
         )
+
+        def _build_section_window(
+            label: str,
+            text: str,
+            *,
+            body_style: str = "class:section.body",
+        ):
+            section_text = _truncate_modal_block(text)
+            if not section_text:
+                return None
+            return HSplit(
+                [
+                    Window(
+                        content=FormattedTextControl(
+                            text=label,
+                            style="class:section.label",
+                        ),
+                        dont_extend_height=True,
+                    ),
+                    Window(
+                        content=FormattedTextControl(
+                            text=section_text,
+                            style=body_style,
+                        ),
+                        wrap_lines=True,
+                        dont_extend_height=True,
+                    ),
+                ],
+                padding=0,
+            )
 
         def _current_max_visible() -> int:
             return self._compute_ask_user_max_visible(
@@ -757,7 +801,9 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
             )
 
         hint_text = (
-            t("shell.ask_user.hint_custom")
+            t("plan.approval.hint")
+            if is_plan_approval and allow_custom_input
+            else t("shell.ask_user.hint_custom")
             if allow_custom_input
             else t("shell.ask_user.hint_select")
         )
@@ -785,6 +831,24 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
         )
 
         body_items = [title_window, separator_window_top, prompt_window, Window(height=1, char="")]
+        if is_plan_approval:
+            summary_window = _build_section_window(
+                t("plan.approval.section_summary"),
+                str(metadata.get("summary") or ""),
+            )
+            artifact_window = _build_section_window(
+                t("plan.approval.section_artifact"),
+                str(metadata.get("artifact_path") or ""),
+            )
+            preview_window = _build_section_window(
+                t("plan.approval.section_preview"),
+                str(metadata.get("artifact_preview") or ""),
+                body_style="class:plan.preview",
+            )
+            for section_window in (summary_window, artifact_window, preview_window):
+                if section_window is not None:
+                    body_items.append(section_window)
+                    body_items.append(Window(height=1, char=""))
         if values:
             body_items.append(options_window)
         if custom_row_window is not None:
@@ -798,6 +862,7 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
             {
                 "title": "bold",
                 "separator": "fg:#6c7086",
+                "prompt": "",
                 "option": "",
                 "option.selected": "bold fg:#7dcfff",
                 "option.description": "fg:#7a8499",
@@ -805,6 +870,9 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
                 "option.placeholder": "fg:#7a8499",
                 "input": "",
                 "hint": "fg:#7a8499",
+                "section.label": "bold fg:#f9e2af",
+                "section.body": "fg:#cdd6f4",
+                "plan.preview": "fg:#bac2de",
             }
         )
 
@@ -863,6 +931,13 @@ def render_interaction_modal(shell: Any, request: Any) -> InteractionResponse:
             resize_stop_event.set()
     except Exception:
         selected_value = None
+
+    if selected_value is None:
+        try:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
     return _build_interaction_response(request, selected_value)
 
@@ -1087,6 +1162,10 @@ def get_user_confirmation(
         old_settings = termios.tcgetattr(fd)
 
         try:
+            try:
+                termios.tcflush(fd, termios.TCIFLUSH)
+            except Exception:
+                pass
             tty.setraw(sys.stdin.fileno())
             char = sys.stdin.read(1)
             # Check for Ctrl+C (ASCII 3)

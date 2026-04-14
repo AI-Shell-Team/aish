@@ -634,5 +634,29 @@ help:
         - "/setup --help        # Show help"
       notes: "New settings are applied immediately without restart. Cancelling keeps current configuration."
 
+plan:
+  unavailable: "Plan mode is unavailable because the LLM session is not ready."
+  approval:
+    title: "Plan Approval"
+    prompt: "Review the plan and choose whether to approve execution."
+    option_approve: "Approve"
+    option_approve_desc: "Approve the plan and return to shell mode with the plan attached as execution context."
+    option_changes: "Request changes"
+    option_changes_desc: "Stay in planning and revise the plan."
+    custom_label: "Request changes with feedback"
+    custom_placeholder: "Describe what should change in the plan"
+    section_summary: "Summary"
+    section_artifact: "Artifact"
+    section_preview: "Plan Preview"
+    hint: "Enter to submit approval · ↑/↓ to choose · Tab or type to request changes · Esc to cancel"
+    approved: "Plan approved. Returned to shell mode with approved plan context."
+    changes_requested: "Plan changes requested. Remaining in plan mode."
+    cancelled: "Plan review cancelled. Remaining in plan mode."
+    reminder_approved: "The plan has been approved. You are back in shell mode and should follow the approved artifact at {path}."
+    reminder_changes: "Plan changes were requested. Revise the bound plan file before calling exit_plan_mode again."
+    reminder_feedback: "Feedback: {feedback}"
+  tool:
+    update_artifact: "📋 Updating plan: {path}"
+
 errors:
   litellm_not_installed: "litellm module is not installed"
