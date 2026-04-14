@@ -19,6 +19,9 @@ from aish.skills import SkillManager
 from aish.state import SessionStore
 
 
+pytestmark = pytest.mark.timeout(5)
+
+
 def test_session_store_update_session_state_persists(tmp_path):
     store = SessionStore(tmp_path / "sessions.db")
     try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import termios
 import time
+import pytest
 from unittest.mock import patch
 
 from rich.console import Console
@@ -251,6 +252,7 @@ def test_handle_interaction_required_prefills_text_input_default():
     assert response_payload.get("answer", {}).get("value") == "kiwi"
 
 
+@pytest.mark.timeout(5)
 def test_get_user_confirmation_flushes_pending_input(monkeypatch):
     shell = _DummyShell()
     flushed: list[tuple[int, int]] = []
@@ -413,6 +415,7 @@ def test_render_interaction_modal_ctrl_c_cancels():
     assert response.answer is None
 
 
+@pytest.mark.timeout(5)
 def test_render_interaction_modal_escape_cancels_and_writes_newline():
     shell = _DummyShell()
     request = PlanApprovalRequestBuilder.from_payload(
@@ -555,6 +558,7 @@ def test_render_interaction_modal_typing_switches_to_custom_input():
     assert response.answer.value == "m"
 
 
+@pytest.mark.timeout(5)
 def test_render_interaction_modal_supports_plan_approval_layout():
     shell = _DummyShell()
     request = PlanApprovalRequestBuilder.from_payload(

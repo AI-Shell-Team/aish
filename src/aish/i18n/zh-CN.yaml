@@ -655,7 +655,7 @@ plan:
     reminder_changes: "已请求修改计划。请在绑定的计划文件中修改计划后，再次调用 exit_plan_mode。"
     reminder_feedback: "反馈：{feedback}"
   tool:
-    update_artifact: "📋 更新计划：{path}"
+    update_artifact: "更新计划：{path}"
 
 errors:
   litellm_not_installed: "litellm 模块未安装"

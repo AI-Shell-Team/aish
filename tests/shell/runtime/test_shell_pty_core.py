@@ -6,6 +6,7 @@ import os
 import threading
 from types import SimpleNamespace
 
+import pytest
 from unittest.mock import Mock
 from unittest.mock import call
 
@@ -131,6 +132,7 @@ def test_ai_handler_skips_prompt_redraw_when_question_is_cancelled():
     shell.submit_backend_command.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_ai_handler_runs_pending_followup_after_current_question():
     handler, shell = _make_ai_handler()
 
@@ -646,6 +648,7 @@ def test_shell_handle_prompt_submission_routes_setup_command_to_special_handler(
     shell.submit_backend_command.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_shell_handle_prompt_submission_routes_plan_command_to_special_handler():
     shell = object.__new__(PTYAIShell)
     shell._pty_manager = Mock()
@@ -665,6 +668,7 @@ def test_shell_handle_prompt_submission_routes_plan_command_to_special_handler()
     shell.submit_backend_command.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_shell_toggle_plan_mode_enters_plan_when_in_shell_mode():
     shell = object.__new__(PTYAIShell)
     shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
@@ -678,6 +682,7 @@ def test_shell_toggle_plan_mode_enters_plan_when_in_shell_mode():
     shell._leave_plan_mode_directly.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_shell_toggle_plan_mode_exits_plan_when_already_planning():
     shell = object.__new__(PTYAIShell)
     shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
@@ -691,6 +696,7 @@ def test_shell_toggle_plan_mode_exits_plan_when_already_planning():
     shell.llm_session.begin_new_plan.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_leave_plan_mode_directly_resets_planning_state_without_approval():
     shell = object.__new__(PTYAIShell)
     plan_state = Mock()
@@ -711,6 +717,7 @@ def test_leave_plan_mode_directly_resets_planning_state_without_approval():
     )
 
 
+@pytest.mark.timeout(5)
 def test_handle_plan_command_exit_leaves_plan_mode_without_approval():
     shell = object.__new__(PTYAIShell)
     shell.console = Mock()
@@ -726,6 +733,7 @@ def test_handle_plan_command_exit_leaves_plan_mode_without_approval():
     shell.llm_session.begin_new_plan.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_handle_plan_command_start_shows_status_when_already_planning():
     shell = object.__new__(PTYAIShell)
     shell.console = Mock()
@@ -751,6 +759,7 @@ def test_handle_plan_command_start_shows_status_when_already_planning():
     )
 
 
+@pytest.mark.timeout(5)
 def test_handle_plan_command_exit_in_shell_mode_is_noop_status():
     shell = object.__new__(PTYAIShell)
     shell.console = Mock()
@@ -763,6 +772,7 @@ def test_handle_plan_command_exit_in_shell_mode_is_noop_status():
     shell.llm_session.begin_new_plan.assert_not_called()
 
 
+@pytest.mark.timeout(5)
 def test_handle_tool_execution_end_approves_plan_signal():
     shell = object.__new__(PTYAIShell)
     shell.console = Mock()
@@ -819,6 +829,7 @@ def test_handle_tool_execution_end_approves_plan_signal():
     assert str(shell.llm_session.plan_state.approved_artifact_path) in queued_prompt
 
 
+@pytest.mark.timeout(5)
 def test_handle_tool_execution_end_keeps_plan_mode_when_changes_requested():
     shell = object.__new__(PTYAIShell)
     shell.console = Mock()

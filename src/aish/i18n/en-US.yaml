@@ -656,7 +656,7 @@ plan:
     reminder_changes: "Plan changes were requested. Revise the bound plan file before calling exit_plan_mode again."
     reminder_feedback: "Feedback: {feedback}"
   tool:
-    update_artifact: "📋 Updating plan: {path}"
+    update_artifact: "Updating plan: {path}"
 
 errors:
   litellm_not_installed: "litellm module is not installed"

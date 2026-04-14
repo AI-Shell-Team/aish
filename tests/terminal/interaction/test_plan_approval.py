@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from aish.plan.approval import (
     PlanApprovalInteractionAdapter,
     PlanApprovalRequestBuilder,
@@ -11,6 +13,11 @@ from aish.terminal.interaction import (
     InteractionResponse,
     InteractionStatus,
 )
+
+
+pytestmark = pytest.mark.timeout(5)
+
+
 def test_plan_approval_request_builder_builds_typed_request():
     request = PlanApprovalRequestBuilder.from_payload(
         prompt="Review this plan.",
