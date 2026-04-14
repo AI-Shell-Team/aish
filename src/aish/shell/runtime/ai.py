@@ -442,67 +442,50 @@ Please analyze the error and suggest a fix. Check the shell history context abov
         try:
             self._restore_terminal_for_output()
             shell = self._require_shell()
-            pending_question = question
-            pending_history_command = question
 
-            while pending_question:
-                question_for_turn = pending_question
-                history_command_for_turn = pending_history_command
+            async def _ask():
+                with self.llm_session.cancellation_token.open_cancel_scope():
+                    system_message = self.prompt_manager.substitute_template(
+                        "oracle",
+                        user_nickname=os.getenv("USER", "user"),
+                        uname_info=getattr(self, "uname_info", ""),
+                        os_info=getattr(self, "os_info", ""),
+                        basic_env_info=getattr(self, "basic_env_info", ""),
+                        output_language=getattr(self, "output_language", "en"),
+                    )
 
-                async def _ask():
-                    with self.llm_session.cancellation_token.open_cancel_scope():
-                        system_message = self.prompt_manager.substitute_template(
-                            "oracle",
-                            user_nickname=os.getenv("USER", "user"),
-                            uname_info=getattr(self, "uname_info", ""),
-                            os_info=getattr(self, "os_info", ""),
-                            basic_env_info=getattr(self, "basic_env_info", ""),
-                            output_language=getattr(self, "output_language", "en"),
-                        )
+                    question_processed = self._inject_skill_prefix(question)
 
-                        question_processed = self._inject_skill_prefix(question_for_turn)
+                    # Recall: inject relevant memories before AI call
+                    self._recall_memories(question_processed)
 
-                        # Recall: inject relevant memories before AI call
-                        self._recall_memories(question_processed)
+                    response = await self.llm_session.process_input(
+                        question_processed,
+                        context_manager=self.context_manager,
+                        system_message=system_message,
+                        stream=True,
+                    )
 
-                        response = await self.llm_session.process_input(
-                            question_processed,
-                            context_manager=self.context_manager,
-                            system_message=system_message,
-                            stream=True,
-                        )
+                    return response
 
-                        return response
+            response, was_cancelled = self._execute_ai_operation(
+                _ask(),
+                shell,
+                history_entry={
+                    "command": question,
+                    "source": "ai",
+                    "returncode": None,
+                    "stdout": None,
+                    "stderr": None,
+                },
+            )
 
-                response, was_cancelled = self._execute_ai_operation(
-                    _ask(),
-                    shell,
-                    history_entry={
-                        "command": history_command_for_turn,
-                        "source": "ai",
-                        "returncode": None,
-                        "stdout": None,
-                        "stderr": None,
-                    },
-                )
+            if was_cancelled:
+                return
 
-                if was_cancelled:
-                    return
-
-                if response:
-                    self._display_ai_response(response)
-                    self._auto_retain_memory(question_for_turn, response)
-
-                followup = None
-                if hasattr(shell, "consume_pending_ai_followup"):
-                    followup = shell.consume_pending_ai_followup()
-                if not followup:
-                    break
-
-                pending_question = str(followup.get("prompt") or "").strip()
-                pending_history_command = str(
-                    followup.get("history_command") or pending_question
-                ).strip()
+            if response:
+                self._display_ai_response(response)
+                self._auto_retain_memory(question, response)
 
         except Exception as error:
             print(f"\r\033[KError: {error}")

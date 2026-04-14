@@ -28,7 +28,7 @@ from aish.plan import (
     ensure_plan_artifact,
     is_approved_plan_current,
 )
-from aish.plan.tools import ExitPlanModeTool
+from aish.plan.tools import EnterPlanModeTool, ExitPlanModeTool
 from aish.terminal.interaction import (
     InteractionRequest,
     InteractionResponse,
@@ -416,9 +416,14 @@ class LLMSession:
                 skill_manager=self.skill_manager,
                 prompt_manager=self.prompt_manager,
             )
+            self.enter_plan_mode_tool = EnterPlanModeTool(
+                get_plan_state=lambda: self.plan_state,
+                begin_new_plan=self.begin_new_plan,
+            )
             self.exit_plan_mode_tool = ExitPlanModeTool(
                 get_plan_state=lambda: self.plan_state,
                 update_plan_state=self.update_plan_state,
+                request_interaction=self.request_interaction,
             )
             self.system_diagnose_agent = SystemDiagnoseAgent(
                 config=config,
@@ -441,6 +446,7 @@ class LLMSession:
                 self.glob_tool.name: self.glob_tool,
                 self.grep_tool.name: self.grep_tool,
                 self.ask_user_tool.name: self.ask_user_tool,
+                self.enter_plan_mode_tool.name: self.enter_plan_mode_tool,
                 self.exit_plan_mode_tool.name: self.exit_plan_mode_tool,
                 self.system_diagnose_agent.name: self.system_diagnose_agent,
                 self.skill_tool.name: self.skill_tool,
@@ -837,11 +843,13 @@ class LLMSession:
             return False
         return candidate == bound_path
 
-    def _is_read_only_tool_during_drift(
+    def _is_tool_allowed_during_drift(
         self,
         tool_name: str,
         tool_args: dict[str, object],
     ) -> bool:
+        if tool_name == "enter_plan_mode":
+            return True
         if tool_name not in READ_ONLY_TOOL_NAMES:
             return False
         if tool_name != "memory":
@@ -886,7 +894,7 @@ class LLMSession:
                         "<system-reminder>\n"
                         f"An approved plan is active while you are in shell mode. Follow the approved plan artifact at {artifact_path}.\n"
                         f"Approved artifact hash: {approved_hash}\n"
-                        "Do not ignore the approved plan without first returning to plan mode and updating approval.\n"
+                        "Do not ignore the approved plan without first calling enter_plan_mode and updating approval.\n"
                         "</system-reminder>"
                     ),
                 }
@@ -1212,7 +1220,7 @@ class LLMSession:
                     )
 
             drift = self._check_execution_plan_drift()
-            if drift is not None and not self._is_read_only_tool_during_drift(
+            if drift is not None and not self._is_tool_allowed_during_drift(
                 tool_name, tool_args
             ):
                 return ToolDispatchOutcome(

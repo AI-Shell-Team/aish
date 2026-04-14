@@ -34,17 +34,9 @@ from ...plan import (
     PLAN_STATE_KEY,
     PlanApprovalStatus,
     PlanPhase,
-    compute_artifact_hash,
-    create_approved_snapshot,
     decode_plan_state,
     encode_plan_state,
-    read_artifact_text,
 )
-from ...plan.approval import (
-    PlanApprovalInteractionAdapter,
-    PlanApprovalRequestBuilder,
-)
-from ...terminal.interaction import InteractionService
 from ...terminal.pty.control_protocol import BackendControlEvent
 from ...prompts import PromptManager
 from ...terminal.pty import PTYManager
@@ -219,7 +211,6 @@ class PTYAIShell:
         self._next_command_seq: int = 1
         self._pending_command_seq: Optional[int] = None
         self._pending_command_text: Optional[str] = None
-        self._pending_ai_followup: Optional[dict[str, str]] = None
         self._current_cwd: str = os.getcwd()
         self.security_manager = SimpleSecurityManager(
             console=self.console,
@@ -609,135 +600,29 @@ class PTYAIShell:
     def handle_tool_execution_end(self, event) -> None:
         tool_name = event.data.get("tool_name", "unknown")
 
-        if tool_name == "exit_plan_mode" and isinstance(
-            event.data.get("result_data"), dict
-        ):
-            self._handle_exit_plan_mode_signal(event.data["result_data"])
-            return None
+        if tool_name == "exit_plan_mode":
+            result_data = event.data.get("result_data")
+            if isinstance(result_data, dict):
+                decision = str(result_data.get("decision") or "").strip().lower()
+                if decision == "approve":
+                    self.console.print(t("plan.approval.approved"), style="green")
+                    return None
+                if decision == "changes_requested":
+                    self.console.print(
+                        t("plan.approval.changes_requested"),
+                        style="yellow",
+                    )
+                    return None
+                if decision == "cancelled":
+                    self.console.print(
+                        t("plan.approval.cancelled"),
+                        style="yellow",
+                    )
+                    return None
 
         if event.data and event.data.get("source") == "system_diagnose_agent":
             prefix = t("shell.tool.done_diagnose")
             self.console.print(f"{prefix}: {tool_name}", style="green")
-        return None
-
-    def _handle_exit_plan_mode_signal(self, payload: dict[str, object]) -> None:
-        plan_state = getattr(self.llm_session, "plan_state", None)
-        if plan_state is None:
-            return
-
-        artifact_path = str(
-            payload.get("artifact_path") or plan_state.artifact_path or ""
-        ).strip()
-        artifact_preview = str(payload.get("artifact_preview") or "")
-        if not artifact_preview:
-            artifact_preview = read_artifact_text(artifact_path)
-        summary = str(payload.get("summary") or plan_state.summary or "").strip()
-
-        self.llm_session.update_plan_state(
-            plan_state.with_updates(
-                approval_status=PlanApprovalStatus.AWAITING_USER.value,
-                summary=summary or plan_state.summary,
-            )
-        )
-
-        request = PlanApprovalRequestBuilder.from_payload(
-            prompt=t("plan.approval.prompt"),
-            summary=summary,
-            artifact_path=artifact_path,
-            artifact_preview=artifact_preview,
-            source_name="exit_plan_mode",
-        )
-        response = InteractionService(renderer=self.llm_session.request_interaction).request(
-            request
-        )
-        approval_result = PlanApprovalInteractionAdapter.to_tool_result(request, response)
-        result_payload = (
-            approval_result.data if isinstance(approval_result.data, dict) else {}
-        )
-        decision = str(result_payload.get("decision") or "").strip().lower()
-
-        if decision == "approve":
-            approved_state, snapshot_path = create_approved_snapshot(
-                self.llm_session.plan_state
-            )
-            approved_hash = compute_artifact_hash(snapshot_path)
-            approved_plan_text = read_artifact_text(snapshot_path)
-            next_state = self.llm_session.update_plan_state(
-                approved_state.with_updates(
-                    phase=PlanPhase.NORMAL.value,
-                    approval_status=PlanApprovalStatus.APPROVED.value,
-                    approved_artifact_hash=approved_hash,
-                    approval_feedback_summary=None,
-                    summary=summary or approved_state.summary,
-                )
-            )
-            self.context_manager.add_memory(
-                MemoryType.LLM,
-                {
-                    "role": "user",
-                    "content": (
-                        "<system-reminder>\n"
-                        f"{t('plan.approval.reminder_approved', path=snapshot_path)}\n"
-                        "</system-reminder>"
-                    ),
-                },
-            )
-            self.console.print(
-                t("plan.approval.approved"),
-                style="green",
-            )
-            self.queue_pending_ai_followup(
-                prompt=self._build_approved_plan_followup_prompt(
-                    approved_plan_path=str(snapshot_path),
-                    approved_plan_text=approved_plan_text,
-                    summary=summary or approved_state.summary or "",
-                ),
-                history_command="[plan approved] continue implementation",
-            )
-            _ = next_state
-            return None
-
-        if decision == "changes_requested":
-            feedback = str(result_payload.get("feedback") or "").strip()
-            self.llm_session.update_plan_state(
-                self.llm_session.plan_state.with_updates(
-                    phase=PlanPhase.PLANNING.value,
-                    approval_status=PlanApprovalStatus.CHANGES_REQUESTED.value,
-                    approval_feedback_summary=feedback or summary or None,
-                    approved_artifact_path=None,
-                    approved_revision=None,
-                    approved_artifact_hash=None,
-                )
-            )
-            if feedback:
-                self.context_manager.add_memory(
-                    MemoryType.LLM,
-                    {
-                        "role": "user",
-                        "content": (
-                            "<system-reminder>\n"
-                            f"{t('plan.approval.reminder_changes')}\n"
-                            f"{t('plan.approval.reminder_feedback', feedback=feedback)}\n"
-                            "</system-reminder>"
-                        ),
-                    },
-                )
-            self.console.print(
-                t("plan.approval.changes_requested"),
-                style="yellow",
-            )
-            return None
-
-        self.llm_session.update_plan_state(
-            self.llm_session.plan_state.with_updates(
-                phase=PlanPhase.PLANNING.value,
-                approval_status=PlanApprovalStatus.DRAFT.value,
-            )
-        )
-        self.console.print(
-            t("plan.approval.cancelled"),
-            style="yellow",
-        )
         return None
 
     def handle_error_event(self, event) -> None:
@@ -1329,44 +1214,6 @@ class PTYAIShell:
     ) -> None:
         self.add_shell_history(command, exit_code, stdout, stderr)
 
-    def queue_pending_ai_followup(self, *, prompt: str, history_command: str) -> None:
-        prompt_text = str(prompt or "").strip()
-        history_text = str(history_command or "").strip()
-        if not prompt_text:
-            return
-        self._pending_ai_followup = {
-            "prompt": prompt_text,
-            "history_command": history_text or prompt_text,
-        }
-
-    def consume_pending_ai_followup(self) -> Optional[dict[str, str]]:
-        payload = getattr(self, "_pending_ai_followup", None)
-        self._pending_ai_followup = None
-        return payload
-
-    def _build_approved_plan_followup_prompt(
-        self,
-        *,
-        approved_plan_path: str,
-        approved_plan_text: str,
-        summary: str,
-    ) -> str:
-        prompt_lines = [
-            "Implement the approved plan now.",
-            f"Approved plan file: {approved_plan_path}",
-        ]
-        summary_text = str(summary or "").strip()
-        if summary_text:
-            prompt_lines.append(f"Approved summary: {summary_text}")
-        prompt_lines.extend(
-            [
-                "Follow the approved plan closely. If new information shows the plan is materially incomplete or wrong, explain why and return to plan mode before taking a different approach.",
-                "Approved plan:",
-                str(approved_plan_text or "").strip() or "(empty approved plan)",
-            ]
-        )
-        return "\n\n".join(prompt_lines)
-
     def toggle_plan_mode(self) -> None:
         if not hasattr(self, "llm_session") or self.llm_session is None:
             return
@@ -1393,29 +1240,20 @@ class PTYAIShell:
         )
 
     def exit_plan_mode(self) -> None:
-        """Exit plan mode through the approval flow.
-
-        Instead of silently switching back to shell mode, this builds a
-        synthetic ``exit_plan_mode`` payload and delegates to the same
-        approval handler that the LLM tool path uses. This keeps explicit
-        exit commands and the model-driven tool call on the same approval UI.
-        """
+        """Exit plan mode through the tool-owned approval flow."""
         if not hasattr(self, "llm_session") or self.llm_session is None:
             return
         plan_state = self.llm_session.plan_state
         if plan_state.phase != PlanPhase.PLANNING.value:
             return
-        artifact_path = str(plan_state.artifact_path or "")
-        artifact_preview = read_artifact_text(artifact_path) if artifact_path else ""
-        summary = plan_state.summary or ""
-        self._handle_exit_plan_mode_signal(
-            {
-                "signal": "exit_plan_mode",
-                "artifact_path": artifact_path,
-                "artifact_preview": artifact_preview,
-                "summary": summary,
-            }
-        )
+        result = self.llm_session.exit_plan_mode_tool(summary=plan_state.summary)
+        decision = str(result.data.get("decision") or "").strip().lower()
+        if decision == "approve":
+            self.console.print(t("plan.approval.approved"), style="green")
+        elif decision == "changes_requested":
+            self.console.print(t("plan.approval.changes_requested"), style="yellow")
+        elif decision == "cancelled":
+            self.console.print(t("plan.approval.cancelled"), style="yellow")
 
     def handle_plan_command(self, user_input: str) -> None:
         parts = self._parse_command_parts(user_input)
