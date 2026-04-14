@@ -8,6 +8,11 @@ from typing import Dict, Optional, Set
 
 from .handlers import BuiltinHandlers, BuiltinResult, DirectoryStack
 
+SHELL_EXIT_COMMANDS: Set[str] = {
+    "exit",
+    "quit",
+}
+
 # Commands that modify shell state and need special handling
 # Also includes commands that are shell built-ins (not executable via subprocess)
 STATE_MODIFYING_COMMANDS: Set[str] = {
@@ -28,10 +33,7 @@ PTY_REQUIRING_COMMANDS: Set[str] = {
 }
 
 # Commands that should be rejected (not supported in tool context)
-REJECTED_COMMANDS: Set[str] = {
-    "exit",
-    "logout",
-}
+REJECTED_COMMANDS: Set[str] = set(SHELL_EXIT_COMMANDS)
 
 
 class BuiltinRegistry:
@@ -148,9 +150,9 @@ class BuiltinRegistry:
 
         cmd_name = cmd_parts[0].lower()
 
-        if cmd_name in ("exit", "logout"):
+        if cmd_name in SHELL_EXIT_COMMANDS:
             return (
-                "Error: The 'exit' command cannot be used through the AI tool. "
+                f"Error: The '{cmd_name}' command cannot be used through the AI tool. "
                 "This command would exit the entire shell session. "
                 "If you want to end the conversation, just say so or use Ctrl+C."
             )
@@ -246,4 +248,5 @@ COMMAND_DESCRIPTIONS: Dict[str, str] = {
     "su": "Substitute user identity (requires PTY)",
     "sudo": "Execute command as another user (requires PTY for interactive use)",
     "exit": "Exit the shell (not supported in tool context)",
+    "quit": "Exit the shell (alias of exit; not supported in tool context)",
 }

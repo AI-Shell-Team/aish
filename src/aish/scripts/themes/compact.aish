@@ -47,9 +47,9 @@ abbrev_path() {
 # Build prompt
 mode="${AISH_MODE:-aish}"
 if [[ "$mode" == "plan" ]]; then
-    p="$Y plan$R:$BL$(abbrev_path "$AISH_CWD")$R"
+    p="${Y}plan${R}:$BL$(abbrev_path "$AISH_CWD")$R"
 else
-    p="$M aish$R:$BL$(abbrev_path "$AISH_CWD")$R"
+    p="${M}aish${R}:$BL$(abbrev_path "$AISH_CWD")$R"
 fi
 
 # Git info

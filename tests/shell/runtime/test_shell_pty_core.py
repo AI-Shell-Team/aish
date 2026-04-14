@@ -232,6 +232,13 @@ def test_output_processor_filters_exit_echo():
     assert processor.process(b"\rexit\r\n") == b""
 
 
+def test_output_processor_filters_quit_echo():
+    processor = OutputProcessor(_FakePTYManager())
+    processor.set_filter_exit_echo(True)
+
+    assert processor.process(b"\rquit\r\n") == b""
+
+
 def test_output_processor_filters_prefixed_user_command_echo():
     processor = OutputProcessor(_FakePTYManager())
     processor.prepare_user_command_echo("pwd", 5)
@@ -831,6 +838,48 @@ def test_shell_submit_backend_command_registers_user_seq():
     )
 
 
+def test_shell_submit_backend_command_treats_quit_as_exit():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = Mock()
+    shell._output_processor = Mock()
+    shell._next_command_seq = 8
+    shell._pending_command_seq = None
+    shell._pending_command_text = None
+    shell._shell_phase = "editing"
+    shell._user_requested_exit = False
+
+    seq = PTYAIShell.submit_backend_command(shell, "quit")
+
+    assert seq == 8
+    assert shell._user_requested_exit is True
+    shell._output_processor.set_filter_exit_echo.assert_called_once_with(True)
+    shell._output_processor.set_waiting_for_result.assert_not_called()
+    shell._output_processor.prepare_user_command_echo.assert_called_once_with(
+        "exit", 8
+    )
+    shell._pty_manager.send_command.assert_called_once_with(
+        "exit", command_seq=8, source="user"
+    )
+
+
+def test_shell_submit_backend_command_maps_quit_exit_code_argument():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = Mock()
+    shell._output_processor = Mock()
+    shell._next_command_seq = 11
+    shell._pending_command_seq = None
+    shell._pending_command_text = None
+    shell._shell_phase = "editing"
+    shell._user_requested_exit = False
+
+    seq = PTYAIShell.submit_backend_command(shell, "quit 7")
+
+    assert seq == 11
+    shell._pty_manager.send_command.assert_called_once_with(
+        "exit 7", command_seq=11, source="user"
+    )
+
+
 def test_shell_submit_ai_backend_command_skips_confirmation_for_approved_command(monkeypatch):
     shell = object.__new__(PTYAIShell)
     shell._pty_manager = Mock()
@@ -966,6 +1015,21 @@ def test_shell_does_not_restart_after_explicit_exit_when_flag_was_not_set(monkey
     shell._restart_pty.assert_not_called()
 
 
+def test_shell_does_not_restart_after_explicit_quit_when_flag_was_not_set(monkeypatch):
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = _FakePTYManager(last_command="quit")
+    shell._output_processor = Mock()
+    shell._pending_command_text = None
+    shell._user_requested_exit = False
+    shell._running = True
+    shell._restart_pty = Mock(return_value=True)
+
+    monkeypatch.setattr("aish.shell.runtime.app.os.read", lambda fd, size: b"")
+
+    PTYAIShell._handle_pty_output(shell)
+
+    assert shell._running is False
+    shell._restart_pty.assert_not_called()
 def test_backend_error_suppressed_prevents_repeated_hints(capsys):
     pty_manager = _FakePTYManager()
     processor = OutputProcessor(pty_manager)

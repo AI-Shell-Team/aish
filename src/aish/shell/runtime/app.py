@@ -58,7 +58,7 @@ from ...skills.hotreload import SkillHotReloadService
 from ...wizard.setup_wizard import run_interactive_setup
 from .ai import AIHandler
 from .events import LLMEventRouter
-from ..commands import BuiltinRegistry
+from ..commands import BuiltinRegistry, SHELL_EXIT_COMMANDS
 from ..ui.interaction import PTYUserInteraction
 from ..ui.welcome import build_welcome_renderable
 from .output import OutputProcessor
@@ -1592,9 +1592,9 @@ class PTYAIShell:
         """Return whether a command should terminate the current shell."""
         if not command:
             return False
-        stripped = command.strip()
-        return stripped in ("exit", "logout") or stripped.startswith(
-            ("exit ", "logout ")
+        stripped = command.strip().lower()
+        return stripped in SHELL_EXIT_COMMANDS or stripped.startswith(
+            tuple(f"{name} " for name in SHELL_EXIT_COMMANDS)
         )
 
     def _should_exit_on_pty_close(self) -> bool:
@@ -1618,7 +1618,7 @@ class PTYAIShell:
             else:
                 # PTY slave closed (bash exited)
                 if self._should_exit_on_pty_close():
-                    # User typed exit/logout — honor it
+                    # User typed an explicit shell-exit command — honor it
                     self._running = False
                 elif self._restart_pty():
                     return
@@ -1645,25 +1645,37 @@ class PTYAIShell:
         self._shell_phase = "command_submitted"
         return seq
 
+    @staticmethod
+    def _normalize_exit_command(command: str) -> str:
+        """Map shell-exit aliases to the backend command bash understands."""
+        stripped = command.strip()
+        if not stripped:
+            return stripped
+
+        first_token, separator, remainder = stripped.partition(" ")
+        if first_token.lower() == "quit":
+            return "exit" if not separator else f"exit {remainder}"
+
+        return stripped
+
     def submit_backend_command(self, command: str) -> int | None:
         command = command.strip()
         if not command or not self._pty_manager:
             return None
 
         seq = self._register_submitted_command(command)
+        backend_command = self._normalize_exit_command(command)
 
-        is_exit_cmd = command in ("exit", "logout") or command.startswith(
-            ("exit ", "logout ")
-        )
+        is_exit_cmd = self._is_exit_command(command)
         if self._output_processor is not None:
             if is_exit_cmd:
                 self._output_processor.set_filter_exit_echo(True)
                 self._user_requested_exit = True
             else:
                 self._output_processor.set_waiting_for_result(True, command)
-            self._output_processor.prepare_user_command_echo(command, seq)
+            self._output_processor.prepare_user_command_echo(backend_command, seq)
 
-        self._pty_manager.send_command(command, command_seq=seq, source="user")
+        self._pty_manager.send_command(backend_command, command_seq=seq, source="user")
         return seq
 
     def _sync_backend_cwd(self, cwd: object) -> None:

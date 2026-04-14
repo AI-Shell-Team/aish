@@ -483,7 +483,7 @@ class BashTool(ToolBase):
                 stop_tool_chain=True,
             )
 
-        # Check for rejected commands first (e.g., exit, logout)
+        # Check for rejected commands first (e.g., exit, quit)
         if BuiltinRegistry.is_rejected_command(code):
             rejected_msg = BuiltinRegistry.get_rejected_command_message(code)
             if rejected_msg:

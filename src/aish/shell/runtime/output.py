@@ -7,6 +7,7 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from ...i18n import t
+from ..commands import SHELL_EXIT_COMMANDS
 from ...terminal.pty.command_state import CommandResult
 from ...terminal.pty.control_protocol import BackendControlEvent
 
@@ -151,12 +152,21 @@ class OutputProcessor:
 
         if self._filter_exit_echo:
             stripped = data.strip(b"\r\n")
-            if stripped == b"exit":
-                return b""
-            for pattern in (b"\rexit\r\n", b"\nexit\r\n", b"\rexit\n"):
-                if data.endswith(pattern):
-                    data = data[: -len(pattern)]
+            for exit_command in SHELL_EXIT_COMMANDS:
+                exit_bytes = exit_command.encode("utf-8")
+                if stripped == exit_bytes:
                     self._filter_exit_echo = False
+                    return b""
+                for pattern in (
+                    b"\r" + exit_bytes + b"\r\n",
+                    b"\n" + exit_bytes + b"\r\n",
+                    b"\r" + exit_bytes + b"\n",
+                ):
+                    if data.endswith(pattern):
+                        data = data[: -len(pattern)]
+                        self._filter_exit_echo = False
+                        break
+                if not self._filter_exit_echo:
                     break
 
         return data

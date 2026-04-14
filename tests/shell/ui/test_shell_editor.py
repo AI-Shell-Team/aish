@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -126,8 +127,30 @@ def test_shell_prompt_controller_theme_env_includes_mode():
     assert env["AISH_MODE"] == "plan"
 
 
+def test_shell_prompt_controller_compact_theme_has_no_leading_space(tmp_path, monkeypatch):
+    controller = ShellPromptController(prompt_theme="compact")
+
+    monkeypatch.setattr("aish.shell.ui.editor.os.getcwd", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        controller,
+        "_build_theme_env",
+        lambda cwd, exit_code, mode="aish": {
+            **os.environ,
+            "AISH_CWD": cwd,
+            "AISH_EXIT_CODE": str(exit_code),
+            "AISH_MODE": mode,
+            "AISH_GIT_REPO": "0",
+        },
+    )
+
+    prompt = controller._render_theme()
+
+    assert prompt
+    assert not prompt.startswith(" ")
+
+
 def test_shell_completer_suggests_builtin_and_special_commands():
-    completer = ShellCompleter(command_provider=lambda: ["ls", "logout", "pwd"])
+    completer = ShellCompleter(command_provider=lambda: ["ls", "quit", "pwd"])
 
     completions = list(
         completer.get_completions(Document(text="/m", cursor_position=2), CompleteEvent(completion_requested=True))

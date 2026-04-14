@@ -10,6 +10,7 @@ from .registry import (
     COMMAND_DESCRIPTIONS,
     PTY_REQUIRING_COMMANDS,
     REJECTED_COMMANDS,
+    SHELL_EXIT_COMMANDS,
     STATE_MODIFYING_COMMANDS,
     BuiltinRegistry,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "BuiltinResult",
     "DirectoryStack",
     "BuiltinRegistry",
+    "SHELL_EXIT_COMMANDS",
     "STATE_MODIFYING_COMMANDS",
     "PTY_REQUIRING_COMMANDS",
     "REJECTED_COMMANDS",
