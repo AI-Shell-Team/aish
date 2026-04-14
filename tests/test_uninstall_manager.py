@@ -1,5 +1,7 @@
 """Tests for UninstallManager."""
 
+from pathlib import Path
+
 import pytest
 from unittest.mock import Mock, patch
 from aish.cli.uninstall_manager import UninstallManager
@@ -236,10 +238,39 @@ def test_uninstall_unknown_method(uninstall_manager):
 @patch("aish.cli.uninstall_manager.shutil.rmtree")
 def test_purge_data_success(mock_rmtree, uninstall_manager):
     """Test successful data purge."""
-    dirs = uninstall_manager.get_data_directories()
+    dirs = {
+        "config": Path("/tmp/test-aish-config/aish"),
+        "data": Path("/tmp/test-aish-data/aish"),
+        "cache": Path("/tmp/test-aish-cache/aish"),
+    }
     with patch.object(uninstall_manager, "get_data_directories", return_value=dirs):
-        result = uninstall_manager.purge_data()
+        with patch.object(Path, "exists", return_value=True):
+            result = uninstall_manager.purge_data()
     assert result is True
+    assert mock_rmtree.call_count == 3
+
+
+@pytest.mark.timeout(5)
+def test_is_safe_purge_path_rejects_system_prefix_descendants():
+    """System directories and their descendants must never be purged."""
+    assert UninstallManager._is_safe_purge_path(Path("/etc/aish")) is False
+    assert UninstallManager._is_safe_purge_path(Path("/usr/local/aish")) is False
+
+
+@pytest.mark.timeout(5)
+def test_is_safe_purge_path_allows_non_home_xdg_paths(tmp_path):
+    """Legitimate XDG locations outside HOME (for example under /tmp) remain allowed."""
+    assert UninstallManager._is_safe_purge_path(tmp_path / "xdg" / "aish") is True
+
+
+@pytest.mark.timeout(5)
+def test_is_safe_purge_path_rejects_symlink_to_system_path(tmp_path):
+    """Symlinked XDG paths must not bypass the system path safety checks."""
+    link_path = tmp_path / "xdg" / "aish"
+    link_path.parent.mkdir(parents=True)
+    link_path.symlink_to(Path("/etc/aish"))
+
+    assert UninstallManager._is_safe_purge_path(link_path) is False
 
 
 @pytest.mark.timeout(5)

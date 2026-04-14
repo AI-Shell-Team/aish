@@ -292,30 +292,39 @@ class UninstallManager:
     def _is_safe_purge_path(path: Path) -> bool:
         """Check if a path is safe to recursively delete.
 
-        Rejects paths that resolve to system-critical directories
-        (/, /etc, /usr, /var, /boot, /dev, /proc, /sys) or that
-        are too shallow (fewer than 2 path components).
+        Rejects paths that resolve to system-critical directories or their
+        descendants. Allows user-scoped directories outside $HOME, such as
+        XDG paths under /tmp.
         """
-        # System-critical prefixes that must never be purged
-        _CRITICAL_PREFIXES = (
-            "/",
-            "/etc",
-            "/usr",
-            "/var",
-            "/boot",
-            "/dev",
-            "/proc",
-            "/sys",
+        critical_prefixes = (
+            Path("/etc"),
+            Path("/usr"),
+            Path("/boot"),
+            Path("/dev"),
+            Path("/proc"),
+            Path("/sys"),
+            Path("/lib"),
+            Path("/lib64"),
+            Path("/bin"),
+            Path("/sbin"),
+            Path("/opt"),
         )
         try:
-            resolved = path.resolve()
-            resolved_str = str(resolved)
-            # Reject if path matches or is a direct child of a critical prefix
-            for prefix in _CRITICAL_PREFIXES:
-                if resolved_str == prefix:
+            lexical = path.expanduser()
+            if not lexical.is_absolute():
+                return False
+
+            for candidate in (lexical, lexical.resolve()):
+                if candidate == Path("/"):
                     return False
+                if candidate.name != "aish":
+                    return False
+                for prefix in critical_prefixes:
+                    if candidate == prefix or prefix in candidate.parents:
+                        return False
+
             # Require at least 2 path components (e.g. /tmp/aish, /home/user/.config)
-            parts = [p for p in resolved.parts if p != "/"]
+            parts = [p for p in lexical.parts if p != "/"]
             if len(parts) < 2:
                 return False
             return True
