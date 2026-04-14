@@ -10,8 +10,6 @@ import pytest
 from unittest.mock import Mock
 from unittest.mock import call
 
-from aish.config import ConfigModel
-from aish.llm import LLMSession
 from aish.memory.config import MemoryConfig
 from aish.memory.models import MemoryCategory
 from aish.i18n import t
@@ -19,13 +17,6 @@ from aish.plan import PlanApprovalStatus, PlanPhase
 from aish.terminal.pty.command_state import CommandResult, CommandState
 from aish.terminal.pty.control_protocol import BackendControlEvent
 from aish.terminal.pty.manager import PTYManager
-from aish.terminal.interaction import (
-    InteractionAnswer,
-    InteractionAnswerType,
-    InteractionResponse,
-    InteractionStatus,
-)
-from aish.skills import SkillManager
 from aish.shell.runtime.ai import AIHandler
 from aish.shell.runtime.app import PTYAIShell
 from aish.shell.runtime.output import OutputProcessor

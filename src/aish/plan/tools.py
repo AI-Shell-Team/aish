@@ -124,7 +124,7 @@ class ExitPlanModeTool(ToolBase):
 
         artifact_text = read_artifact_text(artifact_path)
         summary_text = str(summary or plan_state.summary or "").strip()
-        awaiting_state = self._update_plan_state(
+        self._update_plan_state(
             plan_state.with_updates(
                 approval_status=PlanApprovalStatus.AWAITING_USER.value,
                 summary=summary_text or plan_state.summary,
