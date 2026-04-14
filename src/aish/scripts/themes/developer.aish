@@ -9,7 +9,10 @@ R=$'\033[0m' B=$'\033[1m' D=$'\033[2m'
 G=$'\033[32m' Y=$'\033[33m' RD=$'\033[31m' BL=$'\033[34m' M=$'\033[35m' C=$'\033[36m'
 
 # Line 1
-p="$D$(date +%H:%M)$R $BL$B$(basename "$AISH_CWD")$R"
+mode="${AISH_MODE:-aish}"
+mode_color="$M"
+[[ "$mode" == "plan" ]] && mode_color="$Y"
+p="$D$(date +%H:%M)$R ${mode_color}$B${mode}$R $BL$B$(basename "$AISH_CWD")$R"
 
 # Git
 if [[ "$AISH_GIT_REPO" == "1" ]]; then

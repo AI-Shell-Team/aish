@@ -58,6 +58,10 @@ class MemoryTool(ToolBase):
             },
         )
         self.memory_manager = memory_manager
+        self._allowed_actions: set[str] | None = None
+
+    def set_allowed_actions(self, actions: set[str] | None) -> None:
+        self._allowed_actions = None if actions is None else set(actions)
 
     def __call__(
         self,
@@ -68,6 +72,16 @@ class MemoryTool(ToolBase):
         memory_id: int | None = None,
         **kwargs: Any,
     ) -> ToolResult:
+        if self._allowed_actions is not None and action not in self._allowed_actions:
+            return ToolResult(
+                ok=False,
+                output=(
+                    f"Error: memory action '{action}' is not available in the current session phase"
+                ),
+                meta={"kind": "plan_mode_blocked", "action": action},
+                stop_tool_chain=True,
+            )
+
         if action == "search":
             if not query:
                 return ToolResult(

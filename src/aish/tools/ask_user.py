@@ -32,6 +32,8 @@ class AskUserTool(ToolBase):
                     [
                         "Ask the user a structured question to gather requirements or clarify ambiguity.",
                         "Use this when the agent needs more user intent before it can plan or proceed.",
+                        "Do not ask routine step-by-step confirmations or restate obvious choices.",
+                        "Batch uncertainty into as few focused questions as possible, and prefer reasonable assumptions when the risk is low.",
                         "- choice_or_text: default for all option-style clarification prompts; always allow custom input.",
                         "- text_input: use when free-form clarification is needed and predefined options would not help.",
                         "Avoid using ask_user as a generic approval or execute/save/cancel mechanism when a dedicated host flow exists.",

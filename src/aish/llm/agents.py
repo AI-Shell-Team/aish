@@ -5,6 +5,7 @@ import anyio
 
 from aish.state.cancellation import CancellationReason, CancellationToken
 from aish.config import ConfigModel
+from aish.plan import PlanModeState
 from aish.prompts import PromptManager
 from aish.state import ContextManager
 from aish.skills import SkillManager
@@ -39,6 +40,7 @@ class SystemDiagnoseAgent(ToolBase):
         parent_event_callback=None,
         cancellation_token: CancellationToken | None = None,
         history_manager=None,
+        plan_state: PlanModeState | None = None,
         **data,
     ):
         # Initialize the Pydantic BaseModel with the class attributes
@@ -52,6 +54,7 @@ class SystemDiagnoseAgent(ToolBase):
         self.parent_event_callback = parent_event_callback
         self.cancellation_token = cancellation_token or CancellationToken()
         self.history_manager = history_manager
+        self.plan_state = plan_state
 
         self.uname_info = get_system_info("uname -a")
         self.os_info = get_system_info("cat /etc/issue 2>/dev/null") or "N/A"
@@ -163,7 +166,11 @@ When ready, use the final_answer tool to deliver your final diagnostic conclusio
         # Build subsession with child cancellation token
         child_token = self.cancellation_token.create_child_token()
         subsession = LLMSession.create_subsession(
-            config, self.skill_manager, tools, child_token
+            config,
+            self.skill_manager,
+            tools,
+            child_token,
+            plan_state=self.plan_state,
         )
 
         # Compose initial message with user query

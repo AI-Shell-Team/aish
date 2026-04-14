@@ -17,6 +17,7 @@ from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.bindings.auto_suggest import (
     load_auto_suggest_bindings,
 )
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import CompleteStyle
 
 from .completion import ShellCompleter
@@ -28,6 +29,13 @@ if TYPE_CHECKING:
 # Cache TTL for theme rendering (seconds). Avoids re-running git commands
 # on every prompt refresh when cwd and exit_code haven't changed.
 _THEME_CACHE_TTL = 2.0
+
+
+def _normalize_prompt_mode(value: object) -> str:
+    mode = str(value or "shell").strip().lower()
+    if mode in {"plan", "planning"}:
+        return "plan"
+    return "aish"
 
 
 class ShellPromptController:
@@ -42,20 +50,25 @@ class ShellPromptController:
         completer: Optional[ShellCompleter] = None,
         prompt_theme: str = "",
         exit_code_provider: Optional[Callable[[], int]] = None,
+        mode_provider: Optional[Callable[[], str]] = None,
+        mode_toggle_handler: Optional[Callable[[], None]] = None,
     ):
-        self._history_manager = history_manager
-        self._interruption_manager = interruption_manager
+        _ = history_manager
+        _ = interruption_manager
         self._on_buffer_change = on_buffer_change
         self._cwd_provider = cwd_provider
         self._prompt_theme = prompt_theme
         self._exit_code_provider = exit_code_provider
+        self._mode_provider = mode_provider
+        self._mode_toggle_handler = mode_toggle_handler
         # Theme render cache: avoids repeated git subprocess calls
-        self._theme_cache_key: tuple[str, int] = ("", 0)
+        self._theme_cache_key: tuple[str, int, str] = ("", 0, "aish")
         self._theme_cache_output: str = ""
         self._theme_cache_time: float = 0.0
         self._history = FileHistory(os.path.expanduser("~/.aish_history"))
         self._completer = completer or ShellCompleter(cwd_provider=cwd_provider)
         self._session = PromptSession(
+            message=self._build_prompt_message,
             history=self._history,
             auto_suggest=AutoSuggestFromHistory(),
             completer=self._completer,
@@ -83,9 +96,13 @@ class ShellPromptController:
 
             buffer.on_text_changed += _handle_change
 
+        prompt_kwargs = {"pre_run": _pre_run}
+
+        message = self._build_prompt_message if prompt_message is None else prompt_message
+
         return self._session.prompt(
-            self._build_prompt_message() if prompt_message is None else prompt_message,
-            pre_run=_pre_run,
+            message,
+            **prompt_kwargs,
         )
 
     def remember_command(self, command: str) -> None:
@@ -97,7 +114,18 @@ class ShellPromptController:
 
     def _build_key_bindings(self):
         bindings = KeyBindings()
+
+        @bindings.add(Keys.F2, eager=True)
+        def _toggle_plan_mode(event) -> None:
+            self._handle_mode_toggle()
+            event.app.invalidate()
+
         return merge_key_bindings([bindings, load_auto_suggest_bindings()])
+
+    def _handle_mode_toggle(self) -> None:
+        if self._mode_toggle_handler is None:
+            return
+        self._mode_toggle_handler()
 
     def _notify_buffer_change(self, text: str) -> None:
         if self._on_buffer_change is not None:
@@ -119,14 +147,27 @@ class ShellPromptController:
             return "~" + cwd_text[len(home) :]
         return cwd_text
 
+    def _get_prompt_mode(self) -> str:
+        if self._mode_provider is None:
+            return "aish"
+        try:
+            return _normalize_prompt_mode(self._mode_provider())
+        except Exception:
+            return "aish"
+
     def _build_prompt_message(self) -> ANSI | HTML:
         if self._prompt_theme:
             theme_output = self._render_theme()
             if theme_output:
                 return ANSI(theme_output)
-        # Default prompt: blue path + cyan >
+        # Default prompt: mode badge + blue path + cyan >
+        mode = escape(self._get_prompt_mode())
         prompt_text = escape(self._get_prompt_text())
-        return HTML(f"<ansiblue>{prompt_text}</ansiblue> <ansicyan>&gt;</ansicyan> ")
+        mode_color = "ansiyellow" if mode == "plan" else "ansimagenta"
+        return HTML(
+            f"<{mode_color}>{mode}</{mode_color}> "
+            f"<ansiblue>{prompt_text}</ansiblue> <ansicyan>&gt;</ansicyan> "
+        )
 
     def _render_theme(self) -> str:
         """Execute theme script and return ANSI prompt string (cached)."""
@@ -145,9 +186,10 @@ class ShellPromptController:
                 exit_code = self._exit_code_provider()
             except Exception:
                 pass
+        mode = self._get_prompt_mode()
 
-        # Return cached result if cwd+exit_code unchanged and TTL not expired
-        cache_key = (cwd, exit_code)
+        # Return cached result if cwd+exit_code+mode unchanged and TTL not expired
+        cache_key = (cwd, exit_code, mode)
         now = time.monotonic()
         if cache_key == self._theme_cache_key and (now - self._theme_cache_time) < _THEME_CACHE_TTL:
             return self._theme_cache_output
@@ -157,7 +199,7 @@ class ShellPromptController:
         if not theme_script:
             return ""
 
-        env = self._build_theme_env(cwd, exit_code)
+        env = self._build_theme_env(cwd, exit_code, mode)
 
         try:
             result = subprocess.run(
@@ -195,11 +237,12 @@ class ShellPromptController:
         return ""
 
     @staticmethod
-    def _build_theme_env(cwd: str, exit_code: int) -> dict[str, str]:
+    def _build_theme_env(cwd: str, exit_code: int, mode: str = "aish") -> dict[str, str]:
         """Build environment variables for theme script execution."""
         env = dict(os.environ)
         env["AISH_CWD"] = cwd
         env["AISH_EXIT_CODE"] = str(exit_code)
+        env["AISH_MODE"] = _normalize_prompt_mode(mode)
 
         # Git status
         try:

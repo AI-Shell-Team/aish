@@ -22,9 +22,21 @@ from typing import TYPE_CHECKING, Any, Optional
 from rich.console import Console
 from rich.live import Live
 
-from ...config import Config, ConfigModel, ToolArgPreviewSettings, get_default_session_db_path
+from ...config import (
+    Config,
+    ConfigModel,
+    ToolArgPreviewSettings,
+    get_default_session_db_path,
+)
 from ...i18n import t
 from ...llm.providers.registry import get_provider_for_model
+from ...plan import (
+    PLAN_STATE_KEY,
+    PlanApprovalStatus,
+    PlanPhase,
+    decode_plan_state,
+    encode_plan_state,
+)
 from ...terminal.pty.control_protocol import BackendControlEvent
 from ...prompts import PromptManager
 from ...terminal.pty import PTYManager
@@ -51,7 +63,11 @@ from ..ui.interaction import PTYUserInteraction
 from ..ui.welcome import build_welcome_renderable
 from .output import OutputProcessor
 from ..ui.editor import ShellPromptController
-from ..ui.prompt_io import display_security_panel, get_user_confirmation, handle_interaction_required
+from ..ui.prompt_io import (
+    display_security_panel,
+    get_user_confirmation,
+    handle_interaction_required,
+)
 
 if TYPE_CHECKING:
     from ...llm import LLMSession, LLMEventType
@@ -233,6 +249,10 @@ class PTYAIShell:
                 state={
                     "temperature": getattr(self.config, "temperature", None),
                     "max_tokens": getattr(self.config, "max_tokens", None),
+                    PLAN_STATE_KEY: encode_plan_state(
+                        {},
+                        decode_plan_state({}, default_source_session_uuid=""),
+                    ).get(PLAN_STATE_KEY),
                 },
             )
         except Exception:
@@ -245,6 +265,10 @@ class PTYAIShell:
                 state={
                     "temperature": getattr(self.config, "temperature", None),
                     "max_tokens": getattr(self.config, "max_tokens", None),
+                    PLAN_STATE_KEY: encode_plan_state(
+                        {},
+                        decode_plan_state({}, default_source_session_uuid=""),
+                    ).get(PLAN_STATE_KEY),
                 },
             )
         finally:
@@ -265,6 +289,7 @@ class PTYAIShell:
         interruption_manager = InterruptionManager()
         self.interruption_manager = interruption_manager
         interruption_manager.set_interrupt_callback(self._on_interrupt_requested)
+        session_record = getattr(self, "session_record", None)
 
         session = LLMSession(
             config=self.config,
@@ -275,6 +300,9 @@ class PTYAIShell:
             is_command_approved=self._is_command_approved,
             history_manager=getattr(self, "history_manager", None),
             memory_manager=getattr(self, "memory_manager", None),
+            session_uuid=session_record.session_uuid if session_record else None,
+            session_state=session_record.state if session_record else None,
+            session_state_updater=self._update_current_session_state,
         )
 
         def init_litellm_in_background() -> None:
@@ -299,6 +327,32 @@ class PTYAIShell:
         self._thinking_start_time = 0.0
         self._ttft = 0.0
         self._ttft_recorded = False
+
+    def _update_current_session_state(self, state_patch: dict[str, object]) -> None:
+        if self.session_record is None:
+            return
+
+        merged = dict(self.session_record.state)
+        merged.update(state_patch)
+        self.session_record.state = merged
+
+        store: Optional[SessionStore] = None
+        try:
+            store = SessionStore(self._resolve_session_db_path())
+            updated = store.update_session_state(
+                self.session_record.session_uuid,
+                state_patch,
+            )
+            if updated is not None:
+                self.session_record = updated
+        except Exception:
+            pass
+        finally:
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:
+                    pass
 
     def handle_operation_start(self, event) -> None:
         self._timing_active = True
@@ -556,19 +610,54 @@ class PTYAIShell:
     def handle_tool_execution_start(self, event) -> None:
         self._finalize_content_preview()
         tool_name = event.data.get("tool_name", "unknown")
-        tool_args = self._format_tool_args_for_display(
-            tool_name, event.data.get("tool_args", {})
-        )
+        tool_args = event.data.get("tool_args", {})
+
+        # Show plan artifact writes with a special label instead of
+        # generic write_file / edit_file, so the user perceives them as
+        # plan-managed operations rather than ordinary file mutations.
+        if (
+            tool_name in {"write_file", "edit_file"}
+            and isinstance(tool_args, dict)
+            and self._is_plan_artifact_write(tool_args)
+        ):
+            artifact = tool_args.get("file_path", "")
+            self.console.print(
+                t("plan.tool.update_artifact", path=artifact),
+                style="cyan",
+            )
+            return None
+
+        display_args = self._format_tool_args_for_display(tool_name, tool_args)
 
         prefix = t("shell.tool.prefix")
         if event.data and event.data.get("source") == "system_diagnose_agent":
             prefix = t("shell.tool.prefix_diagnose")
 
-        self.console.print(f"{prefix}: {tool_name} ({tool_args})", style="cyan")
+        self.console.print(f"{prefix}: {tool_name} ({display_args})", style="cyan")
         return None
 
     def handle_tool_execution_end(self, event) -> None:
         tool_name = event.data.get("tool_name", "unknown")
+
+        if tool_name == "exit_plan_mode":
+            result_data = event.data.get("result_data")
+            if isinstance(result_data, dict):
+                decision = str(result_data.get("decision") or "").strip().lower()
+                if decision == "approve":
+                    self.console.print(t("plan.approval.approved"), style="green")
+                    return None
+                if decision == "changes_requested":
+                    self.console.print(
+                        t("plan.approval.changes_requested"),
+                        style="yellow",
+                    )
+                    return None
+                if decision == "cancelled":
+                    self.console.print(
+                        t("plan.approval.cancelled"),
+                        style="yellow",
+                    )
+                    return None
 
         if event.data and event.data.get("source") == "system_diagnose_agent":
             prefix = t("shell.tool.done_diagnose")
@@ -874,6 +963,14 @@ class PTYAIShell:
             tool_args = next(iter(tool_args.values()))
         return self._format_tool_arg_value(tool_args, settings)
 
+    def _is_plan_artifact_write(self, tool_args: dict[str, object]) -> bool:
+        """Check if tool_args target the bound plan artifact file."""
+        if not hasattr(self, "llm_session") or self.llm_session is None:
+            return False
+        if self.llm_session.plan_state.phase != PlanPhase.PLANNING.value:
+            return False
+        return self.llm_session._is_bound_plan_artifact_write(tool_args)
+
     def _remember_approved_command(self, command: str) -> None:
         command = str(command)
         if not command:
@@ -1042,6 +1139,13 @@ class PTYAIShell:
             cwd_provider=lambda: self._current_cwd,
             prompt_theme=self.config.prompt_theme if self.config.enable_scripts else "",
             exit_code_provider=lambda: self._pty_manager.last_exit_code if self._pty_manager else 0,
+            mode_provider=lambda: (
+                "plan"
+                if self.llm_session is not None
+                and self.llm_session.plan_state.phase == PlanPhase.PLANNING.value
+                else "aish"
+            ),
+            mode_toggle_handler=self.toggle_plan_mode,
         )
 
         # Wire PTY manager and context manager to BashTool for AI tool execution
@@ -1138,7 +1242,7 @@ class PTYAIShell:
     def _is_special_command(parts: list[str]) -> bool:
         if not parts:
             return False
-        return parts[0] in {"/model", "/setup"}
+        return parts[0] in {"/model", "/setup", "/plan"}
 
     def _record_special_command_result(
         self,
@@ -1149,6 +1253,117 @@ class PTYAIShell:
         stderr: str = "",
     ) -> None:
         self.add_shell_history(command, exit_code, stdout, stderr)
+
+    def toggle_plan_mode(self) -> None:
+        if not hasattr(self, "llm_session") or self.llm_session is None:
+            return
+        if self.llm_session.plan_state.phase == PlanPhase.PLANNING.value:
+            self._leave_plan_mode_directly()
+            return
+        self.llm_session.begin_new_plan()
+
+    def _leave_plan_mode_directly(self) -> None:
+        if not hasattr(self, "llm_session") or self.llm_session is None:
+            return
+        plan_state = self.llm_session.plan_state
+        if plan_state.phase != PlanPhase.PLANNING.value:
+            return
+        self.llm_session.update_plan_state(
+            plan_state.with_updates(
+                phase=PlanPhase.NORMAL.value,
+                approval_status=PlanApprovalStatus.DRAFT.value,
+                approved_artifact_path=None,
+                approved_revision=None,
+                approved_artifact_hash=None,
+                approval_feedback_summary=None,
+            )
+        )
+
+    def exit_plan_mode(self) -> None:
+        """Exit plan mode through the tool-owned approval flow."""
+        if not hasattr(self, "llm_session") or self.llm_session is None:
+            return
+        plan_state = self.llm_session.plan_state
+        if plan_state.phase != PlanPhase.PLANNING.value:
+            return
+        result = self.llm_session.exit_plan_mode_tool(summary=plan_state.summary)
+        decision = str(result.data.get("decision") or "").strip().lower()
+        if decision == "approve":
+            self.console.print(t("plan.approval.approved"), style="green")
+        elif decision == "changes_requested":
+            self.console.print(t("plan.approval.changes_requested"), style="yellow")
+        elif decision == "cancelled":
+            self.console.print(t("plan.approval.cancelled"), style="yellow")
+
+    def handle_plan_command(self, user_input: str) -> None:
+        parts = self._parse_command_parts(user_input)
+        if not parts:
+            return
+
+        def _record(exit_code: int, stdout: str = "", stderr: str = "") -> None:
+            self._record_special_command_result(
+                user_input,
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        if not hasattr(self, "llm_session") or self.llm_session is None:
+            message = t("plan.unavailable")
+            self.console.print(message, style="red")
+            _record(1, stderr=message)
+            return
+
+        if len(parts) > 1 and parts[1] in {"--help", "-h"}:
+            message = "Usage: /plan [status]"
+            self.console.print(message, style="cyan")
+            _record(0, stdout=message)
+            return
+
+        plan_state = self.llm_session.plan_state
+        subcommand = parts[1] if len(parts) > 1 else ""
+
+        if subcommand == "status":
+            mode = "plan" if plan_state.phase == PlanPhase.PLANNING.value else "shell"
+            message = (
+                f"mode={mode}, approval_status={plan_state.approval_status}, "
+                f"artifact={plan_state.artifact_path or '-'}"
+            )
+            self.console.print(message)
+            _record(0, stdout=message)
+            return
+
+        if subcommand and subcommand not in {"start", "exit"}:
+            message = f"Unknown /plan subcommand: {subcommand}"
+            self.console.print(message, style="red")
+            _record(1, stderr=message)
+            return
+
+        # `/plan` acts as the main command: enter planning from shell or
+        # show current plan status when already planning. Explicit subcommands
+        # keep direct, unsurprising semantics.
+        if plan_state.phase == PlanPhase.PLANNING.value:
+            if not subcommand or subcommand == "start":
+                # Bare `/plan` while already planning → show status
+                mode = "plan"
+                message = (
+                    f"mode={mode}, approval_status={plan_state.approval_status}, "
+                    f"artifact={plan_state.artifact_path or '-'}"
+                )
+                self.console.print(message)
+                _record(0, stdout=message)
+            else:
+                # `/plan exit` while in plan mode
+                self._leave_plan_mode_directly()
+                _record(0)
+        else:
+            if subcommand == "exit":
+                message = "mode=shell, approval_status=draft, artifact=-"
+                self.console.print(message)
+                _record(0, stdout=message)
+            else:
+                self.llm_session.begin_new_plan()
+                _record(0)
 
     def handle_model_command(self, user_input: str) -> None:
         parts = self._parse_command_parts(user_input)
@@ -1323,6 +1538,8 @@ class PTYAIShell:
                 self.handle_model_command(line)
             elif parts[0] == "/setup":
                 self.handle_setup_command(line)
+            elif parts[0] == "/plan":
+                self.handle_plan_command(line)
             return
 
         self.submit_backend_command(line)

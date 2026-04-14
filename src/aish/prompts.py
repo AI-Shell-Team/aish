@@ -12,11 +12,11 @@ except ImportError:
 
 
 class PromptManager:
-    def __init__(self):
+    def __init__(self) -> None:
         self.prompts: Dict[str, str] = {}
         self._load_prompts()
 
-    def _load_prompts(self):
+    def _load_prompts(self) -> None:
         """Load all prompt templates from the prompts directory"""
         if files is not None and as_file is not None:
             try:

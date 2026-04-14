@@ -10,19 +10,22 @@ import yaml
 from rich.console import Console
 from rich.panel import Panel
 
-from .config import Config, ConfigModel
-from .i18n import t
-from .i18n.typer import I18nTyperCommand, I18nTyperGroup
-from .llm.providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
-from .llm.providers.registry import (
+from aish import __version__
+from aish.config import Config, ConfigModel
+from aish.i18n import t
+from aish.i18n.typer import I18nTyperCommand, I18nTyperGroup
+from aish.llm.providers.openai_codex import OPENAI_CODEX_DEFAULT_CALLBACK_PORT
+from aish.llm.providers.registry import (
     get_provider_by_id as get_provider_by_id,
     get_provider_for_model as get_provider_for_model,
     list_auth_capable_provider_ids as list_auth_capable_provider_ids,
     resolve_provider_metadata as resolve_provider_metadata,
 )
-from .state.logging import init_logging
-from .skills import SkillManager
-from .wizard.setup_wizard import (
+from aish.state.logging import init_logging
+from aish.skills import SkillManager
+from .uninstall_manager import UninstallManager
+from .update_manager import UpdateCheckError, UpdateManager
+from aish.wizard.setup_wizard import (
     needs_interactive_setup as needs_interactive_setup,
     run_interactive_setup as run_interactive_setup,
     run_live_tool_support_check_debug,
@@ -277,11 +280,23 @@ def get_effective_config(
 
 
 @app.callback()
-def _default(ctx: typer.Context):
+def _default(
+    ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Show version and exit.",
+        is_eager=True,
+    ),
+):
     """Default entrypoint.
 
     Running `aish` with no subcommand behaves like `aish run`.
     """
+    if version:
+        print(f"aish {__version__}")
+        raise typer.Exit()
 
     if ctx.invoked_subcommand is None:
         run(model=None, api_key=None, api_base=None, config_file=None)
@@ -402,6 +417,119 @@ def setup(
     if result is None:
         console.print(t("cli.setup.cancelled"), style="yellow")
         sys.exit(1)
+
+
+@app.command(help=t("cli.update_command_help"), cls=I18nTyperCommand)
+def update(
+    check_only: bool = typer.Option(
+        False,
+        "--check-only",
+        "-c",
+        help=t("cli.update.check_only"),
+    ),
+    pre_release: bool = typer.Option(
+        False,
+        "--pre-release",
+        "-p",
+        help=t("cli.update.pre_release"),
+    ),
+):
+    """Update aish to the latest version."""
+    with UpdateManager() as manager:
+        # Check for updates
+        console.print(f"[bold cyan]{t('cli.update.checking')}[/bold cyan]")
+        try:
+            update_info = manager.check_for_updates(include_pre_release=pre_release)
+        except UpdateCheckError as e:
+            console.print(f"[red]Update check failed: {e}[/red]")
+            raise typer.Exit(1)
+
+        if not update_info:
+            console.print(f"[green]{t('cli.update.already_latest')}[/green]")
+            return
+
+        # Show update info
+        console.print(
+            f"[bold yellow]{t('cli.update.update_available', version=update_info['latest_version'])}[/bold yellow]"
+        )
+        console.print(f"[dim]{t('cli.update.current_version', version=update_info['current_version'])}[/dim]")
+
+        if check_only:
+            return
+
+        # Ask for confirmation
+        from rich.prompt import Confirm
+        if not Confirm.ask(t("cli.update.confirm")):
+            console.print(f"[yellow]{t('cli.update.cancelled')}[/yellow]")
+            return
+
+        # Download
+        archive_path = manager.download_release(update_info["tag_name"])
+        if not archive_path:
+            console.print(f"[red]{t('cli.update.download_failed')}[/red]")
+            raise typer.Exit(1)
+
+        # Install
+        if manager.install_release(archive_path):
+            console.print(f"[green]{t('cli.update.install_complete')}[/green]")
+            console.print(f"[yellow]{t('cli.update.restart_hint')}[/yellow]")
+        else:
+            console.print(f"[red]{t('cli.update.install_failed')}[/red]")
+            raise typer.Exit(1)
+
+
+@app.command(help=t("cli.uninstall_command_help"), cls=I18nTyperCommand)
+def uninstall(
+    purge: bool = typer.Option(
+        False,
+        "--purge",
+        help=t("cli.uninstall.purge_help"),
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help=t("cli.uninstall.yes_help"),
+    ),
+):
+    """Uninstall aish."""
+    manager = UninstallManager()
+
+    # Show what will be done
+    console.print(f"[bold cyan]{t('cli.uninstall.detecting')}[/bold cyan]")
+    method = manager.detect_installation_method()
+    # Show friendly method name
+    if method == "archive":
+        method_display = t("cli.uninstall.method_archive")
+    else:
+        method_display = method
+    console.print(f"[dim]{t('cli.uninstall.install_method', method=method_display)}[/dim]")
+    console.print(f"[dim]{t('cli.uninstall.will_uninstall')}[/dim]")
+
+    if purge:
+        console.print(f"[bold red]{t('cli.uninstall.purge_warning')}[/bold red]")
+
+    # Ask for confirmation
+    if not yes:
+        from rich.prompt import Confirm
+        if not Confirm.ask(f"{t('cli.uninstall.confirm')}"):
+            console.print(f"[yellow]{t('cli.uninstall.cancelled')}[/yellow]")
+            raise typer.Exit(0)
+
+    # Uninstall
+    console.print(f"[bold cyan]{t('cli.uninstall.uninstalling')}[/bold cyan]")
+    if not manager.uninstall_package(method=method, purge=purge):
+        console.print(f"[red]{t('cli.uninstall.failed')}[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[green]{t('cli.uninstall.uninstall_complete')}[/green]")
+
+    # Purge if requested
+    if purge:
+        if not manager.purge_data():
+            console.print(f"[red]{t('cli.uninstall.purge_failed')}[/red]")
+            raise typer.Exit(1)
+        console.print(f"[green]{t('cli.uninstall.purge_complete')}[/green]")
 
 
 @models_auth_app.callback(invoke_without_command=True)

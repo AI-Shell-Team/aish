@@ -218,7 +218,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
 
         return None
 
-    def run_with_pty(cancel_event=None):
+    def run_with_pty(cancel_event=None) -> CommandResult:
         """Run command with PTY support and cancellation checking"""
         master_fd = None
         slave_fd = None

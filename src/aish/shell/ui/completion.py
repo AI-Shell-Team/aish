@@ -6,7 +6,12 @@ import os
 from contextlib import contextmanager
 from typing import Callable, Iterable, Iterator, Optional
 
-from prompt_toolkit.completion import CompleteEvent, Completer, Completion, PathCompleter
+from prompt_toolkit.completion import (
+    CompleteEvent,
+    Completer,
+    Completion,
+    PathCompleter,
+)
 
 from ..commands.registry import (
     PTY_REQUIRING_COMMANDS,
@@ -59,7 +64,7 @@ COMMON_SHELL_COMMANDS = frozenset(
         "wait",
     }
 )
-SPECIAL_SHELL_COMMANDS = frozenset({"/model", "/setup"})
+SPECIAL_SHELL_COMMANDS = frozenset({"/model", "/setup", "/plan"})
 DIRECTORY_COMMANDS = frozenset({"cd", "pushd", "popd"})
 AI_PREFIXES = (";", "；")
 

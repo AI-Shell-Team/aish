@@ -61,7 +61,7 @@ class SkillManager:
     When duplicate skill names are found, the higher priority skill is kept.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the skill manager"""
         self._loaded_skills: dict[str, Skill] = {}  # skill_name -> Skill
         self._skill_lists: list[SkillList] = []

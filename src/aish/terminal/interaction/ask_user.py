@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import uuid
 
 from aish.i18n import t
@@ -222,21 +221,6 @@ class AskUserInteractionAdapter:
                 default=request.default or "",
             )
         )
-        lines.append("")
-        context = {
-            "kind": "ask_user_context",
-            "interaction_id": request.id,
-            "prompt": request.prompt,
-            "default": request.default or "",
-            "options": [option.to_dict() for option in request.options],
-            "suggested_continue_commands": [
-                "; continue with default",
-                "; 使用默认继续",
-            ],
-        }
-        lines.append("```json")
-        lines.append(json.dumps(context, ensure_ascii=False))
-        lines.append("```")
         return "\n".join(lines).strip()
 
 

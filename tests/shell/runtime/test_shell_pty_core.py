@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import os
 import threading
+from types import SimpleNamespace
 
+import pytest
 from unittest.mock import Mock
 from unittest.mock import call
 
 from aish.memory.config import MemoryConfig
 from aish.memory.models import MemoryCategory
 from aish.i18n import t
+from aish.plan import PlanApprovalStatus, PlanPhase
 from aish.terminal.pty.command_state import CommandResult, CommandState
 from aish.terminal.pty.control_protocol import BackendControlEvent
 from aish.terminal.pty.manager import PTYManager
@@ -118,6 +121,29 @@ def test_ai_handler_skips_prompt_redraw_when_question_is_cancelled():
 
     handler._display_ai_response.assert_not_called()
     shell.submit_backend_command.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_ai_handler_handles_single_question_without_host_followup():
+    handler, shell = _make_ai_handler()
+
+    def _complete_operation(coro, shell, history_entry=None):
+        _ = shell
+        coro.close()
+        return ("first-response", False)
+
+    handler._execute_ai_operation = Mock(side_effect=_complete_operation)
+    handler._display_ai_response = Mock()
+    handler._auto_retain_memory = Mock()
+    shell.consume_pending_ai_followup = Mock(return_value={"prompt": "ignored"})
+
+    handler.handle_question("hello")
+
+    assert handler._execute_ai_operation.call_count == 1
+    history_entry = handler._execute_ai_operation.call_args.kwargs["history_entry"]
+    assert history_entry["command"] == "hello"
+    shell.consume_pending_ai_followup.assert_not_called()
+    handler._display_ai_response.assert_called_once_with("first-response")
 
 
 def test_ai_handler_executes_corrected_command_via_security_submission():
@@ -598,6 +624,172 @@ def test_shell_handle_prompt_submission_routes_setup_command_to_special_handler(
     shell.handle_setup_command.assert_called_once_with("/setup")
     shell.handle_model_command.assert_not_called()
     shell.submit_backend_command.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_shell_handle_prompt_submission_routes_plan_command_to_special_handler():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = Mock()
+    shell._ai_handler = Mock()
+    shell._prompt_controller = Mock()
+    shell.submit_backend_command = Mock()
+    shell.handle_model_command = Mock()
+    shell.handle_setup_command = Mock()
+    shell.handle_plan_command = Mock()
+
+    PTYAIShell._handle_prompt_submission(shell, "/plan start")
+
+    shell._prompt_controller.remember_command.assert_called_once_with("/plan start")
+    shell.handle_plan_command.assert_called_once_with("/plan start")
+    shell.handle_model_command.assert_not_called()
+    shell.handle_setup_command.assert_not_called()
+    shell.submit_backend_command.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_shell_toggle_plan_mode_enters_plan_when_in_shell_mode():
+    shell = object.__new__(PTYAIShell)
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
+    shell.exit_plan_mode = Mock()
+    shell._leave_plan_mode_directly = Mock()
+
+    PTYAIShell.toggle_plan_mode(shell)
+
+    shell.llm_session.begin_new_plan.assert_called_once_with()
+    shell.exit_plan_mode.assert_not_called()
+    shell._leave_plan_mode_directly.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_shell_toggle_plan_mode_exits_plan_when_already_planning():
+    shell = object.__new__(PTYAIShell)
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
+    shell.exit_plan_mode = Mock()
+    shell._leave_plan_mode_directly = Mock()
+
+    PTYAIShell.toggle_plan_mode(shell)
+
+    shell._leave_plan_mode_directly.assert_called_once_with()
+    shell.exit_plan_mode.assert_not_called()
+    shell.llm_session.begin_new_plan.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_leave_plan_mode_directly_resets_planning_state_without_approval():
+    shell = object.__new__(PTYAIShell)
+    plan_state = Mock()
+    plan_state.phase = PlanPhase.PLANNING.value
+    plan_state.with_updates.return_value = "updated-plan-state"
+    shell.llm_session = Mock(plan_state=plan_state)
+
+    PTYAIShell._leave_plan_mode_directly(shell)
+
+    shell.llm_session.update_plan_state.assert_called_once_with("updated-plan-state")
+    plan_state.with_updates.assert_called_once_with(
+        phase=PlanPhase.NORMAL.value,
+        approval_status=PlanApprovalStatus.DRAFT.value,
+        approved_artifact_path=None,
+        approved_revision=None,
+        approved_artifact_hash=None,
+        approval_feedback_summary=None,
+    )
+
+
+@pytest.mark.timeout(5)
+def test_handle_plan_command_exit_leaves_plan_mode_without_approval():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
+    shell.exit_plan_mode = Mock()
+    shell._leave_plan_mode_directly = Mock()
+    shell._record_special_command_result = Mock()
+
+    PTYAIShell.handle_plan_command(shell, "/plan exit")
+
+    shell._leave_plan_mode_directly.assert_called_once_with()
+    shell.exit_plan_mode.assert_not_called()
+    shell.llm_session.begin_new_plan.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_handle_plan_command_start_shows_status_when_already_planning():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.llm_session = Mock(
+        plan_state=SimpleNamespace(
+            phase=PlanPhase.PLANNING.value,
+            approval_status=PlanApprovalStatus.DRAFT.value,
+            artifact_path="/tmp/plan.md",
+        )
+    )
+    shell._record_special_command_result = Mock()
+
+    PTYAIShell.handle_plan_command(shell, "/plan start")
+
+    shell.console.print.assert_called_once_with(
+        "mode=plan, approval_status=draft, artifact=/tmp/plan.md"
+    )
+    shell._record_special_command_result.assert_called_once_with(
+        "/plan start",
+        exit_code=0,
+        stdout="mode=plan, approval_status=draft, artifact=/tmp/plan.md",
+        stderr="",
+    )
+
+
+@pytest.mark.timeout(5)
+def test_handle_plan_command_exit_in_shell_mode_is_noop_status():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
+    shell._record_special_command_result = Mock()
+
+    PTYAIShell.handle_plan_command(shell, "/plan exit")
+
+    shell.console.print.assert_called_once_with("mode=shell, approval_status=draft, artifact=-")
+    shell.llm_session.begin_new_plan.assert_not_called()
+
+
+@pytest.mark.timeout(5)
+def test_handle_tool_execution_end_reports_plan_approval():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+
+    PTYAIShell.handle_tool_execution_end(
+        shell,
+        SimpleNamespace(
+            data={
+                "tool_name": "exit_plan_mode",
+                "result_data": {"decision": "approve"},
+            }
+        ),
+    )
+
+    shell.console.print.assert_called_once_with(
+        t("plan.approval.approved"),
+        style="green",
+    )
+
+
+@pytest.mark.timeout(5)
+def test_handle_tool_execution_end_reports_plan_changes_requested():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+
+    PTYAIShell.handle_tool_execution_end(
+        shell,
+        SimpleNamespace(
+            data={
+                "tool_name": "exit_plan_mode",
+                "result_data": {"decision": "changes_requested"},
+            }
+        ),
+    )
+
+    shell.console.print.assert_called_once_with(
+        t("plan.approval.changes_requested"),
+        style="yellow",
+    )
 
 
 def test_shell_handle_model_command_reports_current_model():

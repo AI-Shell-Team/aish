@@ -15,6 +15,7 @@
 #   AISH_GIT_AHEAD     - Commits ahead of upstream
 #   AISH_GIT_BEHIND    - Commits behind upstream
 #   AISH_VIRTUAL_ENV   - Virtual environment name
+#   AISH_MODE          - Current aish mode: aish or plan
 
 #──────────────────────────────────────────────────────────────────────────────
 # Colors (use $'...' for proper ANSI escape parsing)
@@ -57,6 +58,13 @@ abbrev_path() {
 # Build Prompt
 #──────────────────────────────────────────────────────────────────────────────
 p=""
+
+mode="${AISH_MODE:-aish}"
+if [[ "$mode" == "plan" ]]; then
+    p+="${Y}plan${R}:"
+else
+    p+="${M}aish${R}:"
+fi
 
 # Path (blue)
 p+=":${BL}$(abbrev_path "$AISH_CWD")${R}"

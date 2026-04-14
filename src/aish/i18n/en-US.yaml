@@ -6,6 +6,42 @@ cli:
   check_langfuse_command_help: "Check Langfuse configuration"
   setup_command_help: "Run interactive setup and exit"
   check_tool_support_command_help: "Debug live tool-call support check"
+  update_command_help: "Update aish to the latest version"
+  uninstall_command_help: "Uninstall aish"
+
+  update:
+    check_only: "Only check for updates, do not install"
+    pre_release: "Include pre-release versions"
+    checking: "Checking for updates..."
+    current_version: "Current version: {version}"
+    latest_version: "Latest version: {version}"
+    already_latest: "Already up to date"
+    update_available: "New version available: {version}"
+    release_notes: "Release Notes"
+    download_start: "Starting download..."
+    download_complete: "Download complete"
+    install_complete: "Installation complete"
+    restart_hint: "Please restart aish to use the new version"
+    download_failed: "Download failed"
+    install_failed: "Installation failed"
+    confirm: "Continue with update?"
+    cancelled: "Update cancelled"
+
+  uninstall:
+    purge_help: "Delete all configuration and data files"
+    yes_help: "Skip confirmation prompt"
+    detecting: "Detecting installation method..."
+    install_method: "Installation method: {method}"
+    will_uninstall: "Will uninstall aish package"
+    method_archive: "archive (binary)"
+    purge_warning: "Warning: --purge will delete all configuration and data files"
+    confirm: "Confirm uninstall? [y/N]"
+    uninstalling: "Uninstalling..."
+    uninstall_complete: "Uninstall complete"
+    purge_complete: "Configuration and data cleaned"
+    purge_failed: "Failed to purge configuration and data"
+    cancelled: "Uninstall cancelled"
+    failed: "Uninstall failed"
 
   models:
     help: "Manage models and provider auth"
@@ -633,6 +669,30 @@ help:
         - "/setup               # Launch setup wizard"
         - "/setup --help        # Show help"
       notes: "New settings are applied immediately without restart. Cancelling keeps current configuration."
+
+plan:
+  unavailable: "Plan mode is unavailable because the LLM session is not ready."
+  approval:
+    title: "Plan Approval"
+    prompt: "Review the plan and choose whether to approve execution."
+    option_approve: "Approve"
+    option_approve_desc: "Approve the plan and return to shell mode with the plan attached as execution context."
+    option_changes: "Request changes"
+    option_changes_desc: "Stay in planning and revise the plan."
+    custom_label: "Request changes with feedback"
+    custom_placeholder: "Describe what should change in the plan"
+    section_summary: "Summary"
+    section_artifact: "Artifact"
+    section_preview: "Plan Preview"
+    hint: "Enter to submit approval · ↑/↓ to choose · Tab or type to request changes · Esc to cancel"
+    approved: "Plan approved. Returned to shell mode with approved plan context."
+    changes_requested: "Plan changes requested. Remaining in plan mode."
+    cancelled: "Plan review cancelled. Remaining in plan mode."
+    reminder_approved: "The plan has been approved. You are back in shell mode and should follow the approved artifact at {path}."
+    reminder_changes: "Plan changes were requested. Revise the bound plan file before calling exit_plan_mode again."
+    reminder_feedback: "Feedback: {feedback}"
+  tool:
+    update_artifact: "Updating plan: {path}"
 
 errors:
   litellm_not_installed: "litellm module is not installed"

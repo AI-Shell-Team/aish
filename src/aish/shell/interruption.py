@@ -65,7 +65,7 @@ class InterruptionManager:
     EXIT_WINDOW = 2.0
     CLEAR_WINDOW = 2.0
 
-    def __init__(self):
+    def __init__(self) -> None:
         # 当前状态
         self._state = ShellState.NORMAL
         self._state_start_time: Optional[float] = None

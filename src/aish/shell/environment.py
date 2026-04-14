@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 class EnvironmentManager:
     """Manage AI Shell internal environment variables"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Internal environment variable storage
         self._env_vars = {}
         # Exported variable set (used to mark which variables need to be exported to child processes)
@@ -20,7 +20,7 @@ class EnvironmentManager:
         # This is shared between the shell core and BashTool
         self.directory_stack: Any | None = None  # Will be set by the shell core
 
-    def _load_system_env(self):
+    def _load_system_env(self) -> None:
         """Load system environment variables into internal storage"""
         self._env_vars = os.environ.copy()
 
