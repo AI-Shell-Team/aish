@@ -1637,6 +1637,7 @@ class LLMSession:
                             generation_status = "success"
                             generation_error_message = None
                             content_preview_started = False
+                            tool_calls_seen = False
 
                             async for chunk in response:
                                 try:
@@ -1664,20 +1665,37 @@ class LLMSession:
                                     if content_delta:
                                         content_acc += str(content_delta)
 
-                                    # Emit CONTENT_DELTA for all content
-                                    if content_acc and not content_preview_started:
-                                        content_preview_started = True
-                                        events.emit_content_delta(
-                                            delta=content_acc,
-                                            accumulated=content_acc,
-                                            is_final=False,
-                                        )
-                                    elif content_preview_started and content_delta:
-                                        events.emit_content_delta(
-                                            delta=str(content_delta),
-                                            accumulated=content_acc,
-                                            is_final=False,
-                                        )
+                                    tool_calls_delta = _stream_get_delta_value(
+                                        delta, "tool_calls"
+                                    )
+                                    if tool_calls_delta:
+                                        tool_calls_seen = True
+
+                                    function_call_delta = _stream_get_delta_value(
+                                        delta, "function_call"
+                                    )
+                                    if function_call_delta and not tool_calls_delta:
+                                        tool_calls_seen = True
+
+                                    # Only emit content during streaming when tool
+                                    # calls are present.  For plain conversations the
+                                    # response is rendered by the caller after the
+                                    # operation completes, which avoids interrupting
+                                    # the reasoning Live display.
+                                    if tool_calls_seen:
+                                        if content_acc and not content_preview_started:
+                                            content_preview_started = True
+                                            events.emit_content_delta(
+                                                delta=content_acc,
+                                                accumulated=content_acc,
+                                                is_final=False,
+                                            )
+                                        elif content_preview_started and content_delta:
+                                            events.emit_content_delta(
+                                                delta=str(content_delta),
+                                                accumulated=content_acc,
+                                                is_final=False,
+                                            )
 
                                     finish_reason = (
                                         choice.get("finish_reason")
@@ -1807,11 +1825,6 @@ class LLMSession:
                             )
                         elif not has_tool_calls:
                             output += content
-                            events.emit_content_delta(
-                                delta=content,
-                                accumulated=output,
-                                is_final=True,
-                            )
                     else:
                         if has_tool_calls:
                             events.emit_content_delta(

@@ -201,6 +201,7 @@ class PTYAIShell:
         self._last_streaming_accumulated: str = ""
         self.current_live: Optional[Any] = None
         self._content_preview_active: bool = False
+        self._content_streamed_to_terminal: bool = False
         self._at_line_start: bool = True
 
         self._current_op_scope: Optional[Any] = None
@@ -360,6 +361,7 @@ class PTYAIShell:
         self._thinking_start_time = time.monotonic()
         self._ttft_recorded = False
         self._ttft = 0.0
+        self._content_streamed_to_terminal = False
         return None
 
     def handle_op_end(self, event) -> None:
@@ -603,6 +605,7 @@ class PTYAIShell:
 
         if not self._content_preview_active:
             self._content_preview_active = True
+            self._content_streamed_to_terminal = True
             content = f"🤖 {content}"
 
         self.console.print(Text(content, style="bold grey50"), end="")
@@ -845,6 +848,11 @@ class PTYAIShell:
         self._reasoning_partial = ""
         self._reasoning_lines = []
         self._last_reasoning_render_lines = []
+
+    @property
+    def content_was_streamed(self) -> bool:
+        """Whether content was streamed to the terminal during this operation."""
+        return self._content_streamed_to_terminal
 
     def _finalize_content_preview(self) -> None:
         if not self._content_preview_active:

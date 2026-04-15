@@ -101,6 +101,7 @@ def _make_ai_handler() -> tuple[AIHandler, Mock]:
     shell._on_interrupt_requested = Mock()
     shell.submit_backend_command = Mock()
     shell.submit_ai_backend_command = Mock(return_value=True)
+    shell.content_was_streamed = False
     shell.operation_in_progress = False
     handler.shell = shell
     return handler, shell

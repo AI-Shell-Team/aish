@@ -430,7 +430,10 @@ Please analyze the error and suggest a fix. Check the shell history context abov
                 return
 
             if response:
-                corrected_cmd = self._display_ai_response(response)
+                if shell.content_was_streamed:
+                    corrected_cmd = response.strip() if response else None
+                else:
+                    corrected_cmd = self._display_ai_response(response)
                 if corrected_cmd:
                     self._ask_execute_command(corrected_cmd)
 
@@ -484,7 +487,10 @@ Please analyze the error and suggest a fix. Check the shell history context abov
                 return
 
             if response:
-                self._display_ai_response(response)
+                # Skip the Rich Panel display when content was already
+                # streamed to the terminal via handle_content_delta.
+                if not shell.content_was_streamed:
+                    self._display_ai_response(response)
                 self._auto_retain_memory(question, response)
 
         except Exception as error:
