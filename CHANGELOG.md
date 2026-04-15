@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed the interactive shell so `quit` works again as an exit alias.
 - Fixed compact prompt theme spacing and related prompt rendering regressions in the shell UI.
-- Fixed release automation paths so preparation and publishing workflows target the current repository layout.
+- Fixed standalone bundle startup so PyInstaller builds include the lazy-loaded shell entry modules needed to launch `aish` after installation.
 
 ## [0.2.0] - 2026-04-03
 
