@@ -93,7 +93,7 @@ def test_check_for_updates_available(
         result = update_manager.check_for_updates()
 
     assert result is not None
-    assert result["current_version"] == "0.2.0"
+    assert result["current_version"] == __version__
     assert result["latest_version"] == "0.3.0"
 
 

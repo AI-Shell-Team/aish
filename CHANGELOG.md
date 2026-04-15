@@ -7,6 +7,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-04-15
+
+### Added
+
+- Added an interactive plan mode for non-trivial tasks, including persisted plan artifacts, review and approval flow, and an explicit transition back into execution. Enter plan mode with `/plan` or `F2`, then leave it with `/plan exit` or `F2` when you want to return to normal shell execution.
+- Added persistent long-term memory backed by Markdown storage, with memory recall and store tooling that can carry forward user preferences and project context across sessions.
+- Added `aish update` and `aish uninstall` commands so archive, pip, and system-package installs have a built-in path for upgrade and removal.
+
+### Changed
+
+- Changed the terminal UI to show a visible thinking timer while the model is working, making longer requests easier to track.
+- Changed startup and session wiring so plan mode, memory, and the new CLI management flows are initialized more consistently from the current package layout.
+
+### Fixed
+
+- Fixed the interactive shell so `quit` works again as an exit alias.
+- Fixed compact prompt theme spacing and related prompt rendering regressions in the shell UI.
+- Fixed release automation paths so preparation and publishing workflows target the current repository layout.
+
 ## [0.2.0] - 2026-04-03
 
 ### Added
