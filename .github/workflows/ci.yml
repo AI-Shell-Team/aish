@@ -30,6 +30,7 @@ jobs:
     outputs:
       code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || steps.default.outputs.code }}
       packaging: ${{ github.event_name == 'pull_request' && steps.filter.outputs.packaging || steps.default.outputs.packaging }}
+      release_candidate: ${{ github.event_name == 'pull_request' && steps.release_candidate.outputs.value || steps.default.outputs.release_candidate }}
     steps:
       - name: Default to full validation outside PRs
         id: default
@@ -37,6 +38,20 @@ jobs:
         run: |
           echo "code=true" >> "$GITHUB_OUTPUT"
           echo "packaging=true" >> "$GITHUB_OUTPUT"
+          echo "release_candidate=false" >> "$GITHUB_OUTPUT"
+
+      - name: Detect release candidate pull request
+        id: release_candidate
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          if [[ "$HEAD_REF" == release/* ]] || [[ ",$PR_LABELS," == *,release-candidate,* ]]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Classify pull request changes
         id: filter
@@ -64,7 +79,7 @@ jobs:
   lint-test:
     name: Lint and test
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
     runs-on: ubuntu-latest
     container:
       image: rockylinux:8
@@ -103,7 +118,7 @@ jobs:
     needs:
       - changes
       - lint-test
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -136,7 +151,7 @@ jobs:
 
   build-bundle:
     name: Build bundle (${{ matrix.arch }})
-    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -190,6 +205,11 @@ jobs:
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
           grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
+
+      - name: Smoke test installed binary runtime
+        run: |
+          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
+          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v6

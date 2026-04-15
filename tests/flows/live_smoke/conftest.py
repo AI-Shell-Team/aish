@@ -69,6 +69,11 @@ _CONFIRMATION_PROMPTS = (
 )
 
 
+def _live_smoke_executable() -> str | None:
+    executable = os.environ.get("AISH_LIVE_SMOKE_EXECUTABLE", "").strip()
+    return executable or None
+
+
 def _expect_shell_prompt(child: Any) -> None:
     child.expect(list(_SHELL_PROMPT_PATTERNS))
 
@@ -127,6 +132,7 @@ def _env_summary(env: dict[str, str]) -> dict[str, str]:
         "XDG_DATA_HOME",
         "AISH_LIVE_SMOKE_MODEL",
         "AISH_LIVE_SMOKE_API_BASE",
+        "AISH_LIVE_SMOKE_EXECUTABLE",
     )
     summary: dict[str, str] = {}
     for key in keys:
@@ -168,27 +174,40 @@ def live_smoke_paths(tmp_path: Path) -> LiveSmokePaths:
 @pytest.fixture
 def live_smoke_env(live_smoke_paths: LiveSmokePaths) -> dict[str, str]:
     env = os.environ.copy()
+    executable = _live_smoke_executable()
     existing_pythonpath = env.get("PYTHONPATH", "")
-    repo_root = Path(__file__).resolve().parents[2]
-    src_path = str(repo_root / "src")
-    pythonpath_parts = [src_path]
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
+    pythonpath_parts: list[str] = []
+    if executable is None:
+        repo_root = Path(__file__).resolve().parents[2]
+        src_path = str(repo_root / "src")
+        pythonpath_parts.append(src_path)
+        if existing_pythonpath:
+            pythonpath_parts.append(existing_pythonpath)
 
     env.update(
         {
             "HOME": str(live_smoke_paths.home),
             "LANG": "en_US.UTF-8",
             "LC_ALL": "en_US.UTF-8",
-            "PYTHONPATH": os.pathsep.join(pythonpath_parts),
             "PYTHONUNBUFFERED": "1",
             "TERM": env.get("TERM", "xterm-256color"),
             "XDG_CONFIG_HOME": str(live_smoke_paths.xdg_config_home),
             "XDG_DATA_HOME": str(live_smoke_paths.xdg_data_home),
         }
     )
+    if pythonpath_parts:
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+    else:
+        env.pop("PYTHONPATH", None)
     env.pop("AISH_CONFIG_DIR", None)
     return env
+
+
+def _build_live_smoke_argv(*args: str) -> list[str]:
+    executable = _live_smoke_executable()
+    if executable is not None:
+        return [executable, *args]
+    return [sys.executable, "-m", "aish", *args]
 
 
 @pytest.fixture
@@ -256,7 +275,7 @@ def live_smoke_runner(
     live_smoke_artifacts: list[dict[str, Any]],
 ):
     def _run(*args: str, timeout: float = 30.0) -> LiveSmokeCommandResult:
-        argv = [sys.executable, "-m", "aish", *args]
+        argv = _build_live_smoke_argv(*args)
         start = time.monotonic()
         completed = subprocess.run(
             argv,
@@ -307,18 +326,15 @@ def live_smoke_chat_runner(
         auto_approve: bool = False,
         expected_file: Path | None = None,
     ) -> LiveSmokeChatResult:
-        argv = [
-            sys.executable,
-            "-m",
-            "aish",
+        argv = _build_live_smoke_argv(
             "run",
             "--config",
             str(live_smoke_config_file),
-        ]
+        )
         transcript = io.StringIO()
         start = time.monotonic()
         child = pexpect.spawn(
-            sys.executable,
+            argv[0],
             argv[1:],
             cwd=str(live_smoke_paths.workspace),
             env=live_smoke_env,

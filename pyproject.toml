@@ -88,6 +88,8 @@ markers = [
     "asyncio: tests using pytest-asyncio",
     "anyio: tests using pytest-anyio",
     "live_smoke: opt-in live smoke tests that use real provider credentials",
+    "live_smoke_blocking: low-variance artifact-based live smoke tests that gate release candidates",
+    "live_smoke_extended: higher-variance artifact-based live smoke tests for manual or scheduled validation",
     "timeout: tests with an execution time limit",
 ]
 

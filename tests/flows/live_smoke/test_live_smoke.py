@@ -8,6 +8,7 @@ def _contains_traceback(text: str) -> bool:
 
 
 @pytest.mark.live_smoke
+@pytest.mark.live_smoke_blocking
 def test_info_command_starts_cleanly(live_smoke_runner):
     result = live_smoke_runner("info")
 
@@ -17,6 +18,7 @@ def test_info_command_starts_cleanly(live_smoke_runner):
 
 
 @pytest.mark.live_smoke
+@pytest.mark.live_smoke_blocking
 def test_check_tool_support_succeeds_with_real_provider(
     live_smoke_provider_config,
     live_smoke_runner,
@@ -34,6 +36,7 @@ def test_check_tool_support_succeeds_with_real_provider(
 
 
 @pytest.mark.live_smoke
+@pytest.mark.live_smoke_blocking
 def test_interactive_shell_can_complete_one_live_round_trip(live_smoke_chat_runner):
     expected_token = "AISH_SMOKE_TEST_OK"
     prompt = (
@@ -52,6 +55,7 @@ def test_interactive_shell_can_complete_one_live_round_trip(live_smoke_chat_runn
 
 
 @pytest.mark.live_smoke
+@pytest.mark.live_smoke_extended
 def test_ai_can_use_tools_to_create_file_in_workspace(
     live_smoke_paths,
     live_smoke_chat_runner,
