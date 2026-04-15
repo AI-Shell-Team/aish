@@ -75,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          uv run --group dev python -m pytest tests/live_smoke -v -m live_smoke --run-live-smoke --basetemp build/pytest-live-smoke
+          uv run --group dev python -m pytest tests/flows/live_smoke -v -m live_smoke --run-live-smoke --basetemp build/pytest-live-smoke
 
       - name: Upload live smoke diagnostics
         if: always()
