@@ -165,6 +165,7 @@ class PTYAIShell:
         self.llm_event_router: LLMEventRouter = LLMEventRouter(
             handlers={
                 LLMEventType.OP_START: self.handle_operation_start,
+                LLMEventType.OP_END: self.handle_op_end,
                 LLMEventType.GENERATION_START: self.handle_generation_start,
                 LLMEventType.GENERATION_END: self.handle_generation_end,
                 LLMEventType.REASONING_START: self.handle_reasoning_start,
@@ -361,6 +362,17 @@ class PTYAIShell:
         self._ttft = 0.0
         return None
 
+    def handle_op_end(self, event) -> None:
+        # Display timing summary at operation end
+        if self._timing_active and self._ttft >= self._TTFT_DISPLAY_THRESHOLD:
+            self.console.print()
+            self.console.print(
+                f"思考: {self._ttft:.1f}s",
+                style="dim",
+            )
+        self._reset_timing_state()
+        return None
+
     def handle_generation_start(self, event) -> None:
         self._finalize_content_preview()
         self._reset_reasoning_state()
@@ -504,16 +516,6 @@ class PTYAIShell:
             self.current_live.update("", refresh=True)
             self.current_live.stop()
             self.current_live = None
-
-        # Display timing summary
-        if self._timing_active and self._ttft >= self._TTFT_DISPLAY_THRESHOLD:
-            self.console.print()
-            self.console.print(
-                f"思考: {self._ttft:.1f}s",
-                style="dim",
-            )
-        self._reset_timing_state()
-
         return None
 
     def handle_completion_done(self, event) -> None:

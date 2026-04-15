@@ -1009,3 +1009,228 @@ def test_user_command_error_shows_hint_exactly_once(capsys):
     )
     captured = capsys.readouterr()
     assert t("shell.error_correction.press_semicolon_hint") not in captured.out
+
+
+def test_ttft_timing_records_on_first_content_delta():
+    """Test that TTFT is recorded when first content delta arrives after operation start."""
+    import time
+
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._start_animation = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+
+    # Initialize timing state
+    shell._timing_active = False
+    shell._thinking_start_time = 0.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    # Simulate operation start
+    PTYAIShell.handle_operation_start(shell, Mock())
+
+    assert shell._timing_active is True
+    assert shell._thinking_start_time > 0
+    assert shell._ttft == 0.0
+    assert shell._ttft_recorded is False
+
+    # Small delay to ensure measurable time
+    time.sleep(0.01)
+
+    # Simulate first content delta - should record TTFT
+    PTYAIShell.handle_content_delta(shell, Mock(data={"delta": "Hello"}))
+
+    assert shell._ttft > 0
+    assert shell._ttft_recorded is True
+
+
+def test_ttft_timing_preserves_state_across_generations(monkeypatch):
+    """Test that timing state is not reset between generations in multi-generation scenarios."""
+    import time
+
+    monkeypatch.setattr("aish.shell.runtime.app.Live", _FakeLive)
+
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._start_animation = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+
+    # Initialize timing state
+    shell._timing_active = False
+    shell._thinking_start_time = 0.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    # Simulate operation start
+    PTYAIShell.handle_operation_start(shell, Mock())
+    start_time = shell._thinking_start_time
+
+    # Small delay
+    time.sleep(0.01)
+
+    # First generation: content delta records TTFT
+    PTYAIShell.handle_content_delta(shell, Mock(data={"delta": "First response"}))
+
+    first_ttft = shell._ttft
+    assert first_ttft > 0
+    assert shell._ttft_recorded is True
+
+    # First generation ends
+    PTYAIShell.handle_generation_end(shell, Mock())
+
+    # Verify timing state is NOT reset
+    assert shell._thinking_start_time == start_time
+    assert shell._ttft == first_ttft
+    assert shell._ttft_recorded is True
+
+    # Second generation starts (tool call scenario)
+    PTYAIShell.handle_generation_start(shell, Mock())
+
+    # Verify thinking_start_time is NOT reset
+    assert shell._thinking_start_time == start_time
+    assert shell._ttft == first_ttft
+    assert shell._ttft_recorded is True
+
+    # Second generation ends
+    PTYAIShell.handle_generation_end(shell, Mock())
+
+    # Still not reset
+    assert shell._thinking_start_time == start_time
+    assert shell._ttft == first_ttft
+    assert shell._ttft_recorded is True
+
+
+def test_ttft_timing_summary_renders_at_op_end_not_generation_end():
+    """Test that timing summary is printed at OP_END, not at GENERATION_END."""
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._start_animation = Mock()
+    shell.current_live = Mock()
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+
+    # Initialize timing state with TTFT above threshold
+    shell._timing_active = True
+    shell._thinking_start_time = 1.0
+    shell._ttft = 0.5  # Above _TTFT_DISPLAY_THRESHOLD (0.1)
+    shell._ttft_recorded = True
+
+    # Call generation_end - should NOT print timing summary
+    PTYAIShell.handle_generation_end(shell, Mock())
+
+    # Verify console.print was NOT called with timing text
+    timing_calls = [
+        call for call in shell.console.print.call_args_list
+        if "思考:" in str(call) and "0.5s" in str(call)
+    ]
+    assert len(timing_calls) == 0
+
+    # Call op_end - SHOULD print timing summary
+    PTYAIShell.handle_op_end(shell, Mock())
+
+    # Verify console.print was called with timing text
+    shell.console.print.assert_called()
+
+
+def test_ttft_timing_state_reset_after_op_end():
+    """Test that timing state is properly reset after operation end."""
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._start_animation = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+
+    # Initialize timing state
+    shell._timing_active = True
+    shell._thinking_start_time = 1.0
+    shell._ttft = 0.5
+    shell._ttft_recorded = True
+
+    # Call op_end - should reset timing state
+    PTYAIShell.handle_op_end(shell, Mock())
+
+    # Verify all timing state is reset
+    assert shell._timing_active is False
+    assert shell._thinking_start_time == 0.0
+    assert shell._ttft == 0.0
+    assert shell._ttft_recorded is False
+
+
+def test_ttft_timing_no_summary_below_threshold():
+    """Test that timing summary is not printed when TTFT is below threshold."""
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._start_animation = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+
+    # Initialize timing state with TTFT below threshold
+    shell._timing_active = True
+    shell._thinking_start_time = 1.0
+    shell._ttft = 0.05  # Below _TTFT_DISPLAY_THRESHOLD (0.1)
+    shell._ttft_recorded = True
+
+    # Call op_end - should NOT print timing summary
+    PTYAIShell.handle_op_end(shell, Mock())
+
+    # Verify console.print was NOT called with timing text
+    timing_calls = [
+        call for call in shell.console.print.call_args_list
+        if len(call[0]) > 0 and "思考:" in str(call[0][0])
+    ]
+    assert len(timing_calls) == 0
+
+
+def test_ttft_thinking_start_does_not_modify_timing_state():
+    """Test that handle_thinking_start does not modify _thinking_start_time if already set."""
+    import time
+
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell._finalize_content_preview = Mock()
+    shell._start_animation = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+
+    # Initialize timing state via operation start
+    shell._timing_active = False
+    shell._thinking_start_time = 0.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    PTYAIShell.handle_operation_start(shell, Mock())
+    original_start_time = shell._thinking_start_time
+
+    # Small delay
+    time.sleep(0.01)
+
+    # Call thinking_start - should NOT modify _thinking_start_time
+    PTYAIShell.handle_thinking_start(shell, Mock())
+
+    assert shell._thinking_start_time == original_start_time
