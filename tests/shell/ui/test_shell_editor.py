@@ -79,16 +79,17 @@ def test_shell_prompt_controller_handle_mode_toggle_calls_handler():
     toggle_handler.assert_called_once_with()
 
 
-def test_shell_prompt_controller_registers_f2_mode_toggle_shortcut():
+def test_shell_prompt_controller_registers_plan_mode_toggle_shortcuts():
     controller = ShellPromptController()
 
     bindings = {
-        tuple(binding.keys)
+        tuple(str(key) for key in binding.keys)
         for binding in controller._build_key_bindings().bindings
         if binding.handler.__name__ == "_toggle_plan_mode"
     }
 
-    assert any(str(key) == "Keys.F2" for group in bindings for key in group)
+    assert ("Keys.BackTab",) in bindings
+    assert ("Keys.ControlX", "p") in bindings
 
 
 def test_shell_prompt_controller_render_theme_preserves_trailing_space(monkeypatch):

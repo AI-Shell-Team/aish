@@ -115,7 +115,8 @@ class ShellPromptController:
     def _build_key_bindings(self):
         bindings = KeyBindings()
 
-        @bindings.add(Keys.F2, eager=True)
+        @bindings.add(Keys.BackTab, eager=True)
+        @bindings.add(Keys.ControlX, "p", eager=True)
         def _toggle_plan_mode(event) -> None:
             self._handle_mode_toggle()
             event.app.invalidate()
