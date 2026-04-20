@@ -90,6 +90,22 @@ def test_pty_manager_execute_command_returns_output_without_marker():
         manager.stop()
 
 
+def test_pty_manager_execute_command_honors_explicit_timeout():
+    manager = PTYManager(use_output_thread=False)
+
+    try:
+        manager.start()
+        output, exit_code = manager.execute_command(
+            "printf 'hello\\n'; sleep 1",
+            timeout=0.1,
+        )
+
+        assert exit_code == -1
+        assert output == "hello"
+    finally:
+        manager.stop()
+
+
 def test_bash_history_hides_internal_command_seq_prefix_for_user_commands(tmp_path: Path):
     histfile = tmp_path / "bash_history"
     manager = PTYManager(use_output_thread=False, env={"HISTFILE": str(histfile)})

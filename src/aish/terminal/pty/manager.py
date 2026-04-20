@@ -371,13 +371,15 @@ class PTYManager:
         return text.strip()
 
     def execute_command(
-        self, command: str, timeout: float = 30.0
+        self, command: str, timeout: Optional[float] = None
     ) -> tuple[str, int]:
         """Execute a command via PTY and return (output, exit_code).
 
         Sends command to bash, buffers output until exit code marker appears,
         then returns cleaned output. During execution, the output thread
         buffers instead of forwarding to the display callback.
+
+        When timeout is None, wait indefinitely for the command to finish.
         """
         if not self.is_running:
             return "", -1
@@ -388,7 +390,7 @@ class PTYManager:
             return self._exec_via_poll(command, timeout)
 
     def _exec_via_thread(
-        self, command: str, timeout: float
+        self, command: str, timeout: Optional[float]
     ) -> tuple[str, int]:
         """Execute using background output thread for I/O."""
         command_seq = self._allocate_backend_command_seq()
@@ -400,7 +402,7 @@ class PTYManager:
         # Send command
         self.send_command(command, command_seq=command_seq)
 
-        # Wait for exit code with timeout
+        # Wait for exit code; only enforce timeout when explicitly requested.
         result = self._wait_for_completed_result(command_seq, timeout)
 
         # Exit exec mode
@@ -411,8 +413,9 @@ class PTYManager:
         self._exec_buffer.clear()
 
         if result is None:
-            # Timeout - send Ctrl+C
-            self.send(b"\x03")
+            if timeout is not None:
+                # Timeout - send Ctrl+C
+                self.send(b"\x03")
             cleaned = self._clean_pty_output(raw_output, command)
             return cleaned, -1
 
@@ -420,7 +423,7 @@ class PTYManager:
         return cleaned, result.exit_code
 
     def _exec_via_poll(
-        self, command: str, timeout: float
+        self, command: str, timeout: Optional[float]
     ) -> tuple[str, int]:
         """Execute by directly polling PTY fd (when no output thread)."""
         command_seq = self._allocate_backend_command_seq()
@@ -449,20 +452,30 @@ class PTYManager:
         self.send_command(command, command_seq=command_seq)
 
         # Read output directly from PTY/control fds until prompt_ready appears.
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         raw_output = bytearray()
 
-        while time.monotonic() < deadline:
+        while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+
             read_fds = [self._master_fd]
             if self._control_fd is not None:
                 read_fds.append(self._control_fd)
-            ready, _, _ = select.select(read_fds, [], [], 0.05)
+            try:
+                ready, _, _ = select.select(read_fds, [], [], 0.05)
+            except (ValueError, OSError):
+                break
             for fd in ready:
                 try:
                     data = os.read(fd, 4096)
                 except OSError:
                     continue
                 if not data:
+                    if fd == self._master_fd:
+                        self._running = False
+                        cleaned_output = self._clean_pty_output(bytes(raw_output), command)
+                        return cleaned_output, -1
                     continue
                 if fd == self._control_fd:
                     self._dispatch_control_chunk(data)
@@ -474,8 +487,9 @@ class PTYManager:
                 cleaned_output = self._clean_pty_output(bytes(raw_output), command)
                 return cleaned_output, result.exit_code
 
-        # Timeout - send Ctrl+C
-        self.send(b"\x03")
+        # Timeout - send Ctrl+C only when explicitly requested.
+        if timeout is not None:
+            self.send(b"\x03")
         cleaned_output = self._clean_pty_output(bytes(raw_output), command)
         return cleaned_output, -1
 
@@ -485,14 +499,21 @@ class PTYManager:
         return seq
 
     def _wait_for_completed_result(
-        self, command_seq: int, timeout: float
+        self, command_seq: int, timeout: Optional[float]
     ) -> CommandResult | None:
-        deadline = time.monotonic() + timeout
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self._completion_condition:
             while True:
                 result = self._pop_completed_result(command_seq)
                 if result is not None:
                     return result
+
+                if not self.is_running:
+                    return None
+
+                if deadline is None:
+                    self._completion_condition.wait(timeout=0.05)
+                    continue
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
