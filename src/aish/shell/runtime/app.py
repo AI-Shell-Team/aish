@@ -199,6 +199,7 @@ class PTYAIShell:
         self._reasoning_max_lines: int = 2
         self._last_reasoning_render_lines: list[str] = []
         self._last_streaming_accumulated: str = ""
+        self._last_final_streamed_content: str = ""
         self.current_live: Optional[Any] = None
         self._content_preview_active: bool = False
         self._content_streamed_to_terminal: bool = False
@@ -362,6 +363,7 @@ class PTYAIShell:
         self._ttft_recorded = False
         self._ttft = 0.0
         self._content_streamed_to_terminal = False
+        self._last_final_streamed_content = ""
         return None
 
     def handle_op_end(self, event) -> None:
@@ -603,9 +605,15 @@ class PTYAIShell:
         if not content:
             return None
 
+        is_final = bool(event.data.get("is_final"))
+        if is_final:
+            self._content_streamed_to_terminal = True
+            self._last_final_streamed_content = str(
+                event.data.get("accumulated") or event.data.get("delta") or ""
+            )
+
         if not self._content_preview_active:
             self._content_preview_active = True
-            self._content_streamed_to_terminal = True
             content = f"🤖 {content}"
 
         self.console.print(Text(content, style="bold grey50"), end="")
@@ -851,8 +859,13 @@ class PTYAIShell:
 
     @property
     def content_was_streamed(self) -> bool:
-        """Whether content was streamed to the terminal during this operation."""
+        """Whether the final assistant response was already rendered inline."""
         return self._content_streamed_to_terminal
+
+    @property
+    def last_final_streamed_content(self) -> str:
+        """Return the last final response content rendered inline for this turn."""
+        return self._last_final_streamed_content
 
     def _finalize_content_preview(self) -> None:
         if not self._content_preview_active:

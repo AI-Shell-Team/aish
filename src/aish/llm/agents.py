@@ -95,6 +95,10 @@ class SystemDiagnoseAgent(ToolBase):
     def get_session_output(self, result) -> str | None:
         return result.render_for_llm()
 
+    def should_stop_after_session_output(self, result) -> bool:
+        _ = result
+        return True
+
     def _create_react_system_prompt(self) -> str:
         """Generate a ReAct-style system prompt for diagnostics."""
         base_prompt = self.prompt_manager.substitute_template(

@@ -102,6 +102,7 @@ def _make_ai_handler() -> tuple[AIHandler, Mock]:
     shell.submit_backend_command = Mock()
     shell.submit_ai_backend_command = Mock(return_value=True)
     shell.content_was_streamed = False
+    shell.last_final_streamed_content = ""
     shell.operation_in_progress = False
     handler.shell = shell
     return handler, shell
@@ -155,6 +156,44 @@ def test_ai_handler_executes_corrected_command_via_security_submission():
     assert result is True
     shell.submit_ai_backend_command.assert_called_once_with("rm -rf /tmp/demo")
     shell.submit_backend_command.assert_not_called()
+
+
+def test_ai_handler_renders_response_when_streamed_content_mismatches_final_response():
+    handler, shell = _make_ai_handler()
+
+    def _complete_operation(coro, shell, history_entry=None):
+        _ = (shell, history_entry)
+        coro.close()
+        return ("final-response", False)
+
+    handler._execute_ai_operation = Mock(side_effect=_complete_operation)
+    handler._display_ai_response = Mock()
+    handler._auto_retain_memory = Mock()
+    shell.content_was_streamed = True
+    shell.last_final_streamed_content = "preview-only"
+
+    handler.handle_question("hello")
+
+    handler._display_ai_response.assert_called_once_with("final-response")
+
+
+def test_ai_handler_skips_duplicate_render_when_streamed_content_matches_final_response():
+    handler, shell = _make_ai_handler()
+
+    def _complete_operation(coro, shell, history_entry=None):
+        _ = (shell, history_entry)
+        coro.close()
+        return ("final-response", False)
+
+    handler._execute_ai_operation = Mock(side_effect=_complete_operation)
+    handler._display_ai_response = Mock()
+    handler._auto_retain_memory = Mock()
+    shell.content_was_streamed = True
+    shell.last_final_streamed_content = "final-response"
+
+    handler.handle_question("hello")
+
+    handler._display_ai_response.assert_not_called()
 
 
 def test_ai_handler_marks_cancelled_operation_and_notifies_shell():
@@ -1175,6 +1214,35 @@ def test_ttft_timing_preserves_state_across_generations(monkeypatch):
     assert shell._thinking_start_time == start_time
     assert shell._ttft == first_ttft
     assert shell._ttft_recorded is True
+
+
+def test_non_final_content_preview_does_not_mark_response_as_streamed():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell.current_live = None
+    shell._thinking_start_time = 0.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+    shell._content_streamed_to_terminal = False
+    shell._at_line_start = True
+
+    PTYAIShell.handle_content_delta(
+        shell,
+        Mock(data={"delta": "Preparing diagnosis", "is_final": False}),
+    )
+
+    assert shell.content_was_streamed is False
+
+    PTYAIShell.handle_content_delta(
+        shell,
+        Mock(data={"delta": "Final diagnosis summary", "is_final": True}),
+    )
+
+    assert shell.content_was_streamed is True
 
 
 def test_ttft_timing_summary_renders_at_op_end_not_generation_end():

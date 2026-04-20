@@ -1515,11 +1515,15 @@ class LLMSession:
                 for ctx_msg in tool_result.context_messages:
                     context_manager.add_memory(MemoryType.LLM, ctx_msg)
 
-                session_output = self.tools[tool_name].get_session_output(tool_result)
+                tool = self.tools[tool_name]
+                session_output = tool.get_session_output(tool_result)
                 if session_output is not None:
                     output = session_output
 
-                if tool_result.stop_tool_chain:
+                should_stop_after_output = tool.should_stop_after_session_output(
+                    tool_result
+                )
+                if tool_result.stop_tool_chain or should_stop_after_output:
                     tool_call_cancelled = True
                     if session_output is None:
                         output = tool_result.output
@@ -1825,6 +1829,12 @@ class LLMSession:
                             )
                         elif not has_tool_calls:
                             output += content
+                            if generation_type == "tool_call":
+                                events.emit_content_delta(
+                                    delta=content,
+                                    accumulated=content,
+                                    is_final=True,
+                                )
                     else:
                         if has_tool_calls:
                             events.emit_content_delta(

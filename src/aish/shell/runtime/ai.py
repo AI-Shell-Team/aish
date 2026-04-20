@@ -430,7 +430,7 @@ Please analyze the error and suggest a fix. Check the shell history context abov
                 return
 
             if response:
-                if shell.content_was_streamed:
+                if self._response_already_rendered(shell, response):
                     corrected_cmd = response.strip() if response else None
                 else:
                     corrected_cmd = self._display_ai_response(response)
@@ -487,9 +487,7 @@ Please analyze the error and suggest a fix. Check the shell history context abov
                 return
 
             if response:
-                # Skip the Rich Panel display when content was already
-                # streamed to the terminal via handle_content_delta.
-                if not shell.content_was_streamed:
+                if not self._response_already_rendered(shell, response):
                     self._display_ai_response(response)
                 self._auto_retain_memory(question, response)
 
@@ -504,6 +502,16 @@ Please analyze the error and suggest a fix. Check the shell history context abov
 
         self.console = Console(force_terminal=True)
         return self.console
+
+    @staticmethod
+    def _response_already_rendered(shell, response: str) -> bool:
+        if not getattr(shell, "content_was_streamed", False):
+            return False
+
+        streamed = str(getattr(shell, "last_final_streamed_content", "") or "").strip()
+        if not streamed:
+            return False
+        return streamed == str(response or "").strip()
 
     def _display_ai_response(self, response: str) -> Optional[str]:
         """Display AI response, handling JSON command format."""

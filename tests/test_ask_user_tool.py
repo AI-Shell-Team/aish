@@ -404,7 +404,7 @@ async def test_handle_tool_calls_system_diagnose_agent_sets_session_output():
             output="",
         )
 
-    assert tool_call_cancelled is False
+    assert tool_call_cancelled is True
     assert output == "diagnostic result"
 
 

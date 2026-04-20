@@ -113,6 +113,11 @@ class ToolBase(BaseModel):
         """Optionally expose a tool result as the session's fallback output."""
         return None
 
+    def should_stop_after_session_output(self, result: ToolResult) -> bool:
+        """Whether exposing session output should also end the current turn."""
+        _ = result
+        return False
+
     def _build_panel_from_legacy(
         self, tool_args: dict[str, Any], info: object
     ) -> ToolPanelSpec:
