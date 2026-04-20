@@ -1,0 +1,531 @@
+cli:
+  app_help: "AI Shell - Eine Shell mit integrierten LLM-Funktionen"
+  help_option_help: "Diese Hilfe anzeigen und beenden."
+  run_command_help: "AI Shell starten"
+  info_command_help: "Informationen zu AI Shell anzeigen"
+  check_langfuse_command_help: "Langfuse-Konfiguration prüfen"
+  setup_command_help: "Interaktive Einrichtung ausführen und beenden"
+  check_tool_support_command_help: "Live-Prüfung der Tool-Call-Unterstützung debuggen"
+
+  option:
+    model: "Zu verwendendes LLM-Modell; kann auch über AISH_MODEL oder die Konfigurationsdatei gesetzt werden."
+    api_key: "API-Schlüssel für den LLM-Anbieter; kann auch über AISH_API_KEY oder Anbieter-Umgebungsvariablen gesetzt werden."
+    api_base: "API-Basis-URL für den LLM-Anbieter; kann auch über AISH_API_BASE oder die Konfigurationsdatei gesetzt werden."
+    config: "Pfad zur Konfigurationsdatei (Standard: ~/.config/aish/config.yaml)."
+
+  setup:
+    step_provider: "Schritt 1/3: Anbieter wählen"
+    step_provider_endpoint: "Schritt 1.5/3: Endpunkt wählen"
+    step_key: "Schritt 2/3: API-Schlüssel eingeben"
+    step_model: "Schritt 3/3: Modell wählen"
+    provider_header: "Anbieter wählen (zum Filtern tippen)"
+    provider_filter_prompt: "Filter:"
+    provider_filter_hint: "Zum Filtern tippen, mit ↑/↓ wählen, mit Enter bestätigen, mit Esc abbrechen."
+    provider_selected_label: "Anbieter"
+    provider_endpoint_selected_label: "Endpunkt"
+    provider_endpoint_header: "API-Endpunkt für {provider} wählen"
+    model_selected_label: "Modell"
+    provider_custom_note: "OpenAI-kompatibel"
+    provider_preset_base: "Voreingestellte API-Basis"
+    custom_api_base_title: "API-Basis-URL"
+    custom_api_base_header: "API-Basis-URL eingeben."
+    provider_custom_api_base: "API-Basis-URL"
+    provider_custom_api_base_required: "API-Basis ist erforderlich"
+    provider_custom_api_base_invalid: "Ungültige API-Basis-URL"
+    provider_custom_default: "Benutzerdefiniert"
+    invalid_choice: "Ungültige Auswahl"
+    filter_no_results: "Keine Treffer. Erneut versuchen oder Enter drücken, um alle anzuzeigen."
+    api_key_header: "API-Schlüssel eingeben (wird in der Konfiguration gespeichert)"
+    api_key_env_found: "Erkannt {env_key}: {masked}"
+    api_key_env_hint: "Mit Enter den erkannten Schlüssel verwenden oder einen neuen eingeben."
+    api_key_prompt: "API-Schlüssel"
+    api_key_required: "API-Schlüssel ist erforderlich"
+    model_header: "Anbieter: {provider}"
+    model_prompt: "Modellname (back eingeben, um den Anbieter zu wechseln)"
+    model_hint_openrouter: "OpenRouter benötigt ein Anbieterpräfix, z. B. openai/gpt-4o. Fehlt es, wird standardmäßig openai/ verwendet."
+    model_hint_custom: "Benutzerdefinierte Anbieter werden als OpenAI-kompatibel behandelt. Ohne Präfix wird openai/<model> gespeichert."
+    model_hint_provider: "Empfohlen: {default}"
+    model_list_unavailable: "Modellliste nicht verfügbar; bitte manuell eingeben"
+    model_filtering: "Modelle mit Tool-Call-Unterstützung werden gefiltert"
+    model_filter_result: "Auf {count} Tool-Call-fähige Modelle gefiltert"
+    model_filter_empty: "Kein Modell hat den Tool-Call-Filter bestanden; vollständige Liste wird angezeigt"
+    model_filter_prompt: "Filter:"
+    model_filter_hint: "Zum Filtern tippen, mit ↑/↓ wählen, mit Enter bestätigen, mit Esc zurück. Für manuelle Eingabe Benutzerdefiniertes Modell wählen."
+    model_custom_option: "Benutzerdefiniertes Modell..."
+    model_custom_required: "Modellname ist erforderlich"
+    model_custom_saved_as: "Wird gespeichert als: {model}"
+    verify_title: "Verifizierung"
+    verify_header: "Tool-Call-Unterstützung wird geprüft..."
+    verify_connectivity_in_progress: "Konnektivität wird geprüft..."
+    verify_tool_in_progress: "Tool-Unterstützung wird geprüft..."
+    verify_static_no_tool_support: "Modell unterstützt keine Tool-Aufrufe (statische Prüfung)"
+    verify_simple_success: "Verifizierung erfolgreich"
+    verify_simple_failed_with_reason: "Verifizierung fehlgeschlagen: {reason}"
+    verify_failed_unknown: "unbekannter Fehler"
+    verify_live_label: "Live-Prüfung"
+    verify_live_detail: "Details"
+    verify_timeout: "Zeitüberschreitung bei der Live-Prüfung"
+    verify_cancelled: "Live-Prüfung abgebrochen"
+    verify_no_tool_call_required: "Kein Tool-Aufruf zurückgegeben (Pflichtmodus)"
+    verify_no_tool_call_auto: "Im Automatikmodus wurde kein Tool aufgerufen"
+    debug_request_title: "Live-Anfrage ({mode})"
+    debug_response_title: "Live-Antwort ({mode})"
+    debug_error_title: "Live-Fehler ({mode})"
+    support_yes: "Unterstützt"
+    support_no: "Nicht unterstützt"
+    support_unknown: "Unbekannt"
+    litellm_missing: "litellm ist nicht installiert; Verifizierung übersprungen"
+    action_header: "Nächste Aktion:"
+    action_prompt: "Option wählen"
+    action_retry_model: "Anderes Modell wählen"
+    action_retry_api_base: "API-Basis erneut eingeben"
+    action_retry_api_key: "API-Schlüssel erneut eingeben"
+    action_change_provider: "Anbieter wechseln"
+    action_continue: "Trotzdem fortfahren (nicht empfohlen)"
+    action_exit: "Einrichtung beenden"
+    retry_api_base_prompt: "API-Basis eingeben (back zum Zurückkehren)"
+    retry_api_base_prompt_with_current: "API-Basis eingeben (aktuell: {current}, back zum Zurückkehren)"
+    retry_api_base_required: "API-Basis ist erforderlich"
+    saved: "Konfiguration gespeichert"
+    saved_with_warning: "Konfiguration gespeichert (Tool-Call nicht verifiziert)"
+    non_interactive: "Nicht-interaktive Umgebung; Einrichtung kann nicht ausgeführt werden"
+    cancelled: "Einrichtung abgebrochen"
+    required_cancelled: "Erforderliche Konfiguration fehlt; Vorgang beendet"
+    connectivity_ok: "Verbindung OK ({}ms)"
+    config_path: "Konfigurationspfad: {}"
+    setup_complete_hint: "Sie koennen nun \x1b[1maish\x1b[0m starten."
+
+  startup:
+    label:
+      skills: "Skills"
+    goodbye: "👋 Auf Wiedersehen!"
+    config_file_error: "❌ Fehler in der Konfigurationsdatei: {error}"
+    config_file_hint: "💡 Mit --config einen gültigen Pfad zur Konfigurationsdatei angeben"
+
+  langfuse:
+    incomplete: "⚠️  Die Langfuse-Konfiguration ist unvollständig"
+    missing: "   Fehlt: {var}"
+    complete: "✅ Die Langfuse-Konfiguration ist vollständig"
+    script_failed: "Langfuse-Prüfskript fehlgeschlagen: {error}"
+    script_not_found: "check_langfuse.py-Skript nicht gefunden"
+    run_from_root: "Bitte diesen Befehl im Projektstamm ausführen"
+
+  parse_errors:
+    title: "Fehler"
+    option_requires_argument: "Option {option} erfordert ein Argument."
+    no_such_option: "Unbekannte Option: {option}"
+    missing_parameter: "Fehlender Parameter: {param}"
+    invalid_value_for_option: "Ungültiger Wert für {option}: {reason}"
+    generic: "Ungültige Argumente: {message}"
+
+shell:
+  welcome2:
+    header: ">_ AI Shell {version}"
+    model_hint: "(mit /model wechseln)"
+    label:
+      model: "Modell"
+      config: "Konfig"
+    quick_start:
+      title: " Schnellstart:"
+      item1_prefix: "Native Shell-Befehle: "
+      cmd_ls: "ls"
+      cmd_top: "top"
+      cmd_vim: "vim"
+      cmd_ssh: "ssh"
+      item1_suffix: " usw."
+      item2_prefix: "KI fragen: "
+      item2_example: "Mit ; beginnen, z. B. ; wie finde ich große Dateien"
+      item3_prefix: "Hilfe:"
+      item3_suffix_1: "Gib "
+      item3_keyword: "help"
+      item3_suffix_2: " ein, um integrierte Hilfe und Verwendung zu sehen."
+    risk: "Von der KI erzeugte Inhalte können riskant sein; bitte sorgfältig prüfen."
+    skills_loaded_suffix: " geladen"
+
+  security:
+    title:
+      blocked: "🛑 Sicherheitsblockierung: {tool}"
+      notice: "🔐 Sicherheitshinweis: {tool}"
+      confirm: "🔐 Bestätigung erforderlich: {tool}"
+    label:
+      description: "Beschreibung"
+      command: "Befehl"
+      target: "Ziel"
+      content_preview: "Inhaltsvorschau"
+      fallback_hint: "Hinweis"
+      risk_level: "Risikostufe"
+      reasons: "Gründe"
+      alternatives: "Alternativen"
+      impact: "Auswirkung"
+      no_additional_info: "Keine weiteren Informationen verfügbar."
+    fallback:
+      sandbox_execute_failed: "Die Vorabausführung des Befehls ist fehlgeschlagen; das Risiko kann nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
+      sandbox_timeout: "Die Vorabausführung des Befehls hat das Zeitlimit überschritten; das Risiko kann nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
+      sandbox_ipc_timeout: "Zeitüberschreitung beim Warten auf die Vorabbewertung des Befehls; das Risiko kann nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
+      generic: "Die Risikobewertung des Befehls konnte nicht abgeschlossen werden. Bitte vor der echten Ausführung bestätigen."
+    options_header: "Optionen"
+    option:
+      approve: "Genehmigen"
+      approve_remember: "Ja, und für diesen Befehl nicht erneut fragen"
+      cancel: "Abbrechen"
+    choice_prompt: "Ihre Auswahl (Standard: n): "
+
+  command_cancelled: "Befehl abgebrochen"
+  error_correction:
+    press_semicolon_hint: "Die Befehlsausführung ist fehlgeschlagen. Geben Sie ; ein und drücken Sie Enter für automatische Analyse und Reparatur, oder geben Sie den nächsten Befehl ein."
+    corrected_command_label: "Vorgeschlagene Korrektur:"
+  error:
+    execution_error: "❌ Fehler während der Ausführung: {error}"
+    pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"
+    potential_error: "🚀 Mögliches Problem erkannt: {reason}, Lösung wird versucht..."
+    llm_error_title: "❌ LLM-Anfrage fehlgeschlagen"
+    llm_error_message: "Fehler: {error}"
+    llm_error_details_title: "Debug-Details"
+    tool_args_json_invalid_hint: "❌ Anfrage fehlgeschlagen, bitte erneut versuchen."
+  prompt:
+    confirm_execute: "?Diesen Befehl ausführen? [y/n]:"
+    ai_hint: "; verwenden, um die KI zu fragen"
+  model:
+    current: "Aktuelles Modell: {model}"
+    unset: "nicht gesetzt"
+    invalid: "Der Modellname darf nicht leer sein"
+    switching: "Modell wird validiert: {model}"
+    switch_same: "Modell unverändert: {model}"
+    switch_success: "Zu Modell gewechselt: {model}"
+    verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
+  token:
+    title: "Token-Nutzung (letzte 7 Tage)"
+    input_tokens: "Eingabe-Tokens"
+    output_tokens: "Ausgabe-Tokens"
+    total: "Gesamt"
+    api_calls: "API-Aufrufe"
+  setup:
+    no_config_manager: "Neukonfiguration nicht möglich: Konfigurationsmanager nicht verfügbar"
+    cancelled: "Einrichtung abgebrochen; aktuelle Einstellungen werden beibehalten"
+    applied: "Konfiguration aktualisiert, aktuelles Modell: {model}"
+  ask_user:
+    title: "Option auswählen"
+    custom_label: "Benutzerdefiniert:"
+    hint_select: "Enter zum Bestätigen · ↑/↓ zum Navigieren · Esc zum Abbrechen"
+    hint_custom: "Enter zum Bestätigen · ↑/↓ zum Navigieren · Tab oder direkt tippen für Eingabe · Esc zum Abbrechen"
+    paused:
+      title: "⏸ Benutzereingabe erforderlich (Aufgabe pausiert)"
+      prompt: "Frage: {prompt}"
+      reason: "Grund: {reason}"
+      options_header: "Optionen:"
+      custom_input: "Sie können auch einen beliebigen benutzerdefinierten Wert eingeben."
+      how_to: "Antworten Sie mit einem Optionswert (oder einer Nummer) oder geben Sie ; continue with default ein (Standard: {default})."
+  diagnose_cancelled: "  └─ ❌ Systemdiagnose abgebrochen"
+  status:
+    thinking: "Denkt nach"
+    thinking_now: "Denkt nach"
+    processing: "Verarbeitet"
+    analyzing: "  Analysiert..."
+    system_diagnosing: "  └─ Systemdiagnose läuft"
+    system_analyzing: "  └─ Systemanalyse läuft"
+  tool:
+    prefix: "🔧 Verwende Tool"
+    prefix_diagnose: "  └─ 🔧 Diagnose-Tool"
+    done_diagnose: "  └─ ✅ Diagnose abgeschlossen"
+
+security:
+  sandbox_off_action:
+    allow: "Direkt erlauben"
+    confirm: "Bestätigung verlangen"
+    block: "Blockieren"
+  sandbox_unavailable:
+    title: "⚠️ Sandbox nicht verfügbar"
+    line1: "Die Sandbox ist nicht verfügbar; das Befehlsrisiko kann nicht bewertet werden."
+    line2: "Nachfolgende KI-generierte Befehle werden wie folgt behandelt: {action}."
+    policy_line1: "Die Sandbox ist per Richtlinie deaktiviert; es wurde kein Sandbox-Lauf ausgeführt."
+    policy_line2: "KI-generierte Befehle werden wie folgt behandelt: {action}."
+    reason: "Grund: {reason}"
+    error: "Fehler: {error}"
+    root_required: "Die Sandbox benötigt Root-Rechte"
+    ipc_unavailable: "Verbindung zum Sandbox-Dienst nicht möglich (aish-sandbox.socket läuft nicht oder ist nicht installiert)"
+    ipc_failed: "Ausführung des Sandbox-Dienstes fehlgeschlagen (aish-sandbox)"
+    sandbox_execute_failed: "Das Befehlsrisiko kann nicht bewertet werden; bitte vor der Ausführung bestätigen"
+  risk_reason:
+    sandbox_disabled_by_policy: "Die Sandbox ist per Richtlinie deaktiviert; Dateiveränderungen können für die Risikobewertung nicht geprüft werden. Aktion: {action}."
+    sandbox_disabled: "Die Sandbox ist nicht aktiviert oder ausgeschaltet; Dateiveränderungen können für die Risikobewertung nicht geprüft werden. Aktion: {action}."
+    cwd_outside_repo_root: "Das aktuelle Arbeitsverzeichnis {cwd} liegt außerhalb der Sandbox-Wurzel {root}; relative Seiteneffekte können nicht zuverlässig bewertet werden. Aktion: {action}."
+    sandbox_unavailable: "Initialisierung oder Ausführung der Sandbox fehlgeschlagen; Dateiveränderungen können für die Risikobewertung nicht geprüft werden. Aktion: {action}."
+    sandbox_exception: "Sandbox-Ausführungsfehler; Dateiveränderungen können für die Risikobewertung nicht geprüft werden. Aktion: {action}."
+    sandbox_failed: "Sandbox fehlgeschlagen; Dateiveränderungen können für die Risikobewertung nicht geprüft werden. Aktion: {action}."
+    policy_fallback_rule_match: "Bei deaktivierter Sandbox hat der Befehl {command} {count} Fallback-Regelpfade getroffen; Behandlung als {risk}-Risiko."
+  ai_risk:
+    no_fs_changes: "Die Sandbox hat keine Dateischreibvorgänge oder Löschungen erkannt."
+    high_hits: "Es wurden {count} Schreib-/Löschvorgänge erkannt, die hochriskante Regeln treffen."
+    medium_hits: "Es wurden {count} Schreib-/Löschvorgänge erkannt, die Regeln mittleren Risikos treffen."
+    low_or_unmatched_hits: "Es wurden {count} Schreib-/Löschvorgänge erkannt, die Regeln mit niedrigem Risiko treffen oder keiner Regel entsprechen."
+    preview_paths: "Beispielpfade (teilweise, können Verzeichnisse/Dateien enthalten): {paths}"
+  command_blocked: "Fehler: Befehl wurde vom Sicherheitssystem blockiert"
+  command_blocked_with_reason: "Fehler: Befehl wurde vom Sicherheitssystem blockiert: {reason}"
+
+tools:
+  smart_log:
+    description: "Ermittelt automatisch Log-Quellen, analysiert Protokolle anhand der Anfrage und gibt eine passende Zusammenfassung zurück."
+    param:
+      query: "Ihre Diagnoseanfrage, z. B. 'ist nginx korrekt konfiguriert' oder 'gibt es verdächtige Anmeldungen'."
+      path: "Optional. Log-Pfad (Datei/Verzeichnis) oder ein systemd-Unit-Name. Wenn nicht angegeben, wird er aus der Anfrage abgeleitet."
+    summary:
+      file: "[DATEI] {ident}: {matched}/{total} Zeilen passend\nBeispiel:\n{sample}"
+      dir: "[VERZ] {path}: {matched}/{total} Zeilen passend\nBeispiel:\n{sample}"
+      systemd: "[SYSTEMD] {ident}: {matched}/{total} Zeilen passend\nBeispiel:\n{sample}"
+      call_failed: "[{stype}] {ident}: Aufruf fehlgeschlagen\n{output}"
+    no_logs_found: "Keine Protokolle oder passenden Informationen gefunden."
+
+help:
+  labels:
+    usage: "Verwendung"
+    options: "Optionen"
+    examples: "Beispiele"
+    notes: "Hinweise"
+    brief_usage: "Verwendung: {usage}"
+  general:
+    title: "📖 AI Shell Hilfe"
+    markdown: |-
+      ## Verfügbare Befehle:
+
+      ### Verzeichnisnavigation
+      - `cd [-L|[-P [-e]]] [directory]` - Verzeichnis mit vollständiger Parameterunterstützung wechseln
+      - `pushd [directory]` - Verzeichnis auf den Stapel legen
+      - `popd` - Verzeichnis vom Stapel nehmen
+      - `dirs [-c]` - Verzeichnisstapel anzeigen
+
+      ### Verlauf
+      - `history [options] [n]` - Befehlsverlauf anzeigen
+      - `history -c` - Verlauf löschen
+      - `history -d offset` - Verlaufseintrag löschen
+
+      ### Umgebungsvariablen
+      - `export [-fn] [name[=value] ...]` - Umgebungsvariablen setzen oder exportieren
+      - `export -p` - Exportierte Variablen anzeigen
+      - `unset [-fv] [name ...]` - Umgebungsvariablen entfernen
+      - `pwd [-L|-P]` - Aktuelles Arbeitsverzeichnis ausgeben
+
+      ### Allgemeine Befehle
+      - `help` - Diese Hilfe anzeigen
+      - `clear` - Bildschirm löschen
+      - `exit` - Shell beenden
+      - `/model [model]` - Modell anzeigen oder wechseln
+      - `/setup` - API-Einstellungen neu konfigurieren
+
+      ### KI-Befehle
+      - `; <question>` - Den KI-Assistenten fragen
+
+      ### Funktionen
+      - ✅ Vollständige PTY-Unterstützung für alle Befehle
+      - ✅ Befehlsverlauf und KI-Kontextintegration
+      - ✅ Umfangreiche Terminalausgabe für KI-Antworten
+      - ✅ Signalbehandlung und sauberes Aufräumen
+
+      ### Weitere Hilfe
+      Verwenden Sie `<command> --help` oder `<command> -h`, um die detaillierte Hilfe für einen beliebigen Befehl anzuzeigen.
+
+      ### Beispiele
+      ```bash
+      history --help       # Detaillierte Hilfe zu history anzeigen
+      cd --help            # Detaillierte Hilfe zu cd anzeigen
+      export JAVA_HOME="/usr/lib/jvm/java-11"  # Umgebungsvariable setzen
+      unset TEMP_VAR       # Umgebungsvariable entfernen
+      ; erkläre ls -la     # KI um Erklärung eines Befehls bitten
+      ```
+
+  command:
+    history:
+      title: "📚 Verlauf"
+      description: "Befehlsverlauf anzeigen oder bearbeiten"
+      usage: "history [options] [n]"
+      options:
+        - ["--help, -h", "Diese Hilfe anzeigen"]
+        - ["-c", "Die Verlaufsliste leeren, indem alle Einträge gelöscht werden"]
+        - ["-d offset", "Den Verlaufseintrag an Position offset löschen"]
+        - ["n", "Nur die letzten n Befehle anzeigen"]
+      examples:
+        - "history              # Gesamten Befehlsverlauf anzeigen"
+        - "history 10           # Die letzten 10 Befehle anzeigen"
+        - "history -c           # Gesamten Verlauf löschen"
+        - "history -d 5         # Verlaufseintrag an Position 5 löschen"
+        - "history --help       # Diese Hilfe anzeigen"
+      notes: "Verlaufseinträge werden für alle ausgeführten Befehle und KI-Interaktionen automatisch aufgezeichnet."
+
+    cd:
+      title: "📁 Verzeichnis wechseln"
+      description: "Das aktuelle Arbeitsverzeichnis mit vollständiger Parameterunterstützung ändern"
+      usage: "cd [-L|[-P [-e]]] [directory]"
+      options:
+        - ["-L", "Symbolische Links verfolgen: Symlinks nach der Verarbeitung von '..' auflösen (Standard)"]
+        - ["-P", "Physische Verzeichnisstruktur ohne Verfolgen symbolischer Links verwenden: Symlinks vor der Verarbeitung von '..' auflösen"]
+        - ["-e", "Falls -P angegeben ist und das aktuelle Arbeitsverzeichnis nicht ermittelt werden kann, mit einem Fehlerstatus beenden"]
+        # - ["-@", "Auf Systemen mit Unterstützung Dateien mit erweiterten Attributen als Attribut-Verzeichnisse darstellen"]
+        - ["directory", "Zielpfad des Verzeichnisses (optional, standardmäßig das Home-Verzeichnis)"]
+        - ["-", "Zum vorherigen Verzeichnis zurückkehren"]
+      examples:
+        - "cd ~                 # Zum Home-Verzeichnis wechseln"
+        - "cd /tmp              # In das Verzeichnis /tmp wechseln"
+        - "cd -                 # Zum vorherigen Verzeichnis zurückkehren"
+        - "cd \"path with spaces\" # Anführungszeichen für Pfade mit Leerzeichen verwenden"
+        - "cd -P /tmp           # Physische Pfadauflösung verwenden"
+        - "cd -P -e /tmp        # Physische Pfadauflösung verwenden und bei Fehler abbrechen"
+        - "cd -L /tmp           # Symbolische Links verfolgen (Standardverhalten)"
+        # - "cd -@ /tmp           # Erweiterte Attribute anzeigen (falls unterstützt)"
+      notes: "Unterstützt Tab-Vervollständigung und den Umgang mit Pfaden mit Sonderzeichen. Das Standardverhalten folgt symbolischen Links (-L)."
+
+    pushd:
+      title: "📤 Verzeichnis auf Stack legen"
+      description: "Ein Verzeichnis auf den Stack legen und dorthin wechseln"
+      usage: "pushd [directory]"
+      options:
+        - ["directory", "Zielpfad des Verzeichnisses"]
+        - ["(no args)", "Die obersten zwei Verzeichnisse auf dem Stack tauschen"]
+      examples:
+        - "pushd /tmp           # Aktuelles Verzeichnis auf den Stack legen und nach /tmp wechseln"
+        - "pushd                # Zwischen aktuellem und vorherigem Verzeichnis wechseln"
+      notes: "Pflegt einen Verzeichnis-Stack für eine einfache Navigation zwischen mehreren Verzeichnissen."
+
+    popd:
+      title: "📥 Verzeichnis vom Stack holen"
+      description: "Ein Verzeichnis vom Stack nehmen und dorthin wechseln"
+      usage: "popd"
+      options: []
+      examples:
+        - "popd                 # Zum vorherigen Verzeichnis vom Stack zurückkehren"
+      notes: "Entfernt das oberste Verzeichnis vom Stack und wechselt dorthin."
+
+    dirs:
+      title: "📋 Verzeichnis-Stack anzeigen"
+      description: "Den Verzeichnis-Stack anzeigen"
+      usage: "dirs [-c]"
+      options:
+        - ["-c", "Den Verzeichnis-Stack leeren"]
+      examples:
+        - "dirs                 # Aktuellen Verzeichnis-Stack anzeigen"
+        - "dirs -c              # Verzeichnis-Stack leeren"
+      notes: "Zeigt alle Verzeichnisse an, die sich aktuell auf dem Navigations-Stack befinden."
+
+    help:
+      title: "❓ Hilfe"
+      description: "Verfügbare Befehle und Funktionen anzeigen"
+      usage: "help"
+      options: []
+      examples:
+        - "help                 # Allgemeine Hilfe anzeigen"
+      notes: "Gibt einen Überblick über alle verfügbaren Befehle und Shell-Funktionen."
+
+    clear:
+      title: "🧹 Bildschirm leeren"
+      description: "Den Terminalbildschirm leeren"
+      usage: "clear"
+      options: []
+      examples:
+        - "clear                # Den Terminalbildschirm leeren"
+      notes: "Entspricht dem standardmäßigen Unix-Befehl clear."
+
+    exit:
+      title: "🚪 Shell beenden"
+      description: "Die AI Shell beenden"
+      usage: "exit"
+      options: []
+      examples:
+        - "exit                 # Die Shell beenden"
+        - "quit                 # Alternative Methode zum Beenden"
+      notes: "Beendet die Shell sauber und bewahrt Sitzungsdaten."
+
+    export:
+      title: "🔧 Umgebungsvariablen exportieren"
+      description: "Umgebungsvariablen mit Export-Attribut setzen oder anzeigen"
+      usage: "export [-fn] [name[=value] ...]\nexport -p"
+      options:
+        - ["-f", "Name verweist auf eine Shell-Funktion (nicht unterstützt)"]
+        - ["-n", "Export-Attribut von jedem Namen entfernen"]
+        - ["-p", "Liste aller exportierten Variablen anzeigen"]
+        - ["--", "Weitere Optionsverarbeitung deaktivieren"]
+      examples:
+        - "export PATH=/usr/local/bin:$PATH"
+        - "export EDITOR=vim"
+        - "export -n VAR  # Export-Attribut von VAR entfernen"
+        - "export -p      # Alle exportierten Variablen anzeigen"
+        - "export JAVA_HOME=\"/usr/lib/jvm/java-11-openjdk\""
+        - "export -- -VAR  # Variable mit dem Namen -VAR setzen"
+      notes: "Mit export gesetzte Umgebungsvariablen werden an Kindprozesse weitergegeben."
+
+    unset:
+      title: "🗑️ Umgebungsvariablen entfernen"
+      description: "Shell-Variablen und Funktionen entfernen"
+      usage: "unset [-f] [-v] [-n] [name ...]"
+      options:
+        - ["-f", "Jeder Name verweist auf eine Shell-Funktion (nicht unterstützt)"]
+        - ["-v", "Jeder Name verweist auf eine Shell-Variable (Standard)"]
+        - ["-n", "Jeder Name verweist auf eine Namensreferenz (nicht unterstützt)"]
+        - ["--", "Weitere Optionsverarbeitung deaktivieren"]
+      examples:
+        - "unset TEMP_VAR"
+        - "unset -v VAR1 VAR2"
+        - "unset JAVA_HOME"
+        - "unset -- -VAR  # Variable mit dem Namen -VAR entfernen"
+      notes: "Entfernt Variablen aus der Shell-Umgebung. Nicht vorhandene Variablen werden ignoriert."
+
+    pwd:
+      title: "📍 Arbeitsverzeichnis ausgeben"
+      description: "Das aktuelle Arbeitsverzeichnis mit Symlink-Behandlung ausgeben"
+      usage: "pwd [-L|-P]"
+      options:
+        - ["-L", "Logischen Pfad anzeigen (Symlinks folgen, Standard)"]
+        - ["-P", "Physischen Pfad anzeigen (Symlinks auflösen)"]
+      examples:
+        - "pwd                  # Logisches aktuelles Verzeichnis anzeigen"
+        - "pwd -L               # Logischen Pfad anzeigen (Symlinks beachten)"
+        - "pwd -P               # Physischen Pfad anzeigen (Symlinks auflösen)"
+      notes: "Das Standardverhalten zeigt den logischen Pfad an und berücksichtigt symbolische Links."
+
+    ";":
+      title: "🤖 KI-Assistent"
+      description: "Dem KI-Assistenten eine Frage stellen"
+      usage: "; <question>"
+      options:
+        - ["question", "Ihre Frage an den KI-Assistenten"]
+      examples:
+        - "; wie finde ich große Dateien?"
+        - "; erkläre diesen Befehl: ls -la"
+        - "; schlage eine bessere Methode zum Komprimieren von Dateien vor"
+      notes: "Der KI-Assistent kann bei Befehlserklärungen, Vorschlägen und allgemeiner Shell-Nutzung helfen."
+
+    "；":
+      title: "🤖 KI-Assistent"
+      description: "Dem KI-Assistenten eine Frage stellen"
+      usage: "； <question>"
+      options:
+        - ["question", "Ihre Frage an den KI-Assistenten"]
+      examples:
+        - "； wie finde ich große Dateien?"
+        - "； erkläre diesen Befehl: ls -la"
+        - "； schlage eine bessere Methode zum Komprimieren von Dateien vor"
+      notes: "Der KI-Assistent kann bei Befehlserklärungen, Vorschlägen und allgemeiner Shell-Nutzung helfen."
+
+    "/model":
+      title: "🧠 Modell wechseln"
+      description: "Das aktuelle Modell anzeigen oder zu einem angegebenen Modell wechseln"
+      usage: "/model [model]"
+      options:
+        - ["model", "Zielmodellkennung (wird auf Tool-Call-Unterstützung geprüft)"]
+        - ["--help, -h", "Diese Hilfe anzeigen"]
+      examples:
+        - "/model               # Aktuelles Modell anzeigen"
+        - "/model gpt-4         # Zu einem Modell wechseln"
+        - "/model --help        # Hilfe anzeigen"
+      notes: "Beim Wechsel werden Konnektivität und Tool-Call-Unterstützung geprüft; bei Fehlern bleibt das aktuelle Modell erhalten."
+
+    "/setup":
+      title: "⚙️ Neu konfigurieren"
+      description: "Den interaktiven Einrichtungsassistenten erneut ausführen, um API-Einstellungen zu ändern (Provider, API-Key, Modell)"
+      usage: "/setup"
+      options:
+        - ["--help, -h", "Diese Hilfe anzeigen"]
+      examples:
+        - "/setup               # Einrichtungsassistent starten"
+        - "/setup --help        # Hilfe anzeigen"
+      notes: "Neue Einstellungen werden sofort ohne Neustart angewendet. Ein Abbruch behält die aktuelle Konfiguration bei."
+
+errors:
+  litellm_not_installed: "Das Modul litellm ist nicht installiert"

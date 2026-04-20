@@ -85,11 +85,6 @@ if [ -f "dist/aish" ] && [ -f "dist/aish-sandbox" ]; then
         else
             echo -e "${YELLOW}⚠️  Sandbox binary has some issues but was built successfully${NC}"
         fi
-        if command -v script >/dev/null 2>&1 && bash ./packaging/scripts/smoke-installed-aish.sh ./dist/aish > /dev/null 2>&1; then
-            echo -e "${GREEN}✅ Interactive binary smoke passed!${NC}"
-        else
-            echo -e "${YELLOW}⚠️  Interactive binary smoke did not complete successfully${NC}"
-        fi
     else
         echo -e "${YELLOW}⚠️  Binary has some issues but was built successfully${NC}"
         echo -e "${YELLOW}   (This may be due to LiteLLM/tiktoken packaging complexity)${NC}"

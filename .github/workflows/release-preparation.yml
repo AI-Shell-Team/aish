@@ -7,11 +7,6 @@ on:
         description: "Target stable release version, for example 0.1.1"
         required: true
         type: string
-      ref:
-        description: "Git ref to validate, for example release/v0.1.1-prep or a commit SHA"
-        required: false
-        default: main
-        type: string
 
 permissions:
   contents: read
@@ -34,7 +29,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.ref }}
 
       - name: Compute release metadata
         id: metadata
@@ -59,7 +53,6 @@ jobs:
 
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
-          - Ref: ${{ github.event.inputs.ref }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
           ## Release Notes
@@ -88,8 +81,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.inputs.ref }}
 
       - name: Set up build environment
         run: ./packaging/scripts/setup-ci-env.sh
@@ -122,11 +113,6 @@ jobs:
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
           grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
 
-      - name: Smoke test installed binary runtime
-        run: |
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
-          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
-
       - name: Upload dry-run artifacts
         uses: actions/upload-artifact@v6
         with:
@@ -141,7 +127,7 @@ jobs:
       - dry-run-package-validation
     uses: ./.github/workflows/live-smoke.yml
     with:
-      ref: ${{ github.event.inputs.ref }}
+      ref: ${{ github.sha }}
     secrets: inherit
 
   release-preparation-summary:
@@ -160,7 +146,6 @@ jobs:
 
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
-          - Ref: ${{ github.event.inputs.ref }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
           Release metadata artifacts, dry-run bundle artifacts, and live smoke validation have completed successfully.

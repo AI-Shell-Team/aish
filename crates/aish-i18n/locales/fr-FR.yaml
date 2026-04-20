@@ -1,0 +1,531 @@
+cli:
+  app_help: "AI Shell - Un shell avec des capacites LLM integrees"
+  help_option_help: "Afficher ce message et quitter."
+  run_command_help: "Lancer AI Shell"
+  info_command_help: "Afficher les informations sur AI Shell"
+  check_langfuse_command_help: "Verifier la configuration de Langfuse"
+  setup_command_help: "Executer la configuration interactive et quitter"
+  check_tool_support_command_help: "Depanner la verification en direct de la prise en charge des appels d'outils"
+
+  option:
+    model: "Modele LLM a utiliser ; peut aussi etre defini via AISH_MODEL ou le fichier de configuration."
+    api_key: "Cle API du fournisseur LLM ; peut aussi etre definie via AISH_API_KEY ou les variables d'environnement du fournisseur."
+    api_base: "URL de base de l'API du fournisseur LLM ; peut aussi etre definie via AISH_API_BASE ou le fichier de configuration."
+    config: "Chemin du fichier de configuration (par defaut : ~/.config/aish/config.yaml)."
+
+  setup:
+    step_provider: "Etape 1/3 : choisir un fournisseur"
+    step_provider_endpoint: "Etape 1.5/3 : choisir un endpoint"
+    step_key: "Etape 2/3 : saisir la cle API"
+    step_model: "Etape 3/3 : choisir un modele"
+    provider_header: "Choisir un fournisseur (taper pour filtrer)"
+    provider_filter_prompt: "Filtre :"
+    provider_filter_hint: "Tapez pour filtrer, utilisez ↑/↓ pour selectionner, Enter pour confirmer et Esc pour annuler."
+    provider_selected_label: "Fournisseur"
+    provider_endpoint_selected_label: "Endpoint"
+    provider_endpoint_header: "Choisir l'endpoint API pour {provider}"
+    model_selected_label: "Modele"
+    provider_custom_note: "Compatible OpenAI"
+    provider_preset_base: "API Base predefinie"
+    custom_api_base_title: "URL API Base"
+    custom_api_base_header: "Saisissez l'URL API Base."
+    provider_custom_api_base: "URL API Base"
+    provider_custom_api_base_required: "L'API Base est obligatoire"
+    provider_custom_api_base_invalid: "URL API Base invalide"
+    provider_custom_default: "Personnalise"
+    invalid_choice: "Selection invalide"
+    filter_no_results: "Aucun resultat. Reessayez ou appuyez sur Enter pour tout afficher."
+    api_key_header: "Saisissez votre cle API (elle sera enregistree dans la configuration)"
+    api_key_env_found: "Detecte {env_key} : {masked}"
+    api_key_env_hint: "Appuyez sur Enter pour utiliser la cle detectee ou saisissez-en une nouvelle."
+    api_key_prompt: "Cle API"
+    api_key_required: "La cle API est obligatoire"
+    model_header: "Fournisseur : {provider}"
+    model_prompt: "Nom du modele (tapez back pour changer de fournisseur)"
+    model_hint_openrouter: "OpenRouter exige un prefixe de fournisseur, par exemple openai/gpt-4o. S'il est omis, openai/ sera utilise par defaut."
+    model_hint_custom: "Les fournisseurs personnalises sont traites comme compatibles OpenAI. Sans prefixe, le modele sera enregistre sous openai/<model>."
+    model_hint_provider: "Recommande : {default}"
+    model_list_unavailable: "Liste des modeles indisponible ; veuillez la saisir manuellement"
+    model_filtering: "Filtrage des modeles compatibles avec les appels d'outils"
+    model_filter_result: "Reduit a {count} modeles compatibles avec les appels d'outils"
+    model_filter_empty: "Aucun modele n'a passe le filtre d'appels d'outils ; la liste complete sera affichee"
+    model_filter_prompt: "Filtre :"
+    model_filter_hint: "Tapez pour filtrer, utilisez ↑/↓ pour selectionner, Enter pour confirmer et Esc pour revenir. Choisissez Modele personnalise pour saisir manuellement."
+    model_custom_option: "Modele personnalise..."
+    model_custom_required: "Le nom du modele est obligatoire"
+    model_custom_saved_as: "Sera enregistre sous : {model}"
+    verify_title: "Verification"
+    verify_header: "Verification de la prise en charge des appels d'outils..."
+    verify_connectivity_in_progress: "Verification de la connectivite..."
+    verify_tool_in_progress: "Verification de la prise en charge des outils..."
+    verify_static_no_tool_support: "Le modele ne prend pas en charge les appels d'outils (verification statique)"
+    verify_simple_success: "Verification reussie"
+    verify_simple_failed_with_reason: "Verification echouee : {reason}"
+    verify_failed_unknown: "erreur inconnue"
+    verify_live_label: "Verification en direct"
+    verify_live_detail: "Details"
+    verify_timeout: "La verification en direct a expire"
+    verify_cancelled: "Verification en direct annulee"
+    verify_no_tool_call_required: "Aucun appel d'outil n'a ete renvoye (mode requis)"
+    verify_no_tool_call_auto: "Le modele n'a appele aucun outil en mode automatique"
+    debug_request_title: "Requete en direct ({mode})"
+    debug_response_title: "Reponse en direct ({mode})"
+    debug_error_title: "Erreur en direct ({mode})"
+    support_yes: "Pris en charge"
+    support_no: "Non pris en charge"
+    support_unknown: "Inconnu"
+    litellm_missing: "litellm n'est pas installe ; verification ignoree"
+    action_header: "Action suivante :"
+    action_prompt: "Choisir une option"
+    action_retry_model: "Choisir un autre modele"
+    action_retry_api_base: "Ressaisir l'API Base"
+    action_retry_api_key: "Ressaisir la cle API"
+    action_change_provider: "Changer de fournisseur"
+    action_continue: "Continuer quand meme (deconseille)"
+    action_exit: "Quitter la configuration"
+    retry_api_base_prompt: "Saisissez l'API Base (back pour revenir)"
+    retry_api_base_prompt_with_current: "Saisissez l'API Base (actuelle : {current}, back pour revenir)"
+    retry_api_base_required: "L'API Base est obligatoire"
+    saved: "Configuration enregistree"
+    saved_with_warning: "Configuration enregistree (appel d'outil non verifie)"
+    non_interactive: "Environnement non interactif ; impossible d'executer la configuration"
+    cancelled: "Configuration annulee"
+    required_cancelled: "Configuration requise manquante ; fermeture"
+    connectivity_ok: "Connectivite OK ({}ms)"
+    config_path: "Chemin de configuration : {}"
+    setup_complete_hint: "Vous pouvez maintenant lancer \x1b[1maish\x1b[0m pour demarrer le shell."
+
+  startup:
+    label:
+      skills: "Skills"
+    goodbye: "👋 Au revoir !"
+    config_file_error: "❌ Erreur de fichier de configuration : {error}"
+    config_file_hint: "💡 Utilisez --config pour specifier un chemin de configuration valide"
+
+  langfuse:
+    incomplete: "⚠️  La configuration Langfuse est incomplete"
+    missing: "   Manquant : {var}"
+    complete: "✅ La configuration Langfuse est complete"
+    script_failed: "Le script de verification Langfuse a echoue : {error}"
+    script_not_found: "Script check_langfuse.py introuvable"
+    run_from_root: "Veuillez executer cette commande depuis la racine du projet"
+
+  parse_errors:
+    title: "Erreur"
+    option_requires_argument: "L'option {option} requiert un argument."
+    no_such_option: "Option inconnue : {option}"
+    missing_parameter: "Parametre manquant : {param}"
+    invalid_value_for_option: "Valeur invalide pour {option} : {reason}"
+    generic: "Arguments invalides : {message}"
+
+shell:
+  welcome2:
+    header: ">_ AI Shell {version}"
+    model_hint: "(tapez /model pour changer)"
+    label:
+      model: "modele"
+      config: "config"
+    quick_start:
+      title: " Demarrage rapide :"
+      item1_prefix: "Commandes shell natives : "
+      cmd_ls: "ls"
+      cmd_top: "top"
+      cmd_vim: "vim"
+      cmd_ssh: "ssh"
+      item1_suffix: " etc."
+      item2_prefix: "Demander a l'IA : "
+      item2_example: "Commencez par ;, par exemple ; comment trouver de gros fichiers"
+      item3_prefix: "Obtenir de l'aide :"
+      item3_suffix_1: "Tapez "
+      item3_keyword: "help"
+      item3_suffix_2: " pour voir l'aide integree et l'utilisation."
+    risk: "Le contenu genere par l'IA peut etre risque ; verifiez-le attentivement."
+    skills_loaded_suffix: " charges"
+
+  security:
+    title:
+      blocked: "🛑 Blocage de securite : {tool}"
+      notice: "🔐 Avertissement de securite : {tool}"
+      confirm: "🔐 Confirmation requise : {tool}"
+    label:
+      description: "Description"
+      command: "Commande"
+      target: "Cible"
+      content_preview: "Apercu du contenu"
+      fallback_hint: "Note"
+      risk_level: "Niveau de risque"
+      reasons: "Raisons"
+      alternatives: "Alternatives"
+      impact: "Impact"
+      no_additional_info: "Aucune information supplementaire fournie."
+    fallback:
+      sandbox_execute_failed: "La pre-execution de la commande a echoue, le risque ne peut donc pas etre evalue. Veuillez confirmer avant d'executer la vraie commande."
+      sandbox_timeout: "La pre-execution de la commande a expire, le risque ne peut donc pas etre evalue. Veuillez confirmer avant d'executer la vraie commande."
+      sandbox_ipc_timeout: "Delai d'attente depasse lors de l'evaluation preliminaire de la commande ; le risque ne peut donc pas etre evalue. Veuillez confirmer avant d'executer la vraie commande."
+      generic: "L'evaluation du risque de la commande n'a pas pu etre menee a bien. Veuillez confirmer avant d'executer la vraie commande."
+    options_header: "Options"
+    option:
+      approve: "Autoriser"
+      approve_remember: "Oui, et ne plus demander pour cette commande"
+      cancel: "Annuler"
+    choice_prompt: "Votre choix (par defaut : n) : "
+
+  command_cancelled: "Commande annulee"
+  error_correction:
+    press_semicolon_hint: "L'execution de la commande a echoue. Tapez ; puis Enter pour analyser et reparer automatiquement, ou saisissez la commande suivante."
+    corrected_command_label: "Correction suggeree :"
+  error:
+    execution_error: "❌ Erreur pendant l'execution : {error}"
+    pty_decode_error: "Erreur de decodage de sortie PTY detectee : {error}"
+    potential_error: "🚀 Probleme potentiel detecte : {reason}, tentative de resolution..."
+    llm_error_title: "❌ Echec de la requete LLM"
+    llm_error_message: "Erreur : {error}"
+    llm_error_details_title: "Details de debogage"
+    tool_args_json_invalid_hint: "❌ La requete a echoue, veuillez reessayer."
+  prompt:
+    confirm_execute: "?Executer cette commande ? [y/n]:"
+    ai_hint: "Utilisez ; pour interroger l'IA"
+  model:
+    current: "Modele actuel : {model}"
+    unset: "non defini"
+    invalid: "Le nom du modele ne peut pas etre vide"
+    switching: "Validation du modele : {model}"
+    switch_same: "Modele inchange : {model}"
+    switch_success: "Modele active : {model}"
+    verify_failed: "La validation du modele a echoue : {reason}"
+  token:
+    title: "Utilisation de tokens (7 derniers jours)"
+    input_tokens: "Tokens d'entrée"
+    output_tokens: "Tokens de sortie"
+    total: "Total"
+    api_calls: "Appels API"
+  setup:
+    no_config_manager: "Reconfiguration impossible : gestionnaire de configuration indisponible"
+    cancelled: "Configuration annulee, les parametres actuels sont conserves"
+    applied: "Configuration mise a jour, modele actuel : {model}"
+  ask_user:
+    title: "Selectionnez une option"
+    custom_label: "Personnalise :"
+    hint_select: "Entree pour confirmer · ↑/↓ pour naviguer · Esc pour annuler"
+    hint_custom: "Entree pour confirmer · ↑/↓ pour naviguer · Tab ou saisie directe pour entrer du texte · Esc pour annuler"
+    paused:
+      title: "⏸ Saisie utilisateur requise (tache en pause)"
+      prompt: "Question : {prompt}"
+      reason: "Raison : {reason}"
+      options_header: "Options :"
+      custom_input: "Vous pouvez aussi repondre avec n'importe quelle valeur personnalisee."
+      how_to: "Repondez avec une valeur d'option (ou un numero) ou tapez ; continue with default (par defaut : {default})."
+  diagnose_cancelled: "  └─ ❌ Diagnostic systeme annule"
+  status:
+    thinking: "Reflexion"
+    thinking_now: "Reflexion"
+    processing: "Traitement"
+    analyzing: "  Analyse..."
+    system_diagnosing: "  └─ Diagnostic systeme en cours"
+    system_analyzing: "  └─ Analyse systeme en cours"
+  tool:
+    prefix: "🔧 Utilisation de l'outil"
+    prefix_diagnose: "  └─ 🔧 Outil de diagnostic"
+    done_diagnose: "  └─ ✅ Diagnostic termine"
+
+security:
+  sandbox_off_action:
+    allow: "Autoriser directement"
+    confirm: "Demander confirmation"
+    block: "Bloquer"
+  sandbox_unavailable:
+    title: "⚠️ Sandbox indisponible"
+    line1: "Le sandbox est indisponible ; le risque de la commande ne peut pas etre evalue."
+    line2: "Les commandes generees par l'IA suivantes seront traitees ainsi : {action}."
+    policy_line1: "Le sandbox est desactive par politique ; aucune execution de sandbox n'a eu lieu."
+    policy_line2: "Les commandes IA seront traitees ainsi : {action}."
+    reason: "Raison : {reason}"
+    error: "Erreur : {error}"
+    root_required: "Le sandbox requiert les privileges root"
+    ipc_unavailable: "Impossible de se connecter au service sandbox (aish-sandbox.socket n'est pas en cours d'execution ou n'est pas installe)"
+    ipc_failed: "Echec de l'execution du service sandbox (aish-sandbox)"
+    sandbox_execute_failed: "Impossible d'evaluer le risque de la commande ; veuillez confirmer avant l'execution"
+  risk_reason:
+    sandbox_disabled_by_policy: "Le sandbox est desactive par politique ; les modifications de fichiers ne peuvent pas etre inspectees pour l'evaluation du risque. Action : {action}."
+    sandbox_disabled: "Le sandbox n'est pas active ou est desactivee ; les modifications de fichiers ne peuvent pas etre inspectees pour l'evaluation du risque. Action : {action}."
+    cwd_outside_repo_root: "Le repertoire courant {cwd} est hors de la racine du sandbox {root} ; les effets relatifs ne peuvent pas etre evalues de facon fiable. Action : {action}."
+    sandbox_unavailable: "L'initialisation ou l'execution du sandbox a echoue ; les modifications de fichiers ne peuvent pas etre inspectees pour l'evaluation du risque. Action : {action}."
+    sandbox_exception: "Erreur d'execution du sandbox ; les modifications de fichiers ne peuvent pas etre inspectees pour l'evaluation du risque. Action : {action}."
+    sandbox_failed: "Echec du sandbox ; les modifications de fichiers ne peuvent pas etre inspectees pour l'evaluation du risque. Action : {action}."
+    policy_fallback_rule_match: "Avec le sandbox desactive par politique, la commande {command} a correspondu a {count} chemins de regles de secours ; traitement comme risque {risk}."
+  ai_risk:
+    no_fs_changes: "Le sandbox n'a detecte aucune ecriture ou suppression de fichier."
+    high_hits: "{count} operations d'ecriture ou de suppression correspondant a des regles a haut risque ont ete detectees."
+    medium_hits: "{count} operations d'ecriture ou de suppression correspondant a des regles a risque moyen ont ete detectees."
+    low_or_unmatched_hits: "{count} operations d'ecriture ou de suppression a faible risque ou sans correspondance ont ete detectees."
+    preview_paths: "Exemples de chemins (partiels, pouvant inclure des fichiers ou repertoires) : {paths}"
+  command_blocked: "Erreur : commande bloquee par le systeme de securite"
+  command_blocked_with_reason: "Erreur : commande bloquee par le systeme de securite : {reason}"
+
+tools:
+  smart_log:
+    description: "Determine automatiquement les sources de journaux, analyse les logs selon la requete et renvoie un resume correspondant."
+    param:
+      query: "Votre requete de diagnostic, par exemple 'nginx est-il correctement configure' ou 'y a-t-il des connexions suspectes'."
+      path: "Optionnel. Chemin du journal (fichier/repertoire) ou nom d'une unite systemd. S'il est omis, il sera deduit de la requete."
+    summary:
+      file: "[FICHIER] {ident} : {matched}/{total} lignes correspondantes\nExemple :\n{sample}"
+      dir: "[REP] {path} : {matched}/{total} lignes correspondantes\nExemple :\n{sample}"
+      systemd: "[SYSTEMD] {ident} : {matched}/{total} lignes correspondantes\nExemple :\n{sample}"
+      call_failed: "[{stype}] {ident} : appel echoue\n{output}"
+    no_logs_found: "Aucun journal ou aucune information correspondante trouve(e)."
+
+help:
+  labels:
+    usage: "Utilisation"
+    options: "Options"
+    examples: "Exemples"
+    notes: "Notes"
+    brief_usage: "Utilisation : {usage}"
+  general:
+    title: "📖 Aide AI Shell"
+    markdown: |-
+      ## Commandes disponibles :
+
+      ### Navigation dans les repertoires
+      - `cd [-L|[-P [-e]]] [directory]` - Changer de repertoire avec prise en charge complete des parametres
+      - `pushd [directory]` - Empiler un repertoire
+      - `popd` - Depiler un repertoire
+      - `dirs [-c]` - Afficher la pile de repertoires
+
+      ### Historique
+      - `history [options] [n]` - Afficher l'historique des commandes
+      - `history -c` - Effacer l'historique
+      - `history -d offset` - Supprimer une entree de l'historique
+
+      ### Variables d'environnement
+      - `export [-fn] [name[=value] ...]` - Definir ou exporter des variables d'environnement
+      - `export -p` - Afficher les variables exportees
+      - `unset [-fv] [name ...]` - Supprimer des variables d'environnement
+      - `pwd [-L|-P]` - Afficher le repertoire courant
+
+      ### Commandes generales
+      - `help` - Afficher cette aide
+      - `clear` - Effacer l'ecran
+      - `exit` - Quitter le shell
+      - `/model [model]` - Afficher ou changer le modele
+      - `/setup` - Reconfigurer les parametres API
+
+      ### Commandes IA
+      - `; <question>` - Interroger l'assistant IA
+
+      ### Fonctionnalites
+      - ✅ Prise en charge PTY complete pour toutes les commandes
+      - ✅ Integration de l'historique des commandes et du contexte IA
+      - ✅ Sortie terminal enrichie pour les reponses IA
+      - ✅ Gestion des signaux et nettoyage propre
+
+      ### Obtenir plus d'aide
+      Utilisez `<command> --help` ou `<command> -h` pour afficher l'aide detaillee de n'importe quelle commande.
+
+      ### Exemples
+      ```bash
+      history --help       # Afficher l'aide detaillee de history
+      cd --help            # Afficher l'aide detaillee de cd
+      export JAVA_HOME="/usr/lib/jvm/java-11"  # Definir une variable d'environnement
+      unset TEMP_VAR       # Supprimer une variable d'environnement
+      ; explique ls -la    # Demander a l'IA d'expliquer une commande
+      ```
+
+  command:
+    history:
+      title: "📚 Historique"
+      description: "Afficher ou manipuler l'historique des commandes"
+      usage: "history [options] [n]"
+      options:
+        - ["--help, -h", "Afficher ce message d'aide"]
+        - ["-c", "Effacer la liste d'historique en supprimant toutes les entrees"]
+        - ["-d offset", "Supprimer l'entree d'historique a la position offset"]
+        - ["n", "Afficher seulement les n dernieres commandes"]
+      examples:
+        - "history              # Afficher tout l'historique des commandes"
+        - "history 10           # Afficher les 10 dernieres commandes"
+        - "history -c           # Effacer tout l'historique"
+        - "history -d 5         # Supprimer l'entree d'historique a la position 5"
+        - "history --help       # Afficher ce message d'aide"
+      notes: "Les entrees d'historique sont enregistrees automatiquement pour toutes les commandes executees et les interactions avec l'IA."
+
+    cd:
+      title: "📁 Changer de repertoire"
+      description: "Changer le repertoire de travail courant avec prise en charge complete des parametres"
+      usage: "cd [-L|[-P [-e]]] [directory]"
+      options:
+        - ["-L", "Forcer le suivi des liens symboliques : resoudre les liens symboliques apres le traitement des occurrences de '..' (par defaut)"]
+        - ["-P", "Utiliser la structure physique des repertoires sans suivre les liens symboliques : resoudre les liens symboliques avant le traitement des occurrences de '..'"]
+        - ["-e", "Si l'option -P est fournie et que le repertoire de travail courant ne peut pas etre determine, quitter avec un code non nul"]
+        # - ["-@", "Sur les systemes qui le prennent en charge, presenter les fichiers avec attributs etendus comme des repertoires contenant les attributs du fichier"]
+        - ["directory", "Chemin du repertoire cible (optionnel, utilise le repertoire personnel par defaut)"]
+        - ["-", "Revenir au repertoire precedent"]
+      examples:
+        - "cd ~                 # Aller au repertoire personnel"
+        - "cd /tmp              # Aller au repertoire /tmp"
+        - "cd -                 # Revenir au repertoire precedent"
+        - "cd \"path with spaces\" # Utiliser des guillemets pour les chemins contenant des espaces"
+        - "cd -P /tmp           # Utiliser la resolution de chemin physique"
+        - "cd -P -e /tmp        # Utiliser la resolution de chemin physique et quitter en cas d'erreur"
+        - "cd -L /tmp           # Forcer le suivi des liens symboliques (comportement par defaut)"
+        # - "cd -@ /tmp           # Afficher les attributs etendus (si pris en charge)"
+      notes: "Prend en charge l'autocompletion par Tab et les chemins avec caracteres speciaux. Le comportement par defaut suit les liens symboliques (-L)."
+
+    pushd:
+      title: "📤 Empiler un repertoire"
+      description: "Ajouter un repertoire a la pile et s'y deplacer"
+      usage: "pushd [directory]"
+      options:
+        - ["directory", "Chemin du repertoire cible"]
+        - ["(no args)", "Echanger les deux repertoires au sommet de la pile"]
+      examples:
+        - "pushd /tmp           # Ajouter le repertoire courant a la pile et aller a /tmp"
+        - "pushd                # Echanger entre le repertoire courant et le precedent"
+      notes: "Maintient une pile de repertoires pour naviguer facilement entre plusieurs repertoires."
+
+    popd:
+      title: "📥 Depiler un repertoire"
+      description: "Retirer un repertoire de la pile et s'y deplacer"
+      usage: "popd"
+      options: []
+      examples:
+        - "popd                 # Revenir au repertoire precedent depuis la pile"
+      notes: "Retire le repertoire au sommet de la pile et s'y deplace."
+
+    dirs:
+      title: "📋 Afficher la pile de repertoires"
+      description: "Afficher la pile de repertoires"
+      usage: "dirs [-c]"
+      options:
+        - ["-c", "Effacer la pile de repertoires"]
+      examples:
+        - "dirs                 # Afficher la pile de repertoires actuelle"
+        - "dirs -c              # Effacer la pile de repertoires"
+      notes: "Affiche tous les repertoires actuellement presents dans la pile de navigation."
+
+    help:
+      title: "❓ Aide"
+      description: "Afficher les commandes et fonctionnalites disponibles"
+      usage: "help"
+      options: []
+      examples:
+        - "help                 # Afficher l'aide generale"
+      notes: "Fournit un apercu de toutes les commandes et fonctionnalites disponibles du shell."
+
+    clear:
+      title: "🧹 Effacer l'ecran"
+      description: "Effacer l'ecran du terminal"
+      usage: "clear"
+      options: []
+      examples:
+        - "clear                # Effacer l'ecran du terminal"
+      notes: "Equivalent a la commande Unix standard clear."
+
+    exit:
+      title: "🚪 Quitter le shell"
+      description: "Quitter AI Shell"
+      usage: "exit"
+      options: []
+      examples:
+        - "exit                 # Quitter le shell"
+        - "quit                 # Methode alternative pour quitter"
+      notes: "Quitte proprement le shell en preservant les donnees de session."
+
+    export:
+      title: "🔧 Exporter les variables d'environnement"
+      description: "Definir ou afficher les variables d'environnement avec attribut d'export"
+      usage: "export [-fn] [name[=value] ...]\nexport -p"
+      options:
+        - ["-f", "Le nom fait reference a une fonction shell (non pris en charge)"]
+        - ["-n", "Retirer l'attribut d'export de chaque nom"]
+        - ["-p", "Afficher la liste de toutes les variables exportees"]
+        - ["--", "Desactiver le traitement ulterieur des options"]
+      examples:
+        - "export PATH=/usr/local/bin:$PATH"
+        - "export EDITOR=vim"
+        - "export -n VAR  # Retirer l'attribut d'export de VAR"
+        - "export -p      # Afficher toutes les variables exportees"
+        - "export JAVA_HOME=\"/usr/lib/jvm/java-11-openjdk\""
+        - "export -- -VAR  # Definir une variable nommee -VAR"
+      notes: "Les variables d'environnement definies avec export sont transmises aux processus enfants."
+
+    unset:
+      title: "🗑️ Supprimer les variables d'environnement"
+      description: "Supprimer les variables et fonctions du shell"
+      usage: "unset [-f] [-v] [-n] [name ...]"
+      options:
+        - ["-f", "Chaque nom fait reference a une fonction shell (non pris en charge)"]
+        - ["-v", "Chaque nom fait reference a une variable shell (par defaut)"]
+        - ["-n", "Chaque nom fait reference a une reference de nom (non pris en charge)"]
+        - ["--", "Desactiver le traitement ulterieur des options"]
+      examples:
+        - "unset TEMP_VAR"
+        - "unset -v VAR1 VAR2"
+        - "unset JAVA_HOME"
+        - "unset -- -VAR  # Supprimer la variable nommee -VAR"
+      notes: "Retire les variables de l'environnement du shell. Les variables inexistantes sont ignorees."
+
+    pwd:
+      title: "📍 Afficher le repertoire courant"
+      description: "Afficher le repertoire de travail courant avec gestion des liens symboliques"
+      usage: "pwd [-L|-P]"
+      options:
+        - ["-L", "Afficher le chemin logique (suivre les liens symboliques, par defaut)"]
+        - ["-P", "Afficher le chemin physique (resoudre les liens symboliques)"]
+      examples:
+        - "pwd                  # Afficher le repertoire courant logique"
+        - "pwd -L               # Afficher le chemin logique (respecte les liens symboliques)"
+        - "pwd -P               # Afficher le chemin physique (resout les liens symboliques)"
+      notes: "Le comportement par defaut affiche le chemin logique en respectant les liens symboliques."
+
+    ";":
+      title: "🤖 Assistant IA"
+      description: "Poser une question a l'assistant IA"
+      usage: "; <question>"
+      options:
+        - ["question", "Votre question pour l'assistant IA"]
+      examples:
+        - "; comment trouver de gros fichiers ?"
+        - "; explique cette commande : ls -la"
+        - "; suggere une meilleure facon de compresser des fichiers"
+      notes: "L'assistant IA peut aider avec les explications de commandes, les suggestions et l'usage general du shell."
+
+    "；":
+      title: "🤖 Assistant IA"
+      description: "Poser une question a l'assistant IA"
+      usage: "； <question>"
+      options:
+        - ["question", "Votre question pour l'assistant IA"]
+      examples:
+        - "； comment trouver de gros fichiers ?"
+        - "； explique cette commande : ls -la"
+        - "； suggere une meilleure facon de compresser des fichiers"
+      notes: "L'assistant IA peut aider avec les explications de commandes, les suggestions et l'usage general du shell."
+
+    "/model":
+      title: "🧠 Changer de modele"
+      description: "Afficher le modele actuel ou passer a un modele specifie"
+      usage: "/model [model]"
+      options:
+        - ["model", "Identifiant du modele cible (verifie pour la prise en charge des appels d'outils)"]
+        - ["--help, -h", "Afficher ce message d'aide"]
+      examples:
+        - "/model               # Afficher le modele actuel"
+        - "/model gpt-4         # Passer a un modele"
+        - "/model --help        # Afficher l'aide"
+      notes: "Le changement verifie la connectivite et la prise en charge des appels d'outils ; en cas d'echec, le modele actuel est conserve."
+
+    "/setup":
+      title: "⚙️ Reconfigurer"
+      description: "Relancer l'assistant de configuration interactif pour modifier les parametres d'API (fournisseur, cle API, modele)"
+      usage: "/setup"
+      options:
+        - ["--help, -h", "Afficher ce message d'aide"]
+      examples:
+        - "/setup               # Lancer l'assistant de configuration"
+        - "/setup --help        # Afficher l'aide"
+      notes: "Les nouveaux parametres sont appliques immediatement sans redemarrage. Une annulation conserve la configuration actuelle."
+
+errors:
+  litellm_not_installed: "Le module litellm n'est pas installe"

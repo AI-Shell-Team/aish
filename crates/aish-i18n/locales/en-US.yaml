@@ -1,0 +1,648 @@
+cli:
+  app_help: "AI Shell - A shell with built-in LLM capabilities"
+  help_option_help: "Show this message and exit."
+  run_command_help: "Run the AI Shell"
+  info_command_help: "Show information about AI Shell"
+  check_langfuse_command_help: "Check Langfuse configuration"
+  setup_command_help: "Run interactive setup and exit"
+  check_tool_support_command_help: "Debug live tool-call support check"
+
+  models:
+    help: "Manage models and provider auth"
+    usage_command_help: "Show provider status and usage dashboard information"
+    auth:
+      help: "Authenticate with a provider"
+      login_command_help: "Deprecated alias for `aish models auth`."
+      option:
+        provider: "Provider id to authenticate (for example: openai-codex)."
+        model: "Default provider model to store in config after authentication."
+        set_default: "Update the config model to the provider model after authentication."
+        auth_flow: "Auth flow to use: browser, device-code, or codex-cli."
+        force: "Force a fresh provider login even if local auth already exists."
+        open_browser: "Open the browser automatically for browser auth."
+        callback_port: "Local callback port for browser auth. Use 0 for an ephemeral port."
+      unsupported_provider: "Unsupported provider `{provider}`. Supported providers: {supported}."
+      no_supported_provider: "No auth-capable provider is available in the current build."
+      provider_required: "Please specify which provider to authenticate. Available auth-capable providers: {providers}."
+      provider_required_example: "Example: {command}"
+      unsupported_auth_flow: "Auth flow `{auth_flow}` is not supported for {provider}."
+      deprecated_login_hint: "`aish models auth login` is deprecated. Use `aish models auth` instead."
+      auth_ready: "{provider} auth ready: {auth_path}"
+      default_model_set: "Default model set to {model}"
+      model_available: "{provider} model available: {model}"
+
+  models_usage:
+    current_model: "Current model"
+    provider: "Provider"
+    api_base: "API base"
+    status: "Status"
+    dashboard: "Dashboard"
+    dashboard_unavailable: "No dashboard available"
+    unknown_provider: "Unknown Provider"
+    authenticated: "Authenticated"
+    not_authenticated: "Not authenticated"
+    auth_file: "Auth file: {path}"
+    expires_at: "Expires: {timestamp}"
+    api_key_configured: "API key configured"
+    api_key_from_env: "Configured via {env_var}"
+    api_key_masked: "Credential: {masked}"
+    not_configured: "No credentials configured"
+    api_key_hint: "Set {env_var} or configure api_key in your config file."
+
+  openai_codex:
+    auth_not_found: "OpenAI Codex auth not found. Run `aish models auth --provider openai-codex` first."
+    auth_read_failed: "Failed to read Codex auth file: {path}"
+    auth_missing_tokens: "Codex auth file does not contain ChatGPT OAuth tokens. Re-run `aish models auth --provider openai-codex`."
+    auth_incomplete: "Codex auth is incomplete. Re-run `aish models auth --provider openai-codex`."
+
+  option:
+    model: "LLM model to use (can also be set via AISH_MODEL or config file)."
+    api_key: "API key for the LLM provider (can also be set via AISH_API_KEY or provider env vars)."
+    api_base: "API base URL for the LLM provider (can also be set via AISH_API_BASE or config file)."
+    config: "Path to configuration file (default: ~/.config/aish/config.yaml)."
+
+  setup:
+    entry_title: "Initial setup"
+    entry_header: "Choose how you want to configure your API access."
+    step_free_key: "Free key setup"
+    step_provider: "Step 1/3: Choose provider"
+    step_provider_endpoint: "Step 1.5/3: Choose endpoint"
+    step_key: "Step 2/3: Enter API key"
+    step_model: "Step 3/3: Choose model"
+    free_key_header: "Get a free API key using this device fingerprint."
+    free_key_detecting_location: "Detecting service region..."
+    free_key_location_detected: "Detected region: {location}"
+    free_key_location_cn: "Regional"
+    free_key_location_overseas: "Global"
+    free_key_registering: "Registering free API key..."
+    free_key_success: "Free API key acquired"
+    free_key_already_registered: "This device has already registered a free key"
+    free_key_failed_with_reason: "Free API key registration failed: {reason}"
+    free_key_provider_label: "Free API"
+    free_key_privacy_title: "Privacy Notice"
+    free_key_privacy_notice: |
+      To provide the free API Key service, we need to collect the following device information:
+
+      • Device fingerprint (a hash generated from hardware info like MAC address, disk serial number, motherboard serial number, etc.)
+      • Your service region (for optimal server assignment)
+
+      Purpose:
+      • Device fingerprint is used to prevent abuse, ensuring each device can only obtain one free key
+      • Service region is used to assign you the nearest server node
+
+      We promise:
+      • No personal identity information will be collected
+      • Device fingerprint is an irreversible hash, original hardware info cannot be recovered
+      • Data is used solely for this service and will not be shared with third parties
+    free_key_quota_exhausted: "Free quota exhausted"
+    free_key_quota_exhausted_hint: "Your free API Key quota has been exhausted. Please configure your own API Key to continue."
+    free_key_service_unavailable: "Service temporarily unavailable"
+    free_key_service_unavailable_hint: "Server resources have reached the limit or the service is temporarily unavailable. Please contact the administrator to increase the quota, or configure your own API Key to continue."
+    provider_header: "Choose a provider (type to filter)"
+    provider_filter_prompt: "Filter: "
+    provider_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to cancel."
+    provider_selected_label: "Provider"
+    provider_endpoint_selected_label: "Endpoint"
+    provider_endpoint_header: "Choose {provider} API endpoint"
+    model_selected_label: "Model"
+    provider_custom_note: "OpenAI-compatible"
+    provider_preset_base: "Preset API Base"
+    custom_api_base_title: "API Base URL"
+    custom_api_base_header: "Enter API Base URL."
+    provider_custom_api_base: "API Base URL"
+    provider_custom_api_base_required: "API Base is required"
+    provider_custom_api_base_invalid: "Invalid API Base URL"
+    provider_custom_default: "Custom"
+    invalid_choice: "Invalid selection"
+    filter_no_results: "No matches. Try again or press Enter to show all."
+    api_key_header: "Enter your API key (it will be saved to config)"
+    api_key_env_found: "Detected {env_key}: {masked}"
+    api_key_env_hint: "Press Enter to use detected key, or type a new one."
+    api_key_prompt: "API Key"
+    api_key_required: "API key is required"
+    model_header: "Provider: {provider}"
+    model_prompt: "Model name (type 'back' to change provider)"
+    model_hint_openrouter: "OpenRouter requires a provider prefix (e.g. openai/gpt-4o). If omitted, we'll default to openai/."
+    model_hint_custom: "Custom provider is OpenAI-compatible. If you omit a prefix, we'll save as openai/<model>."
+    model_hint_provider: "Recommended: {default}"
+    model_list_unavailable: "Model list unavailable; please enter manually"
+    model_filtering: "Filtering models by tool-call support"
+    model_filter_result: "Filtered to {count} tool-call capable models"
+    model_filter_empty: "No models passed the tool-call filter; showing full list"
+    model_filter_prompt: "Filter: "
+    model_filter_hint: "Type to filter, use ↑/↓ to select, Enter to confirm, Esc to go back. Select Custom to enter manually."
+    model_custom_option: "Custom model..."
+    model_custom_required: "Model name is required"
+    model_custom_saved_as: "Will be saved as: {model}"
+    verify_title: "Verification"
+    verify_header: "Verifying tool-call support..."
+    verify_connectivity_in_progress: "Checking connectivity..."
+    verify_tool_in_progress: "Checking tool support..."
+    verify_static_no_tool_support: "Model does not support tool calling (static check)"
+    verify_simple_success: "Verification successful"
+    verify_simple_failed_with_reason: "Verification failed: {reason}"
+    verify_failed_unknown: "unknown error"
+    verify_live_label: "Live check"
+    verify_live_detail: "Details"
+    verify_timeout: "Live verification timed out"
+    verify_cancelled: "Live verification cancelled"
+    verify_model_prefix_required: "When API Base is set, the model must include a provider prefix, for example openai/{model}"
+    verify_no_tool_call_required: "No tool call returned (required mode)"
+    verify_no_tool_call_auto: "Model did not call tool (auto mode)"
+    debug_request_title: "Live request ({mode})"
+    debug_response_title: "Live response ({mode})"
+    debug_error_title: "Live error ({mode})"
+    support_yes: "Supported"
+    support_no: "Not supported"
+    support_unknown: "Unknown"
+    litellm_missing: "litellm is not installed; verification skipped"
+    action_header: "Next action:"
+    action_prompt: "Choose an option"
+    action_retry_model: "Choose another model"
+    action_retry_api_base: "Re-enter API Base"
+    action_retry_api_key: "Re-enter API Key"
+    action_retry_free_key: "Retry free key registration"
+    action_fallback_manual: "Switch to manual setup"
+    action_use_free_key: "Use free API key"
+    action_manual_setup: "Manual provider setup"
+    action_change_provider: "Change provider"
+    action_continue: "Continue anyway (not recommended)"
+    action_exit: "Exit setup"
+    action_agree: "Agree and continue"
+    action_disagree: "Disagree"
+    retry_api_base_prompt: "Enter API Base (type back to return)"
+    retry_api_base_prompt_with_current: "Enter API Base (current: {current}, type back to return)"
+    retry_api_base_required: "API Base is required"
+    saved: "Configuration saved"
+    saved_with_warning: "Configuration saved (tool-call not verified)"
+    non_interactive: "Non-interactive environment; setup cannot run"
+    cancelled: "Setup cancelled"
+    required_cancelled: "Required configuration missing; exiting"
+    connectivity_ok: "Connectivity OK ({}ms)"
+    config_path: "Config path: {}"
+    setup_complete_hint: "You can now run \x1b[1maish\x1b[0m to start the shell."
+
+  startup:
+    label:
+      skills: "Skills"
+    goodbye: "👋 Goodbye!"
+    config_file_error: "❌ Config file error: {error}"
+    config_file_hint: "💡 Use --config to specify a valid config file path"
+
+  langfuse:
+    incomplete: "⚠️  Langfuse configuration is incomplete"
+    missing: "   Missing: {var}"
+    complete: "✅ Langfuse configuration is complete"
+    script_failed: "Langfuse check script failed: {error}"
+    script_not_found: "check_langfuse.py script not found"
+    run_from_root: "Please ensure you run this command from the project root"
+
+  parse_errors:
+    title: "Error"
+    missing_command: "A subcommand is required."
+    missing_command_hint: "Available commands: {commands}. Run {help_command} to see usage."
+    try_help_hint: "Run {help_command} to see usage."
+    missing_option: "Missing required option: {option}."
+    option_requires_argument: "Option {option} requires an argument."
+    no_such_option: "No such option: {option}"
+    missing_parameter: "Missing parameter: {param}"
+    invalid_value_for_option: "Invalid value for {option}: {reason}"
+    generic: "Invalid arguments: {message}"
+    models_auth:
+      provider_example: "Example: {command}"
+
+shell:
+  welcome2:
+    header: ">_ AI Shell {version}"
+    model_hint: "(type /model to switch)"
+    label:
+      model: "model"
+      config: "config"
+    quick_start:
+      title: " Quick Start:"
+      item1_prefix: "Native Shell commands: "
+      cmd_ls: "ls"
+      cmd_top: "top"
+      cmd_vim: "vim"
+      cmd_ssh: "ssh"
+      item1_suffix: " etc."
+      item2_prefix: "Ask AI: "
+      item2_example: "Start with ; (e.g., ; how to find large files)"
+      item3_prefix: "Get help:"
+      item3_suffix_1: "Type "
+      item3_keyword: "help"
+      item3_suffix_2: " to see built-in help and usage."
+    risk: "AI-generated content may be risky, please verify carefully."
+    skills_loaded_suffix: " loaded"
+
+  security:
+    title:
+      blocked: "🛑 Security Blocked: {tool}"
+      notice: "🔐 Security Notice: {tool}"
+      confirm: "🔐 Confirmation Required: {tool}"
+    label:
+      description: "Description"
+      command: "Command"
+      target: "Target"
+      content_preview: "Content Preview"
+      fallback_hint: "Note"
+      risk_level: "Risk Level"
+      reasons: "Reasons"
+      alternatives: "Alternatives"
+      impact: "Impact"
+      no_additional_info: "No additional information provided."
+
+    fallback:
+      sandbox_execute_failed: "Command pre-execution failed, so risk cannot be assessed. Please confirm before running the real command."
+      sandbox_timeout: "Command pre-execution timed out, so risk cannot be assessed. Please confirm before running the real command."
+      sandbox_ipc_timeout: "Waiting for command pre-evaluation timed out, so risk cannot be assessed. Please confirm before running the real command."
+      generic: "Could not complete command risk assessment. Please confirm before running the real command."
+    options_header: "Options"
+    option:
+      approve: "Approve"
+      approve_remember: "Yes, and don't ask again for this command"
+      cancel: "Cancel"
+    choice_prompt: "Your choice (default: n): "
+
+  command_cancelled: "Command cancelled"
+
+  error_correction:
+    press_semicolon_hint: "Command execution failed. Type ; and press Enter to auto-analyze and fix, or enter the next command directly."
+    corrected_command_label: "Suggested fix:"
+    corrected_command_title: "💡 Corrected command:"
+    confirm_execute_prefix: "Execute: "
+    confirm_execute_suffix: "? (Y/n): "
+    no_valid_command: "Unable to determine correct command"
+    retry_hint: "Type ';' to tell AI what you want to do, and it will help find the right command"
+
+  error:
+    execution_error: "❌ Error during execution: {error}"
+    pty_decode_error: "Caught PTY output decode error: {error}"
+    potential_error: "🚀 Potential issue detected: {reason}, attempting to resolve..."
+    llm_error_title: "❌ LLM Request Failed"
+    llm_error_message: "Error: {error}"
+    llm_error_details_title: "Debug Details"
+    tool_args_json_invalid_hint: "❌ Request failed, please retry."
+
+  hint:
+    run_setup: "Type /setup to reconfigure your API Key"
+
+  prompt:
+    confirm_execute: "?Execute this command? [y/n]:"
+    ai_hint: "Use ';' to ask AI"
+
+  model:
+    current: "Current model: {model}"
+    unset: "unset"
+    invalid: "Model name cannot be empty"
+    switching: "Validating model: {model}"
+    switch_same: "Model unchanged: {model}"
+    switch_success: "Switched to model: {model}"
+    verify_failed: "Model validation failed: {reason}"
+
+  token:
+    title: "Token Usage (last 7 days)"
+    input_tokens: "Input tokens"
+    output_tokens: "Output tokens"
+    total: "Total"
+    api_calls: "API calls"
+
+  setup:
+    no_config_manager: "Cannot reconfigure: configuration manager unavailable"
+    cancelled: "Setup cancelled, keeping current settings"
+    applied: "Configuration updated, current model: {model}"
+
+  ask_user:
+    title: "Select an option"
+    custom_label: "Custom:"
+    hint_select: "Enter to confirm · ↑/↓ to navigate · Esc to cancel"
+    hint_custom: "Enter to confirm · ↑/↓ to navigate · Tab or type to enter custom input · Esc to cancel"
+    paused:
+      title: "⏸ User input required (task paused)"
+      prompt: "Question: {prompt}"
+      reason: "Reason: {reason}"
+      options_header: "Options:"
+      custom_input: "You can also reply with any custom value."
+      how_to: "Reply with an option value (or number), or type `; continue with default` (default: {default}). Option descriptions are shown beneath each choice when available."
+
+  diagnose_cancelled: "  └─ ❌ System diagnosis cancelled"
+
+  status:
+    thinking: "Thinking"
+    thinking_now: "Thinking"
+    processing: "Processing"
+    analyzing: "  Analyzing..."
+    system_diagnosing: "  └─ System diagnosis in progress"
+    system_analyzing: "  └─ System analysis in progress"
+
+  tool:
+    prefix: "🔧 Using tool"
+    prefix_diagnose: "  └─ 🔧 Diagnose tool"
+    done_diagnose: "  └─ ✅ Diagnosis done"
+
+security:
+  sandbox_off_action:
+    allow: "Allow"
+    confirm: "Require confirmation"
+    block: "Block"
+
+  sandbox_unavailable:
+    title: "⚠️ Sandbox Unavailable"
+    line1: "Sandbox is unavailable; command risk cannot be evaluated."
+    line2: "Subsequent AI-generated commands will be handled as: {action}."
+    policy_line1: "Sandbox is disabled by policy; no sandbox run was performed."
+    policy_line2: "AI-generated commands will be handled as: {action}."
+    reason: "Reason: {reason}"
+    error: "Error: {error}"
+    root_required: "Sandbox requires root privileges"
+    ipc_unavailable: "Cannot connect to sandbox service (aish-sandbox.socket not running or not installed)"
+    ipc_failed: "Sandbox service execution failed (aish-sandbox)"
+    sandbox_execute_failed: "Cannot evaluate command risk; please confirm before executing"
+
+  risk_reason:
+    sandbox_disabled_by_policy: "Sandbox is disabled by policy; file changes cannot be inspected for risk evaluation. Action: {action}."
+    sandbox_disabled: "Sandbox is not enabled or configured off; file changes cannot be inspected for risk evaluation. Action: {action}."
+    cwd_outside_repo_root: "Current working directory {cwd} is outside sandbox root {root}; relative-path side effects cannot be reliably evaluated. Action: {action}."
+    sandbox_unavailable: "Sandbox initialization/execution failed; file changes cannot be inspected for risk evaluation. Action: {action}."
+    sandbox_exception: "Sandbox execution error; file changes cannot be inspected for risk evaluation. Action: {action}."
+    sandbox_failed: "Sandbox failed; file changes cannot be inspected for risk evaluation. Action: {action}."
+    policy_fallback_rule_match: "With sandbox disabled by policy, command {command} matched {count} fallback-rule paths; handling as {risk} risk."
+
+  ai_risk:
+    no_fs_changes: "Sandbox detected no file writes or deletions."
+    high_hits: "Detected {count} write/delete operations matching high-risk rules."
+    medium_hits: "Detected {count} write/delete operations matching medium-risk rules."
+    low_or_unmatched_hits: "Detected {count} write/delete operations matching low-risk or unmatched rules."
+    preview_paths: "Example paths (partial, may include dirs/files): {paths}"
+
+  command_blocked: "Error: Command blocked by the security system"
+  command_blocked_with_reason: "Error: Command blocked by the security system: {reason}"
+
+tools:
+  smart_log:
+    description: "Automatically determine log sources, analyze logs based on the query, and return a matched summary."
+    param:
+      query: "Your diagnostic query, e.g. 'is nginx configured correctly' or 'are there suspicious logins'."
+      path: "Optional. Log path (file/dir) or a systemd unit name. If omitted, it will be inferred from the query."
+    summary:
+      file: "[FILE] {ident}: matched {matched}/{total} lines\nSample:\n{sample}"
+      dir: "[DIR] {path}: matched {matched}/{total} lines\nSample:\n{sample}"
+      systemd: "[SYSTEMD] {ident}: matched {matched}/{total} lines\nSample:\n{sample}"
+      call_failed: "[{stype}] {ident}: call failed\n{output}"
+    no_logs_found: "No logs or matching information found."
+
+help:
+  labels:
+    usage: "Usage"
+    options: "Options"
+    examples: "Examples"
+    notes: "Notes"
+    brief_usage: "Usage: {usage}"
+
+  general:
+    title: "📖 AI Shell Help"
+    markdown: |-
+      ## Available Commands:
+
+      ### Directory Navigation
+      - `cd [-L|[-P [-e]]] [directory]` - Change directory with full parameter support
+      - `pushd [directory]` - Push directory onto stack
+      - `popd` - Pop directory from stack
+      - `dirs [-c]` - Show directory stack
+
+      ### History Management
+      - `history [options] [n]` - Show command history
+      - `history -c` - Clear history
+      - `history -d offset` - Delete history entry
+
+      ### Environment Variables
+      - `export [-fn] [name[=value] ...]` - Set/export environment variables
+      - `export -p` - Display exported variables
+      - `unset [-fv] [name ...]` - Unset environment variables
+      - `pwd [-L|-P]` - Print working directory
+
+      ### General Commands
+      - `help` - Show this help message
+      - `clear` - Clear the screen
+      - `exit` - Exit the shell
+      - `/model [model]` - Show or switch model
+      - `/setup` - Reconfigure API settings
+
+      ### AI Commands
+      - `; <question>` - Ask the AI assistant
+
+      ### Features
+      - ✅ Full PTY support for all commands
+      - ✅ Command history and AI context integration
+      - ✅ Rich terminal output for AI responses
+      - ✅ Signal handling and graceful cleanup
+
+      ### Getting Help
+      Use `<command> --help` or `<command> -h` for detailed help on any command.
+
+      ### Examples
+      ```bash
+      history --help       # Show detailed history help
+      cd --help            # Show detailed cd help
+      export JAVA_HOME="/usr/lib/jvm/java-11"  # Set environment variable
+      unset TEMP_VAR       # Remove environment variable
+      ; explain ls -la     # Ask AI to explain a command
+      ```
+
+  command:
+    history:
+      title: "📚 History Command"
+      description: "Display or manipulate command history"
+      usage: "history [options] [n]"
+      options:
+        - ["--help, -h", "Show this help message"]
+        - ["-c", "Clear the history list by deleting all entries"]
+        - ["-d offset", "Delete the history entry at position offset"]
+        - ["n", "Show only the last n commands"]
+      examples:
+        - "history              # Show all command history"
+        - "history 10           # Show last 10 commands"
+        - "history -c           # Clear all history"
+        - "history -d 5         # Delete history entry at position 5"
+        - "history --help       # Show this help message"
+      notes: "History entries are automatically recorded for all executed commands and AI interactions."
+
+    cd:
+      title: "📁 Change Directory"
+      description: "Change the current working directory with full parameter support"
+      usage: "cd [-L|[-P [-e]]] [directory]"
+      options:
+        - ["-L", "Force symbolic links to be followed: resolve symbolic links after processing '..' instances (default)"]
+        - ["-P", "Use physical directory structure without following symbolic links: resolve symbolic links before processing '..' instances"]
+        - ["-e", "If -P option is provided and current working directory cannot be determined, exit with non-zero status"]
+        # - ["-@", "On systems that support it, present files with extended attributes as directories containing file attributes"]
+        - ["directory", "Target directory path (optional, defaults to home directory)"]
+        - ["-", "Return to previous directory"]
+      examples:
+        - "cd ~                 # Switch to home directory"
+        - "cd /tmp              # Switch to /tmp directory"
+        - "cd -                 # Return to previous directory"
+        - "cd \"path with spaces\" # Use quotes for paths with spaces"
+        - "cd -P /tmp           # Use physical path resolution"
+        - "cd -P -e /tmp        # Use physical path resolution, exit on error"
+        - "cd -L /tmp           # Force following symbolic links (default behavior)"
+        # - "cd -@ /tmp           # Show extended attributes (if supported)"
+      notes: "Supports tab completion and handling of paths with special characters. Default behavior follows symbolic links (-L)."
+
+    pushd:
+      title: "📤 Push Directory"
+      description: "Push directory onto stack and change to it"
+      usage: "pushd [directory]"
+      options:
+        - ["directory", "Target directory path"]
+        - ["(no args)", "Swap top two directories on stack"]
+      examples:
+        - "pushd /tmp           # Push current dir to stack, go to /tmp"
+        - "pushd                # Swap between current and previous directory"
+      notes: "Maintains a directory stack for easy navigation between multiple directories."
+
+    popd:
+      title: "📥 Pop Directory"
+      description: "Pop directory from stack and change to it"
+      usage: "popd"
+      options: []
+      examples:
+        - "popd                 # Return to previous directory from stack"
+      notes: "Removes the top directory from the stack and changes to it."
+
+    dirs:
+      title: "📋 Show Directory Stack"
+      description: "Display the directory stack"
+      usage: "dirs [-c]"
+      options:
+        - ["-c", "Clear the directory stack"]
+      examples:
+        - "dirs                 # Show current directory stack"
+        - "dirs -c              # Clear directory stack"
+      notes: "Shows all directories currently on the navigation stack."
+
+    help:
+      title: "❓ Help Command"
+      description: "Show available commands and features"
+      usage: "help"
+      options: []
+      examples:
+        - "help                 # Show general help information"
+      notes: "Provides overview of all available commands and shell features."
+
+    clear:
+      title: "🧹 Clear Screen"
+      description: "Clear the terminal screen"
+      usage: "clear"
+      options: []
+      examples:
+        - "clear                # Clear the terminal screen"
+      notes: "Equivalent to the standard Unix clear command."
+
+    exit:
+      title: "🚪 Exit Shell"
+      description: "Exit the AI Shell"
+      usage: "exit"
+      options: []
+      examples:
+        - "exit                 # Exit the shell"
+        - "quit                 # Alternative way to exit"
+      notes: "Cleanly exits the shell, preserving session data."
+
+    export:
+      title: "🔧 Export Environment Variables"
+      description: "Set or display environment variables with export attributes"
+      usage: "export [-fn] [name[=value] ...]\nexport -p"
+      options:
+        - ["-f", "Name refers to a shell function (not supported)"]
+        - ["-n", "Remove export attribute from each name"]
+        - ["-p", "Display list of all exported variables"]
+        - ["--", "Disable further option processing"]
+      examples:
+        - "export PATH=/usr/local/bin:$PATH"
+        - "export EDITOR=vim"
+        - "export -n VAR  # Remove export attribute from VAR"
+        - "export -p      # Display all exported variables"
+        - "export JAVA_HOME=\"/usr/lib/jvm/java-11-openjdk\""
+        - "export -- -VAR  # Set variable named -VAR"
+      notes: "Environment variables set with export are passed to child processes."
+
+    unset:
+      title: "🗑️ Unset Environment Variables"
+      description: "Unset shell variables and functions"
+      usage: "unset [-f] [-v] [-n] [name ...]"
+      options:
+        - ["-f", "Each name refers to a shell function (not supported)"]
+        - ["-v", "Each name refers to a shell variable (default)"]
+        - ["-n", "Each name refers to a name reference (not supported)"]
+        - ["--", "Disable further option processing"]
+      examples:
+        - "unset TEMP_VAR"
+        - "unset -v VAR1 VAR2"
+        - "unset JAVA_HOME"
+        - "unset -- -VAR  # Unset variable named -VAR"
+      notes: "Removes variables from the shell environment. Variables that don't exist are ignored."
+
+    pwd:
+      title: "📍 Print Working Directory"
+      description: "Print the current working directory with symlink handling"
+      usage: "pwd [-L|-P]"
+      options:
+        - ["-L", "Show logical path (follow symlinks, default)"]
+        - ["-P", "Show physical path (resolve symlinks)"]
+      examples:
+        - "pwd                  # Show logical current directory"
+        - "pwd -L               # Show logical path (respect symlinks)"
+        - "pwd -P               # Show physical path (resolve symlinks)"
+      notes: "Default behavior shows logical path that respects symbolic links."
+
+    ";":
+      title: "🤖 AI Assistant"
+      description: "Ask the AI assistant a question"
+      usage: "; <question>"
+      options:
+        - ["question", "Your question for the AI assistant"]
+      examples:
+        - "; how do I find large files?"
+        - "; explain this command: ls -la"
+        - "; suggest a better way to compress files"
+      notes: "The AI assistant can help with command explanations, suggestions, and general shell usage."
+
+    "；":
+      title: "🤖 AI Assistant"
+      description: "Ask the AI assistant a question"
+      usage: "； <question>"
+      options:
+        - ["question", "Your question for the AI assistant"]
+      examples:
+        - "； how do I find large files?"
+        - "； explain this command: ls -la"
+        - "； suggest a better way to compress files"
+      notes: "The AI assistant can help with command explanations, suggestions, and general shell usage."
+
+    "/model":
+      title: "🧠 model Switch Model"
+      description: "Show the current model or switch to a specified model"
+      usage: "/model [model]"
+      options:
+        - ["model", "Target model identifier (validated for tool-call support)"]
+        - ["--help, -h", "Show this help message"]
+      examples:
+        - "/model               # Show current model"
+        - "/model gpt-4         # Switch to a model"
+        - "/model --help        # Show help"
+      notes: "Switching validates connectivity and tool-call support; failures keep the current model."
+
+    "/setup":
+      title: "⚙️ setup Reconfigure"
+      description: "Re-run the interactive setup wizard to change API settings (provider, API key, model)"
+      usage: "/setup"
+      options:
+        - ["--help, -h", "Show this help message"]
+      examples:
+        - "/setup               # Launch setup wizard"
+        - "/setup --help        # Show help"
+      notes: "New settings are applied immediately without restart. Cancelling keeps current configuration."
+
+errors:
+  litellm_not_installed: "litellm module is not installed"

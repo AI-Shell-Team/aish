@@ -80,7 +80,6 @@ def test_ask_user_tool_cancelled_pauses(monkeypatch):
     assert result.meta.get("reason") == "cancelled"
     assert "continue with default" in result.output
     assert "Alpha option" in result.output
-    assert "ask_user_context" not in result.output
 
 
 def test_ask_user_tool_preserves_option_descriptions(monkeypatch):

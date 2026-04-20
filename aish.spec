@@ -5,7 +5,7 @@ Build command: pyinstaller aish.spec
 """
 
 import os
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files
 
 
 def _filter_linux_toolchain_libs(binaries):
@@ -86,7 +86,6 @@ litellm_datas = collect_data_files('litellm', includes=['litellm_core_utils/toke
 
 # Collect root-level JSON price/context data files
 litellm_json_datas = collect_data_files('litellm', includes=['*.json'])
-shell_hiddenimports = collect_submodules('aish.shell')
 
 block_cipher = None
 
@@ -147,7 +146,7 @@ a = Analysis(
         'tiktoken.load',
         'tiktoken.core',
         'regex',
-    ] + shell_hiddenimports,
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

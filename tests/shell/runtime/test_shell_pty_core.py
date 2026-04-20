@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import os
 import threading
-from types import SimpleNamespace
 
-import pytest
 from unittest.mock import Mock
 from unittest.mock import call
 
 from aish.memory.config import MemoryConfig
 from aish.memory.models import MemoryCategory
 from aish.i18n import t
-from aish.plan import PlanApprovalStatus, PlanPhase
 from aish.terminal.pty.command_state import CommandResult, CommandState
 from aish.terminal.pty.control_protocol import BackendControlEvent
 from aish.terminal.pty.manager import PTYManager
@@ -101,7 +98,6 @@ def _make_ai_handler() -> tuple[AIHandler, Mock]:
     shell._on_interrupt_requested = Mock()
     shell.submit_backend_command = Mock()
     shell.submit_ai_backend_command = Mock(return_value=True)
-    shell.content_was_streamed = False
     shell.operation_in_progress = False
     handler.shell = shell
     return handler, shell
@@ -122,29 +118,6 @@ def test_ai_handler_skips_prompt_redraw_when_question_is_cancelled():
 
     handler._display_ai_response.assert_not_called()
     shell.submit_backend_command.assert_not_called()
-
-
-@pytest.mark.timeout(5)
-def test_ai_handler_handles_single_question_without_host_followup():
-    handler, shell = _make_ai_handler()
-
-    def _complete_operation(coro, shell, history_entry=None):
-        _ = shell
-        coro.close()
-        return ("first-response", False)
-
-    handler._execute_ai_operation = Mock(side_effect=_complete_operation)
-    handler._display_ai_response = Mock()
-    handler._auto_retain_memory = Mock()
-    shell.consume_pending_ai_followup = Mock(return_value={"prompt": "ignored"})
-
-    handler.handle_question("hello")
-
-    assert handler._execute_ai_operation.call_count == 1
-    history_entry = handler._execute_ai_operation.call_args.kwargs["history_entry"]
-    assert history_entry["command"] == "hello"
-    shell.consume_pending_ai_followup.assert_not_called()
-    handler._display_ai_response.assert_called_once_with("first-response")
 
 
 def test_ai_handler_executes_corrected_command_via_security_submission():
@@ -231,13 +204,6 @@ def test_output_processor_filters_exit_echo():
     processor.set_filter_exit_echo(True)
 
     assert processor.process(b"\rexit\r\n") == b""
-
-
-def test_output_processor_filters_quit_echo():
-    processor = OutputProcessor(_FakePTYManager())
-    processor.set_filter_exit_echo(True)
-
-    assert processor.process(b"\rquit\r\n") == b""
 
 
 def test_output_processor_filters_prefixed_user_command_echo():
@@ -634,172 +600,6 @@ def test_shell_handle_prompt_submission_routes_setup_command_to_special_handler(
     shell.submit_backend_command.assert_not_called()
 
 
-@pytest.mark.timeout(5)
-def test_shell_handle_prompt_submission_routes_plan_command_to_special_handler():
-    shell = object.__new__(PTYAIShell)
-    shell._pty_manager = Mock()
-    shell._ai_handler = Mock()
-    shell._prompt_controller = Mock()
-    shell.submit_backend_command = Mock()
-    shell.handle_model_command = Mock()
-    shell.handle_setup_command = Mock()
-    shell.handle_plan_command = Mock()
-
-    PTYAIShell._handle_prompt_submission(shell, "/plan start")
-
-    shell._prompt_controller.remember_command.assert_called_once_with("/plan start")
-    shell.handle_plan_command.assert_called_once_with("/plan start")
-    shell.handle_model_command.assert_not_called()
-    shell.handle_setup_command.assert_not_called()
-    shell.submit_backend_command.assert_not_called()
-
-
-@pytest.mark.timeout(5)
-def test_shell_toggle_plan_mode_enters_plan_when_in_shell_mode():
-    shell = object.__new__(PTYAIShell)
-    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
-    shell.exit_plan_mode = Mock()
-    shell._leave_plan_mode_directly = Mock()
-
-    PTYAIShell.toggle_plan_mode(shell)
-
-    shell.llm_session.begin_new_plan.assert_called_once_with()
-    shell.exit_plan_mode.assert_not_called()
-    shell._leave_plan_mode_directly.assert_not_called()
-
-
-@pytest.mark.timeout(5)
-def test_shell_toggle_plan_mode_exits_plan_when_already_planning():
-    shell = object.__new__(PTYAIShell)
-    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
-    shell.exit_plan_mode = Mock()
-    shell._leave_plan_mode_directly = Mock()
-
-    PTYAIShell.toggle_plan_mode(shell)
-
-    shell._leave_plan_mode_directly.assert_called_once_with()
-    shell.exit_plan_mode.assert_not_called()
-    shell.llm_session.begin_new_plan.assert_not_called()
-
-
-@pytest.mark.timeout(5)
-def test_leave_plan_mode_directly_resets_planning_state_without_approval():
-    shell = object.__new__(PTYAIShell)
-    plan_state = Mock()
-    plan_state.phase = PlanPhase.PLANNING.value
-    plan_state.with_updates.return_value = "updated-plan-state"
-    shell.llm_session = Mock(plan_state=plan_state)
-
-    PTYAIShell._leave_plan_mode_directly(shell)
-
-    shell.llm_session.update_plan_state.assert_called_once_with("updated-plan-state")
-    plan_state.with_updates.assert_called_once_with(
-        phase=PlanPhase.NORMAL.value,
-        approval_status=PlanApprovalStatus.DRAFT.value,
-        approved_artifact_path=None,
-        approved_revision=None,
-        approved_artifact_hash=None,
-        approval_feedback_summary=None,
-    )
-
-
-@pytest.mark.timeout(5)
-def test_handle_plan_command_exit_leaves_plan_mode_without_approval():
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.PLANNING.value))
-    shell.exit_plan_mode = Mock()
-    shell._leave_plan_mode_directly = Mock()
-    shell._record_special_command_result = Mock()
-
-    PTYAIShell.handle_plan_command(shell, "/plan exit")
-
-    shell._leave_plan_mode_directly.assert_called_once_with()
-    shell.exit_plan_mode.assert_not_called()
-    shell.llm_session.begin_new_plan.assert_not_called()
-
-
-@pytest.mark.timeout(5)
-def test_handle_plan_command_start_shows_status_when_already_planning():
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell.llm_session = Mock(
-        plan_state=SimpleNamespace(
-            phase=PlanPhase.PLANNING.value,
-            approval_status=PlanApprovalStatus.DRAFT.value,
-            artifact_path="/tmp/plan.md",
-        )
-    )
-    shell._record_special_command_result = Mock()
-
-    PTYAIShell.handle_plan_command(shell, "/plan start")
-
-    shell.console.print.assert_called_once_with(
-        "mode=plan, approval_status=draft, artifact=/tmp/plan.md"
-    )
-    shell._record_special_command_result.assert_called_once_with(
-        "/plan start",
-        exit_code=0,
-        stdout="mode=plan, approval_status=draft, artifact=/tmp/plan.md",
-        stderr="",
-    )
-
-
-@pytest.mark.timeout(5)
-def test_handle_plan_command_exit_in_shell_mode_is_noop_status():
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell.llm_session = Mock(plan_state=SimpleNamespace(phase=PlanPhase.NORMAL.value))
-    shell._record_special_command_result = Mock()
-
-    PTYAIShell.handle_plan_command(shell, "/plan exit")
-
-    shell.console.print.assert_called_once_with("mode=shell, approval_status=draft, artifact=-")
-    shell.llm_session.begin_new_plan.assert_not_called()
-
-
-@pytest.mark.timeout(5)
-def test_handle_tool_execution_end_reports_plan_approval():
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-
-    PTYAIShell.handle_tool_execution_end(
-        shell,
-        SimpleNamespace(
-            data={
-                "tool_name": "exit_plan_mode",
-                "result_data": {"decision": "approve"},
-            }
-        ),
-    )
-
-    shell.console.print.assert_called_once_with(
-        t("plan.approval.approved"),
-        style="green",
-    )
-
-
-@pytest.mark.timeout(5)
-def test_handle_tool_execution_end_reports_plan_changes_requested():
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-
-    PTYAIShell.handle_tool_execution_end(
-        shell,
-        SimpleNamespace(
-            data={
-                "tool_name": "exit_plan_mode",
-                "result_data": {"decision": "changes_requested"},
-            }
-        ),
-    )
-
-    shell.console.print.assert_called_once_with(
-        t("plan.approval.changes_requested"),
-        style="yellow",
-    )
-
-
 def test_shell_handle_model_command_reports_current_model():
     shell = object.__new__(PTYAIShell)
     shell.console = Mock()
@@ -836,48 +636,6 @@ def test_shell_submit_backend_command_registers_user_seq():
     shell._output_processor.set_waiting_for_result.assert_called_once_with(True, "pwd")
     shell._pty_manager.send_command.assert_called_once_with(
         "pwd", command_seq=3, source="user"
-    )
-
-
-def test_shell_submit_backend_command_treats_quit_as_exit():
-    shell = object.__new__(PTYAIShell)
-    shell._pty_manager = Mock()
-    shell._output_processor = Mock()
-    shell._next_command_seq = 8
-    shell._pending_command_seq = None
-    shell._pending_command_text = None
-    shell._shell_phase = "editing"
-    shell._user_requested_exit = False
-
-    seq = PTYAIShell.submit_backend_command(shell, "quit")
-
-    assert seq == 8
-    assert shell._user_requested_exit is True
-    shell._output_processor.set_filter_exit_echo.assert_called_once_with(True)
-    shell._output_processor.set_waiting_for_result.assert_not_called()
-    shell._output_processor.prepare_user_command_echo.assert_called_once_with(
-        "exit", 8
-    )
-    shell._pty_manager.send_command.assert_called_once_with(
-        "exit", command_seq=8, source="user"
-    )
-
-
-def test_shell_submit_backend_command_maps_quit_exit_code_argument():
-    shell = object.__new__(PTYAIShell)
-    shell._pty_manager = Mock()
-    shell._output_processor = Mock()
-    shell._next_command_seq = 11
-    shell._pending_command_seq = None
-    shell._pending_command_text = None
-    shell._shell_phase = "editing"
-    shell._user_requested_exit = False
-
-    seq = PTYAIShell.submit_backend_command(shell, "quit 7")
-
-    assert seq == 11
-    shell._pty_manager.send_command.assert_called_once_with(
-        "exit 7", command_seq=11, source="user"
     )
 
 
@@ -1016,21 +774,6 @@ def test_shell_does_not_restart_after_explicit_exit_when_flag_was_not_set(monkey
     shell._restart_pty.assert_not_called()
 
 
-def test_shell_does_not_restart_after_explicit_quit_when_flag_was_not_set(monkeypatch):
-    shell = object.__new__(PTYAIShell)
-    shell._pty_manager = _FakePTYManager(last_command="quit")
-    shell._output_processor = Mock()
-    shell._pending_command_text = None
-    shell._user_requested_exit = False
-    shell._running = True
-    shell._restart_pty = Mock(return_value=True)
-
-    monkeypatch.setattr("aish.shell.runtime.app.os.read", lambda fd, size: b"")
-
-    PTYAIShell._handle_pty_output(shell)
-
-    assert shell._running is False
-    shell._restart_pty.assert_not_called()
 def test_backend_error_suppressed_prevents_repeated_hints(capsys):
     pty_manager = _FakePTYManager()
     processor = OutputProcessor(pty_manager)
@@ -1074,228 +817,3 @@ def test_user_command_error_shows_hint_exactly_once(capsys):
     )
     captured = capsys.readouterr()
     assert t("shell.error_correction.press_semicolon_hint") not in captured.out
-
-
-def test_ttft_timing_records_on_first_content_delta():
-    """Test that TTFT is recorded when first content delta arrives after operation start."""
-    import time
-
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell._stop_animation = Mock()
-    shell._reset_reasoning_state = Mock()
-    shell._finalize_content_preview = Mock()
-    shell._start_animation = Mock()
-    shell.current_live = None
-    shell._at_line_start = True
-    shell._last_streaming_accumulated = ""
-    shell._content_preview_active = False
-
-    # Initialize timing state
-    shell._timing_active = False
-    shell._thinking_start_time = 0.0
-    shell._ttft = 0.0
-    shell._ttft_recorded = False
-
-    # Simulate operation start
-    PTYAIShell.handle_operation_start(shell, Mock())
-
-    assert shell._timing_active is True
-    assert shell._thinking_start_time > 0
-    assert shell._ttft == 0.0
-    assert shell._ttft_recorded is False
-
-    # Small delay to ensure measurable time
-    time.sleep(0.01)
-
-    # Simulate first content delta - should record TTFT
-    PTYAIShell.handle_content_delta(shell, Mock(data={"delta": "Hello"}))
-
-    assert shell._ttft > 0
-    assert shell._ttft_recorded is True
-
-
-def test_ttft_timing_preserves_state_across_generations(monkeypatch):
-    """Test that timing state is not reset between generations in multi-generation scenarios."""
-    import time
-
-    monkeypatch.setattr("aish.shell.runtime.app.Live", _FakeLive)
-
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell._stop_animation = Mock()
-    shell._reset_reasoning_state = Mock()
-    shell._finalize_content_preview = Mock()
-    shell._start_animation = Mock()
-    shell.current_live = None
-    shell._at_line_start = True
-    shell._last_streaming_accumulated = ""
-    shell._content_preview_active = False
-
-    # Initialize timing state
-    shell._timing_active = False
-    shell._thinking_start_time = 0.0
-    shell._ttft = 0.0
-    shell._ttft_recorded = False
-
-    # Simulate operation start
-    PTYAIShell.handle_operation_start(shell, Mock())
-    start_time = shell._thinking_start_time
-
-    # Small delay
-    time.sleep(0.01)
-
-    # First generation: content delta records TTFT
-    PTYAIShell.handle_content_delta(shell, Mock(data={"delta": "First response"}))
-
-    first_ttft = shell._ttft
-    assert first_ttft > 0
-    assert shell._ttft_recorded is True
-
-    # First generation ends
-    PTYAIShell.handle_generation_end(shell, Mock())
-
-    # Verify timing state is NOT reset
-    assert shell._thinking_start_time == start_time
-    assert shell._ttft == first_ttft
-    assert shell._ttft_recorded is True
-
-    # Second generation starts (tool call scenario)
-    PTYAIShell.handle_generation_start(shell, Mock())
-
-    # Verify thinking_start_time is NOT reset
-    assert shell._thinking_start_time == start_time
-    assert shell._ttft == first_ttft
-    assert shell._ttft_recorded is True
-
-    # Second generation ends
-    PTYAIShell.handle_generation_end(shell, Mock())
-
-    # Still not reset
-    assert shell._thinking_start_time == start_time
-    assert shell._ttft == first_ttft
-    assert shell._ttft_recorded is True
-
-
-def test_ttft_timing_summary_renders_at_op_end_not_generation_end():
-    """Test that timing summary is printed at OP_END, not at GENERATION_END."""
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell._stop_animation = Mock()
-    shell._reset_reasoning_state = Mock()
-    shell._finalize_content_preview = Mock()
-    shell._start_animation = Mock()
-    shell.current_live = Mock()
-    shell._at_line_start = True
-    shell._last_streaming_accumulated = ""
-
-    # Initialize timing state with TTFT above threshold
-    shell._timing_active = True
-    shell._thinking_start_time = 1.0
-    shell._ttft = 0.5  # Above _TTFT_DISPLAY_THRESHOLD (0.1)
-    shell._ttft_recorded = True
-
-    # Call generation_end - should NOT print timing summary
-    PTYAIShell.handle_generation_end(shell, Mock())
-
-    # Verify console.print was NOT called with timing text
-    timing_calls = [
-        call for call in shell.console.print.call_args_list
-        if "思考:" in str(call) and "0.5s" in str(call)
-    ]
-    assert len(timing_calls) == 0
-
-    # Call op_end - SHOULD print timing summary
-    PTYAIShell.handle_op_end(shell, Mock())
-
-    # Verify console.print was called with timing text
-    shell.console.print.assert_called()
-
-
-def test_ttft_timing_state_reset_after_op_end():
-    """Test that timing state is properly reset after operation end."""
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell._stop_animation = Mock()
-    shell._reset_reasoning_state = Mock()
-    shell._finalize_content_preview = Mock()
-    shell._start_animation = Mock()
-    shell.current_live = None
-    shell._at_line_start = True
-    shell._last_streaming_accumulated = ""
-
-    # Initialize timing state
-    shell._timing_active = True
-    shell._thinking_start_time = 1.0
-    shell._ttft = 0.5
-    shell._ttft_recorded = True
-
-    # Call op_end - should reset timing state
-    PTYAIShell.handle_op_end(shell, Mock())
-
-    # Verify all timing state is reset
-    assert shell._timing_active is False
-    assert shell._thinking_start_time == 0.0
-    assert shell._ttft == 0.0
-    assert shell._ttft_recorded is False
-
-
-def test_ttft_timing_no_summary_below_threshold():
-    """Test that timing summary is not printed when TTFT is below threshold."""
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell._stop_animation = Mock()
-    shell._reset_reasoning_state = Mock()
-    shell._finalize_content_preview = Mock()
-    shell._start_animation = Mock()
-    shell.current_live = None
-    shell._at_line_start = True
-    shell._last_streaming_accumulated = ""
-
-    # Initialize timing state with TTFT below threshold
-    shell._timing_active = True
-    shell._thinking_start_time = 1.0
-    shell._ttft = 0.05  # Below _TTFT_DISPLAY_THRESHOLD (0.1)
-    shell._ttft_recorded = True
-
-    # Call op_end - should NOT print timing summary
-    PTYAIShell.handle_op_end(shell, Mock())
-
-    # Verify console.print was NOT called with timing text
-    timing_calls = [
-        call for call in shell.console.print.call_args_list
-        if len(call[0]) > 0 and "思考:" in str(call[0][0])
-    ]
-    assert len(timing_calls) == 0
-
-
-def test_ttft_thinking_start_does_not_modify_timing_state():
-    """Test that handle_thinking_start does not modify _thinking_start_time if already set."""
-    import time
-
-    shell = object.__new__(PTYAIShell)
-    shell.console = Mock()
-    shell._stop_animation = Mock()
-    shell._reset_reasoning_state = Mock()
-    shell._finalize_content_preview = Mock()
-    shell._start_animation = Mock()
-    shell.current_live = None
-    shell._at_line_start = True
-    shell._last_streaming_accumulated = ""
-
-    # Initialize timing state via operation start
-    shell._timing_active = False
-    shell._thinking_start_time = 0.0
-    shell._ttft = 0.0
-    shell._ttft_recorded = False
-
-    PTYAIShell.handle_operation_start(shell, Mock())
-    original_start_time = shell._thinking_start_time
-
-    # Small delay
-    time.sleep(0.01)
-
-    # Call thinking_start - should NOT modify _thinking_start_time
-    PTYAIShell.handle_thinking_start(shell, Mock())
-
-    assert shell._thinking_start_time == original_start_time

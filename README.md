@@ -10,7 +10,7 @@ Empower the Shell to think. Evolve Operations.
 
 [![Official Website](https://img.shields.io/badge/Website-aishell.ai-blue.svg)](https://www.aishell.ai)
 [![GitHub](https://img.shields.io/badge/GitHub-AI--Shell--Team/aish-black.svg)](https://github.com/AI-Shell-Team/aish/)
-[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Rust Version](https://img.shields.io/badge/rust-1.80+-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](#)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
@@ -341,11 +341,50 @@ Recommendations:
 
 ## Development & Testing
 
+### Python Version (Legacy)
+
 ```bash
 uv sync
 uv run aish
 uv run pytest
 ```
+
+### Rust Version (Current)
+
+The project has been rewritten in Rust for performance and safety. The Rust codebase lives on the `rust-rewrite` branch and is organized as a Cargo workspace with 14 crates.
+
+```bash
+# Build
+cargo build --release
+
+# Run
+./target/release/aish
+
+# Test
+cargo test
+
+# Lint
+cargo clippy
+```
+
+#### Architecture (14 crates)
+
+| Crate | Description |
+|-------|-------------|
+| `aish-core` | Error types, shared enums (RiskLevel, MemoryCategory, etc.) |
+| `aish-config` | YAML config loading with XDG paths and env overrides |
+| `aish-i18n` | Internationalization with 6 locales and embedded fallback |
+| `aish-pty` | PTY executor with fork/exec, select()-based I/O, output offload |
+| `aish-llm` | OpenAI-compatible HTTP client with SSE streaming and tool calling |
+| `aish-session` | SQLite session persistence with WAL mode |
+| `aish-context` | Sliding-window context manager with tiktoken token counting |
+| `aish-security` | Security policy engine with glob-to-regex pattern matching |
+| `aish-skills` | Skill plugin discovery with hot-reload via notify |
+| `aish-memory` | Markdown-based long-term memory with relevance scoring |
+| `aish-tools` | Built-in tools: bash, fs (read/write/edit), ask_user, memory, skill |
+| `aish-scripts` | .aish script system with frontmatter, ai "prompt" syntax, hooks |
+| `aish-shell` | Main shell: REPL loop, AI handler, built-in commands, animation |
+| `aish-cli` | CLI entry point with clap derive macros |
 
 ---
 
