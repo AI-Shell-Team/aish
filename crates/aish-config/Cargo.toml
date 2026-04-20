@@ -1,0 +1,13 @@
+[package]
+name = "aish-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aish-core.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+dirs.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

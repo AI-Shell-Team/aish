@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - rust
     tags:
       - 'v*'
   workflow_dispatch:
@@ -21,7 +22,8 @@ permissions:
   pull-requests: read
 
 env:
-  UV_CACHE_DIR: .uv-cache
+  CARGO_TERM_COLOR: always
+  CACHE_KEY_SUFFIX: v1
 
 jobs:
   changes:
@@ -30,7 +32,6 @@ jobs:
     outputs:
       code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || steps.default.outputs.code }}
       packaging: ${{ github.event_name == 'pull_request' && steps.filter.outputs.packaging || steps.default.outputs.packaging }}
-      release_candidate: ${{ github.event_name == 'pull_request' && steps.release_candidate.outputs.value || steps.default.outputs.release_candidate }}
     steps:
       - name: Default to full validation outside PRs
         id: default
@@ -38,20 +39,6 @@ jobs:
         run: |
           echo "code=true" >> "$GITHUB_OUTPUT"
           echo "packaging=true" >> "$GITHUB_OUTPUT"
-          echo "release_candidate=false" >> "$GITHUB_OUTPUT"
-
-      - name: Detect release candidate pull request
-        id: release_candidate
-        if: github.event_name == 'pull_request'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: |
-          if [[ "$HEAD_REF" == release/* ]] || [[ ",$PR_LABELS," == *,release-candidate,* ]]; then
-            echo "value=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Classify pull request changes
         id: filter
@@ -60,18 +47,14 @@ jobs:
         with:
           filters: |
             code:
-              - 'src/**'
-              - 'tests/**'
-              - 'main.py'
-              - 'pyproject.toml'
-              - 'Makefile'
-              - 'build.sh'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             packaging:
               - 'packaging/**'
               - 'debian/**'
               - 'config/**'
-              - 'aish.spec'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
               - '.github/workflows/release-preparation.yml'
@@ -79,38 +62,46 @@ jobs:
   lint-test:
     name: Lint and test
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
-      - name: Sync development dependencies
-        run: uv sync --group dev
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
-      - name: Run lint
-        run: make lint
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: make test
+        run: cargo test --workspace
 
-      - name: Build Python package
-        run: make build
+      - name: Build release binary
+        run: cargo build --release
 
-      - name: Upload Python package artifacts
+      - name: Upload release binary
         uses: actions/upload-artifact@v6
         with:
-          name: python-package
-          path: dist/*
+          name: aish-linux-amd64-debug
+          path: target/release/aish
           if-no-files-found: error
 
   cross-platform-smoke:
@@ -118,48 +109,64 @@ jobs:
     needs:
       - changes
       - lint-test
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          python-version: '3.11'
+          targets: ${{ matrix.target }}
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
         with:
-          enable-cache: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
-      - name: Sync dependencies
-        run: uv sync --group dev
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Smoke test import
+      - name: Smoke test binary
+        shell: bash
         run: |
-          uv run python -c "import platform; import aish; print('ok', platform.system(), platform.machine())"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            ./target/${{ matrix.target }}/release/aish.exe --help
+          else
+            ./target/${{ matrix.target }}/release/aish --help
+          fi
 
   build-bundle:
     name: Build bundle (${{ matrix.arch }})
-    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
             runs_on: ubuntu-latest
+            target: x86_64-unknown-linux-musl
           - arch: arm64
             runs_on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runs_on }}
     needs:
       - changes
@@ -175,41 +182,42 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Install build dependencies
+        run: |
+          dnf install -y gcc make curl tar gzip
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Install musl target and cross-compilation support for arm64
+          source "$HOME/.cargo/env"
+          rustup target add ${{ matrix.target }}
 
-      - name: Build bundle
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
+
+      - name: Build release binary
+        run: |
+          source "$HOME/.cargo/env"
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare bundle archive
         run: |
           VERSION="0.0.0+${GITHUB_SHA::8}"
           OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
-          tar -tf "$OUTPUT_DIR/aish-${VERSION}-linux-${{ matrix.arch }}.tar.gz" >/dev/null
+          mkdir -p "$OUTPUT_DIR"
+          cp target/${{ matrix.target }}/release/aish "$OUTPUT_DIR/aish"
+          tar -czf "$OUTPUT_DIR/aish-${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C "$OUTPUT_DIR" aish
 
-      - name: Smoke test bundle install
+      - name: Smoke test binary
         run: |
-          VERSION="0.0.0+${GITHUB_SHA::8}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          BUNDLE="aish-${VERSION}-linux-${{ matrix.arch }}"
-          EXTRACT_DIR="$PWD/build/install-smoke/${{ matrix.arch }}"
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
-
-          rm -rf "$EXTRACT_DIR" "$INSTALL_ROOT"
-          mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
-
-          tar -xzf "$OUTPUT_DIR/${BUNDLE}.tar.gz" -C "$EXTRACT_DIR"
-          AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
-
-          test -x "$INSTALL_ROOT/usr/local/bin/aish"
-          test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
-          test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
-          grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-
-      - name: Smoke test installed binary runtime
-        run: |
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
-          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
+          artifacts/${{ matrix.arch }}/aish --help
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v6

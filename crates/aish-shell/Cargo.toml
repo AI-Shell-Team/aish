@@ -1,0 +1,40 @@
+[package]
+name = "aish-shell"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aish-core.workspace = true
+aish-config.workspace = true
+aish-i18n.workspace = true
+aish-pty.workspace = true
+aish-scripts.workspace = true
+aish-llm.workspace = true
+aish-session.workspace = true
+aish-context.workspace = true
+aish-security.workspace = true
+aish-skills.workspace = true
+aish-memory.workspace = true
+aish-tools.workspace = true
+aish-prompts.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+reqwest.workspace = true
+richrs.workspace = true
+regex.workspace = true
+sysinfo.workspace = true
+rustyline.workspace = true
+inquire = "0.9.4"
+unicode-width = "0.2"
+which = "8.0.2"
+
+[dev-dependencies]
+tempfile = "3"

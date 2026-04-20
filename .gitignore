@@ -5,6 +5,9 @@
 .idea/
 .claude/
 
+# Rust build artifacts
+target/
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -89,3 +92,4 @@ Thumbs.db
 tmp
 CLAUDE.md
 opencode
+.worktrees/

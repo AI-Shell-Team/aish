@@ -1,0 +1,23 @@
+[package]
+name = "aish-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "aish"
+path = "src/main.rs"
+
+[dependencies]
+aish-core.workspace = true
+aish-config.workspace = true
+aish-shell.workspace = true
+aish-llm.workspace = true
+aish-i18n.workspace = true
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+reqwest.workspace = true

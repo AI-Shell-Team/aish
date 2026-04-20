@@ -1,6 +1,6 @@
 [project]
 name = "aish"
-version = "0.2.2"
+version = "0.2.0"
 description = "AI Shell - A shell with built-in LLM capabilities"
 readme = "README.md"
 authors = [{ name = "Sian Cao", email = "yinshuiboy@gmail.com" }]
@@ -11,7 +11,6 @@ dependencies = [
     "langfuse==2.60.3",
     "litellm==1.74.3",
     "prompt-toolkit>=3.0.51",
-    "packaging>=20.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.1.1",
     "pyyaml>=6.0.0",
@@ -63,10 +62,10 @@ dev = [
     "mypy>=1.17.0",
     "pexpect>=4.9.0",
     "pyinstaller>=6.14.2",
-    "pyte>=0.8.2",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
     "pytest-cov>=7.0.0",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.12.7",
 ]
 
@@ -88,8 +87,6 @@ markers = [
     "asyncio: tests using pytest-asyncio",
     "anyio: tests using pytest-anyio",
     "live_smoke: opt-in live smoke tests that use real provider credentials",
-    "live_smoke_blocking: low-variance artifact-based live smoke tests that gate release candidates",
-    "live_smoke_extended: higher-variance artifact-based live smoke tests for manual or scheduled validation",
     "timeout: tests with an execution time limit",
 ]
 

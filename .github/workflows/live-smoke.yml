@@ -8,27 +8,12 @@ on:
         required: false
         default: main
         type: string
-      suite:
-        description: Live smoke suite to run
-        required: false
-        default: blocking
-        type: choice
-        options:
-          - blocking
-          - extended
-          - all
   workflow_call:
     inputs:
       ref:
         description: Git ref to validate
         required: false
         type: string
-        default: main
-      suite:
-        description: Live smoke suite to run
-        required: false
-        type: string
-        default: blocking
 
 concurrency:
   group: "live-smoke-${{ github.workflow }}-${{ inputs.ref || github.ref }}"
@@ -44,8 +29,7 @@ jobs:
   live-smoke:
     name: Run live smoke tests
     runs-on: ubuntu-latest
-    environment:
-      name: live-smoke
+    environment: live-smoke
 
     steps:
       - name: Checkout repository
@@ -66,11 +50,6 @@ jobs:
       - name: Sync development dependencies
         run: uv sync --group dev
 
-      - name: Install live smoke runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap util-linux
-
       - name: Validate live smoke secrets
         env:
           AISH_LIVE_SMOKE_API_KEY: ${{ secrets.AISH_LIVE_SMOKE_API_KEY }}
@@ -88,24 +67,6 @@ jobs:
             exit 1
           fi
 
-      - name: Build and install live smoke bundle
-        run: |
-          set -euo pipefail
-          VERSION="0.0.0+${GITHUB_SHA::8}"
-          OUTPUT_DIR="$PWD/build/live-smoke-artifacts"
-          EXTRACT_DIR="$PWD/build/live-smoke-extract"
-          INSTALL_ROOT="$PWD/build/live-smoke-install-root"
-          BUNDLE="aish-${VERSION}-linux-amd64"
-
-          rm -rf "$OUTPUT_DIR" "$EXTRACT_DIR" "$INSTALL_ROOT"
-          mkdir -p "$OUTPUT_DIR" "$EXTRACT_DIR" "$INSTALL_ROOT"
-
-          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
-          tar -xzf "$OUTPUT_DIR/${BUNDLE}.tar.gz" -C "$EXTRACT_DIR"
-          AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
-          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
-          echo "AISH_LIVE_SMOKE_EXECUTABLE=$INSTALL_ROOT/usr/local/bin/aish" >> "$GITHUB_ENV"
-
       - name: Run live smoke tests
         env:
           AISH_LIVE_SMOKE_API_BASE: ${{ secrets.AISH_LIVE_SMOKE_API_BASE }}
@@ -114,14 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          SUITE="${{ inputs.suite || 'blocking' }}"
-          MARK_EXPR="live_smoke and live_smoke_blocking"
-          if [[ "$SUITE" == "extended" ]]; then
-            MARK_EXPR="live_smoke and live_smoke_extended"
-          elif [[ "$SUITE" == "all" ]]; then
-            MARK_EXPR="live_smoke"
-          fi
-          uv run --group dev python -m pytest tests/flows/live_smoke -v -m "$MARK_EXPR" --run-live-smoke --basetemp build/pytest-live-smoke
+          uv run --group dev python -m pytest tests/live_smoke -v -m live_smoke --run-live-smoke --basetemp build/pytest-live-smoke
 
       - name: Upload live smoke diagnostics
         if: always()
@@ -140,10 +94,8 @@ jobs:
           # Live Smoke Summary
 
           - Ref: ${{ inputs.ref || github.sha }}
-          - Suite: ${{ inputs.suite || 'blocking' }}
           - Model: ${LIVE_MODEL:-<missing>}
-          - Executable: ${AISH_LIVE_SMOKE_EXECUTABLE:-<missing>}
           - Diagnostics artifact: live-smoke-diagnostics-${{ github.run_id }}
 
-          This workflow runs the opt-in pytest live smoke suite against an installed bundle artifact with real provider credentials from the protected \`live-smoke\` environment.
+          This workflow runs the opt-in pytest live smoke suite with real provider credentials from the protected \`live-smoke\` environment.
           EOF

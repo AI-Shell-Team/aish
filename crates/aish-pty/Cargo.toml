@@ -1,0 +1,18 @@
+[package]
+name = "aish-pty"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aish-core.workspace = true
+nix.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+futures.workspace = true
+libc.workspace = true
+regex.workspace = true
+sha2.workspace = true

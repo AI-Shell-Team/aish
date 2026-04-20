@@ -1,0 +1,531 @@
+cli:
+  app_help: "AI Shell - LLM 機能を内蔵した対話型シェル"
+  help_option_help: "このメッセージを表示して終了します。"
+  run_command_help: "AI Shell を起動します"
+  info_command_help: "AI Shell の情報を表示します"
+  check_langfuse_command_help: "Langfuse の設定を確認します"
+  setup_command_help: "対話式セットアップを実行して終了します"
+  check_tool_support_command_help: "ツール呼び出しのライブ検証をデバッグします"
+
+  option:
+    model: "使用する LLM モデル。AISH_MODEL または設定ファイルでも指定できます。"
+    api_key: "LLM プロバイダーの API キー。AISH_API_KEY または各プロバイダーの環境変数でも指定できます。"
+    api_base: "LLM プロバイダーの API ベース URL。AISH_API_BASE または設定ファイルでも指定できます。"
+    config: "設定ファイルのパス（既定値: ~/.config/aish/config.yaml）。"
+
+  setup:
+    step_provider: "ステップ 1/3: プロバイダーを選択"
+    step_provider_endpoint: "ステップ 1.5/3: エンドポイントを選択"
+    step_key: "ステップ 2/3: API キーを入力"
+    step_model: "ステップ 3/3: モデルを選択"
+    provider_header: "プロバイダーを選択（入力で絞り込み）"
+    provider_filter_prompt: "フィルター:"
+    provider_filter_hint: "入力して絞り込み、↑/↓ で選択、Enter で確定、Esc でキャンセルします。"
+    provider_selected_label: "プロバイダー"
+    provider_endpoint_selected_label: "エンドポイント"
+    provider_endpoint_header: "{provider} の API エンドポイントを選択"
+    model_selected_label: "モデル"
+    provider_custom_note: "OpenAI 互換"
+    provider_preset_base: "既定の API Base"
+    custom_api_base_title: "API Base URL"
+    custom_api_base_header: "API Base URL を入力してください。"
+    provider_custom_api_base: "API Base URL"
+    provider_custom_api_base_required: "API Base は必須です"
+    provider_custom_api_base_invalid: "無効な API Base URL です"
+    provider_custom_default: "カスタム"
+    invalid_choice: "無効な選択です"
+    filter_no_results: "一致する項目がありません。再入力するか Enter ですべて表示します。"
+    api_key_header: "API キーを入力してください（設定に保存されます）"
+    api_key_env_found: "{env_key} を検出: {masked}"
+    api_key_env_hint: "Enter で検出されたキーを使うか、新しいキーを入力してください。"
+    api_key_prompt: "API キー"
+    api_key_required: "API キーは必須です"
+    model_header: "プロバイダー: {provider}"
+    model_prompt: "モデル名（プロバイダーを変更するには back と入力）"
+    model_hint_openrouter: "OpenRouter では openai/gpt-4o のようなプロバイダープレフィックスが必要です。省略した場合は openai/ が既定で使われます。"
+    model_hint_custom: "カスタムプロバイダーは OpenAI 互換として扱われます。プレフィックスを省略すると openai/<model> として保存されます。"
+    model_hint_provider: "推奨: {default}"
+    model_list_unavailable: "モデル一覧を取得できません。手動で入力してください"
+    model_filtering: "ツール呼び出しに対応したモデルを絞り込んでいます"
+    model_filter_result: "ツール呼び出し対応モデル {count} 件に絞り込みました"
+    model_filter_empty: "ツール呼び出し対応モデルが見つからなかったため、一覧全体を表示します"
+    model_filter_prompt: "フィルター:"
+    model_filter_hint: "入力して絞り込み、↑/↓ で選択、Enter で確定、Esc で戻ります。手動入力するにはカスタムモデルを選択してください。"
+    model_custom_option: "カスタムモデル..."
+    model_custom_required: "モデル名は必須です"
+    model_custom_saved_as: "保存名: {model}"
+    verify_title: "検証"
+    verify_header: "ツール呼び出し対応を検証しています..."
+    verify_connectivity_in_progress: "接続性を確認しています..."
+    verify_tool_in_progress: "ツール対応を確認しています..."
+    verify_static_no_tool_support: "このモデルはツール呼び出しをサポートしていません（静的判定）"
+    verify_simple_success: "検証に成功しました"
+    verify_simple_failed_with_reason: "検証に失敗しました: {reason}"
+    verify_failed_unknown: "不明なエラー"
+    verify_live_label: "ライブ検証"
+    verify_live_detail: "詳細"
+    verify_timeout: "ライブ検証がタイムアウトしました"
+    verify_cancelled: "ライブ検証を中止しました"
+    verify_no_tool_call_required: "ツール呼び出しが返されませんでした（必須モード）"
+    verify_no_tool_call_auto: "自動モードでツール呼び出しが発生しませんでした"
+    debug_request_title: "ライブリクエスト ({mode})"
+    debug_response_title: "ライブレスポンス ({mode})"
+    debug_error_title: "ライブエラー ({mode})"
+    support_yes: "対応"
+    support_no: "非対応"
+    support_unknown: "不明"
+    litellm_missing: "litellm がインストールされていないため検証をスキップしました"
+    action_header: "次の操作:"
+    action_prompt: "オプションを選択してください"
+    action_retry_model: "別のモデルを選択"
+    action_retry_api_base: "API Base を再入力"
+    action_retry_api_key: "API キーを再入力"
+    action_change_provider: "プロバイダーを変更"
+    action_continue: "このまま続行（非推奨）"
+    action_exit: "セットアップを終了"
+    retry_api_base_prompt: "API Base を入力してください（戻るには back）"
+    retry_api_base_prompt_with_current: "API Base を入力してください（現在: {current}、戻るには back）"
+    retry_api_base_required: "API Base は必須です"
+    saved: "設定を保存しました"
+    saved_with_warning: "設定を保存しました（ツール呼び出しは未検証です）"
+    non_interactive: "非対話環境ではセットアップを実行できません"
+    cancelled: "セットアップをキャンセルしました"
+    required_cancelled: "必須設定が不足しているため終了します"
+    connectivity_ok: "接続正常（{}ms）"
+    config_path: "設定ファイルパス：{}"
+    setup_complete_hint: "\x1b[1maish\x1b[0m を実行してシェルを起動できます。"
+
+  startup:
+    label:
+      skills: "スキル"
+    goodbye: "👋 終了します"
+    config_file_error: "❌ 設定ファイルエラー: {error}"
+    config_file_hint: "💡 --config で有効な設定ファイルパスを指定してください"
+
+  langfuse:
+    incomplete: "⚠️  Langfuse の設定が不完全です"
+    missing: "   不足: {var}"
+    complete: "✅ Langfuse の設定は完全です"
+    script_failed: "Langfuse 確認スクリプトが失敗しました: {error}"
+    script_not_found: "check_langfuse.py スクリプトが見つかりません"
+    run_from_root: "このコマンドはプロジェクトのルートで実行してください"
+
+  parse_errors:
+    title: "エラー"
+    option_requires_argument: "オプション {option} には引数が必要です。"
+    no_such_option: "そのようなオプションはありません: {option}"
+    missing_parameter: "不足しているパラメーター: {param}"
+    invalid_value_for_option: "{option} の値が無効です: {reason}"
+    generic: "無効な引数です: {message}"
+
+shell:
+  welcome2:
+    header: ">_ AI Shell {version}"
+    model_hint: "(/model で切り替え)"
+    label:
+      model: "モデル"
+      config: "設定"
+    quick_start:
+      title: " クイックスタート:"
+      item1_prefix: "ネイティブなシェルコマンド: "
+      cmd_ls: "ls"
+      cmd_top: "top"
+      cmd_vim: "vim"
+      cmd_ssh: "ssh"
+      item1_suffix: " など"
+      item2_prefix: "AI に質問: "
+      item2_example: "; で始めます。例: ; 大きなファイルを探す方法"
+      item3_prefix: "ヘルプを見る:"
+      item3_suffix_1: ""
+      item3_keyword: "help"
+      item3_suffix_2: " を入力すると組み込みヘルプを表示します。"
+    risk: "AI が生成した内容にはリスクがあるため、必ず注意して確認してください。"
+    skills_loaded_suffix: " 件読み込み済み"
+
+  security:
+    title:
+      blocked: "🛑 セキュリティによりブロック: {tool}"
+      notice: "🔐 セキュリティ通知: {tool}"
+      confirm: "🔐 確認が必要です: {tool}"
+    label:
+      description: "説明"
+      command: "コマンド"
+      target: "対象"
+      content_preview: "内容プレビュー"
+      fallback_hint: "注意"
+      risk_level: "リスクレベル"
+      reasons: "理由"
+      alternatives: "代替案"
+      impact: "影響"
+      no_additional_info: "追加情報はありません。"
+    fallback:
+      sandbox_execute_failed: "コマンドの事前実行に失敗したため、リスクを評価できません。本実行前に確認してください。"
+      sandbox_timeout: "コマンドの事前実行がタイムアウトしたため、リスクを評価できません。本実行前に確認してください。"
+      sandbox_ipc_timeout: "コマンドの事前評価待機がタイムアウトしたため、リスクを評価できません。本実行前に確認してください。"
+      generic: "コマンドのリスク評価を完了できませんでした。本実行前に確認してください。"
+    options_header: "オプション"
+    option:
+      approve: "許可"
+      approve_remember: "はい。このコマンドでは今後確認しない"
+      cancel: "キャンセル"
+    choice_prompt: "選択してください（既定: n）: "
+
+  command_cancelled: "コマンドをキャンセルしました"
+  error_correction:
+    press_semicolon_hint: "コマンド実行に失敗しました。; を入力して Enter で自動解析・修復、または次のコマンドを入力してください。"
+    corrected_command_label: "修正候補:"
+  error:
+    execution_error: "❌ 実行中にエラーが発生しました: {error}"
+    pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
+    potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
+    llm_error_title: "❌ LLM リクエストに失敗しました"
+    llm_error_message: "エラー: {error}"
+    llm_error_details_title: "デバッグ詳細"
+    tool_args_json_invalid_hint: "❌ リクエストに失敗しました。再試行してください。"
+  prompt:
+    confirm_execute: "?このコマンドを実行しますか? [y/n]:"
+    ai_hint: "; で AI に質問"
+  model:
+    current: "現在のモデル: {model}"
+    unset: "未設定"
+    invalid: "モデル名は空にできません"
+    switching: "モデルを検証しています: {model}"
+    switch_same: "モデルは変更されていません: {model}"
+    switch_success: "モデルを切り替えました: {model}"
+    verify_failed: "モデル検証に失敗しました: {reason}"
+  token:
+    title: "Token 使用量 (過去7日間)"
+    input_tokens: "入力 tokens"
+    output_tokens: "出力 tokens"
+    total: "合計"
+    api_calls: "API 呼び出し回数"
+  setup:
+    no_config_manager: "再設定できません: 設定マネージャーを利用できません"
+    cancelled: "セットアップをキャンセルしました。現在の設定を維持します"
+    applied: "設定を更新しました。現在のモデル: {model}"
+  ask_user:
+    title: "オプションを選択"
+    custom_label: "カスタム:"
+    hint_select: "Enter で選択 ・ ↑/↓ で移動 ・ Esc でキャンセル"
+    hint_custom: "Enter で確定 ・ ↑/↓ で移動 ・ Tab または直接入力でカスタム入力へ ・ Esc でキャンセル"
+    paused:
+      title: "⏸ ユーザー入力が必要です（タスクは一時停止中）"
+      prompt: "質問: {prompt}"
+      reason: "理由: {reason}"
+      options_header: "選択肢:"
+      custom_input: "任意の値を自由入力することもできます。"
+      how_to: "選択肢の値（または番号）で返信するか、; continue with default と入力してください（既定値: {default}）。"
+  diagnose_cancelled: "  └─ ❌ システム診断をキャンセルしました"
+  status:
+    thinking: "考え中"
+    thinking_now: "考え中"
+    processing: "処理中"
+    analyzing: "  解析中..."
+    system_diagnosing: "  └─ システム診断中"
+    system_analyzing: "  └─ システム解析中"
+  tool:
+    prefix: "🔧 ツールを使用中"
+    prefix_diagnose: "  └─ 🔧 診断ツール"
+    done_diagnose: "  └─ ✅ 診断完了"
+
+security:
+  sandbox_off_action:
+    allow: "そのまま許可"
+    confirm: "確認を求める"
+    block: "ブロック"
+  sandbox_unavailable:
+    title: "⚠️ サンドボックスを利用できません"
+    line1: "サンドボックスを利用できないため、コマンドのリスクを評価できません。"
+    line2: "以後の AI 生成コマンドは次の方針で扱われます: {action}。"
+    policy_line1: "ポリシーによりサンドボックスが無効化されているため、サンドボックス実行は行われませんでした。"
+    policy_line2: "AI 生成コマンドは次の方針で扱われます: {action}。"
+    reason: "理由: {reason}"
+    error: "エラー: {error}"
+    root_required: "サンドボックスには root 権限が必要です"
+    ipc_unavailable: "サンドボックスサービスに接続できません（aish-sandbox.socket が起動していないか未インストールです）"
+    ipc_failed: "サンドボックスサービスの実行に失敗しました（aish-sandbox）"
+    sandbox_execute_failed: "コマンドのリスクを評価できません。実行前に確認してください"
+  risk_reason:
+    sandbox_disabled_by_policy: "ポリシーによりサンドボックスが無効です。ファイル変更を検査してリスク評価できません。処理方針: {action}。"
+    sandbox_disabled: "サンドボックスが有効でないか無効化されています。ファイル変更を検査してリスク評価できません。処理方針: {action}。"
+    cwd_outside_repo_root: "現在の作業ディレクトリ {cwd} はサンドボックスルート {root} の外にあるため、相対パスの副作用を信頼して評価できません。処理方針: {action}。"
+    sandbox_unavailable: "サンドボックスの初期化または実行に失敗したため、ファイル変更を検査してリスク評価できません。処理方針: {action}。"
+    sandbox_exception: "サンドボックス実行エラーのため、ファイル変更を検査してリスク評価できません。処理方針: {action}。"
+    sandbox_failed: "サンドボックスが失敗したため、ファイル変更を検査してリスク評価できません。処理方針: {action}。"
+    policy_fallback_rule_match: "ポリシーによりサンドボックス無効時、コマンド {command} が {count} 件のフォールバックルールに一致しました。{risk} リスクとして扱います。"
+  ai_risk:
+    no_fs_changes: "サンドボックスはファイルの書き込みや削除を検出しませんでした。"
+    high_hits: "高リスクルールに一致する書き込みまたは削除を {count} 件検出しました。"
+    medium_hits: "中リスクルールに一致する書き込みまたは削除を {count} 件検出しました。"
+    low_or_unmatched_hits: "低リスクまたは未一致の書き込みまたは削除を {count} 件検出しました。"
+    preview_paths: "対象パスの例（一部のみ。ディレクトリやファイルを含む場合があります）: {paths}"
+  command_blocked: "エラー: コマンドはセキュリティシステムによりブロックされました"
+  command_blocked_with_reason: "エラー: コマンドはセキュリティシステムによりブロックされました: {reason}"
+
+tools:
+  smart_log:
+    description: "ログソースを自動判定し、問い合わせに基づいてログを解析し、一致する要約を返します。"
+    param:
+      query: "診断したい内容。例: nginx は正しく設定されているか、怪しいログインはあるか。"
+      path: "任意。ログパス（ファイルまたはディレクトリ）または systemd ユニット名。省略時は問い合わせから推定します。"
+    summary:
+      file: "[FILE] {ident}: 一致 {matched}/{total} 行\nサンプル:\n{sample}"
+      dir: "[DIR] {path}: 一致 {matched}/{total} 行\nサンプル:\n{sample}"
+      systemd: "[SYSTEMD] {ident}: 一致 {matched}/{total} 行\nサンプル:\n{sample}"
+      call_failed: "[{stype}] {ident}: 呼び出し失敗\n{output}"
+    no_logs_found: "ログまたは一致する情報は見つかりませんでした。"
+
+help:
+  labels:
+    usage: "使い方"
+    options: "オプション"
+    examples: "例"
+    notes: "補足"
+    brief_usage: "使い方: {usage}"
+  general:
+    title: "📖 AI Shell ヘルプ"
+    markdown: |-
+      ## 利用可能なコマンド:
+
+      ### ディレクトリ操作
+      - `cd [-L|[-P [-e]]] [directory]` - 完全なパラメーター対応でディレクトリを変更
+      - `pushd [directory]` - ディレクトリをスタックに積む
+      - `popd` - ディレクトリをスタックから取り出す
+      - `dirs [-c]` - ディレクトリスタックを表示
+
+      ### 履歴管理
+      - `history [options] [n]` - コマンド履歴を表示
+      - `history -c` - 履歴を消去
+      - `history -d offset` - 履歴エントリーを削除
+
+      ### 環境変数
+      - `export [-fn] [name[=value] ...]` - 環境変数を設定または export
+      - `export -p` - export 済み変数を表示
+      - `unset [-fv] [name ...]` - 環境変数を解除
+      - `pwd [-L|-P]` - 現在の作業ディレクトリを表示
+
+      ### 一般コマンド
+      - `help` - このヘルプを表示
+      - `clear` - 画面を消去
+      - `exit` - シェルを終了
+      - `/model [model]` - モデルを表示または切り替え
+      - `/setup` - API 設定を再構成
+
+      ### AI コマンド
+      - `; <question>` - AI アシスタントに質問
+
+      ### 機能
+      - ✅ すべてのコマンドで完全な PTY サポート
+      - ✅ コマンド履歴と AI コンテキストの統合
+      - ✅ AI 応答のリッチなターミナル表示
+      - ✅ シグナル処理と適切なクリーンアップ
+
+      ### さらに詳しいヘルプ
+      任意のコマンドで `<command> --help` または `<command> -h` を使うと詳細ヘルプを表示できます。
+
+      ### 例
+      ```bash
+      history --help       # history の詳細ヘルプを表示
+      cd --help            # cd の詳細ヘルプを表示
+      export JAVA_HOME="/usr/lib/jvm/java-11"  # 環境変数を設定
+      unset TEMP_VAR       # 環境変数を削除
+      ; ls -la を説明して   # AI にコマンド説明を依頼
+      ```
+
+  command:
+    history:
+      title: "📚 履歴"
+      description: "コマンド履歴を表示または操作します"
+      usage: "history [options] [n]"
+      options:
+        - ["--help, -h", "このヘルプメッセージを表示します"]
+        - ["-c", "すべての項目を削除して履歴一覧を消去します"]
+        - ["-d offset", "位置 offset の履歴項目を削除します"]
+        - ["n", "直近 n 件のコマンドのみ表示します"]
+      examples:
+        - "history              # すべてのコマンド履歴を表示します"
+        - "history 10           # 直近 10 件のコマンドを表示します"
+        - "history -c           # すべての履歴を消去します"
+        - "history -d 5         # 位置 5 の履歴項目を削除します"
+        - "history --help       # このヘルプメッセージを表示します"
+      notes: "実行したすべてのコマンドと AI との対話は自動的に履歴へ記録されます。"
+
+    cd:
+      title: "📁 ディレクトリ移動"
+      description: "完全な引数サポート付きで現在の作業ディレクトリを変更します"
+      usage: "cd [-L|[-P [-e]]] [directory]"
+      options:
+        - ["-L", "シンボリックリンクをたどります: '..' を処理した後にリンクを解決します（既定）"]
+        - ["-P", "シンボリックリンクをたどらず物理ディレクトリ構造を使います: '..' を処理する前にリンクを解決します"]
+        - ["-e", "-P が指定され、現在の作業ディレクトリを判定できない場合は非ゼロ終了します"]
+        # - ["-@", "対応システムでは、拡張属性を持つファイルを属性を含むディレクトリとして表示します"]
+        - ["directory", "移動先ディレクトリのパス（省略時はホームディレクトリ）"]
+        - ["-", "前のディレクトリに戻ります"]
+      examples:
+        - "cd ~                 # ホームディレクトリへ移動します"
+        - "cd /tmp              # /tmp ディレクトリへ移動します"
+        - "cd -                 # 前のディレクトリに戻ります"
+        - "cd \"path with spaces\" # スペースを含むパスでは引用符を使います"
+        - "cd -P /tmp           # 物理パス解決を使います"
+        - "cd -P -e /tmp        # 物理パス解決を使い、エラー時に終了します"
+        - "cd -L /tmp           # シンボリックリンクをたどります（既定動作）"
+        # - "cd -@ /tmp           # 拡張属性を表示します（対応時）"
+      notes: "Tab 補完と特殊文字を含むパスの処理に対応しています。既定ではシンボリックリンクをたどります（-L）。"
+
+    pushd:
+      title: "📤 ディレクトリをスタックに追加"
+      description: "ディレクトリをスタックに積み、その場所へ移動します"
+      usage: "pushd [directory]"
+      options:
+        - ["directory", "移動先ディレクトリのパス"]
+        - ["(no args)", "スタック先頭の 2 つのディレクトリを入れ替えます"]
+      examples:
+        - "pushd /tmp           # 現在のディレクトリをスタックに積み、/tmp へ移動します"
+        - "pushd                # 現在と直前のディレクトリを入れ替えます"
+      notes: "複数のディレクトリ間を簡単に移動できるよう、ディレクトリスタックを維持します。"
+
+    popd:
+      title: "📥 ディレクトリをスタックから取り出す"
+      description: "スタックからディレクトリを取り出し、その場所へ移動します"
+      usage: "popd"
+      options: []
+      examples:
+        - "popd                 # スタックから前のディレクトリへ戻ります"
+      notes: "スタック先頭のディレクトリを取り除き、その場所へ移動します。"
+
+    dirs:
+      title: "📋 ディレクトリスタック表示"
+      description: "ディレクトリスタックを表示します"
+      usage: "dirs [-c]"
+      options:
+        - ["-c", "ディレクトリスタックを消去します"]
+      examples:
+        - "dirs                 # 現在のディレクトリスタックを表示します"
+        - "dirs -c              # ディレクトリスタックを消去します"
+      notes: "現在ナビゲーションスタックにあるすべてのディレクトリを表示します。"
+
+    help:
+      title: "❓ ヘルプ"
+      description: "利用可能なコマンドと機能を表示します"
+      usage: "help"
+      options: []
+      examples:
+        - "help                 # 一般的なヘルプ情報を表示します"
+      notes: "利用可能なすべてのコマンドとシェル機能の概要を表示します。"
+
+    clear:
+      title: "🧹 画面クリア"
+      description: "ターミナル画面を消去します"
+      usage: "clear"
+      options: []
+      examples:
+        - "clear                # ターミナル画面を消去します"
+      notes: "標準的な Unix の clear コマンドと同等です。"
+
+    exit:
+      title: "🚪 シェル終了"
+      description: "AI Shell を終了します"
+      usage: "exit"
+      options: []
+      examples:
+        - "exit                 # シェルを終了します"
+        - "quit                 # 別の終了方法です"
+      notes: "セッションデータを保持したままシェルを正常終了します。"
+
+    export:
+      title: "🔧 環境変数を export"
+      description: "export 属性付きで環境変数を設定または表示します"
+      usage: "export [-fn] [name[=value] ...]\nexport -p"
+      options:
+        - ["-f", "名前はシェル関数を指します（未対応）"]
+        - ["-n", "各名前から export 属性を削除します"]
+        - ["-p", "export 済み変数の一覧を表示します"]
+        - ["--", "以降のオプション処理を無効にします"]
+      examples:
+        - "export PATH=/usr/local/bin:$PATH"
+        - "export EDITOR=vim"
+        - "export -n VAR  # VAR から export 属性を削除します"
+        - "export -p      # export 済み変数をすべて表示します"
+        - "export JAVA_HOME=\"/usr/lib/jvm/java-11-openjdk\""
+        - "export -- -VAR  # -VAR という名前の変数を設定します"
+      notes: "export で設定した環境変数は子プロセスへ引き継がれます。"
+
+    unset:
+      title: "🗑️ 環境変数を解除"
+      description: "シェル変数と関数を削除します"
+      usage: "unset [-f] [-v] [-n] [name ...]"
+      options:
+        - ["-f", "各名前はシェル関数を指します（未対応）"]
+        - ["-v", "各名前はシェル変数を指します（既定）"]
+        - ["-n", "各名前は名前参照を指します（未対応）"]
+        - ["--", "以降のオプション処理を無効にします"]
+      examples:
+        - "unset TEMP_VAR"
+        - "unset -v VAR1 VAR2"
+        - "unset JAVA_HOME"
+        - "unset -- -VAR  # -VAR という名前の変数を削除します"
+      notes: "シェル環境から変数を削除します。存在しない変数は無視されます。"
+
+    pwd:
+      title: "📍 作業ディレクトリ表示"
+      description: "シンボリックリンク処理付きで現在の作業ディレクトリを表示します"
+      usage: "pwd [-L|-P]"
+      options:
+        - ["-L", "論理パスを表示します（シンボリックリンクをたどる、既定）"]
+        - ["-P", "物理パスを表示します（シンボリックリンクを解決する）"]
+      examples:
+        - "pwd                  # 論理的な現在ディレクトリを表示します"
+        - "pwd -L               # 論理パスを表示します（シンボリックリンクを考慮）"
+        - "pwd -P               # 物理パスを表示します（シンボリックリンクを解決）"
+      notes: "既定ではシンボリックリンクを考慮した論理パスを表示します。"
+
+    ";":
+      title: "🤖 AI アシスタント"
+      description: "AI アシスタントに質問します"
+      usage: "; <question>"
+      options:
+        - ["question", "AI アシスタントへの質問"]
+      examples:
+        - "; 大きいファイルを見つけるには？"
+        - "; このコマンドを説明して: ls -la"
+        - "; ファイルを圧縮するもっと良い方法を提案して"
+      notes: "AI アシスタントは、コマンドの説明、提案、一般的なシェルの使い方を支援できます。"
+
+    "；":
+      title: "🤖 AI アシスタント"
+      description: "AI アシスタントに質問します"
+      usage: "； <question>"
+      options:
+        - ["question", "AI アシスタントへの質問"]
+      examples:
+        - "； 大きいファイルを見つけるには？"
+        - "； このコマンドを説明して: ls -la"
+        - "； ファイルを圧縮するもっと良い方法を提案して"
+      notes: "AI アシスタントは、コマンドの説明、提案、一般的なシェルの使い方を支援できます。"
+
+    "/model":
+      title: "🧠 モデル切替"
+      description: "現在のモデルを表示するか、指定したモデルへ切り替えます"
+      usage: "/model [model]"
+      options:
+        - ["model", "切り替え先のモデル識別子（ツール呼び出し対応を検証します）"]
+        - ["--help, -h", "このヘルプメッセージを表示します"]
+      examples:
+        - "/model               # 現在のモデルを表示します"
+        - "/model gpt-4         # モデルを切り替えます"
+        - "/model --help        # ヘルプを表示します"
+      notes: "切り替え時には接続性とツール呼び出し対応を検証し、失敗した場合は現在のモデルを維持します。"
+
+    "/setup":
+      title: "⚙️ 再設定"
+      description: "対話型セットアップウィザードを再実行し、API 設定（プロバイダー、API キー、モデル）を変更します"
+      usage: "/setup"
+      options:
+        - ["--help, -h", "このヘルプメッセージを表示します"]
+      examples:
+        - "/setup               # セットアップウィザードを起動します"
+        - "/setup --help        # ヘルプを表示します"
+      notes: "新しい設定は再起動なしで直ちに適用されます。キャンセルした場合は現在の設定が維持されます。"
+
+errors:
+  litellm_not_installed: "litellm モジュールがインストールされていません"

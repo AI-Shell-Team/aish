@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import io
-import termios
 import time
-import pytest
 from unittest.mock import patch
 
 from rich.console import Console
 
-from aish.plan.approval import PlanApprovalRequestBuilder
 from aish.terminal.interaction import AskUserRequestBuilder
 from aish.llm import LLMCallbackResult, LLMEvent, LLMEventType
 from aish.shell.ui.prompt_io import (
     display_security_panel,
     handle_interaction_required,
-    get_user_confirmation,
     render_interaction_modal,
     handle_tool_confirmation_required,
 )
@@ -32,18 +28,6 @@ class _DummyShell:
     def __init__(self) -> None:
         self.current_live = None
         self.console = Console(file=io.StringIO(), force_terminal=False, width=120)
-        self._remembered_commands: list[str] = []
-        self.llm_session = type(
-            "_DummyLLMSession",
-            (),
-            {
-                "cancellation_token": type(
-                    "_Token",
-                    (),
-                    {"cancel": staticmethod(lambda *args, **kwargs: None)},
-                )()
-            },
-        )()
 
     def _stop_animation(self) -> None:
         return
@@ -66,9 +50,6 @@ class _DummyShell:
 
     def _is_ui_resize_enabled(self) -> bool:
         return False
-
-    def _remember_approved_command(self, command: str) -> None:
-        self._remembered_commands.append(command)
 
 
 def test_handle_interaction_required_sets_interaction_response():
@@ -252,34 +233,6 @@ def test_handle_interaction_required_prefills_text_input_default():
     assert response_payload.get("answer", {}).get("value") == "kiwi"
 
 
-@pytest.mark.timeout(5)
-def test_get_user_confirmation_flushes_pending_input(monkeypatch):
-    shell = _DummyShell()
-    flushed: list[tuple[int, int]] = []
-
-    monkeypatch.setattr("sys.stdin.fileno", lambda: 9)
-    monkeypatch.setattr("sys.stdin.read", lambda _count: "y")
-    monkeypatch.setattr("sys.stdout.flush", lambda: None)
-    monkeypatch.setattr(
-        "termios.tcgetattr",
-        lambda _fd: [0, 0, 0, 0, 0, 0],
-    )
-    monkeypatch.setattr(
-        "termios.tcsetattr",
-        lambda _fd, _when, _settings: None,
-    )
-    monkeypatch.setattr(
-        "termios.tcflush",
-        lambda fd, queue: flushed.append((fd, queue)),
-    )
-    monkeypatch.setattr("tty.setraw", lambda _fd: None)
-
-    result = get_user_confirmation(shell, remember_command="echo hi", allow_remember=True)
-
-    assert result == LLMCallbackResult.APPROVE
-    assert flushed == [(9, termios.TCIFLUSH)]
-
-
 def test_render_interaction_modal_supports_digit_shortcuts():
     shell = _DummyShell()
     request = AskUserRequestBuilder.from_tool_args(
@@ -415,68 +368,6 @@ def test_render_interaction_modal_ctrl_c_cancels():
     assert response.answer is None
 
 
-@pytest.mark.timeout(5)
-def test_render_interaction_modal_escape_cancels_and_writes_newline():
-    shell = _DummyShell()
-    request = PlanApprovalRequestBuilder.from_payload(
-        prompt="Review this plan.",
-        artifact_preview="# Plan\n\nStep 1",
-    )
-
-    class _FakeKeyBindings:
-        def __init__(self) -> None:
-            self.handlers: dict[str, tuple[object, object]] = {}
-
-        def add(self, *keys, filter=None, eager=False):
-            _ = filter, eager
-
-            def decorator(func):
-                self.handlers[str(keys[0])] = (func, filter)
-                return func
-
-            return decorator
-
-    class _DummyApp:
-        def __init__(self, *args, **kwargs) -> None:
-            self.layout = kwargs["layout"]
-            self.key_bindings = kwargs["key_bindings"]
-            self._result = None
-
-            class _Input:
-                @staticmethod
-                def flush() -> None:
-                    return
-
-                @staticmethod
-                def flush_keys() -> None:
-                    return
-
-            self.input = _Input()
-
-        def exit(self, result=None) -> None:
-            self._result = result
-
-        def invalidate(self) -> None:
-            return
-
-        def run(self, in_thread: bool = True) -> str | None:
-            _ = in_thread
-            handler, _filter_obj = self.key_bindings.handlers["escape"]
-            event = type("_Event", (), {"app": self})()
-            handler(event)
-            return self._result
-
-    stdout = io.StringIO()
-    with patch("sys.stdout", stdout), patch(
-        "prompt_toolkit.key_binding.KeyBindings", _FakeKeyBindings
-    ), patch("prompt_toolkit.Application", _DummyApp):
-        response = render_interaction_modal(shell, request)
-
-    assert response.status.value == "cancelled"
-    assert response.answer is None
-    assert stdout.getvalue() == "\n"
-
-
 def test_render_interaction_modal_typing_switches_to_custom_input():
     shell = _DummyShell()
     request = AskUserRequestBuilder.from_tool_args(
@@ -556,51 +447,6 @@ def test_render_interaction_modal_typing_switches_to_custom_input():
     assert response.answer is not None
     assert response.answer.type.value == "text"
     assert response.answer.value == "m"
-
-
-@pytest.mark.timeout(5)
-def test_render_interaction_modal_supports_plan_approval_layout():
-    shell = _DummyShell()
-    request = PlanApprovalRequestBuilder.from_payload(
-        prompt="Review this implementation plan.",
-        summary="Add shell status bar and top-level mode toggle.",
-        artifact_path="/tmp/plan.md",
-        artifact_preview="# Plan\n\n1. Add toolbar\n2. Bind Shift+Tab",
-    )
-
-    class _DummyApp:
-        def __init__(self, *args, **kwargs) -> None:
-            self.layout = kwargs["layout"]
-            self.key_bindings = kwargs["key_bindings"]
-            self._result = None
-
-            class _Input:
-                @staticmethod
-                def flush() -> None:
-                    return
-
-                @staticmethod
-                def flush_keys() -> None:
-                    return
-
-            self.input = _Input()
-
-        def exit(self, result=None) -> None:
-            self._result = result
-
-        def invalidate(self) -> None:
-            return
-
-        def run(self, in_thread: bool = True) -> str | None:
-            _ = in_thread
-            return "approve"
-
-    with patch("prompt_toolkit.Application", _DummyApp):
-        response = render_interaction_modal(shell, request)
-
-    assert response.status.value == "submitted"
-    assert response.answer is not None
-    assert response.answer.value == "approve"
 
 
 def test_display_security_panel_shows_fallback_rule_details(monkeypatch):

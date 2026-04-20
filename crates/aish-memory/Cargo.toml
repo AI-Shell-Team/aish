@@ -1,0 +1,14 @@
+[package]
+name = "aish-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aish-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+regex.workspace = true
+dirs.workspace = true
+uuid.workspace = true

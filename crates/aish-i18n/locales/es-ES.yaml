@@ -1,0 +1,531 @@
+cli:
+  app_help: "AI Shell - Un shell con capacidades de LLM integradas"
+  help_option_help: "Muestra este mensaje y sale."
+  run_command_help: "Ejecutar AI Shell"
+  info_command_help: "Mostrar información sobre AI Shell"
+  check_langfuse_command_help: "Comprobar la configuración de Langfuse"
+  setup_command_help: "Ejecutar la configuración interactiva y salir"
+  check_tool_support_command_help: "Depurar la comprobación en vivo de soporte de llamadas a herramientas"
+
+  option:
+    model: "Modelo LLM que se va a usar; también puede definirse mediante AISH_MODEL o el archivo de configuración."
+    api_key: "Clave API del proveedor LLM; también puede definirse mediante AISH_API_KEY o variables de entorno del proveedor."
+    api_base: "URL base de la API del proveedor LLM; también puede definirse mediante AISH_API_BASE o el archivo de configuración."
+    config: "Ruta al archivo de configuración (predeterminada: ~/.config/aish/config.yaml)."
+
+  setup:
+    step_provider: "Paso 1/3: Elegir proveedor"
+    step_provider_endpoint: "Paso 1.5/3: Elegir endpoint"
+    step_key: "Paso 2/3: Introducir la clave API"
+    step_model: "Paso 3/3: Elegir modelo"
+    provider_header: "Elige un proveedor (escribe para filtrar)"
+    provider_filter_prompt: "Filtro:"
+    provider_filter_hint: "Escribe para filtrar, usa ↑/↓ para seleccionar, Enter para confirmar y Esc para cancelar."
+    provider_selected_label: "Proveedor"
+    provider_endpoint_selected_label: "Endpoint"
+    provider_endpoint_header: "Elegir endpoint de API para {provider}"
+    model_selected_label: "Modelo"
+    provider_custom_note: "Compatible con OpenAI"
+    provider_preset_base: "API Base predefinida"
+    custom_api_base_title: "URL base de la API"
+    custom_api_base_header: "Introduce la URL base de la API."
+    provider_custom_api_base: "URL base de la API"
+    provider_custom_api_base_required: "La API Base es obligatoria"
+    provider_custom_api_base_invalid: "URL base de API no válida"
+    provider_custom_default: "Personalizado"
+    invalid_choice: "Selección no válida"
+    filter_no_results: "No hay coincidencias. Inténtalo de nuevo o pulsa Enter para mostrar todo."
+    api_key_header: "Introduce tu clave API (se guardará en la configuración)"
+    api_key_env_found: "Detectado {env_key}: {masked}"
+    api_key_env_hint: "Pulsa Enter para usar la clave detectada o escribe una nueva."
+    api_key_prompt: "Clave API"
+    api_key_required: "La clave API es obligatoria"
+    model_header: "Proveedor: {provider}"
+    model_prompt: "Nombre del modelo (escribe back para cambiar de proveedor)"
+    model_hint_openrouter: "OpenRouter requiere un prefijo de proveedor, por ejemplo openai/gpt-4o. Si se omite, se usará openai/ por defecto."
+    model_hint_custom: "Los proveedores personalizados se tratan como compatibles con OpenAI. Si omites el prefijo, se guardará como openai/<model>."
+    model_hint_provider: "Recomendado: {default}"
+    model_list_unavailable: "La lista de modelos no está disponible; introdúcela manualmente"
+    model_filtering: "Filtrando modelos con soporte para llamadas a herramientas"
+    model_filter_result: "Filtrado a {count} modelos compatibles con llamadas a herramientas"
+    model_filter_empty: "Ningún modelo superó el filtro de llamadas a herramientas; se mostrará la lista completa"
+    model_filter_prompt: "Filtro:"
+    model_filter_hint: "Escribe para filtrar, usa ↑/↓ para seleccionar, Enter para confirmar y Esc para volver. Selecciona Modelo personalizado para introducirlo manualmente."
+    model_custom_option: "Modelo personalizado..."
+    model_custom_required: "El nombre del modelo es obligatorio"
+    model_custom_saved_as: "Se guardará como: {model}"
+    verify_title: "Verificación"
+    verify_header: "Verificando el soporte de llamadas a herramientas..."
+    verify_connectivity_in_progress: "Comprobando la conectividad..."
+    verify_tool_in_progress: "Comprobando el soporte de herramientas..."
+    verify_static_no_tool_support: "El modelo no admite llamadas a herramientas (comprobación estática)"
+    verify_simple_success: "Verificación correcta"
+    verify_simple_failed_with_reason: "Verificación fallida: {reason}"
+    verify_failed_unknown: "error desconocido"
+    verify_live_label: "Comprobación en vivo"
+    verify_live_detail: "Detalles"
+    verify_timeout: "La verificación en vivo agotó el tiempo"
+    verify_cancelled: "Verificación en vivo cancelada"
+    verify_no_tool_call_required: "No se devolvió ninguna llamada a herramienta (modo obligatorio)"
+    verify_no_tool_call_auto: "El modelo no llamó a ninguna herramienta en modo automático"
+    debug_request_title: "Solicitud en vivo ({mode})"
+    debug_response_title: "Respuesta en vivo ({mode})"
+    debug_error_title: "Error en vivo ({mode})"
+    support_yes: "Compatible"
+    support_no: "No compatible"
+    support_unknown: "Desconocido"
+    litellm_missing: "litellm no está instalado; se omite la verificación"
+    action_header: "Siguiente acción:"
+    action_prompt: "Elige una opción"
+    action_retry_model: "Elegir otro modelo"
+    action_retry_api_base: "Volver a introducir la API Base"
+    action_retry_api_key: "Volver a introducir la clave API"
+    action_change_provider: "Cambiar proveedor"
+    action_continue: "Continuar de todos modos (no recomendado)"
+    action_exit: "Salir de la configuración"
+    retry_api_base_prompt: "Introduce la API Base (back para volver)"
+    retry_api_base_prompt_with_current: "Introduce la API Base (actual: {current}, back para volver)"
+    retry_api_base_required: "La API Base es obligatoria"
+    saved: "Configuración guardada"
+    saved_with_warning: "Configuración guardada (la llamada a herramientas no se verificó)"
+    non_interactive: "Entorno no interactivo; no se puede ejecutar la configuración"
+    cancelled: "Configuración cancelada"
+    required_cancelled: "Falta configuración obligatoria; saliendo"
+    connectivity_ok: "Conectividad OK ({}ms)"
+    config_path: "Ruta de configuracion: {}"
+    setup_complete_hint: "Ahora puede ejecutar \x1b[1maish\x1b[0m para iniciar el shell."
+
+  startup:
+    label:
+      skills: "Skills"
+    goodbye: "👋 ¡Adiós!"
+    config_file_error: "❌ Error en el archivo de configuración: {error}"
+    config_file_hint: "💡 Usa --config para indicar una ruta válida del archivo de configuración"
+
+  langfuse:
+    incomplete: "⚠️  La configuración de Langfuse está incompleta"
+    missing: "   Falta: {var}"
+    complete: "✅ La configuración de Langfuse está completa"
+    script_failed: "El script de comprobación de Langfuse falló: {error}"
+    script_not_found: "No se encontró el script check_langfuse.py"
+    run_from_root: "Asegúrate de ejecutar este comando desde la raíz del proyecto"
+
+  parse_errors:
+    title: "Error"
+    option_requires_argument: "La opción {option} requiere un argumento."
+    no_such_option: "No existe la opción: {option}"
+    missing_parameter: "Falta el parámetro: {param}"
+    invalid_value_for_option: "Valor no válido para {option}: {reason}"
+    generic: "Argumentos no válidos: {message}"
+
+shell:
+  welcome2:
+    header: ">_ AI Shell {version}"
+    model_hint: "(escribe /model para cambiar)"
+    label:
+      model: "modelo"
+      config: "config"
+    quick_start:
+      title: " Inicio rápido:"
+      item1_prefix: "Comandos nativos del shell: "
+      cmd_ls: "ls"
+      cmd_top: "top"
+      cmd_vim: "vim"
+      cmd_ssh: "ssh"
+      item1_suffix: " etc."
+      item2_prefix: "Pregunta a la IA: "
+      item2_example: "Empieza con ;, por ejemplo ; como encontrar archivos grandes"
+      item3_prefix: "Obtener ayuda:"
+      item3_suffix_1: "Escribe "
+      item3_keyword: "help"
+      item3_suffix_2: " para ver la ayuda integrada y el uso."
+    risk: "El contenido generado por IA puede ser arriesgado; verificalo con cuidado."
+    skills_loaded_suffix: " cargadas"
+
+  security:
+    title:
+      blocked: "🛑 Bloqueado por seguridad: {tool}"
+      notice: "🔐 Aviso de seguridad: {tool}"
+      confirm: "🔐 Confirmación requerida: {tool}"
+    label:
+      description: "Descripción"
+      command: "Comando"
+      target: "Objetivo"
+      content_preview: "Vista previa del contenido"
+      fallback_hint: "Nota"
+      risk_level: "Nivel de riesgo"
+      reasons: "Motivos"
+      alternatives: "Alternativas"
+      impact: "Impacto"
+      no_additional_info: "No se proporcionó información adicional."
+    fallback:
+      sandbox_execute_failed: "La preejecución del comando falló, por lo que no se puede evaluar el riesgo. Confirma antes de ejecutar el comando real."
+      sandbox_timeout: "La preejecución del comando agotó el tiempo, por lo que no se puede evaluar el riesgo. Confirma antes de ejecutar el comando real."
+      sandbox_ipc_timeout: "Se agotó el tiempo esperando la preevaluación del comando, por lo que no se puede evaluar el riesgo. Confirma antes de ejecutar el comando real."
+      generic: "No se pudo completar la evaluación de riesgo del comando. Confirma antes de ejecutar el comando real."
+    options_header: "Opciones"
+    option:
+      approve: "Aprobar"
+      approve_remember: "Sí, y no volver a preguntar por este comando"
+      cancel: "Cancelar"
+    choice_prompt: "Tu elección (predeterminado: n): "
+
+  command_cancelled: "Comando cancelado"
+  error_correction:
+    press_semicolon_hint: "La ejecución del comando falló. Escribe ; y pulsa Enter para analizar y reparar automáticamente, o introduce el siguiente comando."
+    corrected_command_label: "Corrección sugerida:"
+  error:
+    execution_error: "❌ Error durante la ejecución: {error}"
+    pty_decode_error: "Error al decodificar la salida PTY: {error}"
+    potential_error: "🚀 Posible problema detectado: {reason}; intentando resolverlo..."
+    llm_error_title: "❌ Falló la solicitud al LLM"
+    llm_error_message: "Error: {error}"
+    llm_error_details_title: "Detalles de depuración"
+    tool_args_json_invalid_hint: "❌ La solicitud falló; inténtalo de nuevo."
+  prompt:
+    confirm_execute: "?¿Ejecutar este comando? [y/n]:"
+    ai_hint: "Usa ; para preguntar a la IA"
+  model:
+    current: "Modelo actual: {model}"
+    unset: "sin definir"
+    invalid: "El nombre del modelo no puede estar vacío"
+    switching: "Validando el modelo: {model}"
+    switch_same: "El modelo no ha cambiado: {model}"
+    switch_success: "Se cambió al modelo: {model}"
+    verify_failed: "Falló la validación del modelo: {reason}"
+  token:
+    title: "Uso de tokens (últimos 7 días)"
+    input_tokens: "Tokens de entrada"
+    output_tokens: "Tokens de salida"
+    total: "Total"
+    api_calls: "Llamadas API"
+  setup:
+    no_config_manager: "No se puede reconfigurar: el gestor de configuración no está disponible"
+    cancelled: "Configuración cancelada; se conservan los ajustes actuales"
+    applied: "Configuración actualizada; modelo actual: {model}"
+  ask_user:
+    title: "Selecciona una opción"
+    custom_label: "Personalizado:"
+    hint_select: "Enter para elegir · ↑/↓ para navegar · Esc para cancelar"
+    hint_custom: "Enter para confirmar · ↑/↓ para navegar · Tab o escribe para introducir texto · Esc para cancelar"
+    paused:
+      title: "⏸ Se requiere entrada del usuario (tarea en pausa)"
+      prompt: "Pregunta: {prompt}"
+      reason: "Motivo: {reason}"
+      options_header: "Opciones:"
+      custom_input: "También puedes responder con cualquier valor personalizado."
+      how_to: "Responde con un valor de opción (o un número), o escribe ; continue with default (predeterminado: {default})."
+  diagnose_cancelled: "  └─ ❌ Diagnóstico del sistema cancelado"
+  status:
+    thinking: "Pensando"
+    thinking_now: "Pensando"
+    processing: "Procesando"
+    analyzing: "  Analizando..."
+    system_diagnosing: "  └─ Diagnóstico del sistema en curso"
+    system_analyzing: "  └─ Análisis del sistema en curso"
+  tool:
+    prefix: "🔧 Usando herramienta"
+    prefix_diagnose: "  └─ 🔧 Herramienta de diagnóstico"
+    done_diagnose: "  └─ ✅ Diagnóstico completado"
+
+security:
+  sandbox_off_action:
+    allow: "Permitir directamente"
+    confirm: "Requerir confirmación"
+    block: "Bloquear"
+  sandbox_unavailable:
+    title: "⚠️ Sandbox no disponible"
+    line1: "El sandbox no está disponible; no se puede evaluar el riesgo del comando."
+    line2: "Los comandos generados por IA a continuación se tratarán como: {action}."
+    policy_line1: "El sandbox está desactivado por política; no se realizó ninguna ejecución en sandbox."
+    policy_line2: "Los comandos generados por IA se tratarán como: {action}."
+    reason: "Motivo: {reason}"
+    error: "Error: {error}"
+    root_required: "El sandbox requiere privilegios de root"
+    ipc_unavailable: "No se puede conectar con el servicio sandbox (aish-sandbox.socket no se está ejecutando o no está instalado)"
+    ipc_failed: "Falló la ejecución del servicio sandbox (aish-sandbox)"
+    sandbox_execute_failed: "No se puede evaluar el riesgo del comando; confirma antes de ejecutarlo"
+  risk_reason:
+    sandbox_disabled_by_policy: "El sandbox está desactivado por política; no se pueden inspeccionar cambios de archivos para evaluar el riesgo. Acción: {action}."
+    sandbox_disabled: "El sandbox no está habilitado o está desactivado; no se pueden inspeccionar cambios de archivos para evaluar el riesgo. Acción: {action}."
+    cwd_outside_repo_root: "El directorio actual {cwd} está fuera de la raíz del sandbox {root}; no se pueden evaluar de forma fiable los efectos relativos. Acción: {action}."
+    sandbox_unavailable: "La inicialización o ejecución del sandbox falló; no se pueden inspeccionar cambios de archivos para evaluar el riesgo. Acción: {action}."
+    sandbox_exception: "Error de ejecución en el sandbox; no se pueden inspeccionar cambios de archivos para evaluar el riesgo. Acción: {action}."
+    sandbox_failed: "El sandbox falló; no se pueden inspeccionar cambios de archivos para evaluar el riesgo. Acción: {action}."
+    policy_fallback_rule_match: "Con el sandbox desactivado por política, el comando {command} coincidió con {count} rutas de reglas de respaldo; se tratará como riesgo {risk}."
+  ai_risk:
+    no_fs_changes: "El sandbox no detectó escrituras ni eliminaciones de archivos."
+    high_hits: "Se detectaron {count} operaciones de escritura o borrado que coinciden con reglas de alto riesgo."
+    medium_hits: "Se detectaron {count} operaciones de escritura o borrado que coinciden con reglas de riesgo medio."
+    low_or_unmatched_hits: "Se detectaron {count} operaciones de escritura o borrado con riesgo bajo o sin coincidencia."
+    preview_paths: "Rutas de ejemplo (parciales, pueden incluir directorios o archivos): {paths}"
+  command_blocked: "Error: el comando fue bloqueado por el sistema de seguridad"
+  command_blocked_with_reason: "Error: el comando fue bloqueado por el sistema de seguridad: {reason}"
+
+tools:
+  smart_log:
+    description: "Determina automáticamente las fuentes de registros, analiza los logs según la consulta y devuelve un resumen coincidente."
+    param:
+      query: "Tu consulta de diagnóstico, por ejemplo 'nginx está bien configurado' o 'hay inicios de sesión sospechosos'."
+      path: "Opcional. Ruta del log (archivo/directorio) o nombre de una unidad systemd. Si se omite, se inferirá a partir de la consulta."
+    summary:
+      file: "[ARCHIVO] {ident}: {matched}/{total} líneas coincidentes\nMuestra:\n{sample}"
+      dir: "[DIR] {path}: {matched}/{total} líneas coincidentes\nMuestra:\n{sample}"
+      systemd: "[SYSTEMD] {ident}: {matched}/{total} líneas coincidentes\nMuestra:\n{sample}"
+      call_failed: "[{stype}] {ident}: llamada fallida\n{output}"
+    no_logs_found: "No se encontraron registros ni información coincidente."
+
+help:
+  labels:
+    usage: "Uso"
+    options: "Opciones"
+    examples: "Ejemplos"
+    notes: "Notas"
+    brief_usage: "Uso: {usage}"
+  general:
+    title: "📖 Ayuda de AI Shell"
+    markdown: |-
+      ## Comandos disponibles:
+
+      ### Navegación por directorios
+      - `cd [-L|[-P [-e]]] [directory]` - Cambiar de directorio con soporte completo de parámetros
+      - `pushd [directory]` - Apilar un directorio
+      - `popd` - Sacar un directorio de la pila
+      - `dirs [-c]` - Mostrar la pila de directorios
+
+      ### Historial
+      - `history [options] [n]` - Mostrar el historial de comandos
+      - `history -c` - Borrar el historial
+      - `history -d offset` - Eliminar una entrada del historial
+
+      ### Variables de entorno
+      - `export [-fn] [name[=value] ...]` - Establecer o exportar variables de entorno
+      - `export -p` - Mostrar variables exportadas
+      - `unset [-fv] [name ...]` - Eliminar variables de entorno
+      - `pwd [-L|-P]` - Mostrar el directorio de trabajo actual
+
+      ### Comandos generales
+      - `help` - Mostrar esta ayuda
+      - `clear` - Limpiar la pantalla
+      - `exit` - Salir del shell
+      - `/model [model]` - Mostrar o cambiar el modelo
+      - `/setup` - Reconfigurar la API
+
+      ### Comandos de IA
+      - `; <question>` - Preguntar al asistente de IA
+
+      ### Funciones
+      - ✅ Soporte PTY completo para todos los comandos
+      - ✅ Integración del historial de comandos con el contexto de IA
+      - ✅ Salida enriquecida para respuestas de IA
+      - ✅ Manejo de señales y limpieza ordenada
+
+      ### Más ayuda
+      Usa `<command> --help` o `<command> -h` para ver la ayuda detallada de cualquier comando.
+
+      ### Ejemplos
+      ```bash
+      history --help       # Mostrar ayuda detallada de history
+      cd --help            # Mostrar ayuda detallada de cd
+      export JAVA_HOME="/usr/lib/jvm/java-11"  # Establecer una variable de entorno
+      unset TEMP_VAR       # Eliminar una variable de entorno
+      ; explica ls -la     # Pedir a la IA que explique un comando
+      ```
+
+  command:
+    history:
+      title: "📚 Historial"
+      description: "Mostrar o manipular el historial de comandos"
+      usage: "history [options] [n]"
+      options:
+        - ["--help, -h", "Mostrar este mensaje de ayuda"]
+        - ["-c", "Borrar la lista del historial eliminando todas las entradas"]
+        - ["-d offset", "Eliminar la entrada del historial en la posición offset"]
+        - ["n", "Mostrar solo los últimos n comandos"]
+      examples:
+        - "history              # Mostrar todo el historial de comandos"
+        - "history 10           # Mostrar los últimos 10 comandos"
+        - "history -c           # Borrar todo el historial"
+        - "history -d 5         # Eliminar la entrada del historial en la posición 5"
+        - "history --help       # Mostrar este mensaje de ayuda"
+      notes: "Las entradas del historial se registran automáticamente para todos los comandos ejecutados y las interacciones con la IA."
+
+    cd:
+      title: "📁 Cambiar directorio"
+      description: "Cambiar el directorio de trabajo actual con soporte completo de parámetros"
+      usage: "cd [-L|[-P [-e]]] [directory]"
+      options:
+        - ["-L", "Forzar el seguimiento de enlaces simbólicos: resolver enlaces simbólicos después de procesar las apariciones de '..' (predeterminado)"]
+        - ["-P", "Usar la estructura física de directorios sin seguir enlaces simbólicos: resolver enlaces simbólicos antes de procesar las apariciones de '..'"]
+        - ["-e", "Si se proporciona la opción -P y no se puede determinar el directorio de trabajo actual, salir con un estado distinto de cero"]
+        # - ["-@", "En sistemas compatibles, mostrar archivos con atributos extendidos como directorios que contienen atributos de archivo"]
+        - ["directory", "Ruta del directorio de destino (opcional; por defecto, el directorio personal)"]
+        - ["-", "Volver al directorio anterior"]
+      examples:
+        - "cd ~                 # Cambiar al directorio personal"
+        - "cd /tmp              # Cambiar al directorio /tmp"
+        - "cd -                 # Volver al directorio anterior"
+        - "cd \"path with spaces\" # Usar comillas para rutas con espacios"
+        - "cd -P /tmp           # Usar resolución física de rutas"
+        - "cd -P -e /tmp        # Usar resolución física de rutas y salir si hay error"
+        - "cd -L /tmp           # Forzar el seguimiento de enlaces simbólicos (comportamiento predeterminado)"
+        # - "cd -@ /tmp           # Mostrar atributos extendidos (si se admite)"
+      notes: "Admite autocompletado con Tab y manejo de rutas con caracteres especiales. El comportamiento predeterminado sigue enlaces simbólicos (-L)."
+
+    pushd:
+      title: "📤 Apilar directorio"
+      description: "Poner un directorio en la pila y cambiar a él"
+      usage: "pushd [directory]"
+      options:
+        - ["directory", "Ruta del directorio de destino"]
+        - ["(no args)", "Intercambiar los dos directorios superiores de la pila"]
+      examples:
+        - "pushd /tmp           # Poner el directorio actual en la pila e ir a /tmp"
+        - "pushd                # Intercambiar entre el directorio actual y el anterior"
+      notes: "Mantiene una pila de directorios para navegar con facilidad entre varios directorios."
+
+    popd:
+      title: "📥 Sacar directorio de la pila"
+      description: "Extraer un directorio de la pila y cambiar a él"
+      usage: "popd"
+      options: []
+      examples:
+        - "popd                 # Volver al directorio anterior desde la pila"
+      notes: "Elimina el directorio superior de la pila y cambia a él."
+
+    dirs:
+      title: "📋 Mostrar pila de directorios"
+      description: "Mostrar la pila de directorios"
+      usage: "dirs [-c]"
+      options:
+        - ["-c", "Borrar la pila de directorios"]
+      examples:
+        - "dirs                 # Mostrar la pila de directorios actual"
+        - "dirs -c              # Borrar la pila de directorios"
+      notes: "Muestra todos los directorios que están actualmente en la pila de navegación."
+
+    help:
+      title: "❓ Ayuda"
+      description: "Mostrar los comandos y funciones disponibles"
+      usage: "help"
+      options: []
+      examples:
+        - "help                 # Mostrar información de ayuda general"
+      notes: "Ofrece una visión general de todos los comandos y funciones disponibles del shell."
+
+    clear:
+      title: "🧹 Limpiar pantalla"
+      description: "Limpiar la pantalla del terminal"
+      usage: "clear"
+      options: []
+      examples:
+        - "clear                # Limpiar la pantalla del terminal"
+      notes: "Equivale al comando estándar clear de Unix."
+
+    exit:
+      title: "🚪 Salir del shell"
+      description: "Salir de AI Shell"
+      usage: "exit"
+      options: []
+      examples:
+        - "exit                 # Salir del shell"
+        - "quit                 # Forma alternativa de salir"
+      notes: "Sale del shell limpiamente y conserva los datos de la sesión."
+
+    export:
+      title: "🔧 Exportar variables de entorno"
+      description: "Establecer o mostrar variables de entorno con atributos de exportación"
+      usage: "export [-fn] [name[=value] ...]\nexport -p"
+      options:
+        - ["-f", "El nombre hace referencia a una función del shell (no compatible)"]
+        - ["-n", "Quitar el atributo de exportación de cada nombre"]
+        - ["-p", "Mostrar la lista de todas las variables exportadas"]
+        - ["--", "Desactivar el procesamiento posterior de opciones"]
+      examples:
+        - "export PATH=/usr/local/bin:$PATH"
+        - "export EDITOR=vim"
+        - "export -n VAR  # Quitar el atributo de exportación de VAR"
+        - "export -p      # Mostrar todas las variables exportadas"
+        - "export JAVA_HOME=\"/usr/lib/jvm/java-11-openjdk\""
+        - "export -- -VAR  # Establecer una variable llamada -VAR"
+      notes: "Las variables de entorno definidas con export se pasan a los procesos hijos."
+
+    unset:
+      title: "🗑️ Eliminar variables de entorno"
+      description: "Eliminar variables y funciones del shell"
+      usage: "unset [-f] [-v] [-n] [name ...]"
+      options:
+        - ["-f", "Cada nombre hace referencia a una función del shell (no compatible)"]
+        - ["-v", "Cada nombre hace referencia a una variable del shell (predeterminado)"]
+        - ["-n", "Cada nombre hace referencia a una referencia de nombre (no compatible)"]
+        - ["--", "Desactivar el procesamiento posterior de opciones"]
+      examples:
+        - "unset TEMP_VAR"
+        - "unset -v VAR1 VAR2"
+        - "unset JAVA_HOME"
+        - "unset -- -VAR  # Eliminar la variable llamada -VAR"
+      notes: "Elimina variables del entorno del shell. Las variables que no existen se ignoran."
+
+    pwd:
+      title: "📍 Mostrar directorio de trabajo"
+      description: "Mostrar el directorio de trabajo actual con manejo de enlaces simbólicos"
+      usage: "pwd [-L|-P]"
+      options:
+        - ["-L", "Mostrar la ruta lógica (seguir enlaces simbólicos, predeterminado)"]
+        - ["-P", "Mostrar la ruta física (resolver enlaces simbólicos)"]
+      examples:
+        - "pwd                  # Mostrar el directorio actual lógico"
+        - "pwd -L               # Mostrar la ruta lógica (respetando enlaces simbólicos)"
+        - "pwd -P               # Mostrar la ruta física (resolviendo enlaces simbólicos)"
+      notes: "El comportamiento predeterminado muestra la ruta lógica que respeta los enlaces simbólicos."
+
+    ";":
+      title: "🤖 Asistente de IA"
+      description: "Hacer una pregunta al asistente de IA"
+      usage: "; <question>"
+      options:
+        - ["question", "Tu pregunta para el asistente de IA"]
+      examples:
+        - "; como encuentro archivos grandes?"
+        - "; explica este comando: ls -la"
+        - "; sugiere una mejor forma de comprimir archivos"
+      notes: "El asistente de IA puede ayudar con explicaciones de comandos, sugerencias y uso general del shell."
+
+    "；":
+      title: "🤖 Asistente de IA"
+      description: "Hacer una pregunta al asistente de IA"
+      usage: "； <question>"
+      options:
+        - ["question", "Tu pregunta para el asistente de IA"]
+      examples:
+        - "； como encuentro archivos grandes?"
+        - "； explica este comando: ls -la"
+        - "； sugiere una mejor forma de comprimir archivos"
+      notes: "El asistente de IA puede ayudar con explicaciones de comandos, sugerencias y uso general del shell."
+
+    "/model":
+      title: "🧠 Cambiar modelo"
+      description: "Mostrar el modelo actual o cambiar a un modelo específico"
+      usage: "/model [model]"
+      options:
+        - ["model", "Identificador del modelo de destino (validado para compatibilidad con llamadas a herramientas)"]
+        - ["--help, -h", "Mostrar este mensaje de ayuda"]
+      examples:
+        - "/model               # Mostrar el modelo actual"
+        - "/model gpt-4         # Cambiar a un modelo"
+        - "/model --help        # Mostrar ayuda"
+      notes: "El cambio valida la conectividad y la compatibilidad con llamadas a herramientas; si falla, se mantiene el modelo actual."
+
+    "/setup":
+      title: "⚙️ Reconfigurar"
+      description: "Volver a ejecutar el asistente de configuración interactiva para cambiar los ajustes de la API (proveedor, clave API, modelo)"
+      usage: "/setup"
+      options:
+        - ["--help, -h", "Mostrar este mensaje de ayuda"]
+      examples:
+        - "/setup               # Iniciar el asistente de configuración"
+        - "/setup --help        # Mostrar ayuda"
+      notes: "La nueva configuración se aplica de inmediato sin reiniciar. Si se cancela, se conserva la configuración actual."
+
+errors:
+  litellm_not_installed: "El modulo litellm no está instalado"

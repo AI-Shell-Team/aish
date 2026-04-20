@@ -155,7 +155,6 @@ def test_ask_user_adapter_builds_pause_message_for_cancelled():
     assert result.meta["interaction_id"] == request.id
     assert "Alpha option" in result.output
     assert "continue with default" in result.output
-    assert "ask_user_context" not in result.output
 
 
 def test_ask_user_adapter_builds_selected_tool_result():

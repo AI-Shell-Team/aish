@@ -7,40 +7,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.2] - 2026-04-16
+## [Unreleased]
 
 ### Added
 
-- Added a dedicated `Release Final Check` workflow so maintainers can confirm merged `main` release metadata before pushing a stable tag.
-
-### Changed
-
-- Changed release candidate validation so release PRs now run installed-binary runtime smoke checks and artifact-based live smoke against the built bundle before merge.
-- Changed the plan mode keyboard toggle from `F2` to `Shift+Tab` and `Ctrl+X P`, reducing conflicts with terminal key handling.
-
-### Fixed
-
-- Fixed normal streamed conversations so the live reasoning display is no longer interrupted by partial content rendering while the model is still responding.
-
-## [0.2.1] - 2026-04-15
-
-### Added
-
-- Added an interactive plan mode for non-trivial tasks, including persisted plan artifacts, review and approval flow, and an explicit transition back into execution. Enter plan mode with `/plan` or `F2`, then leave it with `/plan exit` or `F2` when you want to return to normal shell execution.
-- Added persistent long-term memory backed by Markdown storage, with memory recall and store tooling that can carry forward user preferences and project context across sessions.
-- Added `aish update` and `aish uninstall` commands so archive, pip, and system-package installs have a built-in path for upgrade and removal.
-
-### Changed
-
-- Changed the terminal UI to show a visible thinking timer while the model is working, making longer requests easier to track.
-- Changed startup and session wiring so plan mode, memory, and the new CLI management flows are initialized more consistently from the current package layout.
-
-### Fixed
-
-- Fixed the interactive shell so `quit` works again as an exit alias.
-- Fixed compact prompt theme spacing and related prompt rendering regressions in the shell UI.
-- Fixed standalone bundle startup so PyInstaller builds include the lazy-loaded shell entry modules needed to launch `aish` after installation.
-- Fixed release automation paths so preparation and publishing workflows target the current repository layout.
+- `aish update` command for self-updating to latest version from GitHub releases
+- `aish uninstall` command for uninstalling aish with optional `--purge` flag
+- UpdateManager class for handling update logic with GitHub API integration
+- UninstallManager class for handling uninstall logic and data cleanup
+- i18n support for update and uninstall commands in Chinese and English
+- DejaGnu integration tests for update and uninstall commands
 
 ## [0.2.0] - 2026-04-03
 
