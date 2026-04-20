@@ -9,6 +9,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
+from ..shell.environment import sanitize_subprocess_loader_env
+
 if TYPE_CHECKING:
     from ..llm import LLMSession
     from ..shell.environment import EnvironmentManager
@@ -184,7 +186,7 @@ class ScriptExecutor:
         Raises:
             ValueError: If required argument is missing.
         """
-        env = dict(os.environ)
+        env = sanitize_subprocess_loader_env(os.environ)
         env["AISH_SCRIPT_DIR"] = script.base_dir
         env["AISH_CWD"] = os.getcwd()
         env["AISH_SCRIPT_NAME"] = script.name

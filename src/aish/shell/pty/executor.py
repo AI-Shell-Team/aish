@@ -18,6 +18,7 @@ from anyio import to_thread
 
 from ...i18n import t
 from ...offload.pty_output_offload import PtyOutputOffload
+from ..environment import sanitize_subprocess_loader_env
 from ...tools.shell_state_capture import (apply_changes, cleanup_state_file,
                                           create_state_file, detect_changes,
                                           get_current_state, parse_state_file,
@@ -80,8 +81,12 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
     # State capture setup for cd/export support in compound commands
     state_file = create_state_file()
     env_vars = (
-        self.env_manager.get_exported_vars() if self.env_manager else dict(os.environ)
+        self.env_manager.get_subprocess_env()
+        if self.env_manager
+        else sanitize_subprocess_loader_env(dict(os.environ))
     )
+    # PTY mode launches the exact same user-facing system commands as the
+    # non-PTY executor, so it must reuse the same loader sanitization.
     old_state = get_current_state(env_vars)
 
     def build_pty_offload_payload(
@@ -345,7 +350,7 @@ async def execute_command_with_pty(shell: Any, command: str) -> CommandResult:
                 stdout=slave_fd,
                 stderr=stderr_write,  # Use pipe for stderr
                 preexec_fn=preexec_setup,
-                env=self.env_manager.get_exported_vars(),  # Use exported environment variables
+                env=env_vars,
             )
 
             # Close slave fd and stderr write end in parent

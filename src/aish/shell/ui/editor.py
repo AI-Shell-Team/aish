@@ -20,6 +20,7 @@ from prompt_toolkit.key_binding.bindings.auto_suggest import (
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.shortcuts import CompleteStyle
 
+from ..environment import sanitize_subprocess_loader_env
 from .completion import ShellCompleter
 
 if TYPE_CHECKING:
@@ -240,7 +241,8 @@ class ShellPromptController:
     @staticmethod
     def _build_theme_env(cwd: str, exit_code: int, mode: str = "aish") -> dict[str, str]:
         """Build environment variables for theme script execution."""
-        env = dict(os.environ)
+        # Theme scripts and their git probes are ordinary subprocesses too.
+        env = sanitize_subprocess_loader_env(os.environ)
         env["AISH_CWD"] = cwd
         env["AISH_EXIT_CODE"] = str(exit_code)
         env["AISH_MODE"] = _normalize_prompt_mode(mode)

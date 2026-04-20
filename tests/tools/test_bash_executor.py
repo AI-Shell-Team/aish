@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -152,6 +153,59 @@ class TestUnifiedBashExecutor:
         assert retcode == 0
         assert stdout == "ok\n"
         assert "timeout" not in captured
+
+    def test_execute_sanitizes_pyinstaller_loader_env(self, executor, monkeypatch):
+        """测试执行子进程时会恢复原始 LD_LIBRARY_PATH"""
+        captured = {}
+
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.get_current_state",
+            lambda env: {"pwd": "/tmp", "env": env.copy()},
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.create_state_file",
+            lambda: "/tmp/fake-state",
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.parse_state_file",
+            lambda path: {"pwd": "/tmp", "env": {}},
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.detect_changes",
+            lambda old_state, new_state: {
+                "cwd_changed": False,
+                "new_cwd": old_state["pwd"],
+                "env_added": {},
+                "env_modified": {},
+                "env_removed": [],
+            },
+        )
+        monkeypatch.setattr("aish.tools.bash_executor.apply_changes", lambda changes, env_manager: None)
+        monkeypatch.setattr("aish.tools.bash_executor.cleanup_state_file", lambda path: None)
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.wrap_command_with_state_capture",
+            lambda command, state_file: command,
+        )
+
+        def fake_run(*args, **kwargs):
+            captured.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", "/tmp/_MEI123", raising=False)
+
+        executor.env_manager.set_var("LD_LIBRARY_PATH", "/tmp/_MEI123:/usr/lib/custom")
+        executor.env_manager.set_var("LD_LIBRARY_PATH_ORIG", "/usr/lib/system")
+        executor.env_manager.set_var("TEST_USER_VAR", "kept")
+
+        success, stdout, stderr, retcode, changes = executor.execute("echo ok")
+
+        assert success is True
+        assert retcode == 0
+        assert stdout == "ok\n"
+        assert captured["LD_LIBRARY_PATH"] == "/usr/lib/system"
+        assert captured["TEST_USER_VAR"] == "kept"
 
 
 if __name__ == "__main__":

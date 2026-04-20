@@ -128,6 +128,19 @@ def test_shell_prompt_controller_theme_env_includes_mode():
     assert env["AISH_MODE"] == "plan"
 
 
+def test_shell_prompt_controller_theme_env_restores_original_loader_env(monkeypatch):
+    monkeypatch.setattr("aish.shell.environment.sys.frozen", True, raising=False)
+    monkeypatch.setattr("aish.shell.environment.sys._MEIPASS", "/tmp/_MEI123", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEI123:/usr/lib/custom")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/system")
+    monkeypatch.setenv("TEST_USER_VAR", "kept")
+
+    env = ShellPromptController._build_theme_env("/tmp/project", 0, "aish")
+
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/system"
+    assert env["TEST_USER_VAR"] == "kept"
+
+
 def test_shell_prompt_controller_compact_theme_has_no_leading_space(tmp_path, monkeypatch):
     controller = ShellPromptController(prompt_theme="compact")
 

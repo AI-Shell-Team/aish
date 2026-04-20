@@ -2,7 +2,57 @@
 
 import os
 import subprocess
-from typing import Any, Dict, Optional
+import sys
+from typing import Any, Dict, Mapping, Optional
+
+
+def sanitize_subprocess_loader_env(
+    env: Mapping[str, str] | None = None,
+) -> Dict[str, str]:
+    """Return a subprocess environment with PyInstaller loader paths removed.
+
+    This preserves the caller's normal shell environment while preventing
+    PyInstaller's private library search path from leaking into system commands.
+    """
+
+    sanitized = dict(os.environ if env is None else env)
+
+    if not (getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")):
+        return sanitized
+
+    ld_library_path_orig = sanitized.get("LD_LIBRARY_PATH_ORIG")
+    if ld_library_path_orig is not None:
+        # PyInstaller keeps the pre-bootstrap loader search path here.
+        # Restoring it preserves any user-provided LD_LIBRARY_PATH entries
+        # without leaking bundle-private shared libraries into system commands.
+        if ld_library_path_orig:
+            sanitized["LD_LIBRARY_PATH"] = ld_library_path_orig
+        else:
+            sanitized.pop("LD_LIBRARY_PATH", None)
+        return sanitized
+
+    current_ld_library_path = sanitized.get("LD_LIBRARY_PATH")
+    if not current_ld_library_path:
+        return sanitized
+
+    meipass = os.path.realpath(str(getattr(sys, "_MEIPASS")))
+    filtered_paths = []
+    for path in current_ld_library_path.split(os.pathsep):
+        if not path:
+            continue
+        real_path = os.path.realpath(path)
+        # Fall back to pruning only the extracted bundle location when
+        # LD_LIBRARY_PATH_ORIG is unavailable.
+        if real_path == meipass or real_path.startswith(meipass + os.sep):
+            continue
+        filtered_paths.append(path)
+
+    if filtered_paths:
+        sanitized["LD_LIBRARY_PATH"] = os.pathsep.join(filtered_paths)
+    else:
+        sanitized.pop("LD_LIBRARY_PATH", None)
+
+    return sanitized
 
 
 class EnvironmentManager:
@@ -124,6 +174,12 @@ class EnvironmentManager:
     def get_exported_vars(self) -> Dict[str, str]:
         """Get exported environment variables only"""
         return {k: v for k, v in self._env_vars.items() if k in self._exported_vars}
+
+    def get_subprocess_env(self) -> Dict[str, str]:
+        """Get exported environment variables with loader paths sanitized."""
+        # Keep the shell's persisted exports intact while stripping only the
+        # frozen-app loader state that should not escape to child processes.
+        return sanitize_subprocess_loader_env(self.get_exported_vars())
 
     def remove_export(self, key: str) -> bool:
         """Remove export attribute from variable"""
