@@ -44,6 +44,78 @@ def test_same_command_failure_retriggers_after_consume():
 
 
 @pytest.mark.timeout(5)
+def test_register_command_returns_pending_submission_metadata():
+    """Registering a command should expose explicit pending-submission metadata."""
+    tracker = CommandState()
+
+    submission = tracker.register_backend_command("echo hello", command_seq=-1)
+
+    assert submission is not None
+    assert submission.command == "echo hello"
+    assert submission.source == "backend"
+    assert submission.command_seq == -1
+    assert tracker.pending_submission is submission
+    assert tracker.pending_submission_count == 1
+    assert tracker.pending_submissions == (submission,)
+    assert tracker.get_pending_submission(-1) is submission
+    assert tracker.has_pending_submission(-1) is True
+
+
+@pytest.mark.timeout(5)
+def test_pending_submission_is_cleared_after_prompt_ready():
+    """Pending submissions should be removed once prompt_ready resolves them."""
+    tracker = CommandState()
+
+    tracker.register_backend_command("echo hello", command_seq=-1)
+
+    assert tracker.has_pending_submission(-1) is True
+
+    tracker.handle_backend_event(_command_started("echo hello", command_seq=-1))
+    tracker.handle_backend_event(_prompt_ready(0, command_seq=-1))
+
+    assert tracker.pending_submission is None
+    assert tracker.pending_submission_count == 0
+    assert tracker.pending_submissions == ()
+    assert tracker.get_pending_submission(-1) is None
+    assert tracker.has_pending_submission(-1) is False
+
+
+@pytest.mark.timeout(5)
+def test_prompt_ready_without_command_seq_uses_pending_submission_seq():
+    """Missing prompt_ready command_seq should still resolve and clear seq-bound submissions."""
+    tracker = CommandState()
+
+    tracker.register_backend_command("echo hello", command_seq=-1)
+    tracker.handle_backend_event(_command_started("echo hello"))
+
+    result = tracker.handle_backend_event(_prompt_ready(0))
+
+    assert result is not None
+    assert result.command == "echo hello"
+    assert result.command_seq == -1
+    assert tracker.pending_submission is None
+    assert tracker.pending_submission_count == 0
+
+
+@pytest.mark.timeout(5)
+def test_command_started_keeps_original_text_and_tracks_observed_command():
+    """Original submitted text stays authoritative while shell-observed text is retained separately."""
+    tracker = CommandState()
+
+    submission = tracker.register_command("ls", source="user", command_seq=7)
+
+    tracker.handle_backend_event(_command_started("ls --color=auto"))
+    result = tracker.handle_backend_event(_prompt_ready(0))
+
+    assert submission is not None
+    assert submission.command == "ls"
+    assert submission.observed_command == "ls --color=auto"
+    assert result is not None
+    assert result.command == "ls"
+    assert result.command_seq == 7
+
+
+@pytest.mark.timeout(5)
 def test_prompt_redraw_no_duplicate_hint():
     """Prompt redraw (same marker, no set_last_command) must not re-trigger hint."""
     tracker = CommandState()

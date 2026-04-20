@@ -29,7 +29,11 @@ esac
 __aish_last_exit_code=0
 __AISH_PROTOCOL_VERSION=1
 __AISH_CONTROL_FD="${AISH_CONTROL_FD:-}"
+__AISH_COMMAND_METADATA_FILE="${AISH_COMMAND_METADATA_FILE:-}"
 __AISH_AT_PROMPT=0
+__AISH_PENDING_COMMAND_SOURCE=""
+__AISH_PENDING_COMMAND_SEQ=""
+__AISH_PENDING_COMMAND_TEXT=""
 
 __aish_json_escape() {
     local value="$1"
@@ -60,6 +64,34 @@ __aish_emit_session_ready() {
     __aish_emit_control_line "$payload"
 }
 
+__aish_reset_command_metadata() {
+    __AISH_PENDING_COMMAND_SOURCE=""
+    __AISH_PENDING_COMMAND_SEQ=""
+    __AISH_PENDING_COMMAND_TEXT=""
+}
+
+__aish_load_command_metadata() {
+    local metadata_file="$__AISH_COMMAND_METADATA_FILE"
+    __aish_reset_command_metadata
+
+    if [[ -z "$metadata_file" || ! -f "$metadata_file" ]]; then
+        return 1
+    fi
+
+    # shellcheck disable=SC1090
+    source "$metadata_file" 2>/dev/null || return 1
+    return 0
+}
+
+__aish_clear_command_metadata_file() {
+    local metadata_file="$__AISH_COMMAND_METADATA_FILE"
+    if [[ -z "$metadata_file" ]]; then
+        return 0
+    fi
+
+    : > "$metadata_file" 2>/dev/null || true
+}
+
 __aish_emit_prompt_ready() {
     local exit_code="$1"
     local ts cwd_json interrupted command_seq payload
@@ -71,16 +103,14 @@ __aish_emit_prompt_ready() {
     fi
 
     command_seq=null
-    if [[ -n "${__AISH_ACTIVE_COMMAND_SEQ:-}" ]]; then
-        command_seq="${__AISH_ACTIVE_COMMAND_SEQ}"
+    if [[ -n "$__AISH_PENDING_COMMAND_SEQ" ]]; then
+        command_seq="$__AISH_PENDING_COMMAND_SEQ"
     fi
 
     printf -v payload \
         '{"version":%s,"type":"prompt_ready","ts":%s,"command_seq":%s,"exit_code":%s,"cwd":"%s","shlvl":%s,"interrupted":%s}' \
         "$__AISH_PROTOCOL_VERSION" "$ts" "$command_seq" "$exit_code" "$cwd_json" "${SHLVL:-0}" "$interrupted"
     __aish_emit_control_line "$payload"
-    unset __AISH_ACTIVE_COMMAND_SEQ
-    unset __AISH_ACTIVE_COMMAND_TEXT
 }
 
 __aish_emit_command_started() {
@@ -90,8 +120,8 @@ __aish_emit_command_started() {
     command_json=$(__aish_json_escape "$command")
 
     command_seq=null
-    if [[ -n "${__AISH_ACTIVE_COMMAND_SEQ:-}" ]]; then
-        command_seq="${__AISH_ACTIVE_COMMAND_SEQ}"
+    if [[ -n "$__AISH_PENDING_COMMAND_SEQ" ]]; then
+        command_seq="$__AISH_PENDING_COMMAND_SEQ"
     fi
 
     printf -v payload \
@@ -101,28 +131,10 @@ __aish_emit_command_started() {
 }
 
 __aish_rewrite_last_history_entry() {
-    local seq="${__AISH_ACTIVE_COMMAND_SEQ:-}"
-    local original_command="${__AISH_ACTIVE_COMMAND_TEXT:-}"
-    local history_line history_index history_command
+    local source="$__AISH_PENDING_COMMAND_SOURCE"
+    local original_command="$__AISH_PENDING_COMMAND_TEXT"
 
-    if [[ -z "$seq" ]]; then
-        return 0
-    fi
-
-    history_line=$(builtin history 1 2>/dev/null || true)
-    if [[ "$history_line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ ]]; then
-        history_index="${BASH_REMATCH[1]}"
-        history_command="${BASH_REMATCH[2]}"
-
-        if [[ "$history_command" == __AISH_ACTIVE_COMMAND_SEQ=* ]]; then
-            builtin history -d "$history_index" 2>/dev/null || true
-            if [[ -z "$original_command" ]]; then
-                original_command="${history_command#*; }"
-            fi
-        fi
-    fi
-
-    if [[ "$seq" == -* ]]; then
+    if [[ "$source" != "user" ]]; then
         return 0
     fi
 
@@ -153,14 +165,10 @@ __aish_on_debug() {
         return 0
     fi
 
+    __aish_load_command_metadata || true
+
     case "$BASH_COMMAND" in
         __aish_prompt_command*|__aish_on_debug*|__aish_emit_*|__aish_json_escape*|trap* )
-            return 0
-            ;;
-        __AISH_ACTIVE_COMMAND_SEQ=* )
-            return 0
-            ;;
-        __AISH_ACTIVE_COMMAND_TEXT=* )
             return 0
             ;;
     esac
@@ -173,6 +181,7 @@ __aish_on_debug() {
 __aish_prompt_command() {
     local exit_code=$?
     __aish_last_exit_code=$exit_code
+    __aish_load_command_metadata || true
     __aish_rewrite_last_history_entry
     # Call original PROMPT_COMMAND if it exists
     if [[ -n "$__AISH_ORIGINAL_PROMPT_COMMAND" ]]; then
@@ -182,6 +191,8 @@ __aish_prompt_command() {
     PS1=''
     __AISH_AT_PROMPT=1
     __aish_emit_prompt_ready "$exit_code"
+    __aish_clear_command_metadata_file
+    __aish_reset_command_metadata
 }
 
 # Save original PROMPT_COMMAND before we override it

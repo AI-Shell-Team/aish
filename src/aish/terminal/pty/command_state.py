@@ -54,6 +54,7 @@ class CommandSubmission:
     command: str
     source: str
     command_seq: int | None = None
+    observed_command: str = ""
     error_correction_dismissed: bool = False
     allow_error_correction: bool = False
 
@@ -94,6 +95,35 @@ class CommandState:
         return self._last_result
 
     @property
+    def pending_submission(self) -> CommandSubmission | None:
+        """Return the currently active pending submission, if any."""
+        return self._active_submission
+
+    @property
+    def pending_submissions(self) -> tuple[CommandSubmission, ...]:
+        """Return the known pending submissions without duplicates."""
+        submissions: list[CommandSubmission] = []
+        seen: set[int] = set()
+
+        if self._active_submission is not None:
+            submissions.append(self._active_submission)
+            seen.add(id(self._active_submission))
+
+        for submission in self._submitted_by_seq.values():
+            submission_id = id(submission)
+            if submission_id in seen:
+                continue
+            submissions.append(submission)
+            seen.add(submission_id)
+
+        return tuple(submissions)
+
+    @property
+    def pending_submission_count(self) -> int:
+        """Return the number of tracked pending submissions."""
+        return len(self.pending_submissions)
+
+    @property
     def can_correct_last_error(self) -> bool:
         result = self._last_result
         return bool(
@@ -103,28 +133,51 @@ class CommandState:
             and not result.interrupted
         )
 
-    def register_user_command(self, command: str) -> None:
-        self.register_command(command, source="user", command_seq=None)
+    def register_user_command(self, command: str) -> CommandSubmission | None:
+        return self.register_command(command, source="user", command_seq=None)
 
     def register_backend_command(
         self, command: str, command_seq: int | None = None
-    ) -> None:
-        self.register_command(command, source="backend", command_seq=command_seq)
+    ) -> CommandSubmission | None:
+        return self.register_command(command, source="backend", command_seq=command_seq)
 
     def register_command(
         self,
         command: str,
         source: str,
         command_seq: int | None = None,
-    ) -> None:
+    ) -> CommandSubmission | None:
         command = command.strip()
         if not command:
-            return
-        self._store_submission(
+            return None
+        return self._store_submission(
             command=command,
             source=source,
             command_seq=command_seq,
         )
+
+    def get_pending_submission(
+        self, command_seq: int | None = None
+    ) -> CommandSubmission | None:
+        """Return a tracked pending submission by sequence or active state."""
+        if command_seq is None:
+            return self._active_submission
+        return self._submitted_by_seq.get(command_seq)
+
+    def has_pending_submission(self, command_seq: int | None = None) -> bool:
+        """Return whether a pending submission is currently tracked."""
+        return self.get_pending_submission(command_seq) is not None
+
+    def resolve_command_seq(self, command_seq: object) -> int | None:
+        """Resolve an event command sequence using pending submission state."""
+        resolved_seq = self._coerce_command_seq(command_seq)
+        if resolved_seq is not None:
+            return resolved_seq
+
+        if self._active_submission is None:
+            return None
+
+        return self._active_submission.command_seq
 
     def clear_error_correction(self) -> None:
         self._pending_error = None
@@ -141,22 +194,24 @@ class CommandState:
     ) -> CommandResult | None:
         if event.type == "command_started":
             command = str(event.payload.get("command") or "").strip()
-            command_seq = self._coerce_command_seq(event.payload.get("command_seq"))
+            command_seq = self.resolve_command_seq(event.payload.get("command_seq"))
             submission = self._resolve_submission(
                 command_seq=command_seq,
                 command=command,
                 create_if_missing=True,
             )
-            if submission is not None and command and (
-                not submission.command or submission.source != "user"
-            ):
-                submission.command = command
+            if submission is not None:
+                self._bind_submission_seq(submission, command_seq)
+                if command:
+                    submission.observed_command = command
+                if not submission.command and command:
+                    submission.command = command
             return None
 
         if event.type != "prompt_ready":
             return None
 
-        command_seq = self._coerce_command_seq(event.payload.get("command_seq"))
+        command_seq = self.resolve_command_seq(event.payload.get("command_seq"))
         submission = self._resolve_submission(
             command_seq=command_seq,
             command=None,
@@ -165,13 +220,16 @@ class CommandState:
         if submission is None or not submission.command:
             return None
 
+        self._bind_submission_seq(submission, command_seq)
+        resolved_command_seq = submission.command_seq if submission.command_seq is not None else command_seq
+
         exit_code = self._coerce_exit_code(event.payload.get("exit_code"))
         interrupted = bool(event.payload.get("interrupted")) or exit_code == 130
         result = CommandResult(
             command=submission.command,
             exit_code=exit_code,
             source=submission.source,
-            command_seq=command_seq,
+            command_seq=resolved_command_seq,
             interrupted=interrupted,
             allow_error_correction=submission.allow_error_correction,
         )
@@ -185,8 +243,8 @@ class CommandState:
         else:
             self._pending_error = None
 
-        if command_seq is not None:
-            self._submitted_by_seq.pop(command_seq, None)
+        if resolved_command_seq is not None:
+            self._submitted_by_seq.pop(resolved_command_seq, None)
         if self._active_submission is submission:
             self._active_submission = None
         return result
@@ -219,6 +277,25 @@ class CommandState:
         if command_seq is not None:
             self._submitted_by_seq[command_seq] = submission
         return submission
+
+    def _bind_submission_seq(
+        self,
+        submission: CommandSubmission,
+        command_seq: int | None,
+    ) -> None:
+        if command_seq is None:
+            return
+
+        existing_seq = submission.command_seq
+        if existing_seq == command_seq:
+            self._submitted_by_seq[command_seq] = submission
+            return
+
+        if existing_seq is not None:
+            self._submitted_by_seq.pop(existing_seq, None)
+
+        submission.command_seq = command_seq
+        self._submitted_by_seq[command_seq] = submission
 
     @classmethod
     def _should_offer_error_correction(cls, *, command: str, source: str) -> bool:

@@ -7,6 +7,7 @@ import select
 import shlex
 import signal
 import struct
+import tempfile
 import termios
 import threading
 import time
@@ -57,6 +58,7 @@ class PTYManager:
         self._child_pid: Optional[int] = None
         self._control_fd: Optional[int] = None
         self._control_write_fd: Optional[int] = None
+        self._command_metadata_path: Optional[str] = None
         self._running = False
         self._output_thread: Optional[threading.Thread] = None
 
@@ -72,7 +74,7 @@ class PTYManager:
         self._next_backend_command_seq = -1
 
         # Lock for thread-safe operations
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # exec mode: when active, output thread buffers instead of forwarding
         self._exec_mode = threading.Event()
@@ -122,6 +124,7 @@ class PTYManager:
         if self._running:
             return
 
+        self._ensure_command_metadata_file()
         self._control_fd, self._control_write_fd = os.pipe()
         os.set_inheritable(self._control_write_fd, True)
 
@@ -142,6 +145,8 @@ class PTYManager:
             env["TERM"] = "xterm-256color"
             if self._control_write_fd is not None:
                 env["AISH_CONTROL_FD"] = str(self._control_write_fd)
+            if self._command_metadata_path is not None:
+                env["AISH_COMMAND_METADATA_FILE"] = self._command_metadata_path
 
             # Use our rcfile wrapper to set up exit code tracking while preserving user's config
             rcfile_path = os.path.join(os.path.dirname(__file__), "bash_rc_wrapper.sh")
@@ -271,17 +276,32 @@ class PTYManager:
 
         Command lifecycle is tracked via the backend control channel.
         """
-        self._command_state.register_command(
-            command.strip(), source=source, command_seq=command_seq
-        )
-        command_to_send = command
-        if command_seq is not None:
-            quoted_command = shlex.quote(command)
-            command_to_send = (
-                f" __AISH_ACTIVE_COMMAND_SEQ={command_seq}; "
-                f"__AISH_ACTIVE_COMMAND_TEXT={quoted_command}; {command}"
+        stripped_command = command.strip()
+        command_to_send = command if source == "user" else f" {command}"
+        lock = getattr(self, "_lock", None)
+
+        if lock is None:
+            self._command_state.register_command(
+                stripped_command, source=source, command_seq=command_seq
             )
-        self.send((command_to_send + "\n").encode())
+            self._write_command_metadata(
+                command=stripped_command,
+                source=source,
+                command_seq=command_seq,
+            )
+            self.send((command_to_send + "\n").encode())
+            return
+
+        with lock:
+            self._command_state.register_command(
+                stripped_command, source=source, command_seq=command_seq
+            )
+            self._write_command_metadata(
+                command=stripped_command,
+                source=source,
+                command_seq=command_seq,
+            )
+            self.send((command_to_send + "\n").encode())
 
     def register_user_command(self, command: str) -> None:
         """Record a user-submitted command before it reaches bash."""
@@ -337,6 +357,25 @@ class PTYManager:
             set_winsize(self._master_fd, rows, cols)
 
     @staticmethod
+    def _strip_echoed_command(text: str, command: str) -> str:
+        command_lines = [line.lstrip().rstrip() for line in command.strip().splitlines()]
+        if not command_lines:
+            return text
+
+        output_lines = text.split("\n")
+        if len(output_lines) < len(command_lines):
+            return text
+
+        for index, command_line in enumerate(command_lines):
+            output_line = output_lines[index].lstrip()
+            if index > 0 and output_line.startswith(">"):
+                output_line = output_line[1:].lstrip()
+            if output_line.rstrip() != command_line:
+                return text
+
+        return "\n".join(output_lines[len(command_lines) :])
+
+    @staticmethod
     def _clean_pty_output(raw: bytes, command: str) -> str:
         """Clean PTY output: strip ANSI, echo, prompt, exit markers."""
         import re as _re
@@ -350,15 +389,7 @@ class PTYManager:
         # Remove carriage returns (keep newlines)
         text = text.replace("\r\n", "\n").replace("\r", "")
 
-        # Remove command echo: lines containing the command itself
-        cmd_escaped = _re.escape(command.strip())
-        text = _re.sub(
-            rf"^.*{cmd_escaped}\s*$\n?",
-            "",
-            text,
-            count=1,
-            flags=_re.MULTILINE,
-        )
+        text = PTYManager._strip_echoed_command(text, command)
 
         # Remove trailing prompt line (contains prompt symbols)
         lines = text.rstrip().split("\n")
@@ -539,6 +570,69 @@ class PTYManager:
         self._control_fd = None
         self._control_write_fd = None
         self._child_pid = None
+
+        self._remove_command_metadata_file()
+
+    def _ensure_command_metadata_file(self) -> None:
+        if self._command_metadata_path is not None:
+            return
+
+        fd, path = tempfile.mkstemp(prefix="aish_command_meta_")
+        os.close(fd)
+        self._command_metadata_path = path
+        self._clear_command_metadata_file()
+
+    def _clear_command_metadata_file(self) -> None:
+        path = getattr(self, "_command_metadata_path", None)
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8"):
+                pass
+        except OSError:
+            pass
+
+    def _remove_command_metadata_file(self) -> None:
+        path = getattr(self, "_command_metadata_path", None)
+        if not path:
+            return
+
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self._command_metadata_path = None
+
+    def _write_command_metadata(
+        self,
+        *,
+        command: str,
+        source: str,
+        command_seq: int | None,
+    ) -> None:
+        path = getattr(self, "_command_metadata_path", None)
+        if not path:
+            return
+
+        payload = "\n".join(
+            [
+                f"__AISH_PENDING_COMMAND_SOURCE={shlex.quote(source)}",
+                f"__AISH_PENDING_COMMAND_SEQ={shlex.quote('' if command_seq is None else str(command_seq))}",
+                f"__AISH_PENDING_COMMAND_TEXT={shlex.quote(command)}",
+                "",
+            ]
+        )
+        tmp_path = f"{path}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            os.replace(tmp_path, path)
+        except OSError:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     def __enter__(self) -> "PTYManager":
         self.start()

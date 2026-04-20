@@ -73,6 +73,10 @@ class _FakePTYManager:
     def can_correct_last_error(self) -> bool:
         return self._command_state.can_correct_last_error
 
+    @property
+    def command_state(self) -> CommandState:
+        return self._command_state
+
 
 def _make_ai_handler() -> tuple[AIHandler, Mock]:
     pty_manager = _FakePTYManager()
@@ -240,26 +244,134 @@ def test_output_processor_filters_quit_echo():
     assert processor.process(b"\rquit\r\n") == b""
 
 
-def test_output_processor_filters_prefixed_user_command_echo():
+def test_output_processor_filters_user_command_echo():
     processor = OutputProcessor(_FakePTYManager())
     processor.prepare_user_command_echo("pwd", 5)
 
-    rendered = processor.process(
-        b" __AISH_ACTIVE_COMMAND_SEQ=5; __AISH_ACTIVE_COMMAND_TEXT=pwd; pwd\r\n"
-    )
+    rendered = processor.process(b"pwd\r\n")
 
     assert rendered == b""
 
 
-def test_output_processor_filters_prefixed_user_command_echo_before_command_output():
+def test_output_processor_filters_user_command_echo_before_command_output():
     processor = OutputProcessor(_FakePTYManager())
     processor.prepare_user_command_echo("pwd", 5)
 
-    rendered = processor.process(
-        b" __AISH_ACTIVE_COMMAND_SEQ=5; __AISH_ACTIVE_COMMAND_TEXT=pwd; pwd\r\n/tmp/project\r\n"
-    )
+    rendered = processor.process(b"pwd\r\n/tmp/project\r\n")
 
     assert rendered == b"/tmp/project\r\n"
+
+
+def test_output_processor_filters_split_user_command_echo_across_chunks():
+    processor = OutputProcessor(_FakePTYManager())
+    processor.prepare_user_command_echo("pwd", 5)
+
+    first = processor.process(b"pw")
+    second = processor.process(b"d\r\n")
+
+    assert first == b""
+    assert second == b""
+
+
+def test_output_processor_filters_split_user_command_echo_before_output():
+    processor = OutputProcessor(_FakePTYManager())
+    processor.prepare_user_command_echo("pwd", 5)
+
+    first = processor.process(b"pw")
+    second = processor.process(b"d\r\n/tmp/project\r\n")
+
+    assert first == b""
+    assert second == b"/tmp/project\r\n"
+
+
+def test_output_processor_does_not_strip_nonleading_command_text():
+    processor = OutputProcessor(_FakePTYManager())
+    processor.prepare_user_command_echo("pwd", 5)
+
+    rendered = processor.process(b"status: pwd\r\n")
+
+    assert rendered == b"status: pwd\r\n"
+
+
+def test_output_processor_filters_user_command_echo_after_async_output():
+    processor = OutputProcessor(_FakePTYManager())
+    processor.prepare_user_command_echo("pwd", 5)
+
+    first = processor.process(b"[1]+ Done sleep 0.1\r\n")
+    second = processor.process(b"pwd\r\n/tmp/project\r\n")
+
+    assert first == b"[1]+ Done sleep 0.1\r\n"
+    assert second == b"/tmp/project\r\n"
+
+
+def test_output_processor_clears_pending_echo_on_prompt_ready():
+    processor = OutputProcessor(_FakePTYManager())
+    processor.prepare_user_command_echo("pwd", 5)
+
+    processor.handle_backend_event(
+        BackendControlEvent(
+            version=1,
+            type="prompt_ready",
+            ts=1,
+            payload={"exit_code": 0},
+        ),
+        result=CommandResult(command="pwd", exit_code=0, source="user"),
+    )
+
+    rendered = processor.process(b"pwd\r\n")
+
+    assert rendered == b"pwd\r\n"
+
+
+def test_pty_manager_send_command_serializes_metadata_and_pty_write():
+    manager = PTYManager()
+    manager._running = True
+    manager._master_fd = 1
+
+    events: list[tuple[str, str]] = []
+    first_metadata_written = threading.Event()
+    release_first = threading.Event()
+
+    def fake_write_command_metadata(*, command: str, source: str, command_seq: int | None) -> None:
+        _ = (source, command_seq)
+        events.append(("meta", command))
+        if command == "one":
+            first_metadata_written.set()
+            release_first.wait(timeout=1)
+
+    def fake_send(data: bytes) -> int:
+        events.append(("send", data.decode("utf-8").strip()))
+        return len(data)
+
+    manager._write_command_metadata = fake_write_command_metadata
+    manager.send = fake_send
+
+    first = threading.Thread(
+        target=manager.send_command,
+        kwargs={"command": "one", "command_seq": 1},
+    )
+    second = threading.Thread(
+        target=manager.send_command,
+        kwargs={"command": "two", "command_seq": 2},
+    )
+
+    first.start()
+    assert first_metadata_written.wait(timeout=1)
+
+    second.start()
+    threading.Event().wait(0.05)
+    assert events == [("meta", "one")]
+
+    release_first.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+
+    assert events == [
+        ("meta", "one"),
+        ("send", "one"),
+        ("meta", "two"),
+        ("send", "two"),
+    ]
 
 
 class _FakeLive:
@@ -400,7 +512,7 @@ def test_output_processor_prints_error_hint_when_command_fails(capsys):
     assert t("shell.error_correction.press_semicolon_hint") in capsys.readouterr().out
 
 
-def test_pty_manager_send_command_injects_command_seq():
+def test_pty_manager_send_command_sends_plain_user_command():
     manager = object.__new__(PTYManager)
     manager._command_state = CommandState()
     manager._completed_results = []
@@ -414,7 +526,7 @@ def test_pty_manager_send_command_injects_command_seq():
 
     manager.send = _fake_send  # type: ignore[method-assign]
 
-    PTYManager.send_command(manager, "echo hi", command_seq=7)
+    PTYManager.send_command(manager, "echo hi", command_seq=7, source="user")
     result = PTYManager.handle_backend_event(
         manager,
         BackendControlEvent(
@@ -435,11 +547,28 @@ def test_pty_manager_send_command_injects_command_seq():
         ),
     )
 
-    assert sent == [
-        b" __AISH_ACTIVE_COMMAND_SEQ=7; __AISH_ACTIVE_COMMAND_TEXT='echo hi'; echo hi\n"
-    ]
+    assert sent == [b"echo hi\n"]
     assert result is not None
     assert manager.last_command == "echo hi"
+
+
+def test_pty_manager_send_command_prefixes_backend_with_space_only():
+    manager = object.__new__(PTYManager)
+    manager._command_state = CommandState()
+    manager._completed_results = []
+    manager._completion_condition = threading.Condition()
+    manager._exit_code_callback = None
+    sent: list[bytes] = []
+
+    def _fake_send(data: bytes) -> int:
+        sent.append(data)
+        return len(data)
+
+    manager.send = _fake_send  # type: ignore[method-assign]
+
+    PTYManager.send_command(manager, "history | tail -n 5", command_seq=-1, source="backend")
+
+    assert sent == [b" history | tail -n 5\n"]
 
 
 def test_shell_tracks_command_seq_and_returns_to_editing_on_prompt_ready():
@@ -483,6 +612,46 @@ def test_shell_tracks_command_seq_and_returns_to_editing_on_prompt_ready():
     assert shell._pending_command_seq is None
     assert shell._pending_command_text is None
     assert shell._output_processor.handle_backend_event.call_count == 2
+
+
+def test_shell_tracks_phase_without_mutating_missing_command_seq_events():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = _FakePTYManager()
+    shell._backend_protocol_events = []
+    shell._backend_protocol_errors = []
+    shell._last_backend_event = None
+    shell._backend_session_ready = False
+    shell._shell_phase = "booting"
+    shell._next_command_seq = 1
+    shell._pending_command_seq = 1
+    shell._pending_command_text = "pwd"
+    shell._running = True
+    shell._output_processor = Mock()
+    shell._pty_manager.command_state.register_command("pwd", source="user", command_seq=1)
+
+    started = BackendControlEvent(
+        version=1,
+        type="command_started",
+        ts=1,
+        payload={"command": "pwd"},
+    )
+    PTYAIShell._track_backend_event(shell, started)
+
+    assert shell._shell_phase == "running_passthrough"
+    assert "command_seq" not in started.payload
+
+    ready = BackendControlEvent(
+        version=1,
+        type="prompt_ready",
+        ts=2,
+        payload={"exit_code": 0},
+    )
+    PTYAIShell._track_backend_event(shell, ready)
+
+    assert shell._shell_phase == "editing"
+    assert shell._pending_command_seq is None
+    assert shell._pending_command_text is None
+    assert "command_seq" not in ready.payload
 
 
 def test_shell_tracks_backend_cwd_from_prompt_ready(monkeypatch):

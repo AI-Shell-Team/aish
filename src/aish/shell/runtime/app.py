@@ -1750,6 +1750,12 @@ class PTYAIShell:
 
         self._sync_backend_cwd(event.payload.get("cwd"))
 
+        resolved_command_seq = None
+        if self._pty_manager is not None and event.type in {"command_started", "prompt_ready"}:
+            resolved_command_seq = self._pty_manager.command_state.resolve_command_seq(
+                event.payload.get("command_seq")
+            )
+
         result = None
         if self._pty_manager is not None:
             result = self._pty_manager.handle_backend_event(event)
@@ -1761,17 +1767,15 @@ class PTYAIShell:
             self._backend_session_ready = True
             self._shell_phase = "editing"
         elif event.type == "command_started":
-            command_seq = event.payload.get("command_seq")
-            if command_seq is None and self._pending_command_seq is not None:
-                event.payload["command_seq"] = self._pending_command_seq
+            command_seq = resolved_command_seq
+            if command_seq is None:
                 command_seq = self._pending_command_seq
 
             if self._pending_command_seq is None or command_seq == self._pending_command_seq:
                 self._shell_phase = "running_passthrough"
         elif event.type == "prompt_ready":
-            command_seq = event.payload.get("command_seq")
-            if command_seq is None and self._pending_command_seq is not None:
-                event.payload["command_seq"] = self._pending_command_seq
+            command_seq = resolved_command_seq
+            if command_seq is None:
                 command_seq = self._pending_command_seq
 
             if self._pending_command_seq is None or command_seq == self._pending_command_seq:

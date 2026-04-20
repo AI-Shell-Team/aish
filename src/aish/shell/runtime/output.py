@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import shlex
+import re
 import sys
 from typing import TYPE_CHECKING, Optional
 
@@ -14,6 +14,10 @@ from ...terminal.pty.control_protocol import BackendControlEvent
 if TYPE_CHECKING:
     from ...terminal.pty import PTYManager
     from .app import PTYAIShell
+
+
+_ANSI_CSI_RE = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_ANSI_OSC_RE = re.compile(rb"\x1b\].*?(?:\x07|\x1b\\)")
 
 
 class OutputProcessor:
@@ -30,6 +34,7 @@ class OutputProcessor:
         self.shell = shell
         self._current_command: str = ""
         self._pending_user_echo: bytes | None = None
+        self._pending_user_echo_buffer = bytearray()
         # Two-layer error suppression:
         # Layer 1 (here): _suppress_error_hint — UI-layer skip for one cycle
         #   (e.g., after Ctrl+C for exit, suppress the spurious hint).
@@ -56,51 +61,68 @@ class OutputProcessor:
         """Suppress the first bash echo for a user-submitted command."""
         command = str(command or "").strip()
         if not command or command_seq is None:
-            self._pending_user_echo = None
+            self._clear_pending_user_echo()
             return
-        quoted_command = shlex.quote(command)
-        self._pending_user_echo = (
-            (
-                f" __AISH_ACTIVE_COMMAND_SEQ={command_seq}; "
-                f"__AISH_ACTIVE_COMMAND_TEXT={quoted_command}; {command}"
-            ).encode("utf-8")
-        )
+        self._pending_user_echo = command.encode("utf-8")
+        self._pending_user_echo_buffer.clear()
+
+    def _clear_pending_user_echo(self) -> None:
+        self._pending_user_echo = None
+        self._pending_user_echo_buffer.clear()
+
+    @staticmethod
+    def _strip_terminal_control(data: bytes) -> bytes:
+        data = _ANSI_CSI_RE.sub(b"", data)
+        data = _ANSI_OSC_RE.sub(b"", data)
+        return data
+
+    def _line_matches_pending_user_echo(self, line: bytes) -> bool:
+        if self._pending_user_echo is None:
+            return False
+
+        normalized = self._strip_terminal_control(line).strip(b"\r\n")
+        normalized = normalized.lstrip(b"\r")
+        return normalized == self._pending_user_echo
+
+    def _buffer_might_be_pending_user_echo(self, buffer: bytes) -> bool:
+        if self._pending_user_echo is None:
+            return False
+
+        normalized = self._strip_terminal_control(buffer)
+        normalized = normalized.lstrip(b"\r")
+        return self._pending_user_echo.startswith(normalized)
 
     def _consume_pending_user_echo(self, data: bytes) -> bytes:
         if self._pending_user_echo is None:
             return data
 
-        echoed = self._pending_user_echo
-        patterns = (
-            b"\r" + echoed + b"\r\n",
-            echoed + b"\r\n",
-            b"\r" + echoed + b"\n",
-            echoed + b"\n",
-            b"\r" + echoed,
-            echoed,
-        )
+        self._pending_user_echo_buffer.extend(data)
+        rendered = bytearray()
 
-        for pattern in patterns:
-            if data.startswith(pattern):
-                self._pending_user_echo = None
-                return data[len(pattern) :]
+        while self._pending_user_echo_buffer:
+            buffered = bytes(self._pending_user_echo_buffer)
+            newline_index = buffered.find(b"\n")
 
-        index = data.find(echoed)
-        if index == -1:
-            return data
+            if newline_index == -1:
+                if self._buffer_might_be_pending_user_echo(buffered):
+                    break
+                rendered.extend(self._pending_user_echo_buffer)
+                self._pending_user_echo_buffer.clear()
+                break
 
-        start = index
-        end = index + len(echoed)
-        if start > 0 and data[start - 1 : start] == b"\r":
-            start -= 1
+            line_end = newline_index + 1
+            line = buffered[:line_end]
+            del self._pending_user_echo_buffer[:line_end]
 
-        if data[end : end + 2] == b"\r\n":
-            end += 2
-        elif data[end : end + 1] in (b"\r", b"\n"):
-            end += 1
+            if self._line_matches_pending_user_echo(line):
+                remainder = bytes(self._pending_user_echo_buffer)
+                self._clear_pending_user_echo()
+                rendered.extend(remainder)
+                break
 
-        self._pending_user_echo = None
-        return data[:start] + data[end:]
+            rendered.extend(line)
+
+        return bytes(rendered)
 
     def set_filter_exit_echo(self, filter_exit: bool) -> None:
         """Set whether to filter exit command echo."""
@@ -122,6 +144,7 @@ class OutputProcessor:
             return
 
         self._waiting_for_result = False
+        self._clear_pending_user_echo()
         if result is None:
             return
 

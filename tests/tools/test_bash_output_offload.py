@@ -8,6 +8,7 @@ import pytest
 from aish.config import BashOutputOffloadSettings
 from aish.security.security_manager import SecurityDecision
 from aish.security.security_policy import RiskLevel
+from aish.terminal.pty.manager import PTYManager
 from aish.tools.code_exec import BashTool
 
 
@@ -99,6 +100,56 @@ async def test_bash_exec_offloads_large_output(tmp_path: Path):
     assert meta_path.exists()
     assert stdout_path.read_text(encoding="utf-8") == "1234567890abcdef"
     assert stderr_path.read_text(encoding="utf-8") == "err"
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_uses_shared_pty_without_metadata_leak(tmp_path: Path):
+    manager = PTYManager(use_output_thread=False, env={"HISTFILE": str(tmp_path / "bash_history")})
+    tool = BashTool(
+        pty_manager=manager,
+        offload_settings=BashOutputOffloadSettings(
+            enabled=True,
+            threshold_bytes=1024,
+            preview_bytes=1024,
+        ),
+    )
+
+    manager.start()
+    try:
+        with patch.object(tool.security_manager, "decide", return_value=_allow_decision()):
+            result = await tool("printf 'hello\\n'")
+
+        assert result.ok is True
+        assert _extract_tag(result.output, "stdout") == "hello"
+        assert "__AISH_ACTIVE_COMMAND_SEQ" not in result.output
+        assert "__AISH_ACTIVE_COMMAND_TEXT" not in result.output
+    finally:
+        manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_uses_shared_pty_for_multiline_command_without_echo(tmp_path: Path):
+    manager = PTYManager(use_output_thread=False, env={"HISTFILE": str(tmp_path / "bash_history")})
+    tool = BashTool(
+        pty_manager=manager,
+        offload_settings=BashOutputOffloadSettings(
+            enabled=True,
+            threshold_bytes=1024,
+            preview_bytes=1024,
+        ),
+    )
+
+    manager.start()
+    try:
+        with patch.object(tool.security_manager, "decide", return_value=_allow_decision()):
+            result = await tool("printf 'hello\\n' && \\\nprintf 'world\\n'")
+
+        assert result.ok is True
+        assert _extract_tag(result.output, "stdout") == "hello\nworld"
+        assert "__AISH_ACTIVE_COMMAND_SEQ" not in result.output
+        assert "__AISH_ACTIVE_COMMAND_TEXT" not in result.output
+    finally:
+        manager.stop()
 
 
 @pytest.mark.asyncio
