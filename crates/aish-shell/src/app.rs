@@ -1,12 +1,12 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use aish_config::ConfigModel;
 use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
-use aish_llm::{LlmCallbackResult, LlmSession};
+use aish_llm::{CancellationToken, LlmCallbackResult, LlmSession};
 use aish_memory::MemoryManager;
 use aish_security::{SecurityManager, SecurityPolicy};
 use aish_session::SessionStore;
@@ -22,6 +22,32 @@ use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
 use crate::types::ShellState;
+
+// ---------------------------------------------------------------------------
+// SIGINT handler for AI operation cancellation
+// ---------------------------------------------------------------------------
+
+/// Raw pointer to the current CancellationToken, set before an AI call and
+/// cleared afterwards. Only accessed from `ai_sigint_handler`.
+static CANCEL_TOKEN_PTR: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// POSIX signal handler for SIGINT during AI operations.
+/// Sets the CancellationToken's atomic flag (async-signal-safe).
+extern "C" fn ai_sigint_handler(_: std::ffi::c_int) {
+    let ptr = CANCEL_TOKEN_PTR.load(Ordering::SeqCst) as *const CancellationToken;
+    if !ptr.is_null() {
+        unsafe { &*ptr }.cancel_atomic();
+    }
+}
+
+/// Poll a CancellationToken until it is cancelled. Used inside `tokio::select!`
+/// to race against the AI operation — when the token fires the AI future is
+/// dropped, which aborts the in-flight HTTP stream.
+async fn poll_cancelled(token: *const CancellationToken) {
+    while !unsafe { &*token }.is_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
 
 /// Braille spinner frames used in the reasoning overlay.
 const DOTS_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
@@ -89,6 +115,8 @@ pub struct AishShell {
     interruption: InterruptionState,
     /// Timestamp of last Ctrl+C press (for double-press detection)
     last_ctrl_c: Option<std::time::Instant>,
+    /// Shared animation spinner, stored so it can be stopped on cancellation.
+    animation: Arc<SharedAnimation>,
 }
 
 impl AishShell {
@@ -647,7 +675,37 @@ impl AishShell {
             phase: ShellPhase::Booting,
             interruption: InterruptionState::default(),
             last_ctrl_c: None,
+            animation,
         })
+    }
+
+    /// Install a POSIX SIGINT handler that atomically sets the LLM
+    /// session's cancellation flag. Returns the previous `SigAction`
+    /// so it can be restored via `restore_ai_sigint_handler`.
+    fn install_ai_sigint_handler(&self) -> Option<nix::sys::signal::SigAction> {
+        use nix::sys::signal::{self, SigAction, SigHandler, SigSet, Signal};
+
+        // Clear any leftover cancellation state from a previous operation.
+        self.ai_handler.cancellation_token().reset();
+
+        let token_ptr = self.ai_handler.cancellation_token() as *const CancellationToken;
+        CANCEL_TOKEN_PTR.store(token_ptr as *mut (), Ordering::SeqCst);
+
+        let action = SigAction::new(
+            SigHandler::Handler(ai_sigint_handler),
+            signal::SaFlags::empty(),
+            SigSet::empty(),
+        );
+        unsafe { signal::sigaction(Signal::SIGINT, &action) }.ok()
+    }
+
+    /// Restore the SIGINT handler saved by `install_ai_sigint_handler`.
+    fn restore_ai_sigint_handler(old: Option<nix::sys::signal::SigAction>) {
+        CANCEL_TOKEN_PTR.store(std::ptr::null_mut(), Ordering::SeqCst);
+        if let Some(old) = old {
+            use nix::sys::signal::{self, Signal};
+            let _ = unsafe { signal::sigaction(Signal::SIGINT, &old) };
+        }
     }
 
     /// Run the main REPL loop.
@@ -779,6 +837,9 @@ impl AishShell {
                     // trigger error correction instead of a normal AI query.
                     if question.is_empty() && self.state.can_correct_error {
                         if let Some(ref cmd) = self.state.last_command.clone() {
+                            let old_sigint = self.install_ai_sigint_handler();
+                            let token_ptr = self.ai_handler.cancellation_token()
+                                as *const CancellationToken;
                             let result = runtime.block_on(async {
                                 tokio::select! {
                                     r = self.ai_handler.handle_error_correction(
@@ -786,12 +847,12 @@ impl AishShell {
                                         self.state.last_exit_code,
                                         &self.state.last_output,
                                     ) => r,
-                                    _ = tokio::signal::ctrl_c() => {
-                                        println!("\n\x1b[33mInterrupted\x1b[0m");
+                                    _ = poll_cancelled(token_ptr) => {
                                         Err(aish_core::AishError::Cancelled)
                                     }
                                 }
                             });
+                            Self::restore_ai_sigint_handler(old_sigint);
                             let did_stream = self.streamed_content.load(Ordering::SeqCst);
 
                             match result {
@@ -814,6 +875,10 @@ impl AishShell {
                                         t("shell.error_correction.no_valid_command")
                                     );
                                 }
+                                Err(aish_core::AishError::Cancelled) => {
+                                    self.animation.stop();
+                                    println!("\x1b[33mInterrupted\x1b[0m");
+                                }
                                 Err(e) => {
                                     let msg = t("shell.error.llm_error_message")
                                         .replace("{error}", &e.to_string());
@@ -824,17 +889,18 @@ impl AishShell {
                         }
                     }
 
+                    let old_sigint = self.install_ai_sigint_handler();
+                    let token_ptr = self.ai_handler.cancellation_token()
+                        as *const CancellationToken;
                     let result = runtime.block_on(async {
                         tokio::select! {
                             r = self.ai_handler.handle_question(&question) => r,
-                            _ = tokio::signal::ctrl_c() => {
-                                // Signal the LLM session to cancel the in-flight request.
-                                self.ai_handler.cancel();
-                                println!("\n\x1b[33mInterrupted\x1b[0m");
+                            _ = poll_cancelled(token_ptr) => {
                                 Err(aish_core::AishError::Cancelled)
                             }
                         }
                     });
+                    Self::restore_ai_sigint_handler(old_sigint);
 
                     let did_stream = self.streamed_content.load(Ordering::SeqCst);
 
@@ -942,6 +1008,10 @@ impl AishShell {
                             }
 
                             self.record_history(input, 0);
+                        }
+                        Err(aish_core::AishError::Cancelled) => {
+                            self.animation.stop();
+                            println!("\x1b[33mInterrupted\x1b[0m");
                         }
                         Err(e) => {
                             let msg = t("shell.error.llm_error_message")

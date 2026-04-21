@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,13 +24,12 @@ const BUILTINS: &[&str] = &[
 /// Special commands starting with /.
 const SPECIALS: &[&str] = &["/model", "/setup"];
 
-/// Common POSIX shell commands that should appear in completion even if not in PATH.
-const COMMON_SHELL_COMMANDS: &[&str] = &[
-    "alias", "bg", "bind", "builtin", "command", "compgen", "complete", "declare", "disown",
-    "echo", "enable", "eval", "exec", "false", "fc", "fg", "getopts", "hash", "help", "jobs",
-    "kill", "let", "local", "printf", "read", "readonly", "return", "set", "shift", "shopt",
-    "source", "test", "times", "trap", "true", "type", "typeset", "ulimit", "umask", "unalias",
-    "wait",
+/// Commands that take another command as their first argument.
+/// After these commands, tab completion suggests commands instead of files.
+const COMMAND_TAKING_COMMANDS: &[&str] = &[
+    "sudo", "doas", "pkexec", "nice", "nohup", "ionice", "taskset", "strace", "ltrace", "perf",
+    "timeout", "xargs", "exec", "chroot", "unshare", "setsid", "env", "bash", "sh", "zsh",
+    "fish", "run0", "time", "coproc",
 ];
 
 /// Commands that only accept directory paths as arguments.
@@ -59,12 +59,14 @@ impl ConditionalEventHandler for ModeToggleHandler {
     }
 }
 
-/// Shell command completer combining builtins, specials, PATH executables,
-/// and file paths.  Also provides history-based autosuggestions via Hinter.
+/// Shell command completer using bash `compgen` for command discovery and
+/// rustyline's `FilenameCompleter` for path completion.  Also provides
+/// history-based autosuggestions via Hinter.
 struct ShellHelper {
     file_completer: FilenameCompleter,
-    /// Cached set of executable names discovered from PATH.
-    path_executables: HashSet<String>,
+    /// Lazily-populated set of all commands from `bash -c 'compgen -c'`.
+    /// Invalidated each prompt so newly-installed commands are picked up.
+    command_cache: RefCell<Option<HashSet<String>>>,
     /// Shared autosuggest engine (Arc<Mutex> so it can be mutated from
     /// ShellReadline without needing helper_mut).
     autosuggest: Arc<Mutex<AutoSuggest>>,
@@ -74,9 +76,24 @@ impl ShellHelper {
     fn new(autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
         Self {
             file_completer: FilenameCompleter::new(),
-            path_executables: discover_path_executables(),
+            command_cache: RefCell::new(None),
             autosuggest,
         }
+    }
+
+    /// Return a reference to the cached command set, populating it first if needed.
+    fn cached_commands(&self) -> std::cell::Ref<'_, HashSet<String>> {
+        if self.command_cache.borrow().is_none() {
+            *self.command_cache.borrow_mut() = Some(bash_compgen_commands());
+        }
+        std::cell::Ref::map(self.command_cache.borrow(), |opt| {
+            opt.as_ref().unwrap()
+        })
+    }
+
+    /// Invalidate the command cache so it is refreshed on the next tab press.
+    fn invalidate_cache(&self) {
+        *self.command_cache.borrow_mut() = None;
     }
 }
 
@@ -131,16 +148,6 @@ impl Completer for ShellHelper {
                 }
             }
 
-            // Common shell commands
-            for cmd in COMMON_SHELL_COMMANDS {
-                if cmd.starts_with(word) {
-                    candidates.push(Pair {
-                        display: cmd.to_string(),
-                        replacement: format!("{} ", cmd),
-                    });
-                }
-            }
-
             // Special commands
             for cmd in SPECIALS {
                 if cmd.starts_with(word) {
@@ -159,13 +166,15 @@ impl Completer for ShellHelper {
                 });
             }
 
-            // PATH executables
+            // All commands from bash compgen (includes PATH executables,
+            // aliases, functions, builtins)
             if !word.is_empty() {
-                for exe in &self.path_executables {
-                    if exe.starts_with(word) {
+                let commands = self.cached_commands();
+                for cmd in &*commands {
+                    if cmd.starts_with(word) && !BUILTINS.contains(&cmd.as_str()) {
                         candidates.push(Pair {
-                            display: exe.clone(),
-                            replacement: format!("{} ", exe),
+                            display: cmd.clone(),
+                            replacement: format!("{} ", cmd),
                         });
                     }
                 }
@@ -187,7 +196,7 @@ impl Completer for ShellHelper {
             return Ok((word_start, candidates));
         }
 
-        // After a command: context-aware path completion
+        // After a command: context-aware completion
         let tokens: Vec<&str> = before.split_whitespace().collect();
         if let Some(&command) = tokens.first() {
             // Skip flag arguments
@@ -198,6 +207,33 @@ impl Completer for ShellHelper {
             if DIRECTORY_ONLY_COMMANDS.contains(&command) {
                 return self.file_completer.complete(line, pos, ctx);
             }
+            // Commands that take another command as first argument (sudo, etc.)
+            if COMMAND_TAKING_COMMANDS.contains(&command) {
+                let mut candidates: Vec<Pair> = Vec::new();
+                if !word.is_empty() {
+                    let commands = self.cached_commands();
+                    for cmd in &*commands {
+                        if cmd.starts_with(word) {
+                            candidates.push(Pair {
+                                display: cmd.clone(),
+                                replacement: format!("{} ", cmd),
+                            });
+                        }
+                    }
+                }
+                if !candidates.is_empty() {
+                    return Ok((word_start, candidates));
+                }
+                // Fall through to file completion for path-like tokens
+                if word.starts_with("./")
+                    || word.starts_with("../")
+                    || word.starts_with("/")
+                    || word.starts_with("~/")
+                {
+                    return self.file_completer.complete(line, pos, ctx);
+                }
+                return Ok((word_start, candidates));
+            }
         }
 
         // Default: file completion
@@ -205,46 +241,23 @@ impl Completer for ShellHelper {
     }
 }
 
-/// Discover all executable file names in PATH directories.
-fn discover_path_executables() -> HashSet<String> {
-    let mut executables = HashSet::new();
-    let path_var = std::env::var("PATH").unwrap_or_default();
+/// Query bash for all available commands using `compgen -c`.
+/// Returns aliases, functions, builtins, and PATH executables.
+fn bash_compgen_commands() -> HashSet<String> {
+    let output = match std::process::Command::new("bash")
+        .args(&["-c", "compgen -c"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return HashSet::new(),
+    };
 
-    for dir in path_var.split(':') {
-        let dir = dir.trim();
-        if dir.is_empty() {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy().to_string();
-                if is_executable(&entry) {
-                    executables.insert(name_str);
-                }
-            }
-        }
-    }
-
-    executables
-}
-
-/// Check if a directory entry is an executable file (or symlink to one).
-#[cfg(unix)]
-fn is_executable(entry: &std::fs::DirEntry) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    entry
-        .metadata()
-        .map(|m| {
-            let mode = m.permissions().mode();
-            m.is_file() && (mode & 0o111 != 0)
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn is_executable(entry: &std::fs::DirEntry) -> bool {
-    entry.metadata().map(|m| m.is_file()).unwrap_or(false)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
 }
 
 /// Wrapper around rustyline Editor with shell-friendly configuration.
@@ -295,6 +308,11 @@ impl ShellReadline {
     /// Supports backslash continuation: lines ending with `\` read
     /// additional lines with a `> ` prompt.
     pub fn read_line(&mut self, prompt: &str) -> rustyline::Result<Option<String>> {
+        // Invalidate command cache so newly-installed commands are discovered.
+        if let Some(helper) = self.editor.helper() {
+            helper.invalidate_cache();
+        }
+
         let line = match self.editor.readline(prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => return Ok(None),
@@ -365,26 +383,23 @@ impl ShellReadline {
 }
 
 #[cfg(test)]
-mod path_tests {
+mod tests {
     use super::*;
 
     #[test]
-    fn test_discover_path_executables_returns_set() {
-        let exes = discover_path_executables();
-        assert!(!exes.is_empty());
-        assert!(exes.contains("ls") || exes.contains("cat"));
+    fn test_bash_compgen_commands_non_empty() {
+        let cmds = bash_compgen_commands();
+        assert!(!cmds.is_empty(), "compgen -c should return commands");
+        // ls and cat are extremely common, at least one should exist
+        assert!(cmds.contains("ls") || cmds.contains("cat") || cmds.contains("echo"));
     }
 
     #[test]
-    fn test_common_commands_all_lowercase() {
-        for cmd in COMMON_SHELL_COMMANDS {
-            assert_eq!(
-                *cmd,
-                cmd.to_lowercase(),
-                "COMMON_SHELL_COMMANDS must be lowercase: {}",
-                cmd
-            );
-        }
+    fn test_command_taking_commands_contains_sudo() {
+        assert!(
+            COMMAND_TAKING_COMMANDS.contains(&"sudo"),
+            "sudo must be in COMMAND_TAKING_COMMANDS"
+        );
     }
 
     #[test]

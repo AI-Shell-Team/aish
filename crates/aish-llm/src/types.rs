@@ -248,6 +248,14 @@ impl CancellationToken {
         }
     }
 
+    /// Set the cancelled flag using only an atomic store.
+    /// Async-signal-safe: safe to call from a POSIX signal handler.
+    /// Note: registered callbacks are NOT invoked.
+    pub fn cancel_atomic(&self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn reset(&self) {
         self.cancelled
             .store(false, std::sync::atomic::Ordering::SeqCst);

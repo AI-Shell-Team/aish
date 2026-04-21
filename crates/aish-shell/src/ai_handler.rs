@@ -213,6 +213,11 @@ impl AiHandler {
         self.llm_session.cancellation_token().cancel();
     }
 
+    /// Get a reference to the LLM session's cancellation token.
+    pub fn cancellation_token(&self) -> &aish_llm::CancellationToken {
+        self.llm_session.cancellation_token()
+    }
+
     /// Add a shell command result to the LLM context so the AI can reference
     /// previous command output in follow-up questions.
     pub fn add_shell_context(&mut self, entry: &str) {
