@@ -23,8 +23,8 @@ pub fn classify_input(input: &str) -> InputIntent {
 
     let cmd = trimmed.split_whitespace().next().unwrap_or("");
     match cmd {
-        "cd" | "pwd" | "export" | "unset" | "pushd" | "popd" | "dirs" | "clear"
-        | "exit" | "quit" | "su" | "sudo" => InputIntent::BuiltinCommand,
+        "cd" | "pwd" | "export" | "unset" | "pushd" | "popd" | "dirs" | "clear" | "exit"
+        | "quit" | "su" | "sudo" => InputIntent::BuiltinCommand,
         _ => {
             // Check if the first word looks like a .aish script
             if cmd.ends_with(".aish") {

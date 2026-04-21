@@ -43,6 +43,13 @@ extern "C" fn ai_sigint_handler(_: std::ffi::c_int) {
 /// Poll a CancellationToken until it is cancelled. Used inside `tokio::select!`
 /// to race against the AI operation — when the token fires the AI future is
 /// dropped, which aborts the in-flight HTTP stream.
+///
+/// # Safety
+///
+/// The caller must guarantee that `token` points to a live `CancellationToken`
+/// that outlives this async task. This holds because the token lives inside
+/// `AiHandler` which is owned by `AishShell`, and `poll_cancelled` is only
+/// spawned as part of a `tokio::select!` block within `AishShell::run()`.
 async fn poll_cancelled(token: *const CancellationToken) {
     while !unsafe { &*token }.is_cancelled() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -104,7 +111,9 @@ pub struct AishShell {
     pub version: String,
     pub operation_in_progress: bool,
     /// Persistent PTY session for executing all external commands.
-    pty: aish_pty::PersistentPty,
+    /// Wrapped in `Arc<Mutex<>>` so the readline completion handler can
+    /// query the PTY bash for tab-completions.
+    pty: Arc<Mutex<aish_pty::PersistentPty>>,
     /// UUID for the current session, used to associate history entries.
     session_uuid: String,
     /// Whether streaming has started printing content (to avoid double-printing).
@@ -120,6 +129,16 @@ pub struct AishShell {
 }
 
 impl AishShell {
+    /// Lock the PTY mutex, recovering from poison if a previous holder
+    /// panicked. A poisoned PTY is still usable — the lock just means
+    /// a prior operation failed, not that the PTY state is corrupt.
+    fn lock_pty(&self) -> std::sync::MutexGuard<'_, aish_pty::PersistentPty> {
+        match self.pty.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Create a new shell instance from the given configuration.
     pub fn new(config: ConfigModel) -> aish_core::Result<Self> {
         // Set terminal defaults and load bash environment
@@ -653,6 +672,7 @@ impl AishShell {
         let pty = aish_pty::PersistentPty::start(&state.cwd, rows, cols).map_err(|e| {
             aish_core::AishError::Pty(format!("failed to start persistent PTY: {e}"))
         })?;
+        let pty = Arc::new(Mutex::new(pty));
 
         // Placeholder instances for struct fields.  The real subsystems live
         // inside AiHandler which needs mutable access during each turn.
@@ -726,7 +746,7 @@ impl AishShell {
         });
 
         // Initialize readline with history, tab completion, and line editing
-        let mut rl = ShellReadline::new().map_err(|e| {
+        let mut rl = ShellReadline::new(self.pty.clone()).map_err(|e| {
             aish_core::AishError::Config(format!("Failed to initialize readline: {}", e))
         })?;
 
@@ -838,8 +858,8 @@ impl AishShell {
                     if question.is_empty() && self.state.can_correct_error {
                         if let Some(ref cmd) = self.state.last_command.clone() {
                             let old_sigint = self.install_ai_sigint_handler();
-                            let token_ptr = self.ai_handler.cancellation_token()
-                                as *const CancellationToken;
+                            let token_ptr =
+                                self.ai_handler.cancellation_token() as *const CancellationToken;
                             let result = runtime.block_on(async {
                                 tokio::select! {
                                     r = self.ai_handler.handle_error_correction(
@@ -890,8 +910,8 @@ impl AishShell {
                     }
 
                     let old_sigint = self.install_ai_sigint_handler();
-                    let token_ptr = self.ai_handler.cancellation_token()
-                        as *const CancellationToken;
+                    let token_ptr =
+                        self.ai_handler.cancellation_token() as *const CancellationToken;
                     let result = runtime.block_on(async {
                         tokio::select! {
                             r = self.ai_handler.handle_question(&question) => r,
@@ -1312,18 +1332,21 @@ impl AishShell {
     fn execute_external_command(&mut self, command: &str) -> i32 {
         // Sync terminal size before each command
         if let Ok((cols, rows)) = crossterm::terminal::size() {
-            self.pty.resize(rows, cols);
+            self.lock_pty().resize(rows, cols);
         }
 
         // Ensure the PTY is alive before sending a command.
-        // If the bash process died (e.g., after `cd` triggered a subshell
-        // exit, or a race with the control pipe), restart it first so the
-        // command runs in the correct working directory.
-        if !self.pty.is_running() {
+        if !self.lock_pty().is_running() {
             self.restart_pty();
         }
 
-        let (exit_code, cwd, output) = match self.pty.send_command_interactive(command) {
+        // Send command via PTY (release the lock inside the block so the
+        // MutexGuard is dropped before any potential restart_pty() call).
+        let result = {
+            let mut pty = self.lock_pty();
+            pty.send_command_interactive(command)
+        };
+        let (exit_code, cwd, output) = match result {
             Ok(result) => result,
             Err(e) => {
                 eprintln!("PTY error: {}", e);
@@ -1346,7 +1369,7 @@ impl AishShell {
         }
 
         // Check if PTY is still running, restart if not
-        if !self.pty.is_running() {
+        if !self.lock_pty().is_running() {
             self.restart_pty();
         }
 
@@ -1357,11 +1380,13 @@ impl AishShell {
     /// persistent PTY bash process so that bash's CWD and env stay in sync
     /// with the Rust shell's tracking. Output is discarded.
     fn sync_command_to_pty(&mut self, command: &str) {
-        if !self.pty.is_running() {
+        if !self.lock_pty().is_running() {
             return;
         }
         let _ = self
             .pty
+            .lock()
+            .unwrap()
             .execute_command(command, std::time::Duration::from_secs(5));
     }
 
@@ -1370,7 +1395,7 @@ impl AishShell {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         match aish_pty::PersistentPty::start(&self.state.cwd, rows, cols) {
             Ok(new_pty) => {
-                self.pty = new_pty;
+                *self.lock_pty() = new_pty;
                 println!("\x1b[33mbash session restarted\x1b[0m");
             }
             Err(e) => {
@@ -1558,11 +1583,12 @@ impl AishShell {
 
     /// Execute accumulated bash commands from a script segment.
     fn flush_bash_segment(&mut self, segment: &str, base_rc: i32) -> i32 {
-        let (exit_code, cwd, output) = self.pty.send_command_interactive(segment).unwrap_or((
-            -1,
-            self.state.cwd.clone(),
-            String::new(),
-        ));
+        let (exit_code, cwd, output) = self
+            .pty
+            .lock()
+            .unwrap()
+            .send_command_interactive(segment)
+            .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
             // Basic ANSI stripping: remove escape sequences for display

@@ -377,4 +377,28 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_cancel_atomic_sets_is_cancelled() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+        token.cancel_atomic();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancel_atomic_does_not_invoke_callbacks() {
+        let token = CancellationToken::new();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = called.clone();
+        token.add_callback(Box::new(move || {
+            called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        token.cancel_atomic();
+        assert!(token.is_cancelled());
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "cancel_atomic should not invoke registered callbacks"
+        );
+    }
 }

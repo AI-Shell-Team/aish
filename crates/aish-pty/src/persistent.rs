@@ -829,7 +829,7 @@ fn write_rcfile_temp() -> aish_core::Result<std::path::PathBuf> {
 }
 
 /// Simple shell quoting for embedding a command in a bash assignment.
-fn shell_quote_escape(s: &str) -> String {
+pub fn shell_quote_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

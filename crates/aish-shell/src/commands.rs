@@ -53,9 +53,8 @@ impl BuiltinResult {
 }
 
 /// Commands that modify shell state (cd, pushd, popd, export, unset, dirs).
-pub const STATE_MODIFYING_COMMANDS: &[&str] = &[
-    "cd", "pushd", "popd", "export", "unset", "dirs", "pwd",
-];
+pub const STATE_MODIFYING_COMMANDS: &[&str] =
+    &["cd", "pushd", "popd", "export", "unset", "dirs", "pwd"];
 
 /// Commands that require a PTY for interactive input.
 pub const PTY_REQUIRING_COMMANDS: &[&str] = &["su", "sudo"];

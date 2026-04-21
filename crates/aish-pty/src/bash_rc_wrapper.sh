@@ -202,4 +202,97 @@ trap '__aish_on_debug' DEBUG
 # through master_fd, which would cause commands to appear twice.
 stty -echo -echonl 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+# Completion query function for aish frontend.
+# Usage: __aish_query_completions "command line" cursor_position
+# Outputs one completion candidate per line.
+# ---------------------------------------------------------------------------
+__aish_query_completions() {
+    local cmd_line="${1:-}"
+    local cursor="${2:-0}"
+    local -a words=()
+    local word=""
+    local i ch
+
+    # Parse command line into words (simple whitespace split).
+    for (( i=0; i<${#cmd_line}; i++ )); do
+        ch="${cmd_line:$i:1}"
+        if [[ "$ch" == " " || "$ch" == $'\t' ]]; then
+            if [[ -n "$word" ]]; then
+                words+=("$word")
+                word=""
+            fi
+        else
+            word+="$ch"
+        fi
+    done
+    if [[ -n "$word" ]]; then
+        words+=("$word")
+    fi
+
+    # If cursor is after a trailing space, append an empty word so that
+    # argument completion (not command-name completion) is triggered.
+    if (( cursor > 0 )) && [[ "${cmd_line:$((cursor-1)):1}" == " " ]]; then
+        words+=("")
+    fi
+
+    # Determine COMP_CWORD: index of the word under the cursor.
+    local cword=0
+    local pos=0
+    for (( i=0; i<${#words[@]}; i++ )); do
+        pos=$(( pos + ${#words[$i]} + 1 ))
+        if (( pos > cursor )); then
+            cword=$i
+            break
+        fi
+        cword=$i
+    done
+
+    local cmd="${words[0]:-}"
+    local cur="${words[$cword]:-}"
+    local prev="${words[$((cword-1))]:-}"
+
+    # --- Empty line: list all commands ---
+    if [[ ${#words[@]} -eq 0 ]]; then
+        compgen -c 2>/dev/null
+        return 0
+    fi
+
+    # --- First word (command name) ---
+    if (( cword == 0 )); then
+        compgen -c -- "$cur" 2>/dev/null
+        return 0
+    fi
+
+    # --- Argument completion: use bash-completion if available ---
+    # Attempt to load the completion function for this command.
+    _completion_loader "$cmd" 2>/dev/null || true
+
+    local comp_spec func_name=""
+    comp_spec=$(complete -p "$cmd" 2>/dev/null) || true
+    if [[ "$comp_spec" =~ -F[[:space:]]+([^[:space:]]+) ]]; then
+        func_name="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -n "$func_name" ]]; then
+        # Call the registered completion function with the standard
+        # bash signature: func COMMAND CURRENT_WORD PREVIOUS_WORD
+        COMPREPLY=()
+        COMP_WORDS=("${words[@]}")
+        COMP_CWORD=$cword
+        COMP_LINE="$cmd_line"
+        COMP_POINT=$cursor
+        "$func_name" "$cmd" "$cur" "$prev" 2>/dev/null || true
+
+        # Deduplicate and output.
+        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then
+            printf '%s\n' "${COMPREPLY[@]}" 2>/dev/null
+            return 0
+        fi
+    fi
+
+    # --- Fallback: file/directory completion ---
+    compgen -f -- "$cur" 2>/dev/null
+}
+
 __aish_emit_session_ready

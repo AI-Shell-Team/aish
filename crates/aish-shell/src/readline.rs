@@ -1,7 +1,6 @@
-use std::cell::RefCell;
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
 use rustyline::highlight::Highlighter;
@@ -24,16 +23,8 @@ const BUILTINS: &[&str] = &[
 /// Special commands starting with /.
 const SPECIALS: &[&str] = &["/model", "/setup"];
 
-/// Commands that take another command as their first argument.
-/// After these commands, tab completion suggests commands instead of files.
-const COMMAND_TAKING_COMMANDS: &[&str] = &[
-    "sudo", "doas", "pkexec", "nice", "nohup", "ionice", "taskset", "strace", "ltrace", "perf",
-    "timeout", "xargs", "exec", "chroot", "unshare", "setsid", "env", "bash", "sh", "zsh",
-    "fish", "run0", "time", "coproc",
-];
-
-/// Commands that only accept directory paths as arguments.
-const DIRECTORY_ONLY_COMMANDS: &[&str] = &["cd", "pushd", "popd"];
+/// Timeout for PTY completion queries.
+const COMPLETION_TIMEOUT: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
 // Mode toggle key binding handler
@@ -59,41 +50,51 @@ impl ConditionalEventHandler for ModeToggleHandler {
     }
 }
 
-/// Shell command completer using bash `compgen` for command discovery and
-/// rustyline's `FilenameCompleter` for path completion.  Also provides
-/// history-based autosuggestions via Hinter.
+/// Shell command completer that delegates to the persistent PTY bash process
+/// for full bash-completion support (git add, systemctl status, etc.).
 struct ShellHelper {
     file_completer: FilenameCompleter,
-    /// Lazily-populated set of all commands from `bash -c 'compgen -c'`.
-    /// Invalidated each prompt so newly-installed commands are picked up.
-    command_cache: RefCell<Option<HashSet<String>>>,
-    /// Shared autosuggest engine (Arc<Mutex> so it can be mutated from
-    /// ShellReadline without needing helper_mut).
+    /// Shared reference to the persistent PTY session.
+    pty: Arc<Mutex<aish_pty::PersistentPty>>,
+    /// Shared autosuggest engine.
     autosuggest: Arc<Mutex<AutoSuggest>>,
 }
 
 impl ShellHelper {
-    fn new(autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
+    fn new(pty: Arc<Mutex<aish_pty::PersistentPty>>, autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
         Self {
             file_completer: FilenameCompleter::new(),
-            command_cache: RefCell::new(None),
+            pty,
             autosuggest,
         }
     }
 
-    /// Return a reference to the cached command set, populating it first if needed.
-    fn cached_commands(&self) -> std::cell::Ref<'_, HashSet<String>> {
-        if self.command_cache.borrow().is_none() {
-            *self.command_cache.borrow_mut() = Some(bash_compgen_commands());
-        }
-        std::cell::Ref::map(self.command_cache.borrow(), |opt| {
-            opt.as_ref().unwrap()
-        })
-    }
+    /// Query the PTY bash for completions using `__aish_query_completions`.
+    /// Returns a list of completion candidates on success, or an empty vec on
+    /// any error (timeout, PTY not running, etc.).
+    fn query_pty_completions(&self, line: &str, pos: usize) -> Vec<String> {
+        let mut pty = match self.pty.lock() {
+            Ok(guard) => guard,
+            Err(_) => return Vec::new(),
+        };
 
-    /// Invalidate the command cache so it is refreshed on the next tab press.
-    fn invalidate_cache(&self) {
-        *self.command_cache.borrow_mut() = None;
+        // Skip if PTY is not running.
+        if !pty.is_running() {
+            return Vec::new();
+        }
+
+        // Build the completion query command.
+        let escaped_line = aish_pty::shell_quote_escape(line);
+        let cmd = format!("__aish_query_completions {} {}", escaped_line, pos);
+
+        match pty.execute_command(&cmd, COMPLETION_TIMEOUT) {
+            Ok((output, _exit_code)) => output
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -134,16 +135,16 @@ impl Completer for ShellHelper {
             return Ok((0, Vec::new()));
         }
 
-        // At the start of the line: complete commands
+        // At the start of the line: mix builtins/specials with PTY results
         if !before.contains(' ') {
             let mut candidates: Vec<Pair> = Vec::new();
 
-            // Builtin commands
+            // Builtin commands (handled by Rust shell, not PTY)
             for cmd in BUILTINS {
                 if cmd.starts_with(word) {
                     candidates.push(Pair {
                         display: cmd.to_string(),
-                        replacement: cmd.to_string(),
+                        replacement: format!("{} ", cmd),
                     });
                 }
             }
@@ -166,17 +167,19 @@ impl Completer for ShellHelper {
                 });
             }
 
-            // All commands from bash compgen (includes PATH executables,
-            // aliases, functions, builtins)
+            // Query PTY for all other command completions
             if !word.is_empty() {
-                let commands = self.cached_commands();
-                for cmd in &*commands {
-                    if cmd.starts_with(word) && !BUILTINS.contains(&cmd.as_str()) {
-                        candidates.push(Pair {
-                            display: cmd.clone(),
-                            replacement: format!("{} ", cmd),
-                        });
+                let pty_results = self.query_pty_completions(line, pos);
+                let builtin_set: Vec<&str> = BUILTINS.to_vec();
+                for candidate in &pty_results {
+                    // Skip duplicates already covered by BUILTINS/SPECIALS
+                    if builtin_set.contains(&candidate.as_str()) {
+                        continue;
                     }
+                    candidates.push(Pair {
+                        display: candidate.clone(),
+                        replacement: format!("{} ", candidate),
+                    });
                 }
             }
 
@@ -196,68 +199,30 @@ impl Completer for ShellHelper {
             return Ok((word_start, candidates));
         }
 
-        // After a command: context-aware completion
-        let tokens: Vec<&str> = before.split_whitespace().collect();
-        if let Some(&command) = tokens.first() {
-            // Skip flag arguments
-            if word.starts_with('-') {
-                return Ok((0, Vec::new()));
-            }
-            // Directory-only commands: complete just directories
-            if DIRECTORY_ONLY_COMMANDS.contains(&command) {
-                return self.file_completer.complete(line, pos, ctx);
-            }
-            // Commands that take another command as first argument (sudo, etc.)
-            if COMMAND_TAKING_COMMANDS.contains(&command) {
-                let mut candidates: Vec<Pair> = Vec::new();
-                if !word.is_empty() {
-                    let commands = self.cached_commands();
-                    for cmd in &*commands {
-                        if cmd.starts_with(word) {
-                            candidates.push(Pair {
-                                display: cmd.clone(),
-                                replacement: format!("{} ", cmd),
-                            });
-                        }
+        // After a command: delegate entirely to PTY for context-aware completion
+        let pty_results = self.query_pty_completions(line, pos);
+        if !pty_results.is_empty() {
+            let candidates: Vec<Pair> = pty_results
+                .into_iter()
+                .map(|c| {
+                    // Append space for non-directory completions
+                    let replacement = if c.ends_with('/') {
+                        c.clone()
+                    } else {
+                        format!("{} ", c)
+                    };
+                    Pair {
+                        display: c,
+                        replacement,
                     }
-                }
-                if !candidates.is_empty() {
-                    return Ok((word_start, candidates));
-                }
-                // Fall through to file completion for path-like tokens
-                if word.starts_with("./")
-                    || word.starts_with("../")
-                    || word.starts_with("/")
-                    || word.starts_with("~/")
-                {
-                    return self.file_completer.complete(line, pos, ctx);
-                }
-                return Ok((word_start, candidates));
-            }
+                })
+                .collect();
+            return Ok((word_start, candidates));
         }
 
-        // Default: file completion
+        // Fallback: file completion
         self.file_completer.complete(line, pos, ctx)
     }
-}
-
-/// Query bash for all available commands using `compgen -c`.
-/// Returns aliases, functions, builtins, and PATH executables.
-fn bash_compgen_commands() -> HashSet<String> {
-    let output = match std::process::Command::new("bash")
-        .args(&["-c", "compgen -c"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return HashSet::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect()
 }
 
 /// Wrapper around rustyline Editor with shell-friendly configuration.
@@ -269,7 +234,7 @@ pub struct ShellReadline {
 }
 
 impl ShellReadline {
-    pub fn new() -> rustyline::Result<Self> {
+    pub fn new(pty: Arc<Mutex<aish_pty::PersistentPty>>) -> rustyline::Result<Self> {
         let autosuggest = Arc::new(Mutex::new(AutoSuggest::new(1000)));
 
         let builder = Config::builder()
@@ -279,7 +244,7 @@ impl ShellReadline {
         let config = builder.history_ignore_dups(true)?.build();
 
         let mut editor = Editor::with_config(config)?;
-        editor.set_helper(Some(ShellHelper::new(autosuggest.clone())));
+        editor.set_helper(Some(ShellHelper::new(pty, autosuggest.clone())));
 
         // Bind Shift+Tab (BackTab) and F2 for mode toggle
         editor.bind_sequence(
@@ -308,11 +273,6 @@ impl ShellReadline {
     /// Supports backslash continuation: lines ending with `\` read
     /// additional lines with a `> ` prompt.
     pub fn read_line(&mut self, prompt: &str) -> rustyline::Result<Option<String>> {
-        // Invalidate command cache so newly-installed commands are discovered.
-        if let Some(helper) = self.editor.helper() {
-            helper.invalidate_cache();
-        }
-
         let line = match self.editor.readline(prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => return Ok(None),
@@ -387,26 +347,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bash_compgen_commands_non_empty() {
-        let cmds = bash_compgen_commands();
-        assert!(!cmds.is_empty(), "compgen -c should return commands");
-        // ls and cat are extremely common, at least one should exist
-        assert!(cmds.contains("ls") || cmds.contains("cat") || cmds.contains("echo"));
+    fn test_builtins_contains_cd() {
+        assert!(BUILTINS.contains(&"cd"));
+        assert!(BUILTINS.contains(&"exit"));
     }
 
     #[test]
-    fn test_command_taking_commands_contains_sudo() {
-        assert!(
-            COMMAND_TAKING_COMMANDS.contains(&"sudo"),
-            "sudo must be in COMMAND_TAKING_COMMANDS"
-        );
-    }
-
-    #[test]
-    fn test_directory_commands_recognized() {
-        let dir_cmds: &[&str] = &["cd", "pushd", "popd"];
-        for cmd in dir_cmds {
-            assert!(DIRECTORY_ONLY_COMMANDS.contains(cmd));
+    fn test_specials_format() {
+        for cmd in SPECIALS {
+            assert!(cmd.starts_with('/'), "special must start with /: {}", cmd);
         }
     }
 }
