@@ -273,6 +273,11 @@ impl ShellReadline {
     /// Supports backslash continuation: lines ending with `\` read
     /// additional lines with a `> ` prompt.
     pub fn read_line(&mut self, prompt: &str) -> rustyline::Result<Option<String>> {
+        // Invalidate command cache so newly-installed commands are discovered.
+        if let Some(helper) = self.editor.helper() {
+            helper.invalidate_cache();
+        }
+
         let line = match self.editor.readline(prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => return Ok(None),
