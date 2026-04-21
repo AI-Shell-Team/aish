@@ -8,12 +8,9 @@ use std::path::{Path, PathBuf};
 
 use aish_core::AishError;
 
-const GITHUB_API_LATEST: &str =
-    "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest";
-const GITHUB_API_LIST: &str =
-    "https://api.github.com/repos/AI-Shell-Team/aish/releases";
-const GITHUB_RELEASES_BASE: &str =
-    "https://github.com/AI-Shell-Team/aish/releases/download";
+const GITHUB_API_LATEST: &str = "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest";
+const GITHUB_API_LIST: &str = "https://api.github.com/repos/AI-Shell-Team/aish/releases";
+const GITHUB_RELEASES_BASE: &str = "https://github.com/AI-Shell-Team/aish/releases/download";
 const FALLBACK_MIRROR: &str = "https://www.aishell.ai/repo";
 const CONNECTION_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
@@ -142,9 +139,7 @@ fn extract_update_info(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let latest = tag.strip_prefix('v').unwrap_or(tag);
-    let current = current_version
-        .strip_prefix('v')
-        .unwrap_or(current_version);
+    let current = current_version.strip_prefix('v').unwrap_or(current_version);
 
     if compare_versions(latest, current) == std::cmp::Ordering::Greater {
         return Ok(Some(UpdateInfo {
@@ -171,11 +166,7 @@ fn extract_update_info(
 // Download with progress
 // ---------------------------------------------------------------------------
 
-fn download_with_progress(
-    url: &str,
-    dest: &Path,
-    label: &str,
-) -> Result<(), AishError> {
+fn download_with_progress(url: &str, dest: &Path, label: &str) -> Result<(), AishError> {
     let client = build_http_client(DOWNLOAD_TIMEOUT_SECS)?;
 
     let resp = client
@@ -286,11 +277,7 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
     // Fallback to mirror
     println!("\x1b[33mGitHub download failed, trying mirror...\x1b[0m");
     let mirror_url = format!("{}/{}/{}", FALLBACK_MIRROR, tag_name, filename);
-    download_with_progress(
-        &mirror_url,
-        &dest_path,
-        &format!("{} (mirror)", filename),
-    )?;
+    download_with_progress(&mirror_url, &dest_path, &format!("{} (mirror)", filename))?;
     println!("\x1b[32mDownloaded: {}\x1b[0m", dest_path.display());
     Ok(dest_path)
 }
@@ -308,10 +295,7 @@ fn find_install_sh(dir: &Path) -> Result<PathBuf, AishError> {
                 if let Some(found) = search(&path) {
                     return Some(found);
                 }
-            } else if path
-                .file_name()
-                .is_some_and(|n| n == "install.sh")
-            {
+            } else if path.file_name().is_some_and(|n| n == "install.sh") {
                 return Some(path);
             }
         }
@@ -321,9 +305,7 @@ fn find_install_sh(dir: &Path) -> Result<PathBuf, AishError> {
 }
 
 fn install_release(archive_path: &Path) -> Result<(), AishError> {
-    let extract_dir = std::env::temp_dir()
-        .join("aish_update")
-        .join("extract");
+    let extract_dir = std::env::temp_dir().join("aish_update").join("extract");
 
     // Clean previous extraction
     let _ = std::fs::remove_dir_all(&extract_dir);

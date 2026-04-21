@@ -225,9 +225,7 @@ pub trait Tool: Send + Sync {
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
         Box::pin(async move {
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.execute(args)
-            })) {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.execute(args))) {
                 Ok(result) => result,
                 Err(payload) => {
                     let message = if let Some(s) = payload.downcast_ref::<&str>() {

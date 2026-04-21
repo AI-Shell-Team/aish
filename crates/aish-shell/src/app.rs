@@ -189,7 +189,8 @@ impl AishShell {
             let mgr = SecurityManager::new(security_manager.policy().clone());
             std::sync::Arc::new(move |cmd: &str| -> aish_security::SecurityDecision {
                 mgr.check_command(cmd)
-            }) as std::sync::Arc<dyn Fn(&str) -> aish_security::SecurityDecision + Send + Sync>
+            })
+                as std::sync::Arc<dyn Fn(&str) -> aish_security::SecurityDecision + Send + Sync>
         };
         let diagnose_event_callback: aish_tools::SharedEventCallback =
             std::sync::Arc::new(std::sync::Mutex::new(None));

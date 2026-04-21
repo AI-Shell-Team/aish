@@ -83,9 +83,7 @@ impl Tool for SystemDiagnoseTool {
     }
 
     fn execute(&self, _args: serde_json::Value) -> ToolResult {
-        ToolResult::error(
-            "system_diagnose_agent requires async execution; use execute_async",
-        )
+        ToolResult::error("system_diagnose_agent requires async execution; use execute_async")
     }
 
     fn execute_async<'a>(
