@@ -79,8 +79,9 @@ fn detect_installation_method() -> InstallMethod {
 
     // 4. System package: dpkg or rpm
     if is_command_available("dpkg") {
-        if let Ok(output) =
-            std::process::Command::new("dpkg").args(["-s", "aish"]).output()
+        if let Ok(output) = std::process::Command::new("dpkg")
+            .args(["-s", "aish"])
+            .output()
         {
             if output.status.success() {
                 return InstallMethod::System;
@@ -89,8 +90,9 @@ fn detect_installation_method() -> InstallMethod {
     }
 
     if is_command_available("rpm") {
-        if let Ok(output) =
-            std::process::Command::new("rpm").args(["-q", "aish"]).output()
+        if let Ok(output) = std::process::Command::new("rpm")
+            .args(["-q", "aish"])
+            .output()
         {
             if output.status.success() {
                 return InstallMethod::System;
@@ -149,7 +151,11 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
         let binary = PathBuf::from(ARCHIVE_BIN_DIR).join(name);
         if binary.exists() {
             if let Err(e) = run_sudo(&["rm", "-f", binary.to_str().unwrap_or("")]) {
-                eprintln!("\x1b[31mFailed to remove {}: {}\x1b[0m", binary.display(), e);
+                eprintln!(
+                    "\x1b[31mFailed to remove {}: {}\x1b[0m",
+                    binary.display(),
+                    e
+                );
                 success = false;
             }
         }
@@ -158,7 +164,11 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
     let share_dir = PathBuf::from(ARCHIVE_SHARE_DIR);
     if share_dir.exists() {
         if let Err(e) = run_sudo(&["rm", "-rf", share_dir.to_str().unwrap_or("")]) {
-            eprintln!("\x1b[31mFailed to remove {}: {}\x1b[0m", share_dir.display(), e);
+            eprintln!(
+                "\x1b[31mFailed to remove {}: {}\x1b[0m",
+                share_dir.display(),
+                e
+            );
             success = false;
         }
     }
@@ -282,8 +292,7 @@ fn get_data_directories() -> Vec<(String, PathBuf)> {
 /// "aish", and requires at least 2 path components.
 fn is_safe_purge_path(path: &Path) -> bool {
     let critical_prefixes: &[&str] = &[
-        "/etc", "/usr", "/boot", "/dev", "/proc", "/sys", "/lib", "/lib64",
-        "/bin", "/sbin", "/opt",
+        "/etc", "/usr", "/boot", "/dev", "/proc", "/sys", "/lib", "/lib64", "/bin", "/sbin", "/opt",
     ];
 
     let lexical = match path.strip_prefix("~") {
@@ -303,7 +312,7 @@ fn is_safe_purge_path(path: &Path) -> bool {
     }
 
     // Must not be root or a system-critical directory
-    if lexical == PathBuf::from("/") {
+    if lexical == std::path::Path::new("/") {
         return false;
     }
     for prefix in critical_prefixes {
@@ -314,9 +323,10 @@ fn is_safe_purge_path(path: &Path) -> bool {
     }
 
     // At least 2 path components
-    let parts: Vec<_> = lexical.components().filter(|c| {
-        matches!(c, std::path::Component::Normal(_))
-    }).collect();
+    let parts: Vec<_> = lexical
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .collect();
     parts.len() >= 2
 }
 
@@ -330,7 +340,10 @@ fn purge_data() -> Result<(), AishError> {
             continue;
         }
         if !is_safe_purge_path(path) {
-            eprintln!("\x1b[31mRefusing to delete {}: unsafe path\x1b[0m", path.display());
+            eprintln!(
+                "\x1b[31mRefusing to delete {}: unsafe path\x1b[0m",
+                path.display()
+            );
             success = false;
             continue;
         }
@@ -346,7 +359,9 @@ fn purge_data() -> Result<(), AishError> {
     if success {
         Ok(())
     } else {
-        Err(AishError::Config("Some directories could not be removed".into()))
+        Err(AishError::Config(
+            "Some directories could not be removed".into(),
+        ))
     }
 }
 
@@ -469,7 +484,9 @@ mod tests {
 
     #[test]
     fn test_is_safe_purge_path_rejects_wrong_name() {
-        assert!(!is_safe_purge_path(&PathBuf::from("/home/user/.config/other")));
+        assert!(!is_safe_purge_path(&PathBuf::from(
+            "/home/user/.config/other"
+        )));
     }
 
     #[test]
