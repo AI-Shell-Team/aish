@@ -465,11 +465,17 @@ class PTYManager:
             try:
                 ready, _, _ = select.select(read_fds, [], [], 0.05)
             except (ValueError, OSError):
-                break
+                self._running = False
+                cleaned_output = self._clean_pty_output(bytes(raw_output), command)
+                return cleaned_output, -1
             for fd in ready:
                 try:
                     data = os.read(fd, 4096)
                 except OSError:
+                    if fd == self._master_fd:
+                        self._running = False
+                        cleaned_output = self._clean_pty_output(bytes(raw_output), command)
+                        return cleaned_output, -1
                     continue
                 if not data:
                     if fd == self._master_fd:
