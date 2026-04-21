@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::codex::CodexProviderAdapter;
 use super::openai_compat::OpenAiCompatProvider;
 use super::types::ProviderAdapter;
 
@@ -15,11 +16,13 @@ pub struct ProviderRegistry {
 }
 
 impl ProviderRegistry {
-    /// Create a new registry pre-loaded with the default `OpenAiCompatProvider`
-    /// as the universal fallback.
+    /// Create a new registry pre-loaded with Codex and OpenAI-compat adapters.
     pub fn new() -> Self {
         Self {
-            providers: vec![Arc::new(OpenAiCompatProvider)],
+            providers: vec![
+                Arc::new(CodexProviderAdapter),
+                Arc::new(OpenAiCompatProvider),
+            ],
         }
     }
 
@@ -173,7 +176,7 @@ mod tests {
     fn test_registry_default() {
         let registry = ProviderRegistry::new();
         let ids = registry.list_provider_ids();
-        assert_eq!(ids, vec!["openai-compat"]);
+        assert_eq!(ids, vec!["openai-codex", "openai-compat"]);
     }
 
     #[test]
@@ -233,7 +236,7 @@ mod tests {
         let mut registry = ProviderRegistry::new();
         registry.register(Arc::new(TestProvider));
         let ids = registry.list_provider_ids();
-        // TestProvider should appear before the fallback.
-        assert_eq!(ids, vec!["test-provider", "openai-compat"]);
+        // TestProvider should appear before the fallbacks.
+        assert_eq!(ids, vec!["openai-codex", "test-provider", "openai-compat"]);
     }
 }
