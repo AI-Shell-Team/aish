@@ -95,10 +95,10 @@ def test_pty_manager_execute_command_waits_without_implicit_timeout():
 
     try:
         manager.start()
-        output, exit_code = manager.execute_command("printf 'hello\\n'; sleep 0.2; printf 'done\\n'")
+        output, exit_code = manager.execute_command("printf x; sleep 0.2; printf y")
 
         assert exit_code == 0
-        assert output == "hello\ndone"
+        assert output == "xy"
     finally:
         manager.stop()
 
