@@ -243,6 +243,9 @@ impl PersistentPty {
         // newline) from readline or stale prompt rendering.  Skip the
         // first newline-containing chunk to avoid a blank line before the
         // actual command output.
+        // The PTY may emit a bare leading newline from stale prompt
+        // rendering.  Only skip a leading CR-LF or LF at the very start
+        // of the first chunk — never consume actual command output.
         let mut skip_leading_newline = true;
 
         while !done {
@@ -332,15 +335,15 @@ impl PersistentPty {
                     n if n > 0 => {
                         let mut data = &tmp[..n as usize];
                         if skip_leading_newline {
-                            // Find the first newline (after any ANSI escape
-                            // sequences) and skip everything up to it.
-                            if let Some(pos) = data.iter().position(|&b| b == b'\n') {
-                                data = &data[pos + 1..];
-                                skip_leading_newline = false;
-                            } else {
-                                // Entire chunk is preamble — skip it.
-                                data = &[];
+                            // Only strip a bare leading CR-LF or LF that
+                            // came from stale prompt rendering.  Do NOT
+                            // discard actual command output.
+                            if data.starts_with(b"\r\n") {
+                                data = &data[2..];
+                            } else if data.starts_with(b"\n") {
+                                data = &data[1..];
                             }
+                            skip_leading_newline = false;
                         }
                         if !data.is_empty() {
                             output_buf.extend_from_slice(data);

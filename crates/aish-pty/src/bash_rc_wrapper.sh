@@ -203,6 +203,24 @@ trap '__aish_on_debug' DEBUG
 stty -echo -echonl 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# Helper: append '/' to entries that are directories.
+# Reads from stdin, one candidate per line.
+# ---------------------------------------------------------------------------
+__aish_mark_dirs() {
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == */ ]]; then
+            printf '%s\n' "$entry"
+        elif [[ -d "$entry" ]]; then
+            printf '%s/\n' "$entry"
+        else
+            printf '%s\n' "$entry"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Completion query function for aish frontend.
 # Usage: __aish_query_completions "command line" cursor_position
 # Outputs one completion candidate per line.
@@ -284,15 +302,15 @@ __aish_query_completions() {
         COMP_POINT=$cursor
         "$func_name" "$cmd" "$cur" "$prev" 2>/dev/null || true
 
-        # Deduplicate and output.
+        # Deduplicate and output, marking directories with /.
         if [[ ${#COMPREPLY[@]} -gt 0 ]]; then
-            printf '%s\n' "${COMPREPLY[@]}" 2>/dev/null
+            printf '%s\n' "${COMPREPLY[@]}" 2>/dev/null | __aish_mark_dirs
             return 0
         fi
     fi
 
     # --- Fallback: file/directory completion ---
-    compgen -f -- "$cur" 2>/dev/null
+    compgen -f -- "$cur" 2>/dev/null | __aish_mark_dirs
 }
 
 __aish_emit_session_ready

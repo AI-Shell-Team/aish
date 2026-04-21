@@ -782,7 +782,7 @@ impl LlmSession {
             ),
             tools: HashMap::new(),
             cancellation_token: CancellationToken::new(),
-            event_callback: None,
+            event_callback: self.event_callback.clone(),
             confirmation_callback: self.confirmation_callback.clone(),
             temperature: self.temperature,
             max_tokens: self.max_tokens,
