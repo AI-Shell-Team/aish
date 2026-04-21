@@ -304,22 +304,27 @@ impl<'a> ReActAgent<'a> {
                 messages.push(assistant_msg);
 
                 // Execute each tool and collect observations.
+                // Note: execute_tool_external already emits TOOL_EXECUTION_START/END
+                // via session.execute_tool, so we do NOT call emit_agent_step for
+                // Action/Observation here (that would cause duplicate events).
+                let mut final_answer_result: Option<String> = None;
                 for tc in &tool_calls {
                     if cancel.is_cancelled() {
                         return Err(AishError::Cancelled);
                     }
 
                     let result = self.session.execute_tool_external(tc).await;
-                    let obs_text = result.output.clone();
+                    messages.push(ChatMessage::tool_result(&tc.id, result.output.clone()));
 
-                    self.emit_agent_step(AgentStep::Action {
-                        tool_name: tc.name.clone(),
-                        args: serde_json::from_str(&tc.arguments)
-                            .unwrap_or(serde_json::Value::Null),
-                    });
-                    self.emit_agent_step(AgentStep::Observation(obs_text.clone()));
+                    // Detect final_answer tool — terminate the loop immediately.
+                    if tc.name == "final_answer" && result.ok {
+                        final_answer_result = Some(result.output);
+                    }
+                }
 
-                    messages.push(ChatMessage::tool_result(&tc.id, result.output));
+                if let Some(answer) = final_answer_result {
+                    self.emit_agent_step(AgentStep::FinalAnswer(answer.clone()));
+                    return Ok(answer);
                 }
 
                 // After tool results, add a user prompt nudging the LLM to continue.
@@ -355,6 +360,7 @@ impl<'a> ReActAgent<'a> {
                         let obs = match self
                             .session
                             .execute_tool_by_name(&action.tool_name, action.args.clone())
+                            .await
                         {
                             Ok(result) => result.output,
                             Err(e) => format!("Error executing tool '{}': {}", action.tool_name, e),
@@ -388,7 +394,7 @@ impl<'a> ReActAgent<'a> {
             ),
             AgentStep::Action { tool_name, args } => (
                 LlmEventType::ToolExecutionStart,
-                serde_json::json!({ "tool_name": tool_name, "args": args }),
+                serde_json::json!({ "tool_name": tool_name, "tool_args": args }),
             ),
             AgentStep::Observation(o) => (
                 LlmEventType::ToolExecutionEnd,

@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use serde::{Deserialize, Serialize};
 
 /// Result of a callback invoked during LLM processing.
@@ -212,6 +215,31 @@ pub trait Tool: Send + Sync {
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult;
+
+    /// Async variant of `execute`. The default implementation delegates to the
+    /// synchronous `execute` wrapped in `catch_unwind` so panics are gracefully
+    /// converted to `ToolResult::error`. Tools that need async I/O (e.g.
+    /// spawning sub-sessions) should override this method.
+    fn execute_async<'a>(
+        &'a self,
+        args: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        Box::pin(async move {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.execute(args))) {
+                Ok(result) => result,
+                Err(payload) => {
+                    let message = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Tool execution panicked".to_string()
+                    };
+                    ToolResult::error(format!("Error: {}", message))
+                }
+            }
+        })
+    }
 }
 
 /// Token used to cancel an in-progress LLM request.

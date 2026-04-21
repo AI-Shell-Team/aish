@@ -34,7 +34,7 @@ pub fn detect_provider_from_model(model: &str) -> ProviderInfo {
     } else if model_lower.starts_with("deepseek") {
         ("deepseek", "DeepSeek")
     } else if model_lower.starts_with("qwen") || model_lower.starts_with("qwq") {
-        ("alibaba", "Alibaba Cloud")
+        ("qwen", "Qwen (Alibaba Cloud)")
     } else if model_lower.starts_with("llama")
         || model_lower.starts_with("mistral")
         || model_lower.starts_with("mixtral")
@@ -87,8 +87,8 @@ pub fn refine_provider_from_api_base(provider: &mut ProviderInfo, api_base: &str
         provider.id = "deepseek".into();
         provider.display_name = "DeepSeek".into();
     } else if base_lower.contains("dashscope") || base_lower.contains("aliyuncs") {
-        provider.id = "alibaba".into();
-        provider.display_name = "Alibaba Cloud".into();
+        provider.id = "qwen".into();
+        provider.display_name = "Qwen (Alibaba Cloud)".into();
     } else if base_lower.contains("mistral.ai") {
         provider.id = "mistral".into();
         provider.display_name = "Mistral AI".into();
@@ -167,7 +167,7 @@ fn dashboard_url_for(provider_id: &str) -> Option<String> {
         "minimax" => {
             Some("https://platform.minimaxi.com/user-center/basic-information/interface-key".into())
         }
-        "alibaba" => Some("https://dashscope.console.aliyun.com/overview".into()),
+        "qwen" => Some("https://dashscope.console.aliyun.com/overview".into()),
         "zhipu" | "zai" => Some("https://platform.z.ai/usage".into()),
         "openrouter" => Some("https://openrouter.ai/settings/credits".into()),
         "together" => Some("https://api.together.xyz/settings/api-keys".into()),
@@ -182,7 +182,7 @@ fn dashboard_url_for(provider_id: &str) -> Option<String> {
 fn supports_tools_for(provider_id: &str) -> bool {
     match provider_id {
         "openai" | "anthropic" | "google" | "deepseek" | "mistral" | "ollama" | "xai"
-        | "moonshot" | "minimax" | "openrouter" | "together" | "zhipu" | "zai" | "alibaba"
+        | "moonshot" | "minimax" | "openrouter" | "together" | "zhipu" | "zai" | "qwen"
         | "qianfan" | "vllm" => true,
         _ => false,
     }
@@ -326,17 +326,17 @@ mod tests {
     #[test]
     fn test_qwen_detection() {
         let p = detect_provider_from_model("qwen-max");
-        assert_eq!(p.id, "alibaba");
-        assert_eq!(p.display_name, "Alibaba Cloud");
+        assert_eq!(p.id, "qwen");
+        assert_eq!(p.display_name, "Qwen (Alibaba Cloud)");
 
         let p2 = detect_provider_from_model("qwq-32b");
-        assert_eq!(p2.id, "alibaba");
+        assert_eq!(p2.id, "qwen");
 
         let p3 = detect_provider(
             "qwen-turbo",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         );
-        assert_eq!(p3.id, "alibaba");
+        assert_eq!(p3.id, "qwen");
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub mod python;
 pub mod registry;
 pub mod secure_bash;
 pub mod skill_tool;
+pub mod system_diagnose;
 
 pub use ask_user::AskUserTool;
 pub use final_answer::FinalAnswerTool;
@@ -37,3 +38,5 @@ pub use python::PythonTool;
 pub use registry::ToolRegistry;
 pub use secure_bash::SecureBashTool;
 pub use skill_tool::{SkillInfo, SkillTool};
+pub use system_diagnose::SharedEventCallback;
+pub use system_diagnose::SystemDiagnoseTool;

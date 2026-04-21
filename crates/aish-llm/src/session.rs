@@ -149,14 +149,14 @@ impl LlmSession {
         self.execute_tool(tool_call).await
     }
 
-    /// Execute a tool by name with given arguments.
-    pub fn execute_tool_by_name(
+    /// Execute a tool by name with given arguments (async path).
+    pub async fn execute_tool_by_name(
         &self,
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, String> {
         match self.tools.get(name) {
-            Some(tool) => Ok(tool.execute(args)),
+            Some(tool) => Ok(tool.as_ref().execute_async(args).await),
             None => Err(format!("Unknown tool: {}", name)),
         }
     }
@@ -703,7 +703,7 @@ impl LlmSession {
             // Execute with retry: try once, retry once on failure.
             // Mirrors Python's normalize_tool_result + error recovery pattern.
             let result = {
-                let first = self.execute_tool_inner(tool, &args);
+                let first = tool.as_ref().execute_async(args.clone()).await;
                 if first.ok {
                     first
                 } else {
@@ -713,7 +713,7 @@ impl LlmSession {
                         tool_call.name,
                         first.output
                     );
-                    let second = self.execute_tool_inner(tool, &args);
+                    let second = tool.as_ref().execute_async(args.clone()).await;
                     if second.ok {
                         second
                     } else {
@@ -765,35 +765,6 @@ impl LlmSession {
             result
         } else {
             ToolResult::error(format!("Unknown tool: {}", tool_call.name))
-        }
-    }
-
-    /// Inner tool execution that catches panics and normalizes results,
-    /// mirroring Python's `normalize_tool_result`.
-    fn execute_tool_inner(&self, tool: &Box<dyn Tool>, args: &serde_json::Value) -> ToolResult {
-        // Use catch_unwind to gracefully handle panics in tool execution.
-        // This mirrors Python's try/except wrapping in normalize_tool_result.
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tool.execute(args.clone())))
-        {
-            Ok(result) => result,
-            Err(payload) => {
-                // Normalize panic into a ToolResult error
-                let message = if let Some(s) = payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Tool execution panicked".to_string()
-                };
-                ToolResult {
-                    ok: false,
-                    output: format!("Error: {}", message),
-                    meta: Some(serde_json::json!({
-                        "kind": "panic",
-                        "exception_type": "panic"
-                    })),
-                }
-            }
         }
     }
 

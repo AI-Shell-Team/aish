@@ -182,6 +182,28 @@ impl AishShell {
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
 
+        // System diagnose tool — needs session credentials to spawn sub-sessions.
+        // The shared event callback holder allows setting the callback after
+        // tool registration (the event callback is created later).
+        let diagnose_security_check = {
+            let mgr = SecurityManager::new(security_manager.policy().clone());
+            std::sync::Arc::new(move |cmd: &str| -> aish_security::SecurityDecision {
+                mgr.check_command(cmd)
+            })
+                as std::sync::Arc<dyn Fn(&str) -> aish_security::SecurityDecision + Send + Sync>
+        };
+        let diagnose_event_callback: aish_tools::SharedEventCallback =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        tool_registry.register(Box::new(aish_tools::SystemDiagnoseTool::new(
+            &config.api_base,
+            &config.api_key,
+            &config.model,
+            Some(config.temperature),
+            config.max_tokens,
+            Some(diagnose_security_check),
+            diagnose_event_callback.clone(),
+        )));
+
         // Initialize shared memory manager (best-effort)
         let memory_manager: SharedMemoryManager = Arc::new(Mutex::new(
             MemoryManager::new(MemoryManager::default_path()).ok(),
@@ -603,7 +625,11 @@ impl AishShell {
                 None // Always continue
             });
 
-        llm_session.set_event_callback(event_callback);
+        llm_session.set_event_callback(event_callback.clone());
+
+        // Share the event callback with the diagnose tool so it can forward
+        // sub-session events (bash_exec, read_file, etc.) to the UI.
+        *diagnose_event_callback.lock().unwrap() = Some(event_callback);
 
         // Set up confirmation callback for tool approval flow
         let confirmation_callback: Arc<dyn Fn(&str, &str) -> bool + Send + Sync> =
