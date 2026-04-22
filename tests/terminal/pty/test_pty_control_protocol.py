@@ -188,6 +188,7 @@ def test_start_drains_startup_prompt_ready_in_poll_mode():
 
         manager.send_command("printf 'ready\\n'", command_seq=11, source="backend")
         output = _wait_for_prompt_ready(manager, 11)
+        output += _drain_master_fd(manager)
 
         assert b"ready" in output
         assert manager.last_command == "printf 'ready\\n'"

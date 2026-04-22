@@ -202,10 +202,25 @@ class CommandState:
     ) -> int | None:
         """Resolve an event command sequence using pending submission state."""
         resolved_seq = self._coerce_command_seq(command_seq)
+        resolved_submission_id = self._coerce_submission_id(submission_id)
+
+        if resolved_seq is not None and resolved_submission_id is not None:
+            seq_submission = self._submitted_by_seq.get(resolved_seq)
+            id_submission = self._submitted_by_id.get(resolved_submission_id)
+            if (
+                seq_submission is not None
+                and id_submission is not None
+                and seq_submission is not id_submission
+            ):
+                self._record_protocol_issue(
+                    "conflicting backend identifiers for "
+                    f"submission_id={resolved_submission_id} and command_seq={resolved_seq}"
+                )
+                return None
+
         if resolved_seq is not None:
             return resolved_seq
 
-        resolved_submission_id = self._coerce_submission_id(submission_id)
         if resolved_submission_id is not None:
             submission = self._submitted_by_id.get(resolved_submission_id)
             if submission is not None:
@@ -269,7 +284,8 @@ class CommandState:
                 create_if_missing=True,
             )
             if submission is not None:
-                self._bind_submission_seq(submission, command_seq)
+                if not self._bind_submission_seq(submission, command_seq):
+                    return None
                 if command:
                     submission.observed_command = command
                 if not submission.command and command:
@@ -291,7 +307,12 @@ class CommandState:
             create_if_missing=False,
         )
         if submission is None or not submission.command:
-            if raw_command_seq is not None:
+            if submission_id is not None and raw_command_seq is not None:
+                self._record_protocol_issue(
+                    "conflicting backend identifiers for "
+                    f"submission_id={submission_id} and command_seq={raw_command_seq}"
+                )
+            elif raw_command_seq is not None:
                 self._record_protocol_issue(
                     f"prompt_ready missing matching submission for command_seq={raw_command_seq}"
                 )
@@ -301,7 +322,8 @@ class CommandState:
                 )
             return None
 
-        self._bind_submission_seq(submission, command_seq)
+        if not self._bind_submission_seq(submission, command_seq):
+            return None
         resolved_command_seq = submission.command_seq if submission.command_seq is not None else command_seq
 
         exit_code = self._coerce_exit_code(event.payload.get("exit_code"))
@@ -380,20 +402,33 @@ class CommandState:
         self,
         submission: CommandSubmission,
         command_seq: int | None,
-    ) -> None:
+    ) -> bool:
         if command_seq is None:
-            return
+            return True
 
         existing_seq = submission.command_seq
         if existing_seq == command_seq:
             self._submitted_by_seq[command_seq] = submission
-            return
+            return True
+
+        mapped_submission = self._submitted_by_seq.get(command_seq)
+        if mapped_submission is not None and mapped_submission is not submission:
+            self._record_protocol_issue(
+                "conflicting backend identifiers for "
+                f"submission_id={submission.submission_id} and command_seq={command_seq}"
+            )
+            return False
 
         if existing_seq is not None:
-            self._submitted_by_seq.pop(existing_seq, None)
+            self._record_protocol_issue(
+                "refusing to rebind submission_id="
+                f"{submission.submission_id} from command_seq={existing_seq} to {command_seq}"
+            )
+            return False
 
         submission.command_seq = command_seq
         self._submitted_by_seq[command_seq] = submission
+        return True
 
     @classmethod
     def _should_offer_error_correction(cls, *, command: str, source: str) -> bool:
@@ -507,17 +542,32 @@ class CommandState:
         command: str | None,
         create_if_missing: bool,
     ) -> CommandSubmission | None:
+        id_submission = None
         if submission_id is not None:
-            submission = self._submitted_by_id.get(submission_id)
-            if submission is not None:
-                self._active_submission = submission
-                return submission
+            id_submission = self._submitted_by_id.get(submission_id)
 
+        seq_submission = None
         if command_seq is not None:
-            submission = self._submitted_by_seq.get(command_seq)
-            if submission is not None:
-                self._active_submission = submission
-                return submission
+            seq_submission = self._submitted_by_seq.get(command_seq)
+
+        if (
+            id_submission is not None
+            and seq_submission is not None
+            and id_submission is not seq_submission
+        ):
+            self._record_protocol_issue(
+                "conflicting backend identifiers for "
+                f"submission_id={submission_id} and command_seq={command_seq}"
+            )
+            return None
+
+        if id_submission is not None:
+            self._active_submission = id_submission
+            return id_submission
+
+        if seq_submission is not None:
+            self._active_submission = seq_submission
+            return seq_submission
 
         if self._active_started_submission is not None:
             if self._submission_matches(

@@ -214,6 +214,56 @@ def test_unmatched_submission_id_does_not_guess_command_seq():
 
 
 @pytest.mark.timeout(5)
+def test_conflicting_identifiers_do_not_resolve_or_rebind_submission():
+    tracker = CommandState()
+
+    first = tracker.register_backend_command("echo one", command_seq=-1)
+    second = tracker.register_backend_command("echo two", command_seq=-2)
+
+    assert first is not None
+    assert second is not None
+
+    assert tracker.resolve_command_seq(-2, first.submission_id) is None
+
+    tracker.handle_backend_event(
+        _command_started(
+            "echo unexpected",
+            command_seq=-2,
+            submission_id=first.submission_id,
+        )
+    )
+
+    assert tracker.get_pending_submission(-1) is first
+    assert tracker.get_pending_submission(-2) is second
+    assert first.status == "submitted"
+    assert second.status == "submitted"
+
+    issues = tracker.consume_protocol_issues()
+    assert any("conflicting backend identifiers" in issue for issue in issues)
+
+
+@pytest.mark.timeout(5)
+def test_submission_id_can_bind_first_command_seq_when_unclaimed():
+    tracker = CommandState()
+
+    submission = tracker.register_user_command("echo one")
+
+    assert submission is not None
+    assert submission.command_seq is None
+
+    tracker.handle_backend_event(
+        _command_started(
+            "echo one",
+            command_seq=7,
+            submission_id=submission.submission_id,
+        )
+    )
+
+    assert submission.command_seq == 7
+    assert tracker.get_pending_submission(7) is submission
+
+
+@pytest.mark.timeout(5)
 def test_missing_identifiers_do_not_guess_when_multiple_pending_submissions_exist():
     tracker = CommandState()
 
