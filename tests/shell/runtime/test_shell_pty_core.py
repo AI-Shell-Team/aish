@@ -654,6 +654,46 @@ def test_shell_tracks_phase_without_mutating_missing_command_seq_events():
     assert "command_seq" not in ready.payload
 
 
+def test_shell_ignores_unmatched_identified_backend_events():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = _FakePTYManager()
+    shell._backend_protocol_events = []
+    shell._backend_protocol_errors = []
+    shell._last_backend_event = None
+    shell._backend_session_ready = False
+    shell._shell_phase = "command_submitted"
+    shell._next_command_seq = 1
+    shell._pending_command_seq = 1
+    shell._pending_command_text = "pwd"
+    shell._running = True
+    shell._output_processor = Mock()
+    shell._pty_manager.command_state.register_command("pwd", source="user", command_seq=1)
+
+    started = BackendControlEvent(
+        version=1,
+        type="command_started",
+        ts=1,
+        payload={"submission_id": "subm_missing", "command": "echo other"},
+    )
+    PTYAIShell._track_backend_event(shell, started)
+
+    assert shell._shell_phase == "command_submitted"
+    assert shell._pending_command_seq == 1
+    assert shell._pending_command_text == "pwd"
+
+    ready = BackendControlEvent(
+        version=1,
+        type="prompt_ready",
+        ts=2,
+        payload={"submission_id": "subm_missing", "exit_code": 0},
+    )
+    PTYAIShell._track_backend_event(shell, ready)
+
+    assert shell._shell_phase == "command_submitted"
+    assert shell._pending_command_seq == 1
+    assert shell._pending_command_text == "pwd"
+
+
 def test_shell_tracks_backend_cwd_from_prompt_ready(monkeypatch):
     shell = object.__new__(PTYAIShell)
     shell._pty_manager = _FakePTYManager()

@@ -74,6 +74,22 @@ def test_register_command_returns_pending_submission_metadata():
 
 
 @pytest.mark.timeout(5)
+def test_pending_submissions_include_id_only_registrations():
+    tracker = CommandState()
+
+    first = tracker.register_user_command("echo one")
+    second = tracker.register_user_command("echo two")
+
+    assert first is not None
+    assert second is not None
+    assert tracker.pending_submission_count == 2
+    assert {submission.submission_id for submission in tracker.pending_submissions} == {
+        first.submission_id,
+        second.submission_id,
+    }
+
+
+@pytest.mark.timeout(5)
 def test_pending_submission_is_cleared_after_prompt_ready():
     """Pending submissions should be removed once prompt_ready resolves them."""
     tracker = CommandState()
@@ -188,6 +204,16 @@ def test_submission_id_matches_correct_pending_submission_before_active_fallback
 
 
 @pytest.mark.timeout(5)
+def test_unmatched_submission_id_does_not_guess_command_seq():
+    tracker = CommandState()
+
+    tracker.register_backend_command("echo one", command_seq=-1)
+    tracker.register_backend_command("echo two", command_seq=-2)
+
+    assert tracker.resolve_command_seq(None, "subm_missing") is None
+
+
+@pytest.mark.timeout(5)
 def test_missing_identifiers_do_not_guess_when_multiple_pending_submissions_exist():
     tracker = CommandState()
 
@@ -201,6 +227,26 @@ def test_missing_identifiers_do_not_guess_when_multiple_pending_submissions_exis
     assert result is None
     assert tracker.get_pending_submission(-1) is first
     assert tracker.get_pending_submission(-2) is second
+
+
+@pytest.mark.timeout(5)
+def test_submission_id_only_placeholder_stays_backend_sourced():
+    tracker = CommandState()
+
+    tracker.handle_backend_event(
+        _command_started(
+            "echo unexpected",
+            submission_id="subm_missing",
+        )
+    )
+
+    pending = tracker.pending_submission
+    assert pending is not None
+    assert pending.source == "backend"
+    assert pending.allow_error_correction is False
+
+    issues = tracker.consume_protocol_issues()
+    assert any("backend event missing matching submission" in issue for issue in issues)
 
 
 @pytest.mark.timeout(5)

@@ -131,6 +131,13 @@ class CommandState:
             submissions.append(submission)
             seen.add(submission_id)
 
+        for submission in self._submitted_by_id.values():
+            submission_obj_id = id(submission)
+            if submission_obj_id in seen:
+                continue
+            submissions.append(submission)
+            seen.add(submission_obj_id)
+
         return tuple(submissions)
 
     @property
@@ -203,12 +210,18 @@ class CommandState:
             submission = self._submitted_by_id.get(resolved_submission_id)
             if submission is not None:
                 return submission.command_seq
-
-        active_submission = self._active_started_submission or self._active_submission
-        if active_submission is None:
             return None
 
-        return active_submission.command_seq
+        if (
+            self._active_started_submission is not None
+            and self._active_submission in (None, self._active_started_submission)
+        ):
+            return self._active_started_submission.command_seq
+
+        unique_submission = self._unique_pending_submission()
+        if unique_submission is None:
+            return None
+        return unique_submission.command_seq
 
     def next_submission_id(self) -> str:
         submission_id = f"subm_{self._next_submission_id}"
@@ -530,7 +543,12 @@ class CommandState:
         if not create_if_missing:
             return None
 
-        source = "backend" if command_seq is not None else "user"
+        if submission_id is not None and command_seq is None:
+            self._record_protocol_issue(
+                f"backend event missing matching submission for submission_id={submission_id}"
+            )
+
+        source = "backend" if (submission_id is not None or command_seq is not None) else "user"
         return self._store_submission(
             command=(command or self._last_command).strip(),
             source=source,
