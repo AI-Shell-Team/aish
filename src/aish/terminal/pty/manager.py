@@ -404,17 +404,21 @@ class PTYManager:
             return text
 
         output_lines = text.split("\n")
-        if len(output_lines) < len(command_lines):
+        first_content_index = 0
+        while first_content_index < len(output_lines) and not output_lines[first_content_index].strip():
+            first_content_index += 1
+
+        if len(output_lines) - first_content_index < len(command_lines):
             return text
 
         for index, command_line in enumerate(command_lines):
-            output_line = output_lines[index].lstrip()
+            output_line = output_lines[first_content_index + index].lstrip()
             if index > 0 and output_line.startswith(">"):
                 output_line = output_line[1:].lstrip()
             if output_line.rstrip() != command_line:
                 return text
 
-        return "\n".join(output_lines[len(command_lines) :])
+        return "\n".join(output_lines[first_content_index + len(command_lines) :])
 
     @staticmethod
     def _clean_pty_output(raw: bytes, command: str) -> str:

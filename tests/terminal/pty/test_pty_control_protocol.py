@@ -202,6 +202,17 @@ def test_pty_manager_execute_command_returns_output_without_marker():
         assert "[AISH_EXIT:" not in output
     finally:
         manager.stop()
+
+
+def test_clean_pty_output_strips_echo_after_leading_blank_line():
+    cleaned = PTYManager._clean_pty_output(
+        b"\r\n printf 'hello\\n'\r\nhello\r\n",
+        "printf 'hello\\n'",
+    )
+
+    assert cleaned == "hello"
+
+
 def test_pty_manager_execute_command_waits_without_implicit_timeout():
     manager = PTYManager(use_output_thread=False)
 

@@ -178,6 +178,9 @@ __aish_emit_command_started() {
 __aish_rewrite_last_history_entry() {
     local source="$__AISH_PENDING_COMMAND_SOURCE"
     local original_command="$__AISH_PENDING_COMMAND_TEXT"
+    local history_line=""
+    local history_index=""
+    local history_command=""
 
     if [[ "$source" != "user" ]]; then
         return 0
@@ -185,6 +188,23 @@ __aish_rewrite_last_history_entry() {
 
     if [[ -z "$original_command" ]]; then
         return 0
+    fi
+
+    history_line=$(builtin history 1 2>/dev/null || true)
+    if [[ "$history_line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+(.*)$ ]]; then
+        history_index="${BASH_REMATCH[1]}"
+        history_command="${BASH_REMATCH[2]}"
+
+        if [[ "$history_command" == "$original_command" ]]; then
+            return 0
+        fi
+
+        if [[ "$original_command" == !* ]]; then
+            builtin history -s "$original_command" 2>/dev/null || true
+            return 0
+        fi
+
+        builtin history -d "$history_index" 2>/dev/null || true
     fi
 
     builtin history -s "$original_command" 2>/dev/null || true
