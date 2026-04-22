@@ -8,6 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use aish_core::AishError;
+use aish_i18n::{t, t_with_args};
 
 // Paths used by the archive/script installer (install.sh)
 const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
@@ -151,11 +152,13 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
         let binary = PathBuf::from(ARCHIVE_BIN_DIR).join(name);
         if binary.exists() {
             if let Err(e) = run_sudo(&["rm", "-f", binary.to_str().unwrap_or("")]) {
-                eprintln!(
-                    "\x1b[31mFailed to remove {}: {}\x1b[0m",
-                    binary.display(),
-                    e
-                );
+                let path_str = binary.display().to_string();
+                eprintln!("\x1b[31m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("path".to_string(), path_str);
+                    args.insert("error".to_string(), e.to_string());
+                    t_with_args("cli.uninstall.file_remove_failed", &args)
+                });
                 success = false;
             }
         }
@@ -164,11 +167,13 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
     let share_dir = PathBuf::from(ARCHIVE_SHARE_DIR);
     if share_dir.exists() {
         if let Err(e) = run_sudo(&["rm", "-rf", share_dir.to_str().unwrap_or("")]) {
-            eprintln!(
-                "\x1b[31mFailed to remove {}: {}\x1b[0m",
-                share_dir.display(),
-                e
-            );
+            let path_str = share_dir.display().to_string();
+            eprintln!("\x1b[31m{}\x1b[0m", {
+                let mut args = std::collections::HashMap::new();
+                args.insert("path".to_string(), path_str);
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.uninstall.file_remove_failed", &args)
+            });
             success = false;
         }
     }
@@ -180,7 +185,7 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
     if success {
         Ok(())
     } else {
-        Err(AishError::Config("Some files could not be removed".into()))
+        Err(AishError::Config(t("cli.uninstall.some_files_failed")))
     }
 }
 
@@ -340,17 +345,33 @@ fn purge_data() -> Result<(), AishError> {
             continue;
         }
         if !is_safe_purge_path(path) {
-            eprintln!(
-                "\x1b[31mRefusing to delete {}: unsafe path\x1b[0m",
-                path.display()
-            );
+            let path_str = path.display().to_string();
+            eprintln!("\x1b[31m{}\x1b[0m", {
+                let mut args = std::collections::HashMap::new();
+                args.insert("path".to_string(), path_str);
+                t_with_args("cli.uninstall.refusing_unsafe_delete", &args)
+            });
             success = false;
             continue;
         }
         match std::fs::remove_dir_all(path) {
-            Ok(()) => println!("\x1b[32mRemoved {}: {}\x1b[0m", name, path.display()),
+            Ok(()) => {
+                let path_str = path.display().to_string();
+                println!("\x1b[32m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.clone());
+                    args.insert("path".to_string(), path_str);
+                    t_with_args("cli.uninstall.file_removed", &args)
+                })
+            }
             Err(e) => {
-                eprintln!("\x1b[31mFailed to remove {}: {}\x1b[0m", path.display(), e);
+                let path_str = path.display().to_string();
+                eprintln!("\x1b[31m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("path".to_string(), path_str);
+                    args.insert("error".to_string(), e.to_string());
+                    t_with_args("cli.uninstall.file_remove_failed", &args)
+                });
                 success = false;
             }
         }
@@ -359,9 +380,7 @@ fn purge_data() -> Result<(), AishError> {
     if success {
         Ok(())
     } else {
-        Err(AishError::Config(
-            "Some directories could not be removed".into(),
-        ))
+        Err(AishError::Config(t("cli.uninstall.some_files_failed")))
     }
 }
 
@@ -370,13 +389,17 @@ fn purge_data() -> Result<(), AishError> {
 // ---------------------------------------------------------------------------
 
 pub fn run_uninstall(purge: bool, yes: bool) {
-    println!("\x1b[1;36mAI Shell Uninstall\x1b[0m\n");
+    println!("\x1b[1;36m{}\x1b[0m\n", t("cli.uninstall.title"));
 
     let method = detect_installation_method();
-    println!("\x1b[2mInstallation method: {}\x1b[0m", method);
+    println!("\x1b[2m{}\x1b[0m", {
+        let mut args = std::collections::HashMap::new();
+        args.insert("method".to_string(), method.to_string());
+        t_with_args("cli.uninstall.installation_method", &args)
+    });
 
     if purge {
-        println!("\x1b[1;33m--purge: ALL config, data and cache files will be removed.\x1b[0m");
+        println!("\x1b[1;33m{}\x1b[0m", t("cli.uninstall.purge_warning"));
         for (_, path) in get_data_directories() {
             if path.exists() {
                 println!("  \x1b[2m{}\x1b[0m", path.display());
@@ -385,17 +408,17 @@ pub fn run_uninstall(purge: bool, yes: bool) {
     }
 
     if !yes {
-        print!("\n\x1b[33mProceed with uninstall? [y/N] \x1b[0m");
+        print!("\n\x1b[33m{}\x1b[0m", t("cli.uninstall.proceed_uninstall"));
         io::stdout().flush().unwrap();
         let mut answer = String::new();
         io::stdin().read_line(&mut answer).unwrap();
         if answer.trim().to_lowercase() != "y" {
-            println!("Cancelled.");
+            println!("{}", t("cli.uninstall.cancelled"));
             return;
         }
     }
 
-    println!("Uninstalling...");
+    println!("{}", t("cli.uninstall.uninstalling"));
 
     let result = match method {
         InstallMethod::Archive => uninstall_archive(purge),
@@ -403,35 +426,53 @@ pub fn run_uninstall(purge: bool, yes: bool) {
         InstallMethod::Pip => uninstall_pip(),
         InstallMethod::System => uninstall_system(purge),
         InstallMethod::Unknown => {
-            eprintln!("\x1b[33mCould not detect installation method.\x1b[0m");
-            eprintln!("\x1b[2mAttempting to remove current binary...\x1b[0m");
+            eprintln!("\x1b[33m{}\x1b[0m", t("cli.uninstall.unknown_method"));
+            eprintln!("\x1b[2m{}\x1b[0m", t("cli.uninstall.attempting_removal"));
             remove_current_binary()
         }
     };
 
     if let Err(e) = result {
-        eprintln!("\x1b[31mUninstall failed: {}\x1b[0m", e);
+        eprintln!("\x1b[31m{}\x1b[0m", {
+            let mut args = std::collections::HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("cli.uninstall.uninstall_failed", &args)
+        });
         return;
     }
-    println!("\x1b[32mPackage removed.\x1b[0m");
+    println!("\x1b[32m{}\x1b[0m", t("cli.uninstall.package_removed"));
 
     if purge {
         match purge_data() {
-            Ok(()) => println!("\x1b[32mConfig, data and cache purged.\x1b[0m"),
-            Err(e) => eprintln!("\x1b[31mPurge failed: {}\x1b[0m", e),
+            Ok(()) => println!("\x1b[32m{}\x1b[0m", t("cli.uninstall.config_purged")),
+            Err(e) => eprintln!("\x1b[31m{}\x1b[0m", {
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.uninstall.purge_failed", &args)
+            }),
         }
     }
 
-    println!("\x1b[32mAI Shell has been uninstalled. Goodbye!\x1b[0m");
+    println!("\x1b[32m{}\x1b[0m", t("cli.uninstall.goodbye"));
 }
 
 /// Fallback: remove the currently running binary.
 fn remove_current_binary() -> Result<(), AishError> {
-    let exe = std::env::current_exe()
-        .map_err(|e| AishError::Config(format!("Cannot determine binary path: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| {
+        AishError::Config({
+            let mut args = std::collections::HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("cli.uninstall.cannot_remove_binary", &args)
+        })
+    })?;
     if exe.exists() {
-        std::fs::remove_file(&exe)
-            .map_err(|e| AishError::Config(format!("Failed to remove binary: {e}")))?;
+        std::fs::remove_file(&exe).map_err(|e| {
+            AishError::Config({
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.uninstall.failed_remove_binary", &args)
+            })
+        })?;
     }
     Ok(())
 }

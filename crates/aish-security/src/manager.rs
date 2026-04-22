@@ -1,6 +1,6 @@
 use crate::fallback::FallbackRuleEngine;
 use crate::policy::SecurityPolicy;
-use crate::sandbox_ipc::SandboxIpc;
+use crate::sandbox_ipc::SandboxSecurityIpc;
 use crate::types::{AiRiskAssessment, SandboxResult};
 use aish_core::{AishError, RiskLevel, SandboxOffAction};
 use std::path::Path;
@@ -19,7 +19,7 @@ pub enum SecurityDecision {
 pub struct SecurityManager {
     policy: SecurityPolicy,
     fallback: FallbackRuleEngine,
-    sandbox_ipc: Option<SandboxIpc>,
+    sandbox_ipc: Option<SandboxSecurityIpc>,
 }
 
 impl SecurityManager {
@@ -32,7 +32,7 @@ impl SecurityManager {
     }
 
     /// Set the sandbox IPC client for async security checks.
-    pub fn with_sandbox_ipc(mut self, ipc: SandboxIpc) -> Self {
+    pub fn with_sandbox_ipc(mut self, ipc: SandboxSecurityIpc) -> Self {
         self.sandbox_ipc = Some(ipc);
         self
     }
@@ -121,22 +121,15 @@ impl SecurityManager {
         // Step 3: Try sandbox execution if available and enabled
         if self.policy.enable_sandbox {
             if let Some(ref ipc) = self.sandbox_ipc {
-                if ipc.is_available() {
+                if ipc.enabled() {
                     // Try executing in sandbox to see what actually happens
-                    match ipc.execute(command, false).await {
-                        Ok(response) => {
+                    match ipc.run(command, None) {
+                        Some(result) => {
                             // Assess the sandbox result
-                            if response.blocked {
-                                return SecurityDecision::Block {
-                                    reason: format!(
-                                        "command blocked by sandbox: {}",
-                                        response.stderr.trim()
-                                    ),
-                                };
-                            }
+                            let sandbox_result = result.sandbox;
 
                             // Check if any changes are to sensitive paths
-                            for change in &response.changes {
+                            for change in &sandbox_result.changes {
                                 let path = &change.path;
                                 for rule in &self.policy.rules {
                                     let pattern = &rule.pattern;
@@ -151,7 +144,7 @@ impl SecurityManager {
                                                 return SecurityDecision::Block {
                                                     reason: format!(
                                                         "{}: {} {}",
-                                                        change.operation,
+                                                        change.kind,
                                                         path,
                                                         rule.reason
                                                             .as_ref()
@@ -163,7 +156,7 @@ impl SecurityManager {
                                                 return SecurityDecision::Confirm {
                                                     reason: format!(
                                                         "{}: {} {}",
-                                                        change.operation,
+                                                        change.kind,
                                                         path,
                                                         rule.reason
                                                             .as_ref()
@@ -178,13 +171,13 @@ impl SecurityManager {
                             }
 
                             // If sandbox execution succeeded with no violations, allow
-                            if response.exit_code == 0 {
+                            if sandbox_result.exit_code == 0 {
                                 return SecurityDecision::Allow;
                             }
                         }
-                        Err(e) => {
+                        None => {
                             // Sandbox execution failed - fall through to other checks
-                            tracing::warn!("sandbox execution failed: {}", e);
+                            tracing::warn!("sandbox execution failed");
                         }
                     }
                 }

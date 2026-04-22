@@ -1,6 +1,14 @@
 use std::process::Command;
 
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
+
+/// Cached translated description.
+static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.python.description"))
+}
 
 /// Tool for executing Python code.
 pub struct PythonTool;
@@ -23,7 +31,7 @@ impl Tool for PythonTool {
     }
 
     fn description(&self) -> &str {
-        "Execute arbitrary Python code and return the result. Use print() for output."
+        get_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -42,7 +50,7 @@ impl Tool for PythonTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let code = match args.get("code").and_then(|c| c.as_str()) {
             Some(c) => c,
-            None => return ToolResult::error("Missing 'code' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.python.missing_code")),
         };
 
         // Build a wrapper script that captures stdout and handles errors
@@ -84,7 +92,7 @@ impl Tool for PythonTool {
                 }
 
                 if exit_code == 0 && result_text.is_empty() {
-                    ToolResult::success("Python code executed successfully with no output.")
+                    ToolResult::success(aish_i18n::t("tools.python.no_output"))
                 } else if exit_code == 0 {
                     ToolResult::success(result_text)
                 } else {
@@ -97,9 +105,14 @@ impl Tool for PythonTool {
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    ToolResult::error("Python 3 is not installed or not in PATH.")
+                    ToolResult::error(aish_i18n::t("tools.python.not_installed"))
                 } else {
-                    ToolResult::error(format!("Failed to execute Python: {}", e))
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("error".to_string(), e.to_string());
+                    ToolResult::error(aish_i18n::t_with_args(
+                        "tools.python.execute_failed",
+                        &args_map,
+                    ))
                 }
             }
         }

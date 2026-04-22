@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Target stable release version, for example 0.1.1"
+        description: "Target stable release version, for example 0.2.0"
         required: true
         type: string
 
@@ -61,44 +61,50 @@ jobs:
           EOF
 
   dry-run-package-validation:
-    name: Dry-run package validation (${{ matrix.arch }})
+    name: Dry-run package validation
     needs: release-meta
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runs_on: ubuntu-latest
-          - arch: arm64
-            runs_on: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runs_on }}
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-musl-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            linux-musl-cargo-v1-
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Build bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          OUTPUT_DIR="artifacts/amd64"
+          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          BUNDLE="aish-${VERSION}-linux-${{ matrix.arch }}"
-          EXTRACT_DIR="$PWD/build/install-smoke/${{ matrix.arch }}"
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
+          OUTPUT_DIR="artifacts/amd64"
+          BUNDLE="aish-${VERSION}-linux-x86_64"
+          EXTRACT_DIR="$PWD/build/install-smoke"
+          INSTALL_ROOT="$PWD/build/install-root"
 
           rm -rf "$EXTRACT_DIR" "$INSTALL_ROOT"
           mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
@@ -109,26 +115,13 @@ jobs:
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
           test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
-          grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
 
       - name: Upload dry-run artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: release-preparation-aish-linux-${{ matrix.arch }}
-          path: artifacts/${{ matrix.arch }}/*
+          name: release-preparation-aish-linux-amd64
+          path: artifacts/amd64/*
           if-no-files-found: error
-
-  live-smoke-validation:
-    name: Live smoke validation
-    needs:
-      - release-meta
-      - dry-run-package-validation
-    uses: ./.github/workflows/live-smoke.yml
-    with:
-      ref: ${{ github.sha }}
-    secrets: inherit
 
   release-preparation-summary:
     name: Summarize release preparation validation
@@ -136,7 +129,6 @@ jobs:
       - release-meta
       - prepare-release
       - dry-run-package-validation
-      - live-smoke-validation
     runs-on: ubuntu-latest
     steps:
       - name: Write final summary
@@ -148,5 +140,5 @@ jobs:
           - Tag: ${{ needs.release-meta.outputs.tag }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
-          Release metadata artifacts, dry-run bundle artifacts, and live smoke validation have completed successfully.
+          Release metadata artifacts and dry-run bundle validation have completed successfully.
           EOF

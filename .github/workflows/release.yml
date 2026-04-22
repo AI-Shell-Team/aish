@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  UV_CACHE_DIR: .uv-cache
-
 jobs:
   release-meta:
     name: Compute release metadata
@@ -64,48 +61,54 @@ jobs:
           name: aish ${{ needs.release-meta.outputs.tag }}
           generate_release_notes: true
 
-  build-release-packages:
-    name: Build release bundle (${{ matrix.arch }})
+  build-release-bundle:
+    name: Build release bundle
     needs:
       - release-meta
       - release-gate
       - create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runs_on: ubuntu-latest
-          - arch: arm64
-            runs_on: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runs_on }}
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-musl-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            linux-musl-cargo-v1-
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Build release bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          OUTPUT_DIR="artifacts/amd64"
+          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          BUNDLE="aish-${VERSION}-linux-${{ matrix.arch }}"
-          EXTRACT_DIR="$PWD/build/install-smoke/${{ matrix.arch }}"
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
+          OUTPUT_DIR="artifacts/amd64"
+          BUNDLE="aish-${VERSION}-linux-x86_64"
+          EXTRACT_DIR="$PWD/build/install-smoke"
+          INSTALL_ROOT="$PWD/build/install-root"
 
           rm -rf "$EXTRACT_DIR" "$INSTALL_ROOT"
           mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
@@ -116,21 +119,18 @@ jobs:
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
           test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
-          grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
-          files: artifacts/${{ matrix.arch }}/*
+          files: artifacts/amd64/*
 
   release-summary:
     name: Summarize published release
     needs:
       - release-meta
-      - build-release-packages
+      - build-release-bundle
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary

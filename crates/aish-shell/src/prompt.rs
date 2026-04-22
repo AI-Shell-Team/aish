@@ -224,7 +224,7 @@ pub fn render_welcome(_version: &str, model: &str, skill_count: usize) -> String
     let item3_keyword = t("shell.welcome2.quick_start.item3_keyword");
     let item3_suffix_2 = t("shell.welcome2.quick_start.item3_suffix_2");
     out.push_str(&format!(
-        " \x1b[1;36m•\x1b[0m {} \x1b[1;36m{}{}\x1b[0m {}\n",
+        " \x1b[1;36m•\x1b[0m {} \x1b[1;36m{} {}\x1b[0m {}\n",
         item3_prefix, item3_suffix_1, item3_keyword, item3_suffix_2
     ));
 

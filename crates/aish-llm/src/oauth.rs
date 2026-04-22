@@ -17,6 +17,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use aish_i18n::{t, t_with_args};
+
 // ---------------------------------------------------------------------------
 // Data structures
 // ---------------------------------------------------------------------------
@@ -158,44 +160,56 @@ pub fn login_with_browser(
     }
 
     // Bind listener before opening browser to avoid race.
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", callback_port))
-        .map_err(|e| format!("Failed to bind port {}: {}", callback_port, e))?;
+    let listener = TcpListener::bind(format!("127.0.0.1:{}", callback_port)).map_err(|e| {
+        let mut args = HashMap::new();
+        args.insert("port".to_string(), callback_port.to_string());
+        args.insert("error".to_string(), e.to_string());
+        t_with_args("llm.oauth.failed_bind_port", &args)
+    })?;
 
     if open_browser {
         open_url(&auth_url);
-        println!(
-            "Opening browser for {} login. If it does not open, visit:\n{}",
-            provider.display_name, auth_url
-        );
+        let mut args = HashMap::new();
+        args.insert("display_name".to_string(), provider.display_name.clone());
+        args.insert("url".to_string(), auth_url.clone());
+        println!("{}", t_with_args("llm.oauth.browser_login_opening", &args));
     } else {
-        println!(
-            "Please open the following URL in your browser to authenticate with {}:\n{}",
-            provider.display_name, auth_url
-        );
+        let mut args = HashMap::new();
+        args.insert("display_name".to_string(), provider.display_name.clone());
+        args.insert("url".to_string(), auth_url.clone());
+        println!("{}", t_with_args("llm.oauth.browser_login_manual", &args));
     }
 
     // Wait for a single callback.
     listener.set_nonblocking(false).ok();
-    let (mut stream, _addr) = listener
-        .accept()
-        .map_err(|e| format!("Failed to accept callback connection: {}", e))?;
+    let (mut stream, _addr) = listener.accept().map_err(|e| {
+        let mut args = HashMap::new();
+        args.insert("error".to_string(), e.to_string());
+        t_with_args("llm.oauth.failed_accept_callback", &args)
+    })?;
 
     // Read HTTP request.
     let mut buf = [0u8; 4096];
-    let n = stream
-        .read(&mut buf)
-        .map_err(|e| format!("Failed to read callback request: {}", e))?;
+    let n = stream.read(&mut buf).map_err(|e| {
+        let mut args = HashMap::new();
+        args.insert("error".to_string(), e.to_string());
+        t_with_args("llm.oauth.failed_read_callback", &args)
+    })?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
     // Send a simple HTML response so the user sees a success page.
-    let html = "\
+    let html = format!(
+        "\
         HTTP/1.1 200 OK\r\n\
         Content-Type: text/html; charset=utf-8\r\n\
         Connection: close\r\n\
         \r\n\
-        <html><body><h2>Authentication successful!</h2>\
-        <p>You can close this tab and return to the terminal.</p>\
-        </body></html>";
+        <html><body><h2>{}</h2>\
+        <p>{}</p>\
+        </body></html>",
+        t("llm.oauth.auth_successful"),
+        t("llm.oauth.auth_successful_close")
+    );
     stream.write_all(html.as_bytes()).ok();
     let _ = stream.flush();
 
@@ -203,14 +217,18 @@ pub fn login_with_browser(
     let code = parse_callback_query_param(&request, "code").ok_or_else(|| {
         let error = parse_callback_query_param(&request, "error");
         match error {
-            Some(e) => format!("OAuth error: {}", e),
-            None => "No authorization code received".to_string(),
+            Some(e) => {
+                let mut args = HashMap::new();
+                args.insert("error".to_string(), e);
+                t_with_args("llm.oauth.oauth_error", &args)
+            }
+            None => t("llm.oauth.no_auth_code"),
         }
     })?;
 
     let returned_state = parse_callback_query_param(&request, "state");
     if returned_state.as_deref() != Some(&state) {
-        return Err("State mismatch - possible CSRF attack".to_string());
+        return Err(t("llm.oauth.state_mismatch"));
     }
 
     exchange_code_for_tokens(provider, &code, &redirect_uri, &pkce.code_verifier)
@@ -228,7 +246,7 @@ pub fn login_with_device_code(provider: &OAuthProviderSpec) -> Result<OAuthToken
     let device_url = provider
         .device_authorization_url
         .as_ref()
-        .ok_or_else(|| "Provider does not support device code flow".to_string())?;
+        .ok_or_else(|| t("llm.oauth.device_code_not_supported"))?;
 
     let client = build_http_client(provider)?;
 
@@ -240,13 +258,21 @@ pub fn login_with_device_code(provider: &OAuthProviderSpec) -> Result<OAuthToken
             ("scope", provider.scope.as_str()),
         ])
         .send()
-        .map_err(|e| format!("Device code request failed: {}", e))?
+        .map_err(|e| {
+            let mut args = HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("llm.oauth.device_code_request_failed", &args)
+        })?
         .json()
-        .map_err(|e| format!("Failed to parse device code response: {}", e))?;
+        .map_err(|e| {
+            let mut args = HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("llm.oauth.device_code_parse_failed", &args)
+        })?;
 
     let user_code = resp["user_code"]
         .as_str()
-        .ok_or("Missing user_code in device code response")?
+        .ok_or_else(|| t("llm.oauth.missing_user_code"))?
         .to_string();
     let verification_uri = resp["verification_uri"]
         .as_str()
@@ -254,19 +280,27 @@ pub fn login_with_device_code(provider: &OAuthProviderSpec) -> Result<OAuthToken
             let v: &serde_json::Value = &resp["verification_url"];
             v.as_str()
         })
-        .ok_or("Missing verification_uri in device code response")?
+        .ok_or_else(|| t("llm.oauth.missing_verification_uri"))?
         .to_string();
     let device_code = resp["device_code"]
         .as_str()
-        .ok_or("Missing device_code in device code response")?
+        .ok_or_else(|| t("llm.oauth.missing_device_code"))?
         .to_string();
 
     let interval = resp["interval"]
         .as_u64()
         .unwrap_or(provider.device_poll_interval_secs);
 
-    println!("\nTo authenticate, visit:\n  {}", verification_uri);
-    println!("And enter code: {}\n", user_code);
+    let mut args_visit = HashMap::new();
+    args_visit.insert("verification_uri".to_string(), verification_uri.clone());
+    println!(
+        "{}",
+        t_with_args("llm.oauth.device_code_visit", &args_visit)
+    );
+
+    let mut args_code = HashMap::new();
+    args_code.insert("user_code".to_string(), user_code.clone());
+    println!("{}", t_with_args("llm.oauth.device_code_enter", &args_code));
 
     open_url(&verification_uri);
 
@@ -282,9 +316,17 @@ pub fn login_with_device_code(provider: &OAuthProviderSpec) -> Result<OAuthToken
                 ("device_code", device_code.as_str()),
             ])
             .send()
-            .map_err(|e| format!("Token polling request failed: {}", e))?
+            .map_err(|e| {
+                let mut args = HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("llm.oauth.token_polling_failed", &args)
+            })?
             .json()
-            .map_err(|e| format!("Failed to parse token polling response: {}", e))?;
+            .map_err(|e| {
+                let mut args = HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("llm.oauth.token_polling_parse_failed", &args)
+            })?;
 
         if let Some(error) = result.get("error").and_then(|v| v.as_str()) {
             match error {
@@ -298,7 +340,9 @@ pub fn login_with_device_code(provider: &OAuthProviderSpec) -> Result<OAuthToken
                         .get("error_description")
                         .and_then(|v| v.as_str())
                         .unwrap_or(error);
-                    return Err(format!("Device code auth failed: {}", desc));
+                    let mut args = HashMap::new();
+                    args.insert("error".to_string(), desc.to_string());
+                    return Err(t_with_args("llm.oauth.device_code_auth_failed", &args));
                 }
             }
         }
@@ -330,9 +374,17 @@ pub fn exchange_code_for_tokens(
             ("code_verifier", code_verifier),
         ])
         .send()
-        .map_err(|e| format!("Token exchange request failed: {}", e))?
+        .map_err(|e| {
+            let mut args = HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("llm.oauth.token_exchange_failed", &args)
+        })?
         .json()
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
+        .map_err(|e| {
+            let mut args = HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("llm.oauth.token_exchange_parse_failed", &args)
+        })?;
 
     // Check for OAuth error.
     if let Some(error) = resp
@@ -343,7 +395,9 @@ pub fn exchange_code_for_tokens(
             .get("error_description")
             .and_then(|v: &serde_json::Value| v.as_str())
             .unwrap_or(error);
-        return Err(format!("Token exchange error: {}", desc));
+        let mut args = HashMap::new();
+        args.insert("error".to_string(), desc.to_string());
+        return Err(t_with_args("llm.oauth.token_exchange_error", &args));
     }
 
     parse_token_response(&resp)

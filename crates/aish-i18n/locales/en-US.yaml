@@ -7,6 +7,79 @@ cli:
   setup_command_help: "Run interactive setup and exit"
   check_tool_support_command_help: "Debug live tool-call support check"
 
+  models_auth_title: "Models Auth: {provider}"
+  checking_existing_auth: "Checking for existing auth state..."
+  oauth_not_implemented: "OAuth flows are not yet implemented in the Rust version."
+  oauth_hint: "Please enter your auth token manually."
+  skipping_browser: "(--no-open-browser: skipping browser)"
+  token_read_failed: "Failed to read token."
+  token_empty: "Token cannot be empty."
+  auth_configured: "Auth configured for {provider}."
+  default_model_set_success: "Default model set to: {model}"
+  save_config_failed: "Failed to save config: {error}"
+
+  uninstall:
+    title: "AI Shell Uninstall"
+    installation_method: "Installation method: {method}"
+    purge_warning: "--purge: ALL config, data and cache files will be removed."
+    purge_file_list: "Files to be removed:"
+    cancelled: "Cancelled."
+    uninstalling: "Uninstalling..."
+    unknown_method: "Could not detect installation method."
+    attempting_removal: "Attempting to remove current binary..."
+    uninstall_failed: "Uninstall failed: {error}"
+    package_removed: "Package removed."
+    file_removed: "Removed {name}: {path}"
+    file_remove_failed: "Failed to remove {path}: {error}"
+    proceed_uninstall: "Proceed with uninstall? [y/N]"
+    config_purged: "Config, data and cache purged."
+    purge_failed: "Purge failed: {error}"
+    goodbye: "AI Shell has been uninstalled. Goodbye!"
+    some_files_failed: "Some files could not be removed"
+    refusing_unsafe_delete: "Refusing to delete {path}: unsafe path"
+    detect_method_failed: "Failed to detect installation method: {error}"
+    cannot_remove_binary: "Cannot determine binary path: {error}"
+    failed_remove_binary: "Failed to remove binary: {error}"
+
+  update:
+    http_error: "HTTP client error: {error}"
+    check_failed: "Failed to check for updates: {error}"
+    parse_releases_failed: "Failed to parse releases: {error}"
+    parse_release_failed: "Failed to parse release: {error}"
+    download_failed: "Download failed: {error}"
+    file_create_failed: "Failed to create file: {error}"
+    download_read_error: "Download read error: {error}"
+    write_error: "Write error: {error}"
+    open_error: "Open error: {error}"
+    read_error: "Read error: {error}"
+    temp_dir_failed: "Failed to create temp dir: {error}"
+    extract_dir_failed: "Failed to create extract dir: {error}"
+    tar_failed: "Failed to run tar: {error}"
+    install_script_failed: "Failed to run install script: {error}"
+    unsupported_platform: "Unsupported platform: {platform}"
+    unsupported_arch: "Unsupported architecture: {arch}"
+    github_api_error: "GitHub API returned status {status}"
+    extraction_failed: "Extraction failed: {error}"
+    installation_failed: "Installation failed: {error}"
+    checking: "Checking for updates..."
+    update_available: "Update available: {current} → {latest}"
+    already_latest: "Already on the latest version ({version})."
+    downloading_from_github: "Downloading from GitHub..."
+    downloading_from_mirror: "GitHub download failed, trying mirror..."
+    downloaded: "Downloaded: {path}"
+    extracting: "Extracting archive..."
+    install_sh_hash: "install.sh SHA256: {hash}"
+    running_install_script: "Running install script..."
+    installation_successful: "Installation successful!"
+    download_install_prompt: "Download and install? [y/N]"
+    update_cancelled: "Update cancelled."
+    installation_error: "Installation error: {error}"
+    download_error: "Download failed: {error}"
+    update_check_failed: "Update check failed: {error}"
+    install_sh_not_found: "install.sh not found in archive"
+    progress_mb: "{label}: {downloaded:.1}/{total:.1} MB ({pct}%)"
+    progress_mb_no_total: "{label}: {downloaded:.1} MB"
+
   models:
     help: "Manage models and provider auth"
     usage_command_help: "Show provider status and usage dashboard information"
@@ -229,11 +302,55 @@ shell:
       item2_prefix: "Ask AI: "
       item2_example: "Start with ; (e.g., ; how to find large files)"
       item3_prefix: "Get help:"
-      item3_suffix_1: "Type "
+      item3_suffix_1: "Type"
       item3_keyword: "help"
       item3_suffix_2: " to see built-in help and usage."
     risk: "AI-generated content may be risky, please verify carefully."
     skills_loaded_suffix: " loaded"
+
+  # General error messages
+  general_error: "error: {error}"
+  readline_init_failed: "Failed to initialize readline: {error}"
+  readline_error: "Readline error: {error}"
+  unknown_command: "Unknown special command: {command}"
+  config_save_warning: "Warning: could not save config: {error}"
+
+  # Model switching
+  model_usage: "Usage: /model [model-name]"
+  switching: "Validating model: {model}"
+
+  # Plan mode
+  plan_mode_enabled: "=== Plan Mode ==="
+  plan_mode_hint: "Type ; followed by your planning request."
+  plan_mode_disabled: "Exited plan mode."
+  plan_approved: "✓ Plan approved. Implementation tools are now available."
+  plan_approved_hint: "Type ; to continue with implementation."
+  plan_changes_requested: "→ Changes requested. Re-entering plan mode..."
+  plan_feedback_sent: "  Feedback sent to AI. Type ; to continue planning."
+  plan_review_cancelled: "Plan review cancelled. Plan mode exited."
+  plan_review_hint: "Use /plan to start a new planning session."
+
+  # Thinking animation
+  thinking_time: "Thinking: {time:.1}s"
+
+  # Analyzing environment
+  analyzing_environment: "Analyzing environment..."
+
+  # Status messages
+  check_status: "  {status} {name}"
+  interrupted: "Interrupted"
+  ctrl_c_again: "Ctrl+C again within 1s to exit"
+  exiting: "Exiting..."
+
+  # Confirm dialog
+  confirm_dialog_title: "Tool Execution"
+  confirm_dialog_tool: "Tool:"
+  confirm_dialog_question: "Allow? [y/N]"
+
+  # Prompt
+  prompt_prefix: "Execute"
+
+  # Security messages (already defined above, kept for reference)
 
   security:
     title:
@@ -280,6 +397,9 @@ shell:
     pty_decode_error: "Caught PTY output decode error: {error}"
     potential_error: "🚀 Potential issue detected: {reason}, attempting to resolve..."
     llm_error_title: "❌ LLM Request Failed"
+    pty_error: "PTY error: {error}"
+    restart_bash_failed: "Failed to restart bash: {error}"
+    load_script_failed: "Failed to load script '{script}': {error}"
     llm_error_message: "Error: {error}"
     llm_error_details_title: "Debug Details"
     tool_args_json_invalid_hint: "❌ Request failed, please retry."
@@ -390,6 +510,132 @@ tools:
       systemd: "[SYSTEMD] {ident}: matched {matched}/{total} lines\nSample:\n{sample}"
       call_failed: "[{stype}] {ident}: call failed\n{output}"
     no_logs_found: "No logs or matching information found."
+
+  bash:
+    description: "Execute a bash command and return the output. Use this tool to run shell commands."
+    param:
+      command: "The bash command to execute"
+      timeout: "Timeout in seconds (default: 120)"
+    missing_command: "Missing 'command' parameter"
+    execute_failed: "Failed to execute: {error}"
+    output_truncated: "[...{bytes} bytes truncated...]\n{tail}"
+    truncated_notice: "[...{bytes} bytes truncated...]"
+
+  fs:
+    read_file:
+      description: "Read the content of a file"
+      param:
+        path: "Path to the file to read"
+        offset: "Line offset to start reading from (0-based)"
+        limit: "Maximum number of lines to read"
+      missing_path: "Missing 'path' parameter"
+      read_failed: "Failed to read {path}: {error}"
+      file_too_large: "File {path} is {size} bytes, exceeding the {limit} byte (32KB) limit"
+      decode_failed: "Failed to decode {path} as UTF-8: {error}"
+      empty_file: "(empty file)"
+      offset_exceeds_length: "Offset {offset} exceeds file length ({length})"
+    write_file:
+      description: "Write content to a file (creates or overwrites)"
+      param:
+        path: "Path to the file to write"
+        content: "Content to write"
+      missing_path: "Missing 'path' parameter"
+      missing_content: "Missing 'content' parameter"
+      create_dirs_failed: "Failed to create parent dirs: {error}"
+      write_success: "Wrote {bytes} bytes to {path}"
+      write_failed: "Failed to write {path}: {error}"
+    edit_file:
+      description: "Edit a file by replacing a specific string with a new string"
+      param:
+        path: "Path to the file"
+        old_string: "The text to replace"
+        new_string: "The replacement text"
+        replace_all: "Replace all occurrences (default: false)"
+      missing_path: "Missing 'path' parameter"
+      missing_old_string: "Missing 'old_string' parameter"
+      missing_new_string: "Missing 'new_string' parameter"
+      edit_read_failed: "Failed to read {path}: {error}"
+      old_string_not_found: "'old_string' not found in {path}"
+      old_string_ambiguous: "'old_string' appears {count} times in {path} - use replace_all=true or provide more context"
+      edit_success: "Edited {path}"
+      edit_write_failed: "Failed to write {path}: {error}"
+
+  ask_user:
+    description: "Ask the user a question to clarify their intent. Use 'text_input' for free-form questions or 'choice_or_text' for multiple-choice with custom input option."
+    param:
+      kind: "Interaction type: text_input for free-form, choice_or_text for options with custom input"
+      prompt: "The question to ask the user"
+      options: "Predefined options for choice_or_text"
+      title: "Optional title for the question"
+      default: "Default value"
+      placeholder: "Placeholder text"
+      required: "Whether the user must provide an answer (default: true)"
+      allow_cancel: "Whether the user can cancel/skip (default: true)"
+      min_length: "Minimum length for text input (default: 0)"
+    missing_prompt: "Missing 'prompt' parameter"
+    unknown_kind: "Unknown kind: {kind}"
+    custom_input_label: "(type custom answer)"
+    help_select_with_cancel: "Esc to cancel, Enter to select"
+    help_select_no_cancel: "Enter to select"
+    custom_input_prompt: "Enter your answer:"
+    custom_input_help_cancel: "Esc to go back"
+    custom_input_help_no_cancel: "Esc to go back to options"
+    answer_required: "Answer is required"
+    answer_too_short: "Answer too short (min {min_length} characters)"
+    user_input_prefix: "User input: {input}"
+    read_input_failed: "Failed to read user input"
+    cancelled: "(cancelled)"
+    options_not_empty: "options must be a non-empty list for choice_or_text"
+
+  memory:
+    description: "Search, store, or manage long-term memories. Use 'search' to find relevant past knowledge, 'store' to save important information, 'list' to see recent memories, 'forget' to remove outdated info."
+    param:
+      action: "Memory operation to perform"
+      query: "Search query (for 'search' action)"
+      content: "Content to store (for 'store' action)"
+      category: "Category for stored memory (default: other)"
+      memory_id: "Memory ID to forget (for 'forget' action)"
+    missing_action: "Missing 'action' parameter"
+    unknown_action: "Unknown action: {action}. Use search/store/forget/list."
+    search_missing_query: "Missing 'query' for search"
+    store_missing_content: "Missing 'content' for store"
+    forget_missing_id: "Missing 'memory_id' for forget"
+    no_results: "No matching memories found."
+    stored: "Stored as memory #{id}."
+    forgot: "Forgot memory #{id}."
+    not_found: "Memory #{id} not found."
+    empty: "No memories yet."
+    not_available: "memory not available"
+
+  python:
+    description: "Execute arbitrary Python code and return the result. Use print() for output."
+    param:
+      code: "The Python code to execute."
+    missing_code: "Missing 'code' parameter"
+    not_installed: "Python 3 is not installed or not in PATH."
+    execute_failed: "Failed to execute Python: {error}"
+    no_output: "Python code executed successfully with no output."
+
+  grep:
+    description: "Search for patterns in files using regex"
+    param:
+      pattern: "Regular expression pattern to search for"
+      path: "File or directory to search in"
+      recursive: "Search recursively in directories"
+      case_insensitive: "Case insensitive search"
+      invert_match: "Show lines that do not match"
+      line_numbers: "Show line numbers"
+      count_only: "Only show count of matching lines"
+    missing_pattern: "Missing 'pattern' parameter"
+    invalid_regex: "Error: invalid regex pattern: {error}"
+
+  glob:
+    description: "Find files matching glob patterns"
+    param:
+      pattern: "Glob pattern to match files"
+      path: "Base directory to search in (default: current directory)"
+    missing_pattern: "Missing 'pattern' parameter"
+    invalid_glob: "Error: invalid glob pattern: {error}"
 
 help:
   labels:
@@ -646,3 +892,31 @@ help:
 
 errors:
   litellm_not_installed: "litellm module is not installed"
+
+llm:
+  oauth:
+    browser_login_opening: "Opening browser for {display_name} login. If it does not open, visit:\n{url}"
+    browser_login_manual: "Please open the following URL in your browser to authenticate with {display_name}:\n{url}"
+    device_code_visit: "\nTo authenticate, visit:\n  {verification_uri}"
+    device_code_enter: "And enter code: {user_code}\n"
+    failed_bind_port: "Failed to bind port {port}: {error}"
+    failed_accept_callback: "Failed to accept callback connection: {error}"
+    failed_read_callback: "Failed to read callback request: {error}"
+    oauth_error: "OAuth error: {error}"
+    no_auth_code: "No authorization code received"
+    state_mismatch: "State mismatch - possible CSRF attack"
+    device_code_not_supported: "Provider does not support device code flow"
+    device_code_request_failed: "Device code request failed: {error}"
+    device_code_parse_failed: "Failed to parse device code response: {error}"
+    missing_user_code: "Missing user_code in device code response"
+    missing_verification_uri: "Missing verification_uri in device code response"
+    missing_device_code: "Missing device_code in device code response"
+    token_polling_failed: "Token polling request failed: {error}"
+    token_polling_parse_failed: "Failed to parse token polling response: {error}"
+    device_code_auth_failed: "Device code auth failed: {error}"
+    token_exchange_failed: "Token exchange request failed: {error}"
+    token_exchange_parse_failed: "Failed to parse token response: {error}"
+    token_exchange_error: "Token exchange error: {error}"
+    failed_open_url: "Failed to open URL: {error}"
+    auth_successful: "Authentication successful!"
+    auth_successful_close: "You can close this tab and return to the terminal."

@@ -1,55 +1,60 @@
 #!/usr/bin/env python3
+"""Update repository version files for a stable release (Rust-based AI Shell)."""
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-PYPROJECT_PATH = ROOT_DIR / "pyproject.toml"
-RUNTIME_VERSION_PATH = ROOT_DIR / "src" / "aish" / "__init__.py"
+CARGO_TOML_PATH = ROOT_DIR / "Cargo.toml"
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
-UV_LOCK_PATH = ROOT_DIR / "uv.lock"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
-PYPROJECT_VERSION_RE = re.compile(r'^(version\s*=\s*")([^"]+)("\s*)$', re.MULTILINE)
-RUNTIME_VERSION_RE = re.compile(r'^(__version__\s*=\s*")([^"]+)("\s*)$', re.MULTILINE)
-UV_LOCK_VERSION_RE = re.compile(
-    r'(?ms)^(\[\[package\]\]\nname\s*=\s*"aish"\nversion\s*=\s*")([^"]+)("\s*$)'
-)
+CARGO_VERSION_RE = re.compile(r'^(version\s*=\s*")([^"]+)("\s*$)', re.MULTILINE)
 CHANGELOG_SECTION_RE = re.compile(r"^## \[", re.MULTILINE)
 
 
-def _replace_single(pattern: re.Pattern[str], text: str, replacement_value: str) -> str:
-    def _replacement(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{replacement_value}{match.group(3)}"
+def _update_cargo_toml(version: str) -> None:
+    """Update version in [workspace.package] section of Cargo.toml."""
+    original = CARGO_TOML_PATH.read_text(encoding="utf-8")
 
-    new_text, count = pattern.subn(_replacement, text, count=1)
-    if count != 1:
-        raise ValueError("Expected to replace exactly one version string")
-    return new_text
+    # Find the [workspace.package] section and update version within it
+    in_workspace_package = False
+    lines = original.split("\n")
+    updated = False
+    new_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_workspace_package = stripped == "[workspace.package]"
+        if in_workspace_package and not updated:
+            match = re.match(r'^(version\s*=\s*")([^"]+)(".*)$', line)
+            if match:
+                line = f"{match.group(1)}{version}{match.group(3)}"
+                updated = True
+        new_lines.append(line)
+
+    if not updated:
+        raise ValueError("Could not find version in [workspace.package] section of Cargo.toml")
+
+    CARGO_TOML_PATH.write_text("\n".join(new_lines), encoding="utf-8")
 
 
-def _update_pyproject(version: str) -> None:
-    original = PYPROJECT_PATH.read_text(encoding="utf-8")
-    updated = _replace_single(PYPROJECT_VERSION_RE, original, version)
-    PYPROJECT_PATH.write_text(updated, encoding="utf-8")
-
-
-def _update_runtime_version(version: str) -> None:
-    original = RUNTIME_VERSION_PATH.read_text(encoding="utf-8")
-    updated = _replace_single(RUNTIME_VERSION_RE, original, version)
-    RUNTIME_VERSION_PATH.write_text(updated, encoding="utf-8")
-
-
-def _update_uv_lock(version: str) -> None:
-    if not UV_LOCK_PATH.exists():
+def _update_cargo_lock(version: str) -> None:
+    """Update aish packages in Cargo.lock to match the new version."""
+    cargo_lock = ROOT_DIR / "Cargo.lock"
+    if not cargo_lock.exists():
         return
 
-    original = UV_LOCK_PATH.read_text(encoding="utf-8")
-    updated = _replace_single(UV_LOCK_VERSION_RE, original, version)
-    UV_LOCK_PATH.write_text(updated, encoding="utf-8")
+    try:
+        subprocess.check_call(["cargo", "generate-lockfile"], cwd=ROOT_DIR)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"Warning: cargo generate-lockfile failed: {exc}", file=sys.stderr)
 
 
 def _update_changelog(version: str, release_date: str) -> None:
@@ -71,9 +76,8 @@ def _update_changelog(version: str, release_date: str) -> None:
 def update_release_files(version: str, release_date: str) -> None:
     if not VERSION_RE.fullmatch(version):
         raise ValueError(f"Invalid version '{version}'. Expected format: X.Y.Z")
-    _update_pyproject(version)
-    _update_runtime_version(version)
-    _update_uv_lock(version)
+    _update_cargo_toml(version)
+    _update_cargo_lock(version)
     _update_changelog(version, release_date)
 
 
@@ -81,7 +85,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Update repository version files for a stable release."
     )
-    parser.add_argument("--version", required=True, help="Stable release version, for example 0.1.1")
+    parser.add_argument("--version", required=True, help="Stable release version, for example 0.2.0")
     parser.add_argument(
         "--date",
         default=dt.date.today().isoformat(),

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 aish-core.workspace = true
 aish-context.workspace = true
+aish-i18n.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true

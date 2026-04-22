@@ -1,19 +1,10 @@
-name: Live Smoke
+name: Live Smoke (Disabled)
+
+# NOTE: This workflow is disabled pending a Rust-based live smoke test suite.
+# The original workflow relied on Python pytest and is no longer applicable.
 
 on:
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: Git ref to validate
-        required: false
-        default: main
-        type: string
-  workflow_call:
-    inputs:
-      ref:
-        description: Git ref to validate
-        required: false
-        type: string
+  workflow_dispatch: {}
 
 concurrency:
   group: "live-smoke-${{ github.workflow }}-${{ inputs.ref || github.ref }}"
@@ -27,6 +18,7 @@ env:
 
 jobs:
   live-smoke:
+    if: ${{ false }} # disabled pending Rust-based live smoke suite
     name: Run live smoke tests
     runs-on: ubuntu-latest
     environment: live-smoke

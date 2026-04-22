@@ -1,78 +1,47 @@
-//! Sandbox daemon for isolated command execution.
+//! Privileged sandbox daemon with systemd socket activation.
 //!
-//! Runs as a long-lived daemon process listening on a Unix socket.
-//! Accepts command execution requests and runs them in isolated bubblewrap
-//! environments, returning results via JSON protocol.
+//! The daemon runs as root, accepts sandbox execution requests over a Unix
+//! socket, spawns worker processes via `unshare --mount --propagation private`,
+//! and returns results.
+//!
+//! Features:
+//! - systemd socket activation support
+//! - Per-user logging
+//! - Peer credential verification
+//! - Worker subprocess isolation
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use super::sandbox::{detect_fs_changes, FsChange, SandboxConfig, SandboxResult};
+use crate::strip_sudo::strip_sudo_prefix;
+use crate::types::{FsChange, IpcRequest, IpcResponse, IpcResult};
+use aish_core::Result;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_BACKLOG: i32 = 32;
+const DEFAULT_SOCKET_PATH: &str = "/run/aish/sandbox.sock";
+const IPC_STDIO_MAX_BYTES: usize = 2 * 1024 * 1024; // 2MB
+const IPC_CHANGES_MAX: usize = 10_000;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024; // 1MB
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
+const MAX_FILE_HANDLERS: usize = 32;
 
 // ---------------------------------------------------------------------------
-// Data types
+// Public types
 // ---------------------------------------------------------------------------
-
-/// Request sent by client to the sandbox daemon.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DaemonRequest {
-    pub id: String,
-    pub command: String,
-    pub cwd: String,
-    pub repo_root: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_s: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_pid: Option<u32>,
-}
-
-/// Response sent by sandbox daemon to client.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DaemonResponse {
-    pub id: String,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<DaemonResult>,
-}
-
-/// Result payload in successful responses.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DaemonResult {
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub changes_truncated: bool,
-    pub changes: Vec<FileChange>,
-}
-
-/// File change in daemon format (simplified from FsChange).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChange {
-    pub path: String,
-    pub kind: String,
-}
 
 /// Configuration for the sandbox daemon.
 #[derive(Debug, Clone)]
@@ -85,28 +54,27 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            socket_path: PathBuf::from("/run/user/1000/aish-sandbox.sock"),
-            backlog: DEFAULT_BACKLOG,
+            socket_path: PathBuf::from(DEFAULT_SOCKET_PATH),
+            backlog: 32,
             max_request_bytes: MAX_REQUEST_BYTES,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Sandbox daemon
-// ---------------------------------------------------------------------------
-
-/// Sandbox daemon that listens for commands and executes them in isolation.
+/// Sandbox daemon that listens for commands and executes them in worker processes.
 pub struct SandboxDaemon {
     config: DaemonConfig,
-    stop_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop_requested: Arc<std::sync::atomic::AtomicBool>,
+    loggers: Arc<Mutex<HashMap<u32, File>>>,
 }
 
 impl SandboxDaemon {
+    /// Create a new sandbox daemon with the given configuration.
     pub fn new(config: DaemonConfig) -> Self {
         Self {
             config,
-            stop_requested: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stop_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            loggers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -114,56 +82,72 @@ impl SandboxDaemon {
     ///
     /// This method blocks and handles incoming connections. Call `stop()` from
     /// another thread to gracefully shut down the server.
-    pub fn serve(&self) -> Result<(), String> {
-        // Ensure socket directory exists.
-        if let Some(parent) = self.config.socket_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create socket directory: {}", e))?;
-        }
+    pub fn serve_forever(&self) -> Result<()> {
+        // Check for systemd socket activation
+        let listener = if let Some(sock) = get_systemd_listen_socket() {
+            info!("Using systemd socket activation (fd 3)");
+            sock
+        } else {
+            // Create socket directory
+            if let Some(parent) = self.config.socket_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    aish_core::AishError::Security(format!(
+                        "Failed to create socket directory: {}",
+                        e
+                    ))
+                })?;
+            }
 
-        // Remove existing socket file if present.
-        let _ = std::fs::remove_file(&self.config.socket_path);
+            // Remove existing socket file
+            let _ = std::fs::remove_file(&self.config.socket_path);
 
-        // Create and bind the Unix socket listener.
-        let listener = UnixListener::bind(&self.config.socket_path).map_err(|e| {
-            format!(
-                "failed to bind socket at {}: {}",
-                self.config.socket_path.display(),
-                e
-            )
+            // Create and bind the Unix socket listener
+            let listener = UnixListener::bind(&self.config.socket_path).map_err(|e| {
+                aish_core::AishError::Security(format!(
+                    "Failed to bind socket at {}: {}",
+                    self.config.socket_path.display(),
+                    e
+                ))
+            })?;
+
+            // Set socket permissions: restrict to owner/group only
+            let perms = PermissionsExt::from_mode(0o660);
+            let _ = std::fs::set_permissions(&self.config.socket_path, perms);
+
+            info!(
+                "Sandbox daemon listening on {}",
+                self.config.socket_path.display()
+            );
+
+            listener
+        };
+
+        listener.set_nonblocking(true).map_err(|e| {
+            aish_core::AishError::Security(format!("Failed to set non-blocking: {}", e))
         })?;
 
-        // Set socket permissions to 0666.
-        let perms = PermissionsExt::from_mode(0o666);
-        let _ = std::fs::set_permissions(&self.config.socket_path, perms);
-
-        info!(
-            "Sandbox daemon listening on {}",
-            self.config.socket_path.display()
-        );
-
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("failed to set non-blocking: {}", e))?;
-
-        // Accept connections in a loop.
+        // Accept connections in a loop
         while !self
             .stop_requested
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            // Accept with timeout to check stop flag.
+            // Accept with timeout to check stop flag
             match listener.accept() {
                 Ok((stream, _addr)) => {
-                    // Handle connection in a thread.
+                    // Handle connection in a thread
                     let stop_clone = self.stop_requested.clone();
+                    let loggers_clone = self.loggers.clone();
+                    let max_req = self.config.max_request_bytes;
                     thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, stop_clone) {
+                        if let Err(e) =
+                            handle_connection(stream, stop_clone, loggers_clone, max_req)
+                        {
                             warn!("Connection handler error: {}", e);
                         }
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No pending connection, sleep briefly and check stop flag.
+                    // No pending connection, sleep briefly and check stop flag
                     thread::sleep(Duration::from_millis(100));
                     continue;
                 }
@@ -186,15 +170,67 @@ impl SandboxDaemon {
 }
 
 // ---------------------------------------------------------------------------
+// Systemd socket activation
+// ---------------------------------------------------------------------------
+
+/// Get systemd socket activation listener if available.
+///
+/// Checks LISTEN_FDS and LISTEN_PID environment variables.
+/// If present and PID matches, returns fd 3 as UnixListener.
+fn get_systemd_listen_socket() -> Option<UnixListener> {
+    let listen_fds: i32 = std::env::var("LISTEN_FDS").ok()?.parse().ok()?;
+    let listen_pid: i32 = std::env::var("LISTEN_PID").ok()?.parse().ok()?;
+
+    if listen_fds < 1 || listen_pid != std::process::id() as i32 {
+        return None;
+    }
+
+    // fd 3 is the first passed fd
+    unsafe { Some(UnixListener::from_raw_fd(3)) }
+}
+
+// ---------------------------------------------------------------------------
 // Connection handler
 // ---------------------------------------------------------------------------
 
 /// Handle a single client connection.
+/// Read a single newline-terminated line from a reader, with a byte limit.
+fn read_line_bounded<R: BufRead>(reader: &mut R, max_bytes: usize) -> aish_core::Result<String> {
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut byte = [0u8; 1];
+    while buf.len() < max_bytes {
+        match reader.read(&mut byte) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            Err(e) => {
+                return Err(aish_core::AishError::Security(format!(
+                    "Failed to read request: {}",
+                    e
+                )));
+            }
+        }
+    }
+    if buf.len() >= max_bytes {
+        return Err(aish_core::AishError::Security(
+            "request_too_large".to_string(),
+        ));
+    }
+    String::from_utf8(buf)
+        .map_err(|e| aish_core::AishError::Security(format!("Invalid UTF-8 in request: {}", e)))
+}
+
 fn handle_connection(
     mut stream: UnixStream,
-    _stop_requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), String> {
-    // Get peer credentials.
+    _stop_requested: Arc<std::sync::atomic::AtomicBool>,
+    loggers: Arc<Mutex<HashMap<u32, File>>>,
+    max_request_bytes: usize,
+) -> Result<()> {
+    // Get peer credentials
     let (peer_pid, peer_uid, peer_gid) = get_peer_credentials(&stream)?;
 
     debug!(
@@ -202,59 +238,114 @@ fn handle_connection(
         peer_pid, peer_uid, peer_gid
     );
 
-    // Read newline-terminated JSON request.
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("failed to read request: {}", e))?;
-
-    if line.is_empty() {
-        return Err("empty request".to_string());
+    // Only allow connections from the same uid or root
+    let daemon_uid = unsafe { libc::geteuid() };
+    if peer_uid != 0 && peer_uid != daemon_uid {
+        return Err(aish_core::AishError::Security(format!(
+            "Unauthorized peer uid={} (daemon uid={})",
+            peer_uid, daemon_uid
+        )));
     }
 
-    // Parse request.
-    let request: DaemonRequest =
-        serde_json::from_str(&line).map_err(|e| format!("failed to parse request: {}", e))?;
+    // Read newline-terminated JSON request with size limit
+    let mut reader = BufReader::new(&stream);
+    let max_bytes = max_request_bytes;
+    let line = read_line_bounded(&mut reader, max_bytes)?;
 
-    // Validate required fields.
+    if line.is_empty() {
+        return Err(aish_core::AishError::Security("Empty request".to_string()));
+    }
+
+    if line.is_empty() {
+        return Err(aish_core::AishError::Security("Empty request".to_string()));
+    }
+
+    // Parse request
+    let request: IpcRequest = serde_json::from_str(&line)
+        .map_err(|e| aish_core::AishError::Security(format!("Failed to parse request: {}", e)))?;
+
+    // Validate required fields
     if request.id.is_empty() {
         send_error(&mut stream, &request.id, "missing_id")?;
-        return Err("missing_id".to_string());
+        return Err(aish_core::AishError::Security("missing_id".to_string()));
     }
     if request.command.is_empty() || request.cwd.is_empty() || request.repo_root.is_empty() {
         send_error(&mut stream, &request.id, "missing_fields")?;
-        return Err("missing_fields".to_string());
+        return Err(aish_core::AishError::Security("missing_fields".to_string()));
     }
 
-    info!(
-        "Executing request {}: cwd={}, command={}",
-        request.id, request.cwd, request.command
-    );
+    // Clamp timeout to [1.0, 300.0]
+    let timeout_s = request.timeout_s.unwrap_or(30.0);
+    let timeout_s = timeout_s.clamp(1.0, 300.0);
 
-    // Execute command in sandbox.
-    let result = execute_in_sandbox(&request, peer_uid, peer_gid);
+    // Strip sudo prefix
+    let (stripped_cmd, sudo_detected, sudo_ok) = strip_sudo_prefix(&request.command);
 
-    // Send response.
-    let response = DaemonResponse {
-        id: request.id.clone(),
-        ok: result.is_ok(),
-        reason: if result.is_ok() {
-            None
-        } else {
-            result.as_ref().err().map(|e| e.to_string())
-        },
-        error: None,
-        result: result.as_ref().ok().map(|r| convert_result(&request, r)),
+    // Determine run_as user
+    let run_as = if sudo_detected {
+        if !sudo_ok {
+            send_error(&mut stream, &request.id, "missing_command")?;
+            return Err(aish_core::AishError::Security(
+                "missing_command".to_string(),
+            ));
+        }
+        None // Run as root (daemon)
+    } else {
+        Some((peer_uid, peer_gid))
     };
 
+    // Log the request
+    log_request(
+        &loggers,
+        peer_uid,
+        peer_pid,
+        &request.id,
+        &request.command,
+        &request.cwd,
+        &request.repo_root,
+        run_as,
+    )?;
+
+    // Execute in worker process
+    let result = execute_in_worker(
+        &request.id,
+        &stripped_cmd,
+        &request.cwd,
+        &request.repo_root,
+        run_as,
+        timeout_s,
+    );
+
+    // Build response
+    let response = match result {
+        Ok(worker_result) => IpcResponse {
+            id: request.id.clone(),
+            ok: true,
+            reason: None,
+            error: None,
+            result: Some(worker_result),
+        },
+        Err(e) => IpcResponse {
+            id: request.id.clone(),
+            ok: false,
+            reason: Some("worker_failed".to_string()),
+            error: Some(e.to_string()),
+            result: None,
+        },
+    };
+
+    // Send response
     send_response(&mut stream, &response)?;
+
+    // Log the result
+    log_result(&loggers, peer_uid, &response)?;
+
     Ok(())
 }
 
 /// Get peer credentials (pid, uid, gid) from a Unix socket.
 #[cfg(target_os = "linux")]
-fn get_peer_credentials(stream: &UnixStream) -> Result<(i32, i32, i32), String> {
+fn get_peer_credentials(stream: &UnixStream) -> Result<(i32, u32, u32)> {
     use std::os::unix::io::AsRawFd;
     let fd = stream.as_raw_fd();
 
@@ -272,156 +363,205 @@ fn get_peer_credentials(stream: &UnixStream) -> Result<(i32, i32, i32), String> 
     };
 
     if ret != 0 {
-        return Err("failed to get peer credentials".to_string());
+        return Err(aish_core::AishError::Security(
+            "Failed to get peer credentials".to_string(),
+        ));
     }
 
-    Ok((creds.pid, creds.uid as i32, creds.gid as i32))
+    Ok((creds.pid, creds.uid, creds.gid))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn get_peer_credentials(_stream: &UnixStream) -> Result<(i32, i32, i32), String> {
-    // Peer credentials are Linux-specific.
-    Ok((-1, -1, -1))
+fn get_peer_credentials(_stream: &UnixStream) -> Result<(i32, u32, u32), aish_core::AishError> {
+    // Peer credentials are Linux-specific
+    Ok((-1, 0, 0))
 }
 
-/// Execute a command inside the sandbox.
-fn execute_in_sandbox(
-    request: &DaemonRequest,
-    uid: i32,
-    gid: i32,
-) -> Result<SandboxResult, String> {
-    // Validate absolute paths.
-    let cwd = Path::new(&request.cwd);
-    let repo_root = Path::new(&request.repo_root);
-    if !cwd.is_absolute() || !repo_root.is_absolute() {
-        return Err("repo_root and cwd must be absolute paths".to_string());
-    }
+/// Execute command in a worker subprocess.
+fn execute_in_worker(
+    _id: &str,
+    command: &str,
+    cwd: &str,
+    repo_root: &str,
+    run_as: Option<(u32, u32)>,
+    timeout_s: f64,
+) -> Result<IpcResult> {
+    // Get current executable path (aish binary)
+    let aish_bin = std::env::current_exe().map_err(|e| {
+        aish_core::AishError::Security(format!("Failed to get current executable: {}", e))
+    })?;
 
-    // Build sandbox config.
-    let config = SandboxConfig {
-        timeout_secs: request
-            .timeout_s
-            .map(|s| s as u64)
-            .unwrap_or(DEFAULT_TIMEOUT_SECS),
-        ..Default::default()
+    // Build worker payload
+    let (sim_uid, sim_gid) = run_as.unwrap_or((0, 0));
+    let payload = WorkerPayload {
+        command: command.to_string(),
+        cwd: cwd.to_string(),
+        repo_root: repo_root.to_string(),
+        sim_uid,
+        sim_gid,
+        timeout_s,
     };
 
-    // Execute using direct bwrap call.
-    // In production, this would spawn a worker subprocess like Python does.
-    let result = execute_with_bwrap(request, &config, uid, gid)?;
-    Ok(result)
-}
+    let payload_json = serde_json::to_string(&payload).map_err(|e| {
+        aish_core::AishError::Security(format!("Failed to serialize worker payload: {}", e))
+    })?;
 
-/// Execute command directly with bwrap.
-fn execute_with_bwrap(
-    request: &DaemonRequest,
-    _config: &SandboxConfig,
-    _uid: i32,
-    _gid: i32,
-) -> Result<SandboxResult, String> {
-    // Create a temporary overlay directory.
-    let overlay_dir = std::env::temp_dir().join(format!("aish-sandbox-{}", uuid::Uuid::new_v4()));
-    let upper_dir = overlay_dir.join("upper");
-    std::fs::create_dir_all(&upper_dir).map_err(|e| format!("failed to create overlay: {}", e))?;
+    // Build unshare command
+    let mut cmd = Command::new("unshare");
+    cmd.arg("--mount")
+        .arg("--propagation")
+        .arg("private")
+        .arg("--")
+        .arg(&aish_bin)
+        .arg("--sandbox-worker");
 
-    // Build bwrap command.
-    let mut cmd = Command::new("bwrap");
-    cmd.arg("--ro-bind")
-        .arg("/")
-        .arg("/")
-        .arg("--bind")
-        .arg(&upper_dir)
-        .arg("/")
-        .arg("--dev")
-        .arg("/dev")
-        .arg("--proc")
-        .arg("/proc")
-        .arg("--unshare-net")
-        .arg("--die-with-parent");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    // Set working directory.
-    let _ = cmd.current_dir(&request.cwd);
-    // If current_dir fails, the command execution will fail with appropriate error.
+    debug!(
+        "Spawning worker: unshare --mount --propagation private -- {} --sandbox-worker",
+        aish_bin.display()
+    );
 
-    // Execute command via bash.
-    cmd.arg("--")
-        .arg("/bin/bash")
-        .arg("-c")
-        .arg(&request.command);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| aish_core::AishError::Security(format!("Failed to spawn worker: {}", e)))?;
 
-    debug!("Executing: bwrap ... -- /bin/bash -c {:?}", request.command);
+    // Write payload to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload_json.as_bytes()).map_err(|e| {
+            aish_core::AishError::Security(format!("Failed to write to worker stdin: {}", e))
+        })?;
+    }
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("bwrap execution failed: {}", e))?;
+    // Read stdout with timeout
+    let worker_timeout = Duration::from_secs_f64(timeout_s + 10.0);
+    let output = read_with_timeout(&mut child, worker_timeout)?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(1);
+    // Parse worker response
+    let worker_response: WorkerResponse = serde_json::from_str(&output).map_err(|e| {
+        aish_core::AishError::Security(format!("Failed to parse worker response: {}", e))
+    })?;
 
-    // Detect file changes.
-    let fs_changes = detect_fs_changes(&upper_dir);
+    if !worker_response.ok {
+        return Err(aish_core::AishError::Security(format!(
+            "Worker failed: {:?} - {:?}",
+            worker_response.reason, worker_response.error
+        )));
+    }
 
-    // Cleanup overlay.
-    let _ = std::fs::remove_dir_all(&overlay_dir);
+    // Truncate if needed
+    let result_ref = worker_response
+        .result
+        .as_ref()
+        .ok_or_else(|| aish_core::AishError::Security("Worker result is missing".to_string()))?;
 
-    Ok(SandboxResult {
-        exit_code,
+    let stdout_truncated = result_ref.stdout.len() > IPC_STDIO_MAX_BYTES;
+    let stderr_truncated = result_ref.stderr.len() > IPC_STDIO_MAX_BYTES;
+    let changes_truncated = result_ref.changes.len() > IPC_CHANGES_MAX;
+
+    let mut stdout = result_ref.stdout.clone();
+    let mut stderr = result_ref.stderr.clone();
+    let mut changes = result_ref.changes.clone();
+
+    if stdout_truncated {
+        stdout.truncate(IPC_STDIO_MAX_BYTES);
+    }
+    if stderr_truncated {
+        stderr.truncate(IPC_STDIO_MAX_BYTES);
+    }
+    if changes_truncated {
+        changes.truncate(IPC_CHANGES_MAX);
+    }
+
+    Ok(IpcResult {
+        exit_code: result_ref.exit_code,
         stdout,
         stderr,
-        fs_changes,
+        stdout_truncated,
+        stderr_truncated,
+        changes_truncated,
+        changes,
     })
 }
 
-/// Convert SandboxResult to DaemonResult format.
-fn convert_result(_request: &DaemonRequest, result: &SandboxResult) -> DaemonResult {
-    let changes: Vec<FileChange> = result
-        .fs_changes
-        .iter()
-        .map(|c| match c {
-            FsChange::Created(p) => FileChange {
-                path: p.display().to_string(),
-                kind: "created".to_string(),
-            },
-            FsChange::Modified(p) => FileChange {
-                path: p.display().to_string(),
-                kind: "modified".to_string(),
-            },
-            FsChange::Deleted(p) => FileChange {
-                path: p.display().to_string(),
-                kind: "deleted".to_string(),
-            },
-        })
-        .collect();
+/// Read worker output with timeout.
+fn read_with_timeout(child: &mut std::process::Child, timeout: Duration) -> Result<String> {
+    // Drain stdout and stderr concurrently to prevent pipe deadlock.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
-    DaemonResult {
-        exit_code: result.exit_code,
-        stdout: result.stdout.clone(),
-        stderr: result.stderr.clone(),
-        stdout_truncated: false,
-        stderr_truncated: false,
-        changes_truncated: false,
-        changes,
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stdout {
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+        }
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stderr {
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+        }
+        buf
+    });
+
+    // Wait for child with timeout
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout_data = stdout_thread.join().unwrap_or_default();
+                let _stderr_data = stderr_thread.join().unwrap_or_default();
+
+                if !status.success() {
+                    return Err(aish_core::AishError::Security(format!(
+                        "Worker exited with status: {:?}",
+                        status
+                    )));
+                }
+
+                return String::from_utf8(stdout_data).map_err(|e| {
+                    aish_core::AishError::Security(format!("Worker output not valid UTF-8: {}", e))
+                });
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(aish_core::AishError::Security("Worker timeout".to_string()));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(aish_core::AishError::Security(format!(
+                    "Failed to wait for worker: {}",
+                    e
+                )));
+            }
+        }
     }
 }
 
 /// Send a response to the client.
-fn send_response(stream: &mut UnixStream, response: &DaemonResponse) -> Result<(), String> {
-    let json = serde_json::to_string(response)
-        .map_err(|e| format!("failed to serialize response: {}", e))?;
+fn send_response(stream: &mut UnixStream, response: &IpcResponse) -> Result<()> {
+    let json = serde_json::to_string(response).map_err(|e| {
+        aish_core::AishError::Security(format!("Failed to serialize response: {}", e))
+    })?;
     let line = format!("{}\n", json);
     stream
         .write_all(line.as_bytes())
-        .map_err(|e| format!("failed to send response: {}", e))?;
+        .map_err(|e| aish_core::AishError::Security(format!("Failed to send response: {}", e)))?;
     stream
         .flush()
-        .map_err(|e| format!("failed to flush response: {}", e))?;
+        .map_err(|e| aish_core::AishError::Security(format!("Failed to flush response: {}", e)))?;
     Ok(())
 }
 
 /// Send an error response.
-fn send_error(stream: &mut UnixStream, id: &str, reason: &str) -> Result<(), String> {
-    let response = DaemonResponse {
+fn send_error(stream: &mut UnixStream, id: &str, reason: &str) -> Result<()> {
+    let response = IpcResponse {
         id: id.to_string(),
         ok: false,
         reason: Some(reason.to_string()),
@@ -429,6 +569,206 @@ fn send_error(stream: &mut UnixStream, id: &str, reason: &str) -> Result<(), Str
         result: None,
     };
     send_response(stream, &response)
+}
+
+// ---------------------------------------------------------------------------
+// Per-user logging
+// ---------------------------------------------------------------------------
+
+/// Log a sandbox request.
+fn log_request(
+    loggers: &Arc<Mutex<HashMap<u32, File>>>,
+    uid: u32,
+    pid: i32,
+    id: &str,
+    command: &str,
+    cwd: &str,
+    repo_root: &str,
+    run_as: Option<(u32, u32)>,
+) -> Result<()> {
+    let log_msg = format!(
+        "sandboxd(uid={}) [pid={}] Request: id={}, command={:?}, cwd={:?}, repo_root={:?}, run_as={:?}\n",
+        uid, pid, id, command, cwd, repo_root, run_as
+    );
+
+    write_log(loggers, uid, &log_msg)
+}
+
+/// Log a sandbox result.
+fn log_result(
+    loggers: &Arc<Mutex<HashMap<u32, File>>>,
+    uid: u32,
+    response: &IpcResponse,
+) -> Result<()> {
+    let log_msg = if response.ok {
+        if let Some(result) = &response.result {
+            format!(
+                "sandboxd(uid={}) Result: exit_code={}, stdout_len={}, stderr_len={}, changes={}, truncated={},{},{}\n",
+                uid,
+                result.exit_code,
+                result.stdout.len(),
+                result.stderr.len(),
+                result.changes.len(),
+                result.stdout_truncated,
+                result.stderr_truncated,
+                result.changes_truncated
+            )
+        } else {
+            format!("sandboxd(uid={}) Result: ok=true (no result)\n", uid)
+        }
+    } else {
+        format!(
+            "sandboxd(uid={}) Result: ok=false, reason={:?}, error={:?}\n",
+            uid, response.reason, response.error
+        )
+    };
+
+    write_log(loggers, uid, &log_msg)
+}
+
+/// Write a log message to a user's log file.
+fn write_log(loggers: &Arc<Mutex<HashMap<u32, File>>>, uid: u32, msg: &str) -> Result<()> {
+    let mut loggers_guard = loggers
+        .lock()
+        .map_err(|e| aish_core::AishError::Security(format!("Failed to lock loggers: {}", e)))?;
+
+    // Evict oldest if too many handlers
+    if loggers_guard.len() >= MAX_FILE_HANDLERS && !loggers_guard.contains_key(&uid) {
+        // Remove first entry
+        let key = loggers_guard.keys().next().copied();
+        if let Some(k) = key {
+            loggers_guard.remove(&k);
+        }
+    }
+
+    // Get or create logger for this user
+    if let std::collections::hash_map::Entry::Vacant(e) = loggers_guard.entry(uid) {
+        let log_path = get_user_log_path(uid)?;
+        let file = File::options()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| {
+                aish_core::AishError::Security(format!("Failed to open log file: {}", e))
+            })?;
+        e.insert(file);
+    }
+
+    // Write log message
+    if let Some(file) = loggers_guard.get_mut(&uid) {
+        file.write_all(msg.as_bytes())
+            .map_err(|e| aish_core::AishError::Security(format!("Failed to write log: {}", e)))?;
+        file.flush()
+            .map_err(|e| aish_core::AishError::Security(format!("Failed to flush log: {}", e)))?;
+    }
+
+    Ok(())
+}
+
+/// Get the log file path for a user.
+/// Uses a root-owned directory to prevent symlink attacks.
+fn get_user_log_path(uid: u32) -> Result<PathBuf> {
+    let log_dir = PathBuf::from("/var/log/aish");
+
+    // Ensure root-owned directory exists with restrictive permissions
+    if !log_dir.exists() {
+        std::fs::create_dir_all(&log_dir).map_err(|e| {
+            aish_core::AishError::Security(format!("Failed to create log directory: {}", e))
+        })?;
+        let perms = PermissionsExt::from_mode(0o755);
+        std::fs::set_permissions(&log_dir, perms).map_err(|e| {
+            aish_core::AishError::Security(format!("Failed to set log dir permissions: {}", e))
+        })?;
+    }
+
+    let log_path = log_dir.join(format!("sandbox-{}.log", uid));
+
+    Ok(log_path)
+}
+
+// ---------------------------------------------------------------------------
+// Worker types
+// ---------------------------------------------------------------------------
+
+/// Payload sent to worker process.
+#[derive(Debug, Serialize)]
+struct WorkerPayload {
+    command: String,
+    cwd: String,
+    repo_root: String,
+    sim_uid: u32,
+    sim_gid: u32,
+    timeout_s: f64,
+}
+
+/// Response from worker process.
+#[derive(Debug, Deserialize)]
+struct WorkerResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<WorkerResultPayload>,
+}
+
+/// Result payload from worker.
+#[derive(Debug, Deserialize)]
+struct WorkerResultPayload {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    changes: Vec<FsChange>,
+}
+
+// ---------------------------------------------------------------------------
+// Legacy compatibility types (deprecated)
+// ---------------------------------------------------------------------------
+
+#[allow(deprecated)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonRequest {
+    pub id: String,
+    pub command: String,
+    pub cwd: String,
+    pub repo_root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_pid: Option<u32>,
+}
+
+#[allow(deprecated)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonResponse {
+    pub id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<DaemonResult>,
+}
+
+#[allow(deprecated)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DaemonResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub changes_truncated: bool,
+    pub changes: Vec<FileChange>,
+}
+
+#[allow(deprecated)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub kind: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -442,97 +782,54 @@ mod tests {
     #[test]
     fn test_daemon_config_default() {
         let config = DaemonConfig::default();
+        assert_eq!(config.socket_path, PathBuf::from(DEFAULT_SOCKET_PATH));
         assert_eq!(config.backlog, 32);
-        assert_eq!(config.max_request_bytes, 1024 * 1024);
+        assert_eq!(config.max_request_bytes, MAX_REQUEST_BYTES);
     }
 
     #[test]
-    fn test_request_serialization() {
-        let req = DaemonRequest {
-            id: "test-123".to_string(),
+    fn test_worker_payload_serialize() {
+        let payload = WorkerPayload {
             command: "ls -la".to_string(),
             cwd: "/home/user".to_string(),
             repo_root: "/home/user/project".to_string(),
-            timeout_s: Some(30.0),
-            client_pid: Some(12345),
+            sim_uid: 1000,
+            sim_gid: 1000,
+            timeout_s: 30.0,
         };
 
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("ls -la"));
-        assert!(json.contains("test-123"));
-
-        let parsed: DaemonRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.id, "test-123");
-        assert_eq!(parsed.command, "ls -la");
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"command\":\"ls -la\""));
+        assert!(json.contains("\"sim_uid\":1000"));
     }
 
     #[test]
-    fn test_response_serialization() {
-        let resp = DaemonResponse {
-            id: "test-123".to_string(),
-            ok: true,
-            reason: None,
-            error: None,
-            result: None,
-        };
+    fn test_worker_response_deserialize() {
+        let json = r#"{
+            "ok": true,
+            "result": {
+                "exit_code": 0,
+                "stdout": "hello",
+                "stderr": "",
+                "changes": []
+            }
+        }"#;
 
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"ok\":true"));
-
-        let parsed: DaemonResponse = serde_json::from_str(&json).unwrap();
-        assert!(parsed.ok);
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.ok);
+        assert!(resp.result.is_some());
     }
 
     #[test]
-    fn test_error_response() {
-        let resp = DaemonResponse {
-            id: "abc".to_string(),
-            ok: false,
-            reason: Some("test_error".to_string()),
-            error: None,
-            result: None,
-        };
+    fn test_worker_error_deserialize() {
+        let json = r#"{
+            "ok": false,
+            "reason": "test_reason",
+            "error": "test error"
+        }"#;
 
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("\"ok\":false"));
-        assert!(json.contains("test_error"));
-    }
-
-    #[test]
-    fn test_file_change_serialization() {
-        let change = FileChange {
-            path: "/tmp/test.txt".to_string(),
-            kind: "created".to_string(),
-        };
-
-        let json = serde_json::to_string(&change).unwrap();
-        let parsed: FileChange = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.path, "/tmp/test.txt");
-        assert_eq!(parsed.kind, "created");
-    }
-
-    #[test]
-    fn test_convert_result() {
-        let request = DaemonRequest {
-            id: "test".to_string(),
-            command: "echo hi".to_string(),
-            cwd: "/tmp".to_string(),
-            repo_root: "/tmp".to_string(),
-            timeout_s: None,
-            client_pid: None,
-        };
-
-        let result = SandboxResult {
-            exit_code: 0,
-            stdout: "hi\n".to_string(),
-            stderr: String::new(),
-            fs_changes: vec![FsChange::Modified(PathBuf::from("/tmp/out.txt"))],
-        };
-
-        let daemon_result = convert_result(&request, &result);
-        assert_eq!(daemon_result.exit_code, 0);
-        assert_eq!(daemon_result.stdout, "hi\n");
-        assert_eq!(daemon_result.changes.len(), 1);
-        assert_eq!(daemon_result.changes[0].kind, "modified");
+        let resp: WorkerResponse = serde_json::from_str(json).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.reason, Some("test_reason".to_string()));
     }
 }

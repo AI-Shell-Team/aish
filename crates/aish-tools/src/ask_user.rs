@@ -8,9 +8,19 @@
 
 use std::io::{self, Write};
 
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
-const CUSTOM_INPUT_LABEL: &str = "(type custom answer)";
+/// Cached translated description.
+static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.ask_user.description"))
+}
+
+fn get_custom_input_label() -> String {
+    aish_i18n::t("tools.ask_user.custom_input_label")
+}
 
 pub struct AskUserTool;
 
@@ -32,8 +42,7 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a question to clarify their intent. Use 'text_input' for free-form questions \
-         or 'choice_or_text' for multiple-choice with custom input option."
+        get_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -101,7 +110,7 @@ impl Tool for AskUserTool {
             .unwrap_or("text_input");
         let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
             Some(p) => p,
-            None => return ToolResult::error("Missing 'prompt' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.ask_user.missing_prompt")),
         };
         let title = args.get("title").and_then(|v| v.as_str());
         let default = args.get("default").and_then(|v| v.as_str());
@@ -118,7 +127,14 @@ impl Tool for AskUserTool {
             "text_input" => {
                 self.handle_text_input(title, prompt, default, allow_cancel, min_length)
             }
-            _ => ToolResult::error(format!("Unknown kind: {}", kind)),
+            _ => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("kind".to_string(), kind.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.ask_user.unknown_kind",
+                    &args_map,
+                ))
+            }
         }
     }
 }
@@ -142,7 +158,7 @@ impl AskUserTool {
     ) -> ToolResult {
         let options = match args.get("options").and_then(|v| v.as_array()) {
             Some(opts) if !opts.is_empty() => opts,
-            _ => return ToolResult::error("options must be a non-empty list for choice_or_text"),
+            _ => return ToolResult::error(aish_i18n::t("tools.ask_user.options_not_empty")),
         };
 
         let display_prompt = match title {
@@ -164,7 +180,7 @@ impl AskUserTool {
                 (display, Slot::Opt(i))
             })
             .collect();
-        items.push((CUSTOM_INPUT_LABEL.to_string(), Slot::Custom));
+        items.push((get_custom_input_label(), Slot::Custom));
 
         let labels: Vec<String> = items.iter().map(|(l, _)| l.clone()).collect();
 
@@ -182,16 +198,16 @@ impl AskUserTool {
         };
 
         let help_msg = if allow_cancel {
-            "Esc to cancel, Enter to select"
+            aish_i18n::t("tools.ask_user.help_select_with_cancel")
         } else {
-            "Enter to select"
+            aish_i18n::t("tools.ask_user.help_select_no_cancel")
         };
 
         // Loop: Select → (custom → Text → Esc back to Select) → done
         loop {
             let select_result = inquire::Select::new(&display_prompt, labels.clone())
                 .with_starting_cursor(starting_cursor)
-                .with_help_message(help_msg)
+                .with_help_message(&help_msg)
                 .prompt();
 
             match select_result {
@@ -211,13 +227,16 @@ impl AskUserTool {
                         }
                         Slot::Custom => {
                             // Open text input; Esc returns to Select.
-                            let text_result = inquire::Text::new("Enter your answer:")
-                                .with_help_message(if allow_cancel {
-                                    "Esc to go back"
-                                } else {
-                                    "Esc to go back to options"
-                                })
-                                .prompt();
+                            let help_message = if allow_cancel {
+                                aish_i18n::t("tools.ask_user.custom_input_help_cancel")
+                            } else {
+                                aish_i18n::t("tools.ask_user.custom_input_help_no_cancel")
+                            };
+                            let text_result = inquire::Text::new(&aish_i18n::t(
+                                "tools.ask_user.custom_input_prompt",
+                            ))
+                            .with_help_message(&help_message)
+                            .prompt();
 
                             match text_result {
                                 Ok(text) => {
@@ -226,7 +245,14 @@ impl AskUserTool {
                                         // Empty input — go back to select.
                                         continue;
                                     }
-                                    return ToolResult::success(format!("User input: {}", trimmed));
+                                    return ToolResult::success({
+                                        let mut args_map = std::collections::HashMap::new();
+                                        args_map.insert("input".to_string(), trimmed.clone());
+                                        aish_i18n::t_with_args(
+                                            "tools.ask_user.user_input_prefix",
+                                            &args_map,
+                                        )
+                                    });
                                 }
                                 Err(_) => {
                                     // Esc pressed — go back to Select.
@@ -242,7 +268,7 @@ impl AskUserTool {
                         if let Some(d) = default {
                             return ToolResult::success(d.to_string());
                         }
-                        return ToolResult::success("(cancelled)".to_string());
+                        return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
                     }
                     // Not allowed to cancel — loop back.
                     continue;
@@ -264,9 +290,13 @@ impl AskUserTool {
             None => prompt.to_string(),
         };
 
-        let help_msg = if allow_cancel { "Esc to cancel" } else { "" };
+        let help_msg = if allow_cancel {
+            aish_i18n::t("tools.ask_user.custom_input_help_cancel")
+        } else {
+            String::new()
+        };
 
-        let mut text = inquire::Text::new(&display_prompt).with_help_message(help_msg);
+        let mut text = inquire::Text::new(&display_prompt).with_help_message(&help_msg);
         if let Some(d) = default {
             text = text.with_default(d);
         }
@@ -279,17 +309,24 @@ impl AskUserTool {
                         return ToolResult::success(d.to_string());
                     }
                     if allow_cancel {
-                        return ToolResult::success("(cancelled)".to_string());
+                        return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
                     }
-                    return ToolResult::error("Answer is required");
+                    return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
                 }
                 if trimmed.len() < min_length {
-                    return ToolResult::error(format!(
-                        "Answer too short (min {} characters)",
-                        min_length
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("min_length".to_string(), min_length.to_string());
+                    return ToolResult::error(aish_i18n::t_with_args(
+                        "tools.ask_user.answer_too_short",
+                        &args_map,
                     ));
                 }
-                ToolResult::success(format!("User input: {}", trimmed))
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("input".to_string(), trimmed.clone());
+                ToolResult::success(aish_i18n::t_with_args(
+                    "tools.ask_user.user_input_prefix",
+                    &args_map,
+                ))
             }
             Err(_) => self.fallback_text_input(title, prompt, default, allow_cancel, min_length),
         }
@@ -321,7 +358,7 @@ impl AskUserTool {
 
         let mut answer = String::new();
         if io::stdin().read_line(&mut answer).is_err() {
-            return ToolResult::error("Failed to read user input");
+            return ToolResult::error(aish_i18n::t("tools.ask_user.read_input_failed"));
         }
         let answer = answer.trim().to_string();
 
@@ -332,13 +369,23 @@ impl AskUserTool {
             if allow_cancel {
                 return ToolResult::success("(cancelled)".to_string());
             }
-            return ToolResult::error("Answer is required");
+            return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
         }
 
         if answer.len() < min_length {
-            return ToolResult::error(format!("Answer too short (min {} characters)", min_length));
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("min_length".to_string(), min_length.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.ask_user.answer_too_short",
+                &args_map,
+            ));
         }
 
-        ToolResult::success(format!("User input: {}", answer))
+        let mut args_map = std::collections::HashMap::new();
+        args_map.insert("input".to_string(), answer.clone());
+        ToolResult::success(aish_i18n::t_with_args(
+            "tools.ask_user.user_input_prefix",
+            &args_map,
+        ))
     }
 }

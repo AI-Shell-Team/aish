@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 use aish_config::ConfigModel;
+use aish_i18n::{t, t_with_args};
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum AuthFlow {
@@ -65,30 +66,34 @@ pub fn run_models_auth(
         }
     };
 
-    println!("\x1b[1;36mModels Auth: {}\x1b[0m\n", provider_id);
+    println!("\x1b[1;36m{}\x1b[0m\n", {
+        let mut args = std::collections::HashMap::new();
+        args.insert("provider".to_string(), provider_id.to_string());
+        t_with_args("cli.models_auth_title", &args)
+    });
 
     if !force {
-        println!("\x1b[2mChecking for existing auth state...\x1b[0m");
+        println!("\x1b[2m{}\x1b[0m", t("cli.checking_existing_auth"));
     }
 
-    println!("\x1b[33mNote: OAuth flows are not yet implemented in the Rust version.\x1b[0m");
-    println!("Please enter your auth token manually.\n");
+    println!("\x1b[33m{}\x1b[0m", t("cli.oauth_not_implemented"));
+    println!("{}\n", t("cli.oauth_hint"));
 
     if !open_browser {
-        println!("(\x1b[2m--no-open-browser: skipping browser\x1b[0m)");
+        println!("{}\x1b[0m", t("cli.skipping_browser"));
     }
 
     print!("Auth token: ");
     io::stdout().flush().unwrap();
     let mut token = String::new();
     if io::stdin().read_line(&mut token).is_err() {
-        eprintln!("\x1b[31mFailed to read token.\x1b[0m");
+        eprintln!("\x1b[31m{}\x1b[0m", t("cli.token_read_failed"));
         return;
     }
     let token = token.trim();
 
     if token.is_empty() {
-        eprintln!("\x1b[31mToken cannot be empty.\x1b[0m");
+        eprintln!("\x1b[31m{}\x1b[0m", t("cli.token_empty"));
         return;
     }
 
@@ -111,13 +116,25 @@ pub fn run_models_auth(
     let config_path = aish_config::ConfigLoader::default_config_path();
     match aish_config::ConfigLoader::save(config, &config_path) {
         Ok(()) => {
-            println!("\n\x1b[32mAuth configured for {}.\x1b[0m", provider_id);
+            println!("\n\x1b[32m{}\x1b[0m", {
+                let mut args = std::collections::HashMap::new();
+                args.insert("provider".to_string(), provider_id.to_string());
+                t_with_args("cli.auth_configured", &args)
+            });
             if set_default {
-                println!("\x1b[32mDefault model set to: {}\x1b[0m", config.model);
+                println!("\x1b[32m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), config.model.clone());
+                    t_with_args("cli.default_model_set_success", &args)
+                });
             }
         }
         Err(e) => {
-            eprintln!("\x1b[31mFailed to save config: {}\x1b[0m", e);
+            eprintln!("\x1b[31m{}\x1b[0m", {
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.save_config_failed", &args)
+            });
         }
     }
 }

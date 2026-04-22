@@ -1,4 +1,12 @@
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
+
+/// Cached translated description.
+static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.memory.description"))
+}
 
 /// Callback type for memory operations.
 pub type MemorySearchFn = Box<dyn Fn(&str, usize) -> Vec<MemorySearchResult> + Send + Sync>;
@@ -41,7 +49,7 @@ impl MemoryTool {
     pub fn noop() -> Self {
         Self {
             search: Box::new(|_, _| Vec::new()),
-            store: Box::new(|_, _, _, _| "memory not available".to_string()),
+            store: Box::new(|_, _, _, _| aish_i18n::t("tools.memory.not_available")),
             delete: Box::new(|_| false),
             list: Box::new(|_| Vec::new()),
         }
@@ -54,9 +62,7 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Search, store, or manage long-term memories. Use 'search' to find relevant past knowledge, \
-         'store' to save important information, 'list' to see recent memories, \
-         'forget' to remove outdated info."
+        get_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -93,18 +99,20 @@ impl Tool for MemoryTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let action = match args.get("action").and_then(|v| v.as_str()) {
             Some(a) => a,
-            None => return ToolResult::error("Missing 'action' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.memory.missing_action")),
         };
 
         match action {
             "search" => {
                 let query = match args.get("query").and_then(|v| v.as_str()) {
                     Some(q) => q,
-                    None => return ToolResult::error("Missing 'query' for search"),
+                    None => {
+                        return ToolResult::error(aish_i18n::t("tools.memory.search_missing_query"))
+                    }
                 };
                 let results = (self.search)(query, 10);
                 if results.is_empty() {
-                    return ToolResult::success("No matching memories found.");
+                    return ToolResult::success(aish_i18n::t("tools.memory.no_results"));
                 }
                 let output: Vec<String> = results
                     .iter()
@@ -115,30 +123,42 @@ impl Tool for MemoryTool {
             "store" => {
                 let content = match args.get("content").and_then(|v| v.as_str()) {
                     Some(c) => c,
-                    None => return ToolResult::error("Missing 'content' for store"),
+                    None => {
+                        return ToolResult::error(aish_i18n::t(
+                            "tools.memory.store_missing_content",
+                        ))
+                    }
                 };
                 let category = args
                     .get("category")
                     .and_then(|v| v.as_str())
                     .unwrap_or("other");
                 let id = (self.store)(content, category, "explicit", 0.8);
-                ToolResult::success(format!("Stored as memory #{}.", id))
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("id".to_string(), id.clone());
+                ToolResult::success(aish_i18n::t_with_args("tools.memory.stored", &args_map))
             }
             "forget" => {
                 let id = match args.get("memory_id").and_then(|v| v.as_u64()) {
                     Some(id) => id as usize,
-                    None => return ToolResult::error("Missing 'memory_id' for forget"),
+                    None => {
+                        return ToolResult::error(aish_i18n::t("tools.memory.forget_missing_id"))
+                    }
                 };
                 if (self.delete)(id) {
-                    ToolResult::success(format!("Forgot memory #{}.", id))
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("id".to_string(), id.to_string());
+                    ToolResult::success(aish_i18n::t_with_args("tools.memory.forgot", &args_map))
                 } else {
-                    ToolResult::error(format!("Memory #{} not found.", id))
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("id".to_string(), id.to_string());
+                    ToolResult::error(aish_i18n::t_with_args("tools.memory.not_found", &args_map))
                 }
             }
             "list" => {
                 let results = (self.list)(10);
                 if results.is_empty() {
-                    return ToolResult::success("No memories yet.");
+                    return ToolResult::success(aish_i18n::t("tools.memory.empty"));
                 }
                 let output: Vec<String> = results
                     .iter()
@@ -146,10 +166,14 @@ impl Tool for MemoryTool {
                     .collect();
                 ToolResult::success(output.join("\n"))
             }
-            _ => ToolResult::error(format!(
-                "Unknown action: {}. Use search/store/forget/list.",
-                action
-            )),
+            _ => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("action".to_string(), action.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.memory.unknown_action",
+                    &args_map,
+                ))
+            }
         }
     }
 }

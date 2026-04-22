@@ -14,3 +14,5 @@ dirs.workspace = true
 uuid.workspace = true
 tokio = { workspace = true, features = ["net", "time", "io-util"] }
 libc.workspace = true
+nix = { workspace = true, features = ["mount", "fs"] }
+tempfile.workspace = true

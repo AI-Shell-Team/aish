@@ -1,6 +1,24 @@
 use std::path::Path;
 
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
+
+/// Cached translated descriptions.
+static READ_DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static WRITE_DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+static EDIT_DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_read_description() -> &'static str {
+    READ_DESCRIPTION.get_or_init(|| aish_i18n::t("tools.fs.read_file.description"))
+}
+
+fn get_write_description() -> &'static str {
+    WRITE_DESCRIPTION.get_or_init(|| aish_i18n::t("tools.fs.write_file.description"))
+}
+
+fn get_edit_description() -> &'static str {
+    EDIT_DESCRIPTION.get_or_init(|| aish_i18n::t("tools.fs.edit_file.description"))
+}
 
 /// Read file content tool.
 pub struct ReadFileTool;
@@ -23,7 +41,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read the content of a file"
+        get_read_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -41,23 +59,33 @@ impl Tool for ReadFileTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let path = match args.get("path").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return ToolResult::error("Missing 'path' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.fs.read_file.missing_path")),
         };
 
         // Read raw bytes first for size check
         let raw_bytes = match std::fs::read(path) {
             Ok(b) => b,
-            Err(e) => return ToolResult::error(format!("Failed to read {}: {}", path, e)),
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.read_failed",
+                    &args_map,
+                ));
+            }
         };
 
         // Enforce 32KB size limit
         const SIZE_LIMIT: usize = 32 * 1024;
         if raw_bytes.len() > SIZE_LIMIT {
-            return ToolResult::error(format!(
-                "File {} is {} bytes, exceeding the {} byte (32KB) limit",
-                path,
-                raw_bytes.len(),
-                SIZE_LIMIT
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            args_map.insert("size".to_string(), raw_bytes.len().to_string());
+            args_map.insert("limit".to_string(), SIZE_LIMIT.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.read_file.file_too_large",
+                &args_map,
             ));
         }
 
@@ -65,7 +93,13 @@ impl Tool for ReadFileTool {
         let content = match String::from_utf8(raw_bytes) {
             Ok(s) => s,
             Err(e) => {
-                return ToolResult::error(format!("Failed to decode {} as UTF-8: {}", path, e))
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.decode_failed",
+                    &args_map,
+                ));
             }
         };
 
@@ -73,7 +107,7 @@ impl Tool for ReadFileTool {
 
         // Handle empty file
         if lines.is_empty() {
-            return ToolResult::success("(empty file)".to_string());
+            return ToolResult::success(aish_i18n::t("tools.fs.read_file.empty_file"));
         }
 
         let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
@@ -83,10 +117,12 @@ impl Tool for ReadFileTool {
             .map(|l| l as usize);
 
         if offset >= lines.len() {
-            return ToolResult::error(format!(
-                "Offset {} exceeds file length ({})",
-                offset,
-                lines.len()
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("offset".to_string(), offset.to_string());
+            args_map.insert("length".to_string(), lines.len().to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.read_file.offset_exceeds_length",
+                &args_map,
             ));
         }
 
@@ -133,7 +169,7 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file (creates or overwrites)"
+        get_write_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -150,23 +186,44 @@ impl Tool for WriteFileTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let path = match args.get("path").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return ToolResult::error("Missing 'path' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.fs.write_file.missing_path")),
         };
         let content = match args.get("content").and_then(|c| c.as_str()) {
             Some(c) => c,
-            None => return ToolResult::error("Missing 'content' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.fs.write_file.missing_content")),
         };
         // Create parent dirs if needed
         if let Some(parent) = Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    return ToolResult::error(format!("Failed to create parent dirs: {}", e));
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("error".to_string(), e.to_string());
+                    return ToolResult::error(aish_i18n::t_with_args(
+                        "tools.fs.write_file.create_dirs_failed",
+                        &args_map,
+                    ));
                 }
             }
         }
         match std::fs::write(path, content) {
-            Ok(()) => ToolResult::success(format!("Wrote {} bytes to {}", content.len(), path)),
-            Err(e) => ToolResult::error(format!("Failed to write {}: {}", path, e)),
+            Ok(()) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("bytes".to_string(), content.len().to_string());
+                args_map.insert("path".to_string(), path.to_string());
+                ToolResult::success(aish_i18n::t_with_args(
+                    "tools.fs.write_file.write_success",
+                    &args_map,
+                ))
+            }
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.write_file.write_failed",
+                    &args_map,
+                ))
+            }
         }
     }
 }
@@ -192,7 +249,7 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a file by replacing a specific string with a new string"
+        get_edit_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -211,15 +268,19 @@ impl Tool for EditFileTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let path = match args.get("path").and_then(|p| p.as_str()) {
             Some(p) => p,
-            None => return ToolResult::error("Missing 'path' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.fs.edit_file.missing_path")),
         };
         let old = match args.get("old_string").and_then(|o| o.as_str()) {
             Some(o) => o,
-            None => return ToolResult::error("Missing 'old_string' parameter"),
+            None => {
+                return ToolResult::error(aish_i18n::t("tools.fs.edit_file.missing_old_string"))
+            }
         };
         let new = match args.get("new_string").and_then(|n| n.as_str()) {
             Some(n) => n,
-            None => return ToolResult::error("Missing 'new_string' parameter"),
+            None => {
+                return ToolResult::error(aish_i18n::t("tools.fs.edit_file.missing_new_string"))
+            }
         };
         let replace_all = args
             .get("replace_all")
@@ -228,11 +289,24 @@ impl Tool for EditFileTool {
 
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
-            Err(e) => return ToolResult::error(format!("Failed to read {}: {}", path, e)),
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.edit_read_failed",
+                    &args_map,
+                ));
+            }
         };
 
         if !content.contains(old) {
-            return ToolResult::error(format!("'old_string' not found in {}", path));
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.edit_file.old_string_not_found",
+                &args_map,
+            ));
         }
 
         let new_content = if replace_all {
@@ -241,17 +315,35 @@ impl Tool for EditFileTool {
             // Check uniqueness
             let count = content.matches(old).count();
             if count > 1 {
-                return ToolResult::error(format!(
-                    "'old_string' appears {} times in {} - use replace_all=true or provide more context",
-                    count, path
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("count".to_string(), count.to_string());
+                args_map.insert("path".to_string(), path.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.old_string_ambiguous",
+                    &args_map,
                 ));
             }
             content.replacen(old, new, 1)
         };
 
         match std::fs::write(path, new_content) {
-            Ok(()) => ToolResult::success(format!("Edited {}", path)),
-            Err(e) => ToolResult::error(format!("Failed to write {}: {}", path, e)),
+            Ok(()) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                ToolResult::success(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.edit_success",
+                    &args_map,
+                ))
+            }
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.edit_write_failed",
+                    &args_map,
+                ))
+            }
         }
     }
 }
@@ -302,6 +394,9 @@ mod tests {
 
     #[test]
     fn test_read_file_size_limit() {
+        // Initialize i18n for testing
+        aish_i18n::set_locale("en-US");
+
         let dir = temp_dir();
         let file_path = dir.path().join("big.txt");
         // Create a file larger than 32KB (33 * 1024 = 33792 bytes)
@@ -315,7 +410,7 @@ mod tests {
 
         assert!(!result.ok);
         assert!(
-            result.output.contains("exceeding the"),
+            result.output.contains("limit") || result.output.contains("bytes"),
             "Expected size limit error, got: {}",
             result.output
         );
@@ -342,6 +437,9 @@ mod tests {
 
     #[test]
     fn test_edit_file_uniqueness_check() {
+        // Initialize i18n for testing
+        aish_i18n::set_locale("en-US");
+
         let dir = temp_dir();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "foo bar foo baz").unwrap();
@@ -355,7 +453,7 @@ mod tests {
 
         assert!(!result.ok);
         assert!(
-            result.output.contains("appears 2 times"),
+            result.output.contains("times") || result.output.contains("ambiguous"),
             "Expected uniqueness error, got: {}",
             result.output
         );

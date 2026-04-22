@@ -4,7 +4,6 @@
 .vscode/
 .idea/
 .claude/
-
 # Rust build artifacts
 target/
 

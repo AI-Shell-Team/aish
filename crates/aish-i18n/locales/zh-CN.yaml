@@ -7,6 +7,79 @@ cli:
   setup_command_help: "运行交互式配置并退出"
   check_tool_support_command_help: "调试 tool-call 在线验证"
 
+  models_auth_title: "模型认证: {provider}"
+  checking_existing_auth: "检查现有认证状态..."
+  oauth_not_implemented: "OAuth 流程尚未在 Rust 版本中实现。"
+  oauth_hint: "请手动输入您的认证令牌。"
+  skipping_browser: "(--no-open-browser: 跳过浏览器)"
+  token_read_failed: "读取令牌失败。"
+  token_empty: "令牌不能为空。"
+  auth_configured: "已配置 {provider} 的认证。"
+  default_model_set_success: "默认模型已设置为: {model}"
+  save_config_failed: "保存配置失败: {error}"
+
+  uninstall:
+    title: "AI Shell 卸载"
+    installation_method: "安装方式: {method}"
+    purge_warning: "--purge: 所有配置、数据和缓存文件将被删除。"
+    purge_file_list: "将被删除的文件："
+    cancelled: "已取消。"
+    uninstalling: "正在卸载..."
+    unknown_method: "无法检测安装方式。"
+    attempting_removal: "尝试移除当前二进制文件..."
+    uninstall_failed: "卸载失败: {error}"
+    package_removed: "软件包已移除。"
+    file_removed: "已移除 {name}: {path}"
+    file_remove_failed: "移除 {path} 失败: {error}"
+    proceed_uninstall: "确认卸载? [y/N]"
+    config_purged: "配置、数据和缓存已清除。"
+    purge_failed: "清除失败: {error}"
+    goodbye: "AI Shell 已卸载。再见！"
+    some_files_failed: "部分文件无法移除"
+    refusing_unsafe_delete: "拒绝删除 {path}: 路径不安全"
+    detect_method_failed: "检测安装方式失败: {error}"
+    cannot_remove_binary: "无法确定二进制文件路径: {error}"
+    failed_remove_binary: "移除二进制文件失败: {error}"
+
+  update:
+    http_error: "HTTP 客户端错误: {error}"
+    check_failed: "检查更新失败: {error}"
+    parse_releases_failed: "解析 releases 失败: {error}"
+    parse_release_failed: "解析 release 失败: {error}"
+    download_failed: "下载失败: {error}"
+    file_create_failed: "创建文件失败: {error}"
+    download_read_error: "下载读取错误: {error}"
+    write_error: "写入错误: {error}"
+    open_error: "打开错误: {error}"
+    read_error: "读取错误: {error}"
+    temp_dir_failed: "创建临时目录失败: {error}"
+    extract_dir_failed: "创建解压目录失败: {error}"
+    tar_failed: "运行 tar 失败: {error}"
+    install_script_failed: "运行安装脚本失败: {error}"
+    unsupported_platform: "不支持的平台: {platform}"
+    unsupported_arch: "不支持的架构: {arch}"
+    github_api_error: "GitHub API 返回状态码 {status}"
+    extraction_failed: "解压失败: {error}"
+    installation_failed: "安装失败: {error}"
+    checking: "正在检查更新..."
+    update_available: "有更新可用: {current} → {latest}"
+    already_latest: "已是最新版本 ({version})。"
+    downloading_from_github: "正在从 GitHub 下载..."
+    downloading_from_mirror: "GitHub 下载失败，尝试镜像..."
+    downloaded: "已下载: {path}"
+    extracting: "正在解压归档..."
+    install_sh_hash: "install.sh SHA256: {hash}"
+    running_install_script: "正在运行安装脚本..."
+    installation_successful: "安装成功！"
+    download_install_prompt: "下载并安装? [y/N]"
+    update_cancelled: "更新已取消。"
+    installation_error: "安装错误: {error}"
+    download_error: "下载失败: {error}"
+    update_check_failed: "更新检查失败: {error}"
+    install_sh_not_found: "归档中未找到 install.sh"
+    progress_mb: "{label}: {downloaded:.1}/{total:.1} MB ({pct}%)"
+    progress_mb_no_total: "{label}: {downloaded:.1} MB"
+
   models:
     help: "管理模型与 Provider 认证"
     usage_command_help: "显示当前 Provider 状态与用量面板信息"
@@ -14,7 +87,7 @@ cli:
       help: "对 Provider 执行认证"
       login_command_help: "已废弃的兼容别名，请改用 `aish models auth`。"
       option:
-        provider: "要认证的 Provider id（例如：openai-codex）。"
+        provider: "要认证的 Provider id(例如：openai-codex)。"
         model: "认证成功后写入配置的默认 Provider 模型。"
         set_default: "认证成功后，将配置中的 model 更新为该 Provider 模型。"
         auth_flow: "要使用的认证流程：browser、device-code 或 codex-cli。"
@@ -56,10 +129,10 @@ cli:
     auth_incomplete: "Codex 认证信息不完整。请重新运行 `aish models auth --provider openai-codex`。"
 
   option:
-    model: "要使用的模型（也可通过 AISH_MODEL 或配置文件设置）。"
-    api_key: "大模型服务的 API Key（也可通过 AISH_API_KEY 或各厂商环境变量设置）。"
-    api_base: "大模型服务的 API Base（也可通过 AISH_API_BASE 或配置文件设置）。"
-    config: "配置文件路径（默认：~/.config/aish/config.yaml）。"
+    model: "要使用的模型(也可通过 AISH_MODEL 或配置文件设置)。"
+    api_key: "大模型服务的 API Key(也可通过 AISH_API_KEY 或各厂商环境变量设置)。"
+    api_base: "大模型服务的 API Base(也可通过 AISH_API_BASE 或配置文件设置)。"
+    config: "配置文件路径(默认：~/.config/aish/config.yaml)。"
 
   setup:
     entry_title: "初始化配置"
@@ -83,8 +156,8 @@ cli:
     free_key_privacy_notice: |
       为了提供免费 API Key 服务，我们需要收集以下设备信息：
 
-      • 设备指纹（基于 MAC 地址、磁盘序列号、主板序列号等硬件信息生成的哈希值）
-      • 服务区域（用于分配最近的服务节点）
+      • 设备指纹(基于 MAC 地址、磁盘序列号、主板序列号等硬件信息生成的哈希值)
+      • 服务区域(用于分配最近的服务节点)
 
       用途说明：
       • 设备指纹用于防止滥用，确保每个设备只能获取一次免费 Key
@@ -115,14 +188,14 @@ cli:
     provider_custom_default: "Custom"
     invalid_choice: "选择无效，请重试"
     filter_no_results: "没有匹配项，请重新输入或回车显示全部"
-    api_key_header: "请输入 API Key（将保存到配置文件）"
+    api_key_header: "请输入 API Key(将保存到配置文件)"
     api_key_env_found: "检测到 {env_key}：{masked}"
     api_key_env_hint: "直接回车使用检测到的 Key，或输入新的 Key"
     api_key_prompt: "API Key"
     api_key_required: "API Key 不能为空"
     model_header: "当前 Provider：{provider}"
-    model_prompt: "模型名称（输入 back 返回选择 Provider）"
-    model_hint_openrouter: "OpenRouter 需要 provider 前缀（如 openai/gpt-4o）。未带前缀将默认使用 openai/。"
+    model_prompt: "模型名称(输入 back 返回选择 Provider)"
+    model_hint_openrouter: "OpenRouter 需要 provider 前缀(如 openai/gpt-4o)。未带前缀将默认使用 openai/。"
     model_hint_custom: "自定义 Provider 按 OpenAI-Compatible 处理，未带前缀将保存为 openai/<model>。"
     model_hint_provider: "推荐模型：{default}"
     model_list_unavailable: "模型列表不可用，请手动输入"
@@ -138,7 +211,7 @@ cli:
     verify_header: "正在验证模型的工具调用能力..."
     verify_connectivity_in_progress: "正在检查连通性..."
     verify_tool_in_progress: "正在检查工具调用能力..."
-    verify_static_no_tool_support: "模型不支持工具调用（静态检测）"
+    verify_static_no_tool_support: "模型不支持工具调用(静态检测)"
     verify_simple_success: "验证成功"
     verify_simple_failed_with_reason: "验证失败：{reason}"
     verify_failed_unknown: "未知错误"
@@ -149,9 +222,9 @@ cli:
     verify_model_prefix_required: "设置 API Base 时，模型名必须带 provider 前缀，例如 openai/{model}"
     verify_no_tool_call_required: "强制调用未返回工具调用"
     verify_no_tool_call_auto: "自动模式未触发工具调用"
-    debug_request_title: "在线请求（{mode}）"
-    debug_response_title: "在线响应（{mode}）"
-    debug_error_title: "在线错误（{mode}）"
+    debug_request_title: "在线请求({mode})"
+    debug_response_title: "在线响应({mode})"
+    debug_error_title: "在线错误({mode})"
     support_yes: "支持"
     support_no: "不支持"
     support_unknown: "未知"
@@ -166,19 +239,19 @@ cli:
     action_use_free_key: "使用免费 API Key"
     action_manual_setup: "手动配置 Provider"
     action_change_provider: "更换 Provider"
-    action_continue: "继续保存（不推荐）"
+    action_continue: "继续保存(不推荐)"
     action_exit: "退出配置"
     action_agree: "同意并继续"
     action_disagree: "不同意"
-    retry_api_base_prompt: "请输入 API Base（输入 back 返回）"
-    retry_api_base_prompt_with_current: "请输入 API Base（当前：{current}，输入 back 返回）"
+    retry_api_base_prompt: "请输入 API Base(输入 back 返回)"
+    retry_api_base_prompt_with_current: "请输入 API Base(当前：{current}，输入 back 返回)"
     retry_api_base_required: "API Base 不能为空"
     saved: "配置已保存"
-    saved_with_warning: "配置已保存（未验证 tool call）"
+    saved_with_warning: "配置已保存(未验证 tool call)"
     non_interactive: "当前环境不可交互，无法运行配置向导"
     cancelled: "配置已取消"
     required_cancelled: "缺少必要配置，已退出"
-    connectivity_ok: "连通性正常（{}ms）"
+    connectivity_ok: "连通性正常({}ms)"
     config_path: "配置文件路径：{}"
     setup_complete_hint: "现在可以运行 \x1b[1maish\x1b[0m 启动 shell。"
 
@@ -214,7 +287,7 @@ cli:
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
-    model_hint: "（输入 /model 切换模型）"
+    model_hint: "(输入 /model 切换模型)"
     label:
       model: "模型"
       config: "配置"
@@ -227,13 +300,57 @@ shell:
       cmd_ssh: "ssh"
       item1_suffix: " 等"
       item2_prefix: "向 AI 提问："
-      item2_example: "以 `;` 开头提问（如：; 如何查找大文件？）"
+      item2_example: "以 `;` 开头提问(如：; 如何查找大文件？)"
       item3_prefix: "获取帮助："
-      item3_suffix_1: "输入 "
+      item3_suffix_1: "输入"
       item3_keyword: "help"
-      item3_suffix_2: " 查看内置帮助与用法"
+      item3_suffix_2: "查看内置帮助与用法"
     risk: "AI 生成内容有风险，请仔细甄别！"
     skills_loaded_suffix: " 已加载"
+
+  # 通用错误消息
+  general_error: "错误: {error}"
+  readline_init_failed: "初始化 readline 失败: {error}"
+  readline_error: "Readline 错误: {error}"
+  unknown_command: "未知特殊命令: {command}"
+  config_save_warning: "警告：无法保存配置: {error}"
+
+  # 模型切换
+  model_usage: "用法: /model [模型名称]"
+  switching: "正在验证模型: {model}"
+
+  # 计划模式
+  plan_mode_enabled: "=== 计划模式 ==="
+  plan_mode_hint: "输入 ; 后跟你的规划请求。"
+  plan_mode_disabled: "已退出计划模式。"
+  plan_approved: "✓ 计划已批准。实现工具现已可用。"
+  plan_approved_hint: "输入 ; 继续实施。"
+  plan_changes_requested: "→ 需要更改。重新进入计划模式..."
+  plan_feedback_sent: "  反馈已发送给 AI。输入 ; 继续规划。"
+  plan_review_cancelled: "计划审查已取消。已退出计划模式。"
+  plan_review_hint: "使用 /plan 开始新的规划会话。"
+
+  # 思考动画
+  thinking_time: "思考: {time:.1}s"
+
+  # 分析环境
+  analyzing_environment: "正在分析环境..."
+
+  # 状态消息
+  check_status: "  {status} {name}"
+  interrupted: "已中断"
+  ctrl_c_again: "1 秒内再次按 Ctrl+C 退出"
+  exiting: "正在退出..."
+
+  # 确认对话框
+  confirm_dialog_title: "工具执行"
+  confirm_dialog_tool: "工具："
+  confirm_dialog_question: "允许? [y/N]"
+
+  # 提示符
+  prompt_prefix: "执行"
+
+  # 安全消息(上面已定义，此处保留作为参考)
 
   security:
     title:
@@ -262,7 +379,7 @@ shell:
       approve: "允许"
       approve_remember: "允许，并不再对该命令询问"
       cancel: "取消"
-    choice_prompt: "你的选择（默认：n）："
+    choice_prompt: "你的选择(默认：n)："
 
   command_cancelled: "命令已取消"
 
@@ -283,6 +400,9 @@ shell:
     llm_error_message: "错误: {error}"
     llm_error_details_title: "调试详情"
     tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
+    pty_error: "PTY 错误：{error}"
+    restart_bash_failed: "重启 bash 失败：{error}"
+    load_script_failed: "加载脚本 '{script}' 失败：{error}"
 
   hint:
     run_setup: "输入 /setup 重新配置 API Key"
@@ -318,12 +438,12 @@ shell:
     hint_select: "按 Enter 键确认 · 按 ↑/↓ 键导航 · 按 Esc 取消"
     hint_custom: "按 Enter 键确认 · 按 ↑/↓ 键导航 · 按 Tab 或直接输入进入自定义内容 · 按 Esc 取消"
     paused:
-      title: "⏸ 需要你的选择（任务已暂停）"
+      title: "⏸ 需要你的选择(任务已暂停)"
       prompt: "问题：{prompt}"
       reason: "原因：{reason}"
       options_header: "可选项："
       custom_input: "你也可以直接回复任意自定义内容。"
-      how_to: "你可以直接回复选项 value（或编号），或输入 `; 使用默认继续` / `; continue with default`（默认：{default}）。如有选项说明，会显示在选项下方。"
+      how_to: "你可以直接回复选项 value(或编号)，或输入 `; 使用默认继续` / `; continue with default`(默认：{default})。如有选项说明，会显示在选项下方。"
 
   diagnose_cancelled: "  └─ ❌ 系统诊断已取消"
 
@@ -348,23 +468,23 @@ security:
   sandbox_unavailable:
     title: "⚠️ 沙箱不可用"
     line1: "检测到沙箱不可用，无法评估命令风险。"
-    line2: "后续 AI 生成命令将按“{action}”处理。"
+    line2: "后续 AI 生成命令将按\"{action}\"处理。"
     policy_line1: "沙箱已按策略关闭，未执行沙箱预跑。"
-    policy_line2: "后续 AI 命令将按“{action}”处理。"
+    policy_line2: "后续 AI 命令将按\"{action}\"处理。"
     reason: "原因：{reason}"
     error: "错误：{error}"
     root_required: "沙箱需要 root 权限"
-    ipc_unavailable: "无法连接沙箱服务（aish-sandbox.socket 未运行或未安装）"
-    ipc_failed: "沙箱服务启动失败（aish-sandbox）"
+    ipc_unavailable: "无法连接沙箱服务(aish-sandbox.socket 未运行或未安装)"
+    ipc_failed: "沙箱服务启动失败(aish-sandbox)"
     sandbox_execute_failed: "无法评估命令风险，请确认后执行"
 
   risk_reason:
-    sandbox_disabled_by_policy: "策略配置已关闭沙箱，无法获取文件变更信息进行风险评估；将按“{action}”处理。"
-    sandbox_disabled: "沙箱未启用或配置为关闭，无法获取文件变更信息进行风险评估；将按“{action}”处理。"
-    cwd_outside_repo_root: "当前工作目录 {cwd} 不在沙箱根目录 {root} 下，无法可靠评估相对路径副作用；将按“{action}”处理。"
-    sandbox_unavailable: "沙箱构建/执行失败，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
-    sandbox_exception: "沙箱执行异常，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
-    sandbox_failed: "沙箱执行失败，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_disabled_by_policy: "策略配置已关闭沙箱，无法获取文件变更信息进行风险评估；将按\"{action}\"处理。"
+    sandbox_disabled: "沙箱未启用或配置为关闭，无法获取文件变更信息进行风险评估；将按\"{action}\"处理。"
+    cwd_outside_repo_root: "当前工作目录 {cwd} 不在沙箱根目录 {root} 下，无法可靠评估相对路径副作用；将按\"{action}\"处理。"
+    sandbox_unavailable: "沙箱构建/执行失败，未能获取文件变更信息进行风险评估；将按\"{action}\"处理。"
+    sandbox_exception: "沙箱执行异常，未能获取文件变更信息进行风险评估；将按\"{action}\"处理。"
+    sandbox_failed: "沙箱执行失败，未能获取文件变更信息进行风险评估；将按\"{action}\"处理。"
     policy_fallback_rule_match: "沙箱按策略关闭时，命令 {command} 命中了 {count} 条兜底规则路径；按 {risk} 风险处理。"
 
   ai_risk:
@@ -381,14 +501,140 @@ tools:
   smart_log:
     description: "自动判断日志来源，根据查询分析日志，并返回匹配摘要。"
     param:
-      query: "你的诊断问题，例如“nginx 配置是否正确”或“是否存在可疑登录”。"
-      path: "可选。日志路径（文件/目录）或 systemd 单元名。若为空，将根据查询自动推断。"
+      query: "你的诊断问题，例如\"nginx 配置是否正确\"或\"是否存在可疑登录\"。"
+      path: "可选。日志路径(文件/目录)或 systemd 单元名。若为空，将根据查询自动推断。"
     summary:
       file: "[文件] {ident}：匹配 {matched}/{total} 行\n示例：\n{sample}"
       dir: "[目录] {path}：匹配 {matched}/{total} 行\n示例：\n{sample}"
       systemd: "[SYSTEMD] {ident}：匹配 {matched}/{total} 行\n示例：\n{sample}"
       call_failed: "[{stype}] {ident}：调用失败\n{output}"
     no_logs_found: "未找到任何日志或匹配信息。"
+
+  bash:
+    description: "执行 bash 命令并返回输出。使用此工具运行 shell 命令。"
+    param:
+      command: "要执行的 bash 命令"
+      timeout: "超时时间(秒)(默认：120)"
+    missing_command: "缺少 'command' 参数"
+    execute_failed: "执行失败: {error}"
+    output_truncated: "[...截断了 {bytes} 字节...]\n{tail}"
+    truncated_notice: "[...截断了 {bytes} 字节...]"
+
+  fs:
+    read_file:
+      description: "读取文件内容"
+      param:
+        path: "要读取的文件路径"
+        offset: "开始读取的行偏移(从 0 开始)"
+        limit: "要读取的最大行数"
+      missing_path: "缺少 'path' 参数"
+      read_failed: "读取 {path} 失败: {error}"
+      file_too_large: "文件 {path} 为 {size} 字节，超过了 {limit} 字节(32KB)的限制"
+      decode_failed: "无法将 {path} 解码为 UTF-8: {error}"
+      empty_file: "(空文件)"
+      offset_exceeds_length: "偏移量 {offset} 超过了文件长度({length})"
+    write_file:
+      description: "将内容写入文件(创建或覆盖)"
+      param:
+        path: "要写入的文件路径"
+        content: "要写入的内容"
+      missing_path: "缺少 'path' 参数"
+      missing_content: "缺少 'content' 参数"
+      create_dirs_failed: "创建父目录失败: {error}"
+      write_success: "已写入 {bytes} 字节到 {path}"
+      write_failed: "写入 {path} 失败: {error}"
+    edit_file:
+      description: "通过替换特定字符串来编辑文件"
+      param:
+        path: "文件路径"
+        old_string: "要替换的文本"
+        new_string: "替换后的文本"
+        replace_all: "替换所有出现的位置(默认：false)"
+      missing_path: "缺少 'path' 参数"
+      missing_old_string: "缺少 'old_string' 参数"
+      missing_new_string: "缺少 'new_string' 参数"
+      edit_read_failed: "读取 {path} 失败: {error}"
+      old_string_not_found: "在 {path} 中未找到 'old_string'"
+      old_string_ambiguous: "'old_string' 在 {path} 中出现了 {count} 次 - 使用 replace_all=true 或提供更多上下文"
+      edit_success: "已编辑 {path}"
+      edit_write_failed: "写入 {path} 失败: {error}"
+
+  ask_user:
+    description: "向用户提问以明确其意图。使用 'text_input' 进行自由式提问，或使用 'choice_or_text' 进行多选并可自定义输入。"
+    param:
+      kind: "交互类型：text_input 用于自由输入，choice_or_text 用于选项加自定义输入"
+      prompt: "要向用户提出的问题"
+      options: "choice_or_text 的预定义选项"
+      title: "问题的可选标题"
+      default: "默认值"
+      placeholder: "占位符文本"
+      required: "用户是否必须提供答案(默认：true)"
+      allow_cancel: "用户是否可以取消/跳过(默认：true)"
+      min_length: "文本输入的最小长度(默认：0)"
+    missing_prompt: "缺少 'prompt' 参数"
+    unknown_kind: "未知类型: {kind}"
+    custom_input_label: "(输入自定义答案)"
+    help_select_with_cancel: "Esc 取消，Enter 选择"
+    help_select_no_cancel: "Enter 选择"
+    custom_input_prompt: "输入你的答案："
+    custom_input_help_cancel: "Esc 返回"
+    custom_input_help_no_cancel: "Esc 返回选项"
+    answer_required: "必须提供答案"
+    answer_too_short: "答案太短(最少 {min_length} 个字符)"
+    user_input_prefix: "用户输入: {input}"
+    read_input_failed: "读取用户输入失败"
+    cancelled: "(已取消)"
+    options_not_empty: "choice_or_text 的 options 必须是非空列表"
+
+  memory:
+    description: "搜索、存储或管理长期记忆。使用 'search' 查找相关的过往知识，'store' 保存重要信息，'list' 查看最近的记忆，'forget' 删除过时信息。"
+    param:
+      action: "要执行的记忆操作"
+      query: "搜索查询(用于 'search' 操作)"
+      content: "要存储的内容(用于 'store' 操作)"
+      category: "存储记忆的类别(默认：other)"
+      memory_id: "要忘记的记忆 ID(用于 'forget' 操作)"
+    missing_action: "缺少 'action' 参数"
+    unknown_action: "未知操作: {action}。请使用 search/store/forget/list。"
+    search_missing_query: "search 缺少 'query' 参数"
+    store_missing_content: "store 缺少 'content' 参数"
+    forget_missing_id: "forget 缺少 'memory_id' 参数"
+    no_results: "未找到匹配的记忆。"
+    stored: "已存储为记忆 #{id}。"
+    forgot: "已忘记记忆 #{id}。"
+    not_found: "未找到记忆 #{id}。"
+    empty: "还没有记忆。"
+    not_available: "记忆功能不可用"
+
+  python:
+    description: "执行任意 Python 代码并返回结果。使用 print() 输出。"
+    param:
+      code: "要执行的 Python 代码。"
+    missing_code: "缺少 'code' 参数"
+    not_installed: "未安装 Python 3 或不在 PATH 中。"
+    execute_failed: "执行 Python 失败: {error}"
+    no_output: "Python 代码执行成功，无输出。"
+
+  grep:
+    description: "使用正则表达式在文件中搜索模式"
+    param:
+      pattern: "要搜索的正则表达式模式"
+      path: "要搜索的文件或目录"
+      recursive: "在目录中递归搜索"
+      case_insensitive: "不区分大小写搜索"
+      invert_match: "显示不匹配的行"
+      line_numbers: "显示行号"
+      count_only: "仅显示匹配行的计数"
+    missing_pattern: "缺少 'pattern' 参数"
+    invalid_regex: "错误：无效的正则表达式: {error}"
+
+  glob:
+    description: "查找匹配 glob 模式的文件"
+    param:
+      pattern: "匹配文件的 glob 模式"
+      path: "搜索的基础目录(默认：当前目录)"
+    missing_pattern: "缺少 'pattern' 参数"
+    invalid_glob: "错误：无效的 glob 模式: {error}"
 
 help:
   labels:
@@ -404,7 +650,7 @@ help:
       ## 可用命令：
 
       ### 目录导航
-      - `cd [-L|[-P [-e]]] [directory]` - 切换目录（完整参数支持）
+      - `cd [-L|[-P [-e]]] [directory]` - 切换目录(完整参数支持)
       - `pushd [directory]` - 将目录压入栈并切换
       - `popd` - 弹出目录栈并切换
       - `dirs [-c]` - 显示目录栈
@@ -468,14 +714,14 @@ help:
 
     cd:
       title: "📁 cd 切换目录"
-      description: "切换当前工作目录（完整参数支持）"
+      description: "切换当前工作目录(完整参数支持)"
       usage: "cd [-L|[-P [-e]]] [directory]"
       options:
-        - ["-L", "强制跟随符号链接：在处理 '..' 后再解析符号链接（默认）"]
+        - ["-L", "强制跟随符号链接：在处理 '..' 后再解析符号链接(默认)"]
         - ["-P", "使用物理目录结构：在处理 '..' 前解析符号链接"]
         - ["-e", "当指定 -P 且无法确定当前目录时，以非 0 状态退出"]
         # - ["-@", "在支持的系统上，将带扩展属性的文件视为包含属性的目录"]
-        - ["directory", "目标目录路径（可选，默认回到 home 目录）"]
+        - ["directory", "目标目录路径(可选，默认回到 home 目录)"]
         - ["-", "返回上一个目录"]
       examples:
         - "cd ~                 # 切换到 home 目录"
@@ -484,9 +730,9 @@ help:
         - "cd \"path with spaces\" # 路径含空格时使用引号"
         - "cd -P /tmp           # 使用物理路径解析"
         - "cd -P -e /tmp        # 使用物理路径解析，出错则退出"
-        - "cd -L /tmp           # 强制跟随符号链接（默认行为）"
-        # - "cd -@ /tmp           # 显示扩展属性（若支持）"
-      notes: "支持 tab 补全与特殊字符路径处理；默认行为为 -L（跟随符号链接）。"
+        - "cd -L /tmp           # 强制跟随符号链接(默认行为)"
+        # - "cd -@ /tmp           # 显示扩展属性(若支持)"
+      notes: "支持 tab 补全与特殊字符路径处理；默认行为为 -L(跟随符号链接)。"
 
     pushd:
       title: "📤 pushd 目录入栈"
@@ -553,7 +799,7 @@ help:
       description: "设置或显示带 export 属性的环境变量"
       usage: "export [-fn] [name[=value] ...]\nexport -p"
       options:
-        - ["-f", "名称指向 shell 函数（不支持）"]
+        - ["-f", "名称指向 shell 函数(不支持)"]
         - ["-n", "移除每个名称的 export 属性"]
         - ["-p", "显示所有已导出的变量"]
         - ["--", "停止进一步的选项处理"]
@@ -571,9 +817,9 @@ help:
       description: "取消设置 shell 变量与函数"
       usage: "unset [-f] [-v] [-n] [name ...]"
       options:
-        - ["-f", "名称指向 shell 函数（不支持）"]
-        - ["-v", "名称指向 shell 变量（默认）"]
-        - ["-n", "名称指向 name reference（不支持）"]
+        - ["-f", "名称指向 shell 函数(不支持)"]
+        - ["-v", "名称指向 shell 变量(默认)"]
+        - ["-n", "名称指向 name reference(不支持)"]
         - ["--", "停止进一步的选项处理"]
       examples:
         - "unset TEMP_VAR"
@@ -584,15 +830,15 @@ help:
 
     pwd:
       title: "📍 pwd 显示当前目录"
-      description: "显示当前工作目录（支持符号链接处理）"
+      description: "显示当前工作目录(支持符号链接处理)"
       usage: "pwd [-L|-P]"
       options:
-        - ["-L", "显示逻辑路径（跟随符号链接，默认）"]
-        - ["-P", "显示物理路径（解析符号链接）"]
+        - ["-L", "显示逻辑路径(跟随符号链接，默认)"]
+        - ["-P", "显示物理路径(解析符号链接)"]
       examples:
         - "pwd                  # 显示逻辑当前目录"
-        - "pwd -L               # 显示逻辑路径（遵循符号链接）"
-        - "pwd -P               # 显示物理路径（解析符号链接）"
+        - "pwd -L               # 显示逻辑路径(遵循符号链接)"
+        - "pwd -P               # 显示物理路径(解析符号链接)"
       notes: "默认行为显示逻辑路径，并尊重符号链接。"
 
     ";":
@@ -624,7 +870,7 @@ help:
       description: "显示当前模型或切换到指定模型"
       usage: "/model [模型名称]"
       options:
-        - ["模型名称", "要切换到的模型标识（会进行 tool-call 能力验证）"]
+        - ["模型名称", "要切换到的模型标识(会进行 tool-call 能力验证)"]
         - ["--help, -h", "显示本帮助信息"]
       examples:
         - "/model               # 显示当前模型"
@@ -634,7 +880,7 @@ help:
 
     "/setup":
       title: "⚙️ setup 重新配置"
-      description: "重新运行交互式配置向导，更改 API 设置（Provider、API Key、模型）"
+      description: "重新运行交互式配置向导，更改 API 设置(Provider、API Key、模型)"
       usage: "/setup"
       options:
         - ["--help, -h", "显示本帮助信息"]
@@ -645,3 +891,31 @@ help:
 
 errors:
   litellm_not_installed: "litellm 模块未安装"
+
+llm:
+  oauth:
+    browser_login_opening: "正在打开浏览器进行 {display_name} 登录。如果未自动打开，请访问：\n{url}"
+    browser_login_manual: "请在浏览器中打开以下链接以完成 {display_name} 认证：\n{url}"
+    device_code_visit: "\n要完成认证，请访问：\n  {verification_uri}"
+    device_code_enter: "并输入代码：{user_code}\n"
+    failed_bind_port: "绑定端口 {port} 失败：{error}"
+    failed_accept_callback: "接受回调连接失败：{error}"
+    failed_read_callback: "读取回调请求失败：{error}"
+    oauth_error: "OAuth 错误：{error}"
+    no_auth_code: "未收到授权码"
+    state_mismatch: "状态不匹配 - 可能是 CSRF 攻击"
+    device_code_not_supported: "提供者不支持设备代码流程"
+    device_code_request_failed: "设备代码请求失败：{error}"
+    device_code_parse_failed: "解析设备代码响应失败：{error}"
+    missing_user_code: "设备代码响应中缺少 user_code"
+    missing_verification_uri: "设备代码响应中缺少 verification_uri"
+    missing_device_code: "设备代码响应中缺少 device_code"
+    token_polling_failed: "令牌轮询请求失败：{error}"
+    token_polling_parse_failed: "解析令牌轮询响应失败：{error}"
+    device_code_auth_failed: "设备代码认证失败：{error}"
+    token_exchange_failed: "令牌交换请求失败：{error}"
+    token_exchange_parse_failed: "解析令牌响应失败：{error}"
+    token_exchange_error: "令牌交换错误：{error}"
+    failed_open_url: "打开 URL 失败：{error}"
+    auth_successful: "认证成功！"
+    auth_successful_close: "您可以关闭此标签页并返回终端。"

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 aish-core.workspace = true
+aish-i18n.workspace = true
 aish-llm.workspace = true
 aish-pty.workspace = true
 aish-security.workspace = true

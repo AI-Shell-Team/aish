@@ -124,7 +124,7 @@ impl SecurityPolicy {
             for change in &result.changes {
                 changes.push(change.clone());
 
-                if let Some(rule) = self.match_rule(&change.path, Some(&change.operation)) {
+                if let Some(rule) = self.match_rule(&change.path, Some(&change.kind)) {
                     if matches!(rule.risk, RiskLevel::High) {
                         max_risk = RiskLevel::High;
                         reasons.push(format!(

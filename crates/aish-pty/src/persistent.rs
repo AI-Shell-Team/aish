@@ -99,7 +99,7 @@ impl PersistentPty {
         let master_raw = master_fd.into_raw_fd();
         let control_raw = control_read.into_raw_fd();
 
-        // NOTE: Don't delete rcfile here — there's a race condition where bash
+        // NOTE: Don't delete rcfile here -- there's a race condition where bash
         // may not have opened it yet. Delete after session_ready is received.
 
         let mut pty = Self {
@@ -128,7 +128,7 @@ impl PersistentPty {
         pty.drain_master_to_stdout();
         pty.drain_control_pipe();
 
-        // Now safe to clean up rcfile — bash has loaded it.
+        // Now safe to clean up rcfile -- bash has loaded it.
         let _ = std::fs::remove_file(&rcfile_path);
 
         Ok(pty)
@@ -196,7 +196,7 @@ impl PersistentPty {
                 Ok((cleaned, pty_result.exit_code))
             }
             None => {
-                // Timeout — send Ctrl-C.
+                // Timeout -- send Ctrl-C.
                 let _ = self.write_master(b"\x03");
                 let cleaned = clean_pty_output(&raw_str, command);
                 Ok((cleaned, -1))
@@ -205,7 +205,7 @@ impl PersistentPty {
     }
 
     /// Send a user command and enter raw stdin forwarding mode until
-    /// prompt_ready is received. Returns (exit_code, cwd).
+    /// prompt_ready is received. Returns (exit_code, cwd, output).
     pub fn send_command_interactive(
         &mut self,
         command: &str,
@@ -239,13 +239,15 @@ impl PersistentPty {
         let mut result_exit_code: i32 = -1;
         let mut output_buf: Vec<u8> = Vec::new();
         let mut done = false;
-        // The PTY may still emit a leading line (ANSI escape sequences +
-        // newline) from readline or stale prompt rendering.  Skip the
-        // first newline-containing chunk to avoid a blank line before the
-        // actual command output.
+        // After receiving PromptReady, keep draining master_fd until a full
+        // select timeout passes with no new data.  The control pipe may
+        // deliver PromptReady before the kernel has flushed all PTY output
+        // to master_fd, causing intermittent missing output for fast
+        // commands.
+        let mut draining = false;
         // The PTY may emit a bare leading newline from stale prompt
         // rendering.  Only skip a leading CR-LF or LF at the very start
-        // of the first chunk — never consume actual command output.
+        // of the first chunk -- never consume actual command output.
         let mut skip_leading_newline = true;
 
         while !done {
@@ -255,19 +257,27 @@ impl PersistentPty {
             unsafe {
                 libc::FD_ZERO(&mut read_fds);
                 libc::FD_ZERO(&mut write_fds);
-                libc::FD_SET(stdin_fd, &mut read_fds);
+                if !draining {
+                    libc::FD_SET(stdin_fd, &mut read_fds);
+                    libc::FD_SET(self.control_fd, &mut read_fds);
+                }
                 libc::FD_SET(self.master_fd, &mut read_fds);
-                libc::FD_SET(self.control_fd, &mut read_fds);
                 if !write_buf.is_empty() {
                     libc::FD_SET(self.master_fd, &mut write_fds);
                 }
             }
 
-            let max_fd = self.master_fd.max(self.control_fd).max(stdin_fd) + 1;
+            let max_fd = if draining {
+                self.master_fd + 1
+            } else {
+                self.master_fd.max(self.control_fd).max(stdin_fd) + 1
+            };
+            // Shorter timeout during drain phase (5ms) to avoid noticeable
+            // latency after the command has already completed.
             let mut tv = libc::timeval {
                 tv_sec: 0,
-                tv_usec: 50_000,
-            }; // 50ms
+                tv_usec: if draining { 5_000 } else { 50_000 },
+            };
 
             let sel = unsafe {
                 libc::select(
@@ -285,6 +295,16 @@ impl PersistentPty {
                     continue;
                 }
                 break;
+            }
+
+            if sel == 0 {
+                // Timeout -- during drain phase this means all output has
+                // been delivered.  During normal phase it's just a poll
+                // cycle with nothing to do.
+                if draining {
+                    done = true;
+                }
+                continue;
             }
 
             // Write buffered data.
@@ -305,8 +325,8 @@ impl PersistentPty {
                 }
             }
 
-            // Read stdin -> master.
-            if unsafe { libc::FD_ISSET(stdin_fd, &read_fds) } {
+            // Read stdin -> master (only during normal phase).
+            if !draining && unsafe { libc::FD_ISSET(stdin_fd, &read_fds) } {
                 let mut tmp = [0u8; 1024];
                 match unsafe {
                     libc::read(stdin_fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len())
@@ -357,7 +377,7 @@ impl PersistentPty {
                         }
                     }
                     0 => {
-                        // EOF on master_fd means the bash slave closed —
+                        // EOF on master_fd means the bash slave closed --
                         // the child process exited.
                         self.running.store(false, Ordering::SeqCst);
                         done = true;
@@ -366,8 +386,8 @@ impl PersistentPty {
                 }
             }
 
-            // Read control pipe for events.
-            if unsafe { libc::FD_ISSET(self.control_fd, &read_fds) } {
+            // Read control pipe for events (only during normal phase).
+            if !draining && unsafe { libc::FD_ISSET(self.control_fd, &read_fds) } {
                 let mut tmp = [0u8; 4096];
                 match unsafe {
                     libc::read(
@@ -381,14 +401,17 @@ impl PersistentPty {
                             decode_control_chunk(&mut self.control_buffer, &tmp[..n as usize]);
                         for event in &events {
                             if let BackendControlEvent::ShellExiting { .. } = event {
-                                // Bash is shutting down — mark as not running so
+                                // Bash is shutting down -- mark as not running so
                                 // the caller can restart the PTY before the next
                                 // command.
                                 self.running.store(false, Ordering::SeqCst);
                             }
                             if let Some(r) = self.command_state.handle_event(event) {
                                 result_exit_code = r.exit_code;
-                                done = true;
+                                // Enter drain phase instead of exiting immediately.
+                                // The control pipe may deliver PromptReady before
+                                // all PTY output has been flushed to master_fd.
+                                draining = true;
                             }
                             if let BackendControlEvent::PromptReady { cwd, .. } = event {
                                 result_cwd = cwd.clone();
@@ -396,7 +419,7 @@ impl PersistentPty {
                         }
                     }
                     0 => {
-                        // Control pipe closed — bash exited.
+                        // Control pipe closed -- bash exited.
                         self.running.store(false, Ordering::SeqCst);
                         done = true;
                     }
@@ -404,11 +427,6 @@ impl PersistentPty {
                 }
             }
         }
-
-        // Drain remaining PTY output to prevent stale data leaking into
-        // the next command.  The control pipe may deliver prompt_ready
-        // before the kernel has flushed all PTY output to master_fd.
-        self.drain_master_to_stdout();
 
         // Restore terminal.
         if let Some(ref saved) = saved_termios {
@@ -531,7 +549,7 @@ impl PersistentPty {
                         )
                     };
                 }
-                _ => break, // EAGAIN / EWOULDBLOCK / error — nothing more to read
+                _ => break, // EAGAIN / EWOULDBLOCK / error -- nothing more to read
             }
         }
     }
@@ -578,7 +596,7 @@ impl PersistentPty {
                 n if n > 0 => {
                     let events = decode_control_chunk(&mut self.control_buffer, &tmp[..n as usize]);
                     // Process events (e.g., update command_state) but
-                    // don't act on them — they're stale.
+                    // don't act on them -- they're stale.
                     for event in &events {
                         let _ = self.command_state.handle_event(event);
                     }
@@ -625,7 +643,7 @@ impl PersistentPty {
                     }
                 }
                 0 => {
-                    // EOF on master_fd — bash exited during init.
+                    // EOF on master_fd -- bash exited during init.
                     self.running.store(false, Ordering::SeqCst);
                     return Err(AishError::Pty("bash exited before session_ready".into()));
                 }
@@ -652,7 +670,7 @@ impl PersistentPty {
                     }
                 }
                 0 => {
-                    // Control pipe closed — bash exited during init.
+                    // Control pipe closed -- bash exited during init.
                     self.running.store(false, Ordering::SeqCst);
                     return Err(AishError::Pty(
                         "control pipe closed before session_ready".into(),
@@ -693,7 +711,7 @@ impl PersistentPty {
                     }
                 }
                 0 => {
-                    // EOF on master_fd — bash exited.
+                    // EOF on master_fd -- bash exited.
                     self.running.store(false, Ordering::SeqCst);
                     return None;
                 }
@@ -724,7 +742,7 @@ impl PersistentPty {
                     }
                 }
                 0 => {
-                    // Control pipe closed — bash exited.
+                    // Control pipe closed -- bash exited.
                     self.running.store(false, Ordering::SeqCst);
                     return None;
                 }

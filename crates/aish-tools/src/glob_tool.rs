@@ -1,6 +1,14 @@
 use std::path::PathBuf;
 
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
+
+/// Cached translated description.
+static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.glob.description"))
+}
 
 /// Directories excluded by default (VCS and common large generated trees).
 const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -40,7 +48,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Enumerate files by glob pattern within a directory. Automatically excludes VCS directories (.git, .svn, …) and common generated trees (node_modules, __pycache__, .venv, target)."
+        get_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -63,7 +71,7 @@ impl Tool for GlobTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let pattern = match args.get("pattern").and_then(|p| p.as_str()) {
             Some(p) if !p.trim().is_empty() => p.to_string(),
-            _ => return ToolResult::error("Error: pattern is required"),
+            _ => return ToolResult::error(aish_i18n::t("tools.glob.missing_pattern")),
         };
 
         let root = normalize_root(args.get("root").and_then(|r| r.as_str()));
@@ -93,7 +101,12 @@ impl Tool for GlobTool {
                 }
             }
             Err(e) => {
-                return ToolResult::error(format!("Error: invalid glob pattern: {}", e));
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.glob.invalid_glob",
+                    &args_map,
+                ));
             }
         }
 

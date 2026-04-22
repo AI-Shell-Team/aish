@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Compute and validate release metadata for the Rust-based AI Shell."""
 from __future__ import annotations
 
 import argparse
@@ -9,35 +10,26 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-PYPROJECT_PATH = ROOT_DIR / "pyproject.toml"
-RUNTIME_VERSION_PATH = ROOT_DIR / "src" / "aish" / "__init__.py"
+CARGO_TOML_PATH = ROOT_DIR / "Cargo.toml"
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-RUNTIME_VERSION_RE = re.compile(r'^__version__\s*=\s*"([^"]+)"\s*$')
 
 
-def _load_pyproject_version() -> str:
-    in_project_section = False
-    for raw_line in PYPROJECT_PATH.read_text(encoding="utf-8").splitlines():
+def _load_cargo_version() -> str:
+    """Extract version from [workspace.package] in Cargo.toml."""
+    in_workspace_package = False
+    for raw_line in CARGO_TOML_PATH.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("["):
-            in_project_section = line == "[project]"
+            in_workspace_package = line == "[workspace.package]"
             continue
-        if in_project_section:
+        if in_workspace_package:
             match = re.match(r'^version\s*=\s*"([^"]+)"\s*$', line)
             if match:
                 return match.group(1)
-    raise ValueError(f"Could not find project.version in {PYPROJECT_PATH}")
-
-
-def _load_runtime_version() -> str:
-    for line in RUNTIME_VERSION_PATH.read_text(encoding="utf-8").splitlines():
-        match = RUNTIME_VERSION_RE.match(line.strip())
-        if match:
-            return match.group(1)
-    raise ValueError(f"Could not find __version__ in {RUNTIME_VERSION_PATH}")
+    raise ValueError(f"Could not find workspace.package.version in {CARGO_TOML_PATH}")
 
 
 def _extract_changelog_section(section_name: str) -> str:
@@ -100,7 +92,7 @@ def _get_previous_stable_tag(excluded_tag: str | None = None) -> str:
         stable_tags = [tag for tag in stable_tags if tag != excluded_tag]
     if not stable_tags:
         return ""
-    return sorted(stable_tags, key=lambda value: tuple(int(part) for part in value[1:].split(".")))[-1]
+    return sorted(stable_tags, key=lambda v: tuple(int(p) for p in v[1:].split(".")))[-1]
 
 
 def _write_github_output(path: Path, metadata: dict[str, str]) -> None:
@@ -118,8 +110,7 @@ def _write_summary(path: Path, metadata: dict[str, str]) -> None:
         "",
         f"- Version: {metadata['version']}",
         f"- Tag: {metadata['tag']}",
-        f"- Pyproject version: {metadata['pyproject_version']}",
-        f"- Runtime version: {metadata['runtime_version']}",
+        f"- Cargo version: {metadata['cargo_version']}",
     ]
 
     if metadata["previous_stable_tag"]:
@@ -142,31 +133,22 @@ def main() -> int:
     parser.add_argument("--print-json", action="store_true", help="Print metadata as JSON")
     args = parser.parse_args()
 
-    pyproject_version = _load_pyproject_version()
-    runtime_version = _load_runtime_version()
-    if pyproject_version != runtime_version:
-        raise SystemExit(
-            "Repository version mismatch: "
-            f"pyproject.toml={pyproject_version}, src/aish/__init__.py={runtime_version}"
-        )
+    cargo_version = _load_cargo_version()
 
-    version = _normalize_version(args.expected_version or pyproject_version)
+    version = _normalize_version(args.expected_version or cargo_version)
     if not SEMVER_RE.fullmatch(version):
-        raise SystemExit(
-            f"Invalid version '{version}'. Expected format: X.Y.Z"
-        )
+        raise SystemExit(f"Invalid version '{version}'. Expected format: X.Y.Z")
 
-    if args.expected_version and version != pyproject_version:
+    if args.expected_version and version != cargo_version:
         raise SystemExit(
-            "Requested version does not match repository version: "
-            f"requested={version}, repository={pyproject_version}"
+            f"Requested version does not match repository version: "
+            f"requested={version}, repository={cargo_version}"
         )
 
     metadata = {
         "version": version,
         "tag": f"v{version}",
-        "pyproject_version": pyproject_version,
-        "runtime_version": runtime_version,
+        "cargo_version": cargo_version,
         "previous_stable_tag": _get_previous_stable_tag(excluded_tag=f"v{version}"),
         "release_notes": _extract_release_notes(version if args.expected_version else None),
     }

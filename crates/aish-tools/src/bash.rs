@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 use aish_pty::{CancelToken, PtyExecutor};
 
@@ -16,6 +17,13 @@ const DEFAULT_KEEP_BYTES: usize = 4096;
 /// Tool for executing bash commands via PTY.
 pub struct BashTool {
     keep_bytes: usize,
+}
+
+/// Cached translated description.
+static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.bash.description"))
 }
 
 impl Default for BashTool {
@@ -43,7 +51,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command and return the output. Use this tool to run shell commands."
+        get_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -67,7 +75,7 @@ impl Tool for BashTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let command = match args.get("command").and_then(|c| c.as_str()) {
             Some(cmd) => cmd,
-            None => return ToolResult::error("Missing 'command' parameter"),
+            None => return ToolResult::error(aish_i18n::t("tools.bash.missing_command")),
         };
         let timeout_secs = args
             .get("timeout")
@@ -117,7 +125,14 @@ impl Tool for BashTool {
                     meta: result.offload,
                 }
             }
-            Err(e) => ToolResult::error(format!("Failed to execute: {}", e)),
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("error".to_string(), e.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.bash.execute_failed",
+                    &args_map,
+                ))
+            }
         }
     }
 }
@@ -133,11 +148,11 @@ fn truncate_output(output: &str, max_bytes: usize) -> String {
     let truncated_bytes = output.len() - max_bytes;
     let tail = &output[truncated_bytes..];
 
-    format!(
-        "[...{} bytes truncated...]\n{}",
-        truncated_bytes,
-        tail.trim_start()
-    )
+    let mut args = std::collections::HashMap::new();
+    args.insert("bytes".to_string(), truncated_bytes.to_string());
+    args.insert("tail".to_string(), tail.trim_start().to_string());
+
+    aish_i18n::t_with_args("tools.bash.output_truncated", &args)
 }
 
 #[cfg(test)]
@@ -186,6 +201,9 @@ mod tests {
 
     #[test]
     fn test_truncate_output() {
+        // Initialize i18n for testing
+        aish_i18n::set_locale("en-US");
+
         // Small output is unchanged.
         let small = "hello world";
         assert_eq!(truncate_output(small, 100), small);
@@ -194,7 +212,7 @@ mod tests {
         let large = "x".repeat(1000);
         let result = truncate_output(&large, 100);
         assert!(
-            result.contains("bytes truncated"),
+            result.contains("truncated"),
             "should mention truncation, got: {}",
             result
         );

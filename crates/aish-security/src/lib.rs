@@ -15,18 +15,34 @@
 
 pub mod fallback;
 pub mod manager;
+pub mod overlay;
 pub mod policy;
 pub mod sandbox;
 pub mod sandbox_daemon;
 pub mod sandbox_ipc;
+pub mod sandbox_worker;
+pub mod strip_sudo;
 pub mod types;
 
+// Core manager types
 pub use fallback::FallbackRuleEngine;
 pub use manager::{SecurityDecision, SecurityManager};
 pub use policy::SecurityPolicy;
-pub use sandbox::{
-    FsChange as SandboxFsChange, SandboxConfig, SandboxExecutor, SandboxResult as SandboxExecResult,
+
+// Unified types from types.rs (canonical definitions)
+pub use types::{
+    AiRiskAssessment, FsChange, IpcRequest, IpcResponse, IpcResult, PolicyRule, SandboxConfig,
+    SandboxResult, SandboxSecurityResult,
 };
-pub use sandbox_daemon::{DaemonConfig, DaemonRequest, DaemonResponse, SandboxDaemon};
-pub use sandbox_ipc::{FileChange, SandboxIpc, SandboxRequest, SandboxResponse};
-pub use types::{AiRiskAssessment, FsChange, PolicyRule, SandboxResult};
+
+// Sandbox executor (uses unified types)
+pub use sandbox::SandboxExecutor;
+
+// Sandbox daemon types
+pub use sandbox_daemon::{DaemonConfig, SandboxDaemon};
+
+// IPC client types
+pub use sandbox_ipc::{SandboxIpcClient, SandboxSecurityIpc, DEFAULT_SOCKET_PATH};
+
+// Utility functions
+pub use strip_sudo::strip_sudo_prefix;

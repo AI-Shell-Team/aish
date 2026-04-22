@@ -53,7 +53,6 @@ jobs:
               - '.github/workflows/ci.yml'
             packaging:
               - 'packaging/**'
-              - 'debian/**'
               - 'config/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
@@ -74,13 +73,12 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Cache Cargo artifacts
+      - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
@@ -97,8 +95,11 @@ jobs:
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl
 
-      - name: Build release binary
+      - name: Build release binary (musl)
         run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Smoke test binary
+        run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
       - name: Upload release binary
         uses: actions/upload-artifact@v6
@@ -107,53 +108,13 @@ jobs:
           path: target/x86_64-unknown-linux-musl/release/aish
           if-no-files-found: error
 
-  cross-platform-smoke:
-    name: Cross-platform smoke (${{ matrix.os }})
-    needs:
-      - changes
-      - lint-test
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
-
-      - name: Build release
-        run: cargo build --release
-
-      - name: Smoke test binary
-        run: ./target/release/aish --help
-
   build-bundle:
-    name: Build bundle (${{ matrix.arch }})
+    name: Build bundle
     if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runs_on: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-    runs-on: ${{ matrix.runs_on }}
+    runs-on: ubuntu-latest
     needs:
       - changes
       - lint-test
-      - cross-platform-smoke
 
     steps:
       - name: Checkout repository
@@ -162,41 +123,37 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-unknown-linux-musl
 
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Cache Cargo artifacts
+      - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-musl-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
+            ${{ runner.os }}-musl-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: Prepare bundle archive
+      - name: Build bundle archive
         run: |
           VERSION="0.0.0+${GITHUB_SHA::8}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          mkdir -p "$OUTPUT_DIR"
-          cp target/${{ matrix.target }}/release/aish "$OUTPUT_DIR/aish"
-          tar -czf "$OUTPUT_DIR/aish-${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C "$OUTPUT_DIR" aish
+          OUTPUT_DIR="artifacts/amd64"
+          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
 
       - name: Smoke test binary
-        run: |
-          artifacts/${{ matrix.arch }}/aish --help
+        run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: aish-linux-${{ matrix.arch }}
+          name: aish-linux-amd64-bundle
           path: |
-            artifacts/${{ matrix.arch }}/*
+            artifacts/amd64/*
           if-no-files-found: error

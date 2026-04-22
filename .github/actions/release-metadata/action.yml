@@ -17,12 +17,9 @@ outputs:
   tag:
     description: Normalized git tag
     value: ${{ steps.metadata.outputs.tag }}
-  pyproject_version:
-    description: Version from pyproject.toml
-    value: ${{ steps.metadata.outputs.pyproject_version }}
-  runtime_version:
-    description: Runtime version from src/aish/__init__.py
-    value: ${{ steps.metadata.outputs.runtime_version }}
+  cargo_version:
+    description: Version from Cargo.toml
+    value: ${{ steps.metadata.outputs.cargo_version }}
   previous_stable_tag:
     description: Most recent stable git tag
     value: ${{ steps.metadata.outputs.previous_stable_tag }}
@@ -33,6 +30,11 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Set up Python for metadata scripts
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
     - name: Validate repository release metadata
       id: metadata
       shell: bash

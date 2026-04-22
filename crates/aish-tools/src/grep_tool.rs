@@ -2,7 +2,15 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
+use aish_i18n;
 use aish_llm::{Tool, ToolResult};
+
+/// Cached translated description.
+static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn get_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.grep.description"))
+}
 
 /// Directories excluded by default (shared with GlobTool).
 const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -43,7 +51,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents by regex pattern within a directory tree. Automatically excludes VCS directories and common generated trees."
+        get_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -70,12 +78,19 @@ impl Tool for GrepTool {
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         let pattern_str = match args.get("pattern").and_then(|p| p.as_str()) {
             Some(p) if !p.trim().is_empty() => p,
-            _ => return ToolResult::error("Error: pattern is required"),
+            _ => return ToolResult::error(aish_i18n::t("tools.grep.missing_pattern")),
         };
 
         let re = match regex::Regex::new(pattern_str) {
             Ok(re) => re,
-            Err(e) => return ToolResult::error(format!("Error: invalid regex pattern: {}", e)),
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.grep.invalid_regex",
+                    &args_map,
+                ));
+            }
         };
 
         let root = normalize_root(args.get("root").and_then(|r| r.as_str()));

@@ -240,7 +240,11 @@ impl AishShell {
                     let cat = parse_category_str(category);
                     match mm.store(content, cat, source, importance as f64) {
                         Ok(id) => id.to_string(),
-                        Err(e) => format!("error: {}", e),
+                        Err(e) => {
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            t_with_args("shell.general_error", &args)
+                        }
                     }
                 } else {
                     "memory not available".to_string()
@@ -652,7 +656,11 @@ impl AishShell {
                     pad_to_width("", width.saturating_sub(38))
                 );
                 println!("\x1b[33m│\x1b[0m");
-                println!("\x1b[33m│\x1b[0m  \x1b[1;36mTool:\x1b[0m   {}", tool_name);
+                println!(
+                    "\x1b[33m│\x1b[0m  \x1b[1;36m{}\x1b[0m   {}",
+                    t("shell.confirm_dialog_tool"),
+                    tool_name
+                );
                 let reason_lines = wrap_text(message, width.saturating_sub(14));
                 println!(
                     "\x1b[33m│\x1b[0m  \x1b[1;36mReason:\x1b[0m {}",
@@ -662,7 +670,10 @@ impl AishShell {
                     println!("\x1b[33m│\x1b[0m         {}", line);
                 }
                 println!("\x1b[33m│\x1b[0m");
-                println!("\x1b[33m│\x1b[0m  \x1b[36mAllow? [y/N]\x1b[0m");
+                println!(
+                    "\x1b[33m│\x1b[0m  \x1b[36m{}\x1b[0m",
+                    t("shell.confirm_dialog_question")
+                );
                 println!("\x1b[33m╰{}╯\x1b[0m", border);
                 print!("  ");
                 let _ = std::io::stdout().flush();
@@ -702,7 +713,12 @@ impl AishShell {
         // Initialize persistent PTY session
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         let pty = aish_pty::PersistentPty::start(&state.cwd, rows, cols).map_err(|e| {
-            aish_core::AishError::Pty(format!("failed to start persistent PTY: {e}"))
+            let mut args = std::collections::HashMap::new();
+            args.insert(
+                "error".to_string(),
+                format!("failed to start persistent PTY: {e}"),
+            );
+            aish_core::AishError::Pty(t_with_args("shell.general_error", &args))
         })?;
         let pty = Arc::new(Mutex::new(pty));
 
@@ -779,7 +795,9 @@ impl AishShell {
 
         // Initialize readline with history, tab completion, and line editing
         let mut rl = ShellReadline::new(self.pty.clone()).map_err(|e| {
-            aish_core::AishError::Config(format!("Failed to initialize readline: {}", e))
+            let mut args = std::collections::HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            aish_core::AishError::Config(t_with_args("shell.readline_init_failed", &args))
         })?;
 
         // Load history from default location
@@ -847,11 +865,11 @@ impl AishShell {
                         let new_phase = self.ai_handler.toggle_plan_mode(&self.session_uuid);
                         match new_phase {
                             aish_core::PlanPhase::Planning => {
-                                println!("\x1b[1;33m=== Plan Mode ===\x1b[0m");
-                                println!("\x1b[2mType ; followed by your planning request.\x1b[0m");
+                                println!("\x1b[1;33m{}\x1b[0m", t("shell.plan_mode_enabled"));
+                                println!("\x1b[2m{}\x1b[0m", t("shell.plan_mode_hint"));
                             }
                             aish_core::PlanPhase::Normal => {
-                                println!("\x1b[33mExited plan mode.\x1b[0m");
+                                println!("\x1b[33m{}\x1b[0m", t("shell.plan_mode_disabled"));
                             }
                         }
                         continue;
@@ -863,7 +881,11 @@ impl AishShell {
                         }
                         continue;
                     }
-                    eprintln!("Readline error: {}", e);
+                    eprintln!("{}", {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        t_with_args("shell.readline_error", &args)
+                    });
                     break;
                 }
             };
@@ -1003,19 +1025,25 @@ impl AishShell {
                                                     &mut state,
                                                 )
                                             {
-                                                println!("\x1b[32m\u{2713} Plan approved. Implementation tools are now available.\x1b[0m");
                                                 println!(
-                                                    "\x1b[2m  Snapshot saved at: {}\x1b[0m",
-                                                    state
-                                                        .approved_artifact_path
-                                                        .as_deref()
-                                                        .unwrap_or("(none)")
+                                                    "\x1b[32m{}\x1b[0m",
+                                                    t("shell.plan_approved")
+                                                );
+                                                println!(
+                                                    "\x1b[2m  {}\x1b[0m",
+                                                    t_with_args(
+                                                        "shell.plan_approved_hint",
+                                                        &std::collections::HashMap::new()
+                                                    )
                                                 );
                                             }
                                         }
                                         PlanApprovalDecision::ChangesRequested { feedback } => {
                                             // Keep in planning phase — re-enter plan mode with feedback
-                                            println!("\x1b[33m\u{21B3} Changes requested. Re-entering plan mode...\x1b[0m");
+                                            println!(
+                                                "\x1b[33m{}\x1b[0m",
+                                                t("shell.plan_changes_requested")
+                                            );
 
                                             // Re-enter plan mode to let the AI revise
                                             self.ai_handler.enter_plan_mode(&self.session_uuid);
@@ -1048,12 +1076,21 @@ impl AishShell {
                                                     feedback
                                                 );
                                                 self.ai_handler.add_shell_context(&feedback_msg);
-                                                println!("\x1b[2m  Feedback sent to AI. Type ; to continue planning.\x1b[0m");
+                                                println!(
+                                                    "\x1b[2m  {}\x1b[0m",
+                                                    t("shell.plan_feedback_sent")
+                                                );
                                             }
                                         }
                                         PlanApprovalDecision::Cancelled => {
-                                            println!("\x1b[33mPlan review cancelled. Plan mode exited.\x1b[0m");
-                                            println!("\x1b[2mUse /plan to start a new planning session.\x1b[0m");
+                                            println!(
+                                                "\x1b[33m{}\x1b[0m",
+                                                t("shell.plan_review_cancelled")
+                                            );
+                                            println!(
+                                                "\x1b[2m{}\x1b[0m",
+                                                t("shell.plan_review_hint")
+                                            );
                                         }
                                     }
                                 }
@@ -1063,7 +1100,7 @@ impl AishShell {
                         }
                         Err(aish_core::AishError::Cancelled) => {
                             self.animation.stop();
-                            println!("\x1b[33mInterrupted\x1b[0m");
+                            println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
                         }
                         Err(e) => {
                             let msg = t("shell.error.llm_error_message")
@@ -1201,7 +1238,11 @@ impl AishShell {
             Some("/plan") => self.handle_plan_command(&parts),
             Some("/token") => self.handle_token_command(),
             _ => {
-                eprintln!("Unknown special command: {}", input);
+                eprintln!("{}", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("command".to_string(), input.to_string());
+                    t_with_args("shell.unknown_command", &args)
+                });
             }
         }
     }
@@ -1216,7 +1257,7 @@ impl AishShell {
         }
 
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
-            println!("\x1b[36mUsage: /model [model-name]\x1b[0m");
+            println!("\x1b[36m{}\x1b[0m", t("shell.model_usage"));
             return;
         }
 
@@ -1244,7 +1285,11 @@ impl AishShell {
         // Persist to config file
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-            eprintln!("\x1b[33mWarning: could not save config: {}\x1b[0m", e);
+            eprintln!("\x1b[33m{}\x1b[0m", {
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("shell.config_save_warning", &args)
+            });
         }
 
         let mut args = std::collections::HashMap::new();
@@ -1318,11 +1363,27 @@ impl AishShell {
         let stats = self.ai_handler.token_stats();
         let total = stats.total_input + stats.total_output;
         println!();
-        println!("Token Usage (last 7 days)");
-        println!("  Input tokens:   {}", format_number(stats.total_input));
-        println!("  Output tokens:  {}", format_number(stats.total_output));
-        println!("  Total:          {}", format_number(total));
-        println!("  API calls:      {}", format_number(stats.request_count));
+        println!("{}", aish_i18n::t("shell.token.title"));
+        println!(
+            "  {}  {}",
+            aish_i18n::t("shell.token.input_tokens"),
+            format_number(stats.total_input)
+        );
+        println!(
+            "  {} {}",
+            aish_i18n::t("shell.token.output_tokens"),
+            format_number(stats.total_output)
+        );
+        println!(
+            "  {}     {}",
+            aish_i18n::t("shell.token.total"),
+            format_number(total)
+        );
+        println!(
+            "  {}  {}",
+            aish_i18n::t("shell.token.api_calls"),
+            format_number(stats.request_count)
+        );
         println!();
     }
 
@@ -1381,7 +1442,11 @@ impl AishShell {
         let (exit_code, cwd, output) = match result {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("PTY error: {}", e);
+                eprintln!("{}", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    aish_i18n::t_with_args("shell.error.pty_error", &args)
+                });
                 // PTY may have died, try restart
                 self.restart_pty();
                 return 1;
@@ -1431,7 +1496,11 @@ impl AishShell {
                 println!("\x1b[33mbash session restarted\x1b[0m");
             }
             Err(e) => {
-                eprintln!("Failed to restart bash: {}", e);
+                eprintln!("{}", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    aish_i18n::t_with_args("shell.error.restart_bash_failed", &args)
+                });
                 self.state.should_exit = true;
             }
         }
@@ -1457,20 +1526,20 @@ impl AishShell {
             InterruptionState::Normal | InterruptionState::Inputting => {
                 self.interruption = InterruptionState::ClearPending;
                 self.last_ctrl_c = Some(now);
-                println!("\x1b[33m(Ctrl+C again within 1s to exit)\x1b[0m");
+                println!("\x1b[33m({})\x1b[0m", aish_i18n::t("shell.ctrl_c_again"));
                 false
             }
             InterruptionState::ClearPending => {
                 if let Some(last) = self.last_ctrl_c {
                     if now.duration_since(last).as_secs() < 1 {
                         self.interruption = InterruptionState::ExitPending;
-                        println!("\x1b[33mExiting...\x1b[0m");
+                        println!("\x1b[33m{}\x1b[0m", aish_i18n::t("shell.exiting"));
                         return true;
                     }
                 }
                 self.interruption = InterruptionState::ClearPending;
                 self.last_ctrl_c = Some(now);
-                println!("\x1b[33m(Ctrl+C again within 1s to exit)\x1b[0m");
+                println!("\x1b[33m({})\x1b[0m", aish_i18n::t("shell.ctrl_c_again"));
                 false
             }
             InterruptionState::ExitPending => true,
@@ -1520,7 +1589,12 @@ impl AishShell {
             match aish_scripts::loader::parse_script_file(std::path::Path::new(script_path)) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("Failed to load script '{}': {}", script_path, e);
+                    eprintln!("{}", {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("script".to_string(), script_path.to_string());
+                        args.insert("error".to_string(), e.to_string());
+                        aish_i18n::t_with_args("shell.error.load_script_failed", &args)
+                    });
                     // Fall back to executing via bash
                     return self.execute_external_command(input);
                 }

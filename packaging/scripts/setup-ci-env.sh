@@ -1,38 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-install_python() {
-	local manager="$1"
-	local version=""
+# Set up CI build environment for Rust + musl.
+#
+# NOTE: GitHub Actions workflows use dtolnay/rust-toolchain instead of this
+# script. This file is kept for self-hosted runners or container environments
+# where the action is not available.
 
-	for candidate in 3.11 3.10; do
-		if "$manager" info -q "python${candidate}" >/dev/null 2>&1; then
-			version="$candidate"
-			break
-		fi
-	done
-
-	if [[ -z "$version" ]]; then
-		echo "Python 3.10+ not found in repositories" >&2
-		exit 1
-	fi
-
-	"$manager" install -y "python${version}" "python${version}-devel" "python${version}-pip"
-	ln -sf "/usr/bin/python${version}" /usr/local/bin/python
-	ln -sf "/usr/bin/pip${version}" /usr/local/bin/pip
-}
-
-if command -v dnf >/dev/null 2>&1; then
-	dnf install -y bubblewrap util-linux tar gzip curl make findutils
-	install_python dnf
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y curl build-essential musl-tools pkg-config libssl-dev
+elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y curl gcc musl-devel openssl-devel
 elif command -v yum >/dev/null 2>&1; then
-	yum install -y bubblewrap util-linux tar gzip curl make findutils
-	install_python yum
+    yum install -y curl gcc openssl-devel
 else
-	echo "No dnf/yum found in container" >&2
-	exit 1
+    echo "No supported package manager found" >&2
+    exit 1
 fi
 
-python -m pip install --upgrade pip setuptools wheel uv
-python --version
-python -c 'import sys; print(sys.executable)'
+# Install Rust if not already available
+if ! command -v cargo >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+
+rustup target add x86_64-unknown-linux-musl
+
+cargo --version
+rustc --version
