@@ -13,10 +13,10 @@ from aish.terminal.pty.manager import PTYManager
 def _wait_for_prompt_ready(manager: PTYManager, command_seq: int, timeout: float = 5.0) -> bytes:
     output = bytearray()
     deadline = time.monotonic() + timeout
+    saw_prompt = False
 
     while time.monotonic() < deadline:
         ready, _, _ = select.select([manager.control_fd, manager._master_fd], [], [], 0.1)
-        saw_prompt = False
         for fd in ready:
             data = os.read(fd, 4096)
             if not data:
@@ -32,6 +32,12 @@ def _wait_for_prompt_ready(manager: PTYManager, command_seq: int, timeout: float
                 output.extend(data)
         if saw_prompt:
             break
+
+    if not saw_prompt:
+        rendered = output.decode("utf-8", errors="replace")
+        raise TimeoutError(
+            f"timed out waiting for prompt_ready with command_seq={command_seq}: {rendered!r}"
+        )
 
     return bytes(output)
 
@@ -226,12 +232,27 @@ def test_pty_manager_execute_command_returns_output_without_marker():
 
 
 def test_clean_pty_output_strips_echo_after_leading_blank_line():
-    cleaned = PTYManager._clean_pty_output(
+    manager = PTYManager(use_output_thread=False)
+
+    cleaned = manager._clean_pty_output(
         b"\r\n printf 'hello\\n'\r\nhello\r\n",
         "printf 'hello\\n'",
     )
 
     assert cleaned == "hello"
+
+
+def test_execute_multiline_command_uses_reported_continuation_prompt():
+    manager = PTYManager(use_output_thread=False, env={"PS2": "cont> "})
+
+    try:
+        manager.start()
+        output, exit_code = manager.execute_command("printf 'hello\\n' && \\\nprintf 'world\\n'")
+
+        assert exit_code == 0
+        assert output == "hello\nworld"
+    finally:
+        manager.stop()
 
 
 def test_pty_manager_execute_command_waits_without_implicit_timeout():

@@ -56,12 +56,13 @@ __aish_emit_control_line() {
 }
 
 __aish_emit_session_ready() {
-    local ts cwd_json payload
+    local ts cwd_json ps2_json payload
     ts=$(date +%s)
     cwd_json=$(__aish_json_escape "$PWD")
+    ps2_json=$(__aish_json_escape "$PS2")
     printf -v payload \
-        '{"version":%s,"type":"session_ready","ts":%s,"shell_pid":%s,"cwd":"%s","shlvl":%s}' \
-        "$__AISH_PROTOCOL_VERSION" "$ts" "$$" "$cwd_json" "${SHLVL:-0}"
+        '{"version":%s,"type":"session_ready","ts":%s,"shell_pid":%s,"cwd":"%s","ps2":"%s","shlvl":%s}' \
+        "$__AISH_PROTOCOL_VERSION" "$ts" "$$" "$cwd_json" "$ps2_json" "${SHLVL:-0}"
     __aish_emit_control_line "$payload"
 }
 
@@ -82,7 +83,7 @@ __aish_load_command_metadata_from_fd() {
         return 1
     fi
 
-    IFS= read -r -t 0.001 metadata_line <&${__AISH_COMMAND_METADATA_FD} || return 1
+    IFS= read -r -t 0.001 metadata_line <&"${__AISH_COMMAND_METADATA_FD}" || return 1
     if [[ -z "$metadata_line" ]]; then
         return 1
     fi

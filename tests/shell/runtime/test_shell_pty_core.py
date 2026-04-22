@@ -518,6 +518,7 @@ def test_pty_manager_send_command_sends_plain_user_command():
     manager._completed_results = []
     manager._completion_condition = threading.Condition()
     manager._exit_code_callback = None
+    manager._lock = threading.RLock()
     sent: list[bytes] = []
 
     def _fake_send(data: bytes) -> int:
@@ -558,6 +559,7 @@ def test_pty_manager_send_command_prefixes_backend_with_space_only():
     manager._completed_results = []
     manager._completion_condition = threading.Condition()
     manager._exit_code_callback = None
+    manager._lock = threading.RLock()
     sent: list[bytes] = []
 
     def _fake_send(data: bytes) -> int:

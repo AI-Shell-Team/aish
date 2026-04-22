@@ -70,6 +70,7 @@ class PTYManager:
         self._command_state = CommandState()
         self._control_buffer = b""
         self._protocol_issues: list[str] = []
+        self._continuation_prompt = "> "
         self._completed_results: list[CommandResult] = []
         self._completion_condition = threading.Condition()
         self._next_backend_command_seq = -1
@@ -305,22 +306,7 @@ class PTYManager:
         """
         stripped_command = command.strip()
         command_to_send = command if source == "user" else f" {command}"
-        lock = getattr(self, "_lock", None)
-
-        if lock is None:
-            submission = self._command_state.register_command(
-                stripped_command, source=source, command_seq=command_seq
-            )
-            self._write_command_metadata(
-                command=stripped_command,
-                source=source,
-                command_seq=command_seq,
-                submission_id=submission.submission_id if submission is not None else None,
-            )
-            self.send((command_to_send + "\n").encode())
-            return
-
-        with lock:
+        with self._lock:
             submission = self._command_state.register_command(
                 stripped_command, source=source, command_seq=command_seq
             )
@@ -386,6 +372,10 @@ class PTYManager:
             self._protocol_issues.extend(errors)
             self._protocol_issues = self._protocol_issues[-50:]
         for event in events:
+            if event.type == "session_ready":
+                ps2 = event.payload.get("ps2")
+                if isinstance(ps2, str) and ps2:
+                    self._continuation_prompt = ps2
             self.handle_backend_event(event)
         return events
 
@@ -400,7 +390,26 @@ class PTYManager:
             set_winsize(self._master_fd, rows, cols)
 
     @staticmethod
-    def _strip_echoed_command(text: str, command: str) -> str:
+    def _strip_continuation_prompt(output_line: str, continuation_prompt: str | None) -> str:
+        candidates: list[str] = []
+        if continuation_prompt:
+            candidates.append(continuation_prompt)
+            stripped_prompt = continuation_prompt.rstrip()
+            if stripped_prompt and stripped_prompt != continuation_prompt:
+                candidates.append(stripped_prompt)
+        candidates.append(">")
+
+        for candidate in candidates:
+            if output_line.startswith(candidate):
+                return output_line[len(candidate) :].lstrip()
+        return output_line
+
+    @staticmethod
+    def _strip_echoed_command(
+        text: str,
+        command: str,
+        continuation_prompt: str | None = None,
+    ) -> str:
         command_lines = [line.lstrip().rstrip() for line in command.strip().splitlines()]
         if not command_lines:
             return text
@@ -415,15 +424,17 @@ class PTYManager:
 
         for index, command_line in enumerate(command_lines):
             output_line = output_lines[first_content_index + index].lstrip()
-            if index > 0 and output_line.startswith(">"):
-                output_line = output_line[1:].lstrip()
+            if index > 0:
+                output_line = PTYManager._strip_continuation_prompt(
+                    output_line,
+                    continuation_prompt,
+                )
             if output_line.rstrip() != command_line:
                 return text
 
         return "\n".join(output_lines[first_content_index + len(command_lines) :])
 
-    @staticmethod
-    def _clean_pty_output(raw: bytes, command: str) -> str:
+    def _clean_pty_output(self, raw: bytes, command: str) -> str:
         """Clean PTY output: strip ANSI, echo, prompt, exit markers."""
         import re as _re
 
@@ -436,7 +447,7 @@ class PTYManager:
         # Remove carriage returns (keep newlines)
         text = text.replace("\r\n", "\n").replace("\r", "")
 
-        text = PTYManager._strip_echoed_command(text, command)
+        text = PTYManager._strip_echoed_command(text, command, self._continuation_prompt)
 
         # Remove trailing prompt line (contains prompt symbols)
         lines = text.rstrip().split("\n")
