@@ -190,6 +190,27 @@ def test_start_drains_startup_prompt_ready_in_poll_mode():
         manager.stop()
 
 
+def test_start_preserves_startup_master_output_in_poll_mode(tmp_path: Path):
+    bashrc = tmp_path / ".bashrc"
+    bashrc.write_text("printf 'startup-marker\\n'\n", encoding="utf-8")
+    manager = PTYManager(use_output_thread=False, env={"HOME": str(tmp_path)})
+
+    try:
+        manager.start()
+
+        output = bytearray()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and b"startup-marker" not in output:
+            ready, _, _ = select.select([manager._master_fd], [], [], 0.1)
+            if not ready:
+                continue
+            output.extend(os.read(manager._master_fd, 4096))
+
+        assert b"startup-marker" in output
+    finally:
+        manager.stop()
+
+
 def test_pty_manager_execute_command_returns_output_without_marker():
     manager = PTYManager(use_output_thread=False)
 

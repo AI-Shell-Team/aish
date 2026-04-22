@@ -207,17 +207,25 @@ class PTYManager:
 
     def _wait_ready(self, timeout: float = 0.3) -> None:
         """Wait for bash to initialize."""
+        if self._control_fd is None:
+            return
+
         start = time.monotonic()
         saw_session_ready = False
         saw_startup_prompt_ready = False
+        quiet_since: float | None = None
 
         while time.monotonic() - start < timeout:
-            read_fds = [self._master_fd]
-            if self._control_fd is not None:
-                read_fds.append(self._control_fd)
-            ready, _, _ = select.select(read_fds, [], [], 0.05)
+            ready, _, _ = select.select([self._control_fd], [], [], 0.05)
             if not ready and saw_session_ready and saw_startup_prompt_ready:
-                break
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                    continue
+                if time.monotonic() - quiet_since >= 0.05:
+                    break
+                continue
+
+            quiet_since = None
             for fd in ready:
                 try:
                     data = os.read(fd, 4096)
@@ -225,18 +233,12 @@ class PTYManager:
                     break
                 if not data:
                     continue
-                if fd == self._control_fd:
-                    events = self._dispatch_control_chunk(data)
-                    for event in events:
-                        if event.type == "session_ready":
-                            saw_session_ready = True
-                        elif event.type == "prompt_ready" and event.payload.get("command_seq") in {None, "", "null"}:
-                            saw_startup_prompt_ready = True
-
-            if saw_session_ready and saw_startup_prompt_ready:
-                extra_ready, _, _ = select.select(read_fds, [], [], 0)
-                if not extra_ready:
-                    break
+                events = self._dispatch_control_chunk(data)
+                for event in events:
+                    if event.type == "session_ready":
+                        saw_session_ready = True
+                    elif event.type == "prompt_ready" and event.payload.get("command_seq") in {None, "", "null"}:
+                        saw_startup_prompt_ready = True
 
     def _output_loop(self) -> None:
         """Background thread to read and forward PTY output."""
@@ -506,14 +508,22 @@ class PTYManager:
 
         # First, drain any existing output from PTY to avoid confusion
         # with previous command's prompt/output.
+        drain_deadline = time.monotonic() + 0.2
+        quiet_since: float | None = None
         try:
-            while True:
+            while time.monotonic() < drain_deadline:
                 read_fds = [self._master_fd]
                 if self._control_fd is not None:
                     read_fds.append(self._control_fd)
-                ready, _, _ = select.select(read_fds, [], [], 0)
+                ready, _, _ = select.select(read_fds, [], [], 0.01)
                 if not ready:
-                    break
+                    if quiet_since is None:
+                        quiet_since = time.monotonic()
+                        continue
+                    if time.monotonic() - quiet_since >= 0.05:
+                        break
+                    continue
+                quiet_since = None
                 for fd in ready:
                     try:
                         data = os.read(fd, 4096)
