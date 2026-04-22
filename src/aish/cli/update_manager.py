@@ -82,6 +82,11 @@ class UpdateManager:
             f"{self.get_download_base_url()}/latest",
         )
 
+    def get_release_download_url(self, tag_name: str, filename: str) -> str:
+        """Resolve the CDN URL for a versioned release artifact."""
+        version_str = tag_name.lstrip("v")
+        return f"{self.get_download_base_url()}/releases/{version_str}/{filename}"
+
     @staticmethod
     def normalize_tag(version_value: str) -> str:
         """Normalize a version string into a release tag."""
@@ -259,7 +264,7 @@ class UpdateManager:
         version_str = tag_name.lstrip("v")
         filename = f"aish-{version_str}-{plat}-{arch}.tar.gz"
         dest_path = dest_dir / filename
-        download_url = f"{self.get_download_base_url()}/{filename}"
+        download_url = self.get_release_download_url(tag_name, filename)
 
         try:
             self._download_with_progress(download_url, dest_path, filename)

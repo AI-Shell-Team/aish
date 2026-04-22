@@ -122,8 +122,10 @@ def test_download_release_success(mock_client_class, update_manager, tmp_path):
     assert result is not None
     assert result.name == "aish-0.3.0-linux-amd64.tar.gz"
     stream_url = mock_client_instance.stream.call_args[0][1]
-    assert stream_url.endswith("/aish-0.3.0-linux-amd64.tar.gz")
-    assert "/v0.3.0/" not in stream_url
+    assert (
+        stream_url
+        == "https://cdn.aishell.ai/download/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+    )
 
 
 @pytest.mark.timeout(5)
@@ -149,7 +151,10 @@ def test_download_release_respects_download_base_override(
 
     assert result is not None
     stream_url = mock_client_instance.stream.call_args[0][1]
-    assert stream_url == "https://cdn.example.com/releases/aish-0.3.0-linux-amd64.tar.gz"
+    assert (
+        stream_url
+        == "https://cdn.example.com/releases/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+    )
 
 
 @pytest.mark.timeout(5)

@@ -121,7 +121,7 @@ aish> ;解释一下这个命令：tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-该安装器会在 `https://www.aishell.ai/repo` 下解析最新发布目录，下载与你当前架构匹配的 bundle，并把 `aish`、`aish-sandbox` 和 `aish-uninstall` 安装到 `/usr/local/bin`。
+该安装器会解析最新稳定版本，下载与你当前架构匹配的 bundle，并把 `aish`、`aish-sandbox` 和 `aish-uninstall` 安装到 `/usr/local/bin`。
 
 ### 从源码运行（开发/试用）
 

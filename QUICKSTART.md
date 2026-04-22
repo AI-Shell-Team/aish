@@ -10,7 +10,7 @@ curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 
 ### Method 2: Manual Bundle Install
 
-Download the matching `aish-<version>-linux-<arch>.tar.gz` bundle from the official release directory, then run:
+Download the matching `aish-<version>-linux-<arch>.tar.gz` bundle from the GitHub Release assets for your target version: `https://github.com/AI-Shell-Team/aish/releases`, then run:
 
 ```bash
 tar -xzf aish-<version>-linux-<arch>.tar.gz
