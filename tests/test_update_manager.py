@@ -14,21 +14,9 @@ def update_manager():
 
 
 @pytest.fixture
-def mock_github_response():
-    """Mock GitHub API response."""
-    return {
-        "tag_name": "v0.3.0",
-        "name": "v0.3.0",
-        "body": "Release notes for v0.3.0",
-        "html_url": "https://github.com/AI-Shell-Team/aish/releases/tag/v0.3.0",
-        "assets": [
-            {
-                "name": "aish-0.3.0-linux-amd64.tar.gz",
-                "browser_download_url": "https://example.com/aish-0.3.0-linux-amd64.tar.gz",
-            }
-        ],
-        "prerelease": False,
-    }
+def mock_latest_version_text():
+    """Mock stable latest-version response body."""
+    return "0.3.0\n"
 
 
 @pytest.mark.timeout(5)
@@ -48,12 +36,12 @@ def test_detect_platform(update_manager):
 @pytest.mark.timeout(5)
 @patch("aish.cli.update_manager.httpx.Client")
 def test_get_latest_release_success(
-    mock_client_class, update_manager, mock_github_response
+    mock_client_class, update_manager, mock_latest_version_text
 ):
-    """Test successful fetching of latest release."""
+    """Test successful fetching of latest release from CDN metadata."""
     mock_response = Mock()
     mock_response.raise_for_status = Mock()
-    mock_response.json = Mock(return_value=mock_github_response)
+    mock_response.text = mock_latest_version_text
     mock_client_instance = mock_client_class.return_value
     mock_client_instance.get = Mock(return_value=mock_response)
 
@@ -62,7 +50,8 @@ def test_get_latest_release_success(
 
     assert result is not None
     assert result["tag_name"] == "v0.3.0"
-    assert result["body"] == "Release notes for v0.3.0"
+    assert result["body"] == ""
+    assert mock_client_instance.get.call_args[0][0].endswith("/latest")
 
 
 @pytest.mark.timeout(5)
@@ -80,12 +69,12 @@ def test_get_latest_release_http_error(mock_client_class, update_manager):
 @pytest.mark.timeout(5)
 @patch("aish.cli.update_manager.httpx.Client")
 def test_check_for_updates_available(
-    mock_client_class, update_manager, mock_github_response
+    mock_client_class, update_manager, mock_latest_version_text
 ):
     """Test checking when update is available."""
     mock_response = Mock()
     mock_response.raise_for_status = Mock()
-    mock_response.json = Mock(return_value=mock_github_response)
+    mock_response.text = mock_latest_version_text
     mock_client_instance = mock_client_class.return_value
     mock_client_instance.get = Mock(return_value=mock_response)
 
@@ -101,17 +90,9 @@ def test_check_for_updates_available(
 @patch("aish.cli.update_manager.httpx.Client")
 def test_check_for_updates_none_available(mock_client_class, update_manager):
     """Test checking when no update available."""
-    old_response = {
-        "tag_name": "v0.1.0",
-        "name": "v0.1.0",
-        "body": "Old release",
-        "html_url": "https://example.com",
-        "assets": [],
-        "prerelease": False,
-    }
     mock_response = Mock()
     mock_response.raise_for_status = Mock()
-    mock_response.json = Mock(return_value=old_response)
+    mock_response.text = "0.1.0\n"
     mock_client_instance = mock_client_class.return_value
     mock_client_instance.get = Mock(return_value=mock_response)
 
@@ -124,7 +105,7 @@ def test_check_for_updates_none_available(mock_client_class, update_manager):
 @pytest.mark.timeout(5)
 @patch("aish.cli.update_manager.httpx.Client")
 def test_download_release_success(mock_client_class, update_manager, tmp_path):
-    """Test successful download."""
+    """Test successful download from CDN."""
     mock_response = Mock()
     mock_response.raise_for_status = Mock()
     mock_response.iter_bytes = Mock(return_value=[b"test data"])
@@ -140,6 +121,35 @@ def test_download_release_success(mock_client_class, update_manager, tmp_path):
 
     assert result is not None
     assert result.name == "aish-0.3.0-linux-amd64.tar.gz"
+    stream_url = mock_client_instance.stream.call_args[0][1]
+    assert stream_url.endswith("/aish-0.3.0-linux-amd64.tar.gz")
+    assert "/v0.3.0/" not in stream_url
+
+
+@pytest.mark.timeout(5)
+@patch("aish.cli.update_manager.httpx.Client")
+def test_download_release_respects_download_base_override(
+    mock_client_class, update_manager, tmp_path, monkeypatch
+):
+    """Test download uses the configured CDN base URL override."""
+    monkeypatch.setenv("AISH_DOWNLOAD_BASE_URL", "https://cdn.example.com/releases")
+
+    mock_response = Mock()
+    mock_response.raise_for_status = Mock()
+    mock_response.iter_bytes = Mock(return_value=[b"test data"])
+    mock_response.headers = {"content-length": "9"}
+    mock_cm = Mock()
+    mock_cm.__enter__ = Mock(return_value=mock_response)
+    mock_cm.__exit__ = Mock(return_value=False)
+    mock_client_instance = mock_client_class.return_value
+    mock_client_instance.stream = Mock(return_value=mock_cm)
+
+    with patch.object(update_manager, "client", mock_client_instance):
+        result = update_manager.download_release("v0.3.0", dest_dir=tmp_path)
+
+    assert result is not None
+    stream_url = mock_client_instance.stream.call_args[0][1]
+    assert stream_url == "https://cdn.example.com/releases/aish-0.3.0-linux-amd64.tar.gz"
 
 
 @pytest.mark.timeout(5)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
+import re
 import shutil
 import subprocess
 import tarfile
@@ -31,11 +33,12 @@ class UpdateCheckError(Exception):
 
 
 # Constants
+DEFAULT_DOWNLOAD_BASE_URL = "https://cdn.aishell.ai/download"
+GITHUB_RELEASES_PAGE_BASE = "https://github.com/AI-Shell-Team/aish/releases"
 GITHUB_API_LATEST = "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest"
 GITHUB_API_LIST = "https://api.github.com/repos/AI-Shell-Team/aish/releases"
-GITHUB_RELEASES_BASE = "https://github.com/AI-Shell-Team/aish/releases/download"
-FALLBACK_MIRROR = "https://www.aishell.ai/repo"
 CONNECTION_TIMEOUT = 10  # seconds
+VERSION_PATTERN = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$")
 
 # Version from package
 CURRENT_VERSION = __version__
@@ -61,6 +64,33 @@ class UpdateManager:
             Current version string.
         """
         return CURRENT_VERSION
+
+    def get_download_base_url(self) -> str:
+        """Resolve bundle download base URL.
+
+        Mirrors the standalone installer environment variables.
+        """
+        return os.getenv(
+            "AISH_DOWNLOAD_BASE_URL",
+            os.getenv("AISH_REPO_URL", DEFAULT_DOWNLOAD_BASE_URL),
+        ).rstrip("/")
+
+    def get_latest_version_url(self) -> str:
+        """Resolve the stable latest-version metadata URL."""
+        return os.getenv(
+            "AISH_LATEST_URL",
+            f"{self.get_download_base_url()}/latest",
+        )
+
+    @staticmethod
+    def normalize_tag(version_value: str) -> str:
+        """Normalize a version string into a release tag."""
+        cleaned_value = version_value.strip()
+        if not cleaned_value or not VERSION_PATTERN.fullmatch(cleaned_value):
+            raise UpdateCheckError(
+                f"Invalid latest version metadata: {cleaned_value or '<empty>'}"
+            )
+        return f"v{cleaned_value.lstrip('v')}"
 
     def detect_platform(self) -> tuple[str, str]:
         """Detect operating system and architecture.
@@ -88,7 +118,7 @@ class UpdateManager:
         return plat, arch
 
     def get_latest_release(self, include_pre_release: bool = False) -> Optional[dict]:
-        """Get latest release information from GitHub API.
+        """Get latest release information.
 
         Args:
             include_pre_release: Whether to include pre-releases.
@@ -110,21 +140,28 @@ class UpdateManager:
                 if not releases:
                     return None
                 data = releases[0]
-            else:
-                response = self.client.get(GITHUB_API_LATEST)
-                response.raise_for_status()
-                data = response.json()
+                tag_name = data.get("tag_name")
+                if not tag_name:
+                    return None
 
-            tag_name = data.get("tag_name")
-            if not tag_name:
-                return None
+                return {
+                    "tag_name": tag_name,
+                    "name": data.get("name"),
+                    "body": data.get("body"),
+                    "html_url": data.get("html_url"),
+                    "assets": data.get("assets", []),
+                }
+            else:
+                response = self.client.get(self.get_latest_version_url())
+                response.raise_for_status()
+                tag_name = self.normalize_tag(response.text)
 
             return {
                 "tag_name": tag_name,
-                "name": data.get("name"),
-                "body": data.get("body"),
-                "html_url": data.get("html_url"),
-                "assets": data.get("assets", []),
+                "name": tag_name,
+                "body": "",
+                "html_url": f"{GITHUB_RELEASES_PAGE_BASE}/tag/{tag_name}",
+                "assets": [],
             }
         except httpx.HTTPError as e:
             raise UpdateCheckError(f"Network error while checking for updates: {e}") from e
@@ -222,31 +259,16 @@ class UpdateManager:
         version_str = tag_name.lstrip("v")
         filename = f"aish-{version_str}-{plat}-{arch}.tar.gz"
         dest_path = dest_dir / filename
-
-        # Try GitHub first
-        github_url = f"{GITHUB_RELEASES_BASE}/{tag_name}/{filename}"
+        download_url = f"{self.get_download_base_url()}/{filename}"
 
         try:
-            self._download_with_progress(github_url, dest_path, filename)
+            self._download_with_progress(download_url, dest_path, filename)
             self.console.print(f"[green]Downloaded: {dest_path}[/green]")
             return dest_path
 
-        except httpx.HTTPError:
-            self.console.print(
-                "[yellow]GitHub download failed, trying mirror...[/yellow]"
-            )
-            mirror_url = f"{FALLBACK_MIRROR}/{tag_name}/{filename}"
-
-            try:
-                self._download_with_progress(
-                    mirror_url, dest_path, f"{filename} (mirror)"
-                )
-                self.console.print(f"[green]Downloaded: {dest_path}[/green]")
-                return dest_path
-
-            except httpx.HTTPError as e:
-                self.console.print(f"[red]Download failed from mirror: {e}[/red]")
-                return None
+        except httpx.HTTPError as e:
+            self.console.print(f"[red]Download failed from CDN: {e}[/red]")
+            return None
 
         except Exception as e:
             self.console.print(f"[red]Unexpected error during download: {e}[/red]")
