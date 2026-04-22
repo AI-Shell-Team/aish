@@ -341,6 +341,7 @@ shell:
   interrupted: "Interrupted"
   ctrl_c_again: "Ctrl+C again within 1s to exit"
   exiting: "Exiting..."
+  exit_goodbye: "Exiting shell. Goodbye!"
 
   # Confirm dialog
   confirm_dialog_title: "Tool Execution"

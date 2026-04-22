@@ -170,6 +170,7 @@ shell:
       cancel: "Abbrechen"
     choice_prompt: "Ihre Auswahl (Standard: n): "
 
+  exit_goodbye: "Shell wird beendet. Auf Wiedersehen!"
   command_cancelled: "Befehl abgebrochen"
   error_correction:
     press_semicolon_hint: "Die Befehlsausführung ist fehlgeschlagen. Geben Sie ; ein und drücken Sie Enter für automatische Analyse und Reparatur, oder geben Sie den nächsten Befehl ein."

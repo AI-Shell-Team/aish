@@ -1,5 +1,6 @@
 use crate::types::ShellState;
 use crate::wizard::SetupWizard;
+use aish_i18n::t;
 
 /// Result of handling a built-in command.
 pub struct BuiltinResult {
@@ -505,7 +506,7 @@ Any other input is executed as an external command via /bin/bash."#;
         self.should_exit = true;
         BuiltinResult {
             handled: true,
-            output: Some("Exiting shell. Goodbye!".to_string()),
+            output: Some(t("shell.exit_goodbye")),
             should_exit: true,
             route_to_pty: false,
             pty_command: None,
@@ -671,7 +672,7 @@ mod tests {
         let result = state.handle_exit();
         assert!(result.handled);
         assert!(result.should_exit);
-        assert_eq!(result.output, Some("Exiting shell. Goodbye!".to_string()));
+        assert!(result.output.is_some_and(|s| !s.is_empty()));
         assert!(!result.route_to_pty);
         assert_eq!(result.pty_command, None);
     }

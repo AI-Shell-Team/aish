@@ -170,6 +170,7 @@ shell:
       cancel: "キャンセル"
     choice_prompt: "選択してください（既定: n）: "
 
+  exit_goodbye: "シェルを終了します。さようなら！"
   command_cancelled: "コマンドをキャンセルしました"
   error_correction:
     press_semicolon_hint: "コマンド実行に失敗しました。; を入力して Enter で自動解析・修復、または次のコマンドを入力してください。"

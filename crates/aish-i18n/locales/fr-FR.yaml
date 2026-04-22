@@ -170,6 +170,7 @@ shell:
       cancel: "Annuler"
     choice_prompt: "Votre choix (par defaut : n) : "
 
+  exit_goodbye: "Fermeture du shell. Au revoir !"
   command_cancelled: "Commande annulee"
   error_correction:
     press_semicolon_hint: "L'execution de la commande a echoue. Tapez ; puis Enter pour analyser et reparer automatiquement, ou saisissez la commande suivante."

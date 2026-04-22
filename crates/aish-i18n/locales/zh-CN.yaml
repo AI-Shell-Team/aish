@@ -341,6 +341,7 @@ shell:
   interrupted: "已中断"
   ctrl_c_again: "1 秒内再次按 Ctrl+C 退出"
   exiting: "正在退出..."
+  exit_goodbye: "正在退出 Shell。再见！"
 
   # 确认对话框
   confirm_dialog_title: "工具执行"
