@@ -98,9 +98,10 @@ jobs:
           BUNDLE="aish-${VERSION}-linux-amd64"
 
           rm -rf "$OUTPUT_DIR" "$EXTRACT_DIR" "$INSTALL_ROOT"
-          mkdir -p "$OUTPUT_DIR" "$EXTRACT_DIR" "$INSTALL_ROOT"
+          mkdir -p "$OUTPUT_DIR"
 
           VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
           tar -xzf "$OUTPUT_DIR/${BUNDLE}.tar.gz" -C "$EXTRACT_DIR"
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
           bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
