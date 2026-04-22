@@ -128,6 +128,53 @@ def test_shell_prompt_controller_theme_env_includes_mode():
     assert env["AISH_MODE"] == "plan"
 
 
+def test_shell_prompt_controller_theme_env_restores_original_loader_env(monkeypatch):
+    monkeypatch.setattr("aish.shell.environment.sys.frozen", True, raising=False)
+    monkeypatch.setattr("aish.shell.environment.sys._MEIPASS", "/tmp/_MEI123", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEI123:/usr/lib/custom")
+    monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/system")
+    monkeypatch.setenv("TEST_USER_VAR", "kept")
+
+    env = ShellPromptController._build_theme_env("/tmp/project", 0, "aish")
+
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/system"
+    assert env["TEST_USER_VAR"] == "kept"
+
+
+def test_shell_prompt_controller_theme_env_keeps_loader_path_when_not_frozen(
+    monkeypatch,
+):
+    monkeypatch.setattr("aish.shell.environment.sys.frozen", False, raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/lib/custom")
+
+    env = ShellPromptController._build_theme_env("/tmp/project", 0, "aish")
+
+    assert env["LD_LIBRARY_PATH"] == "/usr/lib/custom"
+
+
+def test_shell_prompt_controller_theme_env_prunes_bundle_paths_without_orig(
+    monkeypatch,
+):
+    bundle_path = "/tmp/pyi-bundle"
+    nested_bundle_path = os.path.join(bundle_path, "nested")
+
+    monkeypatch.setattr("aish.shell.environment.sys.frozen", True, raising=False)
+    monkeypatch.setattr("aish.shell.environment.sys._MEIPASS", bundle_path, raising=False)
+    monkeypatch.setenv(
+        "LD_LIBRARY_PATH",
+        os.pathsep.join([bundle_path, "/usr/lib", nested_bundle_path, "/opt/other"]),
+    )
+    monkeypatch.delenv("LD_LIBRARY_PATH_ORIG", raising=False)
+
+    env = ShellPromptController._build_theme_env("/tmp/project", 0, "aish")
+
+    child_ld = env.get("LD_LIBRARY_PATH", "")
+    assert "/usr/lib" in child_ld
+    assert "/opt/other" in child_ld
+    assert bundle_path not in child_ld
+    assert nested_bundle_path not in child_ld
+
+
 def test_shell_prompt_controller_compact_theme_has_no_leading_space(tmp_path, monkeypatch):
     controller = ShellPromptController(prompt_theme="compact")
 

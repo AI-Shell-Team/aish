@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,42 @@ class TestUnifiedBashExecutor:
     @pytest.fixture
     def executor(self, env_manager):
         return UnifiedBashExecutor(env_manager=env_manager)
+
+    @staticmethod
+    def _patch_state_capture(monkeypatch):
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.get_current_state",
+            lambda env: {"pwd": "/tmp", "env": env.copy()},
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.create_state_file",
+            lambda: "/tmp/fake-state",
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.parse_state_file",
+            lambda path: {"pwd": "/tmp", "env": {}},
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.detect_changes",
+            lambda old_state, new_state: {
+                "cwd_changed": False,
+                "new_cwd": old_state["pwd"],
+                "env_added": {},
+                "env_modified": {},
+                "env_removed": [],
+            },
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.apply_changes",
+            lambda changes, env_manager: None,
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.cleanup_state_file", lambda path: None
+        )
+        monkeypatch.setattr(
+            "aish.tools.bash_executor.wrap_command_with_state_capture",
+            lambda command, state_file: command,
+        )
 
     def test_simple_command(self, executor):
         """测试简单命令"""
@@ -152,6 +189,95 @@ class TestUnifiedBashExecutor:
         assert retcode == 0
         assert stdout == "ok\n"
         assert "timeout" not in captured
+
+    def test_execute_sanitizes_pyinstaller_loader_env(self, executor, monkeypatch):
+        """测试执行子进程时会恢复原始 LD_LIBRARY_PATH"""
+        captured = {}
+
+        self._patch_state_capture(monkeypatch)
+
+        def fake_run(*args, **kwargs):
+            captured.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", "/tmp/_MEI123", raising=False)
+
+        executor.env_manager.set_var("LD_LIBRARY_PATH", "/tmp/_MEI123:/usr/lib/custom")
+        executor.env_manager.set_var("LD_LIBRARY_PATH_ORIG", "/usr/lib/system")
+        executor.env_manager.set_var("TEST_USER_VAR", "kept")
+
+        success, stdout, stderr, retcode, changes = executor.execute("echo ok")
+
+        assert success is True
+        assert retcode == 0
+        assert stdout == "ok\n"
+        assert captured["LD_LIBRARY_PATH"] == "/usr/lib/system"
+        assert captured["TEST_USER_VAR"] == "kept"
+
+    def test_execute_sanitizes_pyinstaller_loader_env_without_orig(
+        self, executor, monkeypatch
+    ):
+        """测试缺少 LD_LIBRARY_PATH_ORIG 时会移除 bundle 路径段"""
+        captured = {}
+        bundle_path = "/tmp/pyi-bundle"
+        nested_bundle_path = os.path.join(bundle_path, "nested")
+
+        self._patch_state_capture(monkeypatch)
+
+        def fake_run(*args, **kwargs):
+            captured["env"] = kwargs["env"].copy()
+            return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", bundle_path, raising=False)
+
+        executor.env_manager.set_var(
+            "LD_LIBRARY_PATH",
+            os.pathsep.join([bundle_path, "/usr/lib", nested_bundle_path, "/opt/other"]),
+        )
+        executor.env_manager.unset_var("LD_LIBRARY_PATH_ORIG")
+
+        success, stdout, stderr, retcode, changes = executor.execute("echo ok")
+
+        assert success is True
+        assert retcode == 0
+        assert stdout == "ok\n"
+        child_ld = captured["env"].get("LD_LIBRARY_PATH", "")
+        assert "/usr/lib" in child_ld
+        assert "/opt/other" in child_ld
+        assert bundle_path not in child_ld
+        assert nested_bundle_path not in child_ld
+
+    def test_execute_sanitizes_pyinstaller_loader_env_without_env_manager(
+        self, monkeypatch
+    ):
+        """测试没有 env_manager 时仍会清理 PyInstaller loader 环境"""
+        captured = {}
+        executor = UnifiedBashExecutor(env_manager=None)
+
+        self._patch_state_capture(monkeypatch)
+
+        def fake_run(*args, **kwargs):
+            captured.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", "/tmp/_MEI123", raising=False)
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/_MEI123:/usr/lib/custom")
+        monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/usr/lib/system")
+        monkeypatch.setenv("TEST_USER_VAR", "kept")
+
+        success, stdout, stderr, retcode, changes = executor.execute("echo ok")
+
+        assert success is True
+        assert retcode == 0
+        assert stdout == "ok\n"
+        assert captured["LD_LIBRARY_PATH"] == "/usr/lib/system"
+        assert captured["TEST_USER_VAR"] == "kept"
 
 
 if __name__ == "__main__":

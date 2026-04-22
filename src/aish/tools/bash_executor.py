@@ -15,6 +15,7 @@ import sys
 import termios
 from typing import Any, Dict, Optional, Tuple
 
+from ..shell.environment import sanitize_subprocess_loader_env
 from .shell_state_capture import (apply_changes, cleanup_state_file,
                                   create_state_file, detect_changes,
                                   get_current_state, parse_state_file,
@@ -75,10 +76,13 @@ class UnifiedBashExecutor:
         Returns:
             (success, stdout, stderr, returncode, changes)
         """
-        # Prepare environment variables
-        env_vars = os.environ.copy()
+        # Every shell command may spawn arbitrary system binaries, so this path
+        # always uses the sanitized subprocess environment instead of trying to
+        # classify commands as "internal" or "external".
         if self.env_manager:
-            env_vars.update(self.env_manager.get_exported_vars())
+            env_vars = self.env_manager.get_subprocess_env()
+        else:
+            env_vars = sanitize_subprocess_loader_env(os.environ.copy())
 
         # Get state before execution
         old_state = get_current_state(env_vars)
