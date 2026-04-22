@@ -74,7 +74,7 @@ impl Tool for BashTool {
             .and_then(|t| t.as_u64())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let executor = PtyExecutor::new(self.keep_bytes);
+        let executor = PtyExecutor::new_silent(self.keep_bytes);
         let cancel_token = Arc::new(CancelToken::new());
 
         // Spawn a thread that cancels after timeout.

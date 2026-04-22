@@ -411,6 +411,12 @@ impl AishShell {
                     LlmEventType::GenerationStart => {
                         animation_ref.stop();
                         clear_reasoning();
+                        // Reset streamed flag so it only reflects the CURRENT
+                        // generation, not a previous iteration that included
+                        // tool calls with interleaved content.  Without this
+                        // reset, tool-call preview text sets the flag to true,
+                        // and the final text-only response is never printed.
+                        streamed_flag.store(false, Ordering::SeqCst);
                         content_started_flag.store(false, Ordering::SeqCst);
                         reasoning_buf_ref.lock().unwrap().clear();
                         reasoning_frame_ref.store(0, Ordering::SeqCst);
