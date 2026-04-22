@@ -1,13 +1,12 @@
 """PTY manager using direct pty.fork() - pyxtermjs style."""
 
 import fcntl
+import json
 import os
 import pty
 import select
-import shlex
 import signal
 import struct
-import tempfile
 import termios
 import threading
 import time
@@ -58,7 +57,8 @@ class PTYManager:
         self._child_pid: Optional[int] = None
         self._control_fd: Optional[int] = None
         self._control_write_fd: Optional[int] = None
-        self._command_metadata_path: Optional[str] = None
+        self._metadata_read_fd: Optional[int] = None
+        self._metadata_write_fd: Optional[int] = None
         self._running = False
         self._output_thread: Optional[threading.Thread] = None
 
@@ -69,6 +69,7 @@ class PTYManager:
         # Event-based command lifecycle state
         self._command_state = CommandState()
         self._control_buffer = b""
+        self._protocol_issues: list[str] = []
         self._completed_results: list[CommandResult] = []
         self._completion_condition = threading.Condition()
         self._next_backend_command_seq = -1
@@ -124,9 +125,10 @@ class PTYManager:
         if self._running:
             return
 
-        self._ensure_command_metadata_file()
         self._control_fd, self._control_write_fd = os.pipe()
         os.set_inheritable(self._control_write_fd, True)
+        self._metadata_read_fd, self._metadata_write_fd = os.pipe()
+        os.set_inheritable(self._metadata_read_fd, True)
 
         self._child_pid, self._master_fd = pty.fork()
 
@@ -138,6 +140,11 @@ class PTYManager:
                     os.close(self._control_fd)
                 except OSError:
                     pass
+            if self._metadata_write_fd is not None:
+                try:
+                    os.close(self._metadata_write_fd)
+                except OSError:
+                    pass
 
             # Build environment
             env = dict(os.environ)
@@ -145,8 +152,8 @@ class PTYManager:
             env["TERM"] = "xterm-256color"
             if self._control_write_fd is not None:
                 env["AISH_CONTROL_FD"] = str(self._control_write_fd)
-            if self._command_metadata_path is not None:
-                env["AISH_COMMAND_METADATA_FILE"] = self._command_metadata_path
+            if self._metadata_read_fd is not None:
+                env["AISH_COMMAND_METADATA_FD"] = str(self._metadata_read_fd)
 
             # Use our rcfile wrapper to set up exit code tracking while preserving user's config
             rcfile_path = os.path.join(os.path.dirname(__file__), "bash_rc_wrapper.sh")
@@ -171,6 +178,12 @@ class PTYManager:
             except OSError:
                 pass
             self._control_write_fd = None
+        if self._metadata_read_fd is not None:
+            try:
+                os.close(self._metadata_read_fd)
+            except OSError:
+                pass
+            self._metadata_read_fd = None
 
         # Set non-blocking
         flags = fcntl.fcntl(self._master_fd, fcntl.F_GETFL)
@@ -184,25 +197,27 @@ class PTYManager:
 
         self._running = True
 
+        # Drain initial shell readiness before exposing the PTY to callers.
+        self._wait_ready(timeout=1.0)
+
         # Start output reader thread (optional - disabled when main loop reads directly)
         if self._use_output_thread:
             self._output_thread = threading.Thread(target=self._output_loop, daemon=True)
             self._output_thread.start()
 
-            # Wait for bash to be ready (discard initial output)
-            self._wait_ready()
-        else:
-            # When not using thread, just wait a bit for bash to start
-            time.sleep(0.1)
-
     def _wait_ready(self, timeout: float = 0.3) -> None:
         """Wait for bash to initialize."""
-        start = time.time()
-        while time.time() - start < timeout:
+        start = time.monotonic()
+        saw_session_ready = False
+        saw_startup_prompt_ready = False
+
+        while time.monotonic() - start < timeout:
             read_fds = [self._master_fd]
             if self._control_fd is not None:
                 read_fds.append(self._control_fd)
             ready, _, _ = select.select(read_fds, [], [], 0.05)
+            if not ready and saw_session_ready and saw_startup_prompt_ready:
+                break
             for fd in ready:
                 try:
                     data = os.read(fd, 4096)
@@ -211,7 +226,17 @@ class PTYManager:
                 if not data:
                     continue
                 if fd == self._control_fd:
-                    self._dispatch_control_chunk(data)
+                    events = self._dispatch_control_chunk(data)
+                    for event in events:
+                        if event.type == "session_ready":
+                            saw_session_ready = True
+                        elif event.type == "prompt_ready" and event.payload.get("command_seq") in {None, "", "null"}:
+                            saw_startup_prompt_ready = True
+
+            if saw_session_ready and saw_startup_prompt_ready:
+                extra_ready, _, _ = select.select(read_fds, [], [], 0)
+                if not extra_ready:
+                    break
 
     def _output_loop(self) -> None:
         """Background thread to read and forward PTY output."""
@@ -281,25 +306,27 @@ class PTYManager:
         lock = getattr(self, "_lock", None)
 
         if lock is None:
-            self._command_state.register_command(
+            submission = self._command_state.register_command(
                 stripped_command, source=source, command_seq=command_seq
             )
             self._write_command_metadata(
                 command=stripped_command,
                 source=source,
                 command_seq=command_seq,
+                submission_id=submission.submission_id if submission is not None else None,
             )
             self.send((command_to_send + "\n").encode())
             return
 
         with lock:
-            self._command_state.register_command(
+            submission = self._command_state.register_command(
                 stripped_command, source=source, command_seq=command_seq
             )
             self._write_command_metadata(
                 command=stripped_command,
                 source=source,
                 command_seq=command_seq,
+                submission_id=submission.submission_id if submission is not None else None,
             )
             self.send((command_to_send + "\n").encode())
 
@@ -340,8 +367,22 @@ class PTYManager:
         self._control_buffer = remainder
         return events, errors
 
+    @property
+    def protocol_issues(self) -> tuple[str, ...]:
+        """Return decoded protocol and command-state issues."""
+        return tuple(self._protocol_issues) + self._command_state.protocol_issues
+
+    def consume_protocol_issues(self) -> tuple[str, ...]:
+        """Consume and clear protocol and command-state issues."""
+        issues = tuple(self._protocol_issues)
+        self._protocol_issues.clear()
+        return issues + self._command_state.consume_protocol_issues()
+
     def _dispatch_control_chunk(self, chunk: bytes) -> list[BackendControlEvent]:
-        events, _errors = self.decode_control_events(chunk)
+        events, errors = self.decode_control_events(chunk)
+        if errors:
+            self._protocol_issues.extend(errors)
+            self._protocol_issues = self._protocol_issues[-50:]
         for event in events:
             self.handle_backend_event(event)
         return events
@@ -565,44 +606,54 @@ class PTYManager:
                 os.close(self._control_write_fd)
             except OSError:
                 pass
+        if self._metadata_read_fd is not None:
+            try:
+                os.close(self._metadata_read_fd)
+            except OSError:
+                pass
+        if self._metadata_write_fd is not None:
+            try:
+                os.close(self._metadata_write_fd)
+            except OSError:
+                pass
 
         self._master_fd = None
         self._control_fd = None
         self._control_write_fd = None
+        self._metadata_read_fd = None
+        self._metadata_write_fd = None
         self._child_pid = None
 
-        self._remove_command_metadata_file()
+    @staticmethod
+    def _serialize_command_metadata(
+        *,
+        command: str,
+        source: str,
+        command_seq: int | None,
+        submission_id: str | None = None,
+    ) -> bytes:
+        payload = {
+            "submission_id": submission_id,
+            "command_seq": command_seq,
+            "source": source,
+            "original_command": command,
+        }
+        return (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
 
-    def _ensure_command_metadata_file(self) -> None:
-        if self._command_metadata_path is not None:
+    def _write_command_metadata_pipe(self, payload: bytes) -> None:
+        fd = getattr(self, "_metadata_write_fd", None)
+        if fd is None:
             return
 
-        fd, path = tempfile.mkstemp(prefix="aish_command_meta_")
-        os.close(fd)
-        self._command_metadata_path = path
-        self._clear_command_metadata_file()
-
-    def _clear_command_metadata_file(self) -> None:
-        path = getattr(self, "_command_metadata_path", None)
-        if not path:
-            return
-
-        try:
-            with open(path, "w", encoding="utf-8"):
-                pass
-        except OSError:
-            pass
-
-    def _remove_command_metadata_file(self) -> None:
-        path = getattr(self, "_command_metadata_path", None)
-        if not path:
-            return
-
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-        self._command_metadata_path = None
+        view = memoryview(payload)
+        while view:
+            try:
+                written = os.write(fd, view)
+            except OSError:
+                return
+            if written <= 0:
+                return
+            view = view[written:]
 
     def _write_command_metadata(
         self,
@@ -610,29 +661,15 @@ class PTYManager:
         command: str,
         source: str,
         command_seq: int | None,
+        submission_id: str | None = None,
     ) -> None:
-        path = getattr(self, "_command_metadata_path", None)
-        if not path:
-            return
-
-        payload = "\n".join(
-            [
-                f"__AISH_PENDING_COMMAND_SOURCE={shlex.quote(source)}",
-                f"__AISH_PENDING_COMMAND_SEQ={shlex.quote('' if command_seq is None else str(command_seq))}",
-                f"__AISH_PENDING_COMMAND_TEXT={shlex.quote(command)}",
-                "",
-            ]
+        payload = self._serialize_command_metadata(
+            command=command,
+            source=source,
+            command_seq=command_seq,
+            submission_id=submission_id,
         )
-        tmp_path = f"{path}.tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-            os.replace(tmp_path, path)
-        except OSError:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
+        self._write_command_metadata_pipe(payload)
 
     def __enter__(self) -> "PTYManager":
         self.start()

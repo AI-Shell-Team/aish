@@ -6,8 +6,15 @@ from aish.terminal.pty.command_state import CommandState
 from aish.terminal.pty.control_protocol import BackendControlEvent
 
 
-def _command_started(command: str, command_seq: int | None = None) -> BackendControlEvent:
+def _command_started(
+    command: str,
+    command_seq: int | None = None,
+    *,
+    submission_id: str | None = None,
+) -> BackendControlEvent:
     payload = {"command": command}
+    if submission_id is not None:
+        payload["submission_id"] = submission_id
     if command_seq is not None:
         payload["command_seq"] = command_seq
     return BackendControlEvent(version=1, type="command_started", ts=1, payload=payload)
@@ -18,8 +25,11 @@ def _prompt_ready(
     command_seq: int | None = None,
     *,
     interrupted: bool = False,
+    submission_id: str | None = None,
 ) -> BackendControlEvent:
     payload = {"exit_code": exit_code, "interrupted": interrupted}
+    if submission_id is not None:
+        payload["submission_id"] = submission_id
     if command_seq is not None:
         payload["command_seq"] = command_seq
     return BackendControlEvent(version=1, type="prompt_ready", ts=2, payload=payload)

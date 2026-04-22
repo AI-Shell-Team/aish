@@ -29,8 +29,9 @@ esac
 __aish_last_exit_code=0
 __AISH_PROTOCOL_VERSION=1
 __AISH_CONTROL_FD="${AISH_CONTROL_FD:-}"
-__AISH_COMMAND_METADATA_FILE="${AISH_COMMAND_METADATA_FILE:-}"
+__AISH_COMMAND_METADATA_FD="${AISH_COMMAND_METADATA_FD:-}"
 __AISH_AT_PROMPT=0
+__AISH_PENDING_COMMAND_ID=""
 __AISH_PENDING_COMMAND_SOURCE=""
 __AISH_PENDING_COMMAND_SEQ=""
 __AISH_PENDING_COMMAND_TEXT=""
@@ -65,36 +66,60 @@ __aish_emit_session_ready() {
 }
 
 __aish_reset_command_metadata() {
+    __AISH_PENDING_COMMAND_ID=""
     __AISH_PENDING_COMMAND_SOURCE=""
     __AISH_PENDING_COMMAND_SEQ=""
     __AISH_PENDING_COMMAND_TEXT=""
 }
 
-__aish_load_command_metadata() {
-    local metadata_file="$__AISH_COMMAND_METADATA_FILE"
+__aish_load_command_metadata_from_fd() {
+    local metadata_line=""
+    local assignments=""
+
     __aish_reset_command_metadata
 
-    if [[ -z "$metadata_file" || ! -f "$metadata_file" ]]; then
+    if [[ ! "$__AISH_COMMAND_METADATA_FD" =~ ^[0-9]+$ ]]; then
         return 1
     fi
 
-    # shellcheck disable=SC1090
-    source "$metadata_file" 2>/dev/null || return 1
-    return 0
-}
-
-__aish_clear_command_metadata_file() {
-    local metadata_file="$__AISH_COMMAND_METADATA_FILE"
-    if [[ -z "$metadata_file" ]]; then
-        return 0
+    IFS= read -r -t 0.001 metadata_line <&${__AISH_COMMAND_METADATA_FD} || return 1
+    if [[ -z "$metadata_line" ]]; then
+        return 1
     fi
 
-    : > "$metadata_file" 2>/dev/null || true
+    assignments=$(METADATA_LINE="$metadata_line" python3 <<'PY'
+import json
+import os
+import shlex
+import sys
+
+line = os.environ.get("METADATA_LINE", "")
+if not line:
+    sys.exit(1)
+
+try:
+    payload = json.loads(line)
+except json.JSONDecodeError:
+    sys.exit(1)
+
+def emit(name, value):
+    text = "" if value is None else str(value)
+    print(f"{name}={shlex.quote(text)}")
+
+emit("__AISH_PENDING_COMMAND_ID", payload.get("submission_id"))
+emit("__AISH_PENDING_COMMAND_SOURCE", payload.get("source"))
+emit("__AISH_PENDING_COMMAND_SEQ", payload.get("command_seq"))
+emit("__AISH_PENDING_COMMAND_TEXT", payload.get("original_command"))
+PY
+) || return 1
+
+    eval "$assignments"
+    return 0
 }
 
 __aish_emit_prompt_ready() {
     local exit_code="$1"
-    local ts cwd_json interrupted command_seq payload
+    local ts cwd_json interrupted command_seq submission_id source_json payload
     ts=$(date +%s)
     cwd_json=$(__aish_json_escape "$PWD")
     interrupted=false
@@ -107,15 +132,25 @@ __aish_emit_prompt_ready() {
         command_seq="$__AISH_PENDING_COMMAND_SEQ"
     fi
 
+    submission_id=null
+    if [[ -n "$__AISH_PENDING_COMMAND_ID" ]]; then
+        submission_id="\"$(__aish_json_escape "$__AISH_PENDING_COMMAND_ID")\""
+    fi
+
+    source_json=null
+    if [[ -n "$__AISH_PENDING_COMMAND_SOURCE" ]]; then
+        source_json="\"$(__aish_json_escape "$__AISH_PENDING_COMMAND_SOURCE")\""
+    fi
+
     printf -v payload \
-        '{"version":%s,"type":"prompt_ready","ts":%s,"command_seq":%s,"exit_code":%s,"cwd":"%s","shlvl":%s,"interrupted":%s}' \
-        "$__AISH_PROTOCOL_VERSION" "$ts" "$command_seq" "$exit_code" "$cwd_json" "${SHLVL:-0}" "$interrupted"
+        '{"version":%s,"type":"prompt_ready","ts":%s,"submission_id":%s,"source":%s,"command_seq":%s,"exit_code":%s,"cwd":"%s","shlvl":%s,"interrupted":%s}' \
+        "$__AISH_PROTOCOL_VERSION" "$ts" "$submission_id" "$source_json" "$command_seq" "$exit_code" "$cwd_json" "${SHLVL:-0}" "$interrupted"
     __aish_emit_control_line "$payload"
 }
 
 __aish_emit_command_started() {
     local command="$1"
-    local ts command_json command_seq payload
+    local ts command_json command_seq submission_id source_json payload
     ts=$(date +%s)
     command_json=$(__aish_json_escape "$command")
 
@@ -124,9 +159,19 @@ __aish_emit_command_started() {
         command_seq="$__AISH_PENDING_COMMAND_SEQ"
     fi
 
+    submission_id=null
+    if [[ -n "$__AISH_PENDING_COMMAND_ID" ]]; then
+        submission_id="\"$(__aish_json_escape "$__AISH_PENDING_COMMAND_ID")\""
+    fi
+
+    source_json=null
+    if [[ -n "$__AISH_PENDING_COMMAND_SOURCE" ]]; then
+        source_json="\"$(__aish_json_escape "$__AISH_PENDING_COMMAND_SOURCE")\""
+    fi
+
     printf -v payload \
-        '{"version":%s,"type":"command_started","ts":%s,"command_seq":%s,"command":"%s","cwd":"%s","shlvl":%s}' \
-        "$__AISH_PROTOCOL_VERSION" "$ts" "$command_seq" "$command_json" "$(__aish_json_escape "$PWD")" "${SHLVL:-0}"
+        '{"version":%s,"type":"command_started","ts":%s,"submission_id":%s,"source":%s,"command_seq":%s,"command":"%s","cwd":"%s","shlvl":%s}' \
+        "$__AISH_PROTOCOL_VERSION" "$ts" "$submission_id" "$source_json" "$command_seq" "$command_json" "$(__aish_json_escape "$PWD")" "${SHLVL:-0}"
     __aish_emit_control_line "$payload"
 }
 
@@ -165,13 +210,13 @@ __aish_on_debug() {
         return 0
     fi
 
-    __aish_load_command_metadata || true
-
     case "$BASH_COMMAND" in
-        __aish_prompt_command*|__aish_on_debug*|__aish_emit_*|__aish_json_escape*|trap* )
+        __aish_prompt_command*|__aish_on_debug*|__aish_emit_*|__aish_json_escape*|__aish_load_command_metadata_from_fd*|__aish_reset_command_metadata*|__aish_rewrite_last_history_entry*|trap* )
             return 0
             ;;
     esac
+
+    __aish_load_command_metadata_from_fd || true
 
     __AISH_AT_PROMPT=0
     __aish_emit_command_started "$BASH_COMMAND"
@@ -181,7 +226,6 @@ __aish_on_debug() {
 __aish_prompt_command() {
     local exit_code=$?
     __aish_last_exit_code=$exit_code
-    __aish_load_command_metadata || true
     __aish_rewrite_last_history_entry
     # Call original PROMPT_COMMAND if it exists
     if [[ -n "$__AISH_ORIGINAL_PROMPT_COMMAND" ]]; then
@@ -191,7 +235,6 @@ __aish_prompt_command() {
     PS1=''
     __AISH_AT_PROMPT=1
     __aish_emit_prompt_ready "$exit_code"
-    __aish_clear_command_metadata_file
     __aish_reset_command_metadata
 }
 

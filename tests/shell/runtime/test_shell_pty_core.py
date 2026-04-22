@@ -332,8 +332,10 @@ def test_pty_manager_send_command_serializes_metadata_and_pty_write():
     first_metadata_written = threading.Event()
     release_first = threading.Event()
 
-    def fake_write_command_metadata(*, command: str, source: str, command_seq: int | None) -> None:
-        _ = (source, command_seq)
+    def fake_write_command_metadata(
+        *, command: str, source: str, command_seq: int | None, submission_id: str | None = None
+    ) -> None:
+        _ = (source, command_seq, submission_id)
         events.append(("meta", command))
         if command == "one":
             first_metadata_written.set()
@@ -493,7 +495,6 @@ def test_restart_notification_uses_rich_style_output(monkeypatch):
 def test_output_processor_prints_error_hint_when_command_fails(capsys):
     pty_manager = _FakePTYManager(error_info=("bad command", 1))
     processor = OutputProcessor(pty_manager)
-    processor._waiting_for_result = True
 
     rendered = processor.process(b"stderr output")
     processor.handle_backend_event(
@@ -507,7 +508,6 @@ def test_output_processor_prints_error_hint_when_command_fails(capsys):
     )
 
     assert rendered == b"stderr output"
-    assert processor._waiting_for_result is False
     pty_manager.consume_error.assert_called_once_with()
     assert t("shell.error_correction.press_semicolon_hint") in capsys.readouterr().out
 
@@ -1002,7 +1002,7 @@ def test_shell_submit_backend_command_registers_user_seq():
     assert shell._pending_command_seq == 3
     assert shell._pending_command_text == "pwd"
     assert shell._shell_phase == "command_submitted"
-    shell._output_processor.set_waiting_for_result.assert_called_once_with(True, "pwd")
+    shell._output_processor.prepare_user_command_echo.assert_called_once_with("pwd", 3)
     shell._pty_manager.send_command.assert_called_once_with(
         "pwd", command_seq=3, source="user"
     )

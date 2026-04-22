@@ -6,8 +6,15 @@ from aish.terminal.pty.command_state import CommandState
 from aish.terminal.pty.control_protocol import BackendControlEvent
 
 
-def _command_started(command: str, command_seq: int | None = None) -> BackendControlEvent:
+def _command_started(
+    command: str,
+    command_seq: int | None = None,
+    *,
+    submission_id: str | None = None,
+) -> BackendControlEvent:
     payload = {"command": command}
+    if submission_id is not None:
+        payload["submission_id"] = submission_id
     if command_seq is not None:
         payload["command_seq"] = command_seq
     return BackendControlEvent(version=1, type="command_started", ts=1, payload=payload)
@@ -18,8 +25,11 @@ def _prompt_ready(
     command_seq: int | None = None,
     *,
     interrupted: bool = False,
+    submission_id: str | None = None,
 ) -> BackendControlEvent:
     payload = {"exit_code": exit_code, "interrupted": interrupted}
+    if submission_id is not None:
+        payload["submission_id"] = submission_id
     if command_seq is not None:
         payload["command_seq"] = command_seq
     return BackendControlEvent(version=1, type="prompt_ready", ts=2, payload=payload)
@@ -51,9 +61,11 @@ def test_register_command_returns_pending_submission_metadata():
     submission = tracker.register_backend_command("echo hello", command_seq=-1)
 
     assert submission is not None
+    assert submission.submission_id.startswith("subm_")
     assert submission.command == "echo hello"
     assert submission.source == "backend"
     assert submission.command_seq == -1
+    assert submission.status == "submitted"
     assert tracker.pending_submission is submission
     assert tracker.pending_submission_count == 1
     assert tracker.pending_submissions == (submission,)
@@ -71,6 +83,9 @@ def test_pending_submission_is_cleared_after_prompt_ready():
     assert tracker.has_pending_submission(-1) is True
 
     tracker.handle_backend_event(_command_started("echo hello", command_seq=-1))
+    pending = tracker.pending_submission
+    assert pending is not None
+    assert pending.status == "started"
     tracker.handle_backend_event(_prompt_ready(0, command_seq=-1))
 
     assert tracker.pending_submission is None
@@ -93,8 +108,33 @@ def test_prompt_ready_without_command_seq_uses_pending_submission_seq():
     assert result is not None
     assert result.command == "echo hello"
     assert result.command_seq == -1
+    assert result.submission_id is not None
     assert tracker.pending_submission is None
     assert tracker.pending_submission_count == 0
+
+
+@pytest.mark.timeout(5)
+def test_prompt_ready_without_matching_submission_records_protocol_issue():
+    tracker = CommandState()
+
+    result = tracker.handle_backend_event(_prompt_ready(0, command_seq=99))
+
+    assert result is None
+    issues = tracker.consume_protocol_issues()
+    assert len(issues) == 1
+    assert "prompt_ready missing matching submission" in issues[0]
+    assert tracker.consume_protocol_issues() == ()
+
+
+@pytest.mark.timeout(5)
+def test_command_started_without_matching_submission_records_protocol_issue():
+    tracker = CommandState()
+
+    tracker.handle_backend_event(_command_started("echo unexpected", command_seq=42))
+
+    issues = tracker.consume_protocol_issues()
+    assert len(issues) == 1
+    assert "command_started missing matching submission" in issues[0]
 
 
 @pytest.mark.timeout(5)
@@ -113,6 +153,54 @@ def test_command_started_keeps_original_text_and_tracks_observed_command():
     assert result is not None
     assert result.command == "ls"
     assert result.command_seq == 7
+
+
+@pytest.mark.timeout(5)
+def test_submission_id_matches_correct_pending_submission_before_active_fallback():
+    tracker = CommandState()
+
+    first = tracker.register_backend_command("echo one", command_seq=-1)
+    second = tracker.register_backend_command("echo two", command_seq=-2)
+
+    assert first is not None
+    assert second is not None
+
+    tracker.handle_backend_event(
+        _command_started(
+            "echo one",
+            submission_id=first.submission_id,
+        )
+    )
+    result = tracker.handle_backend_event(
+        _prompt_ready(
+            0,
+            submission_id=first.submission_id,
+        )
+    )
+
+    assert result is not None
+    assert result.command == "echo one"
+    assert result.command_seq == -1
+    assert result.submission_id == first.submission_id
+    assert tracker.get_pending_submission(-1) is None
+    assert tracker.get_pending_submission(-2) is second
+    assert second.status == "submitted"
+
+
+@pytest.mark.timeout(5)
+def test_missing_identifiers_do_not_guess_when_multiple_pending_submissions_exist():
+    tracker = CommandState()
+
+    first = tracker.register_backend_command("echo one", command_seq=-1)
+    second = tracker.register_backend_command("echo two", command_seq=-2)
+
+    result = tracker.handle_backend_event(_prompt_ready(0))
+
+    assert first is not None
+    assert second is not None
+    assert result is None
+    assert tracker.get_pending_submission(-1) is first
+    assert tracker.get_pending_submission(-2) is second
 
 
 @pytest.mark.timeout(5)

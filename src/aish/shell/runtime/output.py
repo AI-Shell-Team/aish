@@ -29,7 +29,6 @@ class OutputProcessor:
         shell: Optional["PTYAIShell"] = None,
     ):
         self.pty_manager = pty_manager
-        self._waiting_for_result = False
         self._filter_exit_echo = False
         self.shell = shell
         self._current_command: str = ""
@@ -42,20 +41,9 @@ class OutputProcessor:
         #   user-typed vs backend commands and only expose failures once.
         self._suppress_error_hint: bool = False
 
-    def set_waiting_for_result(self, waiting: bool, command: str = "") -> None:
-        """Set whether we're waiting for a command result."""
-        self._waiting_for_result = waiting
-        self._suppress_error_hint = False
-        if waiting:
-            self._current_command = command
-
     def suppress_next_error_hint(self) -> None:
         """Suppress the next error correction hint (e.g., after Ctrl+C for exit)."""
         self._suppress_error_hint = True
-
-    def set_current_command(self, command: str) -> None:
-        """Set the current command being executed."""
-        self._current_command = command
 
     def prepare_user_command_echo(self, command: str, command_seq: int | None) -> None:
         """Suppress the first bash echo for a user-submitted command."""
@@ -143,7 +131,6 @@ class OutputProcessor:
         if event.type != "prompt_ready":
             return
 
-        self._waiting_for_result = False
         self._clear_pending_user_echo()
         if result is None:
             return

@@ -1721,8 +1721,6 @@ class PTYAIShell:
             if is_exit_cmd:
                 self._output_processor.set_filter_exit_echo(True)
                 self._user_requested_exit = True
-            else:
-                self._output_processor.set_waiting_for_result(True, command)
             self._output_processor.prepare_user_command_echo(backend_command, seq)
 
         self._pty_manager.send_command(backend_command, command_seq=seq, source="user")
@@ -1753,7 +1751,8 @@ class PTYAIShell:
         resolved_command_seq = None
         if self._pty_manager is not None and event.type in {"command_started", "prompt_ready"}:
             resolved_command_seq = self._pty_manager.command_state.resolve_command_seq(
-                event.payload.get("command_seq")
+                event.payload.get("command_seq"),
+                event.payload.get("submission_id"),
             )
 
         result = None
