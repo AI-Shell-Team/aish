@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-04-22
+
+### Changed
+
+- Changed `aish update` stable release detection to read CDN-hosted latest release metadata, and switched archive downloads to the CDN bundle path while preserving `AISH_DOWNLOAD_BASE_URL`, `AISH_LATEST_URL`, and legacy `AISH_REPO_URL` overrides.
+
+### Fixed
+
+- Fixed shared PTY commands so they no longer time out after 30 seconds unless a caller explicitly requests a timeout.
+- Fixed PTY command lifecycle tracking by moving command metadata off the shell input path onto a dedicated metadata pipe, preventing metadata leaks and incorrect backend event binding.
+- Fixed PyInstaller subprocess launches by sanitizing loader environment variables before spawning child processes.
+
 ## [0.2.2] - 2026-04-16
 
 ### Added

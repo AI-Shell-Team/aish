@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 # Avoid importing heavy modules (and any side-effects) at package import time.
 # This matters for system services like aish-sandbox, which only need aish.sandboxd.
