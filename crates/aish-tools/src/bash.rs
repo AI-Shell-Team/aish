@@ -12,6 +12,14 @@ const CAPTURE_KEEP_BYTES: usize = 10 * 1024 * 1024; // 10MB
 /// Default timeout for command execution in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+/// Check if a command likely needs interactive stdin (e.g. sudo password prompt).
+/// False positives (e.g. `grep sudo file`) are harmless — interactive mode just
+/// means output also goes to the terminal, it's still captured for the LLM.
+fn needs_interactive(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    lower.contains("sudo") || lower.starts_with("su ")
+}
+
 /// Tool for executing bash commands via PTY.
 pub struct BashTool {}
 
@@ -71,8 +79,13 @@ impl Tool for BashTool {
             .and_then(|t| t.as_u64())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        // Use large keep_bytes so the PTY executor captures full output in memory.
-        let executor = PtyExecutor::new_silent(CAPTURE_KEEP_BYTES);
+        // Use interactive executor (stdin forwarding + terminal display) for
+        // commands that may prompt for a password. Otherwise capture silently.
+        let executor = if needs_interactive(command) {
+            PtyExecutor::new(CAPTURE_KEEP_BYTES)
+        } else {
+            PtyExecutor::new_silent(CAPTURE_KEEP_BYTES)
+        };
         let cancel_token = Arc::new(CancelToken::new());
 
         // Spawn a thread that cancels after timeout.
@@ -109,8 +122,12 @@ impl Tool for BashTool {
                     offload_result.offload_payload.as_ref(),
                 );
 
+                // Always report ok=true when PTY execution succeeds.
+                // Non-zero exit codes are normal command outcomes, not tool
+                // failures — the LLM sees <return_code> and decides what to do.
+                // Returning ok=false triggers a pointless retry of the same command.
                 ToolResult {
-                    ok: result.exit_code == 0,
+                    ok: true,
                     output,
                     meta: offload_result
                         .offload_payload
@@ -134,6 +151,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_needs_interactive_sudo() {
+        assert!(needs_interactive("sudo apt update"));
+        assert!(needs_interactive("echo 3 | sudo tee /file"));
+        assert!(needs_interactive("sudo -u root ls"));
+        assert!(needs_interactive("w;sudo ip a"));
+        assert!(needs_interactive("sync&&sudo tee /file"));
+    }
+
+    #[test]
+    fn test_needs_interactive_su() {
+        assert!(needs_interactive("su -"));
+        assert!(needs_interactive("su -c 'whoami'"));
+    }
+
+    #[test]
+    fn test_needs_interactive_no() {
+        assert!(!needs_interactive("ls -la"));
+        assert!(!needs_interactive("echo hello"));
+    }
+
+    #[test]
     #[ignore] // PTY output not reliable in CI environments
     fn test_bash_tool_echo() {
         let tool = BashTool::new();
@@ -154,7 +192,8 @@ mod tests {
         let result = tool.execute(serde_json::json!({
             "command": "exit 42"
         }));
-        assert!(!result.ok, "non-zero exit should report failure");
+        // Tool succeeds even with non-zero exit — LLM reads <return_code> to decide.
+        assert!(result.ok, "tool execution should succeed regardless of exit code");
         assert!(
             result.output.contains("<return_code>\n42\n</return_code>"),
             "output should mention return code 42, got: {}",
@@ -169,7 +208,7 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         }));
-        // After timeout + cancellation, exit code should be non-zero.
-        assert!(!result.ok, "timed-out command should report failure");
+        // Tool succeeds even when command is killed by timeout.
+        assert!(result.ok, "tool execution should succeed even after timeout kill");
     }
 }
