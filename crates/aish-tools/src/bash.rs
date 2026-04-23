@@ -17,7 +17,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// means output also goes to the terminal, it's still captured for the LLM.
 fn needs_interactive(command: &str) -> bool {
     let lower = command.to_lowercase();
-    lower.contains("sudo") || lower.starts_with("su ")
+    lower.contains("sudo") || lower.contains(" su ") || lower.starts_with("su ")
 }
 
 /// Tool for executing bash commands via PTY.
@@ -163,6 +163,9 @@ mod tests {
     fn test_needs_interactive_su() {
         assert!(needs_interactive("su -"));
         assert!(needs_interactive("su -c 'whoami'"));
+        assert!(needs_interactive("cmd && su -"));
+        assert!(needs_interactive("cmd || su -"));
+        assert!(needs_interactive("cmd | su -"));
     }
 
     #[test]
@@ -193,7 +196,10 @@ mod tests {
             "command": "exit 42"
         }));
         // Tool succeeds even with non-zero exit — LLM reads <return_code> to decide.
-        assert!(result.ok, "tool execution should succeed regardless of exit code");
+        assert!(
+            result.ok,
+            "tool execution should succeed regardless of exit code"
+        );
         assert!(
             result.output.contains("<return_code>\n42\n</return_code>"),
             "output should mention return code 42, got: {}",
@@ -209,6 +215,9 @@ mod tests {
             "timeout": 1
         }));
         // Tool succeeds even when command is killed by timeout.
-        assert!(result.ok, "tool execution should succeed even after timeout kill");
+        assert!(
+            result.ok,
+            "tool execution should succeed even after timeout kill"
+        );
     }
 }
