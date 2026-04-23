@@ -267,6 +267,7 @@ def test_output_processor_filters_user_command_echo_before_command_output():
 def test_setup_pty_reuses_manager_startup_handshake(monkeypatch, tmp_path):
     frontend_cwd = str(tmp_path / "frontend")
     backend_cwd = str(tmp_path / "backend")
+    sleep_mock = Mock()
 
     class _StartedPTYManager:
         def __init__(self, *, rows: int, cols: int, cwd: str, use_output_thread: bool):
@@ -285,7 +286,7 @@ def test_setup_pty_reuses_manager_startup_handshake(monkeypatch, tmp_path):
 
     monkeypatch.setattr("aish.shell.runtime.app.PTYManager", _StartedPTYManager)
     monkeypatch.setattr("aish.shell.runtime.app.shutil.get_terminal_size", _terminal_size)
-    monkeypatch.setattr("aish.shell.runtime.app.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("aish.shell.runtime.app.time.sleep", sleep_mock)
     monkeypatch.setattr("aish.shell.runtime.app.get_current_env_info", lambda: "env-info")
     monkeypatch.setattr("aish.shell.runtime.app.os.chdir", lambda _cwd: None)
 
@@ -301,6 +302,7 @@ def test_setup_pty_reuses_manager_startup_handshake(monkeypatch, tmp_path):
     assert shell.current_env_info == "env-info"
     assert shell._backend_session_ready is True
     assert shell._shell_phase == "editing"
+    sleep_mock.assert_not_called()
 
 
 def test_output_processor_filters_split_user_command_echo_across_chunks():
