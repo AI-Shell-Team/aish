@@ -74,6 +74,9 @@ class PTYManager:
         self._completed_results: list[CommandResult] = []
         self._completion_condition = threading.Condition()
         self._next_backend_command_seq = -1
+        self._startup_session_ready = False
+        self._startup_prompt_ready = False
+        self._startup_cwd: Optional[str] = None
 
         # Lock for thread-safe operations
         self._lock = threading.RLock()
@@ -111,6 +114,26 @@ class PTYManager:
     def control_fd(self) -> Optional[int]:
         """Get the read end of the backend control channel."""
         return self._control_fd
+
+    @property
+    def startup_session_ready(self) -> bool:
+        """Whether the startup handshake emitted session_ready."""
+        return self._startup_session_ready
+
+    @property
+    def startup_prompt_ready(self) -> bool:
+        """Whether the startup handshake emitted an initial prompt_ready."""
+        return self._startup_prompt_ready
+
+    @property
+    def startup_ready(self) -> bool:
+        """Whether startup reached an interactive prompt before start() returned."""
+        return self._startup_session_ready and self._startup_prompt_ready
+
+    @property
+    def startup_cwd(self) -> Optional[str]:
+        """Initial cwd reported by the backend startup handshake."""
+        return self._startup_cwd
 
     def set_output_callback(self, callback: Callable[[bytes], None]) -> None:
         """Set callback for PTY output."""
@@ -212,8 +235,8 @@ class PTYManager:
             return
 
         start = time.monotonic()
-        saw_session_ready = False
-        saw_startup_prompt_ready = False
+        saw_session_ready = self._startup_session_ready
+        saw_startup_prompt_ready = self._startup_prompt_ready
         quiet_since: float | None = None
 
         while time.monotonic() - start < timeout:
@@ -234,12 +257,24 @@ class PTYManager:
                     break
                 if not data:
                     continue
-                events = self._dispatch_control_chunk(data)
+                events, errors = self.decode_control_events(data)
+                if errors:
+                    self._protocol_issues.extend(errors)
+                    self._protocol_issues = self._protocol_issues[-50:]
                 for event in events:
                     if event.type == "session_ready":
+                        ps2 = event.payload.get("ps2")
+                        if isinstance(ps2, str) and ps2:
+                            self._continuation_prompt = ps2
+                        cwd = event.payload.get("cwd")
+                        if isinstance(cwd, str) and cwd:
+                            self._startup_cwd = cwd
                         saw_session_ready = True
                     elif event.type == "prompt_ready" and event.payload.get("command_seq") in {None, "", "null"}:
                         saw_startup_prompt_ready = True
+
+        self._startup_session_ready = saw_session_ready
+        self._startup_prompt_ready = saw_startup_prompt_ready
 
     def _output_loop(self) -> None:
         """Background thread to read and forward PTY output."""

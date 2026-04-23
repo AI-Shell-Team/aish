@@ -1123,7 +1123,13 @@ class PTYAIShell:
             rows=rows, cols=cols, cwd=self._current_cwd, use_output_thread=False,
         )
         self._pty_manager.start()
-        time.sleep(0.2)
+        if self._pty_manager.startup_cwd:
+            self._sync_backend_cwd(self._pty_manager.startup_cwd)
+        if self._pty_manager.startup_ready:
+            self._backend_session_ready = True
+            self._shell_phase = "editing"
+        else:
+            time.sleep(0.2)
 
     def _setup_components(self) -> None:
         self.user_interaction._original_termios = self._original_termios

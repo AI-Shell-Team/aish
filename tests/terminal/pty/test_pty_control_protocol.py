@@ -183,6 +183,12 @@ def test_start_drains_startup_prompt_ready_in_poll_mode():
     try:
         manager.start()
 
+        assert manager.startup_session_ready is True
+        assert manager.startup_prompt_ready is True
+        assert manager.startup_ready is True
+        assert manager.startup_cwd
+        assert manager.consume_protocol_issues() == ()
+
         ready, _, _ = select.select([manager.control_fd], [], [], 0.1)
         assert ready == []
 

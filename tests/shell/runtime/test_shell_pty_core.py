@@ -38,6 +38,8 @@ class _FakePTYManager:
         self._completion_condition = threading.Condition()
         self._exit_code_callback = None
         self._error_info = error_info
+        self.startup_ready = False
+        self.startup_cwd = None
         self.last_command = last_command
         self.last_exit_code = last_exit_code
         self.register_user_command = Mock(side_effect=self._remember_user_command)
@@ -260,6 +262,39 @@ def test_output_processor_filters_user_command_echo_before_command_output():
     rendered = processor.process(b"pwd\r\n/tmp/project\r\n")
 
     assert rendered == b"/tmp/project\r\n"
+
+
+def test_setup_pty_reuses_manager_startup_handshake(monkeypatch):
+    class _StartedPTYManager:
+        def __init__(self, *, rows: int, cols: int, cwd: str, use_output_thread: bool):
+            assert rows == 24
+            assert cols == 80
+            assert cwd == "/tmp/frontend"
+            assert use_output_thread is False
+            self.startup_ready = True
+            self.startup_cwd = "/tmp/backend"
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr("aish.shell.runtime.app.PTYManager", _StartedPTYManager)
+    monkeypatch.setattr("aish.shell.runtime.app.shutil.get_terminal_size", lambda: os.terminal_size((80, 24)))
+    monkeypatch.setattr("aish.shell.runtime.app.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("aish.shell.runtime.app.get_current_env_info", lambda: "env-info")
+    monkeypatch.setattr("aish.shell.runtime.app.os.chdir", lambda _cwd: None)
+
+    shell = object.__new__(PTYAIShell)
+    shell._current_cwd = "/tmp/frontend"
+    shell._backend_session_ready = False
+    shell._shell_phase = "booting"
+
+    PTYAIShell._setup_pty(shell)
+
+    assert shell._pty_manager is not None
+    assert shell._current_cwd == "/tmp/backend"
+    assert shell.current_env_info == "env-info"
+    assert shell._backend_session_ready is True
+    assert shell._shell_phase == "editing"
 
 
 def test_output_processor_filters_split_user_command_echo_across_chunks():
