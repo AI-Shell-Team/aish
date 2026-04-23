@@ -264,34 +264,40 @@ def test_output_processor_filters_user_command_echo_before_command_output():
     assert rendered == b"/tmp/project\r\n"
 
 
-def test_setup_pty_reuses_manager_startup_handshake(monkeypatch):
+def test_setup_pty_reuses_manager_startup_handshake(monkeypatch, tmp_path):
+    frontend_cwd = str(tmp_path / "frontend")
+    backend_cwd = str(tmp_path / "backend")
+
     class _StartedPTYManager:
         def __init__(self, *, rows: int, cols: int, cwd: str, use_output_thread: bool):
             assert rows == 24
             assert cols == 80
-            assert cwd == "/tmp/frontend"
+            assert cwd == frontend_cwd
             assert use_output_thread is False
             self.startup_ready = True
-            self.startup_cwd = "/tmp/backend"
+            self.startup_cwd = backend_cwd
 
         def start(self) -> None:
             return None
 
+    def _terminal_size(*_args, **_kwargs):
+        return os.terminal_size((80, 24))
+
     monkeypatch.setattr("aish.shell.runtime.app.PTYManager", _StartedPTYManager)
-    monkeypatch.setattr("aish.shell.runtime.app.shutil.get_terminal_size", lambda: os.terminal_size((80, 24)))
+    monkeypatch.setattr("aish.shell.runtime.app.shutil.get_terminal_size", _terminal_size)
     monkeypatch.setattr("aish.shell.runtime.app.time.sleep", lambda _seconds: None)
     monkeypatch.setattr("aish.shell.runtime.app.get_current_env_info", lambda: "env-info")
     monkeypatch.setattr("aish.shell.runtime.app.os.chdir", lambda _cwd: None)
 
     shell = object.__new__(PTYAIShell)
-    shell._current_cwd = "/tmp/frontend"
+    shell._current_cwd = frontend_cwd
     shell._backend_session_ready = False
     shell._shell_phase = "booting"
 
     PTYAIShell._setup_pty(shell)
 
     assert shell._pty_manager is not None
-    assert shell._current_cwd == "/tmp/backend"
+    assert shell._current_cwd == backend_cwd
     assert shell.current_env_info == "env-info"
     assert shell._backend_session_ready is True
     assert shell._shell_phase == "editing"

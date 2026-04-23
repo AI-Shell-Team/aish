@@ -149,6 +149,10 @@ class PTYManager:
         if self._running:
             return
 
+        self._startup_session_ready = False
+        self._startup_prompt_ready = False
+        self._startup_cwd = None
+
         self._control_fd, self._control_write_fd = os.pipe()
         os.set_inheritable(self._control_write_fd, True)
         self._metadata_read_fd, self._metadata_write_fd = os.pipe()
