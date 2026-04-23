@@ -305,6 +305,47 @@ def test_setup_pty_reuses_manager_startup_handshake(monkeypatch, tmp_path):
     sleep_mock.assert_not_called()
 
 
+def test_setup_pty_preserves_startup_session_ready_without_prompt(monkeypatch, tmp_path):
+    frontend_cwd = str(tmp_path / "frontend")
+    backend_cwd = str(tmp_path / "backend")
+    sleep_mock = Mock()
+
+    class _StartedPTYManager:
+        def __init__(self, *, rows: int, cols: int, cwd: str, use_output_thread: bool):
+            assert rows == 24
+            assert cols == 80
+            assert cwd == frontend_cwd
+            assert use_output_thread is False
+            self.startup_session_ready = True
+            self.startup_ready = False
+            self.startup_cwd = backend_cwd
+
+        def start(self) -> None:
+            return None
+
+    def _terminal_size(*_args, **_kwargs):
+        return os.terminal_size((80, 24))
+
+    monkeypatch.setattr("aish.shell.runtime.app.PTYManager", _StartedPTYManager)
+    monkeypatch.setattr("aish.shell.runtime.app.shutil.get_terminal_size", _terminal_size)
+    monkeypatch.setattr("aish.shell.runtime.app.time.sleep", sleep_mock)
+    monkeypatch.setattr("aish.shell.runtime.app.get_current_env_info", lambda: "env-info")
+    monkeypatch.setattr("aish.shell.runtime.app.os.chdir", lambda _cwd: None)
+
+    shell = object.__new__(PTYAIShell)
+    shell._current_cwd = frontend_cwd
+    shell._backend_session_ready = False
+    shell._shell_phase = "booting"
+
+    PTYAIShell._setup_pty(shell)
+
+    assert shell._pty_manager is not None
+    assert shell._current_cwd == backend_cwd
+    assert shell._backend_session_ready is True
+    assert shell._shell_phase == "booting"
+    sleep_mock.assert_called_once_with(0.2)
+
+
 def test_output_processor_filters_split_user_command_echo_across_chunks():
     processor = OutputProcessor(_FakePTYManager())
     processor.prepare_user_command_echo("pwd", 5)

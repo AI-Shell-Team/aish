@@ -1129,8 +1129,11 @@ class PTYAIShell:
         self._pty_manager.start()
         if self._pty_manager.startup_cwd:
             self._sync_backend_cwd(self._pty_manager.startup_cwd)
+        self._backend_session_ready = bool(
+            getattr(self._pty_manager, "startup_session_ready", False)
+            or getattr(self._pty_manager, "startup_ready", False)
+        )
         if self._pty_manager.startup_ready:
-            self._backend_session_ready = True
             self._shell_phase = "editing"
         else:
             time.sleep(0.2)
