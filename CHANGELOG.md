@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-04-23
+
+### Changed
+
+- Changed stable release publishing so tagged releases now keep GitHub Release assets while also publishing versioned Linux bundles and latest-version metadata to the CDN download paths used by the installer and stable self-update.
+- Changed shell startup to reuse the PTY startup handshake, reducing duplicate initialization work and keeping startup state tracking more consistent.
+
+### Fixed
+
+- Fixed final AI answer rendering so completed responses are shown once and no longer leak startup or timing state into the visible shell session.
+
 ## [0.2.3] - 2026-04-22
 
 ### Changed

@@ -1,6 +1,6 @@
 [project]
 name = "aish"
-version = "0.2.3"
+version = "0.2.4"
 description = "AI Shell - A shell with built-in LLM capabilities"
 readme = "README.md"
 authors = [{ name = "Sian Cao", email = "yinshuiboy@gmail.com" }]
