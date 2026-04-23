@@ -7,13 +7,14 @@ This module implements the test requirements from Step 6:
 3. End-to-end: run a dummy query via outer LLMSession; verify nested agent executes and returns
 """
 
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from aish.config import ConfigModel
 from aish.llm.agents import SystemDiagnoseAgent
-from aish.llm import LLMSession
+from aish.llm import LLMEvent, LLMEventType, LLMSession
 from aish.skills import SkillManager
 from aish.tools.code_exec import BashTool
 from aish.tools.final_answer import FinalAnswer
@@ -218,6 +219,73 @@ class TestSystemDiagnoseAgentMocked:
         result = agent(query="Test query")
 
         assert "Error during diagnosis: LLM API error" in result
+
+    @patch("aish.llm.LLMSession")
+    def test_system_diagnose_agent_filters_nested_content_and_lifecycle_events(
+        self, mock_llm_session_class
+    ):
+        config = ConfigModel(
+            model="openrouter/moonshotai/kimi-k2", api_base=None, api_key="sk-test-key"
+        )
+        parent_events = []
+
+        def parent_event_callback(event):
+            parent_events.append(event)
+
+        agent = SystemDiagnoseAgent(
+            config=config,
+            model_id="openrouter/moonshotai/kimi-k2",
+            api_base=None,
+            api_key="sk-test-key",
+            skill_manager=make_skill_manager(),
+            parent_event_callback=parent_event_callback,
+        )
+
+        mock_subsession = AsyncMock()
+        mock_llm_session_class.create_subsession.return_value = mock_subsession
+
+        async def fake_process_input(*args, **kwargs):
+            _ = (args, kwargs)
+            callback = mock_subsession.event_callback
+            callback(
+                LLMEvent(
+                    event_type=LLMEventType.OP_START,
+                    data={"turn_id": "child-turn", "operation": "process_input"},
+                    timestamp=time.time(),
+                )
+            )
+            callback(
+                LLMEvent(
+                    event_type=LLMEventType.CONTENT_DELTA,
+                    data={"delta": "nested content", "is_final": True},
+                    timestamp=time.time(),
+                )
+            )
+            callback(
+                LLMEvent(
+                    event_type=LLMEventType.TOOL_EXECUTION_END,
+                    data={"tool_name": "final_answer", "result": "final diagnosis"},
+                    timestamp=time.time(),
+                )
+            )
+            callback(
+                LLMEvent(
+                    event_type=LLMEventType.OP_END,
+                    data={"turn_id": "child-turn", "result": "final diagnosis"},
+                    timestamp=time.time(),
+                )
+            )
+            return "final diagnosis"
+
+        mock_subsession.process_input = AsyncMock(side_effect=fake_process_input)
+
+        result = agent(query="Check memory")
+
+        assert result == "final diagnosis"
+        assert [event.event_type for event in parent_events] == [
+            LLMEventType.TOOL_EXECUTION_END,
+        ]
+        assert parent_events[0].data.get("source") == "system_diagnose_agent"
 
 
 class TestSystemDiagnoseAgentEndToEnd:

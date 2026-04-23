@@ -1369,6 +1369,103 @@ def test_ttft_timing_records_on_first_content_delta():
     assert shell._ttft_recorded is True
 
 
+def test_non_final_content_delta_does_not_mark_content_streamed():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+    shell._content_streamed_to_terminal = False
+    shell._thinking_start_time = 0.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    PTYAIShell.handle_content_delta(
+        shell,
+        Mock(data={"delta": "Working on it", "is_final": False}),
+    )
+
+    assert shell._content_streamed_to_terminal is False
+    shell.console.print.assert_called_once()
+
+
+def test_final_content_delta_marks_content_streamed():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+    shell._content_streamed_to_terminal = False
+    shell._thinking_start_time = 0.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    PTYAIShell.handle_content_delta(
+        shell,
+        Mock(data={"delta": "Final answer", "is_final": True}),
+    )
+
+    assert shell._content_streamed_to_terminal is True
+    shell.console.print.assert_called_once()
+
+
+def test_non_final_content_delta_does_not_record_ttft():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+    shell._content_streamed_to_terminal = False
+    shell._thinking_start_time = 1.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    PTYAIShell.handle_content_delta(
+        shell,
+        Mock(data={"delta": "Preview before tool", "is_final": False}),
+    )
+
+    assert shell._ttft == 0.0
+    assert shell._ttft_recorded is False
+
+
+def test_op_end_does_not_render_ttft_for_non_final_preview_only():
+    shell = object.__new__(PTYAIShell)
+    shell.console = Mock()
+    shell._stop_animation = Mock()
+    shell._reset_reasoning_state = Mock()
+    shell.current_live = None
+    shell._at_line_start = True
+    shell._last_streaming_accumulated = ""
+    shell._content_preview_active = False
+    shell._content_streamed_to_terminal = False
+    shell._timing_active = True
+    shell._thinking_start_time = 1.0
+    shell._ttft = 0.0
+    shell._ttft_recorded = False
+
+    PTYAIShell.handle_content_delta(
+        shell,
+        Mock(data={"delta": "Preview before tool", "is_final": False}),
+    )
+    PTYAIShell.handle_op_end(shell, Mock())
+
+    timing_calls = [
+        call for call in shell.console.print.call_args_list
+        if "思考:" in str(call)
+    ]
+    assert timing_calls == []
+
+
 def test_ttft_timing_preserves_state_across_generations(monkeypatch):
     """Test that timing state is not reset between generations in multi-generation scenarios."""
     import time

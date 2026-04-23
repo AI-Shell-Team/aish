@@ -202,8 +202,17 @@ When ready, use the final_answer tool to deliver your final diagnostic conclusio
                         "Cancelled by parent session",
                     )
 
+            forwarded_event_types = {
+                LLMEventType.TOOL_EXECUTION_START,
+                LLMEventType.TOOL_EXECUTION_END,
+                LLMEventType.ERROR,
+                LLMEventType.CANCELLED,
+                LLMEventType.TOOL_CONFIRMATION_REQUIRED,
+                LLMEventType.INTERACTION_REQUIRED,
+            }
+
             # Forward event to parent callback if available
-            if self.parent_event_callback:
+            if self.parent_event_callback and event.event_type in forwarded_event_types:
                 # Add source information to the event data
                 modified_data = event.data.copy() if event.data else {}
                 modified_data["source"] = "system_diagnose_agent"

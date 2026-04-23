@@ -594,7 +594,9 @@ class PTYAIShell:
             self.current_live.stop()
             self.current_live = None
 
-        if not self._ttft_recorded and self._thinking_start_time > 0:
+        is_final = bool(event.data.get("is_final", True))
+
+        if is_final and not self._ttft_recorded and self._thinking_start_time > 0:
             self._ttft = time.monotonic() - self._thinking_start_time
             self._ttft_recorded = True
 
@@ -605,8 +607,10 @@ class PTYAIShell:
 
         if not self._content_preview_active:
             self._content_preview_active = True
-            self._content_streamed_to_terminal = True
             content = f"🤖 {content}"
+
+        if is_final:
+            self._content_streamed_to_terminal = True
 
         self.console.print(Text(content, style="bold grey50"), end="")
         self._at_line_start = False
