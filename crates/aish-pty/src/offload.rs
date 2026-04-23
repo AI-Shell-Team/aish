@@ -602,6 +602,10 @@ impl BashOutputOffload {
     }
 
     /// Render bash output, offloading to disk if thresholds exceeded.
+    /// Returns an AI-friendly offload payload matching Python's format:
+    ///   - below threshold: `{"status": "inline", "reason": "below_threshold"}`
+    ///   - offloaded: `{"status": "offloaded", "stdout_path": "...", "stderr_path": "...", "hint": "..."}`
+    ///   - failed: `{"status": "failed", "hint": "Output shown as preview only"}`
     pub fn render(
         &self,
         stdout: &str,
@@ -616,11 +620,15 @@ impl BashOutputOffload {
                 || stderr_bytes_len > self.settings.threshold_bytes);
 
         if !should_offload {
+            // Below threshold: return full output with inline status
             return BashOffloadResult {
                 stdout_text: stdout.to_string(),
                 stderr_text: stderr.to_string(),
                 offloaded: false,
-                offload_payload: None,
+                offload_payload: Some(serde_json::json!({
+                    "status": "inline",
+                    "reason": "below_threshold"
+                })),
             };
         }
 
@@ -634,11 +642,20 @@ impl BashOutputOffload {
         // Create directory.
         if let Err(e) = fs::create_dir_all(&offload_dir) {
             tracing::warn!("failed to create offload dir: {e}");
+            // Offload failed: return preview with failed status
+            let (stdout_preview, _) =
+                truncate_utf8_safe(stdout.as_bytes(), self.settings.preview_bytes);
+            let (stderr_preview, _) =
+                truncate_utf8_safe(stderr.as_bytes(), self.settings.preview_bytes);
             return BashOffloadResult {
-                stdout_text: stdout.to_string(),
-                stderr_text: stderr.to_string(),
+                stdout_text: String::from_utf8_lossy(&stdout_preview).to_string(),
+                stderr_text: String::from_utf8_lossy(&stderr_preview).to_string(),
                 offloaded: false,
-                offload_payload: None,
+                offload_payload: Some(serde_json::json!({
+                    "status": "failed",
+                    "error": e.to_string(),
+                    "hint": "Output shown as preview only"
+                })),
             };
         }
 
@@ -674,7 +691,7 @@ impl BashOutputOffload {
             tracing::warn!("failed to write stderr offload: {e}");
         }
 
-        // Write metadata.
+        // Write internal metadata to disk (detailed, for debugging).
         let command_hash = if command.is_empty() {
             None
         } else {
@@ -719,11 +736,23 @@ impl BashOutputOffload {
             let _ = fs::set_permissions(p, file_perm.clone());
         }
 
+        // Build AI-friendly offload payload (matching Python's format).
+        let stdout_path_str = stdout_path.to_str().unwrap_or("").to_string();
+        let stderr_path_str = stderr_path.to_str().unwrap_or("").to_string();
+        let meta_path_str = meta_path.to_str().unwrap_or("").to_string();
+        let ai_payload = serde_json::json!({
+            "status": "offloaded",
+            "stdout_path": stdout_path_str,
+            "stderr_path": stderr_path_str,
+            "meta_path": meta_path_str,
+            "hint": "Read offload paths for full output"
+        });
+
         BashOffloadResult {
             stdout_text: stdout_preview_str,
             stderr_text: stderr_preview_str,
             offloaded: true,
-            offload_payload: Some(meta),
+            offload_payload: Some(ai_payload),
         }
     }
 }
@@ -1088,7 +1117,10 @@ mod tests {
         assert!(!result.offloaded);
         assert_eq!(result.stdout_text, "small output");
         assert_eq!(result.stderr_text, "small error");
-        assert!(result.offload_payload.is_none());
+        // Below threshold returns inline status
+        let payload = result.offload_payload.unwrap();
+        assert_eq!(payload["status"], "inline");
+        assert_eq!(payload["reason"], "below_threshold");
     }
 
     #[test]
@@ -1109,13 +1141,13 @@ mod tests {
         assert_eq!(result.stderr_text, "err");
         assert!(result.offload_payload.is_some());
 
-        // Verify files were written.
+        // Verify AI-friendly payload format (matching Python)
         let payload = result.offload_payload.unwrap();
-        assert_eq!(payload["version"], 1);
-        assert_eq!(payload["tool"], "bash_exec");
-        assert!(payload["uid"].is_string());
-        assert!(payload["exec_id"].is_string());
-        assert!(payload["command_sha256"].is_string());
+        assert_eq!(payload["status"], "offloaded");
+        assert!(payload["stdout_path"].is_string());
+        assert!(payload["stderr_path"].is_string());
+        assert!(payload["meta_path"].is_string());
+        assert_eq!(payload["hint"], "Read offload paths for full output");
     }
 
     #[test]

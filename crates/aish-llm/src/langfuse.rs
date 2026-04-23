@@ -2,14 +2,13 @@
 //!
 //! Provides best-effort tracing of LLM sessions, generation spans, and tool call spans.
 //! All methods are async and non-blocking — errors are logged but never propagated to callers.
+//!
+//! Internally delegates to the `langfuse-ergonomic` crate for HTTP communication with the
+//! Langfuse ingestion API.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use reqwest::Client;
-use serde::Serialize;
 use serde_json::json;
-use tokio::sync::Mutex;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -28,171 +27,163 @@ pub struct LangfuseConfig {
 
 impl LangfuseConfig {
     /// Build a LangfuseConfig from the optional fields in the application config.
-    /// Returns `None` if either key is missing (i.e. Langfuse is not configured).
+    ///
+    /// Environment variables `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and
+    /// `LANGFUSE_BASE_URL` take priority over the passed-in values.
+    ///
+    /// Returns `None` if both the public key and secret key are missing.
     pub fn from_parts(
         public_key: Option<&str>,
         secret_key: Option<&str>,
         host: Option<&str>,
     ) -> Option<Self> {
-        let public_key = public_key?.to_string();
-        let secret_key = secret_key?.to_string();
+        // Env vars take priority over passed-in config values
+        let public_key = std::env::var("LANGFUSE_PUBLIC_KEY")
+            .ok()
+            .or_else(|| public_key.map(|s| s.to_string()));
+        let secret_key = std::env::var("LANGFUSE_SECRET_KEY")
+            .ok()
+            .or_else(|| secret_key.map(|s| s.to_string()));
+
+        let public_key = public_key?;
+        let secret_key = secret_key?;
         if public_key.is_empty() || secret_key.is_empty() {
             return None;
         }
+
+        let base_url = std::env::var("LANGFUSE_BASE_URL")
+            .ok()
+            .or_else(|| host.map(|h| h.trim_end_matches('/').to_string()))
+            .unwrap_or_else(|| "https://cloud.langfuse.com".to_string());
+
         Some(Self {
             enabled: true,
             public_key,
             secret_key,
-            base_url: host
-                .map(|h| h.trim_end_matches('/').to_string())
-                .unwrap_or_else(|| "https://cloud.langfuse.com".to_string()),
+            base_url,
         })
     }
-}
-
-// ---------------------------------------------------------------------------
-// Ingestion event types (Langfuse Ingestion API)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TraceEvent {
-    id: String,
-    name: String,
-    metadata: serde_json::Value,
-    timestamp: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GenerationEvent {
-    id: String,
-    trace_id: String,
-    name: String,
-    model: String,
-    input: serde_json::Value,
-    output: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    usage: Option<UsagePayload>,
-    timestamp: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SpanEvent {
-    id: String,
-    trace_id: String,
-    name: String,
-    input: serde_json::Value,
-    output: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<serde_json::Value>,
-    timestamp: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsagePayload {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: u64,
-}
-
-/// Wrapper for the batched ingestion payload.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IngestionBatch {
-    batch: Vec<IngestionItem>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
-enum IngestionItem {
-    #[serde(rename = "trace")]
-    Trace(TraceEvent),
-    #[serde(rename = "generation")]
-    Generation(GenerationEvent),
-    #[serde(rename = "span")]
-    Span(SpanEvent),
 }
 
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
-/// Best-effort Langfuse client that buffers events and flushes them via the
-/// Ingestion API.  All public methods swallow errors and log warnings instead.
-#[derive(Debug, Clone)]
+/// Best-effort Langfuse client backed by `langfuse-ergonomic`.
+///
+/// All public methods swallow errors and log warnings instead of propagating them.
+/// Each method is async but returns quickly because the actual HTTP work is
+/// fire-and-forget (spawned on the Tokio runtime).
+#[derive(Clone)]
 pub struct LangfuseClient {
-    http: Client,
-    base_url: String,
-    auth_header: String,
-    buffer: Arc<Mutex<Vec<IngestionItem>>>,
+    inner: Arc<langfuse_ergonomic::LangfuseClient>,
+}
+
+impl std::fmt::Debug for LangfuseClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LangfuseClient")
+            .field("inner", &"langfuse_ergonomic::LangfuseClient")
+            .finish()
+    }
 }
 
 impl LangfuseClient {
+    /// Create a new Langfuse client from the given configuration.
+    ///
+    /// Panics if the underlying `langfuse-ergonomic` client cannot be built
+    /// (e.g. invalid URL). This should only happen during initial setup.
     pub fn new(config: LangfuseConfig) -> Self {
-        let auth_header = format!("Bearer {}:{}", config.public_key, config.secret_key);
+        let inner = langfuse_ergonomic::ClientBuilder::new()
+            .public_key(&config.public_key)
+            .secret_key(&config.secret_key)
+            .base_url(&config.base_url)
+            .build()
+            .expect("Failed to create Langfuse client: invalid configuration");
         Self {
-            http: Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
-            base_url: config.base_url,
-            auth_header,
-            buffer: Arc::new(Mutex::new(Vec::new())),
+            inner: Arc::new(inner),
         }
     }
 
-    // -- Public high-level helpers -------------------------------------------
-
-    /// Create a trace for a session and return the trace ID.
+    /// Create a trace for a session and return the trace ID immediately.
+    ///
+    /// The trace ID is a pre-generated UUID so callers can use it right away.
+    /// The actual HTTP ingestion is fire-and-forget.
     pub async fn trace_session(&self, session_id: &str, metadata: &serde_json::Value) -> String {
         let trace_id = Uuid::new_v4().to_string();
-        let event = TraceEvent {
-            id: trace_id.clone(),
-            name: format!("session-{}", session_id),
-            metadata: metadata.clone(),
-            timestamp: now_iso(),
-        };
-        self.push(IngestionItem::Trace(event)).await;
+        let name = format!("session-{}", session_id);
+        let client = self.inner.clone();
+        let id_for_call = trace_id.clone();
+        let metadata_clone = metadata.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .trace()
+                .id(&id_for_call)
+                .name(&name)
+                .metadata(metadata_clone)
+                .call()
+                .await
+            {
+                warn!("Langfuse trace creation failed: {}", e);
+            }
+        });
+
         trace_id
     }
 
     /// Log a generation span under an existing trace.
+    ///
+    /// `input` accepts a serialized value (typically the full message list)
+    /// so the Langfuse dashboard shows the complete conversation context.
+    ///
+    /// Token usage is embedded in metadata since langfuse-ergonomic v0.6.x
+    /// does not natively wire usage through the generation builder.
+    /// The call is fire-and-forget; errors are logged as warnings.
     pub async fn span_generation(
         &self,
         trace_id: &str,
         model: &str,
-        input: &str,
+        input: serde_json::Value,
         output: &str,
         prompt_tokens: u64,
         completion_tokens: u64,
     ) {
-        let gen_id = Uuid::new_v4().to_string();
-        let usage = if prompt_tokens > 0 || completion_tokens > 0 {
-            Some(UsagePayload {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
+        let client = self.inner.clone();
+        let trace_id = trace_id.to_string();
+        let model = model.to_string();
+        let output_val = json!(output);
+        let meta = if prompt_tokens > 0 || completion_tokens > 0 {
+            json!({
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                }
             })
         } else {
-            None
+            json!({})
         };
-        let event = GenerationEvent {
-            id: gen_id,
-            trace_id: trace_id.to_string(),
-            name: "generation".to_string(),
-            model: model.to_string(),
-            input: json!(input),
-            output: json!(output),
-            usage,
-            timestamp: now_iso(),
-        };
-        self.push(IngestionItem::Generation(event)).await;
+
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .generation()
+                .trace_id(&trace_id)
+                .name("generation")
+                .model(&model)
+                .input(input)
+                .output(output_val)
+                .metadata(meta)
+                .call()
+                .await
+            {
+                warn!("Langfuse generation span failed: {}", e);
+            }
+        });
     }
 
     /// Log a tool-call span under an existing trace.
+    ///
+    /// The call is fire-and-forget; errors are logged as warnings.
     pub async fn span_tool_call(
         &self,
         trace_id: &str,
@@ -201,124 +192,92 @@ impl LangfuseClient {
         result: &str,
         duration_ms: u64,
     ) {
-        let span_id = Uuid::new_v4().to_string();
-        let event = SpanEvent {
-            id: span_id,
-            trace_id: trace_id.to_string(),
-            name: format!("tool-{}", tool_name),
-            input: json!(args),
-            output: json!(result),
-            metadata: Some(json!({ "duration_ms": duration_ms })),
-            timestamp: now_iso(),
-        };
-        self.push(IngestionItem::Span(event)).await;
+        let client = self.inner.clone();
+        let trace_id = trace_id.to_string();
+        let name = format!("tool-{}", tool_name);
+        let input_val = json!(args);
+        let output_val = json!(result);
+        let meta = json!({ "duration_ms": duration_ms });
+
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .span()
+                .trace_id(&trace_id)
+                .name(&name)
+                .input(input_val)
+                .output(output_val)
+                .metadata(meta)
+                .call()
+                .await
+            {
+                warn!("Langfuse tool call span failed: {}", e);
+            }
+        });
     }
 
-    /// Flush all buffered events to the Langfuse Ingestion API.
-    /// Errors are logged but not returned.
+    /// Flush any pending events.
+    ///
+    /// With the direct API approach each call is already sent immediately,
+    /// so this is effectively a no-op. The method is kept for API compatibility.
     pub async fn flush(&self) {
-        let items = {
-            let mut buf = self.buffer.lock().await;
-            std::mem::take(&mut *buf)
-        };
-        if items.is_empty() {
-            return;
-        }
-
-        let url = format!("{}/api/public/ingestion", self.base_url);
-        let body = IngestionBatch { batch: items };
-
-        match self
-            .http
-            .post(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    warn!("Langfuse ingestion failed: {} {}", status, text);
-                }
-            }
-            Err(e) => {
-                warn!("Langfuse ingestion error: {}", e);
-            }
-        }
+        // No-op: direct API calls are already sent
     }
 
-    // -- Internal helpers ----------------------------------------------------
-
-    async fn push(&self, item: IngestionItem) {
-        let mut buf = self.buffer.lock().await;
-        buf.push(item);
-        // Auto-flush when buffer reaches 20 items
-        if buf.len() >= 20 {
-            let items = std::mem::take(&mut *buf);
-            drop(buf); // release lock before network call
-            self.send_batch(items).await;
-        }
-    }
-
-    async fn send_batch(&self, items: Vec<IngestionItem>) {
-        let url = format!("{}/api/public/ingestion", self.base_url);
-        let body = IngestionBatch { batch: items };
-
-        if let Err(e) = self
-            .http
-            .post(&url)
-            .header("Authorization", &self.auth_header)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-        {
-            warn!("Langfuse batch send error: {}", e);
-        }
+    /// Shut down the client gracefully.
+    ///
+    /// With the direct API approach there is no background batcher to flush,
+    /// so this is a no-op. The method exists for future compatibility.
+    pub async fn shutdown(&self) {
+        // No-op: no background batcher to shut down
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn now_iso() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    // ISO 8601 with millisecond precision
-    let secs = now.as_secs();
-    let millis = now.subsec_millis();
-    // Simple formatting without chrono dependency
-    let days_since_epoch = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
+    #[test]
+    fn test_config_from_parts_with_values() {
+        let config = LangfuseConfig::from_parts(
+            Some("pk-test"),
+            Some("sk-test"),
+            Some("https://langfuse.example.com"),
+        );
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.public_key, "pk-test");
+        assert_eq!(config.secret_key, "sk-test");
+        assert_eq!(config.base_url, "https://langfuse.example.com");
+        assert!(config.enabled);
+    }
 
-    // Convert epoch days to year-month-day (Gregorian calendar algorithm)
-    let (year, month, day) = epoch_days_to_date(days_since_epoch);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        year, month, day, hours, minutes, seconds, millis
-    )
-}
+    #[test]
+    fn test_config_from_parts_missing_keys() {
+        assert!(LangfuseConfig::from_parts(None, Some("sk-test"), None).is_none());
+        assert!(LangfuseConfig::from_parts(Some("pk-test"), None, None).is_none());
+        assert!(LangfuseConfig::from_parts(None, None, None).is_none());
+    }
 
-/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
-fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
-    // Algorithm from Howard Hinnant: http://howardhinnant.github.io/date_algorithms.html
-    let z = days as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y as u64, m as u64, d as u64)
+    #[test]
+    fn test_config_from_parts_empty_keys() {
+        assert!(LangfuseConfig::from_parts(Some(""), Some("sk-test"), None).is_none());
+        assert!(LangfuseConfig::from_parts(Some("pk-test"), Some(""), None).is_none());
+    }
+
+    #[test]
+    fn test_config_default_base_url() {
+        let config = LangfuseConfig::from_parts(Some("pk-test"), Some("sk-test"), None).unwrap();
+        assert_eq!(config.base_url, "https://cloud.langfuse.com");
+    }
+
+    #[test]
+    fn test_config_strips_trailing_slash() {
+        let config = LangfuseConfig::from_parts(
+            Some("pk-test"),
+            Some("sk-test"),
+            Some("https://langfuse.example.com/"),
+        )
+        .unwrap();
+        assert_eq!(config.base_url, "https://langfuse.example.com");
+    }
 }

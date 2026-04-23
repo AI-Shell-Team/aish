@@ -6,7 +6,10 @@ use std::time::Instant;
 use aish_config::ConfigModel;
 use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
-use aish_llm::{CancellationToken, LlmCallbackResult, LlmSession};
+use aish_llm::{
+    langfuse::{LangfuseClient, LangfuseConfig},
+    CancellationToken, LlmCallbackResult, LlmSession,
+};
 use aish_memory::MemoryManager;
 use aish_security::{SecurityManager, SecurityPolicy};
 use aish_session::SessionStore;
@@ -159,6 +162,18 @@ impl AishShell {
             config.max_tokens,
         );
 
+        // Initialize Langfuse observability if configured
+        if config.enable_langfuse {
+            if let Some(lf_config) = LangfuseConfig::from_parts(
+                config.langfuse_public_key.as_deref(),
+                config.langfuse_secret_key.as_deref(),
+                config.langfuse_host.as_deref(),
+            ) {
+                llm_session.set_langfuse(LangfuseClient::new(lf_config));
+                tracing::info!("Langfuse observability enabled");
+            }
+        }
+
         // Initialize security manager (before tool registration)
         let security_manager = SecurityManager::from_config(None)
             .unwrap_or_else(|_| SecurityManager::new(SecurityPolicy::default_policy()));
@@ -194,15 +209,17 @@ impl AishShell {
         };
         let diagnose_event_callback: aish_tools::SharedEventCallback =
             std::sync::Arc::new(std::sync::Mutex::new(None));
-        tool_registry.register(Box::new(aish_tools::SystemDiagnoseTool::new(
-            &config.api_base,
-            &config.api_key,
-            &config.model,
-            Some(config.temperature),
+        // SystemDiagnoseTool registration is deferred until after skill loading
+        // so we can wire skill callbacks. Store the construction parameters.
+        let diagnose_tool_params = (
+            config.api_base.clone(),
+            config.api_key.clone(),
+            config.model.clone(),
+            config.temperature,
             config.max_tokens,
-            Some(diagnose_security_check),
+            diagnose_security_check,
             diagnose_event_callback.clone(),
-        )));
+        );
 
         // Initialize shared memory manager (best-effort)
         let memory_manager: SharedMemoryManager = Arc::new(Mutex::new(
@@ -320,6 +337,45 @@ impl AishShell {
             aish_tools::SkillTool::new(lookup, list)
         };
         tool_registry.register(Box::new(skill_tool));
+
+        // Create SystemDiagnoseTool with skill callbacks wired from the loaded skills
+        {
+            let (api_base, api_key, model, temp, max_tok, sec_check, ev_cb) = diagnose_tool_params;
+            let diag_tool = aish_tools::SystemDiagnoseTool::new(
+                &api_base,
+                &api_key,
+                &model,
+                Some(temp),
+                max_tok,
+                Some(sec_check),
+                ev_cb,
+            );
+            // Build skill callbacks for the diagnose agent (separate snapshot from main SkillTool)
+            let diag_skills: std::collections::HashMap<String, aish_tools::SkillInfo> =
+                skill_manager
+                    .list_skills()
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.metadata.name.clone(),
+                            aish_tools::SkillInfo {
+                                name: s.metadata.name.clone(),
+                                content: s.content.clone(),
+                                description: s.metadata.description.clone(),
+                                base_dir: s.base_dir.clone(),
+                            },
+                        )
+                    })
+                    .collect();
+            let diag_skill_names: Vec<String> = diag_skills.keys().cloned().collect();
+            let diag_lookup = std::sync::Arc::new(move |name: &str| diag_skills.get(name).cloned())
+                as std::sync::Arc<dyn Fn(&str) -> Option<aish_tools::SkillInfo> + Send + Sync>;
+            let diag_list = std::sync::Arc::new(move || diag_skill_names.clone())
+                as std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+            let callbacks: aish_tools::system_diagnose::SkillCallbacks =
+                Some((diag_lookup, diag_list));
+            tool_registry.register(Box::new(diag_tool.with_skill_callbacks(callbacks)));
+        }
 
         let tools: Vec<(String, Box<dyn aish_llm::Tool>)> = tool_registry.drain_tools();
         for (_name, tool) in tools {
@@ -576,25 +632,24 @@ impl AishShell {
                         }
                     }
                     LlmEventType::ToolExecutionEnd => {
-                        let is_diagnose = event
-                            .data
-                            .get("source")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s == "system_diagnose_agent")
-                            .unwrap_or(false);
-                        if is_diagnose {
-                            let name = event
+                        if let Some(preview) =
+                            event.data.get("output_preview").and_then(|p| p.as_str())
+                        {
+                            // Display collapsed output (first 2 lines) for bash tool,
+                            // matching Python's _collapse_output_lines behavior.
+                            let tool_name = event
                                 .data
                                 .get("tool_name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("");
-                            let ok = event
-                                .data
-                                .get("ok")
-                                .and_then(|o| o.as_bool())
-                                .unwrap_or(true);
-                            let (status, color) = if ok { ("✓", "32") } else { ("✗", "31") };
-                            println!("\x1b[{}m  {} {}\x1b[0m", color, status, name);
+                            if tool_name == "bash" && !preview.is_empty() {
+                                let content = strip_tool_output_xml(preview);
+                                if !content.is_empty() {
+                                    let collapsed = collapse_display_lines(&content, 2);
+                                    println!("\x1b[2m{}\x1b[0m", collapsed);
+                                    let _ = io::stdout().flush();
+                                }
+                            }
                         }
                     }
                     LlmEventType::Error => {
@@ -927,27 +982,66 @@ impl AishShell {
                                 }
                             });
                             Self::restore_ai_sigint_handler(old_sigint);
-                            let did_stream = self.streamed_content.load(Ordering::SeqCst);
 
                             match result {
-                                Ok(Some(corrected)) => {
-                                    if !did_stream {
-                                        println!("\x1b[36m{}\x1b[0m", corrected);
+                                Ok(correction) => {
+                                    match &correction.command {
+                                        Some(corrected) => {
+                                            // Display corrected command and description
+                                            println!(
+                                                "{} \x1b[1;36m{}\x1b[0m",
+                                                t("shell.error_correction.corrected_command_title"),
+                                                corrected
+                                            );
+                                            if let Some(ref desc) = correction.description {
+                                                if !desc.is_empty() {
+                                                    println!("   {}", desc);
+                                                }
+                                            }
+                                            // Ask user confirmation: Y/n
+                                            let prompt = format!(
+                                                "{}\x1b[1;36m{}\x1b[0m{}",
+                                                t("shell.error_correction.confirm_execute_prefix"),
+                                                corrected,
+                                                t("shell.error_correction.confirm_execute_suffix")
+                                            );
+                                            print!("{}", prompt);
+                                            let _ = std::io::stdout().flush();
+                                            let mut answer = String::new();
+                                            if std::io::stdin().read_line(&mut answer).is_err() {
+                                                continue;
+                                            }
+                                            let answer = answer.trim().to_lowercase();
+                                            if answer == "y" || answer == "yes" || answer.is_empty()
+                                            {
+                                                let exit_code =
+                                                    self.execute_external_command(corrected);
+                                                self.record_history(corrected, exit_code);
+                                            }
+                                            self.state.can_correct_error = false;
+                                        }
+                                        None => {
+                                            // No valid command, show description if available
+                                            println!(
+                                                "\x1b[33m\u{26a0} {}\x1b[0m",
+                                                t("shell.error_correction.no_valid_command")
+                                            );
+                                            if let Some(ref desc) = correction.description {
+                                                let clean = desc
+                                                    .split("Insufficient context")
+                                                    .next()
+                                                    .unwrap_or(desc)
+                                                    .trim();
+                                                if !clean.is_empty() {
+                                                    println!("   {}", clean);
+                                                }
+                                            }
+                                            println!(
+                                                "   \x1b[36m{}\x1b[0m",
+                                                t("shell.error_correction.retry_hint")
+                                            );
+                                        }
                                     }
-                                    println!(
-                                        "\n\x1b[2m{}\x1b[0m",
-                                        t("shell.error_correction.retry_hint")
-                                    );
-                                    // Auto-execute the corrected command
-                                    let exit_code = self.execute_external_command(&corrected);
-                                    self.record_history(&corrected, exit_code);
-                                    self.state.can_correct_error = false;
-                                }
-                                Ok(None) => {
-                                    println!(
-                                        "\x1b[33m{}\x1b[0m",
-                                        t("shell.error_correction.no_valid_command")
-                                    );
                                 }
                                 Err(aish_core::AishError::Cancelled) => {
                                     self.animation.stop();
@@ -1171,6 +1265,7 @@ impl AishShell {
 
                     // Inject command result into LLM context so AI can reference
                     // previous command output in follow-up questions.
+                    // Always add, matching main branch's unconditional add_memory.
                     let output_preview = if self.state.last_output.len() > 4096 {
                         // Safe UTF-8 truncation: find nearest char boundary
                         let end = {
@@ -1184,13 +1279,11 @@ impl AishShell {
                     } else {
                         &self.state.last_output
                     };
-                    if !output_preview.trim().is_empty() {
-                        let entry = format!(
-                            "[Shell] {}\n<returncode>{}</returncode>\n<output>{}</output>",
-                            input, exit_code, output_preview
-                        );
-                        self.ai_handler.add_shell_context(&entry);
-                    }
+                    let entry = format!(
+                        "[Shell] {}\n<returncode>{}</returncode>\n<output>{}</output>",
+                        input, exit_code, output_preview
+                    );
+                    self.ai_handler.add_shell_context(&entry);
 
                     // Show error correction hint
                     if exit_code != 0 && exit_code != 130 {
@@ -1734,6 +1827,50 @@ impl AishShell {
             self.state.env_vars.insert(key.clone(), value.clone());
         }
     }
+}
+
+/// Cached regex for stripping complete XML tags from tool output.
+static TOOL_XML_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+/// Cached regex for removing multi-line offload blocks (<offload>...</offload>).
+static TOOL_XML_OFFLOAD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+/// Cached regex for removing incomplete tags from truncation.
+static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+/// Strip XML tags from tool output to extract plain text content for terminal display.
+/// Handles multi-line <offload>JSON</offload> blocks, <return_code>, <stdout>,
+/// <stderr>, and any incomplete tags from truncation.
+fn strip_tool_output_xml(output: &str) -> String {
+    // Remove multi-line <offload>...</offload> blocks first (may span multiple lines)
+    let re_offload = TOOL_XML_OFFLOAD_RE
+        .get_or_init(|| regex::Regex::new(r"(?s)<offload>.*?</offload>").unwrap());
+    let cleaned = re_offload.replace_all(output, "").to_string();
+    // Remove incomplete tags (e.g. "<stdo" from truncation)
+    let re_incomplete =
+        TOOL_XML_INCOMPLETE_RE.get_or_init(|| regex::Regex::new(r"<[^>]*$").unwrap());
+    let cleaned = re_incomplete.replace_all(&cleaned, "").to_string();
+    // Remove remaining single-line XML tags
+    let re = TOOL_XML_RE.get_or_init(|| {
+        regex::Regex::new(r"</?(?:stdout|stderr|return_code|exit-code)/?>").unwrap()
+    });
+    let cleaned = re.replace_all(&cleaned, "").to_string();
+    // Collapse multiple blank lines and trim
+    cleaned
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Collapse output to first N lines for terminal display, matching Python's
+/// `_collapse_output_lines` behavior: show first `max_lines` lines and append
+/// " ..." if truncated.
+fn collapse_display_lines(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        return text.to_string();
+    }
+    let collapsed: Vec<&str> = lines.iter().take(max_lines).copied().collect();
+    format!("{} ...", collapsed.join("\n"))
 }
 
 /// Collapse long output for display, showing first/last N lines with a truncation notice.

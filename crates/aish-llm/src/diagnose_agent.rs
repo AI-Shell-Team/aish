@@ -21,10 +21,15 @@ impl DiagnoseAgent {
     }
 
     /// Create a new diagnostic agent with custom configuration.
+    /// Uses the config's system_prompt if set, otherwise falls back to the default.
     pub fn with_config(config: SubSessionConfig) -> Self {
+        let system_prompt = config
+            .system_prompt
+            .clone()
+            .unwrap_or_else(|| build_diagnose_prompt());
         Self {
             config,
-            system_prompt: build_diagnose_prompt(),
+            system_prompt,
         }
     }
 
@@ -60,6 +65,7 @@ impl DiagnoseAgent {
             max_iterations: sub.config.max_iterations,
             temperature: Some(0.3),
             max_tokens: Some(4096),
+            max_context_messages: sub.config.max_context_messages,
         });
 
         let system_prompt = sub
@@ -106,7 +112,7 @@ pub fn build_diagnose_prompt() -> String {
          Final Answer: provide the final diagnostic conclusion\n\
          \n\
          Available tools will be provided via the tool-calling interface. \
-         Use bash_exec to run diagnostic commands and read_file to inspect \
+         Use bash to run diagnostic commands and read_file to inspect \
          log files or configuration.\n\
          \n\
          Guidelines:\n\
@@ -158,7 +164,7 @@ mod tests {
 
     impl Tool for MockBashTool {
         fn name(&self) -> &str {
-            "bash_exec"
+            "bash"
         }
 
         fn description(&self) -> &str {

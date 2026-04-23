@@ -462,41 +462,47 @@ fn check_langfuse(
     secret_key: Option<String>,
     host: Option<String>,
 ) {
+    // Priority: CLI args > env vars > config.yaml
     let public_key = public_key
-        .or_else(|| config.langfuse_public_key.clone())
-        .or_else(|| std::env::var("LANGFUSE_PUBLIC_KEY").ok());
+        .or_else(|| std::env::var("LANGFUSE_PUBLIC_KEY").ok())
+        .or_else(|| config.langfuse_public_key.clone());
     let secret_key = secret_key
-        .or_else(|| config.langfuse_secret_key.clone())
-        .or_else(|| std::env::var("LANGFUSE_SECRET_KEY").ok());
+        .or_else(|| std::env::var("LANGFUSE_SECRET_KEY").ok())
+        .or_else(|| config.langfuse_secret_key.clone());
     let host = host
-        .or_else(|| config.langfuse_host.clone())
-        .or_else(|| std::env::var("LANGFUSE_HOST").ok());
+        .or_else(|| std::env::var("LANGFUSE_BASE_URL").ok())
+        .or_else(|| config.langfuse_host.clone());
 
     match (public_key, secret_key) {
         (Some(pk), Some(sk)) => {
-            let lf_config =
-                aish_llm::LangfuseConfig::from_parts(Some(&pk), Some(&sk), host.as_deref());
-            match lf_config {
-                Some(cfg) => {
-                    let base_url = cfg.base_url.clone();
-                    let _client = aish_llm::LangfuseClient::new(cfg);
-                    println!("Langfuse configuration found.");
-                    println!("  Host: {}", base_url);
-                    if pk.len() > 8 {
-                        println!("  Public Key: {}...{}", &pk[..4], &pk[pk.len() - 4..]);
-                    } else {
-                        println!(
-                            "  Public Key: {}...{}",
-                            &pk[..2.min(pk.len())],
-                            &pk[(pk.len() - 2).min(pk.len())..]
-                        );
-                    }
-                    println!("\x1b[32mLangfuse is configured and ready.\x1b[0m");
-                }
-                None => {
-                    eprintln!("Langfuse configuration is incomplete.");
-                }
+            if pk.is_empty() || sk.is_empty() {
+                eprintln!("Langfuse configuration is incomplete.");
+                return;
             }
+            let base_url = host
+                .as_deref()
+                .map(|h| h.trim_end_matches('/').to_string())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| "https://cloud.langfuse.com".to_string());
+            let cfg = aish_llm::LangfuseConfig {
+                enabled: true,
+                public_key: pk.clone(),
+                secret_key: sk.clone(),
+                base_url: base_url.clone(),
+            };
+            let _client = aish_llm::LangfuseClient::new(cfg);
+            println!("Langfuse configuration found.");
+            println!("  Host: {}", base_url);
+            if pk.len() > 8 {
+                println!("  Public Key: {}...{}", &pk[..4], &pk[pk.len() - 4..]);
+            } else {
+                println!(
+                    "  Public Key: {}...{}",
+                    &pk[..2.min(pk.len())],
+                    &pk[(pk.len() - 2).min(pk.len())..]
+                );
+            }
+            println!("\x1b[32mLangfuse is configured and ready.\x1b[0m");
         }
         (None, _) | (_, None) => {
             eprintln!("Langfuse is not configured.");

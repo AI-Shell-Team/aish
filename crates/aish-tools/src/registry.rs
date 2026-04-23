@@ -3,9 +3,15 @@ use std::collections::HashMap;
 use aish_llm::{Tool, ToolSpec};
 
 /// Format tool output as tagged XML for LLM consumption.
+/// Matches Python's `_build_bash_tagged_result()` format:
+///   <stdout>preview</stdout>
+///   <stderr>preview</stderr>
+///   <return_code>0</return_code>
+///   <offload>{"status":"offloaded","stdout_path":"...","hint":"Read offload paths for full output"}</offload>
 pub fn format_tagged_result(
     stdout: &str,
     stderr: &str,
+    return_code: i32,
     offload: Option<&serde_json::Value>,
 ) -> String {
     let mut parts = Vec::new();
@@ -18,20 +24,13 @@ pub fn format_tagged_result(
         parts.push(format!("<stderr>\n{}\n</stderr>", stderr));
     }
 
+    // Always include return_code, matching Python's behavior
+    parts.push(format!("<return_code>\n{}\n</return_code>", return_code));
+
     if let Some(off) = offload {
-        let path = off
-            .get("stdout")
-            .and_then(|v| v.get("path"))
-            .and_then(|p| p.as_str())
-            .unwrap_or("");
-        let bytes = off
-            .get("stdout")
-            .and_then(|v| v.get("bytes"))
-            .and_then(|p| p.as_u64())
-            .unwrap_or(0);
-        if !path.is_empty() {
-            parts.push(format!("<offload path=\"{}\" bytes=\"{}\" />", path, bytes));
-        }
+        // Format as compact JSON inside <offload> tags, matching Python
+        let offload_json = serde_json::to_string(off).unwrap_or_else(|_| "{}".to_string());
+        parts.push(format!("<offload>\n{}\n</offload>", offload_json));
     }
 
     parts.join("\n")
@@ -115,17 +114,18 @@ mod tests {
 
     #[test]
     fn test_format_tagged_result_stdout_only() {
-        let result = format_tagged_result("hello", "", None);
+        let result = format_tagged_result("hello", "", 0, None);
         assert!(result.contains("<stdout>"));
         assert!(result.contains("hello"));
         assert!(result.contains("</stdout>"));
         assert!(!result.contains("<stderr>"));
-        assert!(!result.contains("<offload"));
+        assert!(result.contains("<return_code>"));
+        assert!(result.contains("<return_code>\n0\n</return_code>"));
     }
 
     #[test]
     fn test_format_tagged_result_with_stderr() {
-        let result = format_tagged_result("out", "err", None);
+        let result = format_tagged_result("out", "err", 0, None);
         assert!(result.contains("<stdout>"));
         assert!(result.contains("out"));
         assert!(result.contains("<stderr>"));
@@ -135,21 +135,23 @@ mod tests {
     #[test]
     fn test_format_tagged_result_with_offload() {
         let offload = serde_json::json!({
+            "status": "offloaded",
             "stdout": {
                 "path": "/tmp/out.txt",
                 "bytes": 12345
-            }
+            },
+            "hint": "Read offload paths for full output"
         });
-        let result = format_tagged_result("out", "err", Some(&offload));
-        assert!(result.contains("<offload path=\"/tmp/out.txt\" bytes=\"12345\" />"));
+        let result = format_tagged_result("out", "err", 0, Some(&offload));
+        assert!(result.contains("<offload>"));
+        assert!(result.contains("/tmp/out.txt"));
+        assert!(result.contains("Read offload paths for full output"));
+        assert!(result.contains("</offload>"));
     }
 
     #[test]
-    fn test_format_tagged_result_empty_streams_omitted() {
-        let result = format_tagged_result("", "", None);
-        assert!(
-            result.is_empty(),
-            "empty streams should produce empty output"
-        );
+    fn test_format_tagged_result_nonzero_exit() {
+        let result = format_tagged_result("out", "err", 1, None);
+        assert!(result.contains("<return_code>\n1\n</return_code>"));
     }
 }

@@ -29,6 +29,9 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     /// Max tokens passed to the LLM for every completion request.
     pub max_tokens: Option<u32>,
+    /// Maximum number of messages kept in the conversation context.
+    /// When exceeded, older messages are trimmed (preserving the system message).
+    pub max_context_messages: usize,
 }
 
 impl Default for AgentConfig {
@@ -37,6 +40,7 @@ impl Default for AgentConfig {
             max_iterations: 10,
             temperature: Some(0.3),
             max_tokens: Some(4096),
+            max_context_messages: 30,
         }
     }
 }
@@ -329,8 +333,22 @@ impl<'a> ReActAgent<'a> {
 
                 // After tool results, add a user prompt nudging the LLM to continue.
                 messages.push(ChatMessage::user(
-                    "Continue your analysis. When you have reached a conclusion, respond with \"Final Answer: <your conclusion>\".",
+                    "Continue with your analysis. Remember to use the final_answer tool when you have completed your diagnostic conclusion.",
                 ));
+
+                // Trim messages to prevent context overflow
+                let max = self.config.max_context_messages;
+                if messages.len() > max && max >= 2 {
+                    let system = messages.first().cloned();
+                    messages.drain(1..messages.len() - (max - 1));
+                    // Ensure system message is preserved
+                    if let Some(sys) = system {
+                        if messages[0].role != "system" {
+                            messages.insert(0, sys);
+                        }
+                    }
+                }
+
                 continue;
             }
 
@@ -374,6 +392,19 @@ impl<'a> ReActAgent<'a> {
                     // Feed observations back as a user message.
                     messages.push(ChatMessage::assistant(&content));
                     messages.push(ChatMessage::user(all_observations.trim().to_string()));
+
+                    // Trim messages to prevent context overflow
+                    let max = self.config.max_context_messages;
+                    if messages.len() > max && max >= 2 {
+                        let system = messages.first().cloned();
+                        messages.drain(1..messages.len() - (max - 1));
+                        // Ensure system message is preserved
+                        if let Some(sys) = system {
+                            if messages[0].role != "system" {
+                                messages.insert(0, sys);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -435,7 +466,7 @@ pub struct SystemDiagnoseAgent<'a> {
 impl<'a> SystemDiagnoseAgent<'a> {
     /// Create a new diagnosis agent backed by the given session.
     ///
-    /// The session should already have `bash_exec` and `read_file` (or similar)
+    /// The session should already have `bash` and `read_file` (or similar)
     /// tools registered.
     pub fn new(session: &'a LlmSession) -> Self {
         Self::with_config(session, AgentConfig::default())
@@ -484,7 +515,7 @@ fn build_diagnose_system_prompt() -> String {
          Final Answer: provide the final diagnostic conclusion\n\
          \n\
          Available tools will be provided via the tool-calling interface. \
-         Use bash_exec to run diagnostic commands and read_file to inspect \
+         Use bash to run diagnostic commands and read_file to inspect \
          log files or configuration.\n\
          \n\
          Guidelines:\n\

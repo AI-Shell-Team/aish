@@ -93,6 +93,9 @@ sysinfo = "0.33"
 # YAML config
 dirs = "5"
 
+# Observability
+langfuse-ergonomic = "0.6"
+
 # Testing
 tempfile = "3"
 

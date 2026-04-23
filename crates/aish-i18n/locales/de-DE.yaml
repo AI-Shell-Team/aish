@@ -175,6 +175,11 @@ shell:
   error_correction:
     press_semicolon_hint: "Die Befehlsausführung ist fehlgeschlagen. Geben Sie ; ein und drücken Sie Enter für automatische Analyse und Reparatur, oder geben Sie den nächsten Befehl ein."
     corrected_command_label: "Vorgeschlagene Korrektur:"
+    corrected_command_title: "💡 Korrigierter Befehl:"
+    confirm_execute_prefix: "Ausführen: "
+    confirm_execute_suffix: "? (Y/n): "
+    no_valid_command: "Korrekter Befehl konnte nicht ermittelt werden"
+    retry_hint: "Geben Sie ';' ein, um der KI mitzuteilen, was Sie tun möchten, und sie hilft Ihnen, den richtigen Befehl zu finden"
   error:
     execution_error: "❌ Fehler während der Ausführung: {error}"
     pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"

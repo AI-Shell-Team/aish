@@ -62,3 +62,36 @@ pub fn set_locale(locale: &str) {
         *m.borrow_mut() = I18nManager::new_with_locale(locale);
     });
 }
+
+/// Return the active locale code from the thread-local manager.
+///
+/// Reflects any runtime changes made via [`set_locale`].
+pub fn current_language() -> String {
+    MANAGER.with(|m| m.borrow().current_locale().to_string())
+}
+
+/// Return a human-readable language name for the given locale code.
+///
+/// Supported mappings:
+///
+/// | Code    | Name      |
+/// |---------|-----------|
+/// | en-US   | English   |
+/// | zh-CN   | Chinese   |
+/// | ja-JP   | Japanese  |
+/// | de-DE   | German    |
+/// | es-ES   | Spanish   |
+/// | fr-FR   | French    |
+///
+/// Falls back to the raw locale code for unknown locales.
+pub fn language_name(locale: &str) -> String {
+    match locale {
+        "en-US" | "en-GB" | "en" => "English".to_string(),
+        "zh-CN" | "zh-TW" | "zh-HK" | "zh" => "Chinese".to_string(),
+        "ja-JP" | "ja" => "Japanese".to_string(),
+        "de-DE" | "de-AT" | "de-CH" | "de" => "German".to_string(),
+        "es-ES" | "es-MX" | "es" => "Spanish".to_string(),
+        "fr-FR" | "fr-CA" | "fr" => "French".to_string(),
+        other => other.to_string(),
+    }
+}

@@ -24,7 +24,6 @@ static EMBEDDED_LOCALES: &[(&str, &str)] = &[
 /// Manages locale detection, YAML loading and key lookup.
 pub struct I18nManager {
     translations: HashMap<String, String>,
-    #[allow(dead_code)] // kept for future locale-switching support
     locale: String,
 }
 
@@ -93,9 +92,14 @@ impl I18nManager {
         substitute_placeholders(&template, args)
     }
 
+    /// Return the locale code this manager was initialised with.
+    pub fn current_locale(&self) -> &str {
+        &self.locale
+    }
+
     // -- internal helpers ---------------------------------------------------
 
-    fn detect_locale() -> String {
+    pub fn detect_locale() -> String {
         // LC_ALL takes precedence over LANG.
         for var in &["LC_ALL", "LANG"] {
             if let Ok(val) = std::env::var(var) {

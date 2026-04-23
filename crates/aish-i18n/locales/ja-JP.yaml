@@ -175,6 +175,11 @@ shell:
   error_correction:
     press_semicolon_hint: "コマンド実行に失敗しました。; を入力して Enter で自動解析・修復、または次のコマンドを入力してください。"
     corrected_command_label: "修正候補:"
+    corrected_command_title: "💡 修正されたコマンド:"
+    confirm_execute_prefix: "実行: "
+    confirm_execute_suffix: "? (Y/n): "
+    no_valid_command: "正しいコマンドを特定できませんでした"
+    retry_hint: "';' を入力して AI に指示すると、適切なコマンドを探します"
   error:
     execution_error: "❌ 実行中にエラーが発生しました: {error}"
     pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"

@@ -175,6 +175,11 @@ shell:
   error_correction:
     press_semicolon_hint: "La ejecución del comando falló. Escribe ; y pulsa Enter para analizar y reparar automáticamente, o introduce el siguiente comando."
     corrected_command_label: "Corrección sugerida:"
+    corrected_command_title: "💡 Comando corregido:"
+    confirm_execute_prefix: "Ejecutar: "
+    confirm_execute_suffix: "? (Y/n): "
+    no_valid_command: "No se pudo determinar el comando correcto"
+    retry_hint: "Escribe ';' para decirle a la IA qué quieres hacer y te ayudará a encontrar el comando adecuado"
   error:
     execution_error: "❌ Error durante la ejecución: {error}"
     pty_decode_error: "Error al decodificar la salida PTY: {error}"

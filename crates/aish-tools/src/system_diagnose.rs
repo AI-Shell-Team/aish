@@ -20,6 +20,15 @@ use aish_security::SecurityDecision;
 pub type SharedEventCallback =
     Arc<Mutex<Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>>>>;
 
+/// Optional skill lookup/list callbacks for the diagnose agent.
+///
+/// When provided, a [`SkillTool`] is added to the diagnose tool set so the
+/// agent can invoke skill plugins during diagnosis.
+pub type SkillCallbacks = Option<(
+    Arc<dyn Fn(&str) -> Option<crate::skill_tool::SkillInfo> + Send + Sync>,
+    Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+)>;
+
 /// Tool that allows the LLM to trigger an isolated system diagnosis session.
 ///
 /// Registered under the name `system_diagnose_agent`, matching the Python version.
@@ -34,6 +43,7 @@ pub struct SystemDiagnoseTool {
     max_tokens: Option<u32>,
     security_check: Option<Arc<dyn Fn(&str) -> SecurityDecision + Send + Sync>>,
     event_callback: SharedEventCallback,
+    skill_callbacks: SkillCallbacks,
 }
 
 impl SystemDiagnoseTool {
@@ -54,7 +64,14 @@ impl SystemDiagnoseTool {
             max_tokens,
             security_check,
             event_callback,
+            skill_callbacks: None,
         }
+    }
+
+    /// Attach skill lookup/list callbacks so the diagnose agent can invoke skills.
+    pub fn with_skill_callbacks(mut self, callbacks: SkillCallbacks) -> Self {
+        self.skill_callbacks = callbacks;
+        self
     }
 }
 
@@ -148,10 +165,19 @@ impl Tool for SystemDiagnoseTool {
                 parent.set_event_callback(proxy_cb);
             }
 
+            // Build diagnose prompt with output language instruction
+            let mut prompt = build_diagnose_prompt();
+            let lang = aish_i18n::current_language();
+            let lang_name = aish_i18n::language_name(&lang);
+            prompt.push_str(&format!(
+                "\n\noutput language: use {} to communicate with the user.",
+                lang_name
+            ));
+
             let config = SubSessionConfig {
                 max_context_messages: 30,
-                max_iterations: 4,
-                system_prompt: Some(build_diagnose_prompt()),
+                max_iterations: 10,
+                system_prompt: Some(prompt),
             };
 
             let agent = DiagnoseAgent::with_config(config);
@@ -166,13 +192,23 @@ impl Tool for SystemDiagnoseTool {
             };
 
             // Tools available for diagnosis
-            let tools: Vec<Box<dyn Tool>> = vec![
+            let mut tools: Vec<Box<dyn Tool>> = vec![
                 Box::new(bash_tool),
                 Box::new(crate::fs::ReadFileTool::new()),
                 Box::new(crate::fs::WriteFileTool::new()),
                 Box::new(crate::fs::EditFileTool::new()),
                 Box::new(crate::FinalAnswerTool::new()),
             ];
+
+            // Add skill tool when callbacks are available (matches Python version)
+            if let Some((lookup, list)) = &self.skill_callbacks {
+                let lookup = Arc::clone(lookup);
+                let list = Arc::clone(list);
+                tools.push(Box::new(crate::SkillTool::new(
+                    Box::new(move |name| lookup(name)),
+                    Box::new(move || list()),
+                )));
+            }
 
             match agent.diagnose(&parent, &query, tools).await {
                 Ok(result) => ToolResult::success(result),

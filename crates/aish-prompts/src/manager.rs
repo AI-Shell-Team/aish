@@ -127,9 +127,19 @@ Analyze the failed command and its error output, then suggest a corrected versio
 **Exit Code:** {{exit_code}}
 {{stderr_section}}
 **Rules:**
-- Output ONLY the corrected command in a ```bash code block
-- If the original command was correct but failed for external reasons, explain briefly
-- Do not suggest destructive alternatives unless the user explicitly asked for one"#;
+- Output ONLY a single ```json code block containing the result, no extra text
+- If no suitable fix exists, return an empty string for "command"
+- Do not suggest destructive alternatives unless the user explicitly asked for one
+- Reference the shell history context above for the full error output and previous commands
+
+**Output format:**
+```json
+{
+  "type": "corrected_command",
+  "command": "the corrected command or empty string",
+  "description": "brief explanation of the fix or why no fix is available"
+}
+```"#;
 
 const ERROR_DETECT_PROMPT: &str = r#"Analyze the following command output and determine if it indicates an error.
 

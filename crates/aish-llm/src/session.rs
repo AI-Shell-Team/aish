@@ -282,6 +282,10 @@ impl LlmSession {
             match response {
                 LlmResponse::Json(json) => {
                     let (content, tool_calls, usage) = StreamParser::parse_response(&json);
+                    let (pt, ct) = usage
+                        .as_ref()
+                        .map(|u| (u.prompt_tokens, u.completion_tokens))
+                        .unwrap_or((0, 0));
                     if let Some(u) = usage {
                         self.record_usage(u);
                     }
@@ -293,10 +297,10 @@ impl LlmSession {
                                 .span_generation(
                                     tid,
                                     self.client.model_name(),
-                                    prompt,
+                                    serde_json::json!(messages),
                                     content.as_deref().unwrap_or(""),
-                                    0,
-                                    0,
+                                    pt,
+                                    ct,
                                 )
                                 .await;
                         }
@@ -364,6 +368,9 @@ impl LlmSession {
                     // content_preview_started / tool_calls_seen logic).
                     let mut tool_calls_seen = false;
                     let mut content_preview_started = false;
+                    // Accumulate token usage from SSE chunks
+                    let mut stream_prompt_tokens: u64 = 0;
+                    let mut stream_completion_tokens: u64 = 0;
 
                     while !stream_done {
                         if self.cancellation_token.is_cancelled() {
@@ -383,6 +390,8 @@ impl LlmSession {
                                         let (events, chunk_usage) =
                                             StreamParser::parse_sse_chunk(line);
                                         if let Some(u) = chunk_usage {
+                                            stream_prompt_tokens += u.prompt_tokens;
+                                            stream_completion_tokens += u.completion_tokens;
                                             self.record_usage(u);
                                         }
                                         for event in events {
@@ -512,10 +521,10 @@ impl LlmSession {
                                 .span_generation(
                                     tid,
                                     self.client.model_name(),
-                                    prompt,
+                                    serde_json::json!(messages),
                                     &accumulated,
-                                    0,
-                                    0,
+                                    stream_prompt_tokens,
+                                    stream_completion_tokens,
                                 )
                                 .await;
                         }
@@ -751,13 +760,32 @@ impl LlmSession {
                 }
             }
 
+            // Prepare output preview only for bash tool (used for terminal display).
+            let output_preview = if tool_call.name == "bash" {
+                let s = &result.output;
+                let limit = 512.min(s.len());
+                // Find safe UTF-8 boundary
+                let mut end = limit;
+                while end > 0 && end < s.len() && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                Some(s[..end].to_string())
+            } else {
+                None
+            };
+
+            let mut event_data = serde_json::json!({
+                "tool_name": tool_call.name,
+                "tool_call_id": tool_call.id,
+                "ok": result.ok,
+            });
+            if let Some(preview) = output_preview {
+                event_data["output_preview"] = serde_json::Value::String(preview);
+            }
+
             self.emit_event(LlmEvent {
                 event_type: LlmEventType::ToolExecutionEnd,
-                data: serde_json::json!({
-                    "tool_name": tool_call.name,
-                    "tool_call_id": tool_call.id,
-                    "ok": result.ok
-                }),
+                data: event_data,
                 timestamp: now_timestamp(),
                 metadata: None,
             });

@@ -373,17 +373,12 @@ impl AiHandler {
         command: &str,
         exit_code: i32,
         stderr: &str,
-    ) -> aish_core::Result<Option<String>> {
-        let stderr_hint = if stderr.is_empty() {
-            String::new()
-        } else {
-            format!("\n**Command Output:**\n```\n{}\n```", stderr)
-        };
-
+    ) -> aish_core::Result<ErrorCorrectionResult> {
         let prompt = format!(
-            "<command_result>\nCommand: {}\nExit code: {}\n</command_result>{}\n\n\
-             Please analyze the error and suggest a corrected command.",
-            command, exit_code, stderr_hint
+            "<command_result>\nCommand: {}\nExit code: {}\n</command_result>\n\n\
+             Please analyze the error and suggest a fix. \
+             Check the shell history context above for the actual error output.",
+            command, exit_code
         );
 
         let context_messages = self.build_context_messages();
@@ -397,7 +392,7 @@ impl AiHandler {
         // Persist token usage delta to disk
         self.persist_token_usage();
 
-        Ok(extract_corrected_command(&response))
+        Ok(parse_error_correction_response(&response))
     }
 
     /// Extract @skill_name references and inject skill prefix.
@@ -619,17 +614,82 @@ fn format_category(cat: &MemoryCategory) -> &'static str {
     }
 }
 
-/// Try to extract a corrected command from the LLM response by looking for
-/// fenced code blocks.
-fn extract_corrected_command(response: &str) -> Option<String> {
-    let re = regex::Regex::new(r"```(?:bash|sh|shell|zsh)?\s*\n([^\n]+)\n```").ok()?;
-    if let Some(caps) = re.captures(response) {
-        let cmd = caps.get(1)?.as_str().trim().to_string();
-        if !cmd.is_empty() {
-            return Some(cmd);
+/// Result of error correction analysis from the LLM.
+pub struct ErrorCorrectionResult {
+    /// The corrected command, if any.
+    pub command: Option<String>,
+    /// Description of the fix or why no fix is available.
+    pub description: Option<String>,
+}
+
+/// Parse the LLM response for error correction, preferring JSON format.
+/// Falls back to extracting a ```bash code block if JSON parsing fails.
+fn parse_error_correction_response(response: &str) -> ErrorCorrectionResult {
+    // Strategy: regex extracts the full content between ```...``` fences,
+    // then serde_json handles actual JSON parsing. This avoids the fragility
+    // of trying to match { brace boundaries } with regex (which breaks on
+    // nested braces in string values like "use ${VAR}").
+    let code_block_re =
+        regex::Regex::new(r"(?s)```(?:json|bash|sh|shell|zsh)?\s*\n(.*?)\n```").unwrap();
+
+    // Phase 1: Try each code block as JSON, then as a raw command.
+    for caps in code_block_re.captures_iter(response) {
+        let content = caps.get(1).unwrap().as_str().trim();
+
+        // Try parsing as JSON
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(content) {
+            if json.get("type").and_then(|v| v.as_str()) == Some("corrected_command") {
+                let command = json
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                let description = json
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.trim().is_empty());
+                return ErrorCorrectionResult {
+                    command,
+                    description,
+                };
+            }
+        }
+
+        // If not JSON, treat as a raw command (first line only)
+        if !content.is_empty() {
+            let first_line = content.lines().next().unwrap_or(content).to_string();
+            return ErrorCorrectionResult {
+                command: Some(first_line),
+                description: None,
+            };
         }
     }
-    None
+
+    // Phase 2: Try parsing the entire response as bare JSON (no fence).
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(response.trim()) {
+        if json.get("type").and_then(|v| v.as_str()) == Some("corrected_command") {
+            let command = json
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let description = json
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty());
+            return ErrorCorrectionResult {
+                command,
+                description,
+            };
+        }
+    }
+
+    ErrorCorrectionResult {
+        command: None,
+        description: None,
+    }
 }
 
 /// Get the current username.
@@ -687,36 +747,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_corrected_command_with_bash_block() {
+    fn test_parse_json_code_block() {
+        let response = r#"```json
+{"type": "corrected_command", "command": "ls -la", "description": "Added -la flag"}
+```"#;
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, Some("ls -la".to_string()));
+        assert_eq!(result.description, Some("Added -la flag".to_string()));
+    }
+
+    #[test]
+    fn test_parse_multiline_json_code_block() {
+        let response = r#"```json
+{
+  "type": "corrected_command",
+  "command": "ls -la",
+  "description": "Added -la flag for detailed listing"
+}
+```"#;
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, Some("ls -la".to_string()));
+        assert_eq!(
+            result.description,
+            Some("Added -la flag for detailed listing".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_json_with_braces_in_value() {
+        let response = r#"```json
+{
+  "type": "corrected_command",
+  "command": "echo ${HOME}",
+  "description": "Variable expansion fix"
+}
+```"#;
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, Some("echo ${HOME}".to_string()));
+        assert_eq!(
+            result.description,
+            Some("Variable expansion fix".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_json_bare() {
+        let response =
+            r#"{"type": "corrected_command", "command": "ls -la", "description": "fix"}"#;
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, Some("ls -la".to_string()));
+    }
+
+    #[test]
+    fn test_parse_json_empty_command() {
+        let response = r#"```json
+{"type": "corrected_command", "command": "", "description": "No fix available"}
+```"#;
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, None);
+        assert_eq!(result.description, Some("No fix available".to_string()));
+    }
+
+    #[test]
+    fn test_parse_fallback_bash_block() {
         let response = "Here is the fix:\n```bash\nls -la\n```\nTry that.";
-        assert_eq!(
-            extract_corrected_command(response),
-            Some("ls -la".to_string())
-        );
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, Some("ls -la".to_string()));
+        assert_eq!(result.description, None);
     }
 
     #[test]
-    fn test_extract_corrected_command_plain_block() {
-        let response = "Try this:\n```\nrm -rf /tmp/old\n```";
-        assert_eq!(
-            extract_corrected_command(response),
-            Some("rm -rf /tmp/old".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_corrected_command_none() {
-        let response = "I don't see a command to fix here.";
-        assert_eq!(extract_corrected_command(response), None);
-    }
-
-    #[test]
-    fn test_extract_corrected_command_zsh_block() {
+    fn test_parse_fallback_zsh_block() {
         let response = "```zsh\necho hello\n```";
-        assert_eq!(
-            extract_corrected_command(response),
-            Some("echo hello".to_string())
-        );
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, Some("echo hello".to_string()));
+    }
+
+    #[test]
+    fn test_parse_none() {
+        let response = "I don't see a command to fix here.";
+        let result = parse_error_correction_response(response);
+        assert_eq!(result.command, None);
+        assert_eq!(result.description, None);
     }
 
     #[test]
