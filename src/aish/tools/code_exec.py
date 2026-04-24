@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import ClassVar, Optional
 
@@ -21,6 +22,11 @@ from aish.tools.result import ToolResult
 DISPLAY_MAX_LINES = 2
 DISPLAY_ELLIPSIS = " ..."
 logger = logging.getLogger("aish.tools.code_exec")
+
+
+def _needs_interactive_bash(command: str) -> bool:
+    lower = command.lower()
+    return "sudo" in lower or " su " in lower or lower.startswith("su ")
 
 
 def _collapse_output_lines(text: str, max_lines: int = DISPLAY_MAX_LINES) -> str:
@@ -282,6 +288,23 @@ class BashTool(ToolBase):
         )
         self.context_manager.add_memory(MemoryType.SHELL, history_entry)
 
+    def _get_cancel_event(self):
+        token = self._get_cancellation_token()
+        if token is None:
+            return None
+        if hasattr(token, "is_set"):
+            return token
+        if not hasattr(token, "is_cancelled"):
+            return None
+
+        cancel_event = threading.Event()
+        if token.is_cancelled():
+            cancel_event.set()
+            return cancel_event
+        if hasattr(token, "add_cancellation_callback"):
+            token.add_cancellation_callback(cancel_event.set)
+        return cancel_event
+
     def need_confirm_before_exec(self, code: Optional[str] = None) -> bool:
         """Override ToolBase method to integrate security check"""
         command = code
@@ -500,7 +523,19 @@ class BashTool(ToolBase):
             self.interruption_manager.set_state(ShellState.COMMAND_EXEC)
 
         # Choose execution backend
-        if self.pty_manager and self.pty_manager.is_running:
+        used_interactive_executor = False
+        if _needs_interactive_bash(code):
+            # Shared PTY execution cannot accept stdin mid-tool-call, so route a
+            # small set of known interactive commands to the legacy PTY executor.
+            _success, stdout, stderr, returncode, _changes = self.executor.execute(
+                code,
+                source="ai",
+                use_pty=True,
+                cancel_event=self._get_cancel_event(),
+            )
+            pty_rc = returncode
+            used_interactive_executor = True
+        elif self.pty_manager and self.pty_manager.is_running:
             # PTY execution: share user's bash session
             pty_stdout, pty_rc = self.pty_manager.execute_command(code)
             stdout = pty_stdout
@@ -540,10 +575,10 @@ class BashTool(ToolBase):
                 pass
 
         # 展示执行结果到终端
-        if stdout:
+        if stdout and not used_interactive_executor:
             display_output = _collapse_output_lines(stdout)
             print(display_output)
-        if stderr:
+        if stderr and not used_interactive_executor:
             display_stderr = _collapse_output_lines(stderr)
             print(f"\033[91m{display_stderr}\033[0m")  # 红色输出
 

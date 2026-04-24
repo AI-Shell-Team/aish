@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import termios
+import fcntl
 from typing import Any, Dict, Optional, Tuple
 
 from ..shell.environment import sanitize_subprocess_loader_env
@@ -188,22 +189,14 @@ class UnifiedBashExecutor:
             # Create PTY
             master_fd, slave_fd = pty.openpty()
 
-            # Set non-blocking mode
-            import fcntl
-
             flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
             fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
             def preexec_setup():
                 os.setsid()
-                # Set up controlling terminal
-                os.close(slave_fd)
-                os.close(0)
-                os.close(1)
-                os.close(2)
-                os.open(os.ttyname(0), os.O_RDWR)
-                os.open(os.ttyname(0), os.O_RDWR)
-                os.open(os.ttyname(0), os.O_RDWR)
+                # subprocess has already duplicated slave_fd onto 0/1/2 in the child.
+                # Claim fd 0 as the controlling terminal for interactive programs.
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
             # Start process
             process = subprocess.Popen(
@@ -222,10 +215,14 @@ class UnifiedBashExecutor:
 
             # Set raw mode
             if old_settings:
-                new_settings = self._build_passthrough_stdin_termios(
-                    termios.tcgetattr(sys.stdin.fileno())
-                )
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, new_settings)
+                try:
+                    stdin_fd = sys.stdin.fileno()
+                    new_settings = self._build_passthrough_stdin_termios(
+                        termios.tcgetattr(stdin_fd)
+                    )
+                    termios.tcsetattr(stdin_fd, termios.TCSANOW, new_settings)
+                except (OSError, ValueError, termios.error):
+                    old_settings = None
 
             # I/O multiplexing
             stdout_buffer = b""
@@ -308,7 +305,10 @@ class UnifiedBashExecutor:
         finally:
             # Restore terminal settings
             if old_settings:
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, old_settings)
+                try:
+                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, old_settings)
+                except (OSError, ValueError, termios.error):
+                    pass
 
             # Clean up file descriptors
             if master_fd is not None:

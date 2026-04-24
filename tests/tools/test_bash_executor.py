@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import termios
 from types import SimpleNamespace
 
 import pytest
@@ -278,6 +279,69 @@ class TestUnifiedBashExecutor:
         assert stdout == "ok\n"
         assert captured["LD_LIBRARY_PATH"] == "/usr/lib/system"
         assert captured["TEST_USER_VAR"] == "kept"
+
+    def test_execute_with_pty_claims_controlling_terminal(self, executor, monkeypatch):
+        """测试 PTY 模式会将子进程 stdin 设为 controlling terminal"""
+        self._patch_state_capture(monkeypatch)
+
+        captured = {}
+
+        class DummyProcess:
+            pid = 123
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        def fake_openpty():
+            return (10, 11)
+
+        def fake_tcgetattr(_fd):
+            return [0, 0, 0, 0, 0, 0, [0] * 32]
+
+        def fake_tcsetattr(_fd, _when, _settings):
+            return None
+
+        def fake_fcntl(_fd, _cmd, arg=None):
+            if arg is None:
+                return 0
+            return 0
+
+        def fake_popen(*args, **kwargs):
+            captured["stdin"] = kwargs["stdin"]
+            captured["stdout"] = kwargs["stdout"]
+            captured["stderr"] = kwargs["stderr"]
+            kwargs["preexec_fn"]()
+            return DummyProcess()
+
+        def fake_ioctl(fd, request, arg=0):
+            captured["ioctl"] = (fd, request, arg)
+            return 0
+
+        monkeypatch.setattr("pty.openpty", fake_openpty)
+        monkeypatch.setattr("termios.tcgetattr", fake_tcgetattr)
+        monkeypatch.setattr("termios.tcsetattr", fake_tcsetattr)
+        monkeypatch.setattr("fcntl.fcntl", fake_fcntl)
+        monkeypatch.setattr("fcntl.ioctl", fake_ioctl)
+        monkeypatch.setattr(os, "setsid", lambda: None)
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        reads = iter([b"ok\n", b""])
+
+        monkeypatch.setattr(
+            "select.select", lambda *args, **kwargs: ([10], [], [])
+        )
+        monkeypatch.setattr(os, "read", lambda fd, size: next(reads))
+        monkeypatch.setattr(os, "write", lambda fd, data: len(data))
+        monkeypatch.setattr(os, "close", lambda fd: None)
+
+        executor.execute("echo ok", use_pty=True)
+
+        assert captured["stdin"] == 11
+        assert captured["stdout"] == 11
+        assert captured["stderr"] == 11
+        assert captured["ioctl"] == (0, termios.TIOCSCTTY, 0)
 
 
 if __name__ == "__main__":

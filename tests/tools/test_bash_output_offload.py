@@ -9,7 +9,7 @@ from aish.config import BashOutputOffloadSettings
 from aish.security.security_manager import SecurityDecision
 from aish.security.security_policy import RiskLevel
 from aish.terminal.pty.manager import PTYManager
-from aish.tools.code_exec import BashTool
+from aish.tools.code_exec import BashTool, _needs_interactive_bash
 
 
 def _allow_decision() -> SecurityDecision:
@@ -25,6 +25,14 @@ def _extract_tag(xml_text: str, tag_name: str) -> str:
     match = re.search(rf"<{tag_name}>(.*?)</{tag_name}>", xml_text, flags=re.S)
     assert match is not None
     return match.group(1).strip("\n")
+
+
+def test_needs_interactive_bash_matches_rust_heuristic():
+    assert _needs_interactive_bash("sudo apt update") is True
+    assert _needs_interactive_bash("echo 3 | sudo tee /tmp/x") is True
+    assert _needs_interactive_bash("su -") is True
+    assert _needs_interactive_bash("cmd && su -") is True
+    assert _needs_interactive_bash("ls -la") is False
 
 
 @pytest.mark.asyncio
@@ -125,6 +133,40 @@ async def test_bash_exec_uses_shared_pty_without_metadata_leak(tmp_path: Path):
         assert "__AISH_ACTIVE_COMMAND_TEXT" not in result.output
     finally:
         manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_bash_exec_bypasses_shared_pty_for_interactive_commands():
+    class _FakePTYManager:
+        is_running = True
+
+        def execute_command(self, _code: str):
+            raise AssertionError("interactive commands should not use shared PTY")
+
+    tool = BashTool(
+        pty_manager=_FakePTYManager(),
+        offload_settings=BashOutputOffloadSettings(
+            enabled=True,
+            threshold_bytes=1024,
+            preview_bytes=1024,
+        ),
+    )
+
+    with (
+        patch.object(tool.security_manager, "decide", return_value=_allow_decision()),
+        patch.object(
+            tool.executor,
+            "execute",
+            return_value=(True, "Password:\n", "", 0, {}),
+        ) as execute_mock,
+        patch("builtins.print") as print_mock,
+    ):
+        result = await tool("sudo whoami")
+
+    assert result.ok is True
+    execute_mock.assert_called_once()
+    assert execute_mock.call_args.kwargs["use_pty"] is True
+    print_mock.assert_not_called()
 
 
 @pytest.mark.asyncio
