@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use aish_core::LlmEvent;
+use aish_core::{LlmEvent, LlmEventType};
 use aish_llm::diagnose_agent::build_diagnose_prompt;
 use aish_llm::types::LlmCallbackResult;
 use aish_llm::{DiagnoseAgent, LlmSession, SubSessionConfig, Tool, ToolResult};
@@ -75,6 +75,18 @@ impl SystemDiagnoseTool {
     }
 }
 
+fn should_forward_diagnose_event(event_type: &LlmEventType) -> bool {
+    matches!(
+        event_type,
+        LlmEventType::ToolExecutionStart
+            | LlmEventType::ToolExecutionEnd
+            | LlmEventType::Error
+            | LlmEventType::ToolConfirmationRequired
+            | LlmEventType::InteractionRequired
+            | LlmEventType::Cancelled
+    )
+}
+
 impl Tool for SystemDiagnoseTool {
     fn name(&self) -> &str {
         "system_diagnose_agent"
@@ -134,6 +146,9 @@ impl Tool for SystemDiagnoseTool {
             if let Some(cb) = maybe_cb {
                 let proxy_cb: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
                     Arc::new(move |event: LlmEvent| {
+                        if !should_forward_diagnose_event(&event.event_type) {
+                            return None;
+                        }
                         let mut modified_data = match event.data.as_object() {
                             Some(obj) => {
                                 let mut new_obj = obj.clone();
@@ -215,5 +230,39 @@ impl Tool for SystemDiagnoseTool {
                 Err(e) => ToolResult::error(format!("Diagnosis failed: {}", e)),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_forward_diagnose_event_matches_allowlist() {
+        let cases = [
+            (LlmEventType::OpStart, false),
+            (LlmEventType::OpEnd, false),
+            (LlmEventType::GenerationStart, false),
+            (LlmEventType::GenerationEnd, false),
+            (LlmEventType::ContentDelta, false),
+            (LlmEventType::ReasoningStart, false),
+            (LlmEventType::ReasoningDelta, false),
+            (LlmEventType::ReasoningEnd, false),
+            (LlmEventType::ToolExecutionStart, true),
+            (LlmEventType::ToolExecutionEnd, true),
+            (LlmEventType::Error, true),
+            (LlmEventType::ToolConfirmationRequired, true),
+            (LlmEventType::InteractionRequired, true),
+            (LlmEventType::Cancelled, true),
+        ];
+
+        for (event_type, expected) in cases {
+            assert_eq!(
+                should_forward_diagnose_event(&event_type),
+                expected,
+                "unexpected forwarding decision for {:?}",
+                event_type
+            );
+        }
     }
 }

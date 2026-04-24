@@ -410,11 +410,13 @@ impl LlmSession {
                                                             self.emit_content_delta(
                                                                 &accumulated,
                                                                 &accumulated,
+                                                                false,
                                                             );
                                                         } else {
                                                             self.emit_content_delta(
                                                                 &delta,
                                                                 &accumulated,
+                                                                false,
                                                             );
                                                         }
                                                     }
@@ -515,6 +517,9 @@ impl LlmSession {
 
                     // No tool calls — return accumulated content
                     if tool_calls_accum.is_empty() {
+                        if !accumulated.is_empty() && should_emit_final_stream_delta(&messages) {
+                            self.emit_content_delta(&accumulated, &accumulated, true);
+                        }
                         // Log generation span to Langfuse
                         if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
                             langfuse
@@ -851,17 +856,26 @@ impl LlmSession {
         sub
     }
 
-    fn emit_content_delta(&self, delta: &str, accumulated: &str) {
+    fn emit_content_delta(&self, delta: &str, accumulated: &str, is_final: bool) {
         self.emit_event(LlmEvent {
             event_type: LlmEventType::ContentDelta,
-            data: serde_json::json!({
-                "delta": delta,
-                "accumulated": accumulated
-            }),
+            data: content_delta_payload(delta, accumulated, is_final),
             timestamp: now_timestamp(),
             metadata: None,
         });
     }
+}
+
+fn content_delta_payload(delta: &str, accumulated: &str, is_final: bool) -> serde_json::Value {
+    serde_json::json!({
+        "delta": delta,
+        "accumulated": accumulated,
+        "is_final": is_final,
+    })
+}
+
+fn should_emit_final_stream_delta(messages: &[ChatMessage]) -> bool {
+    messages.iter().any(|message| message.role == "tool")
 }
 
 /// Helper: current time as a UNIX timestamp in seconds (f64).
@@ -1175,5 +1189,24 @@ mod tests {
         assert!(tool_names.contains(&"read_file"));
         assert!(tool_names.contains(&"grep"));
         assert!(!tool_names.contains(&"bash_exec"));
+    }
+
+    #[test]
+    fn test_content_delta_payload_marks_preview_phase() {
+        let payload = content_delta_payload("preview", "preview", false);
+
+        assert_eq!(payload["delta"].as_str(), Some("preview"));
+        assert_eq!(payload["accumulated"].as_str(), Some("preview"));
+        assert_eq!(payload["is_final"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_should_emit_final_stream_delta_only_after_tool_context() {
+        let plain_messages = vec![make_msg("system", "sys"), make_msg("user", "hello")];
+        assert!(!should_emit_final_stream_delta(&plain_messages));
+
+        let mut tool_messages = plain_messages;
+        tool_messages.push(ChatMessage::tool_result("tool-1", "done"));
+        assert!(should_emit_final_stream_delta(&tool_messages));
     }
 }

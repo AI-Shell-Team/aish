@@ -9,12 +9,8 @@ use aish_pty::{BashOffloadSettings, BashOutputOffload, CancelToken, PtyExecutor}
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
 const CAPTURE_KEEP_BYTES: usize = 10 * 1024 * 1024; // 10MB
 
-/// Default timeout for command execution in seconds.
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
-
 /// Check if a command likely needs interactive stdin (e.g. sudo password prompt).
-/// False positives (e.g. `grep sudo file`) are harmless — interactive mode just
-/// means output also goes to the terminal, it's still captured for the LLM.
+/// False positives are acceptable because output is still captured for the LLM.
 fn needs_interactive(command: &str) -> bool {
     let lower = command.to_lowercase();
     lower.contains("sudo") || lower.contains(" su ") || lower.starts_with("su ")
@@ -28,6 +24,18 @@ static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn get_description() -> &'static str {
     DESCRIPTION.get_or_init(|| aish_i18n::t("tools.bash.description"))
+}
+
+fn timeout_secs(args: &serde_json::Value) -> Result<Option<u64>, ToolResult> {
+    match args.get("timeout") {
+        None => Ok(None),
+        Some(timeout) => match timeout.as_i64() {
+            Some(seconds) if seconds > 0 => Ok(Some(seconds as u64)),
+            _ => Err(ToolResult::error(aish_i18n::t(
+                "tools.bash.invalid_timeout",
+            ))),
+        },
+    }
 }
 
 impl Default for BashTool {
@@ -61,8 +69,8 @@ impl Tool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default: 120)",
-                    "default": 120
+                    "minimum": 1,
+                    "description": "Timeout in seconds. If omitted, the command runs until completion or cancellation."
                 }
             },
             "required": ["command"]
@@ -74,13 +82,11 @@ impl Tool for BashTool {
             Some(cmd) => cmd,
             None => return ToolResult::error(aish_i18n::t("tools.bash.missing_command")),
         };
-        let timeout_secs = args
-            .get("timeout")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        let timeout_secs = match timeout_secs(&args) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
 
-        // Use interactive executor (stdin forwarding + terminal display) for
-        // commands that may prompt for a password. Otherwise capture silently.
         let executor = if needs_interactive(command) {
             PtyExecutor::new(CAPTURE_KEEP_BYTES)
         } else {
@@ -88,13 +94,14 @@ impl Tool for BashTool {
         };
         let cancel_token = Arc::new(CancelToken::new());
 
-        // Spawn a thread that cancels after timeout.
-        let timeout_token = Arc::clone(&cancel_token);
-        let timeout_duration = Duration::from_secs(timeout_secs);
-        std::thread::spawn(move || {
-            std::thread::sleep(timeout_duration);
-            timeout_token.cancel();
-        });
+        if let Some(timeout_secs) = timeout_secs {
+            let timeout_token = Arc::clone(&cancel_token);
+            let timeout_duration = Duration::from_secs(timeout_secs);
+            std::thread::spawn(move || {
+                std::thread::sleep(timeout_duration);
+                timeout_token.cancel();
+            });
+        }
 
         let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
 
@@ -122,10 +129,6 @@ impl Tool for BashTool {
                     offload_result.offload_payload.as_ref(),
                 );
 
-                // Always report ok=true when PTY execution succeeds.
-                // Non-zero exit codes are normal command outcomes, not tool
-                // failures — the LLM sees <return_code> and decides what to do.
-                // Returning ok=false triggers a pointless retry of the same command.
                 ToolResult {
                     ok: true,
                     output,
@@ -195,7 +198,6 @@ mod tests {
         let result = tool.execute(serde_json::json!({
             "command": "exit 42"
         }));
-        // Tool succeeds even with non-zero exit — LLM reads <return_code> to decide.
         assert!(
             result.ok,
             "tool execution should succeed regardless of exit code"
@@ -214,10 +216,43 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         }));
-        // Tool succeeds even when command is killed by timeout.
         assert!(
             result.ok,
             "tool execution should succeed even after timeout kill"
+        );
+    }
+
+    #[test]
+    fn test_bash_tool_parameters_do_not_advertise_default_timeout() {
+        let tool = BashTool::new();
+        let params = tool.parameters();
+        let timeout = &params["properties"]["timeout"];
+
+        assert!(timeout.get("default").is_none());
+        assert_eq!(
+            timeout["description"].as_str(),
+            Some("Timeout in seconds. If omitted, the command runs until completion or cancellation.")
+        );
+    }
+
+    #[test]
+    fn test_timeout_secs_is_optional() {
+        assert_eq!(
+            timeout_secs(&serde_json::json!({ "command": "echo hi" })).unwrap(),
+            None
+        );
+        assert_eq!(
+            timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": 3 })).unwrap(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_timeout_secs_rejects_invalid_values() {
+        assert!(timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": 0 })).is_err());
+        assert!(timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": -1 })).is_err());
+        assert!(
+            timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": "5" })).is_err()
         );
     }
 }

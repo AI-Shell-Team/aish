@@ -99,14 +99,14 @@ jobs:
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          BUNDLE="aish-${VERSION}-linux-x86_64"
+          BUNDLE="aish-${VERSION}-linux-amd64"
           EXTRACT_DIR="$PWD/build/install-smoke"
           INSTALL_ROOT="$PWD/build/install-root"
 
@@ -126,11 +126,58 @@ jobs:
           tag_name: ${{ needs.release-meta.outputs.tag }}
           files: artifacts/amd64/*
 
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-bundle-linux-amd64
+          path: artifacts/amd64/*
+          if-no-files-found: error
+
+  publish-release-bundles:
+    name: Publish release bundles
+    needs:
+      - release-meta
+      - release-gate
+      - build-release-bundle
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      VERSION: ${{ needs.release-meta.outputs.version }}
+      ARTIFACT_ROOT: artifacts/release
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: release-bundle-linux-*
+          path: ${{ env.ARTIFACT_ROOT }}
+
+      - name: Ensure aws CLI is available
+        run: |
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+          aws --version
+
+      - name: Publish release bundles
+        run: bash ./packaging/scripts/publish_release.sh
+
   release-summary:
     name: Summarize published release
     needs:
       - release-meta
+      - create-release
       - build-release-bundle
+      - publish-release-bundles
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
@@ -141,5 +188,5 @@ jobs:
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
 
-          GitHub Release metadata was generated from the tag push, and bundle assets were uploaded successfully.
+          GitHub Release metadata was generated from the tag push, bundle assets were uploaded to both GitHub Release and the release bucket, and download/latest was updated successfully.
           EOF

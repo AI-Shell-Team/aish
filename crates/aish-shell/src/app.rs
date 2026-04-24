@@ -494,15 +494,18 @@ impl AishShell {
                     LlmEventType::ContentDelta => {
                         if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
                             if !delta.is_empty() {
+                                let is_final = content_delta_is_final(&event.data);
                                 animation_ref.stop();
-                                if !ttft_recorded_ref.load(Ordering::SeqCst) {
+                                if is_final && !ttft_recorded_ref.load(Ordering::SeqCst) {
                                     if let Some(start) = *thinking_start_ref.lock().unwrap() {
                                         let elapsed = start.elapsed().as_secs_f64();
                                         *ttft_value_ref.lock().unwrap() = elapsed;
                                         ttft_recorded_ref.store(true, Ordering::SeqCst);
                                     }
                                 }
-                                streamed_flag.store(true, Ordering::SeqCst);
+                                if is_final {
+                                    streamed_flag.store(true, Ordering::SeqCst);
+                                }
                                 clear_reasoning();
                                 // Robot emoji prefix on first content chunk
                                 if !content_started_flag.load(Ordering::SeqCst) {
@@ -1909,6 +1912,12 @@ pub fn collapse_output(
     result
 }
 
+fn content_delta_is_final(data: &serde_json::Value) -> bool {
+    data.get("is_final")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod collapsing_tests {
     use super::*;
@@ -1937,6 +1946,21 @@ mod collapsing_tests {
         let output = lines.join("\n");
         let result = collapse_output(&output, Some("/tmp/offload.raw"), 20, 5);
         assert!(result.contains("/tmp/offload.raw"));
+    }
+
+    #[test]
+    fn test_content_delta_is_final_defaults_true() {
+        assert!(content_delta_is_final(
+            &serde_json::json!({ "delta": "answer" })
+        ));
+    }
+
+    #[test]
+    fn test_content_delta_is_final_respects_preview_flag() {
+        assert!(!content_delta_is_final(&serde_json::json!({
+            "delta": "preview",
+            "is_final": false,
+        })));
     }
 }
 
