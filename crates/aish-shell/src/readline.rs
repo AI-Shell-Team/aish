@@ -110,8 +110,16 @@ impl Hinter for ShellHelper {
         if pos == 0 || pos < line.len() {
             return None;
         }
+        let trimmed = line.trim_start();
         let guard = self.autosuggest.lock().unwrap();
-        guard.suggest(line).map(|s| s[line.len()..].to_string())
+        guard.suggest(trimmed).and_then(|s| {
+            let start = line.len();
+            if start < s.len() && s.is_char_boundary(start) {
+                Some(s[start..].to_string())
+            } else {
+                None
+            }
+        })
     }
 }
 
@@ -126,6 +134,15 @@ impl Completer for ShellHelper {
         pos: usize,
         ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        // Clamp pos to nearest valid char boundary (guards against CJK misalignment)
+        let pos = if line.is_char_boundary(pos) {
+            pos
+        } else {
+            (0..=pos)
+                .rev()
+                .find(|&p| line.is_char_boundary(p))
+                .unwrap_or(0)
+        };
         let before = &line[..pos];
         let word_start = before.rfind(' ').map(|i| i + 1).unwrap_or(0);
         let word = &before[word_start..];

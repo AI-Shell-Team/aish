@@ -3,6 +3,9 @@ use std::process::Command;
 use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
+/// Maximum output length (matches main branch's 1000 chars).
+const MAX_OUTPUT_CHARS: usize = 1000;
+
 /// Cached translated description.
 static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -53,25 +56,21 @@ impl Tool for PythonTool {
             None => return ToolResult::error(aish_i18n::t("tools.python.missing_code")),
         };
 
-        // Build a wrapper script that captures stdout and handles errors
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+
+        // Spawn python3 with cwd set via Command::current_dir so non-UTF-8
+        // paths are handled correctly (no lossy string conversion needed).
+        let indented_code = indent_each_line(code, " ");
         let wrapper = format!(
-            "import sys, os\n\
-             os.chdir({:?})\n\
-             try:\n\
-             {}\
-             except Exception as e:\n\
-             print(f'Error: {{e}}', file=sys.stderr)\n\
-             sys.exit(1)",
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/".to_string()),
-            indent_each_line(code, "    ")
+            "import sys\ntry:\n{indented_code}\nexcept Exception as e:\n print(f'Error: {{e}}',file=sys.stderr)\n sys.exit(1)",
         );
 
         let result = Command::new("python3")
+            .current_dir(&cwd)
             .arg("-c")
             .arg(&wrapper)
             .env("PYTHONIOENCODING", "utf-8")
+            .env("PYTHONUTF8", "1")
             .output();
 
         match result {
@@ -80,22 +79,29 @@ impl Tool for PythonTool {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let exit_code = output.status.code().unwrap_or(-1);
 
-                let mut result_text = String::new();
-                if !stdout.is_empty() {
-                    result_text.push_str(&stdout);
-                }
-                if !stderr.is_empty() {
-                    if !result_text.is_empty() {
-                        result_text.push('\n');
-                    }
-                    result_text.push_str(&format!("[stderr]\n{}", stderr));
-                }
+                // Truncate stdout like the main branch (1000 chars).
+                let stdout_owned = stdout.into_owned();
+                let stdout =
+                    if let Some((end, _)) = stdout_owned.char_indices().nth(MAX_OUTPUT_CHARS) {
+                        let mut s = stdout_owned[..end].to_string();
+                        s.push_str("\n[Output truncated due to length]");
+                        s
+                    } else {
+                        stdout_owned
+                    };
 
-                if exit_code == 0 && result_text.is_empty() {
+                if exit_code == 0 && stdout.is_empty() {
                     ToolResult::success(aish_i18n::t("tools.python.no_output"))
                 } else if exit_code == 0 {
-                    ToolResult::success(result_text)
+                    ToolResult::success(stdout)
                 } else {
+                    let mut result_text = stdout;
+                    if !stderr.is_empty() {
+                        if !result_text.is_empty() {
+                            result_text.push('\n');
+                        }
+                        result_text.push_str(&stderr);
+                    }
                     ToolResult {
                         ok: false,
                         output: result_text,
@@ -119,7 +125,8 @@ impl Tool for PythonTool {
     }
 }
 
-/// Indent each line of code for embedding inside a try block.
+/// Indent each line for embedding inside a try block (1 space, matching the
+/// single-space indentation used in the wrapper format string).
 fn indent_each_line(code: &str, indent: &str) -> String {
     code.lines()
         .map(|line| {

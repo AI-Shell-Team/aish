@@ -143,17 +143,22 @@ impl PersistentPty {
         };
         self.command_state.register_command(command, source, seq);
 
-        let mut payload = String::new();
+        // Prepend Ctrl-U (NAK) to clear stale input in the PTY line
+        // discipline canonical buffer.  Keystrokes forwarded from the
+        // interactive forwarding loop may linger there and corrupt the
+        // next command.
+        let mut payload = b"\x15".to_vec();
         if let Some(s) = seq {
             let quoted = shell_quote_escape(command);
-            payload.push_str(&format!(
-                " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; "
-            ));
+            payload.extend_from_slice(
+                format!(" __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; ")
+                    .as_bytes(),
+            );
         }
-        payload.push_str(command);
-        payload.push('\n');
+        payload.extend_from_slice(command.as_bytes());
+        payload.push(b'\n');
 
-        self.write_master(payload.as_bytes())
+        self.write_master(&payload)
     }
 
     /// Execute a command and wait for completion with timeout.
@@ -218,10 +223,14 @@ impl PersistentPty {
         // prompt rendering (PS1 / readline init sequences, etc.).
         self.drain_master_silent();
 
-        // Write command to bash.
-        let mut payload = command.to_string();
-        payload.push('\n');
-        self.write_master(payload.as_bytes())?;
+        // Write command to bash.  Prepend Ctrl-U (NAK) to clear any
+        // stale input in the PTY line discipline canonical buffer so
+        // that leftover keystrokes from a previous interactive session
+        // are not prepended to the actual command.
+        let mut payload = vec![0x15];
+        payload.extend_from_slice(command.as_bytes());
+        payload.push(b'\n');
+        self.write_master(&payload)?;
 
         // Save and set terminal to raw mode.
         let stdin_fd = libc::STDIN_FILENO;
@@ -408,6 +417,11 @@ impl PersistentPty {
                             }
                             if let Some(r) = self.command_state.handle_event(event) {
                                 result_exit_code = r.exit_code;
+                                // Discard any stdin bytes captured in the same
+                                // poll cycle.  Without this, a buffered newline
+                                // could execute a stale line before the next
+                                // command's Ctrl-U gets a chance to clear it.
+                                write_buf.clear();
                                 // Enter drain phase instead of exiting immediately.
                                 // The control pipe may deliver PromptReady before
                                 // all PTY output has been flushed to master_fd.
