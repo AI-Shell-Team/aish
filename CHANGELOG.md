@@ -11,16 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `aish update` command for self-updating to the latest stable version from CDN-hosted release metadata
+- `aish update` command for self-updating to latest version from GitHub releases
 - `aish uninstall` command for uninstalling aish with optional `--purge` flag
-- UpdateManager class for handling stable CDN update logic and GitHub pre-release discovery
+- UpdateManager class for handling update logic with GitHub API integration
 - UninstallManager class for handling uninstall logic and data cleanup
 - i18n support for update and uninstall commands in Chinese and English
 - DejaGnu integration tests for update and uninstall commands
-
-### Changed
-
-- Changed stable self-update and release publication to use the CDN layout `download/latest` plus `download/releases/<version>/...`, while preserving GitHub releases for pre-release discovery and release pages.
 
 ## [0.2.0] - 2026-04-03
 

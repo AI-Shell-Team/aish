@@ -81,15 +81,13 @@ Empower the Shell to think. Evolve Operations.
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-The installer resolves stable versions from `https://cdn.aishell.ai/download/latest` and downloads bundles from `https://cdn.aishell.ai/download/releases/<version>/...`. You can override this with `AISH_DOWNLOAD_BASE_URL`, `AISH_LATEST_URL`, or the legacy alias `AISH_REPO_URL`.
-
 #### Option 2: Manual bundle install
 
-Download the published stable bundle `aish-<version>-linux-amd64.tar.gz` from the CDN release directory `https://cdn.aishell.ai/download/releases/<version>/` (use `amd64`, not `x86_64`), then run:
+Download the matching `aish-<version>-linux-<arch>.tar.gz` bundle from the official release directory, then run:
 
 ```bash
-tar -xzf aish-<version>-linux-amd64.tar.gz
-cd aish-<version>-linux-amd64
+tar -xzf aish-<version>-linux-<arch>.tar.gz
+cd aish-<version>-linux-<arch>
 sudo ./install.sh
 ```
 
@@ -128,7 +126,7 @@ aish> ;explain this command: tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-The installer resolves the latest stable version from `https://cdn.aishell.ai/download/latest`, downloads the matching bundle from `https://cdn.aishell.ai/download/releases/<version>/`, and installs `aish`, `aish-sandbox`, and `aish-uninstall` into `/usr/local/bin`.
+The installer resolves the latest release directory under `https://www.aishell.ai/repo`, downloads the matching bundle for your architecture, and installs `aish`, `aish-sandbox`, and `aish-uninstall` into `/usr/local/bin`.
 
 ### Run from Source (Development/Trial)
 

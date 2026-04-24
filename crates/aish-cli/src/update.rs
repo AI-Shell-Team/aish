@@ -1,7 +1,7 @@
-//! Self-update via CDN-hosted stable releases and GitHub pre-releases.
+//! Self-update via GitHub releases.
 //!
-//! Stable updates read the CDN latest metadata and download versioned release
-//! bundles. Pre-release discovery continues to use the GitHub releases API.
+//! Supports platform-aware download, progress display, mirror fallback,
+//! archive extraction with install.sh execution, and automatic cleanup.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
 
-const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download";
+const GITHUB_API_LATEST: &str = "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest";
 const GITHUB_API_LIST: &str = "https://api.github.com/repos/AI-Shell-Team/aish/releases";
-const GITHUB_RELEASES_PAGE_BASE: &str = "https://github.com/AI-Shell-Team/aish/releases";
+const GITHUB_RELEASES_BASE: &str = "https://github.com/AI-Shell-Team/aish/releases/download";
+const FALLBACK_MIRROR: &str = "https://www.aishell.ai/repo";
 const CONNECTION_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 
@@ -58,6 +59,7 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
 fn detect_platform() -> Result<(&'static str, &'static str), AishError> {
     let plat = match std::env::consts::OS {
         "linux" => "linux",
+        "macos" => "darwin",
         other => {
             return Err(AishError::Config({
                 let mut args = std::collections::HashMap::new();
@@ -68,6 +70,7 @@ fn detect_platform() -> Result<(&'static str, &'static str), AishError> {
     };
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
+        "aarch64" => "arm64",
         other => {
             return Err(AishError::Config({
                 let mut args = std::collections::HashMap::new();
@@ -97,93 +100,18 @@ fn build_http_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, Ais
         })
 }
 
-fn env_var(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
+pub fn check_for_updates(
+    current_version: &str,
+    include_pre_release: bool,
+) -> Result<Option<UpdateInfo>, AishError> {
+    let client = build_http_client(CONNECTION_TIMEOUT_SECS)?;
+    let url = if include_pre_release {
+        GITHUB_API_LIST
+    } else {
+        GITHUB_API_LATEST
+    };
 
-fn download_base_url() -> String {
-    env_var("AISH_DOWNLOAD_BASE_URL")
-        .or_else(|| env_var("AISH_REPO_URL"))
-        .unwrap_or_else(|| DEFAULT_DOWNLOAD_BASE_URL.to_string())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-fn latest_version_url() -> String {
-    env_var("AISH_LATEST_URL").unwrap_or_else(|| format!("{}/latest", download_base_url()))
-}
-
-fn release_download_url(tag_name: &str, filename: &str) -> String {
-    let version_str = tag_name.strip_prefix('v').unwrap_or(tag_name);
-    format!(
-        "{}/releases/{}/{}",
-        download_base_url(),
-        version_str,
-        filename
-    )
-}
-
-fn normalize_release_tag(version_value: &str) -> Result<String, AishError> {
-    let trimmed = version_value.trim();
-    if trimmed.is_empty() {
-        return Err(AishError::Config(t("cli.update.latest_metadata_invalid")));
-    }
-
-    let normalized = trimmed.trim_start_matches('v');
-    let valid = normalized
-        .split('.')
-        .all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()));
-
-    if !valid || !normalized.chars().any(|ch| ch.is_ascii_digit()) {
-        return Err(AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("value".to_string(), trimmed.to_string());
-            t_with_args("cli.update.latest_metadata_invalid_value", &args)
-        }));
-    }
-
-    Ok(format!("v{}", normalized))
-}
-
-fn stable_release_info(client: &reqwest::blocking::Client) -> Result<serde_json::Value, AishError> {
-    let resp = client.get(latest_version_url()).send().map_err(|e| {
-        AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("error".to_string(), e.to_string());
-            t_with_args("cli.update.check_failed", &args)
-        })
-    })?;
-
-    if !resp.status().is_success() {
-        return Err(AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("status".to_string(), resp.status().to_string());
-            t_with_args("cli.update.release_metadata_error", &args)
-        }));
-    }
-
-    let tag_name = normalize_release_tag(&resp.text().map_err(|e| {
-        AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("error".to_string(), e.to_string());
-            t_with_args("cli.update.parse_release_failed", &args)
-        })
-    })?)?;
-
-    Ok(serde_json::json!({
-        "tag_name": tag_name,
-        "html_url": format!("{}/tag/{}", GITHUB_RELEASES_PAGE_BASE, tag_name),
-        "body": "",
-    }))
-}
-
-fn pre_release_info(
-    client: &reqwest::blocking::Client,
-) -> Result<Option<serde_json::Value>, AishError> {
-    let resp = client.get(GITHUB_API_LIST).send().map_err(|e| {
+    let resp = client.get(url).send().map_err(|e| {
         AishError::Config({
             let mut args = std::collections::HashMap::new();
             args.insert("error".to_string(), e.to_string());
@@ -199,29 +127,26 @@ fn pre_release_info(
         }));
     }
 
-    let releases: Vec<serde_json::Value> = resp.json().map_err(|e| {
-        AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("error".to_string(), e.to_string());
-            t_with_args("cli.update.parse_releases_failed", &args)
-        })
-    })?;
-
-    Ok(releases.into_iter().next())
-}
-
-pub fn check_for_updates(
-    current_version: &str,
-    include_pre_release: bool,
-) -> Result<Option<UpdateInfo>, AishError> {
-    let client = build_http_client(CONNECTION_TIMEOUT_SECS)?;
     let release = if include_pre_release {
-        match pre_release_info(&client)? {
+        let releases: Vec<serde_json::Value> = resp.json().map_err(|e| {
+            AishError::Config({
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.update.parse_releases_failed", &args)
+            })
+        })?;
+        match releases.into_iter().next() {
             Some(r) => r,
             None => return Ok(None),
         }
     } else {
-        stable_release_info(&client)?
+        resp.json().map_err(|e| {
+            AishError::Config({
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.update.parse_release_failed", &args)
+            })
+        })?
     };
 
     extract_update_info(&release, current_version)
@@ -278,7 +203,7 @@ fn download_with_progress(url: &str, dest: &Path, label: &str) -> Result<(), Ais
         return Err(AishError::Config({
             let mut args = std::collections::HashMap::new();
             args.insert("status".to_string(), resp.status().to_string());
-            t_with_args("cli.update.download_status_error", &args)
+            t_with_args("cli.update.github_api_error", &args)
         }));
     }
 
@@ -380,41 +305,8 @@ fn sha256_file(path: &Path) -> Result<String, AishError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn expected_sha256(path: &Path) -> Result<String, AishError> {
-    let contents = std::fs::read_to_string(path).map_err(|e| {
-        AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("error".to_string(), e.to_string());
-            t_with_args("cli.update.read_error", &args)
-        })
-    })?;
-
-    contents
-        .split_whitespace()
-        .next()
-        .filter(|value| value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit()))
-        .map(|value| value.to_ascii_lowercase())
-        .ok_or_else(|| AishError::Config(t("cli.update.checksum_file_invalid")))
-}
-
-fn verify_download_checksum(archive_path: &Path, checksum_path: &Path) -> Result<(), AishError> {
-    let expected = expected_sha256(checksum_path)?;
-    let actual = sha256_file(archive_path)?;
-
-    if actual != expected {
-        return Err(AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("expected".to_string(), expected);
-            args.insert("actual".to_string(), actual);
-            t_with_args("cli.update.checksum_mismatch", &args)
-        }));
-    }
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
-// Download release bundle from CDN
+// Download release (GitHub → mirror fallback)
 // ---------------------------------------------------------------------------
 
 fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
@@ -432,15 +324,27 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
     })?;
 
     let dest_path = temp_dir.join(&filename);
-    let checksum_filename = format!("{filename}.sha256");
-    let checksum_path = temp_dir.join(&checksum_filename);
 
-    let release_url = release_download_url(tag_name, &filename);
-    let checksum_url = release_download_url(tag_name, &checksum_filename);
-    println!("\x1b[1;36m{}\x1b[0m", t("cli.update.downloading_release"));
-    download_with_progress(&release_url, &dest_path, &filename)?;
-    download_with_progress(&checksum_url, &checksum_path, &checksum_filename)?;
-    verify_download_checksum(&dest_path, &checksum_path)?;
+    // Try GitHub first
+    let github_url = format!("{}/{}/{}", GITHUB_RELEASES_BASE, tag_name, filename);
+    println!(
+        "\x1b[1;36m{}\x1b[0m",
+        t("cli.update.downloading_from_github")
+    );
+    if download_with_progress(&github_url, &dest_path, &filename).is_ok() {
+        let path_str = dest_path.display().to_string();
+        println!("\x1b[32m{}\x1b[0m", {
+            let mut args = std::collections::HashMap::new();
+            args.insert("path".to_string(), path_str);
+            t_with_args("cli.update.downloaded", &args)
+        });
+        return Ok(dest_path);
+    }
+
+    // Fallback to mirror
+    println!("\x1b[33m{}\x1b[0m", t("cli.update.downloading_from_mirror"));
+    let mirror_url = format!("{}/{}/{}", FALLBACK_MIRROR, tag_name, filename);
+    download_with_progress(&mirror_url, &dest_path, &format!("{} (mirror)", filename))?;
     let path_str = dest_path.display().to_string();
     println!("\x1b[32m{}\x1b[0m", {
         let mut args = std::collections::HashMap::new();
@@ -637,12 +541,6 @@ pub fn run_update(check_only: bool, pre_release: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     #[test]
     fn test_compare_versions_equal() {
@@ -686,10 +584,12 @@ mod tests {
 
     #[test]
     fn test_detect_platform() {
-        match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("linux", "x86_64") => assert_eq!(detect_platform().unwrap(), ("linux", "amd64")),
-            _ => assert!(detect_platform().is_err()),
-        }
+        // Should succeed on any supported platform
+        let result = detect_platform();
+        assert!(result.is_ok());
+        let (plat, arch) = result.unwrap();
+        assert!(plat == "linux" || plat == "darwin");
+        assert!(arch == "amd64" || arch == "arm64");
     }
 
     #[test]
@@ -715,131 +615,6 @@ mod tests {
         let result = find_install_sh(&dir);
         assert!(result.is_ok());
         assert!(result.unwrap().ends_with("install.sh"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_download_base_url_defaults_to_cdn() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::remove_var("AISH_DOWNLOAD_BASE_URL");
-            std::env::remove_var("AISH_REPO_URL");
-        }
-        assert_eq!(download_base_url(), "https://cdn.aishell.ai/download");
-    }
-
-    #[test]
-    fn test_download_base_url_prefers_explicit_override() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::set_var("AISH_REPO_URL", "https://legacy.example.com/download");
-            std::env::set_var(
-                "AISH_DOWNLOAD_BASE_URL",
-                "https://cdn.example.com/download/",
-            );
-        }
-        assert_eq!(download_base_url(), "https://cdn.example.com/download");
-        unsafe {
-            std::env::remove_var("AISH_DOWNLOAD_BASE_URL");
-            std::env::remove_var("AISH_REPO_URL");
-        }
-    }
-
-    #[test]
-    fn test_latest_version_url_uses_default_pattern() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::remove_var("AISH_DOWNLOAD_BASE_URL");
-            std::env::remove_var("AISH_REPO_URL");
-            std::env::remove_var("AISH_LATEST_URL");
-        }
-        assert_eq!(
-            latest_version_url(),
-            "https://cdn.aishell.ai/download/latest"
-        );
-    }
-
-    #[test]
-    fn test_latest_version_url_prefers_override() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::set_var(
-                "AISH_LATEST_URL",
-                "https://cdn.example.com/custom/latest.txt",
-            );
-        }
-        assert_eq!(
-            latest_version_url(),
-            "https://cdn.example.com/custom/latest.txt"
-        );
-        unsafe {
-            std::env::remove_var("AISH_LATEST_URL");
-        }
-    }
-
-    #[test]
-    fn test_release_download_url_uses_versioned_cdn_path() {
-        let _guard = env_test_lock();
-        unsafe {
-            std::env::set_var("AISH_DOWNLOAD_BASE_URL", "https://cdn.example.com/download");
-        }
-        assert_eq!(
-            release_download_url("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz"),
-            "https://cdn.example.com/download/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
-        );
-        unsafe {
-            std::env::remove_var("AISH_DOWNLOAD_BASE_URL");
-        }
-    }
-
-    #[test]
-    fn test_normalize_release_tag_accepts_plain_version_text() {
-        assert_eq!(normalize_release_tag("0.3.0\n").unwrap(), "v0.3.0");
-        assert_eq!(normalize_release_tag("v0.3.0").unwrap(), "v0.3.0");
-    }
-
-    #[test]
-    fn test_normalize_release_tag_rejects_invalid_metadata() {
-        assert!(normalize_release_tag("").is_err());
-        assert!(normalize_release_tag("latest").is_err());
-        assert!(normalize_release_tag("release-2026-04-23").is_err());
-        assert!(normalize_release_tag("0-rc1").is_err());
-    }
-
-    #[test]
-    fn test_expected_sha256_accepts_sha256sum_output() {
-        let dir = std::env::temp_dir().join("aish_test_expected_sha256");
-        std::fs::create_dir_all(&dir).unwrap();
-        let checksum_path = dir.join("bundle.tar.gz.sha256");
-        std::fs::write(
-            &checksum_path,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9  bundle.tar.gz\n",
-        )
-        .unwrap();
-
-        assert_eq!(
-            expected_sha256(&checksum_path).unwrap(),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_verify_download_checksum_rejects_mismatch() {
-        let dir = std::env::temp_dir().join("aish_test_verify_download_checksum");
-        std::fs::create_dir_all(&dir).unwrap();
-        let archive_path = dir.join("bundle.tar.gz");
-        let checksum_path = dir.join("bundle.tar.gz.sha256");
-        std::fs::write(&archive_path, b"hello world").unwrap();
-        std::fs::write(
-            &checksum_path,
-            "0000000000000000000000000000000000000000000000000000000000000000  bundle.tar.gz\n",
-        )
-        .unwrap();
-
-        assert!(verify_download_checksum(&archive_path, &checksum_path).is_err());
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 

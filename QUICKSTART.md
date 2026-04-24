@@ -8,15 +8,13 @@
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-The installer reads stable version metadata from `https://cdn.aishell.ai/download/latest` and downloads bundles from `https://cdn.aishell.ai/download/releases/<version>/`. Override behavior with `AISH_DOWNLOAD_BASE_URL`, `AISH_LATEST_URL`, or the legacy alias `AISH_REPO_URL` when needed.
-
 ### Method 2: Manual Bundle Install
 
-Download the published stable bundle `aish-<version>-linux-amd64.tar.gz` from the CDN release directory `https://cdn.aishell.ai/download/releases/<version>/` (use `amd64`, not `x86_64`), then run:
+Download the matching `aish-<version>-linux-<arch>.tar.gz` bundle from the official release directory, then run:
 
 ```bash
-tar -xzf aish-<version>-linux-amd64.tar.gz
-cd aish-<version>-linux-amd64
+tar -xzf aish-<version>-linux-<arch>.tar.gz
+cd aish-<version>-linux-<arch>
 sudo ./install.sh
 ```
 

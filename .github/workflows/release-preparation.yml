@@ -95,14 +95,14 @@ jobs:
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          BUNDLE="aish-${VERSION}-linux-amd64"
+          BUNDLE="aish-${VERSION}-linux-x86_64"
           EXTRACT_DIR="$PWD/build/install-smoke"
           INSTALL_ROOT="$PWD/build/install-root"
 
@@ -115,28 +115,6 @@ jobs:
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
           test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
-
-      - name: Validate CDN release layout
-        run: |
-          VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/amd64"
-          BUNDLE="aish-${VERSION}-linux-amd64.tar.gz"
-          SHA_FILE="${BUNDLE}.sha256"
-          RELEASE_LAYOUT="$PWD/build/release-layout/download"
-
-          rm -rf "$RELEASE_LAYOUT"
-          mkdir -p "$RELEASE_LAYOUT/releases/${VERSION}"
-          cp "$OUTPUT_DIR/$BUNDLE" "$RELEASE_LAYOUT/releases/${VERSION}/"
-          cp "$OUTPUT_DIR/$SHA_FILE" "$RELEASE_LAYOUT/releases/${VERSION}/"
-          printf '%s' "$VERSION" > "$RELEASE_LAYOUT/latest"
-
-          test -f "$RELEASE_LAYOUT/latest"
-          test -f "$RELEASE_LAYOUT/releases/${VERSION}/$BUNDLE"
-          test -f "$RELEASE_LAYOUT/releases/${VERSION}/$SHA_FILE"
-          (
-            cd "$RELEASE_LAYOUT/releases/${VERSION}"
-            sha256sum -c "$SHA_FILE"
-          )
 
       - name: Upload dry-run artifacts
         uses: actions/upload-artifact@v6
@@ -162,5 +140,5 @@ jobs:
           - Tag: ${{ needs.release-meta.outputs.tag }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
-          Release metadata artifacts, CDN layout validation, and dry-run bundle validation have completed successfully.
+          Release metadata artifacts and dry-run bundle validation have completed successfully.
           EOF
