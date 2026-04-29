@@ -1550,7 +1550,8 @@ impl AishShell {
         // MutexGuard is dropped before any potential restart_pty() call).
         let result = {
             let mut pty = self.lock_pty();
-            pty.send_command_interactive(command)
+            let ai_cb = Self::build_session_ai_callback(&self.config);
+            pty.send_command_interactive(command, ai_cb)
         };
         let (exit_code, cwd, output) = match result {
             Ok(result) => result,
@@ -1806,7 +1807,7 @@ impl AishShell {
             .pty
             .lock()
             .unwrap()
-            .send_command_interactive(segment)
+            .send_command_interactive(segment, None)
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
@@ -1846,6 +1847,64 @@ impl AishShell {
             std::env::set_var(key, value);
             self.state.env_vars.insert(key.clone(), value.clone());
         }
+    }
+
+    /// Build an AI callback for session commands (SSH, telnet).
+    fn build_session_ai_callback(config: &aish_config::ConfigModel) -> Option<Box<aish_pty::AiCallback>> {
+        let api_base = config.api_base.clone();
+        let api_key = config.api_key.clone();
+        let model = config.model.clone();
+        let temperature = config.temperature;
+        let max_tokens = config.max_tokens;
+
+        Some(Box::new(move |query: aish_pty::AiQuery| {
+            let context = if query.recent_output.is_empty() {
+                format!(
+                    "The user is in a remote SSH session. Question: {}",
+                    query.question
+                )
+            } else {
+                format!(
+                    "The user is in a remote SSH session.\n\
+                     Recent terminal output:\n{}\n\n\
+                     Question: {}",
+                    query.recent_output, query.question
+                )
+            };
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let api_base_t = api_base.clone();
+            let api_key_t = api_key.clone();
+            let model_t = model.clone();
+
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result = rt.block_on(async {
+                    let session = LlmSession::new(
+                        &api_base_t,
+                        &api_key_t,
+                        &model_t,
+                        Some(temperature),
+                        max_tokens,
+                    );
+                    let system_msg = "You are an AI assistant helping in a remote SSH session. \
+                        Analyze the user's question and terminal output. \
+                        Respond with a clear explanation. \
+                        If you can suggest a command, put it in a single ```bash code block.";
+                    session.completion(&context, Some(system_msg), false).await
+                });
+                let _ = tx.send(result);
+            });
+
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(Ok(text)) => {
+                    let command = extract_bash_command(&text);
+                    Ok(aish_pty::AiResponse { text, command })
+                }
+                Ok(Err(e)) => Err(format!("LLM error: {}", e)),
+                Err(_) => Err("LLM timeout (30s)".to_string()),
+            }
+        }))
     }
 }
 
@@ -2100,6 +2159,20 @@ fn print_md(text: &str) {
     use crate::renderer::ShellRenderer;
     let mut renderer = ShellRenderer::new();
     renderer.render_markdown(text);
+}
+
+/// Extract the first ```bash code block from AI response text.
+fn extract_bash_command(text: &str) -> Option<String> {
+    let marker = "```bash";
+    let start = text.find(marker)?;
+    let content_start = start + marker.len();
+    let content_end = text[content_start..].find("```")?;
+    let cmd = text[content_start..content_start + content_end].trim().to_string();
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.lines().next().unwrap_or("").to_string())
+    }
 }
 
 #[cfg(test)]
