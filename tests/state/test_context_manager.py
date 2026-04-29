@@ -410,5 +410,121 @@ def test_recall_clears_old_results_on_no_match():
     assert "memory_recall" not in cm.knowledge_cache
 
 
+class TestToolResponseOrdering:
+    """Verify that as_messages() keeps tool responses directly after their
+    assistant tool_calls, even when SHELL memories are interleaved."""
+
+    def test_shell_between_tool_calls_and_response(self):
+        """SHELL memory inserted between assistant tool_calls and tool
+        response must be moved after the tool response."""
+        cm = ContextManager()
+        cm.add_memory(MemoryType.LLM, {"role": "user", "content": "run ip a"})
+        cm.add_memory(
+            MemoryType.LLM,
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_001",
+                        "type": "function",
+                        "function": {"name": "bash_exec", "arguments": "{}"},
+                    }
+                ],
+            },
+        )
+        # SHELL memory added during tool execution
+        cm.add_memory(
+            MemoryType.SHELL, "$ ip a → ✓ (exit 0)\n<stdout>1: lo</stdout>"
+        )
+        cm.add_memory(
+            MemoryType.LLM,
+            {
+                "role": "tool",
+                "tool_call_id": "call_001",
+                "content": "<stdout>1: lo</stdout>",
+            },
+        )
+
+        msgs = cm.as_messages()
+
+        assert msgs[0]["role"] == "user"
+        assert msgs[1]["role"] == "assistant"
+        assert msgs[1].get("tool_calls") is not None
+        # tool response must directly follow assistant tool_calls
+        assert msgs[2]["role"] == "tool"
+        assert msgs[2]["tool_call_id"] == "call_001"
+        # SHELL-originated user message comes after tool response
+        assert msgs[3]["role"] == "user"
+        assert "$ ip a" in msgs[3]["content"]
+
+    def test_multiple_tool_calls(self):
+        """Multiple tool calls from one assistant message."""
+        cm = ContextManager()
+        cm.add_memory(MemoryType.LLM, {"role": "user", "content": "go"})
+        cm.add_memory(
+            MemoryType.LLM,
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_a",
+                        "type": "function",
+                        "function": {"name": "f1", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": {"name": "f2", "arguments": "{}"},
+                    },
+                ],
+            },
+        )
+        cm.add_memory(MemoryType.SHELL, "$ cmd1 → ✓ (exit 0)")
+        cm.add_memory(
+            MemoryType.LLM,
+            {"role": "tool", "tool_call_id": "call_a", "content": "result-a"},
+        )
+        cm.add_memory(MemoryType.SHELL, "$ cmd2 → ✗ (exit 1)")
+        cm.add_memory(
+            MemoryType.LLM,
+            {"role": "tool", "tool_call_id": "call_b", "content": "result-b"},
+        )
+
+        msgs = cm.as_messages()
+
+        assert msgs[0]["role"] == "user"
+        assert msgs[1]["role"] == "assistant"
+        # Both tool responses directly follow
+        assert msgs[2]["role"] == "tool"
+        assert msgs[2]["tool_call_id"] == "call_a"
+        assert msgs[3]["role"] == "tool"
+        assert msgs[3]["tool_call_id"] == "call_b"
+        # Deferred user messages come after
+        assert msgs[4]["role"] == "user"
+        assert msgs[5]["role"] == "user"
+
+    def test_no_tool_calls_unchanged(self):
+        """Messages without tool calls should not be reordered."""
+        cm = ContextManager()
+        cm.add_memory(MemoryType.LLM, {"role": "user", "content": "hello"})
+        cm.add_memory(
+            MemoryType.LLM, {"role": "assistant", "content": "hi there"}
+        )
+        cm.add_memory(MemoryType.SHELL, "$ ls → ✓ (exit 0)")
+        cm.add_memory(
+            MemoryType.LLM, {"role": "user", "content": "thanks"}
+        )
+
+        msgs = cm.as_messages()
+
+        assert len(msgs) == 4
+        assert msgs[0]["content"] == "hello"
+        assert msgs[1]["content"] == "hi there"
+        assert msgs[2]["content"] == "$ ls → ✓ (exit 0)"
+        assert msgs[3]["content"] == "thanks"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

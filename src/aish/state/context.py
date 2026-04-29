@@ -2,6 +2,56 @@ from enum import Enum
 from typing import Any, Optional
 
 
+def _fix_tool_response_ordering(messages: list[dict]) -> list[dict]:
+    """Ensure tool response messages directly follow their assistant tool_calls.
+
+    Non-LLM memories (e.g. SHELL history rendered as user-role messages) can
+    end up between an assistant message with ``tool_calls`` and the matching
+    ``role: "tool"`` response.  The OpenAI / DeepSeek API rejects such
+    sequences, so we re-order: tool responses are pulled forward, and any
+    intervening messages are deferred.
+    """
+    result: list[dict] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        result.append(msg)
+
+        tool_calls = msg.get("tool_calls")
+        if (
+            msg.get("role") == "assistant"
+            and isinstance(tool_calls, list)
+            and tool_calls
+        ):
+            needed_ids = {
+                tc["id"]
+                for tc in tool_calls
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            tool_responses: list[dict] = []
+            deferred: list[dict] = []
+
+            for m in messages[i + 1 :]:
+                if (
+                    needed_ids
+                    and m.get("role") == "tool"
+                    and m.get("tool_call_id") in needed_ids
+                ):
+                    tool_responses.append(m)
+                    needed_ids.discard(m["tool_call_id"])
+                else:
+                    deferred.append(m)
+
+            result.extend(tool_responses)
+            messages = deferred
+            i = 0
+            continue
+
+        i += 1
+
+    return result
+
+
 class MemoryType(Enum):
     LLM = "llm"
     SHELL = "shell"
@@ -282,4 +332,8 @@ class ContextManager:
                 # Compact shell history format
                 messages.append({"role": "user", "content": memory["content"]})
 
-        return messages
+        # Non-LLM memories (e.g. SHELL) can be interleaved between an
+        # assistant message with tool_calls and its tool response, which
+        # violates the OpenAI/deepseek message ordering requirement.
+        # Post-process to keep tool responses directly after their caller.
+        return _fix_tool_response_ordering(messages)
