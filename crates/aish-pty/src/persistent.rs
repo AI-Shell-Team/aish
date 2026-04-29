@@ -491,6 +491,11 @@ impl PersistentPty {
                 if draining {
                     done = true;
                 }
+                // No data arrived for 50ms — the remote shell is idle and
+                // sitting at a prompt waiting for input.
+                if is_session {
+                    interceptor.mark_prompt_ready();
+                }
                 continue;
             }
 
@@ -546,17 +551,27 @@ impl PersistentPty {
                                     }
                                 }
                                 crate::StdinAction::TriggerAi(question) => {
-                                    // Clear the local echo line
+                                    // Move to a new line (preserve user's input line)
                                     unsafe {
                                         libc::write(
                                             libc::STDOUT_FILENO,
-                                            b"\r\x1b[2K".as_ptr() as *const libc::c_void,
-                                            5,
+                                            b"\r\n".as_ptr() as *const libc::c_void,
+                                            2,
                                         );
                                     }
 
                                     // Call AI callback (handles all display)
                                     if let Some(cmd) = interceptor.call_ai(question) {
+                                        // Show bash_exec-style command display
+                                        let tool_line =
+                                            format!("\x1b[36m🔧 bash_exec: {}\x1b[0m\r\n", cmd);
+                                        unsafe {
+                                            libc::write(
+                                                libc::STDOUT_FILENO,
+                                                tool_line.as_ptr() as *const libc::c_void,
+                                                tool_line.len(),
+                                            );
+                                        }
                                         // Inject command into PTY master
                                         let mut inject = cmd.as_bytes().to_vec();
                                         inject.push(b'\r');

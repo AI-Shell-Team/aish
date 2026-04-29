@@ -121,6 +121,14 @@ impl SessionInterceptor {
         self.state == InterceptorState::AiProcessing
     }
 
+    /// Called when the select loop times out with no data — the remote
+    /// shell is idle and sitting at a prompt waiting for input.
+    pub fn mark_prompt_ready(&mut self) {
+        if self.state == InterceptorState::Passthrough {
+            self.at_line_start = true;
+        }
+    }
+
     /// Run the AI callback. The callback handles all display and returns
     /// the command to inject into the remote shell, if any.
     pub fn call_ai(&self, question: String) -> Option<String> {
