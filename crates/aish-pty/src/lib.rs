@@ -17,6 +17,7 @@ pub mod command_state;
 pub mod control;
 pub mod executor;
 pub mod offload;
+pub mod output_buffer;
 pub mod persistent;
 pub mod state_capture;
 pub mod types;
@@ -29,6 +30,7 @@ pub use offload::{
     BashOffloadResult, BashOffloadSettings, BashOutputOffload, OffloadResult, OffloadState,
     PtyOutputOffload,
 };
+pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use state_capture::StateChanges;
 pub use types::{CommandSource, CommandSubmission, PtyCommandResult, StreamName};
