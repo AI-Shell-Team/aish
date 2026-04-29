@@ -554,38 +554,19 @@ impl PersistentPty {
                                             5,
                                         );
                                     }
-                                    // Show thinking indicator
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            b"\x1b[36m[AI thinking...]\x1b[0m\r\n".as_ptr()
-                                                as *const libc::c_void,
-                                            28,
-                                        );
-                                    }
 
-                                    // Call AI
-                                    match interceptor.call_ai(question) {
-                                        Some(Ok(response)) => {
-                                            crate::SessionInterceptor::display_response_and_inject(
-                                                &response,
+                                    // Call AI callback (handles all display)
+                                    if let Some(cmd) = interceptor.call_ai(question) {
+                                        // Inject command into PTY master
+                                        let mut inject = cmd.as_bytes().to_vec();
+                                        inject.push(b'\r');
+                                        unsafe {
+                                            libc::write(
                                                 self.master_fd,
+                                                inject.as_ptr() as *const libc::c_void,
+                                                inject.len(),
                                             );
                                         }
-                                        Some(Err(e)) => {
-                                            let msg = format!(
-                                                "\x1b[31m[AI error: {}]\x1b[0m\r\n",
-                                                e
-                                            );
-                                            unsafe {
-                                                libc::write(
-                                                    libc::STDOUT_FILENO,
-                                                    msg.as_ptr() as *const libc::c_void,
-                                                    msg.len(),
-                                                );
-                                            }
-                                        }
-                                        None => {}
                                     }
                                     interceptor.finish_ai();
                                 }

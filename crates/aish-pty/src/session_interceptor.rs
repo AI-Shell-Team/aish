@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use crate::output_buffer::OutputBuffer;
 
 // ---------------------------------------------------------------------------
@@ -14,17 +12,11 @@ pub struct AiQuery {
     pub recent_output: String,
 }
 
-/// Response returned by the AI callback.
-pub struct AiResponse {
-    /// Full AI response text to display.
-    pub text: String,
-    /// Suggested command to inject into remote shell, if any.
-    pub command: Option<String>,
-}
-
-/// Callback function type: receives query, returns response.
-/// Implemented by the shell layer using LLM.
-pub type AiCallback = dyn Fn(AiQuery) -> Result<AiResponse, String> + Send + Sync;
+/// Callback function type: receives query, handles ALL display (spinner,
+/// response formatting, errors), returns command to inject into remote shell.
+/// Implemented by the shell layer using LLM + renderer + animation.
+/// Returns Some(command) to inject, None for no injection or error.
+pub type AiCallback = dyn Fn(AiQuery) -> Option<String> + Send + Sync;
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -65,8 +57,8 @@ pub struct SessionInterceptor {
 
 impl SessionInterceptor {
     /// Create a new interceptor.
-    /// `ai_callback` is None → interceptor is disabled (pure passthrough).
-    /// `ai_callback` is Some → interceptor will intercept `;` input.
+    /// `ai_callback` is None -> interceptor is disabled (pure passthrough).
+    /// `ai_callback` is Some -> interceptor will intercept `;` input.
     pub fn new(ai_callback: Option<Box<AiCallback>>) -> Self {
         Self {
             state: InterceptorState::Passthrough,
@@ -106,9 +98,7 @@ impl SessionInterceptor {
                     StdinAction::EchoLocally
                 }
             }
-            InterceptorState::AiProcessing => {
-                StdinAction::EchoLocally
-            }
+            InterceptorState::AiProcessing => StdinAction::EchoLocally,
         }
     }
 
@@ -131,15 +121,10 @@ impl SessionInterceptor {
         self.state == InterceptorState::AiProcessing
     }
 
-    /// Get the recent PTY output for error correction context.
-    pub fn recent_output(&self, max_len: usize) -> String {
-        let bytes = self.output_buffer.recent(max_len);
-        String::from_utf8_lossy(&bytes).to_string()
-    }
-
-    /// Run the AI callback and return the response.
-    pub fn call_ai(&self, question: String) -> Option<Result<AiResponse, String>> {
-        self.ai_callback.as_ref().map(|cb| {
+    /// Run the AI callback. The callback handles all display and returns
+    /// the command to inject into the remote shell, if any.
+    pub fn call_ai(&self, question: String) -> Option<String> {
+        self.ai_callback.as_ref().and_then(|cb| {
             let recent = self.recent_output(4000);
             cb(AiQuery {
                 question,
@@ -148,35 +133,10 @@ impl SessionInterceptor {
         })
     }
 
-    /// Display the AI response on stdout and inject command into PTY master.
-    /// Returns the command string if injected.
-    pub fn display_response_and_inject(
-        response: &AiResponse,
-        pty_master_fd: std::os::fd::RawFd,
-    ) -> Option<String> {
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-
-        let _ = handle.write_all(b"\r\x1b[2K");
-        let _ = handle.write_all(b"\x1b[36m--- AI ---\x1b[0m\r\n");
-        let _ = handle.write_all(response.text.as_bytes());
-        let _ = handle.write_all(b"\r\n\x1b[36m----------\x1b[0m\r\n");
-        let _ = handle.flush();
-
-        if let Some(ref cmd) = response.command {
-            let mut inject = cmd.as_bytes().to_vec();
-            inject.push(b'\r');
-            unsafe {
-                libc::write(
-                    pty_master_fd,
-                    inject.as_ptr() as *const libc::c_void,
-                    inject.len(),
-                );
-            }
-            Some(cmd.clone())
-        } else {
-            None
-        }
+    /// Get the recent PTY output for error correction context.
+    pub fn recent_output(&self, max_len: usize) -> String {
+        let bytes = self.output_buffer.recent(max_len);
+        String::from_utf8_lossy(&bytes).to_string()
     }
 }
 
@@ -197,12 +157,11 @@ mod tests {
     use super::*;
 
     fn noop_callback() -> Box<AiCallback> {
-        Box::new(|_q| {
-            Ok(AiResponse {
-                text: "test response".to_string(),
-                command: Some("echo test".to_string()),
-            })
-        })
+        Box::new(|_q| Some("echo test".to_string()))
+    }
+
+    fn noop_callback_no_cmd() -> Box<AiCallback> {
+        Box::new(|_q| None)
     }
 
     // ---- extract_ai_question tests ----
@@ -307,5 +266,21 @@ mod tests {
         ic.feed_pty_output(b"hello ");
         ic.feed_pty_output(b"world\n");
         assert!(ic.recent_output(100).contains("hello world"));
+    }
+
+    #[test]
+    fn test_call_ai_returns_command() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        ic.feed_stdin(b';');
+        ic.feed_stdin(b'\r');
+        let cmd = ic.call_ai("test".to_string());
+        assert_eq!(cmd, Some("echo test".to_string()));
+    }
+
+    #[test]
+    fn test_call_ai_returns_none() {
+        let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()));
+        let cmd = ic.call_ai("test".to_string());
+        assert_eq!(cmd, None);
     }
 }

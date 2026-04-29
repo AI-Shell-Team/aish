@@ -1550,7 +1550,7 @@ impl AishShell {
         // MutexGuard is dropped before any potential restart_pty() call).
         let result = {
             let mut pty = self.lock_pty();
-            let ai_cb = Self::build_session_ai_callback(&self.config);
+            let ai_cb = Self::build_session_ai_callback(&self.config, &self.animation);
             pty.send_command_interactive(command, ai_cb)
         };
         let (exit_code, cwd, output) = match result {
@@ -1850,12 +1850,18 @@ impl AishShell {
     }
 
     /// Build an AI callback for session commands (SSH, telnet).
-    fn build_session_ai_callback(config: &aish_config::ConfigModel) -> Option<Box<aish_pty::AiCallback>> {
+    /// The callback handles ALL display (spinner, response formatting, errors)
+    /// and returns the command to inject into the remote shell.
+    fn build_session_ai_callback(
+        config: &aish_config::ConfigModel,
+        animation: &Arc<crate::animation::SharedAnimation>,
+    ) -> Option<Box<aish_pty::AiCallback>> {
         let api_base = config.api_base.clone();
         let api_key = config.api_key.clone();
         let model = config.model.clone();
         let temperature = config.temperature;
         let max_tokens = config.max_tokens;
+        let animation = animation.clone();
 
         Some(Box::new(move |query: aish_pty::AiQuery| {
             let context = if query.recent_output.is_empty() {
@@ -1871,6 +1877,9 @@ impl AishShell {
                     query.recent_output, query.question
                 )
             };
+
+            // Start thinking spinner (blue dots + elapsed time)
+            animation.start("thinking");
 
             let (tx, rx) = std::sync::mpsc::channel();
             let api_base_t = api_base.clone();
@@ -1896,13 +1905,30 @@ impl AishShell {
                 let _ = tx.send(result);
             });
 
-            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+
+            // Stop spinner
+            animation.stop();
+
+            match result {
                 Ok(Ok(text)) => {
                     let command = extract_bash_command(&text);
-                    Ok(aish_pty::AiResponse { text, command })
+                    // Display response matching local aish style
+                    let mut renderer = ShellRenderer::new();
+                    renderer.render_separator();
+                    print!("\x1b[1;90m🤖 ");
+                    renderer.render_markdown(&text);
+                    renderer.render_separator();
+                    command
                 }
-                Ok(Err(e)) => Err(format!("LLM error: {}", e)),
-                Err(_) => Err("LLM timeout (30s)".to_string()),
+                Ok(Err(e)) => {
+                    eprintln!("\x1b[31mLLM error: {}\x1b[0m", e);
+                    None
+                }
+                Err(_) => {
+                    eprintln!("\x1b[31mLLM timeout (30s)\x1b[0m");
+                    None
+                }
             }
         }))
     }
