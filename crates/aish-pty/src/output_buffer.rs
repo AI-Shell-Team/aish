@@ -1,5 +1,5 @@
-/// Circular buffer that keeps the most recent N bytes of PTY output.
-/// Used to provide context for AI error correction during SSH sessions.
+//! Circular buffer that keeps the most recent N bytes of PTY output.
+//! Used to provide context for AI error correction during SSH sessions.
 
 pub struct OutputBuffer {
     data: Vec<u8>,

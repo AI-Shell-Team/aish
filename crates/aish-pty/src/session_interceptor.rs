@@ -81,14 +81,15 @@ impl SessionInterceptor {
     pub fn feed_stdin(&mut self, byte: u8) -> StdinAction {
         match self.state {
             InterceptorState::Passthrough => {
-                if self.at_line_start && self.ai_callback.is_some() {
-                    if byte == b';' || byte == 0xEF {
-                        self.line_buffer.clear();
-                        self.line_buffer.push(byte);
-                        self.state = InterceptorState::AiInput;
-                        self.at_line_start = false;
-                        return StdinAction::EchoLocally;
-                    }
+                if self.at_line_start
+                    && self.ai_callback.is_some()
+                    && (byte == b';' || byte == 0xEF)
+                {
+                    self.line_buffer.clear();
+                    self.line_buffer.push(byte);
+                    self.state = InterceptorState::AiInput;
+                    self.at_line_start = false;
+                    return StdinAction::EchoLocally;
                 }
                 self.at_line_start = false;
                 StdinAction::Forward
