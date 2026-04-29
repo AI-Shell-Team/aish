@@ -41,6 +41,10 @@ pub enum StdinAction {
     EchoLocally,
     /// AI input line is complete. Caller should invoke AI callback.
     TriggerAi(String),
+    /// User pressed Ctrl+C / Escape in AI input; cancel and return to passthrough.
+    CancelAi,
+    /// User pressed backspace in AI input; erase last char on screen.
+    EraseChar,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,15 +91,44 @@ impl SessionInterceptor {
                 StdinAction::Forward
             }
             InterceptorState::AiInput => {
-                self.line_buffer.push(byte);
-                if byte == b'\r' || byte == b'\n' {
-                    let line = String::from_utf8_lossy(&self.line_buffer).to_string();
-                    let question = extract_ai_question(&line);
-                    self.state = InterceptorState::AiProcessing;
-                    self.line_buffer.clear();
-                    StdinAction::TriggerAi(question)
-                } else {
-                    StdinAction::EchoLocally
+                match byte {
+                    // Ctrl+C (0x03) or Escape (0x1B) — cancel AI input
+                    0x03 | 0x1B => {
+                        self.line_buffer.clear();
+                        self.state = InterceptorState::Passthrough;
+                        self.at_line_start = true;
+                        StdinAction::CancelAi
+                    }
+                    // Backspace (0x7F) or Delete (0x08) — erase last char
+                    0x7F | 0x08 => {
+                        if self.line_buffer.len() > 1 {
+                            // Remove last byte (keep the `;` prefix)
+                            self.line_buffer.pop();
+                            StdinAction::EraseChar
+                        } else {
+                            StdinAction::EchoLocally // can't erase `;` prefix
+                        }
+                    }
+                    // Ctrl+U (0x15) — clear entire line content (keep `;`)
+                    0x15 => {
+                        if !self.line_buffer.is_empty() {
+                            self.line_buffer.truncate(1); // keep `;` or 0xEF
+                        }
+                        StdinAction::CancelAi // reuse CancelAi to reset line
+                    }
+                    // Enter — submit
+                    b'\r' | b'\n' => {
+                        let line = String::from_utf8_lossy(&self.line_buffer).to_string();
+                        let question = extract_ai_question(&line);
+                        self.state = InterceptorState::AiProcessing;
+                        self.line_buffer.clear();
+                        StdinAction::TriggerAi(question)
+                    }
+                    // Normal character — buffer and echo
+                    _ => {
+                        self.line_buffer.push(byte);
+                        StdinAction::EchoLocally
+                    }
                 }
             }
             InterceptorState::AiProcessing => StdinAction::EchoLocally,

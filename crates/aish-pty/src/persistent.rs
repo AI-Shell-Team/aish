@@ -550,6 +550,26 @@ impl PersistentPty {
                                         );
                                     }
                                 }
+                                crate::StdinAction::CancelAi => {
+                                    // Show ^C and move to new line
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"^C\r\n".as_ptr() as *const libc::c_void,
+                                            4,
+                                        );
+                                    }
+                                }
+                                crate::StdinAction::EraseChar => {
+                                    // Erase character: backspace, space, backspace
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"\x08 \x08".as_ptr() as *const libc::c_void,
+                                            3,
+                                        );
+                                    }
+                                }
                                 crate::StdinAction::TriggerAi(question) => {
                                     // Move to a new line (preserve user's input line)
                                     unsafe {
