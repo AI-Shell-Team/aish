@@ -373,8 +373,14 @@ impl PersistentPty {
     pub fn send_command_interactive(
         &mut self,
         command: &str,
+        ai_callback: Option<Box<crate::session_interceptor::AiCallback>>,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
+        let mut interceptor = if is_session {
+            crate::SessionInterceptor::new(ai_callback)
+        } else {
+            crate::SessionInterceptor::new(None)
+        };
 
         // Drain stale data from both the PTY master fd and the control
         // pipe BEFORE registering the new command.  A stale PromptReady
@@ -506,7 +512,7 @@ impl PersistentPty {
                 }
             }
 
-            // Read stdin -> master (only during normal phase).
+            // Read stdin -> interceptor or master (only during normal phase).
             if !draining && unsafe { libc::FD_ISSET(stdin_fd, &read_fds) } {
                 let mut tmp = [0u8; 1024];
                 match unsafe {
@@ -514,10 +520,77 @@ impl PersistentPty {
                 } {
                     n if n > 0 => {
                         let data = &tmp[..n as usize];
-                        if data.contains(&0x03) && !is_session {
-                            let _ = kill_pg(self.child_pid, Signal::SIGINT);
+
+                        // Non-session: original passthrough behavior
+                        if !is_session {
+                            if data.contains(&0x03) {
+                                let _ = kill_pg(self.child_pid, Signal::SIGINT);
+                            }
+                            write_buf.extend_from_slice(data);
+                            continue;
                         }
-                        write_buf.extend_from_slice(data);
+
+                        // Session command: route through interceptor
+                        for &byte in data {
+                            match interceptor.feed_stdin(byte) {
+                                crate::StdinAction::Forward => {
+                                    write_buf.push(byte);
+                                }
+                                crate::StdinAction::EchoLocally => {
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            &byte as *const u8 as *const libc::c_void,
+                                            1,
+                                        );
+                                    }
+                                }
+                                crate::StdinAction::TriggerAi(question) => {
+                                    // Clear the local echo line
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"\r\x1b[2K".as_ptr() as *const libc::c_void,
+                                            5,
+                                        );
+                                    }
+                                    // Show thinking indicator
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"\x1b[36m[AI thinking...]\x1b[0m\r\n".as_ptr()
+                                                as *const libc::c_void,
+                                            28,
+                                        );
+                                    }
+
+                                    // Call AI
+                                    match interceptor.call_ai(question) {
+                                        Some(Ok(response)) => {
+                                            crate::SessionInterceptor::display_response_and_inject(
+                                                &response,
+                                                self.master_fd,
+                                            );
+                                        }
+                                        Some(Err(e)) => {
+                                            let msg = format!(
+                                                "\x1b[31m[AI error: {}]\x1b[0m\r\n",
+                                                e
+                                            );
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    msg.as_ptr() as *const libc::c_void,
+                                                    msg.len(),
+                                                );
+                                            }
+                                        }
+                                        None => {}
+                                    }
+                                    interceptor.finish_ai();
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -548,13 +621,20 @@ impl PersistentPty {
                         }
                         if !data.is_empty() {
                             output_buf.extend_from_slice(data);
-                            let _ = unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    data.as_ptr() as *const libc::c_void,
-                                    data.len(),
-                                )
-                            };
+                            // Feed interceptor for line-start tracking and output buffering
+                            if is_session {
+                                interceptor.feed_pty_output(data);
+                            }
+                            // Display unless AI is processing
+                            if !interceptor.is_ai_processing() {
+                                let _ = unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        data.as_ptr() as *const libc::c_void,
+                                        data.len(),
+                                    )
+                                };
+                            }
                         }
                     }
                     0 => {
