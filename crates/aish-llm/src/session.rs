@@ -305,7 +305,8 @@ impl LlmSession {
 
             match response {
                 LlmResponse::Json(json) => {
-                    let (content, tool_calls, usage) = StreamParser::parse_response(&json);
+                    let (content, reasoning_content, tool_calls, usage) =
+                        StreamParser::parse_response(&json);
                     let (pt, ct) = usage
                         .as_ref()
                         .map(|u| (u.prompt_tokens, u.completion_tokens))
@@ -362,6 +363,7 @@ impl LlmSession {
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string());
                         chat_msg.tool_calls = Some(tool_calls.clone());
+                        chat_msg.reasoning_content = reasoning_content;
                         messages.push(chat_msg);
                     }
 
@@ -380,6 +382,7 @@ impl LlmSession {
 
                 LlmResponse::Stream(resp) => {
                     let mut accumulated = String::new();
+                    let mut reasoning_accumulated = String::new();
                     let mut tool_calls_accum: HashMap<usize, (String, String, String)> =
                         HashMap::new(); // index -> (id, name, args)
 
@@ -444,6 +447,7 @@ impl LlmSession {
                                                     }
                                                 }
                                                 SseEvent::ReasoningDelta(delta) => {
+                                                    reasoning_accumulated.push_str(&delta);
                                                     if !reasoning_started {
                                                         reasoning_started = true;
                                                         self.emit_event(LlmEvent {
@@ -642,6 +646,9 @@ impl LlmSession {
                         Some(accumulated)
                     };
                     assistant_msg.tool_calls = Some(tool_calls.clone());
+                    if !reasoning_accumulated.is_empty() {
+                        assistant_msg.reasoning_content = Some(reasoning_accumulated);
+                    }
                     messages.push(assistant_msg);
 
                     // Execute tools
@@ -680,7 +687,7 @@ impl LlmSession {
 
         match response {
             LlmResponse::Json(json) => {
-                let (content, _, usage) = StreamParser::parse_response(&json);
+                let (content, _reasoning, _tool_calls, usage) = StreamParser::parse_response(&json);
                 if let Some(u) = usage {
                     self.record_usage(u);
                 }
@@ -912,8 +919,9 @@ fn trim_messages(
     let estimate_tokens = |msgs: &[ChatMessage]| -> usize {
         msgs.iter()
             .map(|m| {
-                let len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
-                len / 4
+                let content_len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
+                let reasoning_len = m.reasoning_content.as_ref().map(|c| c.len()).unwrap_or(0);
+                (content_len + reasoning_len) / 4
             })
             .sum()
     };
@@ -951,7 +959,11 @@ fn trim_messages(
 
     // Keep newest middle messages that fit
     for msg in middle.into_iter().rev() {
-        let msg_tokens = msg.content.as_ref().map(|c| c.len() / 4).unwrap_or(0);
+        let msg_tokens = {
+            let content_len = msg.content.as_ref().map(|c| c.len()).unwrap_or(0);
+            let reasoning_len = msg.reasoning_content.as_ref().map(|c| c.len()).unwrap_or(0);
+            (content_len + reasoning_len) / 4
+        };
         if middle_used + msg_tokens > middle_budget {
             break;
         }
@@ -977,6 +989,7 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning_content: None,
         }
     }
 

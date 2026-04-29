@@ -230,6 +230,7 @@ fn test_message_with_none_content() {
         tool_calls: None,
         tool_call_id: None,
         name: None,
+        reasoning_content: None,
     };
     assert_eq!(msg_with_content.content, Some("Hello".to_string()));
 
@@ -239,6 +240,7 @@ fn test_message_with_none_content() {
         tool_calls: Some(vec![]),
         tool_call_id: None,
         name: None,
+        reasoning_content: None,
     };
     assert_eq!(msg_without_content.content, None);
 }

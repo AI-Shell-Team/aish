@@ -20,10 +20,11 @@ pub enum SseEvent {
 pub struct StreamParser;
 
 impl StreamParser {
-    /// Parse a non-streaming JSON response into final content and tool calls.
+    /// Parse a non-streaming JSON response into final content, reasoning content,
+    /// and tool calls.
     pub fn parse_response(
         response: &serde_json::Value,
-    ) -> (Option<String>, Vec<ToolCall>, Option<TokenUsage>) {
+    ) -> (Option<String>, Option<String>, Vec<ToolCall>, Option<TokenUsage>) {
         let choices = response.get("choices").and_then(|c| c.as_array());
         if let Some(choices) = choices {
             if let Some(choice) = choices.first() {
@@ -32,17 +33,22 @@ impl StreamParser {
                     .and_then(|m| m.get("content"))
                     .and_then(|c| c.as_str())
                     .map(|s| s.to_string());
+                let reasoning_content = message
+                    .and_then(|m| m.get("reasoning_content"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string());
                 let tool_calls = Self::parse_tool_calls_from_message(message);
                 let usage = TokenUsage::from_response_json(response);
                 let has_usage = usage.prompt_tokens > 0 || usage.completion_tokens > 0;
                 return (
                     content,
+                    reasoning_content,
                     tool_calls,
                     if has_usage { Some(usage) } else { None },
                 );
             }
         }
-        (None, Vec::new(), None)
+        (None, None, Vec::new(), None)
     }
 
     fn parse_tool_calls_from_message(message: Option<&serde_json::Value>) -> Vec<ToolCall> {

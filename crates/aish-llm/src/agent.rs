@@ -280,11 +280,11 @@ impl<'a> ReActAgent<'a> {
                 )
                 .await?;
 
-            // Extract text content and tool calls from the response.
-            let (content, tool_calls) = match response {
+            // Extract text content, reasoning content, and tool calls from the response.
+            let (content, reasoning_content, tool_calls) = match response {
                 LlmResponse::Json(json) => {
-                    let (text, tcs, _usage) = StreamParser::parse_response(&json);
-                    (text.unwrap_or_default(), tcs)
+                    let (text, reasoning, tcs, _usage) = StreamParser::parse_response(&json);
+                    (text.unwrap_or_default(), reasoning, tcs)
                 }
                 LlmResponse::Stream(_) => {
                     // Should not happen since we requested non-streaming,
@@ -305,6 +305,7 @@ impl<'a> ReActAgent<'a> {
                 // Add the assistant message with tool calls to history.
                 let mut assistant_msg = ChatMessage::assistant(&content);
                 assistant_msg.tool_calls = Some(tool_calls.clone());
+                assistant_msg.reasoning_content = reasoning_content;
                 messages.push(assistant_msg);
 
                 // Execute each tool and collect observations.
@@ -390,7 +391,9 @@ impl<'a> ReActAgent<'a> {
                     }
 
                     // Feed observations back as a user message.
-                    messages.push(ChatMessage::assistant(&content));
+                    let mut asst = ChatMessage::assistant(&content);
+                    asst.reasoning_content = reasoning_content.clone();
+                    messages.push(asst);
                     messages.push(ChatMessage::user(all_observations.trim().to_string()));
 
                     // Trim messages to prevent context overflow
