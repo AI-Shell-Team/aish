@@ -19,6 +19,7 @@ pub mod executor;
 pub mod offload;
 pub mod output_buffer;
 pub mod persistent;
+pub mod session_interceptor;
 pub mod state_capture;
 pub mod types;
 
@@ -31,6 +32,9 @@ pub use offload::{
     PtyOutputOffload,
 };
 pub use output_buffer::OutputBuffer;
+pub use session_interceptor::{
+    AiCallback, AiQuery, AiResponse, InterceptorState, SessionInterceptor, StdinAction,
+};
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use state_capture::StateChanges;
 pub use types::{CommandSource, CommandSubmission, PtyCommandResult, StreamName};
