@@ -115,15 +115,18 @@ class ShellCompleter(Completer):
 
         if pty_results is not None:
             prefix = current_token
+            yielded = False
             for candidate in pty_results:
                 if prefix and not candidate.startswith(prefix):
                     continue
+                yielded = True
                 yield Completion(
                     candidate,
                     start_position=-len(prefix),
                     display=candidate,
                 )
-            return
+            if yielded:
+                return
 
         # Fallback: PATH scanning + PathCompleter
         yield from self._fallback_completions(
