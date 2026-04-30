@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import shlex
 from contextlib import contextmanager
-from typing import Callable, Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional
 
 from prompt_toolkit.completion import (
     CompleteEvent,
@@ -19,51 +20,9 @@ from ..commands.registry import (
     STATE_MODIFYING_COMMANDS,
 )
 
-COMMON_SHELL_COMMANDS = frozenset(
-    {
-        "alias",
-        "bg",
-        "bind",
-        "builtin",
-        "command",
-        "compgen",
-        "complete",
-        "declare",
-        "disown",
-        "echo",
-        "enable",
-        "eval",
-        "exec",
-        "false",
-        "fc",
-        "fg",
-        "getopts",
-        "hash",
-        "help",
-        "jobs",
-        "kill",
-        "let",
-        "local",
-        "printf",
-        "read",
-        "readonly",
-        "return",
-        "set",
-        "shift",
-        "shopt",
-        "source",
-        "test",
-        "times",
-        "trap",
-        "true",
-        "type",
-        "typeset",
-        "ulimit",
-        "umask",
-        "unalias",
-        "wait",
-    }
-)
+if TYPE_CHECKING:
+    from ...terminal.pty import PTYManager
+
 SPECIAL_SHELL_COMMANDS = frozenset({"/model", "/setup", "/plan"})
 DIRECTORY_COMMANDS = frozenset({"cd", "pushd", "popd"})
 AI_PREFIXES = (";", "；")
@@ -107,17 +66,22 @@ def _looks_like_path_token(token: str) -> bool:
 
 
 class ShellCompleter(Completer):
-    """Provide command-first completion with path fallback."""
+    """Provide tab completion by delegating to PTY bash.
+
+    Falls back to PATH scanning + PathCompleter when PTY is unavailable.
+    """
 
     def __init__(
         self,
         cwd_provider: Optional[Callable[[], str]] = None,
         command_provider: Optional[Callable[[], Iterable[str]]] = None,
         ai_prefixes: tuple[str, ...] = AI_PREFIXES,
+        pty_provider: Optional[Callable[[], Optional["PTYManager"]]] = None,
     ) -> None:
         self._cwd_provider = cwd_provider
         self._command_provider = command_provider or self._default_command_provider
         self._ai_prefixes = ai_prefixes
+        self._pty_provider = pty_provider
         self._path_completer = PathCompleter(expanduser=True)
         self._dir_completer = PathCompleter(only_directories=True, expanduser=True)
         self._cached_path_value: Optional[str] = None
@@ -132,16 +96,70 @@ class ShellCompleter(Completer):
         if stripped.startswith(self._ai_prefixes):
             return
 
-        tokens, current_token, trailing_space = self._split_tokens(text_before_cursor)
+        tokens, current_token, trailing_space = self._split_tokens(
+            text_before_cursor
+        )
         if not tokens and not current_token:
             return
 
+        # Special aish commands always handled in Python
         if (not tokens and current_token.startswith("/")) or (
             tokens and tokens[0] in SPECIAL_SHELL_COMMANDS
         ):
             yield from self._complete_special_commands(current_token)
             return
 
+        # Attempt PTY bash completion
+        cursor_pos = len(text_before_cursor)
+        pty_results = self._query_pty_completions(text_before_cursor, cursor_pos)
+
+        if pty_results is not None:
+            prefix = current_token
+            for candidate in pty_results:
+                if prefix and not candidate.startswith(prefix):
+                    continue
+                yield Completion(
+                    candidate,
+                    start_position=-len(prefix),
+                    display=candidate,
+                )
+            return
+
+        # Fallback: PATH scanning + PathCompleter
+        yield from self._fallback_completions(
+            tokens, current_token, trailing_space, complete_event
+        )
+
+    def _query_pty_completions(
+        self, line: str, cursor_pos: int
+    ) -> Optional[list[str]]:
+        """Query the PTY bash for completions. Returns None on failure."""
+        pty_manager = self._pty_provider() if self._pty_provider else None
+        if pty_manager is None or not pty_manager.is_running:
+            return None
+
+        escaped_line = shlex.quote(line)
+        cmd = f"__aish_query_completions {escaped_line} {cursor_pos}"
+
+        try:
+            output, exit_code = pty_manager.execute_command(cmd, timeout=0.5)
+        except Exception:
+            return None
+
+        if exit_code != 0 or not output:
+            return None
+
+        candidates = [c for c in output.splitlines() if c]
+        return candidates or None
+
+    def _fallback_completions(
+        self,
+        tokens: list[str],
+        current_token: str,
+        trailing_space: bool,
+        complete_event: CompleteEvent,
+    ) -> Iterator[Completion]:
+        """Fallback completion using PATH scanning and PathCompleter."""
         if not tokens:
             if _looks_like_path_token(current_token):
                 yield from self._complete_paths(
@@ -203,7 +221,7 @@ class ShellCompleter(Completer):
     def _default_command_provider(self) -> Iterable[str]:
         path_value = os.environ.get("PATH", "")
         if path_value != self._cached_path_value:
-            commands = set(COMMON_SHELL_COMMANDS)
+            commands = set()
             commands.update(STATE_MODIFYING_COMMANDS)
             commands.update(PTY_REQUIRING_COMMANDS)
             commands.update(REJECTED_COMMANDS)

@@ -271,5 +271,95 @@ __AISH_ORIGINAL_PROMPT_COMMAND="$PROMPT_COMMAND"
 PROMPT_COMMAND='__aish_prompt_command'
 
 trap '__aish_on_exit' EXIT
+__aish_mark_dirs() {
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == */ ]]; then
+            printf '%s\n' "$entry"
+        elif [[ -d "$entry" ]]; then
+            printf '%s/\n' "$entry"
+        else
+            printf '%s\n' "$entry"
+        fi
+    done
+}
+
+__aish_query_completions() {
+    local cmd_line="${1:-}"
+    local cursor="${2:-0}"
+    local -a words=()
+    local word=""
+    local i ch
+
+    for (( i=0; i<${#cmd_line}; i++ )); do
+        ch="${cmd_line:$i:1}"
+        if [[ "$ch" == " " || "$ch" == $'\t' ]]; then
+            if [[ -n "$word" ]]; then
+                words+=("$word")
+                word=""
+            fi
+        else
+            word+="$ch"
+        fi
+    done
+    if [[ -n "$word" ]]; then
+        words+=("$word")
+    fi
+
+    if (( cursor > 0 )) && [[ "${cmd_line:$((cursor-1)):1}" == " " ]]; then
+        words+=("")
+    fi
+
+    local cword=0
+    local pos=0
+    for (( i=0; i<${#words[@]}; i++ )); do
+        pos=$(( pos + ${#words[$i]} + 1 ))
+        if (( pos > cursor )); then
+            cword=$i
+            break
+        fi
+        cword=$i
+    done
+
+    local cmd="${words[0]:-}"
+    local cur="${words[$cword]:-}"
+    local prev="${words[$((cword-1))]:-}"
+
+    if [[ ${#words[@]} -eq 0 ]]; then
+        compgen -c 2>/dev/null
+        return 0
+    fi
+
+    if (( cword == 0 )); then
+        compgen -c -- "$cur" 2>/dev/null
+        return 0
+    fi
+
+    _completion_loader "$cmd" 2>/dev/null || true
+
+    local comp_spec func_name=""
+    comp_spec=$(complete -p "$cmd" 2>/dev/null) || true
+    if [[ "$comp_spec" =~ -F[[:space:]]+([^[:space:]]+) ]]; then
+        func_name="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -n "$func_name" ]]; then
+        COMPREPLY=()
+        COMP_WORDS=("${words[@]}")
+        COMP_CWORD=$cword
+        COMP_LINE="$cmd_line"
+        COMP_POINT=$cursor
+        "$func_name" "$cmd" "$cur" "$prev" 2>/dev/null || true
+
+        if [[ ${#COMPREPLY[@]} -gt 0 ]]; then
+            printf '%s\n' "${COMPREPLY[@]}" 2>/dev/null | __aish_mark_dirs
+            return 0
+        fi
+    fi
+
+    compgen -f -- "$cur" 2>/dev/null | __aish_mark_dirs
+}
+
 trap '__aish_on_debug' DEBUG
 __aish_emit_session_ready

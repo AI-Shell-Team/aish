@@ -1169,6 +1169,7 @@ class PTYAIShell:
                 else "aish"
             ),
             mode_toggle_handler=self.toggle_plan_mode,
+            pty_provider=lambda: self._pty_manager,
         )
 
         # Wire PTY manager and context manager to BashTool for AI tool execution

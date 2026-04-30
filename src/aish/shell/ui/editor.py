@@ -25,6 +25,7 @@ from .completion import ShellCompleter
 
 if TYPE_CHECKING:
     from ...state import HistoryManager
+    from ...terminal.pty import PTYManager
     from ..interruption import InterruptionManager
 
 # Cache TTL for theme rendering (seconds). Avoids re-running git commands
@@ -53,6 +54,7 @@ class ShellPromptController:
         exit_code_provider: Optional[Callable[[], int]] = None,
         mode_provider: Optional[Callable[[], str]] = None,
         mode_toggle_handler: Optional[Callable[[], None]] = None,
+        pty_provider: Optional[Callable[[], Optional["PTYManager"]]] = None,
     ):
         _ = history_manager
         _ = interruption_manager
@@ -67,7 +69,10 @@ class ShellPromptController:
         self._theme_cache_output: str = ""
         self._theme_cache_time: float = 0.0
         self._history = FileHistory(os.path.expanduser("~/.aish_history"))
-        self._completer = completer or ShellCompleter(cwd_provider=cwd_provider)
+        self._completer = completer or ShellCompleter(
+            cwd_provider=cwd_provider,
+            pty_provider=pty_provider,
+        )
         self._session = PromptSession(
             message=self._build_prompt_message,
             history=self._history,
