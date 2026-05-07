@@ -11,11 +11,15 @@ from aish.config import BashOutputOffloadSettings
 from aish.i18n import t
 from aish.shell.interruption import ShellState
 from aish.offload import render_bash_output
-from aish.security.security_manager import (SecurityDecision,
-                                            SimpleSecurityManager)
+from aish.security.security_manager import SecurityDecision, SimpleSecurityManager
 from aish.state import MemoryType
-from aish.tools.base import (ToolBase, ToolExecutionContext, ToolPanelSpec,
-                             ToolPreflightAction, ToolPreflightResult)
+from aish.tools.base import (
+    ToolBase,
+    ToolExecutionContext,
+    ToolPanelSpec,
+    ToolPreflightAction,
+    ToolPreflightResult,
+)
 from aish.tools.bash_executor import UnifiedBashExecutor
 from aish.tools.result import ToolResult
 
@@ -256,9 +260,13 @@ class BashTool(ToolBase):
             stderr_preview = ""
 
         if stdout_truncated:
-            stdout_preview += f"\n... [stdout preview truncated to {preview_bytes} bytes]"
+            stdout_preview += (
+                f"\n... [stdout preview truncated to {preview_bytes} bytes]"
+            )
         if stderr_truncated:
-            stderr_preview += f"\n... [stderr preview truncated to {preview_bytes} bytes]"
+            stderr_preview += (
+                f"\n... [stderr preview truncated to {preview_bytes} bytes]"
+            )
 
         status_symbol = "\u2713" if returncode == 0 else "\u2717"
         summary = f"$ {command} \u2192 {status_symbol} (exit {returncode})"
@@ -362,10 +370,7 @@ class BashTool(ToolBase):
             remember_key=command,
         )
 
-        if (
-            isinstance(analysis_data, dict)
-            and analysis_data.get("fail_open") is True
-        ):
+        if isinstance(analysis_data, dict) and analysis_data.get("fail_open") is True:
             return ToolPreflightResult(action=ToolPreflightAction.EXECUTE)
 
         if callable(context.is_approved) and context.is_approved(command):
@@ -405,17 +410,23 @@ class BashTool(ToolBase):
             analysis_data.get("sandbox", {}) if isinstance(analysis_data, dict) else {}
         )
         sandbox_reason = (
-            str(sandbox_info.get("reason", "")) if isinstance(sandbox_info, dict) else ""
+            str(sandbox_info.get("reason", ""))
+            if isinstance(sandbox_info, dict)
+            else ""
         )
         fallback_rule_matched = bool(
             analysis_data.get("fallback_rule_matched")
             if isinstance(analysis_data, dict)
             else False
         )
-        skip_notice_panel = sandbox_reason in {
-            "sandbox_disabled",
-            "sandbox_disabled_by_policy",
-        } and not fallback_rule_matched
+        skip_notice_panel = (
+            sandbox_reason
+            in {
+                "sandbox_disabled",
+                "sandbox_disabled_by_policy",
+            }
+            and not fallback_rule_matched
+        )
 
         if decision.require_confirmation:
             panel.mode = "confirm"
@@ -532,6 +543,7 @@ class BashTool(ToolBase):
                 source="ai",
                 use_pty=True,
                 cancel_event=self._get_cancel_event(),
+                stdin_yield_event=getattr(self, "stdin_yield_event", None),
             )
             pty_rc = returncode
             used_interactive_executor = True

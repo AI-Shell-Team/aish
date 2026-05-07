@@ -17,10 +17,15 @@ import fcntl
 from typing import Any, Dict, Optional, Tuple
 
 from ..shell.environment import sanitize_subprocess_loader_env
-from .shell_state_capture import (apply_changes, cleanup_state_file,
-                                  create_state_file, detect_changes,
-                                  get_current_state, parse_state_file,
-                                  wrap_command_with_state_capture)
+from .shell_state_capture import (
+    apply_changes,
+    cleanup_state_file,
+    create_state_file,
+    detect_changes,
+    get_current_state,
+    parse_state_file,
+    wrap_command_with_state_capture,
+)
 
 
 class UnifiedBashExecutor:
@@ -63,6 +68,7 @@ class UnifiedBashExecutor:
         timeout: Optional[int] = None,
         use_pty: bool = False,
         cancel_event: Optional[Any] = None,
+        stdin_yield_event: Optional[Any] = None,
     ) -> Tuple[bool, str, str, int, Dict]:
         """
         Execute command and detect state changes.
@@ -73,6 +79,8 @@ class UnifiedBashExecutor:
             timeout: Optional timeout in seconds; None disables timeout
             use_pty: Whether to use PTY (for interactive commands)
             cancel_event: Cancellation event (PTY mode only)
+            stdin_yield_event: When set, signals _stdin_loop to stop reading
+                stdin so the PTY executor can take over.
 
         Returns:
             (success, stdout, stderr, returncode, changes)
@@ -95,7 +103,12 @@ class UnifiedBashExecutor:
             if use_pty:
                 # PTY execution (interactive commands)
                 success, stdout, stderr, returncode = self._execute_with_pty(
-                    command, state_file, old_state["pwd"], env_vars, cancel_event
+                    command,
+                    state_file,
+                    old_state["pwd"],
+                    env_vars,
+                    cancel_event,
+                    stdin_yield_event,
                 )
             else:
                 # Normal execution (AI tool calls)
@@ -166,6 +179,7 @@ class UnifiedBashExecutor:
         cwd: str,
         env_vars: Dict[str, str],
         cancel_event: Optional[Any],
+        stdin_yield_event: Optional[Any] = None,
     ) -> Tuple[bool, str, str, int]:
         """PTY execution for interactive commands."""
         import pty
@@ -227,6 +241,10 @@ class UnifiedBashExecutor:
             # I/O multiplexing
             stdout_buffer = b""
             KEEP_LEN = 1024 * 16
+
+            # Signal the AI stdin monitor to stop reading so we can take over.
+            if stdin_yield_event is not None:
+                stdin_yield_event.set()
 
             while True:
                 process_alive = process.poll() is None
@@ -303,6 +321,10 @@ class UnifiedBashExecutor:
             return False, "", f"Error: {str(e)}", -1
 
         finally:
+            # Release stdin back to the AI monitor thread.
+            if stdin_yield_event is not None:
+                stdin_yield_event.clear()
+
             # Restore terminal settings
             if old_settings:
                 try:
