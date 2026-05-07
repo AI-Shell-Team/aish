@@ -2316,7 +2316,7 @@ impl AishShell {
             let is_error_correction =
                 query.question.is_empty() && !query.recent_output.is_empty();
 
-            let (context, system_msg_t) = if is_error_correction {
+            let (context, effective_system_msg) = if is_error_correction {
                 // Use aish's cmd_error template (same as local aish error correction)
                 let mut pm = aish_prompts::PromptManager::default_dir();
                 pm.load_all();
@@ -2414,14 +2414,14 @@ impl AishShell {
             let context_messages_t = conversation_history.lock().unwrap().clone();
             let context_for_thread = context.clone();
             let conversation_history_t = conversation_history.clone();
-            let system_msg_t = system_msg.clone();
+            let system_msg_t = effective_system_msg.clone();
             let query_question_t = query.question.clone();
             let api_base_th = api_base.clone();
             let api_key_th = api_key.clone();
             let model_th = model.clone();
             let animation_th = animation.clone();
             let conversation_history_th = conversation_history.clone();
-            let system_msg_th = system_msg.clone();
+            let system_msg_th = effective_system_msg.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();

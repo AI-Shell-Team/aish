@@ -102,15 +102,6 @@ impl Tool for ChannelAskUserTool {
                     "type": "string",
                     "description": "Default value"
                 },
-                "placeholder": {
-                    "type": "string",
-                    "description": "Placeholder text"
-                },
-                "required": {
-                    "type": "boolean",
-                    "description": "Whether the user must provide an answer (default: true)",
-                    "default": true
-                },
                 "allow_cancel": {
                     "type": "boolean",
                     "description": "Whether the user can cancel/skip (default: true)",

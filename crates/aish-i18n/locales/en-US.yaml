@@ -392,6 +392,10 @@ shell:
       default_hint: "[default: {default}]"
       help_with_cancel: "Esc to cancel, Enter to select"
       help_no_cancel: "Enter to select"
+      min_length_error: "Answer too short (minimum {min} characters)"
+      tool_banner: "🔧 Using tool: ask_user ({preview})"
+      choice_preview: "choice_or_text: {prompt} [{count} options]"
+      text_preview: "text_input: {prompt}"
     thinking: "Thinking"
     thinking_elapsed: "Thinking {elapsed}s"
 

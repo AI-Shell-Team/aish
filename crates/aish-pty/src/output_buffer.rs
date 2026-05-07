@@ -10,6 +10,7 @@ pub struct OutputBuffer {
 
 impl OutputBuffer {
     pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "OutputBuffer capacity must be > 0");
         Self {
             data: vec![0u8; capacity],
             capacity,

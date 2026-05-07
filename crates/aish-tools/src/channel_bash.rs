@@ -55,6 +55,7 @@ impl Tool for ChannelBashTool {
             Some(c) => c.to_string(),
             None => return ToolResult::error(aish_i18n::t("tools.bash.missing_command")),
         };
+        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
 
         let (output_tx, output_rx) = std::sync::mpsc::channel::<String>();
 
@@ -69,7 +70,7 @@ impl Tool for ChannelBashTool {
             return ToolResult::error("Channel closed");
         }
 
-        match output_rx.recv_timeout(std::time::Duration::from_secs(120)) {
+        match output_rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
             Ok(output) => ToolResult::success(output),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 ToolResult::error(aish_i18n::t("tools.bash.execute_failed").replace("{error}", "timeout"))

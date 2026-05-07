@@ -392,6 +392,10 @@ shell:
       default_hint: "[default: {default}]"
       help_with_cancel: "Esc 取消，Enter 选择"
       help_no_cancel: "Enter 选择"
+      min_length_error: "答案太短(最少 {min} 个字符)"
+      tool_banner: "🔧 使用工具: ask_user ({preview})"
+      choice_preview: "choice_or_text: {prompt} [{count} 个选项]"
+      text_preview: "text_input: {prompt}"
     thinking: "思考中"
     thinking_elapsed: "思考中 {elapsed}s"
 

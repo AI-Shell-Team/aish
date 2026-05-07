@@ -444,6 +444,11 @@ impl PersistentPty {
         // Pending AI response — shared between TriggerAi handler and
         // followup handler for multi-round tool chaining.
         let mut pending_response: Option<crate::AiResponse> = None;
+        // Consecutive idle poll count — require N empty polls before treating
+        // the shell as truly idle (prevents premature followup triggers over
+        // SSH where brief network gaps can exceed 50ms).
+        let mut idle_poll_count: u32 = 0;
+        const IDLE_THRESHOLD: u32 = 3;
 
         while !done {
             // Build fd sets.
@@ -494,54 +499,59 @@ impl PersistentPty {
 
             if sel == 0 {
                 // Timeout -- during drain phase this means all output has
-                // been delivered.  During normal phase it's just a poll
-                // cycle with nothing to do.
+                // been delivered.  During normal phase increment the idle
+                // counter to require consecutive empty polls before acting.
+                idle_poll_count += 1;
                 if draining {
                     done = true;
                 }
-                // No data arrived for 50ms — the remote shell is idle and
-                // sitting at a prompt waiting for input.
-                if is_session {
-                    interceptor.mark_prompt_ready();
-                }
-                // If we were capturing output for followup analysis, the
-                // command has finished — invoke the followup callback.
-                if followup_capturing {
-                    // Detect stuck state: shell is showing a PS2 continuation
-                    // prompt (e.g. unclosed heredoc/quote). Send Ctrl+C to
-                    // cancel and skip the followup.
-                    if looks_like_continuation_prompt(&followup_captured) {
-                        unsafe {
-                            libc::write(
-                                self.master_fd,
-                                b"\x03".as_ptr() as *const libc::c_void,
-                                1,
-                            );
-                        }
-                        followup_capturing = false;
-                        pending_followup = None;
-                        followup_captured.clear();
-                    } else {
-                        followup_capturing = false;
-                        if let Some(followup) = pending_followup.take() {
-                            let output =
-                                String::from_utf8_lossy(&followup_captured).to_string();
-                            let clean = strip_ansi_and_prompt(&output);
-                            let next_response = followup(&clean);
-                            if let Some(resp) = next_response {
-                                pending_response = Some(resp);
-                            } else {
-                                unsafe {
-                                    libc::write(
-                                        self.master_fd,
-                                        b"\r".as_ptr() as *const libc::c_void,
-                                        1,
-                                    );
-                                }
-                                skip_leading_newline = true;
+                // Only treat the shell as idle after N consecutive timeouts
+                // to avoid false positives from brief SSH network gaps.
+                if idle_poll_count >= IDLE_THRESHOLD {
+                    // No data for N * 50ms — the remote shell is idle and
+                    // sitting at a prompt waiting for input.
+                    if is_session {
+                        interceptor.mark_prompt_ready();
+                    }
+                    // If we were capturing output for followup analysis, the
+                    // command has finished — invoke the followup callback.
+                    if followup_capturing {
+                        // Detect stuck state: shell is showing a PS2 continuation
+                        // prompt (e.g. unclosed heredoc/quote). Send Ctrl+C to
+                        // cancel and skip the followup.
+                        if looks_like_continuation_prompt(&followup_captured) {
+                            unsafe {
+                                libc::write(
+                                    self.master_fd,
+                                    b"\x03".as_ptr() as *const libc::c_void,
+                                    1,
+                                );
                             }
+                            followup_capturing = false;
+                            pending_followup = None;
+                            followup_captured.clear();
+                        } else {
+                            followup_capturing = false;
+                            if let Some(followup) = pending_followup.take() {
+                                let output =
+                                    String::from_utf8_lossy(&followup_captured).to_string();
+                                let clean = strip_ansi_and_prompt(&output);
+                                let next_response = followup(&clean);
+                                if let Some(resp) = next_response {
+                                    pending_response = Some(resp);
+                                } else {
+                                    unsafe {
+                                        libc::write(
+                                            self.master_fd,
+                                            b"\r".as_ptr() as *const libc::c_void,
+                                            1,
+                                        );
+                                    }
+                                    skip_leading_newline = true;
+                                }
+                            }
+                            followup_captured.clear();
                         }
-                        followup_captured.clear();
                     }
                 }
                 // Process pending AI response (multi-round chaining).
@@ -614,6 +624,9 @@ impl PersistentPty {
                                         echo.len(),
                                     );
                                 }
+                                // Drain trailing newline/CR so it doesn't leak
+                                // into the next read cycle.
+                                drain_stdin_trailing(stdin_fd);
                                 ans[0] == b'y'
                                     || ans[0] == b'Y'
                                     || ans[0] == b'\r'
@@ -695,6 +708,7 @@ impl PersistentPty {
                 } {
                     n if n > 0 => {
                         let data = &tmp[..n as usize];
+                        idle_poll_count = 0;
 
                         // Non-session: original passthrough behavior
                         if !is_session {
@@ -829,6 +843,7 @@ impl PersistentPty {
                     )
                 } {
                     n if n > 0 => {
+                        idle_poll_count = 0;
                         let mut data = &tmp[..n as usize];
                         if skip_leading_newline {
                             // Only strip a bare leading CR-LF or LF that
@@ -944,6 +959,7 @@ impl PersistentPty {
                                     echo.len(),
                                 );
                             }
+                            drain_stdin_trailing(stdin_fd);
                             ans[0] == b'y'
                                 || ans[0] == b'Y'
                                 || ans[0] == b'\r'
@@ -1362,6 +1378,45 @@ impl PersistentPty {
 
 // ---- ask_user helpers for SSH sessions ----
 
+/// Drain trailing bytes (e.g. `\n` or `\r`) from stdin after a single-byte
+/// confirmation read so they don't leak into the next input cycle.
+fn drain_stdin_trailing(stdin_fd: libc::c_int) {
+    let mut discard = [0u8; 1];
+    loop {
+        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut rfds);
+            libc::FD_SET(stdin_fd, &mut rfds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 10_000, // 10ms
+        };
+        let sel = unsafe {
+            libc::select(
+                stdin_fd + 1,
+                &mut rfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel <= 0 {
+            break;
+        }
+        match unsafe { libc::read(stdin_fd, discard.as_mut_ptr() as *mut libc::c_void, 1) } {
+            1 => {
+                if discard[0] == b'\n' || discard[0] == b'\r' {
+                    break;
+                }
+                // Non-newline byte — stop draining
+                break;
+            }
+            _ => break,
+        }
+    }
+}
+
 /// Truncate a string to `max` bytes, respecting UTF-8 boundaries.
 fn truncate_str(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -1624,10 +1679,15 @@ fn read_line_from_stdin_raw(
                             continue;
                         }
                         if trimmed.len() < request.min_length {
-                            let msg = format!(
-                                "\x1b[31m\u{7b54}\u{6848}\u{592a}\u{77ed}(\u{6700}\u{5c11} {} \u{4e2a}\u{5b57}\u{7b26})\x1b[0m\r\n",
-                                request.min_length
+                            let min_len_msg = aish_i18n::t_with_args(
+                                "shell.session.ask_user.min_length_error",
+                                &{
+                                    let mut m = std::collections::HashMap::new();
+                                    m.insert("min".to_string(), request.min_length.to_string());
+                                    m
+                                },
                             );
+                            let msg = format!("\x1b[31m{}\x1b[0m\r\n", min_len_msg);
                             unsafe {
                                 libc::write(
                                     libc::STDOUT_FILENO,
@@ -1846,17 +1906,22 @@ fn handle_ask_user_interaction(
     let args_preview = match request.kind.as_str() {
         "choice_or_text" => {
             let n = request.options.as_ref().map_or(0, |o| o.len());
-            format!(
-                "choice_or_text: {} [{} \u{4e2a}\u{9009}\u{9879}]",
-                truncate_str(&request.prompt, 60),
-                n
-            )
+            let mut m = std::collections::HashMap::new();
+            m.insert("prompt".to_string(), truncate_str(&request.prompt, 60).to_string());
+            m.insert("count".to_string(), n.to_string());
+            aish_i18n::t_with_args("shell.session.ask_user.choice_preview", &m)
         }
-        _ => format!("text_input: {}", truncate_str(&request.prompt, 80)),
+        _ => {
+            let mut m = std::collections::HashMap::new();
+            m.insert("prompt".to_string(), truncate_str(&request.prompt, 80).to_string());
+            aish_i18n::t_with_args("shell.session.ask_user.text_preview", &m)
+        }
     };
+    let mut tool_args = std::collections::HashMap::new();
+    tool_args.insert("preview".to_string(), args_preview);
     let tool_line = format!(
-        "\x1b[36m\u{1f527} \u{4f7f}\u{7528}\u{5de5}\u{5177}: ask_user ({})\x1b[0m\r\n",
-        args_preview
+        "\x1b[36m{}\x1b[0m\r\n",
+        aish_i18n::t_with_args("shell.session.ask_user.tool_banner", &tool_args)
     );
     unsafe {
         libc::write(
@@ -1898,9 +1963,146 @@ fn handle_ask_user_interaction(
             }
             Ok(crate::AiEvent::BashExec { command, output_sender }) => {
                 debug!("handle_ask_user: follow-up bash_exec, cmd={}", command);
-                // Send output through channel (LLM will receive it)
-                let _ = output_sender.send(format!("(command queued: {})", command));
-                break;
+                // Show tool indicator and confirmation, then execute inline.
+                let tool_text = aish_i18n::t_with_args(
+                    "shell.session.tool_bash",
+                    &{
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("command".to_string(), command.clone());
+                        m
+                    },
+                );
+                let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
+                unsafe {
+                    libc::write(
+                        libc::STDOUT_FILENO,
+                        tool_line.as_ptr() as *const libc::c_void,
+                        tool_line.len(),
+                    );
+                }
+                let confirm = format!(
+                    "\x1b[33m{}\x1b[0m ",
+                    aish_i18n::t("shell.session.confirm_execute")
+                );
+                unsafe {
+                    libc::write(
+                        libc::STDOUT_FILENO,
+                        confirm.as_ptr() as *const libc::c_void,
+                        confirm.len(),
+                    );
+                }
+                let mut ans = [0u8; 1];
+                let approved = match unsafe {
+                    libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
+                } {
+                    1 => {
+                        let echo = if ans[0] == b'y'
+                            || ans[0] == b'Y'
+                            || ans[0] == b'\r'
+                            || ans[0] == b'\n'
+                        {
+                            b"y\r\n"
+                        } else {
+                            b"n\r\n"
+                        };
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                echo.as_ptr() as *const libc::c_void,
+                                echo.len(),
+                            );
+                        }
+                        drain_stdin_trailing(stdin_fd);
+                        ans[0] == b'y'
+                            || ans[0] == b'Y'
+                            || ans[0] == b'\r'
+                            || ans[0] == b'\n'
+                    }
+                    _ => false,
+                };
+                if approved {
+                    let safe_cmd = close_unclosed_heredoc(&command);
+                    let mut inject = safe_cmd.as_bytes().to_vec();
+                    inject.push(b'\r');
+                    unsafe {
+                        libc::write(
+                            master_fd,
+                            inject.as_ptr() as *const libc::c_void,
+                            inject.len(),
+                        );
+                    }
+                    // Wait for command output until the shell goes idle.
+                    let mut captured = Vec::new();
+                    let mut idle_count: u32 = 0;
+                    loop {
+                        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+                        unsafe {
+                            libc::FD_ZERO(&mut rfds);
+                            libc::FD_SET(master_fd, &mut rfds);
+                        }
+                        let mut tv = libc::timeval {
+                            tv_sec: 0,
+                            tv_usec: 50_000,
+                        };
+                        let sel = unsafe {
+                            libc::select(
+                                master_fd + 1,
+                                &mut rfds,
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                &mut tv,
+                            )
+                        };
+                        if sel > 0
+                            && unsafe { libc::FD_ISSET(master_fd, &mut rfds) }
+                        {
+                            let mut tmp = [0u8; 4096];
+                            match unsafe {
+                                libc::read(
+                                    master_fd,
+                                    tmp.as_mut_ptr() as *mut libc::c_void,
+                                    tmp.len(),
+                                )
+                            } {
+                                n if n > 0 => {
+                                    let data = &tmp[..n as usize];
+                                    captured.extend_from_slice(data);
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            data.as_ptr() as *const libc::c_void,
+                                            data.len(),
+                                        );
+                                    }
+                                    idle_count = 0;
+                                }
+                                _ => break,
+                            }
+                        } else {
+                            idle_count += 1;
+                            if idle_count >= 3 {
+                                break;
+                            }
+                        }
+                    }
+                    let output = String::from_utf8_lossy(&captured).to_string();
+                    let clean = strip_ansi_and_prompt(&output);
+                    let _ = output_sender.send(clean);
+                } else {
+                    let cancel_msg = format!(
+                        "\x1b[33m{}\x1b[0m\r\n",
+                        aish_i18n::t("shell.command_cancelled")
+                    );
+                    unsafe {
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            cancel_msg.as_ptr() as *const libc::c_void,
+                            cancel_msg.len(),
+                        );
+                    }
+                    let _ = output_sender.send(format!("(cancelled: {})", command));
+                }
+                continue;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 // Forward PTY output while waiting for LLM
