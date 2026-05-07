@@ -7,6 +7,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.6] - 2026-05-07
+
+### Added
+
+- Added PTY-backed Bash tab completion so interactive completion can use shell-aware suggestions, installed Bash completion scripts, and PATH command discovery.
+- Added Ctrl+Z job-control forwarding for Bash commands and AI-triggered PTY tool runs, making it possible to suspend and resume interactive jobs more reliably.
+
+### Fixed
+
+- Fixed assistant tool-call rendering so tool responses stay attached to the invoking assistant turn instead of appearing out of order.
+- Fixed PTY completion and command-state isolation so background completion queries and repeated completion filtering no longer interfere with the active shell command.
+- Fixed AI-triggered `sudo` command handling so PTY stdin ownership is restored correctly and password prompts no longer race with background AI output monitoring.
+
 ## [0.2.5] - 2026-04-24
 
 ### Fixed
