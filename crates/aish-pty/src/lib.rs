@@ -17,7 +17,9 @@ pub mod command_state;
 pub mod control;
 pub mod executor;
 pub mod offload;
+pub mod output_buffer;
 pub mod persistent;
+pub mod session_interceptor;
 pub mod state_capture;
 pub mod types;
 
@@ -28,6 +30,11 @@ pub use types::CancelToken;
 pub use offload::{
     BashOffloadResult, BashOffloadSettings, BashOutputOffload, OffloadResult, OffloadState,
     PtyOutputOffload,
+};
+pub use output_buffer::OutputBuffer;
+pub use session_interceptor::{
+    AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel, AskUserOption,
+    AskUserRequest, FollowupCallback, InterceptorState, SessionInterceptor, StdinAction,
 };
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use state_capture::StateChanges;

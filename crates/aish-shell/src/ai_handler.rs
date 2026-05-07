@@ -630,7 +630,7 @@ pub struct ErrorCorrectionResult {
 
 /// Parse the LLM response for error correction, preferring JSON format.
 /// Falls back to extracting a ```bash code block if JSON parsing fails.
-fn parse_error_correction_response(response: &str) -> ErrorCorrectionResult {
+pub(crate) fn parse_error_correction_response(response: &str) -> ErrorCorrectionResult {
     // Strategy: regex extracts the full content between ```...``` fences,
     // then serde_json handles actual JSON parsing. This avoids the fragility
     // of trying to match { brace boundaries } with regex (which breaks on
@@ -699,14 +699,14 @@ fn parse_error_correction_response(response: &str) -> ErrorCorrectionResult {
 }
 
 /// Get the current username.
-fn whoami() -> String {
+pub(crate) fn whoami() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "user".to_string())
 }
 
 /// Get the hostname.
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| {
             std::process::Command::new("hostname")
@@ -718,7 +718,7 @@ fn hostname() -> String {
 }
 
 /// Get OS information string.
-fn os_info() -> String {
+pub(crate) fn os_info() -> String {
     format!(
         "{} {} ({})",
         sysinfo::System::name().unwrap_or_default(),

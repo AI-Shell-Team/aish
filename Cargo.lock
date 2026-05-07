@@ -153,6 +153,7 @@ name = "aish-pty"
 version = "0.2.0"
 dependencies = [
  "aish-core",
+ "aish-i18n",
  "chrono",
  "futures",
  "libc",

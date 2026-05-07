@@ -319,6 +319,11 @@ impl ShellRenderer {
         }
     }
 
+    /// Return the detected terminal width (columns).
+    pub fn width(&self) -> usize {
+        self.terminal_width
+    }
+
     /// Render complete markdown text.
     /// Code blocks → syntax highlighting, tables → box drawing, rest → richrs Markdown.
     pub fn render_markdown(&mut self, text: &str) {
