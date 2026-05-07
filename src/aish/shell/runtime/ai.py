@@ -32,9 +32,13 @@ class AIHandler:
 
     _SKILL_REF_EXTRACT_RE = re.compile(r"@(\w+)")
     _AUTO_RETAIN_PATTERNS = [
-        re.compile(r"^(?:please\s+)?remember(?:\s+that)?\s+(?P<fact>.+)$", re.IGNORECASE),
+        re.compile(
+            r"^(?:please\s+)?remember(?:\s+that)?\s+(?P<fact>.+)$", re.IGNORECASE
+        ),
         re.compile(r"^(?:please\s+)?note(?:\s+that)?\s+(?P<fact>.+)$", re.IGNORECASE),
-        re.compile(r"^(?:for\s+future\s+reference[:,]?\s*)(?P<fact>.+)$", re.IGNORECASE),
+        re.compile(
+            r"^(?:for\s+future\s+reference[:,]?\s*)(?P<fact>.+)$", re.IGNORECASE
+        ),
         re.compile(r"^(?P<fact>i\s+prefer.+)$", re.IGNORECASE),
         re.compile(r"^(?P<fact>my\s+preferred.+)$", re.IGNORECASE),
         re.compile(r"^(?P<fact>we\s+use.+)$", re.IGNORECASE),
@@ -95,7 +99,7 @@ class AIHandler:
         """Try to parse response as JSON command."""
         import json
 
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response, re.DOTALL)
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response, re.DOTALL)
         if json_match:
             try:
                 return json.loads(json_match.group(1))
@@ -128,7 +132,10 @@ class AIHandler:
 
         Uses polling-based cancellation to allow Ctrl+C interruption.
         """
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+        from concurrent.futures import (
+            ThreadPoolExecutor,
+            TimeoutError as FutureTimeoutError,
+        )
 
         result_box: list[Optional[str]] = [None]
         exc_box: list[BaseException | None] = [None]
@@ -275,11 +282,16 @@ class AIHandler:
 
     def _categorize_retained_fact(self, fact: str, memory_category):
         lowered = fact.casefold()
-        if any(token in lowered for token in ["prefer", "preferred", "default", "always use"]):
+        if any(
+            token in lowered
+            for token in ["prefer", "preferred", "default", "always use"]
+        ):
             return memory_category.PREFERENCE
         if any(token in lowered for token in ["pattern", "convention", "style"]):
             return memory_category.PATTERN
-        if any(token in lowered for token in ["fix", "solution", "workaround", "resolved"]):
+        if any(
+            token in lowered for token in ["fix", "solution", "workaround", "resolved"]
+        ):
             return memory_category.SOLUTION
         if any(
             token in lowered
@@ -300,7 +312,6 @@ class AIHandler:
         ):
             return memory_category.ENVIRONMENT
         return memory_category.OTHER
-
 
     @staticmethod
     def _get_cancel_exceptions() -> tuple[type[BaseException], ...]:
@@ -364,12 +375,22 @@ class AIHandler:
         # at a prompt and forwarding them would pollute its readline buffer.
         cancel_requested = threading.Event()
 
+        # When PTY-based tools (e.g. bash_exec with sudo) need to take over
+        # stdin, they set this event so _stdin_loop pauses and stops
+        # competing for sys.stdin reads.
+        stdin_yield_event = threading.Event()
+        bash_tool = getattr(self.llm_session, "bash_tool", None)
+        if bash_tool is not None:
+            bash_tool.stdin_yield_event = stdin_yield_event
+
         def _stdin_loop():
             while not cancel_requested.is_set():
+                # Yield stdin to PTY-based tools when requested.
+                if stdin_yield_event.is_set():
+                    cancel_requested.wait(0.05)
+                    continue
                 try:
-                    ready, _, _ = select.select(
-                        [sys.stdin.fileno()], [], [], 0.5
-                    )
+                    ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0.5)
                     if not ready:
                         continue
                     data = os.read(sys.stdin.fileno(), 1)
@@ -404,9 +425,14 @@ class AIHandler:
             shell.handle_processing_cancelled()
         finally:
             cancel_requested.set()
+            # Clear yield event so _stdin_loop doesn't block forever.
+            stdin_yield_event.clear()
+            if bash_tool is not None:
+                bash_tool.stdin_yield_event = None
             monitor_thread.join(timeout=1.0)
             if monitor_thread.is_alive():
                 import logging
+
                 logging.getLogger(__name__).warning(
                     "stdin monitor thread did not exit in time"
                 )
@@ -420,11 +446,13 @@ class AIHandler:
             if pre_monitor_settings is not None:
                 try:
                     termios.tcsetattr(
-                        sys.stdin.fileno(), termios.TCSADRAIN,
+                        sys.stdin.fileno(),
+                        termios.TCSADRAIN,
                         pre_monitor_settings,
                     )
                 except Exception:
                     import logging
+
                     logging.getLogger(__name__).warning(
                         "failed to restore terminal settings"
                     )
@@ -588,7 +616,9 @@ Please analyze the error and suggest a fix. Check the shell history context abov
                         f"[yellow]⚠ {t('shell.error_correction.no_valid_command')}[/yellow]"
                     )
                     if description:
-                        clean_desc = description.split("Insufficient context")[0].strip()
+                        clean_desc = description.split("Insufficient context")[
+                            0
+                        ].strip()
                         if clean_desc:
                             console.print(f"   {clean_desc}")
                     console.print(
@@ -607,7 +637,9 @@ Please analyze the error and suggest a fix. Check the shell history context abov
                 sys.stderr.flush()
                 return command
 
-            console.print(Panel(Markdown(response), border_style="green", box=HORIZONTALS))
+            console.print(
+                Panel(Markdown(response), border_style="green", box=HORIZONTALS)
+            )
             sys.stdout.flush()
             sys.stderr.flush()
             console.show_cursor()
