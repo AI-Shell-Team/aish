@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Optional
 
@@ -110,8 +109,10 @@ class ShellCompleter(Completer):
             return
 
         # Attempt PTY bash completion
-        cursor_pos = len(text_before_cursor)
-        pty_results = self._query_pty_completions(text_before_cursor, cursor_pos)
+        pty_results = self._query_pty_completions(
+            document.text,
+            document.cursor_position,
+        )
 
         if pty_results is not None:
             prefix = current_token
@@ -141,11 +142,12 @@ class ShellCompleter(Completer):
         if pty_manager is None or not pty_manager.is_running:
             return None
 
-        escaped_line = shlex.quote(line)
-        cmd = f"__aish_query_completions {escaped_line} {cursor_pos}"
-
         try:
-            output, exit_code = pty_manager.execute_command(cmd, timeout=0.5)
+            output, exit_code = pty_manager.query_completions(
+                line,
+                cursor_pos,
+                timeout=0.5,
+            )
         except Exception:
             return None
 

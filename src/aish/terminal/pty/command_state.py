@@ -77,6 +77,8 @@ class CommandResult:
 class CommandState:
     """Track submitted commands and completed results using control events."""
 
+    INTERNAL_SOURCE = "internal"
+
     def __init__(self) -> None:
         self._active_submission: CommandSubmission | None = None
         self._active_started_submission: CommandSubmission | None = None
@@ -338,14 +340,15 @@ class CommandState:
             submission_id=submission.submission_id,
         )
 
-        self._last_command = result.command
-        self._last_exit_code = result.exit_code
-        self._last_result = result
+        if result.source != self.INTERNAL_SOURCE:
+            self._last_command = result.command
+            self._last_exit_code = result.exit_code
+            self._last_result = result
 
-        if result.allow_error_correction and result.exit_code != 0 and not result.interrupted:
-            self._pending_error = result
-        else:
-            self._pending_error = None
+            if result.allow_error_correction and result.exit_code != 0 and not result.interrupted:
+                self._pending_error = result
+            else:
+                self._pending_error = None
 
         submission.status = "completed"
 

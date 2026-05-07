@@ -12,6 +12,17 @@ from aish.shell.ui.completion import ShellCompleter
 from aish.shell.ui.editor import ShellPromptController
 
 
+class FakeCompletionPTY:
+    def __init__(self, output: str = "status\n") -> None:
+        self.is_running = True
+        self.output = output
+        self.calls = []
+
+    def query_completions(self, line, cursor_pos, timeout=None):
+        self.calls.append((line, cursor_pos, timeout))
+        return self.output, 0
+
+
 def test_shell_prompt_controller_uses_file_history_and_remembers_commands():
     history_manager = Mock()
     controller = ShellPromptController(history_manager=history_manager)
@@ -266,3 +277,18 @@ def test_shell_completer_skips_ai_prefixed_input():
     )
 
     assert completions == []
+
+
+def test_shell_completer_queries_pty_with_full_line_and_cursor():
+    fake_pty = FakeCompletionPTY(output="checkout\n")
+    completer = ShellCompleter(pty_provider=lambda: fake_pty)
+
+    completions = list(
+        completer.get_completions(
+            Document(text="git chec kout main", cursor_position=8),
+            CompleteEvent(completion_requested=True),
+        )
+    )
+
+    assert [item.text for item in completions] == ["checkout"]
+    assert fake_pty.calls == [("git chec kout main", 8, 0.5)]

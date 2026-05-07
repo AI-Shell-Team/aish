@@ -6,6 +6,7 @@ import os
 import pty
 import select
 import signal
+import shlex
 import struct
 import termios
 import threading
@@ -375,7 +376,7 @@ class PTYManager:
         """Update internal command state from a decoded backend event."""
         result = self._command_state.handle_backend_event(event)
         if result is not None:
-            if self._exit_code_callback:
+            if result.source != CommandState.INTERNAL_SOURCE and self._exit_code_callback:
                 try:
                     self._exit_code_callback(result.exit_code)
                 except Exception:
@@ -513,12 +514,39 @@ class PTYManager:
             return "", -1
 
         if self._use_output_thread:
-            return self._exec_via_thread(command, timeout)
+            return self._exec_via_thread(command, timeout, source="backend")
         else:
-            return self._exec_via_poll(command, timeout)
+            return self._exec_via_poll(command, timeout, source="backend")
+
+    def execute_internal_command(
+        self, command: str, timeout: Optional[float] = None
+    ) -> tuple[str, int]:
+        """Execute an internal query without updating user-visible command state."""
+        if not self.is_running:
+            return "", -1
+
+        if self._use_output_thread:
+            return self._exec_via_thread(
+                command,
+                timeout,
+                source=CommandState.INTERNAL_SOURCE,
+            )
+        return self._exec_via_poll(
+            command,
+            timeout,
+            source=CommandState.INTERNAL_SOURCE,
+        )
+
+    def query_completions(
+        self, line: str, cursor_pos: int, timeout: Optional[float] = 0.5
+    ) -> tuple[str, int]:
+        """Query backend bash completions without changing shell command state."""
+        escaped_line = shlex.quote(line)
+        command = f"__aish_query_completions {escaped_line} {cursor_pos}"
+        return self.execute_internal_command(command, timeout=timeout)
 
     def _exec_via_thread(
-        self, command: str, timeout: Optional[float]
+        self, command: str, timeout: Optional[float], *, source: str
     ) -> tuple[str, int]:
         """Execute using background output thread for I/O."""
         command_seq = self._allocate_backend_command_seq()
@@ -528,7 +556,7 @@ class PTYManager:
         self._exec_mode.set()
 
         # Send command
-        self.send_command(command, command_seq=command_seq)
+        self.send_command(command, command_seq=command_seq, source=source)
 
         # Wait for exit code; only enforce timeout when explicitly requested.
         result = self._wait_for_completed_result(command_seq, timeout)
@@ -551,7 +579,7 @@ class PTYManager:
         return cleaned, result.exit_code
 
     def _exec_via_poll(
-        self, command: str, timeout: Optional[float]
+        self, command: str, timeout: Optional[float], *, source: str
     ) -> tuple[str, int]:
         """Execute by directly polling PTY fd (when no output thread)."""
         command_seq = self._allocate_backend_command_seq()
@@ -585,7 +613,7 @@ class PTYManager:
             pass
 
         # Send command
-        self.send_command(command, command_seq=command_seq)
+        self.send_command(command, command_seq=command_seq, source=source)
 
         # Read output directly from PTY/control fds until prompt_ready appears.
         deadline = None if timeout is None else time.monotonic() + timeout
