@@ -436,6 +436,9 @@ impl PersistentPty {
         // rendering.  Only skip a leading CR-LF or LF at the very start
         // of the first chunk -- never consume actual command output.
         let mut skip_leading_newline = true;
+        // When a command is injected, the remote shell echoes it back.
+        // Store the command here so the echo can be stripped from output.
+        let mut skip_echo_cmd: Option<String> = None;
         // Followup callback state: after AI injects a command, capture its
         // output and call the followup when the shell goes idle.
         let mut pending_followup: Option<Box<crate::FollowupCallback>> = None;
@@ -636,6 +639,7 @@ impl PersistentPty {
                         };
                         if approved {
                             let safe_cmd = close_unclosed_heredoc(cmd);
+                            skip_echo_cmd = Some(safe_cmd.clone());
                             let mut inject = safe_cmd.as_bytes().to_vec();
                             inject.push(b'\r');
                             unsafe {
@@ -667,7 +671,19 @@ impl PersistentPty {
                                     1,
                                 );
                             }
-                            skip_leading_newline = true;
+                            // Call the followup with a cancellation message so
+                            // the LLM thread receives output instead of
+                            // "Channel closed" when the sender is dropped.
+                            if let Some(followup) = response.followup {
+                                let next_response = followup("Command cancelled by user");
+                                if let Some(resp) = next_response {
+                                    pending_response = Some(resp);
+                                } else {
+                                    skip_leading_newline = true;
+                                }
+                            } else {
+                                skip_leading_newline = true;
+                            }
                         }
                     } else {
                         unsafe {
@@ -856,6 +872,19 @@ impl PersistentPty {
                             }
                             skip_leading_newline = false;
                         }
+                        // Strip the remote shell's echo of an injected command.
+                        if let Some(ref echo_cmd) = skip_echo_cmd {
+                            let pattern = format!("{}\r\n", echo_cmd).into_bytes();
+                            if data.starts_with(&pattern) {
+                                data = &data[pattern.len()..];
+                            } else {
+                                let pattern_cr = format!("{}\r", echo_cmd).into_bytes();
+                                if data.starts_with(&pattern_cr) {
+                                    data = &data[pattern_cr.len()..];
+                                }
+                            }
+                            skip_echo_cmd = None;
+                        }
                         if !data.is_empty() {
                             output_buf.extend_from_slice(data);
                             // Feed interceptor for line-start tracking and output buffering
@@ -970,6 +999,7 @@ impl PersistentPty {
 
                     if approved {
                         let safe_cmd = close_unclosed_heredoc(cmd);
+                        skip_echo_cmd = Some(safe_cmd.clone());
                         let mut inject = safe_cmd.as_bytes().to_vec();
                         inject.push(b'\r');
                         unsafe {
@@ -1001,7 +1031,19 @@ impl PersistentPty {
                                 1,
                             );
                         }
-                        skip_leading_newline = true;
+                        // Call the followup with a cancellation message so
+                        // the LLM thread receives output instead of
+                        // "Channel closed" when the sender is dropped.
+                        if let Some(followup) = response.followup {
+                            let next_response = followup("Command cancelled by user");
+                            if let Some(resp) = next_response {
+                                pending_response = Some(resp);
+                            } else {
+                                skip_leading_newline = true;
+                            }
+                        } else {
+                            skip_leading_newline = true;
+                        }
                     }
                 } else {
                     // AI returned explanation only (no command)

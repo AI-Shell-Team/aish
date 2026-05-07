@@ -2754,21 +2754,79 @@ impl AishShell {
                         ask_user: Some((request, channel)),
                     })
                 }
-                // Bash_exec — return command for execution on remote host
-                Some(CallbackEvent::BashExec { command, output_sender, event_receiver: _ }) => {
-                    let osender = output_sender.clone();
-                    let done_rx = std::sync::Mutex::new(llm_done_rx);
-                    let followup: Box<aish_pty::FollowupCallback> = Box::new(
-                        move |captured_output: &str| -> Option<aish_pty::AiResponse> {
-                            let _ = osender.send(captured_output.to_string());
-                            // Block until LLM thread finishes all rendering
-                            // so the forwarding loop only requests a prompt
-                            // after the analysis is on screen.
-                            let _ = done_rx.lock().unwrap().recv_timeout(
-                                std::time::Duration::from_secs(120),
-                            );
-                            None
-                        },
+                // Bash_exec — return command for execution on remote host,
+                // with multi-round chaining support.
+                Some(CallbackEvent::BashExec { command, output_sender, event_receiver }) => {
+                    let shared_event_rx = std::sync::Arc::new(std::sync::Mutex::new(
+                        Some(event_receiver),
+                    ));
+                    let shared_done_rx = std::sync::Arc::new(std::sync::Mutex::new(
+                        Some(llm_done_rx),
+                    ));
+                    let answer_tx_f = answer_tx.clone();
+
+                    fn make_chain_followup(
+                        event_rx: std::sync::Arc<std::sync::Mutex<
+                            Option<std::sync::mpsc::Receiver<aish_pty::AiEvent>>,
+                        >>,
+                        done_rx: std::sync::Arc<std::sync::Mutex<
+                            Option<std::sync::mpsc::Receiver<()>>,
+                        >>,
+                        answer_tx: std::sync::mpsc::Sender<aish_pty::AskUserAnswer>,
+                        output_sender: std::sync::mpsc::Sender<String>,
+                    ) -> Box<aish_pty::FollowupCallback> {
+                        Box::new(move |captured_output: &str| -> Option<aish_pty::AiResponse> {
+                            let _ = output_sender.send(captured_output.to_string());
+
+                            let rx = match event_rx.lock().unwrap().take() {
+                                Some(rx) => rx,
+                                None => return None,
+                            };
+
+                            match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                                Ok(aish_pty::AiEvent::BashExec { command, output_sender: new_sender }) => {
+                                    *event_rx.lock().unwrap() = Some(rx);
+                                    Some(aish_pty::AiResponse {
+                                        command: Some(command),
+                                        display_text: String::new(),
+                                        followup: Some(make_chain_followup(
+                                            event_rx.clone(),
+                                            done_rx.clone(),
+                                            answer_tx.clone(),
+                                            new_sender,
+                                        )),
+                                        ask_user: None,
+                                    })
+                                }
+                                Ok(aish_pty::AiEvent::AskUser(request)) => {
+                                    Some(aish_pty::AiResponse {
+                                        command: None,
+                                        display_text: String::new(),
+                                        followup: None,
+                                        ask_user: Some((
+                                            request,
+                                            aish_pty::AskUserChannel {
+                                                answer_sender: answer_tx.clone(),
+                                                event_receiver: rx,
+                                            },
+                                        )),
+                                    })
+                                }
+                                Ok(aish_pty::AiEvent::Done(_)) | Err(_) => {
+                                    if let Some(drx) = done_rx.lock().unwrap().take() {
+                                        let _ = drx.recv_timeout(std::time::Duration::from_secs(120));
+                                    }
+                                    None
+                                }
+                            }
+                        })
+                    }
+
+                    let followup = make_chain_followup(
+                        shared_event_rx,
+                        shared_done_rx,
+                        answer_tx_f,
+                        output_sender,
                     );
                     Some(aish_pty::AiResponse {
                         command: Some(command),
