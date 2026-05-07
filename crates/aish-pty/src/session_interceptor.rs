@@ -12,11 +12,88 @@ pub struct AiQuery {
     pub recent_output: String,
 }
 
-/// Callback function type: receives query, handles ALL display (spinner,
-/// response formatting, errors), returns command to inject into remote shell.
-/// Implemented by the shell layer using LLM + renderer + animation.
-/// Returns Some(command) to inject, None for no injection or error.
-pub type AiCallback = dyn Fn(AiQuery) -> Option<String> + Send + Sync;
+/// Result returned by the AI callback containing an optional command to
+/// inject into the remote shell and raw display text to be shown later
+/// (after command output has been displayed).
+pub struct AiResponse {
+    /// Command to inject into the remote PTY. `None` when the AI only
+    /// provides an explanation without a runnable command.
+    pub command: Option<String>,
+    /// Raw LLM response text for deferred display (markdown, will be
+    /// rendered by the forwarding loop after command output).
+    pub display_text: String,
+    /// When Some(command), the forwarding loop should execute the command
+    /// on the remote host, capture its output, and pass it to this
+    /// followup callback for analysis.
+    pub followup: Option<Box<FollowupCallback>>,
+    /// When Some, the AI needs user input before continuing.  The
+    /// forwarding loop displays the question, reads user input, sends
+    /// the answer back via the channel, and waits for the next event.
+    pub ask_user: Option<(AskUserRequest, AskUserChannel)>,
+}
+
+/// A question the AI wants to ask the user during an SSH session.
+pub struct AskUserRequest {
+    /// Interaction type: "text_input" or "choice_or_text".
+    pub kind: String,
+    /// The question to display.
+    pub prompt: String,
+    /// Predefined choices for "choice_or_text" mode.
+    pub options: Option<Vec<AskUserOption>>,
+    /// Optional title for the question.
+    pub title: Option<String>,
+    /// Default value (pre-selected).
+    pub default: Option<String>,
+    /// Whether the user can cancel/skip (default: true).
+    pub allow_cancel: bool,
+    /// Minimum length for text input (default: 0).
+    pub min_length: usize,
+}
+
+/// One option in a choice_or_text ask_user interaction.
+pub struct AskUserOption {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+/// Answer from the user to an ask_user question.
+pub enum AskUserAnswer {
+    Response(String),
+    Cancelled,
+}
+
+/// Event from the LLM thread to the forwarding loop.
+pub enum AiEvent {
+    /// The LLM wants to ask the user a question.
+    AskUser(AskUserRequest),
+    /// The LLM wants to execute a bash command on the remote host.
+    BashExec {
+        command: String,
+        output_sender: std::sync::mpsc::Sender<String>,
+    },
+    /// The LLM has finished processing. Payload is a fully processed AiResponse
+    /// (with command, followup, etc. already populated).
+    Done(Option<AiResponse>),
+}
+
+/// Channel pair for ask_user communication between the LLM thread and
+/// the forwarding loop.
+pub struct AskUserChannel {
+    /// Send user's answer back to the LLM thread.
+    pub answer_sender: std::sync::mpsc::Sender<AskUserAnswer>,
+    /// Receive next event (another ask_user or done) from the LLM thread.
+    pub event_receiver: std::sync::mpsc::Receiver<AiEvent>,
+}
+
+/// Second-stage callback invoked after the injected command finishes on
+/// the remote host.  Receives the captured command output, streams the
+/// AI analysis to the terminal, and optionally returns a new `AiResponse`
+/// to chain another command execution (multi-round tool use).
+pub type FollowupCallback = dyn Fn(&str) -> Option<AiResponse> + Send + Sync;
+
+/// AI callback type: receives an AiQuery and returns an optional AiResponse.
+pub type AiCallback = dyn Fn(AiQuery) -> Option<AiResponse> + Send + Sync;
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -26,8 +103,6 @@ pub type AiCallback = dyn Fn(AiQuery) -> Option<String> + Send + Sync;
 pub enum InterceptorState {
     /// Normal passthrough — all stdin bytes go to PTY master.
     Passthrough,
-    /// Collecting AI input after detecting `;` at line start.
-    AiInput,
     /// AI callback is running; buffer PTY output but don't display.
     AiProcessing,
 }
@@ -41,10 +116,6 @@ pub enum StdinAction {
     EchoLocally,
     /// AI input line is complete. Caller should invoke AI callback.
     TriggerAi(String),
-    /// User pressed Ctrl+C / Escape in AI input; cancel and return to passthrough.
-    CancelAi,
-    /// User pressed backspace in AI input; erase last char on screen.
-    EraseChar,
 }
 
 // ---------------------------------------------------------------------------
@@ -53,10 +124,29 @@ pub enum StdinAction {
 
 pub struct SessionInterceptor {
     state: InterceptorState,
-    at_line_start: bool,
-    line_buffer: Vec<u8>,
+    /// Shadow buffer of the current input line in Passthrough mode.
+    /// Used for line-level AI trigger detection: when Enter is pressed,
+    /// we check whether the accumulated line starts with `;` or `；`.
+    line_shadow: Vec<u8>,
+    /// Flag set when AI is triggered from line-level detection (the PTY
+    /// already has the echoed text). The forwarding loop should send
+    /// Ctrl+C to the PTY to cancel the line before invoking AI.
+    cancel_pty_line: bool,
     output_buffer: OutputBuffer,
     ai_callback: Option<Box<AiCallback>>,
+    /// Escape sequence tracker: when Some, we're consuming bytes of a
+    /// terminal escape sequence (arrow keys, function keys, etc.) so they
+    /// don't corrupt line_shadow.
+    escape_seq: Option<EscSeqPhase>,
+}
+
+/// Phase of an escape sequence being consumed.
+#[derive(Debug, Clone, Copy)]
+enum EscSeqPhase {
+    /// Received ESC (0x1B), waiting for the next byte.
+    Start,
+    /// Received ESC [ — consuming CSI parameter/intermediate bytes.
+    Csi,
 }
 
 impl SessionInterceptor {
@@ -66,87 +156,118 @@ impl SessionInterceptor {
     pub fn new(ai_callback: Option<Box<AiCallback>>) -> Self {
         Self {
             state: InterceptorState::Passthrough,
-            at_line_start: true,
-            line_buffer: Vec::with_capacity(4096),
+            line_shadow: Vec::with_capacity(4096),
+            cancel_pty_line: false,
             output_buffer: OutputBuffer::new(8192),
             ai_callback,
+            escape_seq: None,
         }
     }
 
     /// Feed a single byte from stdin. Returns the action the caller should take.
     pub fn feed_stdin(&mut self, byte: u8) -> StdinAction {
+        // Escape sequence tracking takes precedence over state machine.
+        // Input methods (Chinese IME, etc.) and terminal keys (arrows, F-keys)
+        // send multi-byte escape sequences starting with 0x1B.  Consuming them
+        // here prevents them from corrupting line_shadow (Passthrough)
+        // or cancelling the AI input prematurely (AiInput).
+        if let Some(phase) = self.escape_seq.take() {
+            return self.handle_escape_seq_byte(byte, phase);
+        }
+
         match self.state {
             InterceptorState::Passthrough => {
-                if self.at_line_start
-                    && self.ai_callback.is_some()
-                    && (byte == b';' || byte == 0xEF)
-                {
-                    self.line_buffer.clear();
-                    self.line_buffer.push(byte);
-                    self.state = InterceptorState::AiInput;
-                    self.at_line_start = false;
-                    return StdinAction::EchoLocally;
-                }
-                self.at_line_start = false;
-                StdinAction::Forward
-            }
-            InterceptorState::AiInput => {
                 match byte {
-                    // Ctrl+C (0x03) or Escape (0x1B) — cancel AI input
-                    0x03 | 0x1B => {
-                        self.line_buffer.clear();
-                        self.state = InterceptorState::Passthrough;
-                        self.at_line_start = true;
-                        StdinAction::CancelAi
-                    }
-                    // Backspace (0x7F) or Delete (0x08) — erase last char
-                    0x7F | 0x08 => {
-                        if self.line_buffer.len() > 1 {
-                            // Remove last byte (keep the `;` prefix)
-                            self.line_buffer.pop();
-                            StdinAction::EraseChar
-                        } else {
-                            StdinAction::EchoLocally // can't erase `;` prefix
-                        }
-                    }
-                    // Ctrl+U (0x15) — clear entire line content (keep `;`)
-                    0x15 => {
-                        if !self.line_buffer.is_empty() {
-                            self.line_buffer.truncate(1); // keep `;` or 0xEF
-                        }
-                        StdinAction::CancelAi // reuse CancelAi to reset line
-                    }
-                    // Enter — submit
                     b'\r' | b'\n' => {
-                        let line = String::from_utf8_lossy(&self.line_buffer).to_string();
-                        let question = extract_ai_question(&line);
-                        self.state = InterceptorState::AiProcessing;
-                        self.line_buffer.clear();
-                        StdinAction::TriggerAi(question)
+                        // End of line — check whether the accumulated input
+                        // starts with `;` or `；` to trigger AI.
+                        if self.ai_callback.is_some()
+                            && starts_with_ai_prefix(&self.line_shadow)
+                        {
+                            let line =
+                                String::from_utf8_lossy(&self.line_shadow).to_string();
+                            let question = extract_ai_question(&line);
+                            self.line_shadow.clear();
+                            self.cancel_pty_line = true;
+                            self.state = InterceptorState::AiProcessing;
+                            return StdinAction::TriggerAi(question);
+                        }
+                        self.line_shadow.clear();
                     }
-                    // Normal character — buffer and echo
+                    0x03 => {
+                        // Ctrl+C — discard current shadow line
+                        self.line_shadow.clear();
+                    }
+                    0x7F | 0x08 => {
+                        // Backspace — pop last UTF-8 character from shadow
+                        pop_last_utf8_char(&mut self.line_shadow);
+                    }
+                    0x15 => {
+                        // Ctrl+U — clear shadow line
+                        self.line_shadow.clear();
+                    }
+                    0x1B => {
+                        // Start of escape sequence — don't add to shadow
+                        self.escape_seq = Some(EscSeqPhase::Start);
+                    }
+                    0x04 => {
+                        // Ctrl+D — don't add to shadow
+                    }
                     _ => {
-                        self.line_buffer.push(byte);
-                        StdinAction::EchoLocally
+                        // Regular character — add to shadow
+                        self.line_shadow.push(byte);
                     }
                 }
+                StdinAction::Forward
             }
             InterceptorState::AiProcessing => StdinAction::EchoLocally,
         }
     }
 
-    /// Feed PTY output data — track line starts and buffer for error correction.
+    /// Handle a byte in the middle of an escape sequence.
+    /// For Passthrough: forward all bytes without updating state flags.
+    /// For AiInput: silently consume the sequence (don't cancel).
+    fn handle_escape_seq_byte(&mut self, byte: u8, phase: EscSeqPhase) -> StdinAction {
+        match phase {
+            EscSeqPhase::Start => match byte {
+                b'[' => {
+                    // CSI sequence — consume parameter/intermediate bytes
+                    self.escape_seq = Some(EscSeqPhase::Csi);
+                }
+                // Two-byte escape (ESC O, ESC (, etc.) — consume final byte
+                _ => {
+                    // Sequence complete
+                    self.escape_seq = None;
+                }
+            },
+            EscSeqPhase::Csi => {
+                if byte >= 0x40 && byte <= 0x7E {
+                    // Final byte — sequence complete
+                    self.escape_seq = None;
+                }
+                // Otherwise still consuming parameters (0x30-0x3F) or
+                // intermediate bytes (0x20-0x2F).
+                else {
+                    self.escape_seq = Some(EscSeqPhase::Csi);
+                }
+            }
+        }
+        match self.state {
+            InterceptorState::Passthrough => StdinAction::Forward,
+            _ => StdinAction::EchoLocally,
+        }
+    }
+
+    /// Feed PTY output data — buffer for error correction context.
     pub fn feed_pty_output(&mut self, data: &[u8]) {
         self.output_buffer.append(data);
-        if data.contains(&b'\n') {
-            self.at_line_start = true;
-        }
     }
 
     /// Reset state to passthrough after AI processing completes.
     pub fn finish_ai(&mut self) {
         self.state = InterceptorState::Passthrough;
-        self.at_line_start = true;
+        self.line_shadow.clear();
+        self.cancel_pty_line = false;
     }
 
     /// Whether AI is currently processing.
@@ -154,17 +275,14 @@ impl SessionInterceptor {
         self.state == InterceptorState::AiProcessing
     }
 
-    /// Called when the select loop times out with no data — the remote
-    /// shell is idle and sitting at a prompt waiting for input.
-    pub fn mark_prompt_ready(&mut self) {
-        if self.state == InterceptorState::Passthrough {
-            self.at_line_start = true;
-        }
-    }
+    /// Called when the select loop times out with no data.
+    /// Kept for backward compatibility — line-level detection no longer
+    /// needs this signal.
+    pub fn mark_prompt_ready(&mut self) {}
 
-    /// Run the AI callback. The callback handles all display and returns
-    /// the command to inject into the remote shell, if any.
-    pub fn call_ai(&self, question: String) -> Option<String> {
+    /// Run the AI callback. The callback returns an AiResponse containing
+    /// an optional command and display text (or None on error).
+    pub fn call_ai(&self, question: String) -> Option<AiResponse> {
         self.ai_callback.as_ref().and_then(|cb| {
             let recent = self.recent_output(4000);
             cb(AiQuery {
@@ -172,6 +290,13 @@ impl SessionInterceptor {
                 recent_output: recent,
             })
         })
+    }
+
+    /// Check and clear the cancel_pty_line flag.
+    /// Returns true when AI was triggered from line-level detection and
+    /// the PTY has an echoed input line that needs to be cancelled.
+    pub fn take_cancel_pty_line(&mut self) -> bool {
+        std::mem::replace(&mut self.cancel_pty_line, false)
     }
 
     /// Get the recent PTY output for error correction context.
@@ -193,12 +318,34 @@ fn extract_ai_question(line: &str) -> String {
     }
 }
 
+/// Check whether a byte buffer starts with the ASCII semicolon `;` or the
+/// fullwidth semicolon `；` (UTF-8: 0xEF 0xBC 0x9B).
+fn starts_with_ai_prefix(line: &[u8]) -> bool {
+    line.first() == Some(&b';') || line.starts_with(&[0xEF, 0xBC, 0x9B])
+}
+
+/// Pop the last complete UTF-8 character from a byte buffer.
+fn pop_last_utf8_char(buf: &mut Vec<u8>) {
+    // Pop trailing continuation bytes (0x80..0xBF), then the leader byte
+    while buf.last().map_or(false, |b| b & 0xC0 == 0x80) {
+        buf.pop();
+    }
+    buf.pop();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn noop_callback() -> Box<AiCallback> {
-        Box::new(|_q| Some("echo test".to_string()))
+        Box::new(|_q| {
+            Some(AiResponse {
+                command: Some("echo test".to_string()),
+                display_text: String::new(),
+                followup: None,
+                ask_user: None,
+            })
+        })
     }
 
     fn noop_callback_no_cmd() -> Box<AiCallback> {
@@ -237,28 +384,25 @@ mod tests {
     }
 
     #[test]
-    fn test_semicolon_at_line_start_triggers_ai() {
+    fn test_semicolon_triggers_ai_on_enter() {
         let mut ic = SessionInterceptor::new(Some(noop_callback()));
-        let action = ic.feed_stdin(b';');
-        assert_eq!(action, StdinAction::EchoLocally);
-        assert_eq!(ic.state, InterceptorState::AiInput);
-    }
-
-    #[test]
-    fn test_semicolon_not_at_line_start_passthrough() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
-        ic.feed_stdin(b'a');
-        let action = ic.feed_stdin(b';');
-        assert_eq!(action, StdinAction::Forward);
-    }
-
-    #[test]
-    fn test_ai_input_line_complete_on_enter() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
-        ic.feed_stdin(b';');
+        // `;` alone is Forward; AI triggers when Enter is pressed
+        assert_eq!(ic.feed_stdin(b';'), StdinAction::Forward);
         let action = ic.feed_stdin(b'\r');
         assert!(matches!(action, StdinAction::TriggerAi(_)));
         assert_eq!(ic.state, InterceptorState::AiProcessing);
+        assert!(ic.take_cancel_pty_line());
+    }
+
+    #[test]
+    fn test_semicolon_midline_does_not_trigger_ai() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        // pwd; → starts with 'p', not ';' → Enter should be Forward
+        ic.feed_stdin(b'p');
+        ic.feed_stdin(b'w');
+        ic.feed_stdin(b'd');
+        ic.feed_stdin(b';');
+        assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
     }
 
     #[test]
@@ -280,14 +424,77 @@ mod tests {
     fn test_no_callback_means_pure_passthrough() {
         let mut ic = SessionInterceptor::new(None);
         assert_eq!(ic.feed_stdin(b';'), StdinAction::Forward);
+        assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
     }
 
     #[test]
-    fn test_pty_output_sets_line_start() {
+    fn test_fullwidth_semicolon_triggers_ai() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        // ； = 0xEF 0xBC 0x9B
+        ic.feed_stdin(0xEF);
+        ic.feed_stdin(0xBC);
+        ic.feed_stdin(0x9B);
+        ic.feed_stdin(b'h');
+        ic.feed_stdin(b'i');
+        if let StdinAction::TriggerAi(q) = ic.feed_stdin(b'\r') {
+            assert_eq!(q, "hi");
+        } else {
+            panic!("expected TriggerAi");
+        }
+    }
+
+    #[test]
+    fn test_ctrl_c_clears_shadow() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        ic.feed_stdin(b';');
+        ic.feed_stdin(b'h');
+        ic.feed_stdin(b'i');
+        assert_eq!(ic.feed_stdin(0x03), StdinAction::Forward);
+        // shadow was cleared — new line with ; should trigger AI
+        ic.feed_stdin(b';');
+        assert!(matches!(ic.feed_stdin(b'\r'), StdinAction::TriggerAi(_)));
+    }
+
+    #[test]
+    fn test_backspace_pops_from_shadow() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        ic.feed_stdin(b'l');
+        ic.feed_stdin(b's');
+        ic.feed_stdin(0x7F); // backspace removes 's'
+        ic.feed_stdin(b';'); // now shadow is "l;" — starts with 'l', not ';'
+        assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
+    }
+
+    #[test]
+    fn test_ctrl_u_clears_shadow() {
         let mut ic = SessionInterceptor::new(Some(noop_callback()));
         ic.feed_stdin(b'a');
-        ic.feed_pty_output(b"output\n");
-        assert_eq!(ic.feed_stdin(b';'), StdinAction::EchoLocally);
+        ic.feed_stdin(b'b');
+        ic.feed_stdin(0x15); // Ctrl+U clears shadow
+        ic.feed_stdin(b';'); // now shadow is ";" — triggers AI
+        assert!(matches!(ic.feed_stdin(b'\r'), StdinAction::TriggerAi(_)));
+    }
+
+    #[test]
+    fn test_escape_sequence_not_in_shadow() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        // Simulate arrow key: ESC [ A
+        ic.feed_stdin(b';');
+        ic.feed_stdin(0x1B); // ESC
+        ic.feed_stdin(b'['); // CSI
+        ic.feed_stdin(b'A'); // final byte (up arrow)
+        // shadow is just ";" — triggers AI
+        assert!(matches!(ic.feed_stdin(b'\r'), StdinAction::TriggerAi(_)));
+    }
+
+    #[test]
+    fn test_cancel_pty_line_flag() {
+        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        assert!(!ic.take_cancel_pty_line());
+        ic.feed_stdin(b';');
+        ic.feed_stdin(b'\r');
+        // Flag is set but we need to call take_cancel_pty_line
+        // (normally done by forwarding loop, not in this order)
     }
 
     #[test]
@@ -298,7 +505,9 @@ mod tests {
         assert!(ic.is_ai_processing());
         ic.finish_ai();
         assert_eq!(ic.state, InterceptorState::Passthrough);
-        assert!(ic.at_line_start);
+        // After finish_ai, a new ; + Enter should trigger again
+        ic.feed_stdin(b';');
+        assert!(matches!(ic.feed_stdin(b'\r'), StdinAction::TriggerAi(_)));
     }
 
     #[test]
@@ -314,14 +523,54 @@ mod tests {
         let mut ic = SessionInterceptor::new(Some(noop_callback()));
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
-        let cmd = ic.call_ai("test".to_string());
-        assert_eq!(cmd, Some("echo test".to_string()));
+        let resp = ic.call_ai("test".to_string());
+        assert!(resp.is_some());
+        let r = resp.unwrap();
+        assert_eq!(r.command, Some("echo test".to_string()));
     }
 
     #[test]
     fn test_call_ai_returns_none() {
         let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()));
         let cmd = ic.call_ai("test".to_string());
-        assert_eq!(cmd, None);
+        assert!(cmd.is_none());
+    }
+
+    // ---- Helper function tests ----
+
+    #[test]
+    fn test_starts_with_ai_prefix_ascii() {
+        assert!(starts_with_ai_prefix(b";hello"));
+        assert!(starts_with_ai_prefix(b";"));
+    }
+
+    #[test]
+    fn test_starts_with_ai_prefix_fullwidth() {
+        assert!(starts_with_ai_prefix(&[0xEF, 0xBC, 0x9B, b'h', b'i']));
+        assert!(starts_with_ai_prefix(&[0xEF, 0xBC, 0x9B]));
+    }
+
+    #[test]
+    fn test_starts_with_ai_prefix_negative() {
+        assert!(!starts_with_ai_prefix(b"hello"));
+        assert!(!starts_with_ai_prefix(b"ls;pwd"));
+        assert!(!starts_with_ai_prefix(b""));
+        // Incomplete fullwidth semicolon (just first byte)
+        assert!(!starts_with_ai_prefix(&[0xEF]));
+    }
+
+    #[test]
+    fn test_pop_last_utf8_char_ascii() {
+        let mut buf = vec![b'a', b'b', b'c'];
+        pop_last_utf8_char(&mut buf);
+        assert_eq!(buf, b"ab");
+    }
+
+    #[test]
+    fn test_pop_last_utf8_char_cjk() {
+        // ；= 0xEF 0xBC 0x9B
+        let mut buf = vec![b'x', 0xEF, 0xBC, 0x9B];
+        pop_last_utf8_char(&mut buf);
+        assert_eq!(buf, b"x");
     }
 }

@@ -331,7 +331,7 @@ shell:
   plan_review_hint: "使用 /plan 开始新的规划会话。"
 
   # 思考动画
-  thinking_time: "思考: {time:.1}s"
+  thinking_time: "思考: {time}s"
 
   # 分析环境
   analyzing_environment: "正在分析环境..."
@@ -383,6 +383,17 @@ shell:
     choice_prompt: "你的选择(默认：n)："
 
   command_cancelled: "命令已取消"
+
+  session:
+    tool_bash: "🔧 使用工具: bash ({command})"
+    confirm_execute: "⚠ 是否执行? [Y/n]"
+    ask_user:
+      custom_input_label: "输入自定义答案"
+      default_hint: "[default: {default}]"
+      help_with_cancel: "Esc 取消，Enter 选择"
+      help_no_cancel: "Enter 选择"
+    thinking: "思考中"
+    thinking_elapsed: "思考中 {elapsed}s"
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 后按 Enter 自动分析修复，或直接输入下一条命令。"

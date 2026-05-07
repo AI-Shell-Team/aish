@@ -373,7 +373,7 @@ impl PersistentPty {
     pub fn send_command_interactive(
         &mut self,
         command: &str,
-        ai_callback: Option<Box<crate::session_interceptor::AiCallback>>,
+        ai_callback: Option<Box<crate::AiCallback>>,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
         let mut interceptor = if is_session {
@@ -436,6 +436,14 @@ impl PersistentPty {
         // rendering.  Only skip a leading CR-LF or LF at the very start
         // of the first chunk -- never consume actual command output.
         let mut skip_leading_newline = true;
+        // Followup callback state: after AI injects a command, capture its
+        // output and call the followup when the shell goes idle.
+        let mut pending_followup: Option<Box<crate::FollowupCallback>> = None;
+        let mut followup_captured: Vec<u8> = Vec::new();
+        let mut followup_capturing = false;
+        // Pending AI response — shared between TriggerAi handler and
+        // followup handler for multi-round tool chaining.
+        let mut pending_response: Option<crate::AiResponse> = None;
 
         while !done {
             // Build fd sets.
@@ -496,6 +504,168 @@ impl PersistentPty {
                 if is_session {
                     interceptor.mark_prompt_ready();
                 }
+                // If we were capturing output for followup analysis, the
+                // command has finished — invoke the followup callback.
+                if followup_capturing {
+                    // Detect stuck state: shell is showing a PS2 continuation
+                    // prompt (e.g. unclosed heredoc/quote). Send Ctrl+C to
+                    // cancel and skip the followup.
+                    if looks_like_continuation_prompt(&followup_captured) {
+                        unsafe {
+                            libc::write(
+                                self.master_fd,
+                                b"\x03".as_ptr() as *const libc::c_void,
+                                1,
+                            );
+                        }
+                        followup_capturing = false;
+                        pending_followup = None;
+                        followup_captured.clear();
+                    } else {
+                        followup_capturing = false;
+                        if let Some(followup) = pending_followup.take() {
+                            let output =
+                                String::from_utf8_lossy(&followup_captured).to_string();
+                            let clean = strip_ansi_and_prompt(&output);
+                            let next_response = followup(&clean);
+                            if let Some(resp) = next_response {
+                                pending_response = Some(resp);
+                            } else {
+                                unsafe {
+                                    libc::write(
+                                        self.master_fd,
+                                        b"\r".as_ptr() as *const libc::c_void,
+                                        1,
+                                    );
+                                }
+                                skip_leading_newline = true;
+                            }
+                        }
+                        followup_captured.clear();
+                    }
+                }
+                // Process pending AI response (multi-round chaining).
+                // Must happen here — the `continue` below skips the
+                // normal pending_response block after the master-fd read.
+                if let Some(response) = pending_response.take() {
+                    // Handle ask_user first — it may produce a new pending_response
+                    if let Some((request, channel)) = response.ask_user {
+                        handle_ask_user_interaction(
+                            request,
+                            channel,
+                            stdin_fd,
+                            self.master_fd,
+                            &mut pending_response,
+                        );
+                        // If ask_user produced a final response, fall through
+                        // to process it on the next iteration.
+                        continue;
+                    }
+                    if let Some(ref cmd) = response.command {
+                        let tool_text = aish_i18n::t_with_args(
+                            "shell.session.tool_bash",
+                            &{
+                                let mut m = std::collections::HashMap::new();
+                                m.insert("command".to_string(), cmd.clone());
+                                m
+                            },
+                        );
+                        let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                tool_line.as_ptr() as *const libc::c_void,
+                                tool_line.len(),
+                            );
+                        }
+                        let confirm = format!(
+                            "\x1b[33m{}\x1b[0m ",
+                            aish_i18n::t("shell.session.confirm_execute")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                confirm.as_ptr() as *const libc::c_void,
+                                confirm.len(),
+                            );
+                        }
+                        let mut ans = [0u8; 1];
+                        let approved = match unsafe {
+                            libc::read(
+                                stdin_fd,
+                                ans.as_mut_ptr() as *mut libc::c_void,
+                                1,
+                            )
+                        } {
+                            1 => {
+                                let echo = if ans[0] == b'y'
+                                    || ans[0] == b'Y'
+                                    || ans[0] == b'\r'
+                                    || ans[0] == b'\n'
+                                {
+                                    b"y\r\n"
+                                } else {
+                                    b"n\r\n"
+                                };
+                                unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        echo.as_ptr() as *const libc::c_void,
+                                        echo.len(),
+                                    );
+                                }
+                                ans[0] == b'y'
+                                    || ans[0] == b'Y'
+                                    || ans[0] == b'\r'
+                                    || ans[0] == b'\n'
+                            }
+                            _ => false,
+                        };
+                        if approved {
+                            let safe_cmd = close_unclosed_heredoc(cmd);
+                            let mut inject = safe_cmd.as_bytes().to_vec();
+                            inject.push(b'\r');
+                            unsafe {
+                                libc::write(
+                                    self.master_fd,
+                                    inject.as_ptr() as *const libc::c_void,
+                                    inject.len(),
+                                );
+                            }
+                            if response.followup.is_some() {
+                                followup_captured.clear();
+                                followup_capturing = true;
+                                pending_followup = response.followup;
+                            }
+                        } else {
+                            let cancel_msg = format!(
+                                "\x1b[33m{}\x1b[0m\r\n",
+                                aish_i18n::t("shell.command_cancelled")
+                            );
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    cancel_msg.as_ptr() as *const libc::c_void,
+                                    cancel_msg.len(),
+                                );
+                                libc::write(
+                                    self.master_fd,
+                                    b"\r".as_ptr() as *const libc::c_void,
+                                    1,
+                                );
+                            }
+                            skip_leading_newline = true;
+                        }
+                    } else {
+                        unsafe {
+                            libc::write(
+                                self.master_fd,
+                                b"\r".as_ptr() as *const libc::c_void,
+                                1,
+                            );
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -550,27 +720,70 @@ impl PersistentPty {
                                         );
                                     }
                                 }
-                                crate::StdinAction::CancelAi => {
-                                    // Show ^C and move to new line
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            b"^C\r\n".as_ptr() as *const libc::c_void,
-                                            4,
-                                        );
-                                    }
-                                }
-                                crate::StdinAction::EraseChar => {
-                                    // Erase character: backspace, space, backspace
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            b"\x08 \x08".as_ptr() as *const libc::c_void,
-                                            3,
-                                        );
-                                    }
-                                }
                                 crate::StdinAction::TriggerAi(question) => {
+                                    // When triggered from line-level detection, the
+                                    // PTY has already echoed the input line.  Send
+                                    // Ctrl+C to cancel it on the remote side.
+                                    if interceptor.take_cancel_pty_line() {
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                b"\x03".as_ptr() as *const libc::c_void,
+                                                1,
+                                            );
+                                        }
+                                        // Drain PTY output from Ctrl+C (^C + new prompt).
+                                        // Must consume it NOW before calling the blocking
+                                        // AI callback, otherwise it appears after the AI
+                                        // response and confirmation prompt.
+                                        let mut drain_buf = [0u8; 4096];
+                                        loop {
+                                            let mut rfds: libc::fd_set =
+                                                unsafe { std::mem::zeroed() };
+                                            unsafe {
+                                                libc::FD_ZERO(&mut rfds);
+                                                libc::FD_SET(self.master_fd, &mut rfds);
+                                            }
+                                            let mut tv = libc::timeval {
+                                                tv_sec: 0,
+                                                tv_usec: 100_000, // 100ms
+                                            };
+                                            let sel = unsafe {
+                                                libc::select(
+                                                    self.master_fd + 1,
+                                                    &mut rfds,
+                                                    std::ptr::null_mut(),
+                                                    std::ptr::null_mut(),
+                                                    &mut tv,
+                                                )
+                                            };
+                                            if sel > 0
+                                                && unsafe {
+                                                    libc::FD_ISSET(
+                                                        self.master_fd,
+                                                        &mut rfds,
+                                                    )
+                                                }
+                                            {
+                                                let n = unsafe {
+                                                    libc::read(
+                                                        self.master_fd,
+                                                        drain_buf.as_mut_ptr()
+                                                            as *mut libc::c_void,
+                                                        drain_buf.len(),
+                                                    )
+                                                };
+                                                if n <= 0 {
+                                                    break;
+                                                }
+                                                let data = &drain_buf[..n as usize];
+                                                interceptor.feed_pty_output(data);
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                    }
+
                                     // Move to a new line (preserve user's input line)
                                     unsafe {
                                         libc::write(
@@ -580,30 +793,23 @@ impl PersistentPty {
                                         );
                                     }
 
-                                    // Call AI callback (handles all display)
-                                    if let Some(cmd) = interceptor.call_ai(question) {
-                                        // Show bash_exec-style command display
-                                        let tool_line =
-                                            format!("\x1b[36m🔧 bash_exec: {}\x1b[0m\r\n", cmd);
-                                        unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                tool_line.as_ptr() as *const libc::c_void,
-                                                tool_line.len(),
-                                            );
-                                        }
-                                        // Inject command into PTY master
-                                        let mut inject = cmd.as_bytes().to_vec();
-                                        inject.push(b'\r');
+                                    // Call AI callback — it handles ALL display
+                                    // and returns an optional command to inject.
+                                    let resp = interceptor.call_ai(question);
+                                    interceptor.finish_ai();
+                                    skip_leading_newline = true;
+                                    if let Some(response) = resp {
+                                        pending_response = Some(response);
+                                    } else {
+                                        // AI returned None — restore prompt
                                         unsafe {
                                             libc::write(
                                                 self.master_fd,
-                                                inject.as_ptr() as *const libc::c_void,
-                                                inject.len(),
+                                                b"\r".as_ptr() as *const libc::c_void,
+                                                1,
                                             );
                                         }
                                     }
-                                    interceptor.finish_ai();
                                 }
                             }
                         }
@@ -641,6 +847,10 @@ impl PersistentPty {
                             if is_session {
                                 interceptor.feed_pty_output(data);
                             }
+                            // Capture output for followup analysis
+                            if followup_capturing {
+                                followup_captured.extend_from_slice(data);
+                            }
                             // Display unless AI is processing
                             if !interceptor.is_ai_processing() {
                                 let _ = unsafe {
@@ -660,6 +870,132 @@ impl PersistentPty {
                         done = true;
                     }
                     _ => {}
+                }
+            }
+
+            // Process pending AI response (from TriggerAi or followup chain).
+            if let Some(response) = pending_response.take() {
+                // Handle ask_user first
+                if let Some((request, channel)) = response.ask_user {
+                    handle_ask_user_interaction(
+                        request,
+                        channel,
+                        stdin_fd,
+                        self.master_fd,
+                        &mut pending_response,
+                    );
+                    // pending_response may now contain the final AI response
+                    // which will be processed on the next loop iteration.
+                } else if let Some(ref cmd) = response.command {
+                    // Show tool indicator matching local aish style
+                    let tool_text = aish_i18n::t_with_args(
+                        "shell.session.tool_bash",
+                        &{
+                            let mut m = std::collections::HashMap::new();
+                            m.insert("command".to_string(), cmd.clone());
+                            m
+                        },
+                    );
+                    let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
+                    unsafe {
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            tool_line.as_ptr() as *const libc::c_void,
+                            tool_line.len(),
+                        );
+                    }
+
+                    // Confirmation prompt before execution
+                    let confirm = format!(
+                        "\x1b[33m{}\x1b[0m ",
+                        aish_i18n::t("shell.session.confirm_execute")
+                    );
+                    unsafe {
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            confirm.as_ptr() as *const libc::c_void,
+                            confirm.len(),
+                        );
+                    }
+
+                    // Read one byte for confirmation (raw mode)
+                    let mut ans = [0u8; 1];
+                    let approved = match unsafe {
+                        libc::read(
+                            stdin_fd,
+                            ans.as_mut_ptr() as *mut libc::c_void,
+                            1,
+                        )
+                    } {
+                        1 => {
+                            let echo = if ans[0] == b'y'
+                                || ans[0] == b'Y'
+                                || ans[0] == b'\r'
+                                || ans[0] == b'\n'
+                            {
+                                b"y\r\n"
+                            } else {
+                                b"n\r\n"
+                            };
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    echo.as_ptr() as *const libc::c_void,
+                                    echo.len(),
+                                );
+                            }
+                            ans[0] == b'y'
+                                || ans[0] == b'Y'
+                                || ans[0] == b'\r'
+                                || ans[0] == b'\n'
+                        }
+                        _ => false,
+                    };
+
+                    if approved {
+                        let safe_cmd = close_unclosed_heredoc(cmd);
+                        let mut inject = safe_cmd.as_bytes().to_vec();
+                        inject.push(b'\r');
+                        unsafe {
+                            libc::write(
+                                self.master_fd,
+                                inject.as_ptr() as *const libc::c_void,
+                                inject.len(),
+                            );
+                        }
+                        if response.followup.is_some() {
+                            followup_captured.clear();
+                            followup_capturing = true;
+                            pending_followup = response.followup;
+                        }
+                    } else {
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                            libc::write(
+                                self.master_fd,
+                                b"\r".as_ptr() as *const libc::c_void,
+                                1,
+                            );
+                        }
+                        skip_leading_newline = true;
+                    }
+                } else {
+                    // AI returned explanation only (no command)
+                    unsafe {
+                        libc::write(
+                            self.master_fd,
+                            b"\r".as_ptr() as *const libc::c_void,
+                            1,
+                        );
+                    }
                 }
             }
 
@@ -1024,6 +1360,595 @@ impl PersistentPty {
 
 }
 
+// ---- ask_user helpers for SSH sessions ----
+
+/// Truncate a string to `max` bytes, respecting UTF-8 boundaries.
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Debug helper: describe the answer kind without exposing the value.
+fn answer_kind(answer: &crate::AskUserAnswer) -> &'static str {
+    match answer {
+        crate::AskUserAnswer::Response(_) => "Response",
+        crate::AskUserAnswer::Cancelled => "Cancelled",
+    }
+}
+
+/// How many lines the ask_user display occupies (so we can erase/redraw).
+fn count_display_lines(request: &crate::AskUserRequest) -> usize {
+    let mut lines = 1; // Header
+    if request.kind == "choice_or_text" {
+        if let Some(ref options) = request.options {
+            lines += options.len() + 1; // options + custom input
+        }
+    }
+    if request.default.is_some() {
+        lines += 1;
+    }
+    lines += 1; // Help line
+    // Prompt line "> " only for text_input mode
+    if request.kind != "choice_or_text" {
+        lines += 1;
+    }
+    lines
+}
+
+/// Erase the current ask_user display and redraw with the cursor at
+/// `cursor` (only meaningful for choice_or_text).
+fn redraw_ask_user(request: &crate::AskUserRequest, prev_lines: usize, cursor: usize) {
+    let mut out = Vec::new();
+
+    // Move up and clear
+    if prev_lines > 0 {
+        out.extend_from_slice(format!("\x1b[{}A", prev_lines).as_bytes());
+    }
+    out.extend_from_slice(b"\x1b[J"); // Clear from cursor to end of screen
+
+    // Header — match local aish's inquire style
+    out.extend_from_slice(b"\x1b[36m? \x1b[1m");
+    if let Some(ref title) = request.title {
+        out.extend_from_slice(title.as_bytes());
+        out.extend_from_slice(b": ");
+    }
+    out.extend_from_slice(request.prompt.as_bytes());
+    out.extend_from_slice(b"\x1b[0m\r\n");
+
+    // Options with cursor highlight for choice_or_text
+    if request.kind == "choice_or_text" {
+        if let Some(ref options) = request.options {
+            for (i, opt) in options.iter().enumerate() {
+                // Use inquire-style cursor: ">" for selected, " " for others
+                if i == cursor {
+                    out.extend_from_slice(b"\x1b[36m> \x1b[1m");
+                } else {
+                    out.extend_from_slice(b"  ");
+                }
+                out.extend_from_slice(opt.label.as_bytes());
+                if let Some(ref desc) = opt.description {
+                    out.extend_from_slice(format!(" - {}", desc).as_bytes());
+                }
+                out.extend_from_slice(b"\x1b[0m\r\n");
+            }
+            // Custom input entry at the bottom — same label as local aish
+            let custom_label = aish_i18n::t("shell.session.ask_user.custom_input_label");
+            if cursor == options.len() {
+                out.extend_from_slice(b"\x1b[36m> \x1b[1m");
+            } else {
+                out.extend_from_slice(b"  ");
+            }
+            out.extend_from_slice(format!("({})", custom_label).as_bytes());
+            out.extend_from_slice(b"\x1b[0m\r\n");
+        }
+    }
+
+    // Default hint — match local aish's [default: xxx] format
+    if let Some(ref default) = request.default {
+        let default_hint = aish_i18n::t_with_args(
+            "shell.session.ask_user.default_hint",
+            &{
+                let mut m = std::collections::HashMap::new();
+                m.insert("default".to_string(), default.clone());
+                m
+            },
+        );
+        out.extend_from_slice(b"\x1b[2m");
+        out.extend_from_slice(default_hint.as_bytes());
+        out.extend_from_slice(b"\x1b[0m\r\n");
+    }
+
+    // Help message — match local aish's style
+    if request.allow_cancel {
+        let help = aish_i18n::t("shell.session.ask_user.help_with_cancel");
+        out.extend_from_slice(b"\x1b[2m");
+        out.extend_from_slice(help.as_bytes());
+        out.extend_from_slice(b"\x1b[0m\r\n");
+    } else {
+        let help = aish_i18n::t("shell.session.ask_user.help_no_cancel");
+        out.extend_from_slice(b"\x1b[2m");
+        out.extend_from_slice(help.as_bytes());
+        out.extend_from_slice(b"\x1b[0m\r\n");
+    }
+
+    // Prompt (only for text_input mode)
+    if request.kind != "choice_or_text" {
+        out.extend_from_slice(b"\x1b[33m> \x1b[0m");
+    }
+
+    unsafe {
+        libc::write(
+            libc::STDOUT_FILENO,
+            out.as_ptr() as *const libc::c_void,
+            out.len(),
+        );
+    }
+}
+
+/// Initial display — ensure we start on a fresh line.
+fn display_ask_user(request: &crate::AskUserRequest) {
+    // Move to a new line to avoid garbling with previous AI output
+    unsafe {
+        libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const libc::c_void, 2);
+    }
+    redraw_ask_user(request, 0, 0);
+}
+
+/// Read one raw byte from stdin with EINTR retry.
+/// Returns the byte on success, or None on EOF/error.
+fn read_byte(stdin_fd: libc::c_int) -> Option<u8> {
+    loop {
+        let mut byte = [0u8; 1];
+        let n = unsafe { libc::read(stdin_fd, byte.as_mut_ptr() as *mut libc::c_void, 1) };
+        match n {
+            1 => return Some(byte[0]),
+            -1 => {
+                let errno = unsafe { *libc::__errno_location() };
+                if errno == libc::EINTR {
+                    continue;
+                }
+                debug!("read_byte: error, errno={}", errno);
+                return None;
+            }
+            0 => {
+                debug!("read_byte: EOF");
+                return None;
+            }
+            _ => {
+                debug!("read_byte: unexpected return {}", n);
+                continue;
+            }
+        }
+    }
+}
+
+/// Check whether stdin has data available within `timeout_us` microseconds.
+fn stdin_poll(stdin_fd: libc::c_int, timeout_us: libc::suseconds_t) -> bool {
+    let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::FD_ZERO(&mut rfds);
+        libc::FD_SET(stdin_fd, &mut rfds);
+    }
+    let mut tv = libc::timeval {
+        tv_sec: 0,
+        tv_usec: timeout_us,
+    };
+    let sel = unsafe {
+        libc::select(
+            stdin_fd + 1,
+            &mut rfds,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut tv,
+        )
+    };
+    sel > 0
+}
+
+/// Consume a CSI escape sequence (already read `\x1b[`).
+/// CSI format: parameters (0x30-0x3F)* intermediate (0x20-0x2F)* final (0x40-0x7E)
+/// Returns the final byte (e.g. 'A' for up arrow) or None on error.
+fn consume_csi(stdin_fd: libc::c_int) -> Option<u8> {
+    loop {
+        match read_byte(stdin_fd) {
+            Some(b) if b >= 0x40 && b <= 0x7E => return Some(b),
+            Some(_) => continue, // parameter or intermediate byte
+            None => return None,
+        }
+    }
+}
+
+/// Read a line of user input in raw mode with escape-sequence handling.
+/// For choice_or_text: up/down arrows navigate options (including custom
+/// input slot at the bottom), Enter selects. Typing text switches to
+/// custom input mode.
+/// For text_input: normal text editing, Enter submits.
+/// Ctrl+C always cancels. Esc cancels only if allow_cancel is true.
+fn read_line_from_stdin_raw(
+    stdin_fd: libc::c_int,
+    request: &crate::AskUserRequest,
+) -> crate::AskUserAnswer {
+    let is_choice = request.kind == "choice_or_text";
+    let num_options = request
+        .options
+        .as_ref()
+        .map_or(0, |o| o.len());
+    let has_options = is_choice && num_options > 0;
+    // Total selectable slots: options + 1 custom-input slot
+    let total_slots = if has_options { num_options + 1 } else { 0 };
+
+    // For choice mode, track cursor position
+    let mut cursor: usize = 0;
+    let mut text_buf: Vec<u8> = Vec::new();
+
+    loop {
+        match read_byte(stdin_fd) {
+            Some(byte) => match byte {
+                // Ctrl+C → always cancel
+                0x03 => {
+                    unsafe {
+                        libc::write(libc::STDOUT_FILENO, b"^C\r\n".as_ptr() as *const _, 5);
+                    }
+                    return crate::AskUserAnswer::Cancelled;
+                }
+                // Enter → submit
+                b'\r' | b'\n' => {
+                    // After printing \r\n the cursor is one line below the
+                    // display.  prev_lines must account for the full display
+                    // height so redraw can move back to the header line.
+                    let prev = count_display_lines(request) + 1; // +1 for the \r\n
+                    unsafe {
+                        libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const _, 2);
+                    }
+                    // If user typed text, treat as custom input
+                    if !text_buf.is_empty() {
+                        let text = String::from_utf8_lossy(&text_buf).to_string();
+                        let trimmed = text.trim().to_string();
+                        if trimmed.is_empty() {
+                            // Empty after trim — treat like empty
+                            if let Some(ref default) = request.default {
+                                return crate::AskUserAnswer::Response(default.clone());
+                            }
+                            if request.allow_cancel {
+                                return crate::AskUserAnswer::Cancelled;
+                            }
+                            // Required — redisplay and loop
+                            redraw_ask_user(request, prev, cursor);
+                            text_buf.clear();
+                            continue;
+                        }
+                        if trimmed.len() < request.min_length {
+                            let msg = format!(
+                                "\x1b[31m\u{7b54}\u{6848}\u{592a}\u{77ed}(\u{6700}\u{5c11} {} \u{4e2a}\u{5b57}\u{7b26})\x1b[0m\r\n",
+                                request.min_length
+                            );
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    msg.as_ptr() as *const libc::c_void,
+                                    msg.len(),
+                                );
+                            }
+                            redraw_ask_user(request, prev, cursor);
+                            text_buf.clear();
+                            continue;
+                        }
+                        return crate::AskUserAnswer::Response(trimmed);
+                    }
+                    // No text typed — select by cursor position
+                    if has_options {
+                        if cursor < num_options {
+                            // Regular option selected
+                            let value = request.options.as_ref().unwrap()[cursor].value.clone();
+                            return crate::AskUserAnswer::Response(value);
+                        } else {
+                            // Custom-input slot selected with no text —
+                            // stay in input mode (same as local AskUserTool
+                            // which goes back to select on empty input)
+                            redraw_ask_user(request, prev, cursor);
+                            continue;
+                        }
+                    }
+                    // text_input mode with empty input
+                    if let Some(ref default) = request.default {
+                        return crate::AskUserAnswer::Response(default.clone());
+                    }
+                    if request.allow_cancel {
+                        return crate::AskUserAnswer::Cancelled;
+                    }
+                    // Required — redisplay and loop
+                    redraw_ask_user(request, prev, cursor);
+                    continue;
+                }
+                // Backspace / Delete
+                0x7F | 0x08 => {
+                    if !text_buf.is_empty() {
+                        // Pop trailing UTF-8 continuation bytes, then leader
+                        while text_buf.last().map_or(false, |b| b & 0xC0 == 0x80) {
+                            text_buf.pop();
+                        }
+                        let leader = text_buf.pop().unwrap();
+                        // Display width: ASCII=1, 2-byte=1, 3-byte(CJK)=2, 4-byte=2
+                        let width = if leader < 0x80 { 1 }
+                            else if leader & 0xE0 == 0xC0 { 1 }
+                            else if leader & 0xF0 == 0xE0 { 2 }
+                            else { 2 };
+                        let erase = format!(
+                            "{}{}{}",
+                            "\x08".repeat(width),
+                            " ".repeat(width),
+                            "\x08".repeat(width),
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                erase.as_ptr() as *const _,
+                                erase.len(),
+                            );
+                        }
+                    }
+                }
+                // Escape — could be standalone Esc or start of escape sequence
+                0x1B => {
+                    // Use 100ms timeout: long enough to cover SSH network
+                    // latency (direction keys arrive as ESC [ A in separate
+                    // packets) while still allowing standalone ESC to cancel.
+                    if stdin_poll(stdin_fd, 100_000) {
+                        // Escape sequence — read next byte
+                        match read_byte(stdin_fd) {
+                            Some(b'[') => {
+                                // CSI sequence
+                                match consume_csi(stdin_fd) {
+                                    Some(b'A') | Some(b'k') => {
+                                        // Up arrow — navigate in choice mode
+                                        if total_slots > 0 {
+                                            if cursor > 0 {
+                                                cursor -= 1;
+                                            } else {
+                                                cursor = total_slots - 1;
+                                            }
+                                            // Clear text buffer when navigating
+                                            if !text_buf.is_empty() {
+                                                let erase = "\x08".repeat(text_buf.len())
+                                                    + &" ".repeat(text_buf.len())
+                                                    + &"\x08".repeat(text_buf.len());
+                                                unsafe {
+                                                    libc::write(
+                                                        libc::STDOUT_FILENO,
+                                                        erase.as_ptr() as *const _,
+                                                        erase.len(),
+                                                    );
+                                                }
+                                                text_buf.clear();
+                                            }
+                                            let prev = if request.kind == "choice_or_text" {
+                                                count_display_lines(request)
+                                            } else {
+                                                count_display_lines(request).saturating_sub(1)
+                                            };
+                                            redraw_ask_user(request, prev, cursor);
+                                        }
+                                    }
+                                    Some(b'B') | Some(b'j') => {
+                                        // Down arrow — navigate in choice mode
+                                        if total_slots > 0 {
+                                            if cursor + 1 < total_slots {
+                                                cursor += 1;
+                                            } else {
+                                                cursor = 0;
+                                            }
+                                            if !text_buf.is_empty() {
+                                                let erase = "\x08".repeat(text_buf.len())
+                                                    + &" ".repeat(text_buf.len())
+                                                    + &"\x08".repeat(text_buf.len());
+                                                unsafe {
+                                                    libc::write(
+                                                        libc::STDOUT_FILENO,
+                                                        erase.as_ptr() as *const _,
+                                                        erase.len(),
+                                                    );
+                                                }
+                                                text_buf.clear();
+                                            }
+                                            let prev = if request.kind == "choice_or_text" {
+                                                count_display_lines(request)
+                                            } else {
+                                                count_display_lines(request).saturating_sub(1)
+                                            };
+                                            redraw_ask_user(request, prev, cursor);
+                                        }
+                                    }
+                                    _ => {
+                                        // Other CSI sequences (Home, End, PgUp, etc.) — ignore
+                                    }
+                                }
+                            }
+                            Some(b'O') => {
+                                // SS3 sequence (F-keys, etc.) — consume final byte and ignore
+                                let _ = read_byte(stdin_fd);
+                            }
+                            Some(_) => {
+                                // Other escape sequences — ignore
+                            }
+                            None => {
+                                // Incomplete sequence — treat as Esc
+                                if request.allow_cancel {
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"\r\n".as_ptr() as *const _,
+                                            2,
+                                        );
+                                    }
+                                    return crate::AskUserAnswer::Cancelled;
+                                }
+                                // Not allowed to cancel — ignore
+                            }
+                        }
+                    } else {
+                        // Standalone Escape
+                        if request.allow_cancel {
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    b"\r\n".as_ptr() as *const _,
+                                    2,
+                                );
+                            }
+                            return crate::AskUserAnswer::Cancelled;
+                        }
+                        // Not allowed to cancel — ignore
+                    }
+                }
+                // Normal byte — typing text automatically switches to custom input
+                _ => {
+                    text_buf.push(byte);
+                    // Echo
+                    unsafe {
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            &byte as *const u8 as *const libc::c_void,
+                            1,
+                        );
+                    }
+                }
+            },
+            None => {
+                // EOF or error
+                return crate::AskUserAnswer::Cancelled;
+            }
+        }
+    }
+}
+
+/// Handle an ask_user interaction: display question, read answer, wait for
+/// next LLM event.  Sets `pending_response` with the final AI response (or
+/// None if the LLM finished without further action).
+fn handle_ask_user_interaction(
+    request: crate::AskUserRequest,
+    channel: crate::AskUserChannel,
+    stdin_fd: libc::c_int,
+    master_fd: libc::c_int,
+    pending_response: &mut Option<crate::AiResponse>,
+) {
+    debug!(
+        "handle_ask_user: kind={}, prompt={}",
+        request.kind, request.prompt
+    );
+
+    // Show tool indicator matching local aish style
+    let args_preview = match request.kind.as_str() {
+        "choice_or_text" => {
+            let n = request.options.as_ref().map_or(0, |o| o.len());
+            format!(
+                "choice_or_text: {} [{} \u{4e2a}\u{9009}\u{9879}]",
+                truncate_str(&request.prompt, 60),
+                n
+            )
+        }
+        _ => format!("text_input: {}", truncate_str(&request.prompt, 80)),
+    };
+    let tool_line = format!(
+        "\x1b[36m\u{1f527} \u{4f7f}\u{7528}\u{5de5}\u{5177}: ask_user ({})\x1b[0m\r\n",
+        args_preview
+    );
+    unsafe {
+        libc::write(
+            libc::STDOUT_FILENO,
+            tool_line.as_ptr() as *const libc::c_void,
+            tool_line.len(),
+        );
+    }
+
+    display_ask_user(&request);
+    let answer = read_line_from_stdin_raw(stdin_fd, &request);
+    debug!("handle_ask_user: got answer {:?}", answer_kind(&answer));
+
+    if channel.answer_sender.send(answer).is_err() {
+        debug!("handle_ask_user: answer channel closed");
+        return;
+    }
+
+    // Wait for next event from LLM, forwarding PTY output meanwhile.
+    loop {
+        match channel.event_receiver.try_recv() {
+            Ok(crate::AiEvent::Done(resp)) => {
+                debug!("handle_ask_user: LLM done, has_command={}", resp.is_some());
+                *pending_response = resp;
+                break;
+            }
+            Ok(crate::AiEvent::AskUser(next_req)) => {
+                debug!(
+                    "handle_ask_user: follow-up ask_user, prompt={}",
+                    next_req.prompt
+                );
+                display_ask_user(&next_req);
+                let answer = read_line_from_stdin_raw(stdin_fd, &next_req);
+                debug!("handle_ask_user: follow-up answer {:?}", answer_kind(&answer));
+                if channel.answer_sender.send(answer).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Ok(crate::AiEvent::BashExec { command, output_sender }) => {
+                debug!("handle_ask_user: follow-up bash_exec, cmd={}", command);
+                // Send output through channel (LLM will receive it)
+                let _ = output_sender.send(format!("(command queued: {})", command));
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Forward PTY output while waiting for LLM
+                let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+                unsafe {
+                    libc::FD_ZERO(&mut rfds);
+                    libc::FD_SET(master_fd, &mut rfds);
+                }
+                let mut tv = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 50_000, // 50ms
+                };
+                let sel = unsafe {
+                    libc::select(
+                        master_fd + 1,
+                        &mut rfds,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut tv,
+                    )
+                };
+                if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &mut rfds) } {
+                    let mut tmp = [0u8; 4096];
+                    match unsafe {
+                        libc::read(
+                            master_fd,
+                            tmp.as_mut_ptr() as *mut libc::c_void,
+                            tmp.len(),
+                        )
+                    } {
+                        n if n > 0 => {
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    tmp.as_ptr() as *const libc::c_void,
+                                    n as usize,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+}
+
 impl Drop for PersistentPty {
     fn drop(&mut self) {
         self.stop();
@@ -1192,6 +2117,22 @@ fn strip_ansi_escapes(s: &str) -> String {
     result
 }
 
+/// Strip ANSI escapes and trim trailing shell prompt from captured output.
+/// Removes the last non-empty line (typically a prompt like `user@host:~$ `).
+fn strip_ansi_and_prompt(raw: &str) -> String {
+    let clean = strip_ansi_escapes(raw);
+    let mut lines: Vec<&str> = clean.lines().collect();
+    // Remove trailing empty lines
+    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    // Remove last non-empty line (shell prompt)
+    if !lines.is_empty() {
+        lines.pop();
+    }
+    lines.join("\n").trim().to_string()
+}
+
 /// Clean PTY output: strip ANSI, command echo, trailing prompt.
 fn clean_pty_output(raw: &str, command: &str) -> String {
     // Strip ANSI escape sequences.
@@ -1217,6 +2158,80 @@ fn clean_pty_output(raw: &str, command: &str) -> String {
 
 fn regex_simple() -> regex::Regex {
     regex::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap()
+}
+
+/// Detect unclosed heredoc in a shell command and close it.
+/// Returns the command with missing heredoc closing delimiters appended.
+/// e.g. "cat > f << 'EOF'" → "cat > f << 'EOF'\nEOF"
+fn close_unclosed_heredoc(cmd: &str) -> String {
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    let len = bytes.len();
+    let mut result = cmd.to_string();
+    let mut appended = false;
+
+    while i + 1 < len {
+        if bytes[i] == b'<' && bytes[i + 1] == b'<' {
+            // Skip << and optional -
+            let mut j = i + 2;
+            if j < len && bytes[j] == b'-' {
+                j += 1;
+            }
+            // Skip whitespace
+            while j < len && bytes[j] == b' ' {
+                j += 1;
+            }
+            // Skip optional quote
+            if j < len && (bytes[j] == b'\'' || bytes[j] == b'"') {
+                j += 1;
+            }
+            // Extract delimiter word
+            let delim_start = j;
+            while j < len
+                && ![
+                    b' ', b'\n', b'\r', b';', b'&', b'|', b'<', b'>', b'#',
+                ]
+                .contains(&bytes[j])
+                && bytes[j] != b'\''
+                && bytes[j] != b'"'
+            {
+                j += 1;
+            }
+            let delimiter = &cmd[delim_start..j];
+
+            if !delimiter.is_empty() {
+                // Check if delimiter appears as a standalone line after the <<
+                let search_start = if appended { 0 } else { j.min(len) };
+                let rest = &result[search_start..];
+                let closed = rest.lines().any(|line| line.trim() == delimiter);
+                if !closed {
+                    result.push('\n');
+                    result.push_str(delimiter);
+                    appended = true;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Detect if PTY output looks like a continuation prompt (PS2: `> `).
+/// Used to detect stuck heredoc/quote states after command injection.
+fn looks_like_continuation_prompt(output: &[u8]) -> bool {
+    if output.is_empty() {
+        return false;
+    }
+    let stripped = strip_ansi_escapes(&String::from_utf8_lossy(output));
+    let lines: Vec<&str> = stripped.lines().collect();
+    if let Some(last_line) = lines.last() {
+        let trimmed_line = last_line.trim();
+        return trimmed_line == ">" || trimmed_line.ends_with("> ");
+    }
+    false
 }
 
 #[cfg(test)]

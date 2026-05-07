@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 aish-core.workspace = true
+aish-i18n.workspace = true
 nix.workspace = true
 tokio.workspace = true
 serde.workspace = true

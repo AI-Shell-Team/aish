@@ -33,7 +33,8 @@ pub use offload::{
 };
 pub use output_buffer::OutputBuffer;
 pub use session_interceptor::{
-    AiCallback, AiQuery, InterceptorState, SessionInterceptor, StdinAction,
+    AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel, AskUserOption,
+    AskUserRequest, FollowupCallback, InterceptorState, SessionInterceptor, StdinAction,
 };
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use state_capture::StateChanges;

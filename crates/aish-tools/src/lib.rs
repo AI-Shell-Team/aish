@@ -15,6 +15,8 @@
 
 pub mod ask_user;
 pub mod bash;
+pub mod channel_ask_user;
+pub mod channel_bash;
 pub mod final_answer;
 pub mod fs;
 pub mod glob_tool;
@@ -28,6 +30,8 @@ pub mod skill_tool;
 pub mod system_diagnose;
 
 pub use ask_user::AskUserTool;
+pub use channel_ask_user::ChannelAskUserTool;
+pub use channel_bash::ChannelBashTool;
 pub use final_answer::FinalAnswerTool;
 pub use fs::{EditFileTool, ReadFileTool, WriteFileTool};
 pub use glob_tool::GlobTool;
