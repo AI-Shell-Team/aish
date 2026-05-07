@@ -325,6 +325,36 @@ def test_backend_command_no_error_hint():
 
 
 @pytest.mark.timeout(5)
+def test_internal_command_does_not_clear_user_error_state():
+    """Internal probes should not replace the last user command result."""
+    tracker = CommandState()
+
+    tracker.register_user_command("bad-user-cmd")
+    tracker.handle_backend_event(_command_started("bad-user-cmd"))
+    tracker.handle_backend_event(_prompt_ready(7))
+
+    assert tracker.last_command == "bad-user-cmd"
+    assert tracker.last_exit_code == 7
+
+    tracker.register_command(
+        "__aish_query_completions git 3",
+        source=CommandState.INTERNAL_SOURCE,
+        command_seq=-1,
+    )
+    tracker.handle_backend_event(
+        _command_started("__aish_query_completions git 3", command_seq=-1)
+    )
+    result = tracker.handle_backend_event(_prompt_ready(0, command_seq=-1))
+
+    assert result is not None
+    assert result.source == CommandState.INTERNAL_SOURCE
+    assert result.exit_code == 0
+    assert tracker.last_command == "bad-user-cmd"
+    assert tracker.last_exit_code == 7
+    assert tracker.consume_error() == ("bad-user-cmd", 7)
+
+
+@pytest.mark.timeout(5)
 def test_backend_error_prompt_redraw_no_hint():
     """After backend command fails, prompt redraws must NOT show error hint.
 
