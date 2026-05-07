@@ -381,7 +381,10 @@ class AIHandler:
                         break
                     if data == b"\x1a":  # Ctrl+Z — forward to PTY for job control
                         if self.pty_manager and self.pty_manager.is_running:
-                            self.pty_manager.send(data)
+                            try:
+                                self.pty_manager.send(data)
+                            except (OSError, ValueError):
+                                pass  # PTY closed between is_running check and write — ignore
                     # Discard all other keystrokes during AI streaming.
                 except (OSError, ValueError):
                     break
