@@ -10,25 +10,6 @@ pub(crate) fn assess_sandbox_result(
 ) -> SecurityAnalysis {
     let changes = convert_changes(&sandbox.changes);
 
-    if sandbox.exit_code != 0 {
-        return SecurityAnalysis {
-            risk_level: RiskLevel::Medium,
-            reasons: vec![format!(
-                "sandbox execution returned non-zero exit code {}; require confirmation",
-                sandbox.exit_code
-            )],
-            changes,
-            sandbox_off_action: Some(policy.sandbox_off_action),
-            sandbox: SandboxStatus {
-                enabled: true,
-                reason: Some("sandbox_execute_failed".to_string()),
-                exit_code: Some(sandbox.exit_code),
-                ..SandboxStatus::default()
-            },
-            ..SecurityAnalysis::default()
-        };
-    }
-
     if sandbox.changes.is_empty() {
         let mut analysis = SecurityAnalysis {
             risk_level: policy.default_risk_level,
@@ -47,6 +28,25 @@ pub(crate) fn assess_sandbox_result(
         };
         apply_truncated_policy(&mut analysis, sandbox.changes_truncated);
         return analysis;
+    }
+
+    if sandbox.exit_code != 0 {
+        return SecurityAnalysis {
+            risk_level: RiskLevel::Medium,
+            reasons: vec![format!(
+                "sandbox execution returned non-zero exit code {}; require confirmation",
+                sandbox.exit_code
+            )],
+            changes,
+            sandbox_off_action: Some(policy.sandbox_off_action),
+            sandbox: SandboxStatus {
+                enabled: true,
+                reason: Some("sandbox_execute_failed".to_string()),
+                exit_code: Some(sandbox.exit_code),
+                ..SandboxStatus::default()
+            },
+            ..SecurityAnalysis::default()
+        };
     }
 
     let mut high_hits = Vec::new();
@@ -428,11 +428,47 @@ mod tests {
     }
 
     #[test]
-    fn assess_sandbox_result_non_zero_exit_requires_confirmation_semantics() {
+    fn assess_sandbox_result_non_zero_exit_with_no_changes_uses_default_risk() {
         let policy = SecurityPolicy {
             enable_sandbox: true,
+            default_risk_level: RiskLevel::Low,
             ..SecurityPolicy::default()
         };
+        let sandbox = SandboxResult {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: "missing file".to_string(),
+            changes: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            changes_truncated: false,
+        };
+
+        let analysis = assess_sandbox_result(&policy, "ls /tmp/missing", &sandbox);
+
+        assert_eq!(analysis.risk_level, RiskLevel::Low);
+        assert_eq!(analysis.sandbox.exit_code, Some(2));
+        assert_eq!(
+            analysis.reasons,
+            vec!["sandbox observed no filesystem changes; using default risk level LOW"]
+        );
+    }
+
+    #[test]
+    fn assess_sandbox_result_non_zero_exit_still_uses_recorded_changes() {
+        let policy = policy_with_rules(vec![PolicyRule {
+            pattern: "/etc/**".to_string(),
+            risk: RiskLevel::High,
+            description: Some("system config directory".to_string()),
+            operations: Some(BTreeSet::from(["DELETE".to_string()])),
+            command_list: Some(BTreeSet::from(["rm".to_string()])),
+            exclude: None,
+            rule_id: Some("H-001".to_string()),
+            name: Some("protect etc".to_string()),
+            reason: Some("system config is protected".to_string()),
+            confirm_message: None,
+            suggestion: None,
+        }]);
         let sandbox = SandboxResult {
             exit_code: 7,
             stdout: String::new(),
@@ -446,6 +482,8 @@ mod tests {
         let analysis = assess_sandbox_result(&policy, "rm -rf /etc/aish", &sandbox);
 
         assert_eq!(analysis.risk_level, RiskLevel::Medium);
+        assert_eq!(analysis.sandbox.exit_code, Some(7));
+        assert_eq!(analysis.changes.len(), 1);
         assert_eq!(
             analysis.reasons,
             vec!["sandbox execution returned non-zero exit code 7; require confirmation"]
