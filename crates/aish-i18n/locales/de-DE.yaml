@@ -143,6 +143,10 @@ shell:
     skills_loaded_suffix: " geladen"
 
   security:
+    panel_title:
+      blocked: "🛑 Sicherheitsblockierung"
+      notice: "🔐 Sicherheitshinweis"
+      confirm: "🔐 Bestätigung erforderlich"
     title:
       blocked: "🛑 Sicherheitsblockierung: {tool}"
       notice: "🔐 Sicherheitshinweis: {tool}"
@@ -163,6 +167,9 @@ shell:
       sandbox_timeout: "Die Vorabausführung des Befehls hat das Zeitlimit überschritten; das Risiko kann nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
       sandbox_ipc_timeout: "Zeitüberschreitung beim Warten auf die Vorabbewertung des Befehls; das Risiko kann nicht bewertet werden. Bitte vor der echten Ausführung bestätigen."
       generic: "Die Risikobewertung des Befehls konnte nicht abgeschlossen werden. Bitte vor der echten Ausführung bestätigen."
+    alternative:
+      generic: "Bitte prüfen Sie diesen Befehl manuell und verifizieren Sie die Auswirkungen vor der Ausführung."
+      etc_manual: "Wenn Sie Dateien unter /etc ändern müssen, bevorzugen Sie einen manuellen Änderungsprozess mit Backups/Change-Management."
     options_header: "Optionen"
     option:
       approve: "Genehmigen"
@@ -280,6 +287,9 @@ tools:
       systemd: "[SYSTEMD] {ident}: {matched}/{total} Zeilen passend\nBeispiel:\n{sample}"
       call_failed: "[{stype}] {ident}: Aufruf fehlgeschlagen\n{output}"
     no_logs_found: "Keine Protokolle oder passenden Informationen gefunden."
+
+  bash:
+    security_handling_required: "der Bash-Befehl erfordert eine Sicherheitsbehandlung der Stufe {level}"
 
 help:
   labels:

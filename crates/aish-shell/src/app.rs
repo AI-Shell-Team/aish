@@ -8,14 +8,15 @@ use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
 use aish_llm::{
     langfuse::{LangfuseClient, LangfuseConfig},
-    CancellationToken, ChatMessage, LlmCallbackResult, LlmSession,
+    CancellationToken, ChatMessage, LlmCallbackResult, LlmSession, PreflightSecurityContext,
+    SecurityPanel, SecurityPanelMode,
 };
 use aish_memory::MemoryManager;
-use aish_security::{SecurityManager, SecurityPolicy};
 use aish_session::SessionStore;
 use aish_skills::hotreload::SkillHotReloader;
 use aish_skills::SkillManager;
 use aish_tools::ToolRegistry;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
 use crate::animation::SharedAnimation;
@@ -24,6 +25,7 @@ use crate::input;
 use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
+use crate::security_panel::build_security_panel;
 use crate::types::ShellState;
 
 // ---------------------------------------------------------------------------
@@ -106,7 +108,6 @@ pub struct AishShell {
     pub state: ShellState,
     pub config: ConfigModel,
     pub ai_handler: AiHandler,
-    pub security_manager: SecurityManager,
     pub session_store: Option<SessionStore>,
     pub skill_manager: SkillManager,
     pub skill_hot_reloader: Option<SkillHotReloader>,
@@ -174,20 +175,10 @@ impl AishShell {
             }
         }
 
-        // Initialize security manager (before tool registration)
-        let security_manager = SecurityManager::from_config(None)
-            .unwrap_or_else(|_| SecurityManager::new(SecurityPolicy::default_policy()));
-
-        // Register tools with security-checked bash execution
-        let security_check = {
-            let mgr = SecurityManager::new(security_manager.policy().clone());
-            move |cmd: &str| mgr.check_command(cmd)
-        };
+        // Register core tools
         let mut tool_registry = ToolRegistry::new();
-        // Shared PTY slot — will be populated after PersistentPty starts.
-        let pty_slot: aish_tools::bash::PtySlot =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
-        let mut bash_tool = aish_tools::SecureBashTool::with_security_check(security_check);
+        let pty_slot: aish_tools::bash::PtySlot = Arc::new(Mutex::new(None));
+        let mut bash_tool = aish_tools::bash::BashTool::new();
         bash_tool.set_cancellation_token(llm_session.cancellation_token_arc());
         bash_tool.set_pty_slot(pty_slot.clone());
         tool_registry.register(Box::new(bash_tool));
@@ -204,13 +195,6 @@ impl AishShell {
         // System diagnose tool — needs session credentials to spawn sub-sessions.
         // The shared event callback holder allows setting the callback after
         // tool registration (the event callback is created later).
-        let diagnose_security_check = {
-            let mgr = SecurityManager::new(security_manager.policy().clone());
-            std::sync::Arc::new(move |cmd: &str| -> aish_security::SecurityDecision {
-                mgr.check_command(cmd)
-            })
-                as std::sync::Arc<dyn Fn(&str) -> aish_security::SecurityDecision + Send + Sync>
-        };
         let diagnose_event_callback: aish_tools::SharedEventCallback =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         // SystemDiagnoseTool registration is deferred until after skill loading
@@ -221,7 +205,6 @@ impl AishShell {
             config.model.clone(),
             config.temperature,
             config.max_tokens,
-            diagnose_security_check,
             diagnose_event_callback.clone(),
         );
 
@@ -344,14 +327,13 @@ impl AishShell {
 
         // Create SystemDiagnoseTool with skill callbacks wired from the loaded skills
         {
-            let (api_base, api_key, model, temp, max_tok, sec_check, ev_cb) = diagnose_tool_params;
+            let (api_base, api_key, model, temp, max_tok, ev_cb) = diagnose_tool_params;
             let diag_tool = aish_tools::SystemDiagnoseTool::new(
                 &api_base,
                 &api_key,
                 &model,
                 Some(temp),
                 max_tok,
-                Some(sec_check),
                 ev_cb,
             );
             // Build skill callbacks for the diagnose agent (separate snapshot from main SkillTool)
@@ -705,40 +687,11 @@ impl AishShell {
         *diagnose_event_callback.lock().unwrap() = Some(event_callback);
 
         // Set up confirmation callback for tool approval flow
-        let confirmation_callback: Arc<dyn Fn(&str, &str) -> bool + Send + Sync> =
-            Arc::new(|tool_name: &str, message: &str| {
-                let width = std::env::var("COLUMNS")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(80);
-                let border = "─".repeat(width.saturating_sub(4));
-                println!();
-                println!("\x1b[33m╭{}╮\x1b[0m", border);
-                println!(
-                    "\x1b[33m│\x1b[1;33m ⚠  Security Confirmation Required\x1b[0m{}",
-                    pad_to_width("", width.saturating_sub(38))
-                );
-                println!("\x1b[33m│\x1b[0m");
-                println!(
-                    "\x1b[33m│\x1b[0m  \x1b[1;36m{}\x1b[0m   {}",
-                    t("shell.confirm_dialog_tool"),
-                    tool_name
-                );
-                let reason_lines = wrap_text(message, width.saturating_sub(14));
-                println!(
-                    "\x1b[33m│\x1b[0m  \x1b[1;36mReason:\x1b[0m {}",
-                    reason_lines.lines().next().unwrap_or("")
-                );
-                for line in reason_lines.lines().skip(1) {
-                    println!("\x1b[33m│\x1b[0m         {}", line);
-                }
-                println!("\x1b[33m│\x1b[0m");
-                println!(
-                    "\x1b[33m│\x1b[0m  \x1b[36m{}\x1b[0m",
-                    t("shell.confirm_dialog_question")
-                );
-                println!("\x1b[33m╰{}╯\x1b[0m", border);
-                print!("  ");
+        let confirmation_callback: Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync> =
+            Arc::new(|context: &PreflightSecurityContext| {
+                let panel = build_security_panel(context);
+                render_security_panel(&panel);
+                print!("  \x1b[36m{}\x1b[0m ", t("shell.confirm_dialog_question"));
                 let _ = std::io::stdout().flush();
 
                 let mut answer = String::new();
@@ -749,7 +702,14 @@ impl AishShell {
                 answer == "y" || answer == "yes"
             });
 
+        let security_notice_callback: Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync> =
+            Arc::new(|context: &PreflightSecurityContext| {
+                let panel = build_security_panel(context);
+                render_security_panel(&panel);
+            });
+
         llm_session.set_confirmation_callback(confirmation_callback);
+        llm_session.set_security_notice_callback(security_notice_callback);
 
         // Build AI handler with all subsystems
         let ai_handler = AiHandler::new(
@@ -799,7 +759,6 @@ impl AishShell {
             state,
             config,
             ai_handler,
-            security_manager,
             session_store,
             skill_manager: shell_skill_manager,
             skill_hot_reloader,
@@ -2858,6 +2817,7 @@ fn strip_tool_output_xml(output: &str) -> String {
     let re_offload = TOOL_XML_OFFLOAD_RE
         .get_or_init(|| regex::Regex::new(r"(?s)<offload>.*?</offload>").unwrap());
     let cleaned = re_offload.replace_all(output, "").to_string();
+    let cleaned = strip_return_code_block(&cleaned);
     // Remove incomplete tags (e.g. "<stdo" from truncation)
     let re_incomplete =
         TOOL_XML_INCOMPLETE_RE.get_or_init(|| regex::Regex::new(r"<[^>]*$").unwrap());
@@ -2873,6 +2833,13 @@ fn strip_tool_output_xml(output: &str) -> String {
         .filter(|l| !l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn strip_return_code_block(output: &str) -> String {
+    static RETURN_CODE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RETURN_CODE_RE
+        .get_or_init(|| regex::Regex::new(r"(?s)<return_code>.*?</return_code>").unwrap());
+    re.replace_all(output, "").to_string()
 }
 
 /// Collapse output to first N lines for terminal display, matching Python's
@@ -3031,37 +2998,195 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     format!("{}...", truncated)
 }
 
-/// Pad a string with trailing spaces to fill the given width (for box borders).
-fn pad_to_width(s: &str, width: usize) -> String {
-    if s.len() >= width {
-        s.to_string()
+/// Wrap text to the given terminal display width.
+///
+/// This intentionally wraps by visible columns instead of whitespace-delimited
+/// words so mixed CJK/ASCII text like "/etc 下文件" does not break awkwardly
+/// at the ASCII token boundary.
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+
+        if current_width > 0 && current_width + ch_width > max_width {
+            lines.push(current.trim_end().to_string());
+            current.clear();
+            current_width = 0;
+
+            if ch.is_whitespace() {
+                continue;
+            }
+        }
+
+        if current.is_empty() && ch.is_whitespace() {
+            continue;
+        }
+
+        current.push(ch);
+        current_width += ch_width;
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current.trim_end().to_string());
+    }
+    lines
+}
+
+fn render_security_panel(panel: &SecurityPanel) {
+    let terminal_width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(80);
+    let inner_width = terminal_width.saturating_sub(4).max(20);
+    let border = "─".repeat(inner_width);
+
+    let (color, title_key) = match panel.mode {
+        SecurityPanelMode::Confirm => ("33", "shell.security.panel_title.confirm"),
+        SecurityPanelMode::Blocked => ("31", "shell.security.panel_title.blocked"),
+        SecurityPanelMode::Info => ("36", "shell.security.panel_title.notice"),
+    };
+    let title = t(title_key);
+
+    println!();
+    println!("\x1b[{color}m╭{}╮\x1b[0m", border);
+    println!(
+        "{}",
+        format_panel_line(
+            color,
+            &format!("\x1b[1;{color}m ⚠  {title}\x1b[0m"),
+            inner_width,
+        )
+    );
+    println!("{}", format_panel_line(color, "", inner_width));
+
+    if let Some(target) = panel.target.as_deref() {
+        print_wrapped_panel_field(
+            color,
+            &t("shell.security.label.command"),
+            target,
+            inner_width,
+        );
+    }
+
+    if let Some(risk_level) = panel.risk_level.as_deref() {
+        print_wrapped_panel_field(
+            color,
+            &t("shell.security.label.risk_level"),
+            risk_level,
+            inner_width,
+        );
+    }
+
+    let detail = if panel.reasons.is_empty() {
+        panel.message.clone()
     } else {
-        format!("{}{}\x1b[33m│\x1b[0m", s, " ".repeat(width - s.len()))
+        panel.reasons.join("; ")
+    };
+    print_wrapped_panel_field(
+        color,
+        &t("shell.security.label.reasons"),
+        &detail,
+        inner_width,
+    );
+
+    if !panel.alternatives.is_empty() {
+        let alternatives = panel.alternatives.join("\n");
+        print_wrapped_panel_field(
+            color,
+            &t("shell.security.label.alternatives"),
+            &alternatives,
+            inner_width,
+        );
+    }
+
+    println!("\x1b[{color}m╰{}╯\x1b[0m", border);
+}
+
+fn format_panel_line(color: &str, content: &str, inner_width: usize) -> String {
+    let content_width = visible_width(content);
+    if content_width >= inner_width {
+        format!("\x1b[{color}m│\x1b[0m{content}\x1b[{color}m│\x1b[0m")
+    } else {
+        format!(
+            "\x1b[{color}m│\x1b[0m{content}{}\x1b[{color}m│\x1b[0m",
+            " ".repeat(inner_width - content_width)
+        )
     }
 }
 
-/// Wrap text to the given width, preserving word boundaries.
-fn wrap_text(text: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return text.to_string();
-    }
-    let mut result = String::new();
-    let mut line_len = 0;
-    for word in text.split_whitespace() {
-        if line_len == 0 {
-            result.push_str(word);
-            line_len = word.len();
-        } else if line_len + 1 + word.len() <= max_width {
-            result.push(' ');
-            result.push_str(word);
-            line_len += 1 + word.len();
+fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if ch == '\x1b' {
+            in_escape = true;
+        } else if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
         } else {
-            result.push('\n');
-            result.push_str(word);
-            line_len = word.len();
+            width += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
     }
-    result
+    width
+}
+
+fn print_wrapped_panel_field(color: &str, label: &str, value: &str, inner_width: usize) {
+    let mut value_lines = value.lines().peekable();
+    let label_text = format!("{label}:");
+    let first_prefix = format!("  \x1b[1;36m{label_text}\x1b[0m ");
+    let first_prefix_width = 2 + UnicodeWidthStr::width(label_text.as_str()) + 1;
+    let continuation_prefix = " ".repeat(first_prefix_width);
+
+    if value_lines.peek().is_none() {
+        println!(
+            "{}",
+            format_panel_line(color, first_prefix.trim_end(), inner_width)
+        );
+        return;
+    }
+
+    let mut printed_first = false;
+    for raw_line in value_lines {
+        let prefix_width = if printed_first {
+            first_prefix_width
+        } else {
+            first_prefix_width
+        };
+        let wrap_width = inner_width.saturating_sub(prefix_width).max(1);
+        let wrapped_lines = wrap_text(raw_line, wrap_width);
+        if !printed_first {
+            let first_value = wrapped_lines.first().map(String::as_str).unwrap_or("");
+            println!(
+                "{}",
+                format_panel_line(color, &format!("{first_prefix}{first_value}"), inner_width)
+            );
+            printed_first = true;
+        } else {
+            let first_value = wrapped_lines.first().map(String::as_str).unwrap_or("");
+            println!(
+                "{}",
+                format_panel_line(
+                    color,
+                    &format!("{continuation_prefix}{first_value}"),
+                    inner_width,
+                )
+            );
+        }
+        for line in wrapped_lines.iter().skip(1) {
+            println!(
+                "{}",
+                format_panel_line(color, &format!("{continuation_prefix}{line}"), inner_width)
+            );
+        }
+    }
 }
 
 /// Parse a category string (from the LLM tool call) into a MemoryCategory.
@@ -3217,5 +3342,52 @@ mod phase_tests {
     fn test_phase_equality() {
         assert_eq!(ShellPhase::Booting, ShellPhase::Booting);
         assert_ne!(ShellPhase::Booting, ShellPhase::Editing);
+    }
+
+    #[test]
+    fn test_security_panel_line_keeps_right_border_with_wide_text() {
+        let line = format_panel_line("33", "  \x1b[1;36m原因:\x1b[0m 写入 /etc/aish/789", 40);
+
+        assert!(line.ends_with("\x1b[33m│\x1b[0m"));
+        assert_eq!(visible_width(&line), 42);
+    }
+
+    #[test]
+    fn test_security_panel_wraps_long_wide_words() {
+        let lines = wrap_text("在/etc/aish/下新建一个789的空文件", 12);
+
+        assert!(lines.len() > 1);
+        assert!(lines
+            .iter()
+            .all(|line| UnicodeWidthStr::width(line.as_str()) <= 12));
+    }
+
+    #[test]
+    fn test_security_panel_wraps_mixed_cjk_ascii_naturally() {
+        let lines = wrap_text(
+            "如需修改 /etc 下文件，建议采用人工变更并配合变更管理或备份策略。",
+            20,
+        );
+
+        assert!(lines.len() > 1);
+        assert_eq!(lines[0], "如需修改 /etc 下文件");
+        assert!(lines
+            .iter()
+            .all(|line| UnicodeWidthStr::width(line.as_str()) <= 20));
+    }
+
+    #[test]
+    fn test_tool_output_preview_hides_return_code_only_output() {
+        let output = strip_tool_output_xml("<return_code>\n0\n</return_code>");
+
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_tool_output_preview_keeps_stdout_without_return_code() {
+        let output =
+            strip_tool_output_xml("<stdout>\nhello\n</stdout>\n<return_code>\n0\n</return_code>");
+
+        assert_eq!(output, "hello");
     }
 }

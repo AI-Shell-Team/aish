@@ -143,6 +143,10 @@ shell:
     skills_loaded_suffix: " cargadas"
 
   security:
+    panel_title:
+      blocked: "🛑 Bloqueado por seguridad"
+      notice: "🔐 Aviso de seguridad"
+      confirm: "🔐 Confirmación requerida"
     title:
       blocked: "🛑 Bloqueado por seguridad: {tool}"
       notice: "🔐 Aviso de seguridad: {tool}"
@@ -163,6 +167,9 @@ shell:
       sandbox_timeout: "La preejecución del comando agotó el tiempo, por lo que no se puede evaluar el riesgo. Confirma antes de ejecutar el comando real."
       sandbox_ipc_timeout: "Se agotó el tiempo esperando la preevaluación del comando, por lo que no se puede evaluar el riesgo. Confirma antes de ejecutar el comando real."
       generic: "No se pudo completar la evaluación de riesgo del comando. Confirma antes de ejecutar el comando real."
+    alternative:
+      generic: "Revisa manualmente este comando y verifica el impacto antes de ejecutarlo."
+      etc_manual: "Si debes modificar archivos en /etc, usa preferentemente un proceso manual con copias de seguridad/gestión de cambios."
     options_header: "Opciones"
     option:
       approve: "Aprobar"
@@ -280,6 +287,9 @@ tools:
       systemd: "[SYSTEMD] {ident}: {matched}/{total} líneas coincidentes\nMuestra:\n{sample}"
       call_failed: "[{stype}] {ident}: llamada fallida\n{output}"
     no_logs_found: "No se encontraron registros ni información coincidente."
+
+  bash:
+    security_handling_required: "el comando bash requiere manejo de seguridad de nivel {level}"
 
 help:
   labels:

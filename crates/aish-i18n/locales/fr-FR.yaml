@@ -143,6 +143,10 @@ shell:
     skills_loaded_suffix: " charges"
 
   security:
+    panel_title:
+      blocked: "🛑 Blocage de securite"
+      notice: "🔐 Avertissement de securite"
+      confirm: "🔐 Confirmation requise"
     title:
       blocked: "🛑 Blocage de securite : {tool}"
       notice: "🔐 Avertissement de securite : {tool}"
@@ -163,6 +167,9 @@ shell:
       sandbox_timeout: "La pre-execution de la commande a expire, le risque ne peut donc pas etre evalue. Veuillez confirmer avant d'executer la vraie commande."
       sandbox_ipc_timeout: "Delai d'attente depasse lors de l'evaluation preliminaire de la commande ; le risque ne peut donc pas etre evalue. Veuillez confirmer avant d'executer la vraie commande."
       generic: "L'evaluation du risque de la commande n'a pas pu etre menee a bien. Veuillez confirmer avant d'executer la vraie commande."
+    alternative:
+      generic: "Veuillez verifier manuellement cette commande et son impact avant execution."
+      etc_manual: "Si vous devez modifier des fichiers sous /etc, privilegiez un processus manuel avec sauvegardes/gestion du changement."
     options_header: "Options"
     option:
       approve: "Autoriser"
@@ -280,6 +287,9 @@ tools:
       systemd: "[SYSTEMD] {ident} : {matched}/{total} lignes correspondantes\nExemple :\n{sample}"
       call_failed: "[{stype}] {ident} : appel echoue\n{output}"
     no_logs_found: "Aucun journal ou aucune information correspondante trouve(e)."
+
+  bash:
+    security_handling_required: "la commande bash nécessite un traitement de sécurité de niveau {level}"
 
 help:
   labels:

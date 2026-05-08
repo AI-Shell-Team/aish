@@ -1,17 +1,19 @@
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aish_i18n;
-use aish_llm::{CancellationToken, Tool, ToolResult};
+use aish_llm::{
+    CancellationToken, PreflightResult, PreflightSecurityContext, SecurityPanelMode, Tool,
+    ToolResult,
+};
 use aish_pty::{BashOffloadSettings, BashOutputOffload, CancelToken, PtyExecutor};
+use aish_security::{load_policy, SecurityDecision, SecurityManager, SecurityRequest};
 
 /// Large keep_bytes for the silent PTY executor to capture full command output.
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
 const CAPTURE_KEEP_BYTES: usize = 10 * 1024 * 1024; // 10MB
-
-/// Default timeout for command execution in seconds.
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// Commands that need a real terminal for interactive use.
 const INTERACTIVE_COMMANDS: &[&str] = &[
@@ -66,6 +68,128 @@ fn get_description() -> &'static str {
     DESCRIPTION.get_or_init(|| aish_i18n::t("tools.bash.description"))
 }
 
+fn timeout_secs(args: &serde_json::Value) -> Result<Option<u64>, ToolResult> {
+    match args.get("timeout") {
+        None => Ok(None),
+        Some(timeout) => match timeout.as_i64() {
+            Some(seconds) if seconds > 0 => Ok(Some(seconds as u64)),
+            _ => Err(ToolResult::error(aish_i18n::t(
+                "tools.bash.invalid_timeout",
+            ))),
+        },
+    }
+}
+
+fn security_preflight(
+    command: &str,
+    cwd: Option<&Path>,
+    config_path: Option<&Path>,
+) -> PreflightResult {
+    security_preflight_with_socket(command, cwd, config_path, None)
+}
+
+fn security_preflight_with_socket(
+    command: &str,
+    cwd: Option<&Path>,
+    config_path: Option<&Path>,
+    sandbox_socket_path: Option<&Path>,
+) -> PreflightResult {
+    let policy = load_policy(config_path);
+    let manager = SecurityManager::new(policy.clone());
+    let mut request = SecurityRequest::ai_command()
+        .with_repo_root("/")
+        .with_sandbox_timeout_s(policy.sandbox_timeout_seconds);
+    if let Some(cwd) = cwd {
+        request = request.with_cwd(cwd.to_path_buf());
+    }
+    if let Some(socket_path) = sandbox_socket_path {
+        request = request.with_sandbox_socket_path(socket_path.to_path_buf());
+    }
+    let decision = manager.decide_with_request(command, &request);
+
+    if !decision.allow {
+        return PreflightResult::Block {
+            message: format_security_message(&decision),
+            security: Some(build_security_context(
+                command,
+                &decision,
+                SecurityPanelMode::Blocked,
+            )),
+        };
+    }
+
+    if decision.require_confirmation {
+        return PreflightResult::Confirm {
+            message: format_security_message(&decision),
+            security: Some(build_security_context(
+                command,
+                &decision,
+                SecurityPanelMode::Confirm,
+            )),
+        };
+    }
+
+    PreflightResult::Allow
+}
+
+fn format_security_message(decision: &SecurityDecision) -> String {
+    if let Some(confirm_message) = decision.analysis.confirm_message.as_deref() {
+        let trimmed = confirm_message.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let impact = decision.analysis.impact_description.trim();
+    if !impact.is_empty() {
+        return impact.to_string();
+    }
+
+    if let Some(reason) = decision
+        .analysis
+        .reasons
+        .iter()
+        .find(|reason| !is_internal_security_reason(reason))
+    {
+        return reason.clone();
+    }
+
+    let mut args = std::collections::HashMap::new();
+    args.insert("level".to_string(), decision.level.to_string());
+    aish_i18n::t_with_args("tools.bash.security_handling_required", &args)
+}
+
+fn build_security_context(
+    command: &str,
+    decision: &SecurityDecision,
+    mode: SecurityPanelMode,
+) -> PreflightSecurityContext {
+    PreflightSecurityContext {
+        tool_name: "bash".to_string(),
+        target: Some(command.to_string()),
+        message: format_security_message(decision),
+        mode,
+        decision: Some(decision.clone()),
+    }
+}
+
+fn is_internal_security_reason(reason: &str) -> bool {
+    [
+        "sandbox degraded because ",
+        "sandbox exit_code:",
+        "policy fallback rule matched for command ",
+        "matched paths: ",
+        "sandbox matched ",
+        "sandbox observed no filesystem changes;",
+        "sandbox changes matched no policy rule;",
+        "unmatched paths: ",
+        "sandbox change list was truncated;",
+        "sandbox execution returned non-zero exit code ",
+    ]
+    .iter()
+    .any(|prefix| reason.starts_with(prefix))
+}
+
 impl Default for BashTool {
     fn default() -> Self {
         Self::new()
@@ -95,18 +219,19 @@ impl BashTool {
     fn execute_via_persistent_pty(
         &self,
         command: &str,
-        timeout_secs: u64,
+        timeout_secs: Option<u64>,
         pty_arc: Arc<Mutex<aish_pty::PersistentPty>>,
     ) -> ToolResult {
         let cancel_token = Arc::new(CancelToken::new());
 
-        // Timeout thread.
-        let timeout_token = Arc::clone(&cancel_token);
-        let timeout_duration = Duration::from_secs(timeout_secs);
-        std::thread::spawn(move || {
-            std::thread::sleep(timeout_duration);
-            timeout_token.cancel();
-        });
+        if let Some(timeout_secs) = timeout_secs {
+            let timeout_token = Arc::clone(&cancel_token);
+            let timeout_duration = Duration::from_secs(timeout_secs);
+            std::thread::spawn(move || {
+                std::thread::sleep(timeout_duration);
+                timeout_token.cancel();
+            });
+        }
 
         // Bridge: AI handler cancellation -> tool cancel token.
         let done = Arc::new(AtomicBool::new(false));
@@ -126,9 +251,10 @@ impl BashTool {
         }
 
         let mut pty = pty_arc.lock().unwrap();
+        let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
         let result = pty.execute_command(
             command,
-            Duration::from_secs(timeout_secs),
+            command_timeout,
             Some(&cancel_token),
         );
         done.store(true, Ordering::SeqCst);
@@ -172,7 +298,7 @@ impl BashTool {
     }
 
     /// Execute via one-shot PtyExecutor — original behavior.
-    fn execute_via_pty_executor(&self, command: &str, timeout_secs: u64) -> ToolResult {
+    fn execute_via_pty_executor(&self, command: &str, timeout_secs: Option<u64>) -> ToolResult {
         let executor = if needs_interactive(command) {
             PtyExecutor::new(CAPTURE_KEEP_BYTES)
         } else {
@@ -180,12 +306,14 @@ impl BashTool {
         };
         let cancel_token = Arc::new(CancelToken::new());
 
-        let timeout_token = Arc::clone(&cancel_token);
-        let timeout_duration = Duration::from_secs(timeout_secs);
-        std::thread::spawn(move || {
-            std::thread::sleep(timeout_duration);
-            timeout_token.cancel();
-        });
+        if let Some(timeout_secs) = timeout_secs {
+            let timeout_token = Arc::clone(&cancel_token);
+            let timeout_duration = Duration::from_secs(timeout_secs);
+            std::thread::spawn(move || {
+                std::thread::sleep(timeout_duration);
+                timeout_token.cancel();
+            });
+        }
 
         let done = Arc::new(AtomicBool::new(false));
         if let Some(ref ct) = self.cancellation_token {
@@ -265,12 +393,21 @@ impl Tool for BashTool {
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default: 120)",
-                    "default": 120
+                    "minimum": 1,
+                    "description": "Timeout in seconds. If omitted, the command runs until completion or cancellation."
                 }
             },
             "required": ["command"]
         })
+    }
+
+    fn preflight(&self, args: &serde_json::Value) -> PreflightResult {
+        let Some(command) = args.get("command").and_then(|c| c.as_str()) else {
+            return PreflightResult::Allow;
+        };
+
+        let cwd = std::env::current_dir().ok();
+        security_preflight(command, cwd.as_deref(), None)
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -278,10 +415,10 @@ impl Tool for BashTool {
             Some(cmd) => cmd,
             None => return ToolResult::error(aish_i18n::t("tools.bash.missing_command")),
         };
-        let timeout_secs = args
-            .get("timeout")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(DEFAULT_TIMEOUT_SECS);
+        let timeout_secs = match timeout_secs(&args) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
 
         // Try PersistentPty path first (supports Ctrl+Z/bg/fg).
         let pty_arc = {
@@ -299,6 +436,13 @@ impl Tool for BashTool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -389,5 +533,245 @@ mod tests {
             result.ok,
             "tool execution should succeed even after timeout kill"
         );
+    }
+    #[test]
+    fn test_bash_tool_parameters_do_not_advertise_default_timeout() {
+        let tool = BashTool::new();
+        let params = tool.parameters();
+        let timeout = &params["properties"]["timeout"];
+
+        assert!(timeout.get("default").is_none());
+        assert_eq!(
+            timeout["description"].as_str(),
+            Some("Timeout in seconds. If omitted, the command runs until completion or cancellation.")
+        );
+    }
+
+    #[test]
+    fn test_timeout_secs_is_optional() {
+        assert_eq!(
+            timeout_secs(&serde_json::json!({ "command": "echo hi" })).unwrap(),
+            None
+        );
+        assert_eq!(
+            timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": 3 })).unwrap(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn test_timeout_secs_rejects_invalid_values() {
+        assert!(timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": 0 })).is_err());
+        assert!(timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": -1 })).is_err());
+        assert!(
+            timeout_secs(&serde_json::json!({ "command": "echo hi", "timeout": "5" })).is_err()
+        );
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_blocks_high_risk_commands() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\n  sandbox_off_action: ALLOW\n  default_risk_level: LOW\nrules:\n  - id: H-001\n    path: [/etc/**]\n    operations: [DELETE]\n    command_list: [rm]\n    risk: HIGH\n    reason: system config is protected\n",
+        )
+        .unwrap();
+
+        let result = security_preflight("rm -rf /etc", None, Some(policy_path.as_path()));
+        match result {
+            PreflightResult::Block {
+                message,
+                security: Some(security),
+            } => {
+                assert_eq!(message, "system config is protected");
+                assert_eq!(security.tool_name, "bash");
+                assert_eq!(security.target.as_deref(), Some("rm -rf /etc"));
+                assert_eq!(security.mode, SecurityPanelMode::Blocked);
+                assert_eq!(security.message, "system config is protected");
+                let decision = security.decision.expect("expected security decision");
+                assert_eq!(decision.level.to_string(), "HIGH");
+                assert_eq!(decision.analysis.matched_paths, vec!["/etc".to_string()]);
+            }
+            other => panic!("unexpected preflight result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_confirms_medium_risk_commands() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\n  sandbox_off_action: ALLOW\n  default_risk_level: LOW\nrules:\n  - id: M-001\n    path: [/home/**]\n    operations: [WRITE]\n    command_list: [cp]\n    risk: MEDIUM\n    reason: home path is protected\n",
+        )
+        .unwrap();
+
+        let result = security_preflight(
+            "cp /tmp/a.txt /home/lixin/a.txt",
+            None,
+            Some(policy_path.as_path()),
+        );
+        match result {
+            PreflightResult::Confirm {
+                message,
+                security: Some(security),
+            } => {
+                assert_eq!(message, "home path is protected");
+                assert_eq!(security.tool_name, "bash");
+                assert_eq!(
+                    security.target.as_deref(),
+                    Some("cp /tmp/a.txt /home/lixin/a.txt")
+                );
+                assert_eq!(security.mode, SecurityPanelMode::Confirm);
+                let decision = security.decision.expect("expected security decision");
+                assert_eq!(decision.level.to_string(), "MEDIUM");
+                assert_eq!(
+                    decision.analysis.matched_paths,
+                    vec!["/home/lixin/a.txt".to_string()]
+                );
+            }
+            other => panic!("unexpected preflight result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_allows_low_risk_commands() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\n  sandbox_off_action: CONFIRM\n  default_risk_level: LOW\nrules: []\n",
+        )
+        .unwrap();
+
+        let result = security_preflight("echo hi", None, Some(policy_path.as_path()));
+
+        assert_eq!(result, PreflightResult::Allow);
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_uses_sandbox_result_when_enabled() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        let socket_path = dir.path().join("sandbox.sock");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: true\n  sandbox_off_action: ALLOW\n  sandbox_timeout_seconds: 13\n  default_risk_level: LOW\nrules:\n  - id: H-001\n    path: [/etc/**]\n    operations: [DELETE]\n    command_list: [rm]\n    risk: HIGH\n    reason: system config is protected\n    description: system config directory\n    suggestion: |\n      edit manually\n      open a ticket\n",
+        )
+        .unwrap();
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request_buf.extend_from_slice(&chunk[..read]);
+                if request_buf.contains(&b'\n') {
+                    break;
+                }
+            }
+
+            let request: serde_json::Value = serde_json::from_slice(&request_buf).unwrap();
+            assert_eq!(request["command"], "echo sandbox");
+            assert_eq!(request["repo_root"], "/");
+            assert_eq!(request["timeout_s"], 13.0);
+            let id = request["id"].as_str().unwrap();
+            let response = serde_json::json!({
+                "id": id,
+                "ok": true,
+                "result": {
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "changes": [
+                        {"path": "/etc/aish/config.yaml", "kind": "deleted"}
+                    ],
+                    "stdout_truncated": false,
+                    "stderr_truncated": false,
+                    "changes_truncated": false
+                }
+            });
+            writeln!(stream, "{}", response).unwrap();
+        });
+
+        let result = security_preflight_with_socket(
+            "echo sandbox",
+            Some(dir.path()),
+            Some(policy_path.as_path()),
+            Some(socket_path.as_path()),
+        );
+
+        handle.join().unwrap();
+        match result {
+            PreflightResult::Block {
+                message,
+                security: Some(security),
+            } => {
+                assert_eq!(message, "system config directory");
+                assert_eq!(security.target.as_deref(), Some("echo sandbox"));
+                assert_eq!(security.mode, SecurityPanelMode::Blocked);
+                let decision = security.decision.expect("expected security decision");
+                assert_eq!(decision.level.to_string(), "HIGH");
+                assert_eq!(
+                    decision.analysis.impact_description,
+                    "system config directory"
+                );
+                assert_eq!(
+                    decision.analysis.suggested_alternatives,
+                    vec!["edit manually".to_string(), "open a ticket".to_string()]
+                );
+                assert_eq!(
+                    decision.analysis.matched_paths,
+                    vec!["/etc/aish/config.yaml".to_string()]
+                );
+            }
+            other => panic!("unexpected preflight result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_surfaces_sandbox_degraded_when_fallback_matches() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        let socket_path = dir.path().join("missing.sock");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: true\n  sandbox_off_action: ALLOW\n  default_risk_level: LOW\nrules:\n  - id: M-001\n    path: [/home/**]\n    operations: [DELETE]\n    command_list: [rm]\n    risk: MEDIUM\n    reason: test-home-rule\n",
+        )
+        .unwrap();
+
+        let result = security_preflight_with_socket(
+            "rm /home/lixin/123",
+            Some(dir.path()),
+            Some(policy_path.as_path()),
+            Some(socket_path.as_path()),
+        );
+        match result {
+            PreflightResult::Confirm {
+                message,
+                security: Some(security),
+            } => {
+                assert_eq!(message, "test-home-rule");
+                assert_eq!(security.target.as_deref(), Some("rm /home/lixin/123"));
+                assert_eq!(security.mode, SecurityPanelMode::Confirm);
+                let decision = security.decision.expect("expected security decision");
+                assert_eq!(decision.level.to_string(), "MEDIUM");
+                assert_eq!(
+                    decision.analysis.sandbox.reason.as_deref(),
+                    Some("sandbox_ipc_unavailable")
+                );
+                assert_eq!(
+                    decision.analysis.matched_paths,
+                    vec!["/home/lixin/123".to_string()]
+                );
+            }
+            other => panic!("unexpected preflight result: {other:?}"),
+        }
     }
 }

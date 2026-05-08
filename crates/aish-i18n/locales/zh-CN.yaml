@@ -354,6 +354,10 @@ shell:
   # 安全消息(上面已定义，此处保留作为参考)
 
   security:
+    panel_title:
+      blocked: "🛑 安全拦截"
+      notice: "🔐 安全提示"
+      confirm: "🔐 需要确认"
     title:
       blocked: "🛑 安全拦截：{tool}"
       notice: "🔐 安全提示：{tool}"
@@ -375,6 +379,9 @@ shell:
       sandbox_timeout: "命令预执行超时，无法检测命令风险，请确认后执行。"
       sandbox_ipc_timeout: "等待命令预评估超时，无法检测命令风险，请确认后执行。"
       generic: "未能完成命令风险评估，请确认后执行。"
+    alternative:
+      generic: "请人工复核该命令并在确认影响后再执行。"
+      etc_manual: "如需修改 /etc 下文件，建议采用人工变更并配合变更管理或备份策略。"
     options_header: "选项"
     option:
       approve: "允许"
@@ -484,23 +491,23 @@ security:
   sandbox_unavailable:
     title: "⚠️ 沙箱不可用"
     line1: "检测到沙箱不可用，无法评估命令风险。"
-    line2: "后续 AI 生成命令将按\"{action}\"处理。"
+    line2: "后续 AI 生成命令将按“{action}”处理。"
     policy_line1: "沙箱已按策略关闭，未执行沙箱预跑。"
-    policy_line2: "后续 AI 命令将按\"{action}\"处理。"
+    policy_line2: "后续 AI 命令将按“{action}”处理。"
     reason: "原因：{reason}"
     error: "错误：{error}"
     root_required: "沙箱需要 root 权限"
-    ipc_unavailable: "无法连接沙箱服务(aish-sandbox.socket 未运行或未安装)"
-    ipc_failed: "沙箱服务启动失败(aish-sandbox)"
+    ipc_unavailable: "无法连接沙箱服务（aish-sandbox.socket 未运行或未安装）"
+    ipc_failed: "沙箱服务启动失败（aish-sandbox）"
     sandbox_execute_failed: "无法评估命令风险，请确认后执行"
 
   risk_reason:
-    sandbox_disabled_by_policy: "策略配置已关闭沙箱，无法获取文件变更信息进行风险评估；将按\"{action}\"处理。"
-    sandbox_disabled: "沙箱未启用或配置为关闭，无法获取文件变更信息进行风险评估；将按\"{action}\"处理。"
-    cwd_outside_repo_root: "当前工作目录 {cwd} 不在沙箱根目录 {root} 下，无法可靠评估相对路径副作用；将按\"{action}\"处理。"
-    sandbox_unavailable: "沙箱构建/执行失败，未能获取文件变更信息进行风险评估；将按\"{action}\"处理。"
-    sandbox_exception: "沙箱执行异常，未能获取文件变更信息进行风险评估；将按\"{action}\"处理。"
-    sandbox_failed: "沙箱执行失败，未能获取文件变更信息进行风险评估；将按\"{action}\"处理。"
+    sandbox_disabled_by_policy: "策略配置已关闭沙箱，无法获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_disabled: "沙箱未启用或配置为关闭，无法获取文件变更信息进行风险评估；将按“{action}”处理。"
+    cwd_outside_repo_root: "当前工作目录 {cwd} 不在沙箱根目录 {root} 下，无法可靠评估相对路径副作用；将按“{action}”处理。"
+    sandbox_unavailable: "沙箱构建/执行失败，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_exception: "沙箱执行异常，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
+    sandbox_failed: "沙箱执行失败，未能获取文件变更信息进行风险评估；将按“{action}”处理。"
     policy_fallback_rule_match: "沙箱按策略关闭时，命令 {command} 命中了 {count} 条兜底规则路径；按 {risk} 风险处理。"
 
   ai_risk:
@@ -528,6 +535,7 @@ tools:
 
   bash:
     description: "执行 bash 命令并返回输出。使用此工具运行 shell 命令。"
+    security_handling_required: "bash 命令需要 {level} 级安全处理"
     param:
       command: "要执行的 bash 命令"
       timeout: "超时时间(秒)(默认：120)"

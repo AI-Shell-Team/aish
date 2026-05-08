@@ -4,11 +4,11 @@ members = [
     "crates/aish-core",
     "crates/aish-config",
     "crates/aish-i18n",
+    "crates/aish-security",
     "crates/aish-pty",
     "crates/aish-llm",
     "crates/aish-session",
     "crates/aish-context",
-    "crates/aish-security",
     "crates/aish-skills",
     "crates/aish-memory",
     "crates/aish-tools",
@@ -103,11 +103,11 @@ tempfile = "3"
 aish-core = { path = "crates/aish-core" }
 aish-config = { path = "crates/aish-config" }
 aish-i18n = { path = "crates/aish-i18n" }
+aish-security = { path = "crates/aish-security" }
 aish-pty = { path = "crates/aish-pty" }
 aish-llm = { path = "crates/aish-llm" }
 aish-session = { path = "crates/aish-session" }
 aish-context = { path = "crates/aish-context" }
-aish-security = { path = "crates/aish-security" }
 aish-skills = { path = "crates/aish-skills" }
 aish-memory = { path = "crates/aish-memory" }
 aish-tools = { path = "crates/aish-tools" }

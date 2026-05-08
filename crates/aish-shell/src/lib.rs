@@ -24,6 +24,7 @@ pub mod input;
 pub mod prompt;
 pub mod readline;
 pub mod renderer;
+pub mod security_panel;
 pub mod token_store;
 pub mod tui;
 pub mod types;

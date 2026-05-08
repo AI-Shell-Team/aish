@@ -354,6 +354,10 @@ shell:
   # Security messages (already defined above, kept for reference)
 
   security:
+    panel_title:
+      blocked: "🛑 Security Blocked"
+      notice: "🔐 Security Notice"
+      confirm: "🔐 Confirmation Required"
     title:
       blocked: "🛑 Security Blocked: {tool}"
       notice: "🔐 Security Notice: {tool}"
@@ -375,6 +379,9 @@ shell:
       sandbox_timeout: "Command pre-execution timed out, so risk cannot be assessed. Please confirm before running the real command."
       sandbox_ipc_timeout: "Waiting for command pre-evaluation timed out, so risk cannot be assessed. Please confirm before running the real command."
       generic: "Could not complete command risk assessment. Please confirm before running the real command."
+    alternative:
+      generic: "Please manually review this command and verify impact before execution."
+      etc_manual: "If you must modify files under /etc, prefer a manual change process with backups/change management."
     options_header: "Options"
     option:
       approve: "Approve"
@@ -529,6 +536,7 @@ tools:
 
   bash:
     description: "Execute a bash command and return the output. Use this tool to run shell commands."
+    security_handling_required: "bash command requires {level} security handling"
     param:
       command: "The bash command to execute"
       timeout: "Timeout in seconds (default: 120)"

@@ -323,7 +323,7 @@ impl AiHandler {
         let agent = DiagnoseAgent::new();
         // Create minimal tool set for diagnosis
         let tools: Vec<Box<dyn aish_llm::Tool>> = vec![
-            Box::new(aish_tools::SecureBashTool::new()),
+            Box::new(aish_tools::bash::BashTool::new()),
             Box::new(aish_tools::fs::ReadFileTool::new()),
         ];
 
