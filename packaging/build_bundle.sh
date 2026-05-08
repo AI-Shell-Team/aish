@@ -36,23 +36,20 @@ mkdir -p "$ROOTFS_DIR" "$OUTPUT_DIR"
 # Install into rootfs using Makefile
 make install NO_BUILD=1 DESTDIR="$ROOTFS_DIR" TARGET="$TARGET"
 
-# Create placeholder aish-sandbox
-SANDBOX_BIN="${ROOTFS_DIR}/usr/bin/aish-sandbox"
-cat > "$SANDBOX_BIN" <<'SANDBOX'
-#!/usr/bin/env bash
-echo "aish-sandbox: not yet implemented in the Rust version" >&2
-exit 1
-SANDBOX
-chmod 755 "$SANDBOX_BIN"
-
 install -m 0755 packaging/scripts/install-bundle.sh "${STAGE_DIR}/install.sh"
 install -m 0755 packaging/scripts/uninstall-bundle.sh "${STAGE_DIR}/uninstall.sh"
+mkdir -p "${STAGE_DIR}/systemd"
+install -m 0644 packaging/systemd/aish-sandbox.service.in "${STAGE_DIR}/systemd/aish-sandbox.service.in"
+install -m 0644 packaging/systemd/aish-sandbox.socket "${STAGE_DIR}/systemd/aish-sandbox.socket"
 
 cat > "${STAGE_DIR}/README.txt" <<EOF
 AI Shell bundle ${VERSION} (${ARCH})
 
 Install:
   sudo ./install.sh
+
+The installer enables aish-sandbox.socket on systemd hosts. Set
+AISH_SKIP_SYSTEMD=1 to install files without touching systemd.
 
 Uninstall:
   sudo ./uninstall.sh

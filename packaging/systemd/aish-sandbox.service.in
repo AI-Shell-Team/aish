@@ -1,0 +1,24 @@
+[Unit]
+Description=AI Shell sandbox daemon
+Documentation=https://github.com/AI-Shell-Team/aish
+Requires=aish-sandbox.socket
+After=aish-sandbox.socket
+PartOf=aish-sandbox.socket
+
+[Service]
+Type=simple
+ExecStart=@AISH_BINDIR@/aish --sandbox-daemon
+User=root
+Group=root
+Restart=on-failure
+RestartSec=1s
+
+# The daemon accepts the systemd socket activation fd and then spawns the
+# hidden --sandbox-worker entry in the same aish binary for each request.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateMounts=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
