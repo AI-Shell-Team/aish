@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTFS_DIR="${SCRIPT_DIR}/rootfs"
+SYSTEMD_DIR="${SCRIPT_DIR}/systemd"
 MIN_GLIBC_VERSION="2.28"
 FORCE_CONFIG_OVERWRITE=0
 INSTALL_ROOT="${AISH_INSTALL_ROOT:-}"
@@ -13,7 +14,7 @@ usage() {
 	cat <<'EOF'
 Usage: sudo ./install.sh [--force-config] [--prefix=PATH]
 
-Installs AI Shell binaries, systemd units, default skills, and the security policy.
+Installs AI Shell binaries, default skills, and the security policy.
 
 Options:
 	--prefix=PATH       Install into PATH instead of system directories (no sudo needed)
@@ -74,17 +75,6 @@ check_glibc() {
 }
 
 check_runtime_dependencies() {
-	require_command bwrap "Install the bubblewrap package before continuing."
-	require_command unshare "Install util-linux before continuing."
-	if [[ "$SKIP_SYSTEMD" != "1" ]]; then
-		require_command systemctl "A systemd-based system is required for aish-sandbox.socket."
-	fi
-
-	if [[ "$SKIP_SYSTEMD" != "1" && ! -d /run/systemd/system ]]; then
-		echo "systemd does not appear to be running on this system." >&2
-		exit 1
-	fi
-
 	if [[ ! -d "$ROOTFS_DIR" ]]; then
 		echo "Bundle payload not found: ${ROOTFS_DIR}" >&2
 		exit 1
@@ -135,34 +125,37 @@ install_tree() {
 	fi
 }
 
-install_systemd_unit() {
-	local source_path="$1"
-	local destination_path="$2"
-	local destination_file
-	destination_file="$(target_path "$destination_path")"
-	local service_exec_path
-	service_exec_path="$(binary_target_dir)/aish-sandbox"
-
-	install -d "$(dirname "$destination_file")"
-	if [[ "$source_path" == *.service ]]; then
-		sed "s|^ExecStart=/usr/bin/aish-sandbox$|ExecStart=${service_exec_path}|" "$source_path" > "$destination_file"
-		chmod 0644 "$destination_file"
-	else
-		install -m 0644 "$source_path" "$destination_file"
-	fi
-}
-
-enable_services() {
-	if [[ "$SKIP_SYSTEMD" == "1" ]]; then
-		echo "Skipping systemd enablement"
+install_systemd_units() {
+	if [[ -n "$INSTALL_PREFIX" ]]; then
 		return
 	fi
-	systemctl daemon-reload
+	if [[ ! -d "$SYSTEMD_DIR" ]]; then
+		echo "Warning: systemd unit payload not found: ${SYSTEMD_DIR}" >&2
+		return
+	fi
+
+	local unit_dir="/lib/systemd/system"
+	local service_target socket_target
+	service_target="$(target_path "${unit_dir}/aish-sandbox.service")"
+	socket_target="$(target_path "${unit_dir}/aish-sandbox.socket")"
+	install -D -m 0644 "$SYSTEMD_DIR/aish-sandbox.socket" "$socket_target"
+	sed "s|@AISH_BINDIR@|${BIN_DIR}|g" "$SYSTEMD_DIR/aish-sandbox.service.in" > "$service_target"
+	chmod 0644 "$service_target"
+
+	if [[ -n "$INSTALL_ROOT" || "$SKIP_SYSTEMD" == "1" ]]; then
+		return
+	fi
+	if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null 2>&1; then
+		echo "Systemd is not active; installed units but did not enable aish-sandbox.socket." >&2
+		return
+	fi
+
+	systemctl daemon-reload >/dev/null 2>&1 || true
 	systemctl enable aish-sandbox.socket >/dev/null 2>&1 || true
 	if systemctl is-active --quiet aish-sandbox.socket || systemctl is-active --quiet aish-sandbox.service; then
-		systemctl restart aish-sandbox.socket
+		systemctl restart aish-sandbox.socket >/dev/null 2>&1 || true
 	else
-		systemctl start aish-sandbox.socket
+		systemctl start aish-sandbox.socket >/dev/null 2>&1 || true
 	fi
 }
 
@@ -195,22 +188,15 @@ check_runtime_dependencies
 BIN_DIR="$(binary_target_dir)"
 
 install_file "$ROOTFS_DIR/usr/bin/aish" "${BIN_DIR}/aish" 0755
-install_file "$ROOTFS_DIR/usr/bin/aish-sandbox" "${BIN_DIR}/aish-sandbox" 0755
 install_file "$SCRIPT_DIR/uninstall.sh" "${BIN_DIR}/aish-uninstall" 0755
 install_config "$ROOTFS_DIR/etc/aish/security_policy.yaml" "/etc/aish/security_policy.yaml"
-if [[ -z "$INSTALL_PREFIX" ]]; then
-	install_systemd_unit "$ROOTFS_DIR/lib/systemd/system/aish-sandbox.service" "/etc/systemd/system/aish-sandbox.service"
-	install_systemd_unit "$ROOTFS_DIR/lib/systemd/system/aish-sandbox.socket" "/etc/systemd/system/aish-sandbox.socket"
-fi
 install_file "$ROOTFS_DIR/usr/share/doc/aish/skills-guide.md" "/usr/local/share/aish/skills-guide.md" 0644
 
 if [[ -d "$ROOTFS_DIR/usr/share/aish/skills" ]]; then
 	install_tree "$ROOTFS_DIR/usr/share/aish/skills" "/usr/local/share/aish/skills"
 fi
 
-if [[ -z "$INSTALL_PREFIX" ]]; then
-	enable_services
-fi
+install_systemd_units
 
 if [[ -n "$INSTALL_ROOT" ]]; then
 	echo "AI Shell installed successfully into ${INSTALL_ROOT}."

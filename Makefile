@@ -1,4 +1,4 @@
-.PHONY: help test lint format build build-bundle install clean
+.PHONY: help test lint format build build-binary build-bundle install clean
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -42,6 +42,8 @@ format-check:
 build:
 	./build.sh
 
+build-binary: build
+
 build-bundle:
 	./packaging/build_bundle.sh
 
@@ -54,11 +56,12 @@ install:
 	install -m 0755 target/$(TARGET)/release/aish "$(DESTDIR)$(BINDIR)/aish"
 	install -d "$(DESTDIR)$(SYSCONFDIR)/aish"
 	install -m 0644 config/security_policy.yaml "$(DESTDIR)$(SYSCONFDIR)/aish/security_policy.yaml"
-	install -d "$(DESTDIR)$(SYSTEMD_UNITDIR)"
-	install -m 0644 debian/aish-sandbox.service "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
-	install -m 0644 debian/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
 	install -d "$(DESTDIR)$(DOCDIR)"
 	install -m 0644 docs/skills-guide.md "$(DESTDIR)$(DOCDIR)/skills-guide.md"
+	install -d "$(DESTDIR)$(SYSTEMD_UNITDIR)"
+	sed 's|@AISH_BINDIR@|$(BINDIR)|g' packaging/systemd/aish-sandbox.service.in > "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
+	chmod 0644 "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
+	install -m 0644 packaging/systemd/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
 	@if [ -d debian/skills ]; then \
 		install -d "$(DESTDIR)$(DATADIR)"; \
 		cp -a debian/skills "$(DESTDIR)$(DATADIR)/"; \
