@@ -207,16 +207,7 @@ impl SecurityManager {
         };
 
         match sandbox_result {
-            Ok(result) if result.exit_code == 0 => {
-                assess_sandbox_result(&self.policy, command, &result)
-            }
-            Ok(result) => analyze_sandbox_degraded(
-                &self.policy,
-                &self.fallback_engine,
-                command,
-                SandboxReason::SandboxExecuteFailed,
-                SandboxDegradedDetails::default().with_exit_code(result.exit_code),
-            ),
+            Ok(result) => assess_sandbox_result(&self.policy, command, &result),
             Err(error) => analyze_sandbox_degraded(
                 &self.policy,
                 &self.fallback_engine,
@@ -516,6 +507,40 @@ mod tests {
         assert_eq!(
             decision.analysis.sandbox_off_action,
             Some(SandboxOffAction::Confirm)
+        );
+    }
+
+    #[test]
+    fn sandbox_non_zero_exit_with_no_changes_uses_assessed_result() {
+        let runner = FakeSandboxRunner::success(crate::sandbox::types::SandboxResult {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: "ls: cannot access '/tmp/missing': No such file or directory".to_string(),
+            changes: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            changes_truncated: false,
+        });
+        let manager = SecurityManager::new(SecurityPolicy {
+            enable_sandbox: true,
+            default_risk_level: RiskLevel::Low,
+            ..SecurityPolicy::default()
+        })
+        .with_sandbox_runner(runner);
+        let request = SecurityRequest::ai_command()
+            .with_cwd("/repo")
+            .with_repo_root("/repo");
+
+        let decision = manager.decide_with_request("ls /tmp/missing", &request);
+
+        assert_eq!(decision.level, RiskLevel::Low);
+        assert!(decision.allow);
+        assert!(!decision.require_confirmation);
+        assert!(decision.analysis.sandbox.enabled);
+        assert_eq!(decision.analysis.sandbox.exit_code, Some(2));
+        assert_eq!(
+            decision.analysis.reasons,
+            vec!["sandbox observed no filesystem changes; using default risk level LOW"]
         );
     }
 
