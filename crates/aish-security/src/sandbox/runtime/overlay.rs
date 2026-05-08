@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -398,16 +399,26 @@ fn encode_mount_path(path: &Path) -> String {
     let encoded = path
         .components()
         .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy()),
+            std::path::Component::Normal(value) => Some(encode_mount_component(value.as_bytes())),
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("_");
+        .join("__");
     if encoded.is_empty() {
         "root".to_string()
     } else {
         encoded
     }
+}
+
+fn encode_mount_component(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2 + 6);
+    encoded.push('c');
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut encoded, "{:02x}", byte);
+    }
+    encoded
 }
 
 fn unescape_mountinfo_path(value: &str) -> String {
@@ -469,7 +480,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        parse_mountinfo_points_under, setup_overlay_plan, OverlayPlanBuilder, OverlayStrategy,
+        encode_mount_path, parse_mountinfo_points_under, setup_overlay_plan, OverlayPlanBuilder,
+        OverlayStrategy,
     };
     use crate::sandbox::error::SandboxReason;
     use crate::sandbox::runtime::executor::SandboxRunGuard;
@@ -577,6 +589,14 @@ mod tests {
     }
 
     #[test]
+    fn encode_mount_path_is_collision_resistant_for_component_boundaries() {
+        assert_ne!(
+            encode_mount_path(Path::new("/repo/a_b")),
+            encode_mount_path(Path::new("/repo/a/b"))
+        );
+    }
+
+    #[test]
     fn plan_rejects_cwd_outside_repo_root() {
         let error = OverlayPlanBuilder::new("/repo", "/other", "/tmp/aish")
             .build()
@@ -616,7 +636,10 @@ mod tests {
         setup_overlay_plan(&plan, &executor, &mut guard).unwrap();
 
         assert!(sandbox_root.join("upper").is_dir());
-        assert!(sandbox_root.join("upper_submounts/repo_cache").is_dir());
+        assert!(sandbox_root
+            .join("upper_submounts")
+            .join(encode_mount_path(Path::new("/repo/cache")))
+            .is_dir());
         assert_eq!(calls.lock().unwrap().len(), plan.mounts.len());
         assert_eq!(guard.mounts_mut().len(), plan.mounts.len());
         guard.close().unwrap();
@@ -638,7 +661,11 @@ mod tests {
         setup_overlay_plan(&plan, &executor, &mut guard).unwrap();
 
         let host_mode = fs::symlink_metadata("/tmp").unwrap().permissions().mode() & 0o7777;
-        let upper_mode = fs::symlink_metadata(sandbox_root.join("upper_rootdirs/tmp"))
+        let upper_mode = fs::symlink_metadata(
+            sandbox_root
+                .join("upper_rootdirs")
+                .join(encode_mount_path(Path::new("/tmp"))),
+        )
             .unwrap()
             .permissions()
             .mode()

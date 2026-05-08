@@ -1,14 +1,16 @@
 use crate::decision::{RiskLevel, SandboxStatus, SecurityAnalysis};
+use crate::fallback::{extract_policy_command_name, rule_accepts_command};
 use crate::policy::{PolicyRule, SecurityPolicy};
 use crate::sandbox::types::{FsChange as SandboxFsChange, FsChangeKind, SandboxResult};
 use crate::types::{FsChange, MatchedRuleSummary};
 
 pub(crate) fn assess_sandbox_result(
     policy: &SecurityPolicy,
-    _command: &str,
+    command: &str,
     sandbox: &SandboxResult,
 ) -> SecurityAnalysis {
     let changes = convert_changes(&sandbox.changes);
+    let command_name = extract_policy_command_name(command);
 
     if sandbox.changes.is_empty() {
         let mut analysis = SecurityAnalysis {
@@ -58,7 +60,7 @@ pub(crate) fn assess_sandbox_result(
         let path = normalize_path(&change.path);
         let operation = operation_for_change(change.kind);
 
-        match match_rule(policy, &path, operation) {
+        match match_rule(policy, command_name.as_deref(), &path, operation) {
             Some(rule) if rule.risk == RiskLevel::High => high_hits.push((change, path, rule)),
             Some(rule) if rule.risk == RiskLevel::Medium => medium_hits.push((change, path, rule)),
             Some(rule) => low_hits.push((change, path, rule)),
@@ -179,8 +181,16 @@ fn operation_for_change(kind: FsChangeKind) -> &'static str {
     }
 }
 
-fn match_rule(policy: &SecurityPolicy, path: &str, operation: &str) -> Option<PolicyRule> {
+fn match_rule(
+    policy: &SecurityPolicy,
+    command_name: Option<&str>,
+    path: &str,
+    operation: &str,
+) -> Option<PolicyRule> {
     for rule in &policy.rules {
+        if !rule_accepts_command(command_name, rule.command_list.as_ref()) {
+            continue;
+        }
         if !path_matches(path, &rule.pattern) {
             continue;
         }
@@ -318,7 +328,7 @@ mod tests {
             changes_truncated: false,
         };
 
-        let analysis = assess_sandbox_result(&policy, "echo hi", &sandbox);
+        let analysis = assess_sandbox_result(&policy, "rm -f /etc/aish/config.yaml", &sandbox);
 
         assert_eq!(analysis.risk_level, RiskLevel::High);
         assert_eq!(analysis.matched_paths, vec!["/etc/aish/config.yaml"]);
@@ -364,7 +374,7 @@ mod tests {
             changes_truncated: false,
         };
 
-        let analysis = assess_sandbox_result(&policy, "echo hi", &sandbox);
+        let analysis = assess_sandbox_result(&policy, "cp /tmp/a /home/lixin/a.txt", &sandbox);
 
         assert_eq!(analysis.risk_level, RiskLevel::Medium);
         assert_eq!(
@@ -372,6 +382,73 @@ mod tests {
             Some("confirm home write")
         );
         assert_eq!(analysis.matched_paths, vec!["/home/lixin/a.txt"]);
+    }
+
+    #[test]
+    fn assess_sandbox_result_honors_command_list() {
+        let policy = policy_with_rules(vec![PolicyRule {
+            pattern: "/home/**".to_string(),
+            risk: RiskLevel::High,
+            description: None,
+            operations: Some(BTreeSet::from(["WRITE".to_string()])),
+            command_list: Some(BTreeSet::from(["rm".to_string()])),
+            exclude: None,
+            rule_id: Some("H-001".to_string()),
+            name: Some("protect home deletes".to_string()),
+            reason: Some("home delete is protected".to_string()),
+            confirm_message: None,
+            suggestion: None,
+        }]);
+        let sandbox = SandboxResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changes: vec![change("/home/lixin/a.txt", FsChangeKind::Created)],
+            stdout_truncated: false,
+            stderr_truncated: false,
+            changes_truncated: false,
+        };
+
+        let analysis = assess_sandbox_result(&policy, "cp /tmp/a /home/lixin/a.txt", &sandbox);
+
+        assert_eq!(analysis.risk_level, RiskLevel::Low);
+        assert!(analysis.matched_rule.is_none());
+        assert!(analysis.matched_paths.is_empty());
+    }
+
+    #[test]
+    fn assess_sandbox_result_honors_command_list_for_wrapped_command() {
+        let policy = policy_with_rules(vec![PolicyRule {
+            pattern: "/etc/**".to_string(),
+            risk: RiskLevel::High,
+            description: None,
+            operations: Some(BTreeSet::from(["DELETE".to_string()])),
+            command_list: Some(BTreeSet::from(["rm".to_string()])),
+            exclude: None,
+            rule_id: Some("H-001".to_string()),
+            name: Some("protect etc".to_string()),
+            reason: Some("system config is protected".to_string()),
+            confirm_message: None,
+            suggestion: None,
+        }]);
+        let sandbox = SandboxResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changes: vec![change("/etc/aish/config.yaml", FsChangeKind::Deleted)],
+            stdout_truncated: false,
+            stderr_truncated: false,
+            changes_truncated: false,
+        };
+
+        let analysis = assess_sandbox_result(
+            &policy,
+            "sudo -E -u root bash -lc 'rm -rf /etc/aish/config.yaml'",
+            &sandbox,
+        );
+
+        assert_eq!(analysis.risk_level, RiskLevel::High);
+        assert_eq!(analysis.matched_paths, vec!["/etc/aish/config.yaml"]);
     }
 
     #[test]

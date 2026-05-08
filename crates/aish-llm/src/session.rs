@@ -413,7 +413,11 @@ impl LlmSession {
                                 timestamp: now_timestamp(),
                                 metadata: None,
                             });
-                            return Ok(String::new());
+                            return Ok(if self.security_notice_callback.is_some() {
+                                String::new()
+                            } else {
+                                output
+                            });
                         }
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
@@ -714,7 +718,11 @@ impl LlmSession {
                                 timestamp: now_timestamp(),
                                 metadata: None,
                             });
-                            return Ok(String::new());
+                            return Ok(if self.security_notice_callback.is_some() {
+                                String::new()
+                            } else {
+                                output
+                            });
                         }
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
