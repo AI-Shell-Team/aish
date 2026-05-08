@@ -165,6 +165,48 @@ impl FallbackRuleEngine {
     }
 }
 
+pub(crate) fn extract_policy_command_name(command: &str) -> Option<String> {
+    let (stripped_command, _sudo_detected, ok) = strip_sudo_prefix(command);
+    if !ok {
+        return None;
+    }
+
+    let mut argv = split_shell_like(&stripped_command)?;
+    if argv.is_empty() {
+        return None;
+    }
+
+    if let Some(wrapper_script) = extract_wrapper_script(&argv) {
+        argv = split_simple_script(&wrapper_script)?;
+        if argv.is_empty() {
+            return None;
+        }
+    }
+
+    normalize_command_name(argv.first()?)
+}
+
+pub(crate) fn rule_accepts_command(
+    command_name: Option<&str>,
+    command_list: Option<&BTreeSet<String>>,
+) -> bool {
+    let Some(command_list) = command_list else {
+        return true;
+    };
+    if command_list.is_empty() {
+        return true;
+    }
+    let Some(command_name) = command_name else {
+        return false;
+    };
+
+    command_list.iter().any(|command| {
+        normalize_command_name(command)
+            .as_ref()
+            .is_some_and(|normalized| normalized == command_name)
+    })
+}
+
 fn highest_risk(levels: impl IntoIterator<Item = RiskLevel>) -> Option<RiskLevel> {
     levels.into_iter().max_by_key(|level| match level {
         RiskLevel::Low => 1,
@@ -319,15 +361,7 @@ fn extract_paths(argv: &[String]) -> Vec<String> {
 }
 
 fn command_in_rule(command_name: &str, command_list: Option<&BTreeSet<String>>) -> bool {
-    let Some(command_list) = command_list else {
-        return false;
-    };
-
-    command_list.iter().any(|command| {
-        normalize_command_name(command)
-            .as_ref()
-            .is_some_and(|normalized| normalized == command_name)
-    })
+    rule_accepts_command(Some(command_name), command_list)
 }
 
 fn normalize_command_name(value: &str) -> Option<String> {

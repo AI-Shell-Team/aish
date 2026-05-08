@@ -349,10 +349,13 @@ fn should_report_change(plan: &OverlayPlan, change: &FsChange) -> bool {
         return true;
     }
 
-    let scaffold_paths = SINGLE_REPO_SCAFFOLD_ROOTS
+    let scaffold_paths: Vec<_> = SINGLE_REPO_SCAFFOLD_ROOTS
         .iter()
-        .map(|root| normalize_absolute_path(&plan.repo_root.join(root)));
-    !scaffold_paths.into_iter().any(|path| change.path == path)
+        .map(|root| normalize_absolute_path(&plan.repo_root.join(root)))
+        .collect();
+    !scaffold_paths.iter().any(|path| {
+        change.path == *path || change.path.starts_with(&format!("{path}/"))
+    })
 }
 
 fn logical_path(overlay: &OverlayMountRecord, rel_path: &Path) -> String {
@@ -581,6 +584,24 @@ mod tests {
 
         assert_eq!(suffix_paths(&collected.changes, &lower), vec!["user.txt"]);
         assert_eq!(collected.changes[0].kind, FsChangeKind::Created);
+    }
+
+    #[test]
+    fn collect_changes_ignores_single_repo_scaffold_descendants() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(upper.join("usr/share")).unwrap();
+        fs::write(upper.join("usr/share/bootstrap.txt"), "bootstrap").unwrap();
+        fs::write(upper.join("work.txt"), "payload").unwrap();
+
+        let collected = collect_changes(
+            &single_overlay_plan(&lower, &upper),
+            SandboxLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(suffix_paths(&collected.changes, &lower), vec!["work.txt"]);
     }
 
     #[test]
