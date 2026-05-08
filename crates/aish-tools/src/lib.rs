@@ -25,7 +25,6 @@ pub mod memory_tool;
 pub mod plan_tool;
 pub mod python;
 pub mod registry;
-pub mod secure_bash;
 pub mod skill_tool;
 pub mod system_diagnose;
 
@@ -40,7 +39,6 @@ pub use memory_tool::{MemorySearchResult, MemoryTool};
 pub use plan_tool::{EnterPlanModeTool, ExitPlanModeTool, ListTemplatesTool};
 pub use python::PythonTool;
 pub use registry::ToolRegistry;
-pub use secure_bash::SecureBashTool;
 pub use skill_tool::{SkillInfo, SkillTool};
 pub use system_diagnose::SharedEventCallback;
 pub use system_diagnose::SystemDiagnoseTool;

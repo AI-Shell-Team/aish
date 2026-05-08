@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use aish_security::SecurityDecision;
 use serde::{Deserialize, Serialize};
 
 /// Result of a callback invoked during LLM processing.
@@ -187,15 +188,85 @@ pub struct FunctionSpec {
     pub parameters: serde_json::Value, // JSON Schema
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecurityPanelMode {
+    Confirm,
+    Blocked,
+    Info,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityPanel {
+    pub mode: SecurityPanelMode,
+    pub tool_name: String,
+    pub target: Option<String>,
+    pub message: String,
+    pub risk_level: Option<String>,
+    pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+}
+
+impl SecurityPanel {
+    pub fn fallback(
+        tool_name: impl Into<String>,
+        message: impl Into<String>,
+        mode: SecurityPanelMode,
+    ) -> Self {
+        Self {
+            mode,
+            tool_name: tool_name.into(),
+            target: None,
+            message: message.into(),
+            risk_level: None,
+            reasons: Vec::new(),
+            alternatives: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightSecurityContext {
+    pub tool_name: String,
+    pub target: Option<String>,
+    pub message: String,
+    pub mode: SecurityPanelMode,
+    pub decision: Option<SecurityDecision>,
+}
+
+impl PreflightSecurityContext {
+    pub fn fallback(
+        tool_name: impl Into<String>,
+        target: Option<String>,
+        message: impl Into<String>,
+        mode: SecurityPanelMode,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            target,
+            message: message.into(),
+            mode,
+            decision: None,
+        }
+    }
+}
+
 /// Result of a preflight check before tool execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreflightResult {
     /// Execution is allowed.
     Allow,
     /// User confirmation is required before execution.
-    Confirm { message: String },
+    Confirm {
+        message: String,
+        security: Option<PreflightSecurityContext>,
+    },
     /// Execution is blocked.
-    Block { message: String },
+    Block {
+        message: String,
+        security: Option<PreflightSecurityContext>,
+    },
 }
 
 /// Trait for tool implementations that the LLM can invoke.
@@ -341,6 +412,7 @@ mod tests {
         fn preflight(&self, _args: &serde_json::Value) -> PreflightResult {
             PreflightResult::Block {
                 message: "blocked for testing".into(),
+                security: None,
             }
         }
         fn execute(&self, _args: serde_json::Value) -> ToolResult {
@@ -364,6 +436,7 @@ mod tests {
         fn preflight(&self, _args: &serde_json::Value) -> PreflightResult {
             PreflightResult::Confirm {
                 message: "please confirm".into(),
+                security: None,
             }
         }
         fn execute(&self, _args: serde_json::Value) -> ToolResult {
@@ -385,7 +458,8 @@ mod tests {
         assert_eq!(
             result,
             PreflightResult::Block {
-                message: "blocked for testing".into()
+                message: "blocked for testing".into(),
+                security: None,
             }
         );
     }
@@ -397,7 +471,8 @@ mod tests {
         assert_eq!(
             result,
             PreflightResult::Confirm {
-                message: "please confirm".into()
+                message: "please confirm".into(),
+                security: None,
             }
         );
     }
@@ -408,7 +483,8 @@ mod tests {
         assert_ne!(
             PreflightResult::Allow,
             PreflightResult::Block {
-                message: String::new()
+                message: String::new(),
+                security: None,
             }
         );
     }

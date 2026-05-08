@@ -1,300 +1,574 @@
-use crate::types::{AiRiskAssessment, FsChange, PolicyRule, SandboxResult};
-use aish_core::{AishError, RiskLevel, SandboxOffAction};
-use regex::Regex;
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-/// Serializable form used when loading the YAML config file.
-#[derive(Debug, Clone, serde::Deserialize)]
-struct PolicyFile {
-    #[serde(default)]
-    enable_sandbox: bool,
-    #[serde(default = "default_sandbox_off_action")]
-    sandbox_off_action: String,
-    #[serde(default = "default_risk")]
-    default_risk_level: String,
-    #[serde(default = "default_timeout")]
-    sandbox_timeout_seconds: f64,
-    #[serde(default)]
-    rules: Vec<PolicyRule>,
-}
+use serde::{Deserialize, Serialize};
+use serde_yaml::{Mapping, Value};
 
-fn default_sandbox_off_action() -> String {
-    "allow".to_string()
-}
-fn default_risk() -> String {
-    "low".to_string()
-}
-fn default_timeout() -> f64 {
-    10.0
+use crate::decision::{RiskLevel, SandboxOffAction};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationIssue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvalidFallbackRule {
+    pub rule_id: String,
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyRule {
+    pub pattern: String,
+    pub risk: RiskLevel,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operations: Option<BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_list: Option<BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+    #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SecurityPolicy {
     pub enable_sandbox: bool,
-    pub rules: Vec<PolicyRule>,
     pub sandbox_off_action: SandboxOffAction,
     pub sandbox_timeout_seconds: f64,
     pub default_risk_level: RiskLevel,
+    pub audit_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_log_path: Option<String>,
+    pub rules: Vec<PolicyRule>,
+    #[serde(default)]
+    pub invalid_fallback_rules: Vec<InvalidFallbackRule>,
+    #[serde(default)]
+    pub validation_issues: Vec<ValidationIssue>,
 }
 
-impl SecurityPolicy {
-    pub fn default_policy() -> Self {
+impl Default for SecurityPolicy {
+    fn default() -> Self {
         Self {
             enable_sandbox: false,
-            rules: Vec::new(),
             sandbox_off_action: SandboxOffAction::Allow,
             sandbox_timeout_seconds: 10.0,
             default_risk_level: RiskLevel::Low,
+            audit_enabled: false,
+            audit_log_path: None,
+            rules: default_rules(),
+            invalid_fallback_rules: Vec::new(),
+            validation_issues: Vec::new(),
+        }
+    }
+}
+
+const EMPTY_POLICY_TEMPLATE: &str = "# AI-Shell Security Policy\n\
+\n\
+global:\n\
+  default_risk_level: LOW\n\
+  enable_sandbox: false\n\
+  sandbox_off_action: ALLOW\n\
+  sandbox_timeout_seconds: 10\n\
+\n\
+rules: []\n";
+
+fn user_security_policy_path() -> PathBuf {
+    let base_dir = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
+            home.push(".config");
+            home
+        });
+
+    base_dir.join("aish").join("security_policy.yaml")
+}
+
+fn ensure_user_policy_template(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .and_then(|_| fs::write(path, EMPTY_POLICY_TEMPLATE));
+}
+
+pub fn resolve_security_policy_path(config_path: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = config_path {
+        if path.exists() {
+            return Some(path.to_path_buf());
         }
     }
 
-    /// Load security policy from a YAML file.
-    pub fn load(path: &Path) -> aish_core::Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            AishError::Security(format!("failed to read policy file {:?}: {}", path, e))
-        })?;
-
-        let pf: PolicyFile = serde_yaml::from_str(&content)
-            .map_err(|e| AishError::Security(format!("failed to parse policy YAML: {}", e)))?;
-
-        let sandbox_off_action = parse_sandbox_off_action(&pf.sandbox_off_action)?;
-        let default_risk_level = parse_risk_level(&pf.default_risk_level)?;
-
-        Ok(Self {
-            enable_sandbox: pf.enable_sandbox,
-            rules: pf.rules,
-            sandbox_off_action,
-            sandbox_timeout_seconds: pf.sandbox_timeout_seconds,
-            default_risk_level,
-        })
+    let system_path = PathBuf::from("/etc/aish/security_policy.yaml");
+    if system_path.exists() {
+        return Some(system_path);
     }
 
-    /// Match a path against policy rules, returning the first matching rule.
-    pub fn match_rule(&self, path: &str, operation: Option<&str>) -> Option<&PolicyRule> {
-        for rule in &self.rules {
-            if let Ok(re) = glob_to_regex(&rule.pattern) {
-                if !re.is_match(path) {
-                    continue;
-                }
-            } else {
-                continue;
-            }
+    let user_path = user_security_policy_path();
+    if !user_path.exists() {
+        ensure_user_policy_template(&user_path);
+    }
+    if user_path.exists() {
+        return Some(user_path);
+    }
 
-            // Check operation filter
-            if let Some(ops) = &rule.operations {
-                if let Some(op) = operation {
-                    if !ops.iter().any(|o| o.eq_ignore_ascii_case(op)) {
-                        continue;
-                    }
-                } else {
-                    // Rule requires specific operations but none provided
-                    continue;
-                }
-            }
+    None
+}
 
-            // Check exclude list
-            if let Some(excludes) = &rule.exclude {
-                let excluded = excludes.iter().any(|exc| {
-                    glob_to_regex(exc)
-                        .map(|re| re.is_match(path))
-                        .unwrap_or(false)
-                });
-                if excluded {
-                    continue;
-                }
-            }
+fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+    mapping.get(Value::String(key.to_string()))
+}
 
-            return Some(rule);
+fn as_mapping(value: Option<&Value>) -> Option<&Mapping> {
+    value.and_then(Value::as_mapping)
+}
+
+fn ensure_list(value: Option<&Value>) -> Vec<&Value> {
+    match value {
+        None => Vec::new(),
+        Some(Value::Sequence(items)) => items.iter().collect(),
+        Some(other) => vec![other],
+    }
+}
+
+fn parse_risk(value: Option<&Value>, default: RiskLevel) -> RiskLevel {
+    let Some(value) = value else {
+        return default;
+    };
+
+    let Some(text) = value.as_str() else {
+        return default;
+    };
+
+    match text.trim().to_ascii_uppercase().as_str() {
+        "LOW" => RiskLevel::Low,
+        "MEDIUM" => RiskLevel::Medium,
+        "HIGH" => RiskLevel::High,
+        _ => default,
+    }
+}
+
+fn parse_sandbox_off_action(value: Option<&Value>) -> Option<SandboxOffAction> {
+    let text = value?.as_str()?.trim().to_ascii_uppercase();
+    match text.as_str() {
+        "ALLOW" => Some(SandboxOffAction::Allow),
+        "CONFIRM" => Some(SandboxOffAction::Confirm),
+        "BLOCK" => Some(SandboxOffAction::Block),
+        _ => None,
+    }
+}
+
+fn parse_bool_strict(value: Option<&Value>, default: bool) -> bool {
+    match value {
+        None => default,
+        Some(Value::Bool(flag)) => *flag,
+        _ => default,
+    }
+}
+
+fn parse_float_gt_zero(value: Option<&Value>, default: f64) -> f64 {
+    let Some(value) = value else {
+        return default;
+    };
+
+    let parsed = match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.parse::<f64>().ok(),
+        _ => None,
+    };
+
+    match parsed {
+        Some(number) if number > 0.0 => number,
+        _ => default,
+    }
+}
+
+fn normalize_string_set(values: Vec<&Value>, uppercase: bool) -> Option<BTreeSet<String>> {
+    let mut result = BTreeSet::new();
+
+    for value in values {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
         }
+        let normalized = if uppercase {
+            text.to_ascii_uppercase()
+        } else {
+            text.to_string()
+        };
+        result.insert(normalized);
+    }
+
+    if result.is_empty() {
         None
-    }
-
-    /// Assess the risk of a command based on optional sandbox results.
-    pub fn assess_risk(
-        &self,
-        command: &str,
-        sandbox_result: Option<&SandboxResult>,
-    ) -> AiRiskAssessment {
-        let mut reasons: Vec<String> = Vec::new();
-        let mut changes: Vec<FsChange> = Vec::new();
-        let mut max_risk = self.default_risk_level.clone();
-
-        // Inspect sandbox results for file changes
-        if let Some(result) = sandbox_result {
-            for change in &result.changes {
-                changes.push(change.clone());
-
-                if let Some(rule) = self.match_rule(&change.path, Some(&change.kind)) {
-                    if matches!(rule.risk, RiskLevel::High) {
-                        max_risk = RiskLevel::High;
-                        reasons.push(format!(
-                            "file change to {} is high risk ({})",
-                            change.path,
-                            rule.description.as_deref().unwrap_or(&rule.pattern)
-                        ));
-                    } else if matches!(rule.risk, RiskLevel::Medium)
-                        && !matches!(max_risk, RiskLevel::High)
-                    {
-                        max_risk = RiskLevel::Medium;
-                        reasons.push(format!(
-                            "file change to {} is medium risk ({})",
-                            change.path,
-                            rule.description.as_deref().unwrap_or(&rule.pattern)
-                        ));
-                    }
-                }
-            }
-
-            // Heuristics: many write operations bump risk
-            if result.changes.len() > 5 {
-                if !matches!(max_risk, RiskLevel::High) {
-                    max_risk = RiskLevel::Medium;
-                }
-                reasons.push(format!(
-                    "command modifies {} files, which is significant",
-                    result.changes.len()
-                ));
-            }
-        }
-
-        // Inspect command text for dangerous patterns
-        let cmd_lower = command.to_lowercase();
-        let dangerous_patterns = [
-            ("rm -rf /", "recursive root delete"),
-            ("mkfs.", "filesystem format"),
-            ("dd if=", "raw disk write"),
-            (":(){ :|:& };:", "fork bomb"),
-            ("> /dev/sd", "direct device write"),
-        ];
-        for (pat, desc) in &dangerous_patterns {
-            if cmd_lower.contains(pat) {
-                max_risk = RiskLevel::High;
-                reasons.push(format!("command matches dangerous pattern: {}", desc));
-            }
-        }
-
-        // System paths in command
-        let system_paths = ["/etc/", "/boot/", "/usr/lib", "/sbin/"];
-        for sp in &system_paths {
-            if cmd_lower.contains(sp) {
-                if !matches!(max_risk, RiskLevel::High) {
-                    max_risk = RiskLevel::Medium;
-                }
-                reasons.push(format!("command references system path: {}", sp));
-            }
-        }
-
-        if reasons.is_empty() {
-            reasons.push("no elevated risk indicators detected".to_string());
-        }
-
-        AiRiskAssessment {
-            level: max_risk,
-            reasons,
-            changes,
-        }
+    } else {
+        Some(result)
     }
 }
 
-/// Convert a simple glob pattern to a Regex.
-///
-/// Rules:
-/// - `**` -> `.*`  (match anything including `/`)
-/// - `*`  -> `[^/]*` (match anything except `/`)
-/// - `?`  -> `[^/]`  (single char except `/`)
-/// - Other regex meta-characters are escaped.
-fn glob_to_regex(pattern: &str) -> Result<Regex, regex::Error> {
-    let mut regex_str = String::with_capacity(pattern.len() * 2);
-    regex_str.push('^');
+fn normalize_string_list(values: Vec<&Value>) -> Option<Vec<String>> {
+    let mut result = Vec::new();
 
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
-                // `**` matches anything including path separators
-                regex_str.push_str(".*");
-                i += 2;
-                // Skip optional trailing `/` after `**`
-                if i < chars.len() && chars[i] == '/' {
-                    regex_str.push_str("/?");
-                    i += 1;
-                }
-            }
-            '*' => {
-                regex_str.push_str("[^/]*");
-                i += 1;
-            }
-            '?' => {
-                regex_str.push_str("[^/]");
-                i += 1;
-            }
-            c => {
-                regex_str.push_str(&regex::escape(&c.to_string()));
-                i += 1;
+    for value in values {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        result.push(text.to_string());
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+fn parse_v2_rules(raw_rules: &[&Mapping]) -> Vec<PolicyRule> {
+    let mut rules = Vec::new();
+
+    for item in raw_rules {
+        let patterns = normalize_string_list(ensure_list(mapping_get(item, "path")));
+        let Some(patterns) = patterns else {
+            continue;
+        };
+
+        let risk = parse_risk(mapping_get(item, "risk"), RiskLevel::Low);
+        let operations = normalize_string_set(ensure_list(mapping_get(item, "operations")), true);
+        let command_list =
+            normalize_string_set(ensure_list(mapping_get(item, "command_list")), false);
+        let exclude = normalize_string_list(ensure_list(mapping_get(item, "exclude")));
+        let description = mapping_get(item, "description")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let rule_id = mapping_get(item, "id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let name = mapping_get(item, "name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let reason = mapping_get(item, "reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let confirm_message = mapping_get(item, "confirm_message")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let suggestion = mapping_get(item, "suggestion")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        for pattern in patterns {
+            rules.push(PolicyRule {
+                pattern,
+                risk,
+                description: description.clone(),
+                operations: operations.clone(),
+                command_list: command_list.clone(),
+                exclude: exclude.clone(),
+                rule_id: rule_id.clone(),
+                name: name.clone(),
+                reason: reason.clone(),
+                confirm_message: confirm_message.clone(),
+                suggestion: suggestion.clone(),
+            });
+        }
+    }
+
+    rules
+}
+
+fn parse_invalid_fallback_rules(
+    raw_rules: &[&Mapping],
+) -> (Vec<InvalidFallbackRule>, Vec<ValidationIssue>) {
+    let mut invalid_rules = Vec::new();
+    let mut issues = Vec::new();
+
+    for item in raw_rules {
+        let patterns = normalize_string_list(ensure_list(mapping_get(item, "path")));
+        let Some(patterns) = patterns else {
+            continue;
+        };
+
+        let risk_value = mapping_get(item, "risk");
+        let is_valid = matches!(
+            parse_risk(risk_value, RiskLevel::Low),
+            RiskLevel::Low | RiskLevel::Medium | RiskLevel::High
+        ) && risk_value.and_then(Value::as_str).is_some_and(|text| {
+            matches!(
+                text.trim().to_ascii_uppercase().as_str(),
+                "LOW" | "MEDIUM" | "HIGH"
+            )
+        });
+
+        if is_valid {
+            continue;
+        }
+
+        let rule_id = mapping_get(item, "id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let risk_text = risk_value.and_then(Value::as_str).map(str::to_string);
+        let exclude = normalize_string_list(ensure_list(mapping_get(item, "exclude")));
+
+        issues.push(ValidationIssue {
+            rule_id: rule_id.clone(),
+            field: "risk".to_string(),
+            value: risk_text,
+            message: Some("invalid rule ignored".to_string()),
+        });
+
+        if let Some(rule_id) = rule_id {
+            for pattern in patterns {
+                invalid_rules.push(InvalidFallbackRule {
+                    rule_id: rule_id.clone(),
+                    pattern,
+                    exclude: exclude.clone(),
+                });
             }
         }
     }
 
-    regex_str.push('$');
-    Regex::new(&regex_str)
+    (invalid_rules, issues)
 }
 
-fn parse_sandbox_off_action(s: &str) -> aish_core::Result<SandboxOffAction> {
-    match s.to_lowercase().as_str() {
-        "allow" => Ok(SandboxOffAction::Allow),
-        "confirm" => Ok(SandboxOffAction::Confirm),
-        "block" => Ok(SandboxOffAction::Block),
-        other => Err(AishError::Security(format!(
-            "invalid sandbox_off_action: {}",
-            other
-        ))),
+pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
+    let Some(effective_path) = resolve_security_policy_path(config_path) else {
+        return SecurityPolicy::default();
+    };
+
+    let Ok(text) = fs::read_to_string(&effective_path) else {
+        return SecurityPolicy::default();
+    };
+    let Ok(data) = serde_yaml::from_str::<Value>(&text) else {
+        return SecurityPolicy::default();
+    };
+
+    let root = data.as_mapping();
+    let global_cfg = root.and_then(|m| as_mapping(mapping_get(m, "global")));
+    let audit_cfg = root.and_then(|m| as_mapping(mapping_get(m, "audit")));
+
+    let default_risk_level = parse_risk(
+        global_cfg.and_then(|m| mapping_get(m, "default_risk_level")),
+        RiskLevel::Low,
+    );
+
+    let enable_sandbox = parse_bool_strict(
+        global_cfg.and_then(|m| mapping_get(m, "enable_sandbox")),
+        false,
+    );
+
+    let mut sandbox_off_action =
+        parse_sandbox_off_action(global_cfg.and_then(|m| mapping_get(m, "sandbox_off_action")))
+            .unwrap_or(SandboxOffAction::Allow);
+
+    let sandbox_timeout_seconds = parse_float_gt_zero(
+        global_cfg.and_then(|m| mapping_get(m, "sandbox_timeout_seconds")),
+        10.0,
+    );
+
+    if global_cfg
+        .and_then(|m| mapping_get(m, "sandbox_off_action"))
+        .is_none()
+    {
+        if let Some(legacy) = global_cfg.and_then(|m| mapping_get(m, "sandbox_fallback_risk")) {
+            sandbox_off_action = match parse_risk(Some(legacy), RiskLevel::Medium) {
+                RiskLevel::High => SandboxOffAction::Block,
+                RiskLevel::Medium => SandboxOffAction::Confirm,
+                RiskLevel::Low => SandboxOffAction::Allow,
+            };
+        }
+    }
+
+    let audit_enabled = parse_bool_strict(audit_cfg.and_then(|m| mapping_get(m, "enabled")), false);
+    let audit_log_path = audit_cfg
+        .and_then(|m| mapping_get(m, "log_path"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let rule_mappings: Vec<&Mapping> = root
+        .and_then(|m| mapping_get(m, "rules"))
+        .and_then(Value::as_sequence)
+        .map(|seq| seq.iter().filter_map(Value::as_mapping).collect())
+        .unwrap_or_default();
+
+    let v2_items: Vec<&Mapping> = rule_mappings
+        .into_iter()
+        .filter(|item| mapping_get(item, "path").is_some())
+        .collect();
+
+    let (invalid_fallback_rules, validation_issues) = parse_invalid_fallback_rules(&v2_items);
+
+    let valid_items: Vec<&Mapping> = v2_items
+        .iter()
+        .copied()
+        .filter(|item| {
+            mapping_get(item, "risk")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    matches!(
+                        text.trim().to_ascii_uppercase().as_str(),
+                        "LOW" | "MEDIUM" | "HIGH"
+                    )
+                })
+        })
+        .collect();
+
+    let mut rules = default_rules();
+    rules.extend(parse_v2_rules(&valid_items));
+
+    SecurityPolicy {
+        enable_sandbox,
+        sandbox_off_action,
+        sandbox_timeout_seconds,
+        default_risk_level,
+        audit_enabled,
+        audit_log_path,
+        rules,
+        invalid_fallback_rules,
+        validation_issues,
     }
 }
 
-fn parse_risk_level(s: &str) -> aish_core::Result<RiskLevel> {
-    match s.to_lowercase().as_str() {
-        "low" => Ok(RiskLevel::Low),
-        "medium" => Ok(RiskLevel::Medium),
-        "high" => Ok(RiskLevel::High),
-        other => Err(AishError::Security(format!(
-            "invalid risk level: {}",
-            other
-        ))),
-    }
+pub fn default_rules() -> Vec<PolicyRule> {
+    vec![PolicyRule {
+        pattern: "/**/security_policy.yaml".to_string(),
+        risk: RiskLevel::High,
+        description: Some("Security policy file is protected".to_string()),
+        operations: Some(BTreeSet::from(["WRITE".to_string(), "DELETE".to_string()])),
+        command_list: None,
+        exclude: None,
+        rule_id: Some("H-SEC-001".to_string()),
+        name: Some("Protect security policy".to_string()),
+        reason: Some("Security policy file should not be modified by AI commands".to_string()),
+        confirm_message: Some(
+            "Security policy file is protected and cannot be modified by AI commands.".to_string(),
+        ),
+        suggestion: Some("Edit the security policy file manually if needed.".to_string()),
+    }]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{load_policy, resolve_security_policy_path, SecurityPolicy};
+    use crate::decision::{RiskLevel, SandboxOffAction};
 
     #[test]
-    fn test_glob_to_regex() {
-        let re = glob_to_regex("/etc/**").unwrap();
-        assert!(re.is_match("/etc/passwd"));
-        assert!(re.is_match("/etc/nginx/nginx.conf"));
-        assert!(!re.is_match("/home/user/file"));
+    fn security_policy_default_matches_phase_one_expectations() {
+        let policy = SecurityPolicy::default();
 
-        let re = glob_to_regex("/home/*").unwrap();
-        assert!(re.is_match("/home/user"));
-        assert!(!re.is_match("/home/user/file"));
-
-        let re = glob_to_regex("/tmp/**").unwrap();
-        assert!(re.is_match("/tmp/test.txt"));
-        assert!(re.is_match("/tmp/a/b/c"));
+        assert!(!policy.enable_sandbox);
+        assert_eq!(policy.sandbox_off_action, SandboxOffAction::Allow);
+        assert_eq!(policy.sandbox_timeout_seconds, 10.0);
+        assert_eq!(policy.default_risk_level, RiskLevel::Low);
+        assert_eq!(policy.rules.len(), 1);
     }
 
     #[test]
-    fn test_match_rule() {
-        let policy = SecurityPolicy::default_policy();
-        assert!(policy.match_rule("/any/path", None).is_none());
+    fn resolve_security_policy_path_prefers_explicit_path() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\nrules: []\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_security_policy_path(Some(&policy_path));
+
+        assert_eq!(resolved.as_deref(), Some(policy_path.as_path()));
     }
 
     #[test]
-    fn test_default_policy() {
-        let p = SecurityPolicy::default_policy();
-        assert!(!p.enable_sandbox);
-        assert!(p.rules.is_empty());
-        assert_eq!(p.sandbox_timeout_seconds, 10.0);
+    fn load_policy_parses_global_and_rule_fields() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\n  sandbox_off_action: BLOCK\n  sandbox_timeout_seconds: 15\n  default_risk_level: MEDIUM\nrules:\n  - id: H-001\n    name: Protect etc\n    command_list: [rm]\n    path: [/etc/**]\n    operations: [WRITE, DELETE]\n    risk: HIGH\n    reason: do not touch etc\n",
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        assert!(!policy.enable_sandbox);
+        assert_eq!(policy.sandbox_off_action, SandboxOffAction::Block);
+        assert_eq!(policy.sandbox_timeout_seconds, 15.0);
+        assert_eq!(policy.default_risk_level, RiskLevel::Medium);
+        assert!(policy
+            .rules
+            .iter()
+            .any(|rule| rule.rule_id.as_deref() == Some("H-001")));
+    }
+
+    #[test]
+    fn load_policy_maps_legacy_sandbox_fallback_risk() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  sandbox_fallback_risk: HIGH\nrules: []\n",
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        assert_eq!(policy.sandbox_off_action, SandboxOffAction::Block);
+    }
+
+    #[test]
+    fn load_policy_records_invalid_risk_rule_for_fallback() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\nrules:\n  - id: H-001\n    path: ['/etc/**']\n    risk: MIDUEM\n",
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        assert_eq!(policy.validation_issues.len(), 1);
+        assert_eq!(
+            policy.validation_issues[0].rule_id.as_deref(),
+            Some("H-001")
+        );
+        assert_eq!(policy.invalid_fallback_rules.len(), 1);
+        assert_eq!(policy.invalid_fallback_rules[0].rule_id, "H-001");
     }
 }

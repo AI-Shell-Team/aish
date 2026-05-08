@@ -81,7 +81,10 @@ impl FallbackRuleEngine {
         Some(FallbackRuleAssessment {
             level,
             reasons,
-            matched_paths: selected_hits.iter().map(|(_, path)| path.clone()).collect(),
+            matched_paths: selected_hits
+                .iter()
+                .map(|(_, path)| path.clone())
+                .collect(),
             matched_rule: MatchedRuleSummary {
                 id: primary_rule.rule_id.clone(),
                 name: primary_rule.name.clone(),
@@ -120,10 +123,7 @@ impl FallbackRuleEngine {
             return None;
         }
 
-        Some(ParsedCommand {
-            command_name,
-            paths,
-        })
+        Some(ParsedCommand { command_name, paths })
     }
 
     fn policy_command_list(&self) -> BTreeSet<String> {
@@ -197,11 +197,7 @@ fn split_shell_like(command: &str) -> Option<Vec<String>> {
 
 fn split_simple_script(script: &str) -> Option<Vec<String>> {
     let tokens = tokenize_shell(script, true)?;
-    if tokens.is_empty()
-        || tokens
-            .iter()
-            .any(|token| CONTROL_TOKENS.contains(&token.as_str()))
-    {
+    if tokens.is_empty() || tokens.iter().any(|token| CONTROL_TOKENS.contains(&token.as_str())) {
         return None;
     }
     Some(tokens)
@@ -279,10 +275,7 @@ fn read_operator(chars: &[char], index: usize) -> Option<String> {
     match ch {
         '&' | '|' | '>' | '<' => {
             let next = chars.get(index + 1).copied();
-            if matches!(
-                (ch, next),
-                ('&', Some('&')) | ('|', Some('|')) | ('>', Some('>')) | ('<', Some('<'))
-            ) {
+            if matches!((ch, next), ('&', Some('&')) | ('|', Some('|')) | ('>', Some('>')) | ('<', Some('<'))) {
                 return Some([ch, next.expect("checked above")].iter().collect());
             }
             Some(ch.to_string())
@@ -352,9 +345,7 @@ fn normalize_path(value: &str) -> String {
             Component::CurDir => {}
             Component::ParentDir => parts.push("..".to_string()),
             Component::Normal(segment) => parts.push(segment.to_string_lossy().into_owned()),
-            Component::Prefix(prefix) => {
-                parts.push(prefix.as_os_str().to_string_lossy().into_owned())
-            }
+            Component::Prefix(prefix) => parts.push(prefix.as_os_str().to_string_lossy().into_owned()),
         }
     }
 
@@ -433,9 +424,7 @@ mod tests {
             ..SecurityPolicy::default()
         });
 
-        let assessment = engine
-            .assess_disabled_command("rm -rf /etc")
-            .expect("should match");
+        let assessment = engine.assess_disabled_command("rm -rf /etc").expect("should match");
 
         assert_eq!(assessment.level, RiskLevel::High);
         assert_eq!(assessment.matched_rule.id.as_deref(), Some("H-001"));
