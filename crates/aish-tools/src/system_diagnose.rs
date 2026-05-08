@@ -11,7 +11,6 @@ use aish_core::LlmEvent;
 use aish_llm::diagnose_agent::build_diagnose_prompt;
 use aish_llm::types::LlmCallbackResult;
 use aish_llm::{DiagnoseAgent, LlmSession, SubSessionConfig, Tool, ToolResult};
-use aish_security::SecurityDecision;
 
 /// Shared event callback holder that can be set after tool construction.
 ///
@@ -41,7 +40,6 @@ pub struct SystemDiagnoseTool {
     model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
-    security_check: Option<Arc<dyn Fn(&str) -> SecurityDecision + Send + Sync>>,
     event_callback: SharedEventCallback,
     skill_callbacks: SkillCallbacks,
 }
@@ -53,7 +51,6 @@ impl SystemDiagnoseTool {
         model: &str,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
-        security_check: Option<Arc<dyn Fn(&str) -> SecurityDecision + Send + Sync>>,
         event_callback: SharedEventCallback,
     ) -> Self {
         Self {
@@ -62,7 +59,6 @@ impl SystemDiagnoseTool {
             model: model.to_string(),
             temperature,
             max_tokens,
-            security_check,
             event_callback,
             skill_callbacks: None,
         }
@@ -182,18 +178,9 @@ impl Tool for SystemDiagnoseTool {
 
             let agent = DiagnoseAgent::with_config(config);
 
-            // Build bash tool with the same security policy as the main session.
-            let bash_tool = match &self.security_check {
-                Some(check) => {
-                    let check = Arc::clone(check);
-                    crate::SecureBashTool::with_security_check(move |cmd| check(cmd))
-                }
-                None => crate::SecureBashTool::new(),
-            };
-
             // Tools available for diagnosis
             let mut tools: Vec<Box<dyn Tool>> = vec![
-                Box::new(bash_tool),
+                Box::new(crate::bash::BashTool::new()),
                 Box::new(crate::fs::ReadFileTool::new()),
                 Box::new(crate::fs::WriteFileTool::new()),
                 Box::new(crate::fs::EditFileTool::new()),

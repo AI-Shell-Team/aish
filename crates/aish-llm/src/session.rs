@@ -8,13 +8,23 @@ use crate::langfuse::LangfuseClient;
 use crate::streaming::{SseEvent, StreamParser};
 use crate::types::*;
 
+fn is_short_circuit_result(result: &ToolResult) -> bool {
+    result
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("dispatch_status"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("short_circuit"))
+}
+
 /// Main LLM session that orchestrates the chat loop with tool calling.
 pub struct LlmSession {
     client: LlmClient,
     tools: HashMap<String, Box<dyn Tool>>,
     cancellation_token: Arc<CancellationToken>,
     event_callback: Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>>,
-    confirmation_callback: Option<Arc<dyn Fn(&str, &str) -> bool + Send + Sync>>,
+    confirmation_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync>>,
+    security_notice_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
@@ -40,6 +50,7 @@ impl LlmSession {
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: None,
             confirmation_callback: None,
+            security_notice_callback: None,
             temperature,
             max_tokens,
             langfuse: None,
@@ -61,9 +72,20 @@ impl LlmSession {
     }
 
     /// Set the confirmation callback invoked when a tool's preflight returns Confirm.
-    /// The callback receives (tool_name, message) and returns true to approve.
-    pub fn set_confirmation_callback(&mut self, cb: Arc<dyn Fn(&str, &str) -> bool + Send + Sync>) {
+    /// The callback receives raw security context and returns true to approve.
+    pub fn set_confirmation_callback(
+        &mut self,
+        cb: Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync>,
+    ) {
         self.confirmation_callback = Some(cb);
+    }
+
+    /// Set the callback invoked when a tool's preflight returns a display-only security notice.
+    pub fn set_security_notice_callback(
+        &mut self,
+        cb: Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync>,
+    ) {
+        self.security_notice_callback = Some(cb);
     }
 
     pub fn cancellation_token(&self) -> &CancellationToken {
@@ -370,13 +392,30 @@ impl LlmSession {
                     // Execute each tool call and append results
                     for tc in &tool_calls {
                         let result = self.execute_tool(tc).await;
+                        let short_circuit = is_short_circuit_result(&result);
+                        let output = result.output.clone();
                         // Log tool call span to Langfuse
                         if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
                             langfuse
-                                .span_tool_call(tid, &tc.name, &tc.arguments, &result.output, 0)
+                                .span_tool_call(tid, &tc.name, &tc.arguments, &output, 0)
                                 .await;
                         }
-                        messages.push(ChatMessage::tool_result(&tc.id, result.output));
+                        if short_circuit {
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::GenerationEnd,
+                                data: serde_json::json!({}),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::OpEnd,
+                                data: serde_json::json!({"reason": "short_circuit"}),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            return Ok(String::new());
+                        }
+                        messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
                 }
 
@@ -654,13 +693,30 @@ impl LlmSession {
                     // Execute tools
                     for tc in &tool_calls {
                         let result = self.execute_tool(tc).await;
+                        let short_circuit = is_short_circuit_result(&result);
+                        let output = result.output.clone();
                         // Log tool call span to Langfuse
                         if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
                             langfuse
-                                .span_tool_call(tid, &tc.name, &tc.arguments, &result.output, 0)
+                                .span_tool_call(tid, &tc.name, &tc.arguments, &output, 0)
                                 .await;
                         }
-                        messages.push(ChatMessage::tool_result(&tc.id, result.output));
+                        if short_circuit {
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::GenerationEnd,
+                                data: serde_json::json!({}),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::OpEnd,
+                                data: serde_json::json!({"reason": "short_circuit"}),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            return Ok(String::new());
+                        }
+                        messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
                 }
             }
@@ -714,9 +770,17 @@ impl LlmSession {
             // Run preflight check before execution
             match tool.preflight(&args) {
                 PreflightResult::Allow => {}
-                PreflightResult::Confirm { message } => {
+                PreflightResult::Confirm { message, security } => {
+                    let security = security.unwrap_or_else(|| {
+                        PreflightSecurityContext::fallback(
+                            tool_call.name.clone(),
+                            None,
+                            message.clone(),
+                            SecurityPanelMode::Confirm,
+                        )
+                    });
                     let approved = if let Some(ref cb) = self.confirmation_callback {
-                        cb(&tool_call.name, &message)
+                        cb(&security)
                     } else {
                         true // No callback = allow (backward compatible)
                     };
@@ -724,8 +788,26 @@ impl LlmSession {
                         return ToolResult::error(format!("Tool execution denied: {}", message));
                     }
                 }
-                PreflightResult::Block { message } => {
-                    return ToolResult::error(format!("Blocked by security policy: {}", message));
+                PreflightResult::Block { message, security } => {
+                    let security = security.unwrap_or_else(|| {
+                        PreflightSecurityContext::fallback(
+                            tool_call.name.clone(),
+                            None,
+                            message.clone(),
+                            SecurityPanelMode::Blocked,
+                        )
+                    });
+                    if let Some(ref cb) = self.security_notice_callback {
+                        cb(&security);
+                    }
+                    return ToolResult {
+                        ok: false,
+                        output: format!("Blocked by security policy: {}", message),
+                        meta: Some(serde_json::json!({
+                            "dispatch_status": "short_circuit",
+                            "reason": "security_blocked"
+                        })),
+                    };
                 }
             }
 
@@ -843,6 +925,7 @@ impl LlmSession {
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: self.event_callback.clone(),
             confirmation_callback: self.confirmation_callback.clone(),
+            security_notice_callback: self.security_notice_callback.clone(),
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             langfuse: self.langfuse.clone(),

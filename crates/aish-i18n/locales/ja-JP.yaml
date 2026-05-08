@@ -143,6 +143,10 @@ shell:
     skills_loaded_suffix: " 件読み込み済み"
 
   security:
+    panel_title:
+      blocked: "🛑 セキュリティによりブロック"
+      notice: "🔐 セキュリティ通知"
+      confirm: "🔐 確認が必要です"
     title:
       blocked: "🛑 セキュリティによりブロック: {tool}"
       notice: "🔐 セキュリティ通知: {tool}"
@@ -163,6 +167,9 @@ shell:
       sandbox_timeout: "コマンドの事前実行がタイムアウトしたため、リスクを評価できません。本実行前に確認してください。"
       sandbox_ipc_timeout: "コマンドの事前評価待機がタイムアウトしたため、リスクを評価できません。本実行前に確認してください。"
       generic: "コマンドのリスク評価を完了できませんでした。本実行前に確認してください。"
+    alternative:
+      generic: "このコマンドは手動で内容と影響を確認してから実行してください。"
+      etc_manual: "/etc 配下の変更が必要な場合は、バックアップや変更管理を伴う手動手順を推奨します。"
     options_header: "オプション"
     option:
       approve: "許可"
@@ -280,6 +287,9 @@ tools:
       systemd: "[SYSTEMD] {ident}: 一致 {matched}/{total} 行\nサンプル:\n{sample}"
       call_failed: "[{stype}] {ident}: 呼び出し失敗\n{output}"
     no_logs_found: "ログまたは一致する情報は見つかりませんでした。"
+
+  bash:
+    security_handling_required: "bash コマンドには {level} レベルのセキュリティ処理が必要です"
 
 help:
   labels:

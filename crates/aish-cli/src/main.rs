@@ -44,7 +44,12 @@ struct Cli {
     #[arg(long)]
     config: Option<String>,
 
-    /// Run as sandbox worker (internal use only)
+    #[arg(long, hide = true)]
+    sandbox_daemon: bool,
+
+    #[arg(long, hide = true)]
+    sandbox_socket: Option<String>,
+
     #[arg(long, hide = true)]
     sandbox_worker: bool,
 
@@ -131,13 +136,6 @@ enum Commands {
         #[arg(long)]
         config: Option<String>,
     },
-
-    /// Start the sandbox daemon (requires root)
-    Sandboxd {
-        /// Socket path for the sandbox daemon
-        #[arg(long, default_value = "/run/aish/sandbox.sock")]
-        socket_path: String,
-    },
 }
 
 fn main() {
@@ -150,10 +148,21 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Handle --sandbox-worker flag (internal use, must check before other commands)
+    if cli.sandbox_daemon {
+        let socket_path = cli.sandbox_socket.as_deref().map(std::path::Path::new);
+        if let Err(error) = aish_security::run_sandbox_daemon(socket_path) {
+            eprintln!("sandbox daemon failed: {}", error);
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if cli.sandbox_worker {
-        let exit_code = aish_security::sandbox_worker::run_worker();
-        std::process::exit(exit_code);
+        if let Err(error) = aish_security::run_sandbox_worker() {
+            eprintln!("sandbox worker failed: {}", error);
+            std::process::exit(1);
+        }
+        return;
     }
 
     // Load configuration
@@ -222,9 +231,6 @@ fn main() {
                 open_browser,
                 callback_port,
             );
-        }
-        Commands::Sandboxd { socket_path } => {
-            run_sandbox_daemon(&socket_path);
         }
     }
 }
@@ -356,47 +362,6 @@ fn show_models_usage(config: &aish_config::ConfigModel) {
     println!();
     println!("\x1b[2mConfig file: ~/.config/aish/config.yaml\x1b[0m");
     println!("\x1b[2mOverride:    AISH_MODEL, AISH_API_KEY, AISH_API_BASE\x1b[0m");
-}
-
-fn run_sandbox_daemon(socket_path: &str) {
-    // Check if running as root
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let uid = libc::geteuid();
-        if uid != 0 {
-            eprintln!("Error: sandboxd must be run as root");
-            eprintln!("Current euid: {}", uid);
-            std::process::exit(2);
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        eprintln!("Error: sandboxd is only supported on Linux");
-        std::process::exit(2);
-    }
-
-    println!("Starting sandbox daemon on socket: {}", socket_path);
-
-    // Create daemon config
-    let config = aish_security::DaemonConfig {
-        socket_path: std::path::PathBuf::from(socket_path),
-        ..Default::default()
-    };
-
-    // Create and start daemon
-    let daemon = aish_security::SandboxDaemon::new(config);
-
-    match daemon.serve_forever() {
-        Ok(_) => {
-            println!("Sandbox daemon stopped gracefully");
-            std::process::exit(0);
-        }
-        Err(e) => {
-            eprintln!("Sandbox daemon error: {}", e);
-            std::process::exit(1);
-        }
-    }
 }
 
 fn check_tool_support(

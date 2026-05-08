@@ -12,9 +12,10 @@ use aish_i18n::{t, t_with_args};
 
 // Paths used by the archive/script installer (install.sh)
 const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
-const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-sandbox", "aish-uninstall"];
+const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
+const SYSTEMD_UNIT_DIR: &str = "/lib/systemd/system";
 
 // ---------------------------------------------------------------------------
 // Installation method detection
@@ -148,6 +149,8 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
     // Fallback: remove files manually
     let mut success = true;
 
+    stop_and_remove_sandbox_units();
+
     for name in ARCHIVE_BINARY_NAMES {
         let binary = PathBuf::from(ARCHIVE_BIN_DIR).join(name);
         if binary.exists() {
@@ -186,6 +189,23 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
         Ok(())
     } else {
         Err(AishError::Config(t("cli.uninstall.some_files_failed")))
+    }
+}
+
+fn stop_and_remove_sandbox_units() {
+    if which_exists("systemctl") && Path::new("/run/systemd/system").exists() {
+        let _ = run_sudo(&["systemctl", "disable", "--now", "aish-sandbox.socket"]);
+        let _ = run_sudo(&["systemctl", "stop", "--no-block", "aish-sandbox.service"]);
+        let _ = run_sudo(&["systemctl", "reset-failed", "aish-sandbox.service"]);
+    }
+
+    let service = Path::new(SYSTEMD_UNIT_DIR).join("aish-sandbox.service");
+    let socket = Path::new(SYSTEMD_UNIT_DIR).join("aish-sandbox.socket");
+    let _ = run_sudo(&["rm", "-f", service.to_str().unwrap_or("")]);
+    let _ = run_sudo(&["rm", "-f", socket.to_str().unwrap_or("")]);
+
+    if which_exists("systemctl") && Path::new("/run/systemd/system").exists() {
+        let _ = run_sudo(&["systemctl", "daemon-reload"]);
     }
 }
 
