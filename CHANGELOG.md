@@ -13,13 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
-## [1.0.0-beta.1] - 2026-05-09
+## [0.3.0-beta.1] - 2026-05-09
 
 ### Added
 
-- Added the first Rust-based 1.0 preview of AISH while keeping the existing product release history intact.
+- Added the first Rust-based 0.3 preview of AISH while keeping the existing product release history intact.
 - Added a crate-based runtime split across the CLI, shell, PTY, security, tools, memory, prompts, skills, and configuration layers, replacing the older Python runtime that centered more behavior inside a single long-lived shell application process.
-- Added the Rust sandbox runtime with packaged daemon assets, systemd units, and release-bundle install validation as part of the default 1.0 execution path.
+- Added the Rust sandbox runtime with packaged daemon assets, systemd units, and release-bundle install validation as part of the default 0.3 beta execution path.
 - Added channel-based follow-up tools for SSH-, telnet-, and other session-style commands so AISH can continue asking questions and chaining tool work inside remote interactive sessions.
 
 ### Changed

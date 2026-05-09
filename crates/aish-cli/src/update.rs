@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn test_compare_versions_prerelease_newer_than_previous_stable() {
         assert_eq!(
-            compare_versions("1.0.0-beta.1", "0.2.0"),
+            compare_versions("0.3.0-beta.1", "0.2.0"),
             std::cmp::Ordering::Greater
         );
     }
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn test_compare_versions_stable_newer_than_prerelease() {
         assert_eq!(
-            compare_versions("1.0.0", "1.0.0-beta.1"),
+            compare_versions("0.3.0", "0.3.0-beta.1"),
             std::cmp::Ordering::Greater
         );
     }
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn test_compare_versions_prerelease_identifiers() {
         assert_eq!(
-            compare_versions("1.0.0-beta.2", "1.0.0-beta.1"),
+            compare_versions("0.3.0-beta.2", "0.3.0-beta.1"),
             std::cmp::Ordering::Greater
         );
     }
