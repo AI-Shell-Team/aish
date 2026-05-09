@@ -131,10 +131,7 @@ L’installeur résout le répertoire de la dernière release sous `https://www.
 ### Exécuter depuis les sources (développement/essai)
 
 ```bash
-uv sync
-uv run aish
-# ou
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -336,9 +333,8 @@ Recommandations :
 ## Développement et tests
 
 ```bash
-uv sync
-uv run aish
-uv run pytest
+cargo test --workspace
+./packaging/tests/release_scripts_smoke.sh
 ```
 
 ---

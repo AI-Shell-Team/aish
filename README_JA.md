@@ -131,10 +131,7 @@ curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ### ソースから実行（開発/試用）
 
 ```bash
-uv sync
-uv run aish
-# または
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -336,9 +333,8 @@ Skills はAIのドメイン知識とワークフローを拡張し、ホット�
 ## 開発とテスト
 
 ```bash
-uv sync
-uv run aish
-uv run pytest
+cargo test --workspace
+./packaging/tests/release_scripts_smoke.sh
 ```
 
 ---

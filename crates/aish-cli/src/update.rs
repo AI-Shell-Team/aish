@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
+use semver::Version;
 
 const GITHUB_API_LATEST: &str = "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest";
 const GITHUB_API_LIST: &str = "https://api.github.com/repos/AI-Shell-Team/aish/releases";
@@ -30,8 +31,13 @@ pub struct UpdateInfo {
 // Version comparison
 // ---------------------------------------------------------------------------
 
-/// Compare two version strings by numeric parts.
+/// Compare version strings with SemVer prerelease ordering.
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let parse_semver = |v: &str| Version::parse(v.strip_prefix('v').unwrap_or(v));
+    if let (Ok(a_version), Ok(b_version)) = (parse_semver(a), parse_semver(b)) {
+        return a_version.cmp(&b_version);
+    }
+
     let parse_parts = |v: &str| -> Vec<u64> {
         v.strip_prefix('v')
             .unwrap_or(v)
@@ -579,6 +585,30 @@ mod tests {
         assert_eq!(
             compare_versions("v0.2.0", "0.2.0"),
             std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_prerelease_newer_than_previous_stable() {
+        assert_eq!(
+            compare_versions("1.0.0-beta.1", "0.2.0"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_stable_newer_than_prerelease() {
+        assert_eq!(
+            compare_versions("1.0.0", "1.0.0-beta.1"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_versions_prerelease_identifiers() {
+        assert_eq!(
+            compare_versions("1.0.0-beta.2", "1.0.0-beta.1"),
+            std::cmp::Ordering::Greater
         );
     }
 

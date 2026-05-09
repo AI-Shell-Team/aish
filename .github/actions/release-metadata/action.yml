@@ -3,7 +3,7 @@ description: Validate release metadata and emit normalized outputs plus summary 
 
 inputs:
   version:
-    description: Stable release version or tag to validate against repository metadata
+    description: Release version or tag to validate against repository metadata
     required: true
   artifact_prefix:
     description: Prefix used for uploaded release metadata artifacts

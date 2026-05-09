@@ -12,7 +12,11 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 CARGO_TOML_PATH = ROOT_DIR / "Cargo.toml"
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
-SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+)
+CHANGELOG_VERSION_HEADING_RE = re.compile(r"^## \[([^\]]+)\]")
 
 
 def _load_cargo_version() -> str:
@@ -62,8 +66,8 @@ def _extract_release_notes(version: str | None) -> str:
 
     lines = CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()
     for line in lines:
-        match = re.match(r"^## \[(\d+\.\d+\.\d+)\]", line)
-        if match:
+        match = CHANGELOG_VERSION_HEADING_RE.match(line)
+        if match and SEMVER_RE.fullmatch(match.group(1)):
             return _extract_changelog_section(match.group(1))
 
     raise ValueError(f"Could not find any versioned changelog sections in {CHANGELOG_PATH}")
@@ -81,6 +85,7 @@ def _get_previous_stable_tag(excluded_tag: str | None = None) -> str:
         output = subprocess.check_output(
             ["git", "tag", "-l", "v*"],
             cwd=ROOT_DIR,
+            stderr=subprocess.DEVNULL,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
@@ -137,7 +142,9 @@ def main() -> int:
 
     version = _normalize_version(args.expected_version or cargo_version)
     if not SEMVER_RE.fullmatch(version):
-        raise SystemExit(f"Invalid version '{version}'. Expected format: X.Y.Z")
+        raise SystemExit(
+            f"Invalid version '{version}'. Expected format: X.Y.Z or X.Y.Z-prerelease"
+        )
 
     if args.expected_version and version != cargo_version:
         raise SystemExit(

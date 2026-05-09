@@ -92,6 +92,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Run packaging release script smoke tests
+        run: ./packaging/tests/release_scripts_smoke.sh
+
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl
 
@@ -145,7 +148,7 @@ jobs:
         run: |
           VERSION="0.0.0+${GITHUB_SHA::8}"
           OUTPUT_DIR="artifacts/amd64"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
 
       - name: Smoke test binary
         run: ./target/x86_64-unknown-linux-musl/release/aish --help

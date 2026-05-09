@@ -131,10 +131,7 @@ El instalador resuelve el último directorio de release en `https://www.aishell.
 ### Ejecutar desde el código fuente (desarrollo/prueba)
 
 ```bash
-uv sync
-uv run aish
-# o
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -336,9 +333,8 @@ Recomendaciones:
 ## Desarrollo y pruebas
 
 ```bash
-uv sync
-uv run aish
-uv run pytest
+cargo test --workspace
+./packaging/tests/release_scripts_smoke.sh
 ```
 
 ---

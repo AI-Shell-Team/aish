@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Update repository version files for a stable release (Rust-based AI Shell)."""
+"""Update repository version files for a release (Rust-based AI Shell)."""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +13,10 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 CARGO_TOML_PATH = ROOT_DIR / "Cargo.toml"
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+)
 CARGO_VERSION_RE = re.compile(r'^(version\s*=\s*")([^"]+)("\s*$)', re.MULTILINE)
 CHANGELOG_SECTION_RE = re.compile(r"^## \[", re.MULTILINE)
 
@@ -74,8 +77,10 @@ def _update_changelog(version: str, release_date: str) -> None:
 
 
 def update_release_files(version: str, release_date: str) -> None:
-    if not VERSION_RE.fullmatch(version):
-        raise ValueError(f"Invalid version '{version}'. Expected format: X.Y.Z")
+    if not SEMVER_RE.fullmatch(version):
+        raise ValueError(
+            f"Invalid version '{version}'. Expected format: X.Y.Z or X.Y.Z-prerelease"
+        )
     _update_cargo_toml(version)
     _update_cargo_lock(version)
     _update_changelog(version, release_date)
@@ -83,9 +88,13 @@ def update_release_files(version: str, release_date: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Update repository version files for a stable release."
+        description="Update repository version files for a release."
     )
-    parser.add_argument("--version", required=True, help="Stable release version, for example 0.2.0")
+    parser.add_argument(
+        "--version",
+        required=True,
+        help="Release version, for example 0.2.0 or 1.0.0-beta.1",
+    )
     parser.add_argument(
         "--date",
         default=dt.date.today().isoformat(),
