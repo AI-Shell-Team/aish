@@ -575,14 +575,11 @@ impl PersistentPty {
                         continue;
                     }
                     if let Some(ref cmd) = response.command {
-                        let tool_text = aish_i18n::t_with_args(
-                            "shell.session.tool_bash",
-                            &{
-                                let mut m = std::collections::HashMap::new();
-                                m.insert("command".to_string(), cmd.clone());
-                                m
-                            },
-                        );
+                        let tool_text = aish_i18n::t_with_args("shell.session.tool_bash", &{
+                            let mut m = std::collections::HashMap::new();
+                            m.insert("command".to_string(), cmd.clone());
+                            m
+                        });
                         let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
                         unsafe {
                             libc::write(
@@ -604,11 +601,7 @@ impl PersistentPty {
                         }
                         let mut ans = [0u8; 1];
                         let approved = match unsafe {
-                            libc::read(
-                                stdin_fd,
-                                ans.as_mut_ptr() as *mut libc::c_void,
-                                1,
-                            )
+                            libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
                         } {
                             1 => {
                                 let echo = if ans[0] == b'y'
@@ -687,11 +680,7 @@ impl PersistentPty {
                         }
                     } else {
                         unsafe {
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                     }
                 }
@@ -741,15 +730,13 @@ impl PersistentPty {
                                 crate::StdinAction::Forward => {
                                     write_buf.push(byte);
                                 }
-                                crate::StdinAction::EchoLocally => {
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            &byte as *const u8 as *const libc::c_void,
-                                            1,
-                                        );
-                                    }
-                                }
+                                crate::StdinAction::EchoLocally => unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        &byte as *const u8 as *const libc::c_void,
+                                        1,
+                                    );
+                                },
                                 crate::StdinAction::TriggerAi(question) => {
                                     // When triggered from line-level detection, the
                                     // PTY has already echoed the input line.  Send
@@ -789,17 +776,13 @@ impl PersistentPty {
                                             };
                                             if sel > 0
                                                 && unsafe {
-                                                    libc::FD_ISSET(
-                                                        self.master_fd,
-                                                        &mut rfds,
-                                                    )
+                                                    libc::FD_ISSET(self.master_fd, &mut rfds)
                                                 }
                                             {
                                                 let n = unsafe {
                                                     libc::read(
                                                         self.master_fd,
-                                                        drain_buf.as_mut_ptr()
-                                                            as *mut libc::c_void,
+                                                        drain_buf.as_mut_ptr() as *mut libc::c_void,
                                                         drain_buf.len(),
                                                     )
                                                 };
@@ -932,14 +915,11 @@ impl PersistentPty {
                     // which will be processed on the next loop iteration.
                 } else if let Some(ref cmd) = response.command {
                     // Show tool indicator matching local aish style
-                    let tool_text = aish_i18n::t_with_args(
-                        "shell.session.tool_bash",
-                        &{
-                            let mut m = std::collections::HashMap::new();
-                            m.insert("command".to_string(), cmd.clone());
-                            m
-                        },
-                    );
+                    let tool_text = aish_i18n::t_with_args("shell.session.tool_bash", &{
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("command".to_string(), cmd.clone());
+                        m
+                    });
                     let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
                     unsafe {
                         libc::write(
@@ -965,11 +945,7 @@ impl PersistentPty {
                     // Read one byte for confirmation (raw mode)
                     let mut ans = [0u8; 1];
                     let approved = match unsafe {
-                        libc::read(
-                            stdin_fd,
-                            ans.as_mut_ptr() as *mut libc::c_void,
-                            1,
-                        )
+                        libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
                     } {
                         1 => {
                             let echo = if ans[0] == b'y'
@@ -989,10 +965,7 @@ impl PersistentPty {
                                 );
                             }
                             drain_stdin_trailing(stdin_fd);
-                            ans[0] == b'y'
-                                || ans[0] == b'Y'
-                                || ans[0] == b'\r'
-                                || ans[0] == b'\n'
+                            ans[0] == b'y' || ans[0] == b'Y' || ans[0] == b'\r' || ans[0] == b'\n'
                         }
                         _ => false,
                     };
@@ -1025,11 +998,7 @@ impl PersistentPty {
                                 cancel_msg.as_ptr() as *const libc::c_void,
                                 cancel_msg.len(),
                             );
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         // Call the followup with a cancellation message so
                         // the LLM thread receives output instead of
@@ -1048,11 +1017,7 @@ impl PersistentPty {
                 } else {
                     // AI returned explanation only (no command)
                     unsafe {
-                        libc::write(
-                            self.master_fd,
-                            b"\r".as_ptr() as *const libc::c_void,
-                            1,
-                        );
+                        libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                     }
                 }
             }
@@ -1415,7 +1380,6 @@ impl PersistentPty {
             "timeout waiting for session_ready event".into(),
         ))
     }
-
 }
 
 // ---- ask_user helpers for SSH sessions ----
@@ -1491,7 +1455,7 @@ fn count_display_lines(request: &crate::AskUserRequest) -> usize {
         lines += 1;
     }
     lines += 1; // Help line
-    // Prompt line "> " only for text_input mode
+                // Prompt line "> " only for text_input mode
     if request.kind != "choice_or_text" {
         lines += 1;
     }
@@ -1548,14 +1512,11 @@ fn redraw_ask_user(request: &crate::AskUserRequest, prev_lines: usize, cursor: u
 
     // Default hint — match local aish's [default: xxx] format
     if let Some(ref default) = request.default {
-        let default_hint = aish_i18n::t_with_args(
-            "shell.session.ask_user.default_hint",
-            &{
-                let mut m = std::collections::HashMap::new();
-                m.insert("default".to_string(), default.clone());
-                m
-            },
-        );
+        let default_hint = aish_i18n::t_with_args("shell.session.ask_user.default_hint", &{
+            let mut m = std::collections::HashMap::new();
+            m.insert("default".to_string(), default.clone());
+            m
+        });
         out.extend_from_slice(b"\x1b[2m");
         out.extend_from_slice(default_hint.as_bytes());
         out.extend_from_slice(b"\x1b[0m\r\n");
@@ -1592,7 +1553,11 @@ fn redraw_ask_user(request: &crate::AskUserRequest, prev_lines: usize, cursor: u
 fn display_ask_user(request: &crate::AskUserRequest) {
     // Move to a new line to avoid garbling with previous AI output
     unsafe {
-        libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const libc::c_void, 2);
+        libc::write(
+            libc::STDOUT_FILENO,
+            b"\r\n".as_ptr() as *const libc::c_void,
+            2,
+        );
     }
     redraw_ask_user(request, 0, 0);
 }
@@ -1625,16 +1590,16 @@ fn read_byte(stdin_fd: libc::c_int) -> Option<u8> {
     }
 }
 
-/// Check whether stdin has data available within `timeout_us` microseconds.
-fn stdin_poll(stdin_fd: libc::c_int, timeout_us: libc::suseconds_t) -> bool {
+/// Check whether stdin has data available within the given timeout.
+fn stdin_poll(stdin_fd: libc::c_int, timeout: Duration) -> bool {
     let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
     unsafe {
         libc::FD_ZERO(&mut rfds);
         libc::FD_SET(stdin_fd, &mut rfds);
     }
     let mut tv = libc::timeval {
-        tv_sec: 0,
-        tv_usec: timeout_us,
+        tv_sec: timeout.as_secs() as _,
+        tv_usec: timeout.subsec_micros() as _,
     };
     let sel = unsafe {
         libc::select(
@@ -1672,10 +1637,7 @@ fn read_line_from_stdin_raw(
     request: &crate::AskUserRequest,
 ) -> crate::AskUserAnswer {
     let is_choice = request.kind == "choice_or_text";
-    let num_options = request
-        .options
-        .as_ref()
-        .map_or(0, |o| o.len());
+    let num_options = request.options.as_ref().map_or(0, |o| o.len());
     let has_options = is_choice && num_options > 0;
     // Total selectable slots: options + 1 custom-input slot
     let total_slots = if has_options { num_options + 1 } else { 0 };
@@ -1777,10 +1739,15 @@ fn read_line_from_stdin_raw(
                         }
                         let leader = text_buf.pop().unwrap();
                         // Display width: ASCII=1, 2-byte=1, 3-byte(CJK)=2, 4-byte=2
-                        let width = if leader < 0x80 { 1 }
-                            else if leader & 0xE0 == 0xC0 { 1 }
-                            else if leader & 0xF0 == 0xE0 { 2 }
-                            else { 2 };
+                        let width = if leader < 0x80 {
+                            1
+                        } else if leader & 0xE0 == 0xC0 {
+                            1
+                        } else if leader & 0xF0 == 0xE0 {
+                            2
+                        } else {
+                            2
+                        };
                         let erase = format!(
                             "{}{}{}",
                             "\x08".repeat(width),
@@ -1801,7 +1768,7 @@ fn read_line_from_stdin_raw(
                     // Use 100ms timeout: long enough to cover SSH network
                     // latency (direction keys arrive as ESC [ A in separate
                     // packets) while still allowing standalone ESC to cancel.
-                    if stdin_poll(stdin_fd, 100_000) {
+                    if stdin_poll(stdin_fd, Duration::from_micros(100_000)) {
                         // Escape sequence — read next byte
                         match read_byte(stdin_fd) {
                             Some(b'[') => {
@@ -1897,11 +1864,7 @@ fn read_line_from_stdin_raw(
                         // Standalone Escape
                         if request.allow_cancel {
                             unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    b"\r\n".as_ptr() as *const _,
-                                    2,
-                                );
+                                libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const _, 2);
                             }
                             return crate::AskUserAnswer::Cancelled;
                         }
@@ -1949,13 +1912,19 @@ fn handle_ask_user_interaction(
         "choice_or_text" => {
             let n = request.options.as_ref().map_or(0, |o| o.len());
             let mut m = std::collections::HashMap::new();
-            m.insert("prompt".to_string(), truncate_str(&request.prompt, 60).to_string());
+            m.insert(
+                "prompt".to_string(),
+                truncate_str(&request.prompt, 60).to_string(),
+            );
             m.insert("count".to_string(), n.to_string());
             aish_i18n::t_with_args("shell.session.ask_user.choice_preview", &m)
         }
         _ => {
             let mut m = std::collections::HashMap::new();
-            m.insert("prompt".to_string(), truncate_str(&request.prompt, 80).to_string());
+            m.insert(
+                "prompt".to_string(),
+                truncate_str(&request.prompt, 80).to_string(),
+            );
             aish_i18n::t_with_args("shell.session.ask_user.text_preview", &m)
         }
     };
@@ -1997,23 +1966,26 @@ fn handle_ask_user_interaction(
                 );
                 display_ask_user(&next_req);
                 let answer = read_line_from_stdin_raw(stdin_fd, &next_req);
-                debug!("handle_ask_user: follow-up answer {:?}", answer_kind(&answer));
+                debug!(
+                    "handle_ask_user: follow-up answer {:?}",
+                    answer_kind(&answer)
+                );
                 if channel.answer_sender.send(answer).is_err() {
                     break;
                 }
                 continue;
             }
-            Ok(crate::AiEvent::BashExec { command, output_sender }) => {
+            Ok(crate::AiEvent::BashExec {
+                command,
+                output_sender,
+            }) => {
                 debug!("handle_ask_user: follow-up bash_exec, cmd={}", command);
                 // Show tool indicator and confirmation, then execute inline.
-                let tool_text = aish_i18n::t_with_args(
-                    "shell.session.tool_bash",
-                    &{
-                        let mut m = std::collections::HashMap::new();
-                        m.insert("command".to_string(), command.clone());
-                        m
-                    },
-                );
+                let tool_text = aish_i18n::t_with_args("shell.session.tool_bash", &{
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("command".to_string(), command.clone());
+                    m
+                });
                 let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
                 unsafe {
                     libc::write(
@@ -2034,34 +2006,31 @@ fn handle_ask_user_interaction(
                     );
                 }
                 let mut ans = [0u8; 1];
-                let approved = match unsafe {
-                    libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
-                } {
-                    1 => {
-                        let echo = if ans[0] == b'y'
-                            || ans[0] == b'Y'
-                            || ans[0] == b'\r'
-                            || ans[0] == b'\n'
-                        {
-                            b"y\r\n"
-                        } else {
-                            b"n\r\n"
-                        };
-                        unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                echo.as_ptr() as *const libc::c_void,
-                                echo.len(),
-                            );
+                let approved =
+                    match unsafe { libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1) }
+                    {
+                        1 => {
+                            let echo = if ans[0] == b'y'
+                                || ans[0] == b'Y'
+                                || ans[0] == b'\r'
+                                || ans[0] == b'\n'
+                            {
+                                b"y\r\n"
+                            } else {
+                                b"n\r\n"
+                            };
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    echo.as_ptr() as *const libc::c_void,
+                                    echo.len(),
+                                );
+                            }
+                            drain_stdin_trailing(stdin_fd);
+                            ans[0] == b'y' || ans[0] == b'Y' || ans[0] == b'\r' || ans[0] == b'\n'
                         }
-                        drain_stdin_trailing(stdin_fd);
-                        ans[0] == b'y'
-                            || ans[0] == b'Y'
-                            || ans[0] == b'\r'
-                            || ans[0] == b'\n'
-                    }
-                    _ => false,
-                };
+                        _ => false,
+                    };
                 if approved {
                     let safe_cmd = close_unclosed_heredoc(&command);
                     let mut inject = safe_cmd.as_bytes().to_vec();
@@ -2095,9 +2064,7 @@ fn handle_ask_user_interaction(
                                 &mut tv,
                             )
                         };
-                        if sel > 0
-                            && unsafe { libc::FD_ISSET(master_fd, &mut rfds) }
-                        {
+                        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &mut rfds) } {
                             let mut tmp = [0u8; 4096];
                             match unsafe {
                                 libc::read(
@@ -2169,21 +2136,15 @@ fn handle_ask_user_interaction(
                 if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &mut rfds) } {
                     let mut tmp = [0u8; 4096];
                     match unsafe {
-                        libc::read(
-                            master_fd,
-                            tmp.as_mut_ptr() as *mut libc::c_void,
-                            tmp.len(),
-                        )
+                        libc::read(master_fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len())
                     } {
-                        n if n > 0 => {
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    tmp.as_ptr() as *const libc::c_void,
-                                    n as usize,
-                                );
-                            }
-                        }
+                        n if n > 0 => unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                tmp.as_ptr() as *const libc::c_void,
+                                n as usize,
+                            );
+                        },
                         _ => {}
                     }
                 }
@@ -2432,10 +2393,7 @@ fn close_unclosed_heredoc(cmd: &str) -> String {
             // Extract delimiter word
             let delim_start = j;
             while j < len
-                && ![
-                    b' ', b'\n', b'\r', b';', b'&', b'|', b'<', b'>', b'#',
-                ]
-                .contains(&bytes[j])
+                && ![b' ', b'\n', b'\r', b';', b'&', b'|', b'<', b'>', b'#'].contains(&bytes[j])
                 && bytes[j] != b'\''
                 && bytes[j] != b'"'
             {

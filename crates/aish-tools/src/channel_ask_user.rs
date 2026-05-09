@@ -6,7 +6,7 @@
 //! until the forwarding loop provides the user's answer.
 
 use aish_llm::{Tool, ToolResult};
-use aish_pty::{AskUserAnswer, AskUserOption, AskUserRequest, AiEvent};
+use aish_pty::{AiEvent, AskUserAnswer, AskUserOption, AskUserRequest};
 
 /// Shared translated description — same as AskUserTool.
 static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -127,7 +127,10 @@ impl Tool for ChannelAskUserTool {
             Some(p) => p.to_string(),
             None => return ToolResult::error(aish_i18n::t("tools.ask_user.missing_prompt")),
         };
-        let title = args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let default = args
             .get("default")
             .and_then(|v| v.as_str())
@@ -142,14 +145,19 @@ impl Tool for ChannelAskUserTool {
             "choice_or_text" => {
                 let options = match args.get("options").and_then(|v| v.as_array()) {
                     Some(opts) if !opts.is_empty() => opts,
-                    _ => return ToolResult::error(aish_i18n::t("tools.ask_user.options_not_empty")),
+                    _ => {
+                        return ToolResult::error(aish_i18n::t("tools.ask_user.options_not_empty"))
+                    }
                 };
                 let parsed_options: Vec<AskUserOption> = options
                     .iter()
                     .filter_map(|item| {
                         let value = item.get("value").and_then(|v| v.as_str())?;
                         let label = item.get("label").and_then(|v| v.as_str()).unwrap_or(value);
-                        let description = item.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                        let description = item
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
                         Some(AskUserOption {
                             value: value.to_string(),
                             label: label.to_string(),
