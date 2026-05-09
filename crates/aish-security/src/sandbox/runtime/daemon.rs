@@ -1,10 +1,12 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use crate::sandbox::error::{SandboxError, SandboxReason};
 use crate::sandbox::ipc::protocol::{
@@ -19,6 +21,7 @@ pub(crate) const DEFAULT_SANDBOX_SOCKET_PATH: &str = "/run/aish/sandbox.sock";
 const DEFAULT_READ_BUFFER_BYTES: usize = 64 * 1024;
 const SYSTEMD_SOCKET_ACTIVATION_FD: RawFd = 3;
 const DEFAULT_SOCKET_MODE: u32 = 0o666;
+const ACCEPT_TO_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SandboxDaemonOptions {
@@ -76,7 +79,9 @@ pub(crate) fn serve_once(
         SandboxError::with_details(SandboxReason::SandboxUnavailable, error.to_string())
     })?;
 
+    set_stream_timeouts(&stream, accept_to_request_timeout())?;
     let request = read_request(&mut stream, options.limits)?;
+    set_stream_timeouts(&stream, request_timeout(options.limits, request.timeout_s))?;
     let identity = peer_credentials(&stream)?;
 
     let response = execute_request(&request, identity, options)?;
@@ -101,7 +106,10 @@ pub(crate) fn run_forever(options: &SandboxDaemonOptions) -> Result<(), SandboxE
             SandboxError::with_details(SandboxReason::SandboxUnavailable, error.to_string())
         })?;
 
-        let _ = serve_connection(stream, options);
+        let options = options.clone();
+        thread::spawn(move || {
+            let _ = serve_connection(stream, &options);
+        });
     }
 }
 
@@ -156,9 +164,11 @@ pub(crate) fn serve_connection(
     mut stream: UnixStream,
     options: &SandboxDaemonOptions,
 ) -> Result<SandboxDaemonRequest, SandboxError> {
+    set_stream_timeouts(&stream, accept_to_request_timeout())?;
     let identity = peer_credentials(&stream)?;
     match read_request(&mut stream, options.limits) {
         Ok(request) => {
+            set_stream_timeouts(&stream, request_timeout(options.limits, request.timeout_s))?;
             let raw = match execute_request(&request, identity, options) {
                 Ok(response) => {
                     log_request_succeeded(&request, &identity, &response);
@@ -227,9 +237,21 @@ fn read_request(
     let mut chunk = [0_u8; DEFAULT_READ_BUFFER_BYTES];
 
     loop {
-        let read = stream.read(&mut chunk).map_err(|error| {
-            SandboxError::with_details(SandboxReason::SandboxIpcFailed, error.to_string())
-        })?;
+        let read = match stream.read(&mut chunk) {
+            Ok(read) => read,
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                return Err(SandboxError::with_details(
+                    SandboxReason::SandboxIpcTimeout,
+                    error.to_string(),
+                ));
+            }
+            Err(error) => {
+                return Err(SandboxError::with_details(
+                    SandboxReason::SandboxIpcFailed,
+                    error.to_string(),
+                ));
+            }
+        };
         if read == 0 {
             break;
         }
@@ -243,6 +265,24 @@ fn read_request(
     }
 
     decode_request_line(&buf, limits)
+}
+
+fn accept_to_request_timeout() -> Duration {
+    Duration::from_secs(ACCEPT_TO_REQUEST_TIMEOUT_SECS)
+}
+
+fn request_timeout(limits: SandboxLimits, timeout_s: f64) -> Duration {
+    Duration::from_secs_f64(limits.clamp_timeout_s(timeout_s).max(0.001))
+}
+
+fn set_stream_timeouts(stream: &UnixStream, timeout: Duration) -> Result<(), SandboxError> {
+    stream.set_read_timeout(Some(timeout)).map_err(|error| {
+        SandboxError::with_details(SandboxReason::SandboxIpcFailed, error.to_string())
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|error| {
+        SandboxError::with_details(SandboxReason::SandboxIpcFailed, error.to_string())
+    })?;
+    Ok(())
 }
 
 fn fake_result_for(request: &SandboxRunRequest) -> SandboxResult {
@@ -521,12 +561,14 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::thread;
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
     use super::{
-        bind_listener, format_request_succeeded_log, make_run_context, serve_connection,
-        serve_once, should_use_systemd_socket, SandboxDaemonOptions, DEFAULT_SOCKET_MODE,
+        bind_listener, format_request_succeeded_log, make_run_context, read_request,
+        serve_connection, serve_once, should_use_systemd_socket, SandboxDaemonOptions,
+        DEFAULT_SOCKET_MODE,
     };
     use crate::sandbox::error::SandboxReason;
     use crate::sandbox::types::{RequestIdentity, SandboxLimits, SandboxResult, SandboxRunRequest};
@@ -573,6 +615,18 @@ mod tests {
         assert_eq!(error.reason(), SandboxReason::BadRequest);
         assert!(buf.contains("\"ok\":false"));
         assert!(buf.contains("\"reason\":\"bad_request\""));
+    }
+
+    #[test]
+    fn read_request_maps_stalled_peer_to_ipc_timeout() {
+        let (_client, mut server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(1)))
+            .unwrap();
+
+        let error = read_request(&mut server, SandboxLimits::default()).unwrap_err();
+
+        assert_eq!(error.reason(), SandboxReason::SandboxIpcTimeout);
     }
 
     #[test]
