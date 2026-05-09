@@ -11,12 +11,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `aish update` command for self-updating to latest version from GitHub releases
-- `aish uninstall` command for uninstalling aish with optional `--purge` flag
-- UpdateManager class for handling update logic with GitHub API integration
-- UninstallManager class for handling uninstall logic and data cleanup
-- i18n support for update and uninstall commands in Chinese and English
-- DejaGnu integration tests for update and uninstall commands
+- No unreleased changes yet.
+
+## [1.0.0-beta.1] - 2026-05-09
+
+### Added
+
+- Added the first Rust-based 1.0 preview of AISH while keeping the existing product release history intact.
+- Added a crate-based runtime split across the CLI, shell, PTY, security, tools, memory, prompts, skills, and configuration layers, replacing the older Python runtime that centered more behavior inside a single long-lived shell application process.
+- Added the Rust sandbox runtime with packaged daemon assets, systemd units, and release-bundle install validation as part of the default 1.0 execution path.
+- Added channel-based follow-up tools for SSH-, telnet-, and other session-style commands so AISH can continue asking questions and chaining tool work inside remote interactive sessions.
+
+### Changed
+
+- Changed the interactive shell from the Python `prompt_toolkit`-driven runtime into a Rust shell built around explicit modules for input classification, rendering, PTY-backed completion, autosuggest, prompt rendering, and shell state management.
+- Changed command execution and tool handling so interactive Bash sessions, remote session commands, cancellation, and job-control flows are managed through the Rust PTY and tool layers instead of Python-specific runtime glue.
+- Changed the security model from the older Python manager centered on dictionary-shaped analysis and IPC wrappers into a typed Rust security pipeline with structured requests, explicit sandbox decisions, fallback rule handling, and degraded-mode analysis.
+- Changed self-update and release publishing so the Rust release line uses semver-aware prerelease comparison, prerelease-capable metadata validation, and consistent `linux-amd64` bundle naming for installer and update paths.
+
+### Removed
+
+- Removed the Python application package, test suite, and development metadata from the active release workspace; the remaining Python code is now limited to narrow release automation helpers under `packaging/scripts`.
+
+### Fixed
+
+- Fixed several interaction gaps that were especially visible in the Python line under heavy PTY use, including completion/query isolation, cancellation handoff, interactive stdin ownership, and Ctrl+Z job control for shell-driven commands.
+- Fixed error presentation around model and tool execution so duplicate failures are suppressed and long-running operations unwind more predictably in the terminal UI.
+- Fixed sandbox cleanup, no-change probe handling, and worker lifecycle behavior so sandboxed execution degrades more predictably when the runtime or host environment cannot complete the ideal path.
+
+## [0.2.6] - 2026-05-07
+
+### Added
+
+- Added PTY-backed Bash tab completion so interactive completion can use shell-aware suggestions, installed Bash completion scripts, and PATH command discovery.
+- Added Ctrl+Z job-control forwarding for Bash commands and AI-triggered PTY tool runs, making it possible to suspend and resume interactive jobs more reliably.
+
+### Fixed
+
+- Fixed assistant tool-call rendering so tool responses stay attached to the invoking assistant turn instead of appearing out of order.
+- Fixed PTY completion and command-state isolation so background completion queries and repeated completion filtering no longer interfere with the active shell command.
+- Fixed AI-triggered `sudo` command handling so PTY stdin ownership is restored correctly and password prompts no longer race with background AI output monitoring.
+
+## [0.2.5] - 2026-04-24
+
+### Fixed
+
+- Fixed AI-initiated `bash_exec` commands that invoke `sudo` so they now run through a PTY-backed path instead of hanging when the system prompts for a password.
+
+## [0.2.4] - 2026-04-23
+
+### Changed
+
+- Changed stable release publishing so tagged releases now keep GitHub Release assets while also publishing versioned Linux bundles and latest-version metadata to the CDN download paths used by the installer and stable self-update.
+- Changed shell startup to reuse the PTY startup handshake, reducing duplicate initialization work and keeping startup state tracking more consistent.
+
+### Fixed
+
+- Fixed final AI answer rendering so completed responses are shown once and no longer leak startup or timing state into the visible shell session.
+
+## [0.2.3] - 2026-04-22
+
+### Changed
+
+- Changed `aish update` stable release detection to read CDN-hosted latest release metadata, and switched archive downloads to the CDN bundle path while preserving `AISH_DOWNLOAD_BASE_URL`, `AISH_LATEST_URL`, and legacy `AISH_REPO_URL` overrides.
+
+### Fixed
+
+- Fixed shared PTY commands so they no longer time out after 30 seconds unless a caller explicitly requests a timeout.
+- Fixed PTY command lifecycle tracking by moving command metadata off the shell input path onto a dedicated metadata pipe, preventing metadata leaks and incorrect backend event binding.
+- Fixed PyInstaller subprocess launches by sanitizing loader environment variables before spawning child processes.
+
+## [0.2.2] - 2026-04-16
+
+### Added
+
+- Added a dedicated `Release Final Check` workflow so maintainers can confirm merged `main` release metadata before pushing a stable tag.
+
+### Changed
+
+- Changed release candidate validation so release PRs now run installed-binary runtime smoke checks and artifact-based live smoke against the built bundle before merge.
+- Changed the plan mode keyboard toggle from `F2` to `Shift+Tab` and `Ctrl+X P`, reducing conflicts with terminal key handling.
+
+### Fixed
+
+- Fixed normal streamed conversations so the live reasoning display is no longer interrupted by partial content rendering while the model is still responding.
+
+## [0.2.1] - 2026-04-15
+
+### Added
+
+- Added an interactive plan mode for non-trivial tasks, including persisted plan artifacts, review and approval flow, and an explicit transition back into execution. Enter plan mode with `/plan` or `F2`, then leave it with `/plan exit` or `F2` when you want to return to normal shell execution.
+- Added persistent long-term memory backed by Markdown storage, with memory recall and store tooling that can carry forward user preferences and project context across sessions.
+- Added `aish update` and `aish uninstall` commands so archive, pip, and system-package installs have a built-in path for upgrade and removal.
+
+### Changed
+
+- Changed the terminal UI to show a visible thinking timer while the model is working, making longer requests easier to track.
+- Changed startup and session wiring so plan mode, memory, and the new CLI management flows are initialized more consistently from the current package layout.
+
+### Fixed
+
+- Fixed the interactive shell so `quit` works again as an exit alias.
+- Fixed compact prompt theme spacing and related prompt rendering regressions in the shell UI.
+- Fixed standalone bundle startup so PyInstaller builds include the lazy-loaded shell entry modules needed to launch `aish` after installation.
+- Fixed release automation paths so preparation and publishing workflows target the current repository layout.
 
 ## [0.2.0] - 2026-04-03
 
