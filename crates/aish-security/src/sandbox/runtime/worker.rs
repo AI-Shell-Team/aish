@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
@@ -151,6 +152,8 @@ pub(crate) fn execute_worker_context_with_runtime(
 ) -> Result<SandboxResult, SandboxError> {
     let resolved = resolve_payload_execution(context)?;
     let temp_root = create_temp_root()?;
+    let mut run_guard = SandboxRunGuard::new();
+    run_guard.push_temp_dir(temp_root.clone());
     let deadline = SandboxDeadline::from_timeout_s(context.request.timeout_s, context.limits);
     let host_submounts = runtime.host_submounts(&context.request.repo_root);
     let plan =
@@ -159,7 +162,6 @@ pub(crate) fn execute_worker_context_with_runtime(
             .build()?;
     let payload = build_payload_command(&plan, &resolved.command, resolved.payload_identity);
 
-    let mut run_guard = SandboxRunGuard::new();
     runtime.prepare_mount_namespace()?;
     setup_overlay_plan(&plan, &runtime.mount_executor(), &mut run_guard)?;
 
@@ -214,16 +216,23 @@ pub(crate) fn spawn_worker_process(
             }
         })?;
 
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        SandboxError::with_details(SandboxReason::SandboxExecuteFailed, "missing_worker_stdin")
-    })?;
-    serde_json::to_writer(&mut stdin, context).map_err(|error| {
-        SandboxError::with_details(SandboxReason::SandboxExecuteFailed, error.to_string())
-    })?;
-    stdin.write_all(b"\n").map_err(|error| {
-        SandboxError::with_details(SandboxReason::SandboxExecuteFailed, error.to_string())
-    })?;
-    drop(stdin);
+    let write_result: Result<(), SandboxError> = (|| {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            SandboxError::with_details(SandboxReason::SandboxExecuteFailed, "missing_worker_stdin")
+        })?;
+        serde_json::to_writer(&mut stdin, context).map_err(|error| {
+            SandboxError::with_details(SandboxReason::SandboxExecuteFailed, error.to_string())
+        })?;
+        stdin.write_all(b"\n").map_err(|error| {
+            SandboxError::with_details(SandboxReason::SandboxExecuteFailed, error.to_string())
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let mut handle = WorkerHandle::new(child);
+        let _ = handle.close();
+        return Err(error);
+    }
 
     let deadline = SandboxDeadline::from_timeout_s(context.request.timeout_s, context.limits);
     let output = wait_for_child_output(
@@ -542,8 +551,17 @@ fn create_temp_root() -> Result<PathBuf, SandboxError> {
 
     for attempt in 0..32_u32 {
         let path = base.join(format!("aish-sandbox-{pid}-{timestamp}-{attempt}"));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
+        match fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => {
+                if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o700)) {
+                    let _ = fs::remove_dir(&path);
+                    return Err(SandboxError::with_details(
+                        SandboxReason::OverlayPermFailed,
+                        error.to_string(),
+                    ));
+                }
+                return Ok(path);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(SandboxError::with_details(
@@ -658,8 +676,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_payload_command, execute_worker_context_with_runtime, run_worker_from_reader_writer,
-        spawn_worker_process, PayloadCommand, WorkerHandle, WorkerRuntime, BASH_PATH, SETPRIV_PATH,
+        build_payload_command, create_temp_root, execute_worker_context_with_runtime,
+        run_worker_from_reader_writer, spawn_worker_process, PayloadCommand, WorkerHandle,
+        WorkerRuntime, BASH_PATH, SETPRIV_PATH,
     };
     use crate::sandbox::error::SandboxReason;
     use crate::sandbox::runtime::mount::{MountCall, MountExecutor};
@@ -747,6 +766,16 @@ mod tests {
         assert!(!status.success());
         assert!(!handle.is_active());
         assert!(handle.close().unwrap().is_none());
+    }
+
+    #[test]
+    fn create_temp_root_uses_owner_only_permissions() {
+        let temp_root = create_temp_root().unwrap();
+
+        let mode = fs::metadata(&temp_root).unwrap().permissions().mode() & 0o777;
+
+        fs::remove_dir_all(&temp_root).unwrap();
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
