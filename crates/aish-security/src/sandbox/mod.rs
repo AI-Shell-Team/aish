@@ -12,11 +12,13 @@ pub(crate) mod types;
 pub use ipc::client::SandboxClient;
 
 pub fn run_sandbox_daemon(socket_path: Option<&Path>) -> std::io::Result<()> {
-    let mut options = runtime::daemon::SandboxDaemonOptions::default();
-    options.worker_program = std::env::current_exe().ok();
-    if let Some(socket_path) = socket_path {
-        options.socket_path = socket_path.to_path_buf();
-    }
+    let options = runtime::daemon::SandboxDaemonOptions {
+        worker_program: std::env::current_exe().ok(),
+        socket_path: socket_path
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| runtime::daemon::DEFAULT_SANDBOX_SOCKET_PATH.into()),
+        ..Default::default()
+    };
 
     runtime::daemon::run_forever(&options).map_err(|error| std::io::Error::other(error.to_string()))
 }

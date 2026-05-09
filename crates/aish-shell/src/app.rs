@@ -2136,7 +2136,7 @@ impl AishShell {
 
                 // Build AiResponse with followup if another command was suggested
                 let next_cmd = text.as_ref().and_then(|t| extract_bash_command(t));
-                let ai_response = if let Some(_) = next_cmd {
+                let ai_response = if next_cmd.is_some() {
                     let next_followup = Self::build_followup_closure(
                         &api_base_th,
                         &api_key_th,
@@ -2232,33 +2232,29 @@ impl AishShell {
                 };
                 if sel > 0 {
                     let mut byte = [0u8; 1];
-                    match unsafe {
+                    if unsafe {
                         nix::libc::read(
                             nix::libc::STDIN_FILENO,
                             byte.as_mut_ptr() as *mut nix::libc::c_void,
                             1,
                         )
-                    } {
-                        1 => {
-                            if byte[0] == 0x03 {
-                                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                                if let Some(ref token) = session_cancel_token {
-                                    token.cancel();
-                                }
-                                anim_f.stop();
-                                let msg =
-                                    format!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
-                                unsafe {
-                                    nix::libc::write(
-                                        nix::libc::STDOUT_FILENO,
-                                        msg.as_ptr() as *mut nix::libc::c_void,
-                                        msg.len(),
-                                    );
-                                }
-                                break None;
-                            }
+                    } == 1
+                        && byte[0] == 0x03
+                    {
+                        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(ref token) = session_cancel_token {
+                            token.cancel();
                         }
-                        _ => {}
+                        anim_f.stop();
+                        let msg = format!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                        unsafe {
+                            nix::libc::write(
+                                nix::libc::STDOUT_FILENO,
+                                msg.as_ptr() as *mut nix::libc::c_void,
+                                msg.len(),
+                            );
+                        }
+                        break None;
                     }
                 }
                 // Check timeout (60s)
@@ -2817,36 +2813,30 @@ impl AishShell {
                 if sel > 0 {
                     // Read one byte to check for Ctrl+C
                     let mut byte = [0u8; 1];
-                    match unsafe {
+                    if unsafe {
                         nix::libc::read(
                             nix::libc::STDIN_FILENO,
                             byte.as_mut_ptr() as *mut nix::libc::c_void,
                             1,
                         )
-                    } {
-                        1 => {
-                            if byte[0] == 0x03 {
-                                // Ctrl+C pressed — cancel the LLM request
-                                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                                if let Some(ref token) = session_cancel_token {
-                                    token.cancel();
-                                }
-                                animation.stop();
-                                println!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
-                                break None;
-                            }
-                            // Non-Ctrl-C byte during AI processing — discard.
-                            // The user shouldn't be typing during AI processing;
-                            // any stray bytes are not recoverable here.
+                    } == 1
+                        && byte[0] == 0x03
+                    {
+                        // Ctrl+C pressed — cancel the LLM request
+                        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(ref token) = session_cancel_token {
+                            token.cancel();
                         }
-                        _ => {}
+                        animation.stop();
+                        println!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                        break None;
                     }
                 }
                 // Check timeout (60s)
                 if thinking_start
                     .lock()
                     .unwrap()
-                    .map_or(false, |s| s.elapsed() > std::time::Duration::from_secs(60))
+                    .is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(60))
                 {
                     animation.stop();
                     eprintln!("\x1b[31mLLM timeout (60s)\x1b[0m");
@@ -3332,11 +3322,7 @@ fn print_wrapped_panel_field(color: &str, label: &str, value: &str, inner_width:
 
     let mut printed_first = false;
     for raw_line in value_lines {
-        let prefix_width = if printed_first {
-            first_prefix_width
-        } else {
-            first_prefix_width
-        };
+        let prefix_width = first_prefix_width;
         let wrap_width = inner_width.saturating_sub(prefix_width).max(1);
         let wrapped_lines = wrap_text(raw_line, wrap_width);
         if !printed_first {

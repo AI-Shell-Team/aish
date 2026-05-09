@@ -238,7 +238,7 @@ impl SessionInterceptor {
                 }
             },
             EscSeqPhase::Csi => {
-                if byte >= 0x40 && byte <= 0x7E {
+                if (0x40..=0x7E).contains(&byte) {
                     // Final byte — sequence complete
                     self.escape_seq = None;
                 }
@@ -324,7 +324,7 @@ fn starts_with_ai_prefix(line: &[u8]) -> bool {
 /// Pop the last complete UTF-8 character from a byte buffer.
 fn pop_last_utf8_char(buf: &mut Vec<u8>) {
     // Pop trailing continuation bytes (0x80..0xBF), then the leader byte
-    while buf.last().map_or(false, |b| b & 0xC0 == 0x80) {
+    while buf.last().is_some_and(|b| b & 0xC0 == 0x80) {
         buf.pop();
     }
     buf.pop();
