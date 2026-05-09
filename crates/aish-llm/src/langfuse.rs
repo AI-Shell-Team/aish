@@ -234,50 +234,111 @@ impl LangfuseClient {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    static LANGFUSE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_langfuse_env<R>(
+        public_key: Option<&str>,
+        secret_key: Option<&str>,
+        base_url: Option<&str>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let _guard = LANGFUSE_ENV_LOCK.lock().unwrap();
+
+        let previous_public = std::env::var("LANGFUSE_PUBLIC_KEY").ok();
+        let previous_secret = std::env::var("LANGFUSE_SECRET_KEY").ok();
+        let previous_base = std::env::var("LANGFUSE_BASE_URL").ok();
+
+        match public_key {
+            Some(value) => std::env::set_var("LANGFUSE_PUBLIC_KEY", value),
+            None => std::env::remove_var("LANGFUSE_PUBLIC_KEY"),
+        }
+        match secret_key {
+            Some(value) => std::env::set_var("LANGFUSE_SECRET_KEY", value),
+            None => std::env::remove_var("LANGFUSE_SECRET_KEY"),
+        }
+        match base_url {
+            Some(value) => std::env::set_var("LANGFUSE_BASE_URL", value),
+            None => std::env::remove_var("LANGFUSE_BASE_URL"),
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        match previous_public {
+            Some(value) => std::env::set_var("LANGFUSE_PUBLIC_KEY", value),
+            None => std::env::remove_var("LANGFUSE_PUBLIC_KEY"),
+        }
+        match previous_secret {
+            Some(value) => std::env::set_var("LANGFUSE_SECRET_KEY", value),
+            None => std::env::remove_var("LANGFUSE_SECRET_KEY"),
+        }
+        match previous_base {
+            Some(value) => std::env::set_var("LANGFUSE_BASE_URL", value),
+            None => std::env::remove_var("LANGFUSE_BASE_URL"),
+        }
+
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
 
     #[test]
     fn test_config_from_parts_with_values() {
-        let config = LangfuseConfig::from_parts(
-            Some("pk-test"),
-            Some("sk-test"),
-            Some("https://langfuse.example.com"),
-        );
-        assert!(config.is_some());
-        let config = config.unwrap();
-        assert_eq!(config.public_key, "pk-test");
-        assert_eq!(config.secret_key, "sk-test");
-        assert_eq!(config.base_url, "https://langfuse.example.com");
-        assert!(config.enabled);
+        with_langfuse_env(None, None, None, || {
+            let config = LangfuseConfig::from_parts(
+                Some("pk-test"),
+                Some("sk-test"),
+                Some("https://langfuse.example.com"),
+            );
+            assert!(config.is_some());
+            let config = config.unwrap();
+            assert_eq!(config.public_key, "pk-test");
+            assert_eq!(config.secret_key, "sk-test");
+            assert_eq!(config.base_url, "https://langfuse.example.com");
+            assert!(config.enabled);
+        });
     }
 
     #[test]
     fn test_config_from_parts_missing_keys() {
-        assert!(LangfuseConfig::from_parts(None, Some("sk-test"), None).is_none());
-        assert!(LangfuseConfig::from_parts(Some("pk-test"), None, None).is_none());
-        assert!(LangfuseConfig::from_parts(None, None, None).is_none());
+        with_langfuse_env(None, None, None, || {
+            assert!(LangfuseConfig::from_parts(None, Some("sk-test"), None).is_none());
+            assert!(LangfuseConfig::from_parts(Some("pk-test"), None, None).is_none());
+            assert!(LangfuseConfig::from_parts(None, None, None).is_none());
+        });
     }
 
     #[test]
     fn test_config_from_parts_empty_keys() {
-        assert!(LangfuseConfig::from_parts(Some(""), Some("sk-test"), None).is_none());
-        assert!(LangfuseConfig::from_parts(Some("pk-test"), Some(""), None).is_none());
+        with_langfuse_env(None, None, None, || {
+            assert!(LangfuseConfig::from_parts(Some(""), Some("sk-test"), None).is_none());
+            assert!(LangfuseConfig::from_parts(Some("pk-test"), Some(""), None).is_none());
+        });
     }
 
     #[test]
     fn test_config_default_base_url() {
-        let config = LangfuseConfig::from_parts(Some("pk-test"), Some("sk-test"), None).unwrap();
-        assert_eq!(config.base_url, "https://cloud.langfuse.com");
+        with_langfuse_env(None, None, None, || {
+            let config =
+                LangfuseConfig::from_parts(Some("pk-test"), Some("sk-test"), None).unwrap();
+            assert_eq!(config.base_url, "https://cloud.langfuse.com");
+        });
     }
 
     #[test]
     fn test_config_strips_trailing_slash() {
-        let config = LangfuseConfig::from_parts(
-            Some("pk-test"),
-            Some("sk-test"),
-            Some("https://langfuse.example.com/"),
-        )
-        .unwrap();
-        assert_eq!(config.base_url, "https://langfuse.example.com");
+        with_langfuse_env(None, None, None, || {
+            let config = LangfuseConfig::from_parts(
+                Some("pk-test"),
+                Some("sk-test"),
+                Some("https://langfuse.example.com/"),
+            )
+            .unwrap();
+            assert_eq!(config.base_url, "https://langfuse.example.com");
+        });
     }
 }

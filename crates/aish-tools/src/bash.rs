@@ -673,7 +673,7 @@ mod tests {
             }
 
             let request: serde_json::Value = serde_json::from_slice(&request_buf).unwrap();
-            assert_eq!(request["command"], "echo sandbox");
+            assert_eq!(request["command"], "rm -f /etc/aish/config.yaml");
             assert_eq!(request["repo_root"], "/");
             assert_eq!(request["timeout_s"], 13.0);
             let id = request["id"].as_str().unwrap();
@@ -696,7 +696,7 @@ mod tests {
         });
 
         let result = security_preflight_with_socket(
-            "echo sandbox",
+            "rm -f /etc/aish/config.yaml",
             Some(dir.path()),
             Some(policy_path.as_path()),
             Some(socket_path.as_path()),
@@ -709,7 +709,10 @@ mod tests {
                 security: Some(security),
             } => {
                 assert_eq!(message, "system config directory");
-                assert_eq!(security.target.as_deref(), Some("echo sandbox"));
+                assert_eq!(
+                    security.target.as_deref(),
+                    Some("rm -f /etc/aish/config.yaml")
+                );
                 assert_eq!(security.mode, SecurityPanelMode::Blocked);
                 let decision = security.decision.expect("expected security decision");
                 assert_eq!(decision.level.to_string(), "HIGH");

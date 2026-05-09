@@ -162,7 +162,7 @@ mod tests {
             "/tmp/aish-bad",
             move |target, _flags| {
                 events.lock().unwrap().push(target.display().to_string());
-                Err(io::Error::new(io::ErrorKind::Other, "boom"))
+                Err(io::Error::other("boom"))
             },
         ));
 

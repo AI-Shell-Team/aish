@@ -588,10 +588,8 @@ mod tests {
     #[test]
     fn mount_stack_attempts_remaining_cleanup_after_failure() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let failing_outcomes = Arc::new(Mutex::new(VecDeque::from([Err(io::Error::new(
-            io::ErrorKind::Other,
-            "boom",
-        ))])));
+        let failing_outcomes =
+            Arc::new(Mutex::new(VecDeque::from([Err(io::Error::other("boom"))])));
         let mut stack = MountStack::new();
         stack.push(MountGuard::with_test_unmount(
             "/tmp/aish-first",

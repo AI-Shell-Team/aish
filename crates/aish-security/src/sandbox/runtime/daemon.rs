@@ -364,23 +364,25 @@ fn log_bad_request(identity: &RequestIdentity, error: &SandboxError) {
 fn format_daemon_started_log(options: &SandboxDaemonOptions, socket_activated: bool) -> String {
     format_daemon_log_message(
         format_daemon_log_header(None, None, None, None),
-        "listen_success",
-        None,
-        None,
-        None,
-        Vec::new(),
-        None,
-        None,
-        vec![format!(
-            "  Socket: {} | activation={} | worker={}",
-            options.socket_path.display(),
-            socket_activated,
-            options
-                .worker_program
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "fake".to_string())
-        )],
+        DaemonLogMessage {
+            state: "listen_success",
+            command: None,
+            cwd: None,
+            repo_root: None,
+            status_bits: Vec::new(),
+            reason: None,
+            detail: None,
+            extra_lines: vec![format!(
+                "  Socket: {} | activation={} | worker={}",
+                options.socket_path.display(),
+                socket_activated,
+                options
+                    .worker_program
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "fake".to_string())
+            )],
+        },
     )
 }
 
@@ -409,14 +411,16 @@ fn format_request_succeeded_log(
             Some(&request.id),
             None,
         ),
-        "request_success",
-        Some(&request.command),
-        Some(request.cwd.as_path()),
-        Some(request.repo_root.as_path()),
-        status_bits,
-        None,
-        None,
-        extra_lines,
+        DaemonLogMessage {
+            state: "request_success",
+            command: Some(&request.command),
+            cwd: Some(request.cwd.as_path()),
+            repo_root: Some(request.repo_root.as_path()),
+            status_bits,
+            reason: None,
+            detail: None,
+            extra_lines,
+        },
     )
 }
 
@@ -433,28 +437,32 @@ fn format_request_failed_log(
             Some(&request.id),
             None,
         ),
-        "request_failure",
-        Some(&request.command),
-        Some(request.cwd.as_path()),
-        Some(request.repo_root.as_path()),
-        Vec::new(),
-        Some(reason.as_str()),
-        details,
-        Vec::new(),
+        DaemonLogMessage {
+            state: "request_failure",
+            command: Some(&request.command),
+            cwd: Some(request.cwd.as_path()),
+            repo_root: Some(request.repo_root.as_path()),
+            status_bits: Vec::new(),
+            reason: Some(reason.as_str()),
+            detail: details,
+            extra_lines: Vec::new(),
+        },
     )
 }
 
 fn format_bad_request_log(identity: &RequestIdentity, error: &SandboxError) -> String {
     format_daemon_log_message(
         format_daemon_log_header(Some(identity), None, None, None),
-        "request_bad_request",
-        None,
-        None,
-        None,
-        Vec::new(),
-        Some(error.reason().as_str()),
-        error.details(),
-        Vec::new(),
+        DaemonLogMessage {
+            state: "request_bad_request",
+            command: None,
+            cwd: None,
+            repo_root: None,
+            status_bits: Vec::new(),
+            reason: Some(error.reason().as_str()),
+            detail: error.details(),
+            extra_lines: Vec::new(),
+        },
     )
 }
 
@@ -490,42 +498,43 @@ fn format_daemon_log_header(
     header
 }
 
-fn format_daemon_log_message(
-    header: String,
-    state: &str,
-    command: Option<&str>,
-    cwd: Option<&Path>,
-    repo_root: Option<&Path>,
+struct DaemonLogMessage<'a> {
+    state: &'a str,
+    command: Option<&'a str>,
+    cwd: Option<&'a Path>,
+    repo_root: Option<&'a Path>,
     status_bits: Vec<String>,
-    reason: Option<&str>,
-    detail: Option<&str>,
+    reason: Option<&'a str>,
+    detail: Option<&'a str>,
     extra_lines: Vec<String>,
-) -> String {
+}
+
+fn format_daemon_log_message(header: String, message: DaemonLogMessage<'_>) -> String {
     let mut lines = vec![header];
 
-    if let Some(command) = command {
+    if let Some(command) = message.command {
         lines.push(format!("  Command: {}", log_field(command)));
     }
-    if let Some(cwd) = cwd {
+    if let Some(cwd) = message.cwd {
         lines.push(format!("  CWD: {}", cwd.display()));
     }
-    if let Some(repo_root) = repo_root {
+    if let Some(repo_root) = message.repo_root {
         lines.push(format!("  RepoRoot: {}", repo_root.display()));
     }
 
-    let mut bits = vec![format!("Status: {state}")];
-    bits.extend(status_bits);
+    let mut bits = vec![format!("Status: {}", message.state)];
+    bits.extend(message.status_bits);
     lines.push(format!("  {}", bits.join(" | ")));
 
-    if let Some(reason) = reason {
+    if let Some(reason) = message.reason {
         lines.push(format!("  Reason: {}", log_field(reason)));
     }
 
-    if let Some(detail) = detail {
+    if let Some(detail) = message.detail {
         lines.extend(format_multiline_block("Error", detail));
     }
 
-    lines.extend(extra_lines);
+    lines.extend(message.extra_lines);
     lines.join("\n")
 }
 

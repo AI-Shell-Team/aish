@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) type SandboxChangeDetail = BTreeMap<String, String>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum FsChangeKind {
     Created,
@@ -14,6 +14,7 @@ pub(crate) enum FsChangeKind {
     Deleted,
     Chmod,
     Chown,
+    #[default]
     Unknown,
 }
 
@@ -27,12 +28,6 @@ impl FsChangeKind {
             Self::Chown => "chown",
             Self::Unknown => "unknown",
         }
-    }
-}
-
-impl Default for FsChangeKind {
-    fn default() -> Self {
-        Self::Unknown
     }
 }
 
