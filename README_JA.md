@@ -126,7 +126,7 @@ aish> ;このコマンドを説明して: tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-インストーラは `https://www.aishell.ai/repo` 配下の最新リリースディレクトリを解決し、アーキテクチャに合ったバンドルをダウンロードして `aish`、`aish-sandbox`、`aish-uninstall` を `/usr/local/bin` にインストールします。
+インストーラは `https://www.aishell.ai/repo` 配下の最新リリースディレクトリを解決し、アーキテクチャに合ったバンドルをダウンロードして `aish` と `aish-uninstall` を `/usr/local/bin` にインストールし、同梱された sandbox systemd ユニットも配置します。
 
 ### ソースから実行（開発/試用）
 

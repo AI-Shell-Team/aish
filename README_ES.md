@@ -126,7 +126,7 @@ aish> ;explica este comando: tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-El instalador resuelve el último directorio de release en `https://www.aishell.ai/repo`, descarga el bundle correspondiente a tu arquitectura e instala `aish`, `aish-sandbox` y `aish-uninstall` en `/usr/local/bin`.
+El instalador resuelve el último directorio de release en `https://www.aishell.ai/repo`, descarga el bundle correspondiente a tu arquitectura e instala `aish` y `aish-uninstall` en `/usr/local/bin`, junto con las unidades systemd del sandbox incluidas en el bundle.
 
 ### Ejecutar desde el código fuente (desarrollo/prueba)
 
