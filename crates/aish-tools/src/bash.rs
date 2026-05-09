@@ -252,11 +252,7 @@ impl BashTool {
 
         let mut pty = pty_arc.lock().unwrap();
         let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
-        let result = pty.execute_command(
-            command,
-            command_timeout,
-            Some(&cancel_token),
-        );
+        let result = pty.execute_command(command, command_timeout, Some(&cancel_token));
         done.store(true, Ordering::SeqCst);
 
         match result {
@@ -268,8 +264,7 @@ impl BashTool {
 
                 let settings = BashOffloadSettings::default();
                 let offloader = BashOutputOffload::new(&session_uuid, &cwd, settings);
-                let offload_result =
-                    offloader.render(&output, &"", command, exit_code);
+                let offload_result = offloader.render(&output, &"", command, exit_code);
 
                 let output_text = crate::registry::format_tagged_result(
                     &offload_result.stdout_text,
