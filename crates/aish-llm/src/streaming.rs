@@ -24,7 +24,12 @@ impl StreamParser {
     /// and tool calls.
     pub fn parse_response(
         response: &serde_json::Value,
-    ) -> (Option<String>, Option<String>, Vec<ToolCall>, Option<TokenUsage>) {
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Vec<ToolCall>,
+        Option<TokenUsage>,
+    ) {
         let choices = response.get("choices").and_then(|c| c.as_array());
         if let Some(choices) = choices {
             if let Some(choice) = choices.first() {

@@ -181,11 +181,8 @@ impl SessionInterceptor {
                     b'\r' | b'\n' => {
                         // End of line — check whether the accumulated input
                         // starts with `;` or `；` to trigger AI.
-                        if self.ai_callback.is_some()
-                            && starts_with_ai_prefix(&self.line_shadow)
-                        {
-                            let line =
-                                String::from_utf8_lossy(&self.line_shadow).to_string();
+                        if self.ai_callback.is_some() && starts_with_ai_prefix(&self.line_shadow) {
+                            let line = String::from_utf8_lossy(&self.line_shadow).to_string();
                             let question = extract_ai_question(&line);
                             self.line_shadow.clear();
                             self.cancel_pty_line = true;
@@ -483,7 +480,7 @@ mod tests {
         ic.feed_stdin(0x1B); // ESC
         ic.feed_stdin(b'['); // CSI
         ic.feed_stdin(b'A'); // final byte (up arrow)
-        // shadow is just ";" — triggers AI
+                             // shadow is just ";" — triggers AI
         assert!(matches!(ic.feed_stdin(b'\r'), StdinAction::TriggerAi(_)));
     }
 

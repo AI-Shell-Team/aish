@@ -72,9 +72,9 @@ impl Tool for ChannelBashTool {
 
         match output_rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
             Ok(output) => ToolResult::success(output),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                ToolResult::error(aish_i18n::t("tools.bash.execute_failed").replace("{error}", "timeout"))
-            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => ToolResult::error(
+                aish_i18n::t("tools.bash.execute_failed").replace("{error}", "timeout"),
+            ),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 ToolResult::error("Channel closed")
             }

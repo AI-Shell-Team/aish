@@ -353,9 +353,9 @@ fn should_report_change(plan: &OverlayPlan, change: &FsChange) -> bool {
         .iter()
         .map(|root| normalize_absolute_path(&plan.repo_root.join(root)))
         .collect();
-    !scaffold_paths.iter().any(|path| {
-        change.path == *path || change.path.starts_with(&format!("{path}/"))
-    })
+    !scaffold_paths
+        .iter()
+        .any(|path| change.path == *path || change.path.starts_with(&format!("{path}/")))
 }
 
 fn logical_path(overlay: &OverlayMountRecord, rel_path: &Path) -> String {

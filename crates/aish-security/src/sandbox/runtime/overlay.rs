@@ -666,9 +666,9 @@ mod tests {
                 .join("upper_rootdirs")
                 .join(encode_mount_path(Path::new("/tmp"))),
         )
-            .unwrap()
-            .permissions()
-            .mode()
+        .unwrap()
+        .permissions()
+        .mode()
             & 0o7777;
         let target_mode = fs::symlink_metadata(sandbox_root.join("merged/tmp"))
             .unwrap()
