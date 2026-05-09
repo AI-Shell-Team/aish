@@ -287,14 +287,13 @@ impl PersistentPty {
                         tmp.len(),
                     )
                 } {
-                    n if n > 0 => {
-                        if self.exec_mode.load(Ordering::SeqCst) {
-                            self.exec_buffer
-                                .lock()
-                                .unwrap()
-                                .extend_from_slice(&tmp[..n as usize]);
-                        }
+                    n if n > 0 && self.exec_mode.load(Ordering::SeqCst) => {
+                        self.exec_buffer
+                            .lock()
+                            .unwrap()
+                            .extend_from_slice(&tmp[..n as usize]);
                     }
+                    n if n > 0 => {}
                     0 => {
                         self.running.store(false, Ordering::SeqCst);
                         break;
@@ -775,9 +774,7 @@ impl PersistentPty {
                                                 )
                                             };
                                             if sel > 0
-                                                && unsafe {
-                                                    libc::FD_ISSET(self.master_fd, &mut rfds)
-                                                }
+                                                && unsafe { libc::FD_ISSET(self.master_fd, &rfds) }
                                             {
                                                 let n = unsafe {
                                                     libc::read(
@@ -1388,38 +1385,26 @@ impl PersistentPty {
 /// confirmation read so they don't leak into the next input cycle.
 fn drain_stdin_trailing(stdin_fd: libc::c_int) {
     let mut discard = [0u8; 1];
-    loop {
-        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
-        unsafe {
-            libc::FD_ZERO(&mut rfds);
-            libc::FD_SET(stdin_fd, &mut rfds);
-        }
-        let mut tv = libc::timeval {
-            tv_sec: 0,
-            tv_usec: 10_000, // 10ms
-        };
-        let sel = unsafe {
-            libc::select(
-                stdin_fd + 1,
-                &mut rfds,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut tv,
-            )
-        };
-        if sel <= 0 {
-            break;
-        }
-        match unsafe { libc::read(stdin_fd, discard.as_mut_ptr() as *mut libc::c_void, 1) } {
-            1 => {
-                if discard[0] == b'\n' || discard[0] == b'\r' {
-                    break;
-                }
-                // Non-newline byte — stop draining
-                break;
-            }
-            _ => break,
-        }
+    let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::FD_ZERO(&mut rfds);
+        libc::FD_SET(stdin_fd, &mut rfds);
+    }
+    let mut tv = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 10_000, // 10ms
+    };
+    let sel = unsafe {
+        libc::select(
+            stdin_fd + 1,
+            &mut rfds,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut tv,
+        )
+    };
+    if sel > 0 {
+        let _ = unsafe { libc::read(stdin_fd, discard.as_mut_ptr() as *mut libc::c_void, 1) };
     }
 }
 
@@ -1619,7 +1604,7 @@ fn stdin_poll(stdin_fd: libc::c_int, timeout: Duration) -> bool {
 fn consume_csi(stdin_fd: libc::c_int) -> Option<u8> {
     loop {
         match read_byte(stdin_fd) {
-            Some(b) if b >= 0x40 && b <= 0x7E => return Some(b),
+            Some(b) if (0x40..=0x7E).contains(&b) => return Some(b),
             Some(_) => continue, // parameter or intermediate byte
             None => return None,
         }
@@ -1734,20 +1719,12 @@ fn read_line_from_stdin_raw(
                 0x7F | 0x08 => {
                     if !text_buf.is_empty() {
                         // Pop trailing UTF-8 continuation bytes, then leader
-                        while text_buf.last().map_or(false, |b| b & 0xC0 == 0x80) {
+                        while text_buf.last().is_some_and(|b| b & 0xC0 == 0x80) {
                             text_buf.pop();
                         }
                         let leader = text_buf.pop().unwrap();
                         // Display width: ASCII=1, 2-byte=1, 3-byte(CJK)=2, 4-byte=2
-                        let width = if leader < 0x80 {
-                            1
-                        } else if leader & 0xE0 == 0xC0 {
-                            1
-                        } else if leader & 0xF0 == 0xE0 {
-                            2
-                        } else {
-                            2
-                        };
+                        let width = if leader < 0xE0 { 1 } else { 2 };
                         let erase = format!(
                             "{}{}{}",
                             "\x08".repeat(width),
@@ -1774,64 +1751,60 @@ fn read_line_from_stdin_raw(
                             Some(b'[') => {
                                 // CSI sequence
                                 match consume_csi(stdin_fd) {
-                                    Some(b'A') | Some(b'k') => {
+                                    Some(b'A') | Some(b'k') if total_slots > 0 => {
                                         // Up arrow — navigate in choice mode
-                                        if total_slots > 0 {
-                                            if cursor > 0 {
-                                                cursor -= 1;
-                                            } else {
-                                                cursor = total_slots - 1;
-                                            }
-                                            // Clear text buffer when navigating
-                                            if !text_buf.is_empty() {
-                                                let erase = "\x08".repeat(text_buf.len())
-                                                    + &" ".repeat(text_buf.len())
-                                                    + &"\x08".repeat(text_buf.len());
-                                                unsafe {
-                                                    libc::write(
-                                                        libc::STDOUT_FILENO,
-                                                        erase.as_ptr() as *const _,
-                                                        erase.len(),
-                                                    );
-                                                }
-                                                text_buf.clear();
-                                            }
-                                            let prev = if request.kind == "choice_or_text" {
-                                                count_display_lines(request)
-                                            } else {
-                                                count_display_lines(request).saturating_sub(1)
-                                            };
-                                            redraw_ask_user(request, prev, cursor);
+                                        if cursor > 0 {
+                                            cursor -= 1;
+                                        } else {
+                                            cursor = total_slots - 1;
                                         }
+                                        // Clear text buffer when navigating
+                                        if !text_buf.is_empty() {
+                                            let erase = "\x08".repeat(text_buf.len())
+                                                + &" ".repeat(text_buf.len())
+                                                + &"\x08".repeat(text_buf.len());
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    erase.as_ptr() as *const _,
+                                                    erase.len(),
+                                                );
+                                            }
+                                            text_buf.clear();
+                                        }
+                                        let prev = if request.kind == "choice_or_text" {
+                                            count_display_lines(request)
+                                        } else {
+                                            count_display_lines(request).saturating_sub(1)
+                                        };
+                                        redraw_ask_user(request, prev, cursor);
                                     }
-                                    Some(b'B') | Some(b'j') => {
+                                    Some(b'B') | Some(b'j') if total_slots > 0 => {
                                         // Down arrow — navigate in choice mode
-                                        if total_slots > 0 {
-                                            if cursor + 1 < total_slots {
-                                                cursor += 1;
-                                            } else {
-                                                cursor = 0;
-                                            }
-                                            if !text_buf.is_empty() {
-                                                let erase = "\x08".repeat(text_buf.len())
-                                                    + &" ".repeat(text_buf.len())
-                                                    + &"\x08".repeat(text_buf.len());
-                                                unsafe {
-                                                    libc::write(
-                                                        libc::STDOUT_FILENO,
-                                                        erase.as_ptr() as *const _,
-                                                        erase.len(),
-                                                    );
-                                                }
-                                                text_buf.clear();
-                                            }
-                                            let prev = if request.kind == "choice_or_text" {
-                                                count_display_lines(request)
-                                            } else {
-                                                count_display_lines(request).saturating_sub(1)
-                                            };
-                                            redraw_ask_user(request, prev, cursor);
+                                        if cursor + 1 < total_slots {
+                                            cursor += 1;
+                                        } else {
+                                            cursor = 0;
                                         }
+                                        if !text_buf.is_empty() {
+                                            let erase = "\x08".repeat(text_buf.len())
+                                                + &" ".repeat(text_buf.len())
+                                                + &"\x08".repeat(text_buf.len());
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    erase.as_ptr() as *const _,
+                                                    erase.len(),
+                                                );
+                                            }
+                                            text_buf.clear();
+                                        }
+                                        let prev = if request.kind == "choice_or_text" {
+                                            count_display_lines(request)
+                                        } else {
+                                            count_display_lines(request).saturating_sub(1)
+                                        };
+                                        redraw_ask_user(request, prev, cursor);
                                     }
                                     _ => {
                                         // Other CSI sequences (Home, End, PgUp, etc.) — ignore
@@ -2064,7 +2037,7 @@ fn handle_ask_user_interaction(
                                 &mut tv,
                             )
                         };
-                        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &mut rfds) } {
+                        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                             let mut tmp = [0u8; 4096];
                             match unsafe {
                                 libc::read(
@@ -2133,7 +2106,7 @@ fn handle_ask_user_interaction(
                         &mut tv,
                     )
                 };
-                if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &mut rfds) } {
+                if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                     let mut tmp = [0u8; 4096];
                     match unsafe {
                         libc::read(master_fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len())
@@ -2328,7 +2301,7 @@ fn strip_ansi_and_prompt(raw: &str) -> String {
     let clean = strip_ansi_escapes(raw);
     let mut lines: Vec<&str> = clean.lines().collect();
     // Remove trailing empty lines
-    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
     // Remove last non-empty line (shell prompt)

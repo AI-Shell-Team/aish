@@ -172,14 +172,12 @@ pub(crate) fn execute_worker_context_with_runtime(
         context.limits.stdout_bytes,
         context.limits.stderr_bytes,
     )
-    .map_err(|error| {
+    .inspect_err(|_error| {
         let _ = run_guard.close();
-        error
     })?;
 
-    let collected = collect_changes(&plan, context.limits).map_err(|error| {
+    let collected = collect_changes(&plan, context.limits).inspect_err(|_error| {
         let _ = run_guard.close();
-        error
     })?;
 
     run_guard.finish()?;

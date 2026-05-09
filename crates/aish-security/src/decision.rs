@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{FsChange, MatchedRuleSummary};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum RiskLevel {
+    #[default]
     Low,
     Medium,
     High,
@@ -22,21 +23,16 @@ impl RiskLevel {
     }
 }
 
-impl Default for RiskLevel {
-    fn default() -> Self {
-        Self::Low
-    }
-}
-
 impl fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum SandboxOffAction {
+    #[default]
     Allow,
     Confirm,
     Block,
@@ -52,19 +48,13 @@ impl SandboxOffAction {
     }
 }
 
-impl Default for SandboxOffAction {
-    fn default() -> Self {
-        Self::Allow
-    }
-}
-
 impl fmt::Display for SandboxOffAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SandboxStatus {
     #[serde(default)]
     pub enabled: bool,
@@ -78,19 +68,6 @@ pub struct SandboxStatus {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_root: Option<String>,
-}
-
-impl Default for SandboxStatus {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            reason: None,
-            error: None,
-            exit_code: None,
-            cwd: None,
-            repo_root: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +191,7 @@ mod tests {
 
     #[test]
     fn sandbox_status_defaults_to_disabled_without_details() {
-        assert_eq!(SandboxStatus::default().enabled, false);
+        assert!(!SandboxStatus::default().enabled);
         assert_eq!(SandboxStatus::default().reason, None);
         assert_eq!(SandboxStatus::default().error, None);
         assert_eq!(SandboxStatus::default().exit_code, None);

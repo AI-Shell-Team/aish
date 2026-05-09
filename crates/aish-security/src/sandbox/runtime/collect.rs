@@ -269,7 +269,7 @@ fn read_dir_sorted(path: &Path) -> Result<Vec<fs::DirEntry>, SandboxError> {
         .map_err(|error| collect_error("read_dir", path, error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| collect_error("read_dir_entry", path, error))?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|left| left.file_name());
     Ok(entries)
 }
 
@@ -552,8 +552,10 @@ mod tests {
         fs::write(upper.join("a.txt"), "a").unwrap();
         fs::write(upper.join("m.txt"), "m").unwrap();
 
-        let mut limits = SandboxLimits::default();
-        limits.changes_max = 2;
+        let limits = SandboxLimits {
+            changes_max: 2,
+            ..SandboxLimits::default()
+        };
         let collected = collect_changes(&single_overlay_plan(&lower, &upper), limits).unwrap();
 
         assert!(collected.truncated);
