@@ -126,10 +126,7 @@ curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ### 从源码运行（开发/试用）
 
 ```bash
-uv sync
-uv run aish
-# 或
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -337,21 +334,17 @@ Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优
 
 ## 开发与测试
 
-### Python 版本（旧版）
-
-```bash
-uv sync
-uv run aish
-uv run pytest
-```
-
-### Rust 版本（当前）
-
-项目已使用 Rust 完全重写，获得更好的性能和安全性。Rust 代码位于 `rust-rewrite` 分支，采用 Cargo workspace 组织，共 14 个 crate。
+当前仓库已经是使用 Rust 完全重写后的 aish，采用 Cargo workspace 组织，共 14 个 crate。
 
 ```bash
 # 编译
 cargo build --release
+
+# 运行测试
+cargo test --workspace
+
+# 发布脚本冒烟测试
+./packaging/tests/release_scripts_smoke.sh
 
 # 运行
 ./target/release/aish

@@ -22,10 +22,7 @@ sudo ./install.sh
 
 ```bash
 cd /path/to/aish
-uv sync
-uv run aish
-# or
-python -m aish
+cargo run --bin aish
 ```
 
 ## 🎯 Basic Usage
@@ -235,22 +232,15 @@ See `docs/skills-guide.md` for details.
 ## 🧪 Development and Testing
 
 ```bash
-# Setup development environment
-uv sync --dev
+# Run packaging release script smoke tests
+./packaging/tests/release_scripts_smoke.sh
 
-# Run tests
-uv run pytest tests/ -v
-
-# Run with coverage
-uv run pytest --cov=aish
+# Run Rust tests
+cargo test --workspace
 
 # Code quality
-uv run ruff check src/ tests/
-uv run ruff format src/ tests/
-uv run mypy src/
-
-# Build wheel package
-uv build
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 
 # Build standalone binary
 ./build.sh
@@ -300,10 +290,10 @@ aish --version
 aish info
 ```
 
-### Reinstall Dependencies
+### Rebuild from Source
 
 ```bash
-uv sync --reinstall
+cargo build --release
 ```
 
 ### View Logs

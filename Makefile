@@ -1,4 +1,4 @@
-.PHONY: help test lint format build build-binary build-bundle install clean
+.PHONY: help test packaging-test prepare-release-files lint format build build-binary build-bundle install clean
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -11,6 +11,7 @@ DESTDIR ?=
 
 TARGET ?= x86_64-unknown-linux-musl
 NO_BUILD ?= 0
+PYTHON ?= python3
 
 help:
 	@echo "AI Shell - Make Commands"
@@ -22,6 +23,8 @@ help:
 	@echo ""
 	@echo "Development:"
 	@echo "  make test           Run tests"
+	@echo "  make packaging-test Run release script smoke tests"
+	@echo "  make prepare-release-files VERSION=X.Y.Z[-PRERELEASE] [DATE=YYYY-MM-DD]"
 	@echo "  make lint           Run clippy"
 	@echo "  make format         Format code"
 	@echo "  make format-check   Check code formatting"
@@ -29,6 +32,14 @@ help:
 
 test:
 	cargo test --workspace
+	PYTHON="$(PYTHON)" ./packaging/tests/release_scripts_smoke.sh
+
+packaging-test:
+	PYTHON="$(PYTHON)" ./packaging/tests/release_scripts_smoke.sh
+
+prepare-release-files:
+	@test -n "$(VERSION)" || { echo "VERSION is required, for example: make prepare-release-files VERSION=1.0.0-beta.1" >&2; exit 2; }
+	$(PYTHON) packaging/scripts/update_release_files.py --version "$(VERSION)" $(if $(DATE),--date "$(DATE)",)
 
 lint:
 	cargo clippy --all-targets -- -D warnings

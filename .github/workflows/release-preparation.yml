@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Target stable release version, for example 0.2.0"
+        description: "Target release version, for example 0.2.0 or 1.0.0-beta.1"
         required: true
         type: string
 
@@ -95,14 +95,14 @@ jobs:
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          BUNDLE="aish-${VERSION}-linux-x86_64"
+          BUNDLE="aish-${VERSION}-linux-amd64"
           EXTRACT_DIR="$PWD/build/install-smoke"
           INSTALL_ROOT="$PWD/build/install-root"
 

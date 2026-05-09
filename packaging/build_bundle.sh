@@ -15,7 +15,7 @@ VERSION="${VERSION:-${1:-}}"
 if [[ -z "$VERSION" ]]; then
   VERSION="$(load_cargo_version)"
 fi
-ARCH="${ARCH:-${2:-x86_64}}"
+ARCH="${ARCH:-${2:-amd64}}"
 PLATFORM="${PLATFORM:-${4:-linux}}"
 TARGET="${AISH_BUILD_TARGET:-x86_64-unknown-linux-musl}"
 OUTPUT_DIR="${OUTPUT_DIR:-${3:-dist/release}}"

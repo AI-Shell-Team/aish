@@ -131,10 +131,7 @@ The installer resolves the latest release directory under `https://www.aishell.a
 ### Run from Source (Development/Trial)
 
 ```bash
-uv sync
-uv run aish
-# or
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -341,30 +338,20 @@ Recommendations:
 
 ## Development & Testing
 
-### Python Version (Legacy)
-
-```bash
-uv sync
-uv run aish
-uv run pytest
-```
-
-### Rust Version (Current)
-
-The project has been rewritten in Rust for performance and safety. The Rust codebase lives on the `rust-rewrite` branch and is organized as a Cargo workspace with 14 crates.
+This repository is now the Rust implementation of aish. The remaining Python scripts under `packaging/scripts/` are release automation helpers and are covered by shell smoke tests.
 
 ```bash
 # Build
 cargo build --release
 
-# Run
-./target/release/aish
+# Run Rust tests
+cargo test --workspace
 
-# Test
-cargo test
+# Lint Rust code
+cargo clippy --all-targets -- -D warnings
 
-# Lint
-cargo clippy
+# Run packaging release script smoke tests
+./packaging/tests/release_scripts_smoke.sh
 ```
 
 #### Architecture (14 crates)

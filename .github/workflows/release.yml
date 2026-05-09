@@ -23,10 +23,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify tag commit is on main
+      - name: Verify tag commit is on a release branch
         run: |
-          git fetch origin main --depth=1
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          for branch in main rust; do
+            git fetch origin "$branch" --depth=1 || continue
+            if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"; then
+              echo "Tag commit is reachable from $branch."
+              exit 0
+            fi
+          done
+          echo "Tag commit must be reachable from main or rust." >&2
+          exit 1
 
       - name: Compute release metadata
         id: metadata
@@ -54,12 +61,13 @@ jobs:
       - release-gate
     runs-on: ubuntu-latest
     steps:
-      - name: Create release entry with generated notes
+      - name: Create release entry with changelog notes
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
           name: aish ${{ needs.release-meta.outputs.tag }}
-          generate_release_notes: true
+          body: ${{ needs.release-meta.outputs.release_notes }}
+          prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
 
   build-release-bundle:
     name: Build release bundle
@@ -99,14 +107,14 @@ jobs:
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="x86_64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/amd64"
-          BUNDLE="aish-${VERSION}-linux-x86_64"
+          BUNDLE="aish-${VERSION}-linux-amd64"
           EXTRACT_DIR="$PWD/build/install-smoke"
           INSTALL_ROOT="$PWD/build/install-root"
 
@@ -124,6 +132,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
+          prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
           files: artifacts/amd64/*
 
   release-summary:
