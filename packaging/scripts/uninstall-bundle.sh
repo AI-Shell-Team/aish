@@ -86,7 +86,7 @@ BIN_DIR="$(binary_target_dir)"
 
 remove_systemd_units
 
-rm -f "$(target_path "${BIN_DIR}/aish")" "$(target_path "${BIN_DIR}/aish-uninstall")"
+rm -f "$(target_path "${BIN_DIR}/aish")"
 
 rm -rf "$(target_path "/usr/local/share/aish/skills")"
 rm -f "$(target_path "/usr/local/share/aish/skills-guide.md")"
