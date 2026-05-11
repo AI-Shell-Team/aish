@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
+## [0.3.0-beta.3] - 2026-05-11
+
+### Fixed
+
+- Fixed Rocky Linux release-preparation and release bundle builds so the Rust musl packaging path no longer aborts early when `musl-gcc` is absent but the Rust target toolchain is already available.
+
 ## [0.3.0-beta.2] - 2026-05-11
 
 ### Added

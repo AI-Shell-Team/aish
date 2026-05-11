@@ -71,8 +71,10 @@ echo -e "${BLUE}Building AI Shell (Rust)...${NC}"
 if [[ "$TARGET" == *musl* ]]; then
     ensure_rust_target "$TARGET"
 
-    if ! command -v musl-gcc &>/dev/null && ! dpkg -l musl-tools &>/dev/null 2>&1; then
-        if command -v apt-get &>/dev/null; then
+    if ! command -v musl-gcc >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1 && dpkg -l musl-tools >/dev/null 2>&1; then
+            :
+        elif command -v apt-get &>/dev/null; then
             echo -e "${YELLOW}Installing musl-tools...${NC}"
             sudo apt-get update && sudo apt-get install -y musl-tools
         elif command -v brew &>/dev/null; then
@@ -80,9 +82,7 @@ if [[ "$TARGET" == *musl* ]]; then
             echo -e "${YELLOW}Install with: brew install filosottile/musl-cross/musl-cross${NC}"
             exit 1
         else
-            echo -e "${RED}Error: musl-tools not found and no supported package manager detected.${NC}"
-            echo -e "${YELLOW}Please install musl-tools or musl-gcc for your platform manually.${NC}"
-            exit 1
+            echo -e "${YELLOW}musl-gcc not found; continuing with the Rust-provided linker toolchain for $TARGET.${NC}"
         fi
     fi
 fi
