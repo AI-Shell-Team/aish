@@ -7,6 +7,22 @@ set -euo pipefail
 # script. This file is kept for self-hosted runners or container environments
 # where the action is not available.
 
+default_build_target() {
+    case "${RUNNER_ARCH:-$(uname -m)}" in
+        X64|x86_64|amd64)
+            printf 'x86_64-unknown-linux-musl\n'
+            ;;
+        ARM64|aarch64|arm64)
+            printf 'aarch64-unknown-linux-musl\n'
+            ;;
+        *)
+            printf 'x86_64-unknown-linux-musl\n'
+            ;;
+    esac
+}
+
+TARGET="${AISH_BUILD_TARGET:-$(default_build_target)}"
+
 ensure_rust_target() {
     local target="$1"
 
@@ -47,7 +63,7 @@ if [[ -n "${GITHUB_PATH:-}" && -d "$HOME/.cargo/bin" ]]; then
     echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 fi
 
-ensure_rust_target x86_64-unknown-linux-musl
+ensure_rust_target "$TARGET"
 
 cargo --version
 rustc --version
