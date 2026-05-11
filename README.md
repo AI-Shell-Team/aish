@@ -126,7 +126,7 @@ aish> ;explain this command: tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-The installer resolves the latest release directory under `https://www.aishell.ai/repo`, downloads the matching bundle for your architecture, and installs `aish`, `aish-sandbox`, and `aish-uninstall` into `/usr/local/bin`.
+The installer resolves the latest release directory under `https://www.aishell.ai/repo`, downloads the matching bundle for your architecture, and installs `aish` into `/usr/local/bin`, along with the bundled sandbox systemd units.
 
 ### Run from Source (Development/Trial)
 
@@ -141,13 +141,13 @@ cargo run --bin aish
 Uninstall (keep configuration files):
 
 ```bash
-sudo aish-uninstall
+sudo aish uninstall --yes
 ```
 
 Complete uninstallation (also removes system-level security policies):
 
 ```bash
-sudo aish-uninstall --purge-config
+sudo aish uninstall --yes --purge
 ```
 
 Optional: Clean user-level configuration (will clear model/API keys etc.):
