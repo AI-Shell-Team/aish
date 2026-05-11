@@ -86,11 +86,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             runs_on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs_on }}
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout repository
