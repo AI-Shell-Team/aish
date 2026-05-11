@@ -27,6 +27,10 @@ if ! command -v cargo >/dev/null 2>&1; then
     source "$HOME/.cargo/env"
 fi
 
+if [[ -n "${GITHUB_PATH:-}" && -d "$HOME/.cargo/bin" ]]; then
+    echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+fi
+
 rustup target add x86_64-unknown-linux-musl
 
 cargo --version

@@ -14,14 +14,48 @@ NC='\033[0m' # No Color
 
 TARGET="${AISH_BUILD_TARGET:-x86_64-unknown-linux-musl}"
 
+restore_rust_path() {
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env"
+    fi
+}
+
+ensure_rust_target() {
+    local target="$1"
+
+    if command -v rustup >/dev/null 2>&1; then
+        if ! rustup target list --installed | grep -q "$target"; then
+            echo -e "${YELLOW}Installing target $target...${NC}"
+            rustup target add "$target"
+        fi
+        return 0
+    fi
+
+    if rustc --print target-libdir --target "$target" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo -e "${RED}Error: rustup is not available and target $target is not installed.${NC}"
+    echo -e "${YELLOW}Install rustup or preinstall the Rust target before running build.sh.${NC}"
+    exit 1
+}
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then
+    restore_rust_path
+fi
+
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+    echo -e "${RED}Error: cargo and rustc must be available to build AISH.${NC}"
+    echo -e "${YELLOW}Install Rust or ensure ~/.cargo/env is loadable in this environment.${NC}"
+    exit 1
+fi
+
 echo -e "${BLUE}Building AI Shell (Rust)...${NC}"
 
 # Check for musl target
 if [[ "$TARGET" == *musl* ]]; then
-    if ! rustup target list --installed | grep -q "$TARGET"; then
-        echo -e "${YELLOW}Installing target $TARGET...${NC}"
-        rustup target add "$TARGET"
-    fi
+    ensure_rust_target "$TARGET"
 
     if ! command -v musl-gcc &>/dev/null && ! dpkg -l musl-tools &>/dev/null 2>&1; then
         if command -v apt-get &>/dev/null; then
