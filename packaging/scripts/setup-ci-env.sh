@@ -7,6 +7,22 @@ set -euo pipefail
 # script. This file is kept for self-hosted runners or container environments
 # where the action is not available.
 
+ensure_rust_target() {
+    local target="$1"
+
+    if command -v rustup >/dev/null 2>&1; then
+        rustup target add "$target"
+        return 0
+    fi
+
+    if rustc --print target-libdir --target "$target" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Rust target $target is not available and rustup is not installed" >&2
+    exit 1
+}
+
 if command -v apt-get >/dev/null 2>&1; then
     apt-get update
     apt-get install -y curl build-essential musl-tools pkg-config libssl-dev
@@ -31,7 +47,7 @@ if [[ -n "${GITHUB_PATH:-}" && -d "$HOME/.cargo/bin" ]]; then
     echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 fi
 
-rustup target add x86_64-unknown-linux-musl
+ensure_rust_target x86_64-unknown-linux-musl
 
 cargo --version
 rustc --version
