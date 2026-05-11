@@ -17,7 +17,21 @@ if [[ -z "$VERSION" ]]; then
 fi
 ARCH="${ARCH:-${2:-amd64}}"
 PLATFORM="${PLATFORM:-${4:-linux}}"
-TARGET="${AISH_BUILD_TARGET:-x86_64-unknown-linux-musl}"
+default_bundle_target() {
+  case "$ARCH" in
+    amd64)
+      printf 'x86_64-unknown-linux-musl\n'
+      ;;
+    arm64)
+      printf 'aarch64-unknown-linux-musl\n'
+      ;;
+    *)
+      printf 'x86_64-unknown-linux-musl\n'
+      ;;
+  esac
+}
+
+TARGET="${AISH_BUILD_TARGET:-$(default_bundle_target)}"
 OUTPUT_DIR="${OUTPUT_DIR:-${3:-dist/release}}"
 BUNDLE_NAME="aish-${VERSION}-${PLATFORM}-${ARCH}"
 STAGE_DIR="build/bundle/${BUNDLE_NAME}"
