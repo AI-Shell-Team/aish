@@ -23,6 +23,21 @@ default_build_target() {
 
 TARGET="${AISH_BUILD_TARGET:-$(default_build_target)}"
 
+run_as_root() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        "$@"
+        return
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+        return
+    fi
+
+    echo "Root privileges are required to install CI build dependencies" >&2
+    exit 1
+}
+
 target_cc_wrapper_name() {
     case "$1" in
         x86_64-unknown-linux-musl)
@@ -104,14 +119,14 @@ configure_musl_cc() {
 }
 
 if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y curl build-essential musl-tools pkg-config libssl-dev tar gzip findutils
+    run_as_root apt-get update
+    run_as_root apt-get install -y curl build-essential musl-tools pkg-config libssl-dev tar gzip findutils
 elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl gcc make tar gzip findutils openssl-devel
-    dnf install -y pkgconf-pkg-config || dnf install -y pkgconf || true
+    run_as_root dnf install -y curl gcc make tar gzip findutils openssl-devel
+    run_as_root dnf install -y pkgconf-pkg-config || run_as_root dnf install -y pkgconf || true
 elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl gcc make tar gzip findutils openssl-devel
-    yum install -y pkgconfig || yum install -y pkgconf || true
+    run_as_root yum install -y curl gcc make tar gzip findutils openssl-devel
+    run_as_root yum install -y pkgconfig || run_as_root yum install -y pkgconf || true
 else
     echo "No supported package manager found" >&2
     exit 1
