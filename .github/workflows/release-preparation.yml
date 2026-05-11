@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Target release version, for example 0.2.0 or 1.0.0-beta.1"
+        description: "Target release version, for example 0.2.0 or 0.3.0-beta.1"
         required: true
         type: string
 
@@ -113,8 +113,9 @@ jobs:
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
 
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
-          test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
+          test -f "$INSTALL_ROOT/lib/systemd/system/aish-sandbox.service"
+          test -f "$INSTALL_ROOT/lib/systemd/system/aish-sandbox.socket"
 
       - name: Upload dry-run artifacts
         uses: actions/upload-artifact@v6
