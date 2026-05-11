@@ -75,6 +75,13 @@ if [[ "$TARGET" == *musl* ]]; then
         if command -v apt-get &>/dev/null; then
             echo -e "${YELLOW}Installing musl-tools...${NC}"
             sudo apt-get update && sudo apt-get install -y musl-tools
+        elif command -v dnf &>/dev/null || command -v yum &>/dev/null; then
+            if command -v gcc &>/dev/null; then
+                echo -e "${YELLOW}musl-gcc not found; using the Rust musl target with system gcc in this CI environment.${NC}"
+            else
+                echo -e "${RED}Error: gcc is required to link the musl target in this environment.${NC}"
+                exit 1
+            fi
         elif command -v brew &>/dev/null; then
             echo -e "${RED}Error: musl cross-compilation on macOS requires a cross toolchain.${NC}"
             echo -e "${YELLOW}Install with: brew install filosottile/musl-cross/musl-cross${NC}"
