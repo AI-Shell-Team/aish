@@ -83,10 +83,7 @@ configure_musl_cc() {
             exit 1
         fi
 
-        cat > "$wrapper_path" <<EOF
-#!/usr/bin/env bash
-exec "$compiler_bin" "$@"
-EOF
+        printf '%s\n' '#!/usr/bin/env bash' "exec \"$compiler_bin\" \"\$@\"" > "$wrapper_path"
         chmod +x "$wrapper_path"
     fi
 
