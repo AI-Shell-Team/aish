@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
+## [0.3.0-beta.2] - 2026-05-11
+
+### Added
+
+- Added beta-channel CDN publishing and installer support so prerelease builds can be installed through the dedicated `download/beta` paths without affecting the stable channel.
+- Added Linux arm64 release bundles and release-preparation validation alongside the existing amd64 artifacts for the Rust beta line.
+
+### Changed
+
+- Changed the Rust release workflows so prerelease tags publish bundle metadata to the beta CDN channel while stable tags continue to update the stable download paths.
+
 ## [0.3.0-beta.1] - 2026-05-09
 
 ### Added
