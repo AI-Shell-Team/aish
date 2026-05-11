@@ -12,7 +12,21 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-TARGET="${AISH_BUILD_TARGET:-x86_64-unknown-linux-musl}"
+default_build_target() {
+    case "$(uname -m)" in
+        x86_64|amd64)
+            printf 'x86_64-unknown-linux-musl\n'
+            ;;
+        aarch64|arm64)
+            printf 'aarch64-unknown-linux-musl\n'
+            ;;
+        *)
+            printf 'x86_64-unknown-linux-musl\n'
+            ;;
+    esac
+}
+
+TARGET="${AISH_BUILD_TARGET:-$(default_build_target)}"
 
 restore_rust_path() {
     if [[ -f "$HOME/.cargo/env" ]]; then
