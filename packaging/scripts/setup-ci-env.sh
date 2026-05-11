@@ -41,12 +41,12 @@ ensure_rust_target() {
 
 if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y curl build-essential musl-tools pkg-config libssl-dev
+    apt-get install -y curl build-essential musl-tools pkg-config libssl-dev tar gzip findutils
 elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl gcc openssl-devel
+    dnf install -y curl gcc make tar gzip findutils openssl-devel
     dnf install -y pkgconf-pkg-config || dnf install -y pkgconf || true
 elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl gcc openssl-devel
+    yum install -y curl gcc make tar gzip findutils openssl-devel
     yum install -y pkgconfig || yum install -y pkgconf || true
 else
     echo "No supported package manager found" >&2
