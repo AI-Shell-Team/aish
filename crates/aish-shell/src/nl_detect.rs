@@ -114,6 +114,49 @@ fn simplify_word(word: &str) -> &str {
         .unwrap_or(word)
 }
 
+// ---------------------------------------------------------------------------
+// CJK detection
+// ---------------------------------------------------------------------------
+
+/// Check if a character falls in CJK Unicode ranges.
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}'   // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}'   // CJK Compatibility Ideographs
+    )
+}
+
+/// Calculate the ratio of CJK characters in the input.
+fn cjk_ratio(input: &str) -> f64 {
+    let chars: Vec<char> = input.chars().filter(|c| !c.is_whitespace()).collect();
+    if chars.is_empty() {
+        return 0.0;
+    }
+    let cjk_count = chars.iter().filter(|c| is_cjk(**c)).count();
+    cjk_count as f64 / chars.len() as f64
+}
+
+// ---------------------------------------------------------------------------
+// Shell syntax detection
+// ---------------------------------------------------------------------------
+
+const SHELL_SYNTAX_CHARS: &[char] = &[
+    '$', '=', '{', '}', '[', ']', '>', '<', '*', '~', '&', '(', ')', '|', '/', '-',
+];
+
+/// Check if a token contains shell syntax characters (not in quotes).
+fn has_shell_syntax(word: &str) -> bool {
+    !word.contains(' ') && word.contains(SHELL_SYNTAX_CHARS)
+}
+
+/// Check if a token is wrapped in single or double quotes.
+fn wrapped_in_quotes(word: &str) -> bool {
+    (word.starts_with('"') && word.ends_with('"'))
+        || (word.starts_with('\'') && word.ends_with('\''))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +204,56 @@ mod tests {
         assert_eq!(simplify_word("listed"), "list");
         assert_eq!(simplify_word("quickly"), "quick");
         assert_eq!(simplify_word("list"), "list");
+    }
+
+    #[test]
+    fn test_is_cjk() {
+        assert!(is_cjk('中'));
+        assert!(is_cjk('文'));
+        assert!(is_cjk('列'));
+        assert!(!is_cjk('a'));
+        assert!(!is_cjk('1'));
+        assert!(!is_cjk(' '));
+    }
+
+    #[test]
+    fn test_cjk_ratio_pure_chinese() {
+        assert!(cjk_ratio("列出所有文件") >= 0.9);
+    }
+
+    #[test]
+    fn test_cjk_ratio_mixed() {
+        // "ls 列出文件" → 4 CJK / 7 non-ws chars
+        let r = cjk_ratio("ls 列出文件");
+        assert!(r >= 0.5 && r < 0.8, "ratio was {}", r);
+    }
+
+    #[test]
+    fn test_cjk_ratio_english_only() {
+        assert_eq!(cjk_ratio("list all files"), 0.0);
+    }
+
+    #[test]
+    fn test_cjk_ratio_empty() {
+        assert_eq!(cjk_ratio(""), 0.0);
+        assert_eq!(cjk_ratio("   "), 0.0);
+    }
+
+    #[test]
+    fn test_has_shell_syntax() {
+        assert!(has_shell_syntax("foo=bar"));
+        assert!(has_shell_syntax("$HOME"));
+        assert!(has_shell_syntax("*.txt"));
+        assert!(has_shell_syntax("a|b"));
+        assert!(!has_shell_syntax("hello"));
+        assert!(!has_shell_syntax("files"));
+    }
+
+    #[test]
+    fn test_wrapped_in_quotes() {
+        assert!(wrapped_in_quotes("\"hello\""));
+        assert!(wrapped_in_quotes("'hello'"));
+        assert!(!wrapped_in_quotes("hello"));
+        assert!(!wrapped_in_quotes("\"hello"));
     }
 }
