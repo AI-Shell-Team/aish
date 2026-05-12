@@ -16,6 +16,7 @@
 pub mod command_state;
 pub mod control;
 pub mod executor;
+pub mod nl_detect;
 pub mod offload;
 pub mod output_buffer;
 pub mod persistent;
