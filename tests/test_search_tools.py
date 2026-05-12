@@ -51,3 +51,25 @@ def test_search_tools_allow_roots_inside_current_workspace(tmp_path, monkeypatch
     assert str(file_path) in glob_result.output
     assert grep_result.ok is True
     assert f"{file_path}:1: needle = True" in grep_result.output
+
+
+def test_search_tools_allow_workspace_sibling_roots_after_chdir(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    tests_dir = workspace / "tests"
+    source.mkdir(parents=True)
+    tests_dir.mkdir()
+    file_path = tests_dir / "example.txt"
+    file_path.write_text("needle from sibling\n", encoding="utf-8")
+    monkeypatch.chdir(workspace)
+    glob_tool = GlobTool()
+    grep_tool = GrepTool()
+    monkeypatch.chdir(source)
+
+    glob_result = glob_tool(pattern="**/*.txt", root="../tests")
+    grep_result = grep_tool(pattern="needle", root=str(tests_dir))
+
+    assert glob_result.ok is True
+    assert str(file_path) in glob_result.output
+    assert grep_result.ok is True
+    assert f"{file_path}:1: needle from sibling" in grep_result.output
