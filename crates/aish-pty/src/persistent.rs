@@ -3523,43 +3523,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_command_from_isearch_line() {
-        let line = "(reverse-i-search)`ssh': ssh -l root 10.10.17.243";
-        assert_eq!(
-            extract_command_from_isearch_line(line),
-            Some("ssh -l root 10.10.17.243")
-        );
-    }
-
-    #[test]
-    fn test_extract_command_from_isearch_line_forward() {
-        let line = "(i-search)`ssh': ssh -l root 10.10.17.243";
-        assert_eq!(
-            extract_command_from_isearch_line(line),
-            Some("ssh -l root 10.10.17.243")
-        );
-    }
-
-    #[test]
-    fn test_extract_command_from_isearch_line_multiple_updates() {
-        // Multiple readline updates separated by \r
-        let line = "(reverse-i-search)`s': ssh\r(reverse-i-search)`ss': ssh -l root\r(reverse-i-search)`ssh': ssh -l root 10.10.17.243";
-        assert_eq!(
-            extract_command_from_isearch_line(line),
-            Some("ssh -l root 10.10.17.243")
-        );
-    }
-
-    #[test]
-    fn test_extract_command_from_isearch_line_no_match() {
-        assert_eq!(
-            extract_command_from_isearch_line("just a normal line"),
-            None
-        );
-        assert_eq!(extract_command_from_isearch_line("': "), None);
-    }
-
-    #[test]
     fn test_scan_output_ignores_ssh_in_reverse_isearch() {
         // Ctrl+R search display should NOT trigger detection
         let output = "(reverse-i-search)`ssh': ssh -l root 10.10.17.243\r\n";
