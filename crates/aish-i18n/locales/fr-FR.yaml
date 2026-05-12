@@ -187,6 +187,8 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "Impossible de determiner la commande correcte"
     retry_hint: "Tapez ';' pour indiquer a l'IA ce que vous voulez faire, elle vous aidera a trouver la bonne commande"
+  nl_detection:
+    confirm_ask_ai: "Cela ressemble à une question en langage naturel. Demander à l'IA ? (Y/n)"
   error:
     execution_error: "❌ Erreur pendant l'execution : {error}"
     pty_decode_error: "Erreur de decodage de sortie PTY detectee : {error}"

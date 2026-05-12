@@ -187,6 +187,8 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "正しいコマンドを特定できませんでした"
     retry_hint: "';' を入力して AI に指示すると、適切なコマンドを探します"
+  nl_detection:
+    confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
   error:
     execution_error: "❌ 実行中にエラーが発生しました: {error}"
     pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
