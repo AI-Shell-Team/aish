@@ -418,6 +418,9 @@ shell:
     no_valid_command: "Unable to determine correct command"
     retry_hint: "Type ';' to tell AI what you want to do, and it will help find the right command"
 
+  nl_detection:
+    confirm_ask_ai: "This looks like a natural language question. Ask AI? (Y/n)"
+
   error:
     execution_error: "❌ Error during execution: {error}"
     pty_decode_error: "Caught PTY output decode error: {error}"
