@@ -129,7 +129,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: live-smoke-diagnostics-${{ github.run_id }}
-          path: build/pytest-live-smoke
+          path: build/pytest-live-smoke/**/live-smoke/diagnostics/**
           if-no-files-found: ignore
 
       - name: Write workflow summary
