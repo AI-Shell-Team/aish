@@ -81,7 +81,7 @@ const NL_KEYWORDS: &[&str] = &[
     "current", "local", "remote", "global", "active", "available", "running",
     "stopped", "hidden", "empty", "large", "small", "new", "old", "latest",
     "previous", "recent", "total", "free", "used", "size", "name", "type",
-    "status", "state", "info", "information", "details", "summary", "list",
+    "status", "state", "info", "information", "details", "summary",
     "content", "contents", "text", "line", "lines", "word", "words",
     "number", "numbers", "string", "strings", "value", "values",
     // Filler / grammar
