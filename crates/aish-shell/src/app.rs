@@ -8,15 +8,14 @@ use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
 use aish_llm::{
     langfuse::{LangfuseClient, LangfuseConfig},
-    CancellationToken, ChatMessage, LlmCallbackResult, LlmSession, PreflightSecurityContext,
-    SecurityPanel, SecurityPanelMode,
+    CancellationToken, ChatMessage, LlmCallbackResult, LlmSession,
 };
 use aish_memory::MemoryManager;
+use aish_security::{SecurityManager, SecurityPolicy};
 use aish_session::SessionStore;
 use aish_skills::hotreload::SkillHotReloader;
 use aish_skills::SkillManager;
 use aish_tools::ToolRegistry;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
 use crate::animation::SharedAnimation;
@@ -25,7 +24,6 @@ use crate::input;
 use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
-use crate::security_panel::build_security_panel;
 use crate::types::ShellState;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +106,7 @@ pub struct AishShell {
     pub state: ShellState,
     pub config: ConfigModel,
     pub ai_handler: AiHandler,
+    pub security_manager: SecurityManager,
     pub session_store: Option<SessionStore>,
     pub skill_manager: SkillManager,
     pub skill_hot_reloader: Option<SkillHotReloader>,
@@ -175,9 +174,14 @@ impl AishShell {
             }
         }
 
-        // Register core tools
+        // Initialize security manager (before tool registration)
+        let security_manager = SecurityManager::new(SecurityPolicy::default());
+
+        // Register tools
         let mut tool_registry = ToolRegistry::new();
-        let pty_slot: aish_tools::bash::PtySlot = Arc::new(Mutex::new(None));
+        // Shared PTY slot — will be populated after PersistentPty starts.
+        let pty_slot: aish_tools::bash::PtySlot =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
         let mut bash_tool = aish_tools::bash::BashTool::new();
         bash_tool.set_cancellation_token(llm_session.cancellation_token_arc());
         bash_tool.set_pty_slot(pty_slot.clone());
@@ -452,10 +456,7 @@ impl AishShell {
                         if ttft >= 0.1 {
                             let mut ttft_args = std::collections::HashMap::new();
                             ttft_args.insert("time".to_string(), format!("{:.1}", ttft));
-                            println!(
-                                "\x1b[2m{}\x1b[0m",
-                                aish_i18n::t_with_args("shell.thinking_time", &ttft_args)
-                            );
+                            println!("\x1b[2m{}\x1b[0m", aish_i18n::t_with_args("shell.thinking_time", &ttft_args));
                         }
                         *thinking_start_ref.lock().unwrap() = None;
                     }
@@ -551,20 +552,12 @@ impl AishShell {
                                         if e >= 1.0 {
                                             let mut args = std::collections::HashMap::new();
                                             args.insert("elapsed".to_string(), format!("{:.1}", e));
-                                            format!(
-                                                " {}",
-                                                aish_i18n::t_with_args(
-                                                    "shell.session.thinking_elapsed",
-                                                    &args
-                                                )
-                                            )
+                                            format!(" {}", aish_i18n::t_with_args("shell.session.thinking_elapsed", &args))
                                         } else {
                                             format!(" {}", aish_i18n::t("shell.session.thinking"))
                                         }
                                     })
-                                    .unwrap_or_else(|| {
-                                        format!(" {}", aish_i18n::t("shell.session.thinking"))
-                                    });
+                                    .unwrap_or_else(|| format!(" {}", aish_i18n::t("shell.session.thinking")));
 
                                 let prev = reasoning_lines_displayed_ref.load(Ordering::SeqCst);
                                 let new_count = 1 + display_lines.len();
@@ -698,11 +691,40 @@ impl AishShell {
         *diagnose_event_callback.lock().unwrap() = Some(event_callback);
 
         // Set up confirmation callback for tool approval flow
-        let confirmation_callback: Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync> =
-            Arc::new(|context: &PreflightSecurityContext| {
-                let panel = build_security_panel(context);
-                render_security_panel(&panel);
-                print!("  \x1b[36m{}\x1b[0m ", t("shell.confirm_dialog_question"));
+        let confirmation_callback: Arc<dyn Fn(&aish_llm::PreflightSecurityContext) -> bool + Send + Sync> =
+            Arc::new(|ctx: &aish_llm::PreflightSecurityContext| {
+                let width = std::env::var("COLUMNS")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(80);
+                let border = "─".repeat(width.saturating_sub(4));
+                println!();
+                println!("\x1b[33m╭{}╮\x1b[0m", border);
+                println!(
+                    "\x1b[33m│\x1b[1;33m ⚠  Security Confirmation Required\x1b[0m{}",
+                    pad_to_width("", width.saturating_sub(38))
+                );
+                println!("\x1b[33m│\x1b[0m");
+                println!(
+                    "\x1b[33m│\x1b[0m  \x1b[1;36m{}\x1b[0m   {}",
+                    t("shell.confirm_dialog_tool"),
+                    ctx.tool_name
+                );
+                let reason_lines = wrap_text(&ctx.message, width.saturating_sub(14));
+                println!(
+                    "\x1b[33m│\x1b[0m  \x1b[1;36mReason:\x1b[0m {}",
+                    reason_lines.lines().next().unwrap_or("")
+                );
+                for line in reason_lines.lines().skip(1) {
+                    println!("\x1b[33m│\x1b[0m         {}", line);
+                }
+                println!("\x1b[33m│\x1b[0m");
+                println!(
+                    "\x1b[33m│\x1b[0m  \x1b[36m{}\x1b[0m",
+                    t("shell.confirm_dialog_question")
+                );
+                println!("\x1b[33m╰{}╯\x1b[0m", border);
+                print!("  ");
                 let _ = std::io::stdout().flush();
 
                 let mut answer = String::new();
@@ -713,14 +735,7 @@ impl AishShell {
                 answer == "y" || answer == "yes"
             });
 
-        let security_notice_callback: Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync> =
-            Arc::new(|context: &PreflightSecurityContext| {
-                let panel = build_security_panel(context);
-                render_security_panel(&panel);
-            });
-
         llm_session.set_confirmation_callback(confirmation_callback);
-        llm_session.set_security_notice_callback(security_notice_callback);
 
         // Build AI handler with all subsystems
         let ai_handler = AiHandler::new(
@@ -770,6 +785,7 @@ impl AishShell {
             state,
             config,
             ai_handler,
+            security_manager,
             session_store,
             skill_manager: shell_skill_manager,
             skill_hot_reloader,
@@ -1525,12 +1541,10 @@ impl AishShell {
         let result = {
             let mut pty = self.lock_pty();
             let remote_host = extract_remote_host(command);
-            let ai_cb = Self::build_session_ai_callback(
-                &self.config,
-                &self.animation,
-                remote_host.as_deref(),
-            );
-            pty.send_command_interactive(command, ai_cb)
+            let shared_host = Arc::new(Mutex::new(remote_host.clone()));
+            let ai_cb =
+                Self::build_session_ai_callback(&self.config, &self.animation, shared_host.clone());
+            pty.send_command_interactive(command, ai_cb, Some(shared_host))
         };
         let (exit_code, cwd, output) = match result {
             Ok(result) => result,
@@ -1573,11 +1587,11 @@ impl AishShell {
         if !self.lock_pty().is_running() {
             return;
         }
-        let _ = self.pty.lock().unwrap().execute_command(
-            command,
-            std::time::Duration::from_secs(5),
-            None,
-        );
+        let _ = self
+            .pty
+            .lock()
+            .unwrap()
+            .execute_command(command, std::time::Duration::from_secs(5), None);
     }
 
     /// Restart the PTY session (e.g., after bash exits or crashes).
@@ -1786,7 +1800,7 @@ impl AishShell {
             .pty
             .lock()
             .unwrap()
-            .send_command_interactive(segment, None)
+            .send_command_interactive(segment, None, None)
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
@@ -1828,6 +1842,62 @@ impl AishShell {
         }
     }
 
+    /// Create a HostNoteTool with shared host state for SSH sessions.
+    fn make_host_note_tool(
+        current_host: Arc<Mutex<Option<String>>>,
+    ) -> Box<dyn aish_llm::Tool> {
+        Box::new(aish_tools::HostNoteTool::new(
+            {
+                let h = current_host.clone();
+                Box::new(move |content: &str| {
+                    let host = match h.lock().unwrap().clone() {
+                        Some(h) if !h.is_empty() => h,
+                        _ => return "No active remote host.".to_string(),
+                    };
+                    let mut profile = aish_hosts::get_or_create_profile(&host);
+                    let id = profile.add_note(content.to_string());
+                    let _ = aish_hosts::save_profile(&profile);
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("id".to_string(), id.to_string());
+                    t_with_args("tools.host_note.stored", &args)
+                })
+            },
+            {
+                let h = current_host.clone();
+                Box::new(move || {
+                    let host = match h.lock().unwrap().clone() {
+                        Some(h) if !h.is_empty() => h,
+                        _ => return Vec::new(),
+                    };
+                    let profile = aish_hosts::get_or_create_profile(&host);
+                    profile.notes.iter().map(|n| aish_tools::HostNoteEntry {
+                        id: n.id,
+                        content: n.content.clone(),
+                    }).collect()
+                })
+            },
+            {
+                let h = current_host.clone();
+                Box::new(move |keyword: &str| {
+                    let host = match h.lock().unwrap().clone() {
+                        Some(h) if !h.is_empty() => h,
+                        _ => return "No active remote host.".to_string(),
+                    };
+                    let mut profile = aish_hosts::get_or_create_profile(&host);
+                    let removed = profile.remove_notes(keyword);
+                    let _ = aish_hosts::save_profile(&profile);
+                    if removed > 0 {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("count".to_string(), removed.to_string());
+                        t_with_args("tools.host_note.forgot", &args)
+                    } else {
+                        t("tools.host_note.forgot_none")
+                    }
+                })
+            },
+        ))
+    }
+
     /// Build an AI callback for session commands (SSH, telnet).
     /// Uses the same oracle prompt as local aish (with remote host context),
     /// streaming output, thinking animation, and ShellRenderer for display.
@@ -1845,6 +1915,7 @@ impl AishShell {
         original_question: &str,
         animation: &Arc<crate::animation::SharedAnimation>,
         history: &Arc<Mutex<Vec<ChatMessage>>>,
+        shared_host: Arc<Mutex<Option<String>>>,
     ) -> Box<aish_pty::FollowupCallback> {
         let api_base_f = api_base.to_string();
         let api_key_f = api_key.to_string();
@@ -1853,6 +1924,7 @@ impl AishShell {
         let question_f = original_question.to_string();
         let anim_f = animation.clone();
         let history_f = history.clone();
+        let shared_host_f = shared_host.clone();
 
         Box::new(move |output: &str| -> Option<aish_pty::AiResponse> {
             let followup_prompt = format!(
@@ -1867,7 +1939,8 @@ impl AishShell {
 
             // Channel for ask_user communication
             let (event_tx, event_rx) = std::sync::mpsc::channel::<aish_pty::AiEvent>();
-            let (answer_tx, answer_rx) = std::sync::mpsc::channel::<aish_pty::AskUserAnswer>();
+            let (answer_tx, answer_rx) =
+                std::sync::mpsc::channel::<aish_pty::AskUserAnswer>();
 
             // Done signal: LLM thread sends when all rendering is complete.
             let (llm_done_tx, llm_done_rx) = std::sync::mpsc::channel::<()>();
@@ -1877,10 +1950,10 @@ impl AishShell {
                 std::sync::mpsc::channel::<std::sync::Arc<CancellationToken>>();
             let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let cancelled_cb = cancelled.clone();
+            let cancelled_fu = cancelled.clone();
 
             // Shared reasoning state for cleanup after cancellation
-            let reasoning_active_main =
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reasoning_active_main = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let reasoning_lines_main = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let reasoning_active_cb = reasoning_active_main.clone();
             let reasoning_lines_cb = reasoning_lines_main.clone();
@@ -1899,6 +1972,7 @@ impl AishShell {
             let followup_prompt_th = followup_prompt.clone();
             let question_th = question_f.clone();
             let conversation_history_th = history_f.clone();
+            let shared_host_th_f = shared_host_f.clone();
 
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
@@ -1917,195 +1991,152 @@ impl AishShell {
                     }
                 };
                 let mut session = LlmSession::new(
-                    &api_base_th,
-                    &api_key_th,
-                    &model_th,
-                    temperature,
-                    max_tokens,
+                    &api_base_th, &api_key_th, &model_th,
+                    temperature, max_tokens,
                 );
                 // Send cancellation token to main thread
                 let _ = token_tx.send(session.cancellation_token_arc());
                 let anim = anim_th.clone();
-                let reasoning_active = reasoning_active_cb.clone();
-                let reasoning_frame = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let reasoning_lines_displayed = reasoning_lines_cb.clone();
-                let reasoning_buf = std::sync::Mutex::new(String::new());
-                let thinking_start_followup =
-                    std::sync::Arc::new(std::sync::Mutex::new(Some(std::time::Instant::now())));
-                session.set_event_callback(std::sync::Arc::new(move |event| {
-                    // Helper: clear reasoning overlay from terminal
-                    let clear_reasoning = || {
-                        if reasoning_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                            let prev = reasoning_lines_displayed
-                                .swap(0, std::sync::atomic::Ordering::SeqCst);
-                            if prev > 0 {
-                                use std::io::Write;
-                                print!("\x1b[{}A", prev);
-                                for _ in 0..prev {
-                                    print!("\r\x1b[K\n");
-                                }
-                                print!("\x1b[{}A", prev);
-                                let _ = std::io::stdout().flush();
-                            }
-                            reasoning_buf.lock().unwrap().clear();
-                        }
-                    };
-                    // Bail out if cancelled
-                    if cancelled_cb.load(std::sync::atomic::Ordering::SeqCst) {
-                        anim.stop();
-                        clear_reasoning();
-                        return None;
-                    }
-                    use aish_core::LlmEventType;
-                    match event.event_type {
-                        LlmEventType::GenerationStart => {
-                            anim.stop();
-                            reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
-                            reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);
-                            reasoning_lines_displayed.store(0, std::sync::atomic::Ordering::SeqCst);
-                            reasoning_buf.lock().unwrap().clear();
-                            anim.start(&t("shell.status.thinking"));
-                        }
-                        LlmEventType::GenerationEnd => {
-                            anim.stop();
-                            clear_reasoning();
-                        }
-                        LlmEventType::ContentDelta => {
-                            if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
-                                if !delta.is_empty() {
-                                    anim.stop();
-                                    clear_reasoning();
-                                }
-                            }
-                        }
-                        LlmEventType::ReasoningDelta => {
-                            if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
-                                if !delta.is_empty() {
-                                    anim.stop();
-                                    if !reasoning_active.load(std::sync::atomic::Ordering::SeqCst) {
-                                        reasoning_active
-                                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                                    }
-                                    let mut buf = reasoning_buf.lock().unwrap();
-                                    buf.push_str(delta);
-                                    let all_lines: Vec<&str> =
-                                        buf.lines().filter(|l| !l.trim().is_empty()).collect();
-                                    let display_lines: Vec<&str> = all_lines
-                                        .iter()
-                                        .rev()
-                                        .take(2)
-                                        .collect::<Vec<_>>()
-                                        .into_iter()
-                                        .rev()
-                                        .copied()
-                                        .collect();
-                                    let max_cols = 76usize;
-                                    let frame = reasoning_frame
-                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                    let spinner = DOTS_FRAMES[frame % DOTS_FRAMES.len()];
-                                    let elapsed_str = thinking_start_followup
-                                        .lock()
-                                        .unwrap()
-                                        .map(|s| {
-                                            let e = s.elapsed().as_secs_f64();
-                                            if e >= 1.0 {
-                                                let mut args = std::collections::HashMap::new();
-                                                args.insert(
-                                                    "elapsed".to_string(),
-                                                    format!("{:.1}", e),
-                                                );
-                                                format!(
-                                                    " {}",
-                                                    aish_i18n::t_with_args(
-                                                        "shell.session.thinking_elapsed",
-                                                        &args
-                                                    )
-                                                )
-                                            } else {
-                                                format!(
-                                                    " {}",
-                                                    aish_i18n::t("shell.session.thinking")
-                                                )
-                                            }
-                                        })
-                                        .unwrap_or_else(|| {
-                                            format!(" {}", aish_i18n::t("shell.session.thinking"))
-                                        });
-                                    let prev = reasoning_lines_displayed
-                                        .load(std::sync::atomic::Ordering::SeqCst);
-                                    let new_count = 1 + display_lines.len();
-                                    if prev > 0 {
-                                        print!("\x1b[{}A", prev);
-                                    }
-                                    if display_lines.is_empty() {
-                                        print!(
-                                            "\r\x1b[K\x1b[90m{}{}...\x1b[0m\n",
-                                            spinner, elapsed_str
-                                        );
-                                    } else {
-                                        print!(
-                                            "\r\x1b[K\x1b[90m{}{}\x1b[0m\n",
-                                            spinner, elapsed_str
-                                        );
-                                    }
-                                    for line in &display_lines {
-                                        let truncated =
-                                            truncate_display_width(line.trim(), max_cols);
-                                        print!("\r\x1b[K\x1b[90m{}\x1b[0m\n", truncated);
-                                    }
-                                    for _ in new_count..prev {
-                                        print!("\r\x1b[K\n");
-                                    }
-                                    if prev > new_count {
-                                        print!("\x1b[{}A", prev - new_count);
-                                    }
-                                    reasoning_lines_displayed
-                                        .store(new_count, std::sync::atomic::Ordering::SeqCst);
-                                    reasoning_active
-                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    let reasoning_active = reasoning_active_cb.clone();
+                    let reasoning_frame = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let reasoning_lines_displayed = reasoning_lines_cb.clone();
+                    let reasoning_buf = std::sync::Mutex::new(String::new());
+                    let thinking_start_followup = std::sync::Arc::new(std::sync::Mutex::new(
+                        Some(std::time::Instant::now())
+                    ));
+                    session.set_event_callback(std::sync::Arc::new(move |event| {
+                        // Helper: clear reasoning overlay from terminal
+                        let clear_reasoning = || {
+                            if reasoning_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                                let prev = reasoning_lines_displayed.swap(0, std::sync::atomic::Ordering::SeqCst);
+                                if prev > 0 {
+                                    use std::io::Write;
+                                    print!("\x1b[{}A", prev);
+                                    for _ in 0..prev { print!("\r\x1b[K\n"); }
+                                    print!("\x1b[{}A", prev);
                                     let _ = std::io::stdout().flush();
                                 }
+                                reasoning_buf.lock().unwrap().clear();
                             }
-                        }
-                        LlmEventType::ReasoningEnd => {
-                            clear_reasoning();
-                        }
-                        LlmEventType::Error => {
+                        };
+                        // Bail out if cancelled
+                        if cancelled_cb.load(std::sync::atomic::Ordering::SeqCst) {
                             anim.stop();
                             clear_reasoning();
-                            let err = event
-                                .data
-                                .get("error")
-                                .or_else(|| event.data.get("error_message"))
-                                .and_then(|e| e.as_str())
-                                .unwrap_or("Unknown error");
-                            let msg = format!("\r\n\x1b[31mFollowup LLM error: {}\x1b[0m\r\n", err);
-                            unsafe {
-                                nix::libc::write(
-                                    nix::libc::STDOUT_FILENO,
-                                    msg.as_ptr() as *const nix::libc::c_void,
-                                    msg.len(),
-                                );
-                            }
+                            return None;
                         }
-                        _ => {}
-                    }
-                    None
-                }));
+                        use aish_core::LlmEventType;
+                        match event.event_type {
+                            LlmEventType::GenerationStart => {
+                                anim.stop();
+                                reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                                reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);
+                                reasoning_lines_displayed.store(0, std::sync::atomic::Ordering::SeqCst);
+                                reasoning_buf.lock().unwrap().clear();
+                                anim.start(&t("shell.status.thinking"));
+                            }
+                            LlmEventType::GenerationEnd => {
+                                anim.stop();
+                                clear_reasoning();
+                            }
+                            LlmEventType::ContentDelta => {
+                                if let Some(delta) =
+                                    event.data.get("delta").and_then(|d| d.as_str())
+                                {
+                                    if !delta.is_empty() {
+                                        anim.stop();
+                                        clear_reasoning();
+                                    }
+                                }
+                            }
+                            LlmEventType::ReasoningDelta => {
+                                if let Some(delta) =
+                                    event.data.get("delta").and_then(|d| d.as_str())
+                                {
+                                    if !delta.is_empty() {
+                                        anim.stop();
+                                        if !reasoning_active.load(std::sync::atomic::Ordering::SeqCst) {
+                                            reasoning_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        }
+                                        let mut buf = reasoning_buf.lock().unwrap();
+                                        buf.push_str(delta);
+                                        let all_lines: Vec<&str> =
+                                            buf.lines().filter(|l| !l.trim().is_empty()).collect();
+                                        let display_lines: Vec<&str> = all_lines
+                                            .iter().rev().take(2)
+                                            .collect::<Vec<_>>().into_iter().rev().copied().collect();
+                                        let max_cols = 76usize;
+                                        let frame = reasoning_frame.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        let spinner = DOTS_FRAMES[frame % DOTS_FRAMES.len()];
+                                        let elapsed_str = thinking_start_followup.lock().unwrap()
+                                            .map(|s| {
+                                                let e = s.elapsed().as_secs_f64();
+                                                if e >= 1.0 {
+                                                    let mut args = std::collections::HashMap::new();
+                                                    args.insert("elapsed".to_string(), format!("{:.1}", e));
+                                                    format!(" {}", aish_i18n::t_with_args("shell.session.thinking_elapsed", &args))
+                                                } else {
+                                                    format!(" {}", aish_i18n::t("shell.session.thinking"))
+                                                }
+                                            })
+                                            .unwrap_or_else(|| format!(" {}", aish_i18n::t("shell.session.thinking")));
+                                        let prev = reasoning_lines_displayed.load(std::sync::atomic::Ordering::SeqCst);
+                                        let new_count = 1 + display_lines.len();
+                                        if prev > 0 { print!("\x1b[{}A", prev); }
+                                        if display_lines.is_empty() {
+                                            print!("\r\x1b[K\x1b[90m{}{}...\x1b[0m\n", spinner, elapsed_str);
+                                        } else {
+                                            print!("\r\x1b[K\x1b[90m{}{}\x1b[0m\n", spinner, elapsed_str);
+                                        }
+                                        for line in &display_lines {
+                                            let truncated = truncate_display_width(line.trim(), max_cols);
+                                            print!("\r\x1b[K\x1b[90m{}\x1b[0m\n", truncated);
+                                        }
+                                        for _ in new_count..prev { print!("\r\x1b[K\n"); }
+                                        if prev > new_count { print!("\x1b[{}A", prev - new_count); }
+                                        reasoning_lines_displayed.store(new_count, std::sync::atomic::Ordering::SeqCst);
+                                        reasoning_active.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                            }
+                            LlmEventType::ReasoningEnd => {
+                                clear_reasoning();
+                            }
+                            LlmEventType::Error => {
+                                anim.stop();
+                                clear_reasoning();
+                                let err = event.data.get("error")
+                                    .or_else(|| event.data.get("error_message"))
+                                    .and_then(|e| e.as_str())
+                                    .unwrap_or("Unknown error");
+                                let msg = format!(
+                                    "\r\n\x1b[31mFollowup LLM error: {}\x1b[0m\r\n", err
+                                );
+                                unsafe {
+                                    nix::libc::write(
+                                        nix::libc::STDOUT_FILENO,
+                                        msg.as_ptr() as *const nix::libc::c_void,
+                                        msg.len(),
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                        None
+                    }));
                 // Register channel-based tools for SSH followup
-                session.register_tool(Box::new(aish_tools::ChannelBashTool::new(event_tx.clone())));
-                session.register_tool(Box::new(aish_tools::ChannelAskUserTool::new(
-                    event_tx.clone(),
-                    answer_rx,
-                )));
+                session.register_tool(Box::new(
+                    aish_tools::ChannelBashTool::new(event_tx.clone()),
+                ));
+                session.register_tool(Box::new(
+                    aish_tools::ChannelAskUserTool::new(event_tx.clone(), answer_rx),
+                ));
+                // Register host_note tool for SSH followup sessions
+                session.register_tool(Self::make_host_note_tool(shared_host_th_f.clone()));
                 let result = rt.block_on(async {
                     session
-                        .process_input(
-                            &followup_prompt_th,
-                            &history_snapshot,
-                            Some(&system_msg_th),
-                            true,
-                        )
+                        .process_input(&followup_prompt_th, &history_snapshot, Some(&system_msg_th), true)
                         .await
                 });
                 let text = result.ok();
@@ -2118,9 +2149,7 @@ impl AishShell {
                         h.push(ChatMessage::assistant(t));
                     }
                     let excess = h.len().saturating_sub(50);
-                    if excess > 0 {
-                        h.drain(..excess);
-                    }
+                    if excess > 0 { h.drain(..excess); }
                 }
 
                 // Render analysis
@@ -2138,15 +2167,9 @@ impl AishShell {
                 let next_cmd = text.as_ref().and_then(|t| extract_bash_command(t));
                 let ai_response = if next_cmd.is_some() {
                     let next_followup = Self::build_followup_closure(
-                        &api_base_th,
-                        &api_key_th,
-                        &model_th,
-                        temperature,
-                        max_tokens,
-                        &system_msg_th,
-                        &question_th,
-                        &anim_th,
-                        &conversation_history_th,
+                        &api_base_th, &api_key_th, &model_th, temperature, max_tokens,
+                        &system_msg_th, &question_th, &anim_th, &conversation_history_th,
+                        shared_host_th_f.clone(),
                     );
                     Some(aish_pty::AiResponse {
                         command: next_cmd,
@@ -2162,9 +2185,7 @@ impl AishShell {
             });
 
             // Wait for result with Ctrl+C cancellation support
-            let session_cancel_token = token_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .ok();
+            let session_cancel_token = token_rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
             let result = loop {
                 match event_rx.try_recv() {
                     Ok(aish_pty::AiEvent::Done(ai_response)) => {
@@ -2184,20 +2205,29 @@ impl AishShell {
                             )),
                         });
                     }
-                    Ok(aish_pty::AiEvent::BashExec {
-                        command,
-                        output_sender,
-                    }) => {
+                    Ok(aish_pty::AiEvent::BashExec { command, output_sender }) => {
                         let osender = output_sender.clone();
                         let done_rx = std::sync::Mutex::new(llm_done_rx);
+                        let cancelled_f = cancelled_fu.clone();
                         let followup: Box<aish_pty::FollowupCallback> = Box::new(
                             move |captured_output: &str| -> Option<aish_pty::AiResponse> {
+                                // When the forwarding loop hard-aborts a
+                                // followup (Ctrl+C during bashexec), it
+                                // passes "Command cancelled by user".  Set
+                                // the cancelled flag so the LLM event
+                                // callback stops writing to stdout while
+                                // the forwarding loop resumes shell I/O.
+                                if captured_output.contains("cancelled by user") {
+                                    cancelled_f.store(
+                                        true,
+                                        std::sync::atomic::Ordering::SeqCst,
+                                    );
+                                }
                                 let _ = osender.send(captured_output.to_string());
                                 // Block until LLM thread finishes all rendering
-                                let _ = done_rx
-                                    .lock()
-                                    .unwrap()
-                                    .recv_timeout(std::time::Duration::from_secs(120));
+                                let _ = done_rx.lock().unwrap().recv_timeout(
+                                    std::time::Duration::from_secs(120),
+                                );
                                 None
                             },
                         );
@@ -2217,10 +2247,7 @@ impl AishShell {
                     nix::libc::FD_ZERO(&mut rfds);
                     nix::libc::FD_SET(nix::libc::STDIN_FILENO, &mut rfds);
                 }
-                let mut tv = nix::libc::timeval {
-                    tv_sec: 0,
-                    tv_usec: 100_000,
-                };
+                let mut tv = nix::libc::timeval { tv_sec: 0, tv_usec: 100_000 };
                 let sel = unsafe {
                     nix::libc::select(
                         nix::libc::STDIN_FILENO + 1,
@@ -2280,9 +2307,7 @@ impl AishShell {
                 if prev > 0 {
                     use std::io::Write;
                     print!("\x1b[{}A", prev);
-                    for _ in 0..prev {
-                        print!("\r\x1b[K\n");
-                    }
+                    for _ in 0..prev { print!("\r\x1b[K\n"); }
                     print!("\x1b[{}A", prev);
                     reasoning_lines_main.store(0, std::sync::atomic::Ordering::SeqCst);
                     let _ = std::io::stdout().flush();
@@ -2296,7 +2321,7 @@ impl AishShell {
     fn build_session_ai_callback(
         config: &aish_config::ConfigModel,
         animation: &Arc<crate::animation::SharedAnimation>,
-        remote_host: Option<&str>,
+        shared_host: Arc<Mutex<Option<String>>>,
     ) -> Option<Box<aish_pty::AiCallback>> {
         let api_base = config.api_base.clone();
         let api_key = config.api_key.clone();
@@ -2318,36 +2343,65 @@ impl AishShell {
         vars.insert("system_info".to_string(), String::new());
         vars.insert("memory_context".to_string(), String::new());
         vars.insert("skill_list".to_string(), String::new());
-        let mut system_msg = prompt_manager.render("oracle", &vars);
-        if let Some(host) = remote_host {
-            system_msg.push_str(&format!(
-                "\n\n**SSH Remote Session Context (overrides tool list above):** \
-                 \n- The user is connected to a remote host **{host}** via SSH. \
-                 \n- **Available tools:** `bash` and `ask_user` only. \
-                 \n- **DO NOT** call python_exec, read_file, write_file, edit_file, \
-                 grep, glob, or any other tool — they do NOT exist in this session. \
-                 \n- `bash` tool runs commands on the remote host. The command will be \
-                 shown to the user for confirmation before execution. After execution, \
-                 the output will be automatically returned to you for analysis. \
-                 \n- `ask_user` asks the user a clarifying question (text_input or choice). \
-                 \n- **For reading/writing/searching files:** use `bash` tool with \
-                 `cat`, `head`, `tail`, `echo`, `tee`, `grep`, `find`, `awk`, etc. \
-                 \n- When the user asks to run a command, execute it, or check something, \
-                 call the `bash` tool directly — do NOT just show the command in a code block."
-            ));
-        }
+        // Static base prompt — SSH context and dossier are built dynamically
+        // inside the closure so nested SSH host changes are reflected.
+        let system_msg_base = prompt_manager.render("oracle", &vars);
+
+        // Shared host reference — updated by the forwarding loop when
+        // nested SSH connections are detected or disconnected.
+        let dossier_host = shared_host.clone();
 
         // Pre-compute static values for error correction template
         let ec_username = crate::ai_handler::whoami();
         let ec_os_info = crate::ai_handler::os_info();
-        let remote_host_owned = remote_host.map(|s| s.to_string());
-        let conversation_history: Arc<Mutex<Vec<ChatMessage>>> = Arc::new(Mutex::new(Vec::new()));
+        let conversation_history: Arc<Mutex<Vec<ChatMessage>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         Some(Box::new(move |query: aish_pty::AiQuery| {
             // Detect error correction mode: user typed just `;` with no
             // question after a command failure.  In this case, the recent
             // output contains the error and we use a dedicated prompt.
-            let is_error_correction = query.question.is_empty() && !query.recent_output.is_empty();
+            let is_error_correction =
+                query.question.is_empty() && !query.recent_output.is_empty();
+
+            // Build SSH context + dossier dynamically using the current host.
+            // This ensures nested SSH host changes are reflected immediately.
+            let current_host = dossier_host.lock().unwrap().clone();
+            let mut system_msg_with_dossier = system_msg_base.clone();
+            if let Some(ref host) = current_host {
+                system_msg_with_dossier.push_str(&format!(
+                    "\n\n**SSH Remote Session Context (overrides tool list above):** \
+                     \n- The user is connected to a remote host **{host}** via SSH. \
+                     \n- **Available tools:** `bash`, `ask_user`, and `host_note`. \
+                     \n- **DO NOT** call python_exec, read_file, write_file, edit_file, \
+                     grep, glob, or any other tool — they do NOT exist in this session. \
+                     \n- `bash` tool runs commands on the remote host. The command will be \
+                     shown to the user for confirmation before execution. After execution, \
+                     the output will be automatically returned to you for analysis. \
+                     \n- `ask_user` asks the user a clarifying question (text_input or choice). \
+                     \n- `host_note` tool saves, lists, or deletes notes about this remote host. \
+                     When the user shares durable facts about this server (deployed services, \
+                     known issues, key paths, assets, important warnings), \
+                     proactively call `host_note` with action `store` to save them. These notes \
+                     persist across sessions — next time the user connects to this host, you will \
+                     automatically see them in the host dossier above. \
+                     Do NOT save transient info like current directory, running process PIDs, \
+                     or temporary file contents. \
+                     \n- **For reading/writing/searching files:** use `bash` tool with \
+                     `cat`, `head`, `tail`, `echo`, `tee`, `grep`, `find`, `awk`, etc. \
+                     \n- When the user asks to run a command, execute it, or check something, \
+                     call the `bash` tool directly — do NOT just show the command in a code block."
+                ));
+
+                // Load host dossier on each invocation so notes added via
+                // ;remember during this session are visible immediately.
+                if let Some(profile) = aish_hosts::load_profile(host) {
+                    let dossier = profile.format_for_prompt();
+                    if !dossier.is_empty() {
+                        system_msg_with_dossier.push_str(&format!("\n\n{}", dossier));
+                    }
+                }
+            }
 
             let (context, effective_system_msg) = if is_error_correction {
                 // Use aish's cmd_error template (same as local aish error correction)
@@ -2381,8 +2435,8 @@ impl AishShell {
                 ec_vars.insert("stderr_section".to_string(), stderr_section);
                 let mut sys = pm.render("cmd_error", &ec_vars);
 
-                // Append SSH host context
-                if let Some(ref host) = remote_host_owned {
+                // Append SSH host context (use current dynamic host)
+                if let Some(ref host) = current_host {
                     sys.push_str(&format!(
                         "\n\n**Important:** The command was executed on remote host **{}** via SSH.",
                         host
@@ -2398,24 +2452,26 @@ impl AishShell {
                 );
                 (ctx, sys)
             } else if query.recent_output.is_empty() {
-                (query.question.clone(), system_msg.clone())
+                (query.question.clone(), system_msg_with_dossier.clone())
             } else {
                 // Put user question first, recent output as reference context
                 let ctx = format!(
                     "{}\n\nFor reference, recent terminal output:\n{}",
                     query.question, query.recent_output
                 );
-                (ctx, system_msg.clone())
+                (ctx, system_msg_with_dossier.clone())
             };
 
             // Start thinking spinner
             animation.start(&t("shell.status.thinking"));
-            let thinking_start =
-                std::sync::Arc::new(std::sync::Mutex::new(Some(std::time::Instant::now())));
+            let thinking_start = std::sync::Arc::new(std::sync::Mutex::new(
+                Some(std::time::Instant::now())
+            ));
 
             // Channel for ask_user communication between LLM thread and callback
             let (event_tx, event_rx) = std::sync::mpsc::channel::<aish_pty::AiEvent>();
-            let (answer_tx, answer_rx) = std::sync::mpsc::channel::<aish_pty::AskUserAnswer>();
+            let (answer_tx, answer_rx) =
+                std::sync::mpsc::channel::<aish_pty::AskUserAnswer>();
 
             // Channel to send the session's cancellation token back to the
             // main thread so Ctrl+C can cancel the in-flight LLM request.
@@ -2423,6 +2479,7 @@ impl AishShell {
                 std::sync::mpsc::channel::<std::sync::Arc<CancellationToken>>();
             let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let cancelled_t = cancelled.clone();
+            let cancelled_fu = cancelled.clone();
 
             // Done signal: LLM thread sends when all rendering is complete.
             // The followup closure waits on this so the forwarding loop only
@@ -2432,8 +2489,7 @@ impl AishShell {
             // Shared reasoning state — needed by both the LLM event callback
             // (inside the thread) and the main thread (to clear residual
             // reasoning lines before ask_user / normal completion).
-            let reasoning_active_main =
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let reasoning_active_main = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let reasoning_lines_main = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let reasoning_active_cb = reasoning_active_main.clone();
             let reasoning_lines_cb = reasoning_lines_main.clone();
@@ -2454,6 +2510,7 @@ impl AishShell {
             let animation_th = animation.clone();
             let conversation_history_th = conversation_history.clone();
             let system_msg_th = effective_system_msg.clone();
+            let shared_host_th = dossier_host.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2473,8 +2530,7 @@ impl AishShell {
                     let anim = animation_t.clone();
                     let cancelled_cb = cancelled_t.clone();
                     let reasoning_active = reasoning_active_cb.clone();
-                    let reasoning_frame =
-                        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let reasoning_frame = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                     let reasoning_lines_displayed = reasoning_lines_cb.clone();
                     let reasoning_buf = std::sync::Mutex::new(String::new());
                     let thinking_start_r = thinking_start_thread.clone();
@@ -2482,14 +2538,11 @@ impl AishShell {
                         // Helper: clear reasoning overlay from terminal
                         let clear_reasoning = || {
                             if reasoning_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                                let prev = reasoning_lines_displayed
-                                    .swap(0, std::sync::atomic::Ordering::SeqCst);
+                                let prev = reasoning_lines_displayed.swap(0, std::sync::atomic::Ordering::SeqCst);
                                 if prev > 0 {
                                     use std::io::Write;
                                     print!("\x1b[{}A", prev);
-                                    for _ in 0..prev {
-                                        print!("\r\x1b[K\n");
-                                    }
+                                    for _ in 0..prev { print!("\r\x1b[K\n"); }
                                     print!("\x1b[{}A", prev);
                                     let _ = std::io::stdout().flush();
                                 }
@@ -2508,8 +2561,7 @@ impl AishShell {
                                 anim.stop();
                                 reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);
-                                reasoning_lines_displayed
-                                    .store(0, std::sync::atomic::Ordering::SeqCst);
+                                reasoning_lines_displayed.store(0, std::sync::atomic::Ordering::SeqCst);
                                 reasoning_buf.lock().unwrap().clear();
                                 anim.start(&t("shell.status.thinking"));
                             }
@@ -2533,92 +2585,47 @@ impl AishShell {
                                 {
                                     if !delta.is_empty() {
                                         anim.stop();
-                                        if !reasoning_active
-                                            .load(std::sync::atomic::Ordering::SeqCst)
-                                        {
-                                            reasoning_active
-                                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        if !reasoning_active.load(std::sync::atomic::Ordering::SeqCst) {
+                                            reasoning_active.store(true, std::sync::atomic::Ordering::SeqCst);
                                         }
                                         let mut buf = reasoning_buf.lock().unwrap();
                                         buf.push_str(delta);
                                         let all_lines: Vec<&str> =
                                             buf.lines().filter(|l| !l.trim().is_empty()).collect();
                                         let display_lines: Vec<&str> = all_lines
-                                            .iter()
-                                            .rev()
-                                            .take(2)
-                                            .collect::<Vec<_>>()
-                                            .into_iter()
-                                            .rev()
-                                            .copied()
-                                            .collect();
+                                            .iter().rev().take(2)
+                                            .collect::<Vec<_>>().into_iter().rev().copied().collect();
                                         let max_cols = 76usize;
-                                        let frame = reasoning_frame
-                                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        let frame = reasoning_frame.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                         let spinner = DOTS_FRAMES[frame % DOTS_FRAMES.len()];
-                                        let elapsed_str = thinking_start_r
-                                            .lock()
-                                            .unwrap()
+                                        let elapsed_str = thinking_start_r.lock().unwrap()
                                             .map(|s| {
                                                 let e = s.elapsed().as_secs_f64();
                                                 if e >= 1.0 {
                                                     let mut args = std::collections::HashMap::new();
-                                                    args.insert(
-                                                        "elapsed".to_string(),
-                                                        format!("{:.1}", e),
-                                                    );
-                                                    format!(
-                                                        " {}",
-                                                        aish_i18n::t_with_args(
-                                                            "shell.session.thinking_elapsed",
-                                                            &args
-                                                        )
-                                                    )
+                                                    args.insert("elapsed".to_string(), format!("{:.1}", e));
+                                                    format!(" {}", aish_i18n::t_with_args("shell.session.thinking_elapsed", &args))
                                                 } else {
-                                                    format!(
-                                                        " {}",
-                                                        aish_i18n::t("shell.session.thinking")
-                                                    )
+                                                    format!(" {}", aish_i18n::t("shell.session.thinking"))
                                                 }
                                             })
-                                            .unwrap_or_else(|| {
-                                                format!(
-                                                    " {}",
-                                                    aish_i18n::t("shell.session.thinking")
-                                                )
-                                            });
-                                        let prev = reasoning_lines_displayed
-                                            .load(std::sync::atomic::Ordering::SeqCst);
+                                            .unwrap_or_else(|| format!(" {}", aish_i18n::t("shell.session.thinking")));
+                                        let prev = reasoning_lines_displayed.load(std::sync::atomic::Ordering::SeqCst);
                                         let new_count = 1 + display_lines.len();
-                                        if prev > 0 {
-                                            print!("\x1b[{}A", prev);
-                                        }
+                                        if prev > 0 { print!("\x1b[{}A", prev); }
                                         if display_lines.is_empty() {
-                                            print!(
-                                                "\r\x1b[K\x1b[90m{}{}...\x1b[0m\n",
-                                                spinner, elapsed_str
-                                            );
+                                            print!("\r\x1b[K\x1b[90m{}{}...\x1b[0m\n", spinner, elapsed_str);
                                         } else {
-                                            print!(
-                                                "\r\x1b[K\x1b[90m{}{}\x1b[0m\n",
-                                                spinner, elapsed_str
-                                            );
+                                            print!("\r\x1b[K\x1b[90m{}{}\x1b[0m\n", spinner, elapsed_str);
                                         }
                                         for line in &display_lines {
-                                            let truncated =
-                                                truncate_display_width(line.trim(), max_cols);
+                                            let truncated = truncate_display_width(line.trim(), max_cols);
                                             print!("\r\x1b[K\x1b[90m{}\x1b[0m\n", truncated);
                                         }
-                                        for _ in new_count..prev {
-                                            print!("\r\x1b[K\n");
-                                        }
-                                        if prev > new_count {
-                                            print!("\x1b[{}A", prev - new_count);
-                                        }
-                                        reasoning_lines_displayed
-                                            .store(new_count, std::sync::atomic::Ordering::SeqCst);
-                                        reasoning_active
-                                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        for _ in new_count..prev { print!("\r\x1b[K\n"); }
+                                        if prev > new_count { print!("\x1b[{}A", prev - new_count); }
+                                        reasoning_lines_displayed.store(new_count, std::sync::atomic::Ordering::SeqCst);
+                                        reasoning_active.store(true, std::sync::atomic::Ordering::SeqCst);
                                         let _ = std::io::stdout().flush();
                                     }
                                 }
@@ -2643,21 +2650,17 @@ impl AishShell {
                     }));
 
                     // Register channel-based tools for SSH sessions
-                    session.register_tool(Box::new(aish_tools::ChannelBashTool::new(
-                        event_tx.clone(),
-                    )));
-                    session.register_tool(Box::new(aish_tools::ChannelAskUserTool::new(
-                        event_tx.clone(),
-                        answer_rx,
-                    )));
+                    session.register_tool(Box::new(
+                        aish_tools::ChannelBashTool::new(event_tx.clone()),
+                    ));
+                    session.register_tool(Box::new(
+                        aish_tools::ChannelAskUserTool::new(event_tx.clone(), answer_rx),
+                    ));
+                    // Register host_note tool for SSH sessions
+                    session.register_tool(Self::make_host_note_tool(shared_host_th.clone()));
 
                     session
-                        .process_input(
-                            &context_for_thread,
-                            &context_messages_t,
-                            Some(&system_msg_t),
-                            true,
-                        )
+                        .process_input(&context_for_thread, &context_messages_t, Some(&system_msg_t), true)
                         .await
                 });
                 if cancelled_t.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2673,16 +2676,15 @@ impl AishShell {
                         h.push(ChatMessage::assistant(response_text));
                     }
                     let excess = h.len().saturating_sub(50);
-                    if excess > 0 {
-                        h.drain(..excess);
-                    }
+                    if excess > 0 { h.drain(..excess); }
                 }
 
                 // Build AiResponse from text
                 let ai_response = match text {
                     Some(ref t) if is_error_correction => {
                         // Render description
-                        let ec_result = crate::ai_handler::parse_error_correction_response(t);
+                        let ec_result =
+                            crate::ai_handler::parse_error_correction_response(t);
                         if let Some(ref desc) = ec_result.description {
                             if !desc.trim().is_empty() {
                                 let _ = std::io::stdout().flush();
@@ -2706,18 +2708,13 @@ impl AishShell {
                             let mut renderer = crate::renderer::ShellRenderer::new();
                             renderer.render_separator();
                             renderer.render_markdown(t.trim());
-                            let elapsed = thinking_start_thread
-                                .lock()
-                                .unwrap()
+                            let elapsed = thinking_start_thread.lock().unwrap()
                                 .map(|s| s.elapsed().as_secs_f64())
                                 .unwrap_or(0.0);
                             if elapsed >= 0.1 {
                                 let mut elapsed_args = std::collections::HashMap::new();
                                 elapsed_args.insert("time".to_string(), format!("{:.1}", elapsed));
-                                println!(
-                                    "\x1b[2m{}\x1b[0m",
-                                    aish_i18n::t_with_args("shell.thinking_time", &elapsed_args)
-                                );
+                                println!("\x1b[2m{}\x1b[0m", aish_i18n::t_with_args("shell.thinking_time", &elapsed_args));
                             }
                             renderer.render_separator();
                             let _ = std::io::stdout().flush();
@@ -2725,15 +2722,10 @@ impl AishShell {
                         let command = extract_bash_command(&t);
                         let followup = command.as_ref().map(|_cmd| {
                             Self::build_followup_closure(
-                                &api_base_th,
-                                &api_key_th,
-                                &model_th,
-                                Some(temperature),
-                                max_tokens,
-                                &system_msg_th,
-                                &query_question_t,
-                                &animation_th,
-                                &conversation_history_th,
+                                &api_base_th, &api_key_th, &model_th,
+                                Some(temperature), max_tokens,
+                                &system_msg_th, &query_question_t, &animation_th, &conversation_history_th,
+                                shared_host_th.clone(),
                             )
                         });
                         Some(aish_pty::AiResponse {
@@ -2761,9 +2753,7 @@ impl AishShell {
                 },
             }
             // Receive the session's cancellation token (sent by the LLM thread)
-            let session_cancel_token = token_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .ok();
+            let session_cancel_token = token_rx.recv_timeout(std::time::Duration::from_secs(5)).ok();
             let cb_event = loop {
                 match event_rx.try_recv() {
                     Ok(aish_pty::AiEvent::Done(ai_response)) => {
@@ -2778,10 +2768,7 @@ impl AishShell {
                             },
                         ));
                     }
-                    Ok(aish_pty::AiEvent::BashExec {
-                        command,
-                        output_sender,
-                    }) => {
+                    Ok(aish_pty::AiEvent::BashExec { command, output_sender }) => {
                         break Some(CallbackEvent::BashExec {
                             command,
                             output_sender,
@@ -2797,29 +2784,14 @@ impl AishShell {
                     nix::libc::FD_ZERO(&mut rfds);
                     nix::libc::FD_SET(nix::libc::STDIN_FILENO, &mut rfds);
                 }
-                let mut tv = nix::libc::timeval {
-                    tv_sec: 0,
-                    tv_usec: 100_000,
-                }; // 100ms
+                let mut tv = nix::libc::timeval { tv_sec: 0, tv_usec: 100_000 }; // 100ms
                 let sel = unsafe {
-                    nix::libc::select(
-                        nix::libc::STDIN_FILENO + 1,
-                        &mut rfds,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        &mut tv,
-                    )
+                    nix::libc::select(nix::libc::STDIN_FILENO + 1, &mut rfds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
                 };
                 if sel > 0 {
                     // Read one byte to check for Ctrl+C
                     let mut byte = [0u8; 1];
-                    if unsafe {
-                        nix::libc::read(
-                            nix::libc::STDIN_FILENO,
-                            byte.as_mut_ptr() as *mut nix::libc::c_void,
-                            1,
-                        )
-                    } == 1
+                    if unsafe { nix::libc::read(nix::libc::STDIN_FILENO, byte.as_mut_ptr() as *mut nix::libc::c_void, 1) } == 1
                         && byte[0] == 0x03
                     {
                         // Ctrl+C pressed — cancel the LLM request
@@ -2831,13 +2803,12 @@ impl AishShell {
                         println!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
                         break None;
                     }
+                    // Non-Ctrl-C byte during AI processing — discard.
+                    // The user shouldn't be typing during AI processing;
+                    // any stray bytes are not recoverable here.
                 }
                 // Check timeout (60s)
-                if thinking_start
-                    .lock()
-                    .unwrap()
-                    .is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(60))
-                {
+                if thinking_start.lock().unwrap().is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(60)) {
                     animation.stop();
                     eprintln!("\x1b[31mLLM timeout (60s)\x1b[0m");
                     break None;
@@ -2854,9 +2825,7 @@ impl AishShell {
                 if prev > 0 {
                     use std::io::Write;
                     print!("\x1b[{}A", prev);
-                    for _ in 0..prev {
-                        print!("\r\x1b[K\n");
-                    }
+                    for _ in 0..prev { print!("\r\x1b[K\n"); }
                     print!("\x1b[{}A", prev);
                     reasoning_lines_main.store(0, std::sync::atomic::Ordering::SeqCst);
                     let _ = std::io::stdout().flush();
@@ -2866,86 +2835,91 @@ impl AishShell {
             // Handle the callback event
             match cb_event {
                 // Ask_user — return response with ask_user channel
-                Some(CallbackEvent::AskUser(request, channel)) => Some(aish_pty::AiResponse {
-                    command: None,
-                    display_text: String::new(),
-                    followup: None,
-                    ask_user: Some((request, channel)),
-                }),
+                Some(CallbackEvent::AskUser(request, channel)) => {
+                    Some(aish_pty::AiResponse {
+                        command: None,
+                        display_text: String::new(),
+                        followup: None,
+                        ask_user: Some((request, channel)),
+                    })
+                }
                 // Bash_exec — return command for execution on remote host,
                 // with multi-round chaining support.
-                Some(CallbackEvent::BashExec {
-                    command,
-                    output_sender,
-                    event_receiver,
-                }) => {
-                    let shared_event_rx =
-                        std::sync::Arc::new(std::sync::Mutex::new(Some(event_receiver)));
-                    let shared_done_rx =
-                        std::sync::Arc::new(std::sync::Mutex::new(Some(llm_done_rx)));
+                Some(CallbackEvent::BashExec { command, output_sender, event_receiver }) => {
+                    let shared_event_rx = std::sync::Arc::new(std::sync::Mutex::new(
+                        Some(event_receiver),
+                    ));
+                    let shared_done_rx = std::sync::Arc::new(std::sync::Mutex::new(
+                        Some(llm_done_rx),
+                    ));
                     let answer_tx_f = answer_tx.clone();
 
                     fn make_chain_followup(
-                        event_rx: std::sync::Arc<
-                            std::sync::Mutex<Option<std::sync::mpsc::Receiver<aish_pty::AiEvent>>>,
-                        >,
-                        done_rx: std::sync::Arc<
-                            std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
-                        >,
+                        event_rx: std::sync::Arc<std::sync::Mutex<
+                            Option<std::sync::mpsc::Receiver<aish_pty::AiEvent>>,
+                        >>,
+                        done_rx: std::sync::Arc<std::sync::Mutex<
+                            Option<std::sync::mpsc::Receiver<()>>,
+                        >>,
                         answer_tx: std::sync::mpsc::Sender<aish_pty::AskUserAnswer>,
                         output_sender: std::sync::mpsc::Sender<String>,
+                        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
                     ) -> Box<aish_pty::FollowupCallback> {
-                        Box::new(
-                            move |captured_output: &str| -> Option<aish_pty::AiResponse> {
-                                let _ = output_sender.send(captured_output.to_string());
+                        Box::new(move |captured_output: &str| -> Option<aish_pty::AiResponse> {
+                            // When the forwarding loop hard-aborts (Ctrl+C
+                            // during bashexec), set the cancelled flag so
+                            // the LLM event callback stops writing to stdout.
+                            if captured_output.contains("cancelled by user") {
+                                cancelled.store(
+                                    true,
+                                    std::sync::atomic::Ordering::SeqCst,
+                                );
+                            }
+                            let _ = output_sender.send(captured_output.to_string());
 
-                                let rx = match event_rx.lock().unwrap().take() {
-                                    Some(rx) => rx,
-                                    None => return None,
-                                };
+                            let rx = match event_rx.lock().unwrap().take() {
+                                Some(rx) => rx,
+                                None => return None,
+                            };
 
-                                match rx.recv_timeout(std::time::Duration::from_secs(120)) {
-                                    Ok(aish_pty::AiEvent::BashExec {
-                                        command,
-                                        output_sender: new_sender,
-                                    }) => {
-                                        *event_rx.lock().unwrap() = Some(rx);
-                                        Some(aish_pty::AiResponse {
-                                            command: Some(command),
-                                            display_text: String::new(),
-                                            followup: Some(make_chain_followup(
-                                                event_rx.clone(),
-                                                done_rx.clone(),
-                                                answer_tx.clone(),
-                                                new_sender,
-                                            )),
-                                            ask_user: None,
-                                        })
-                                    }
-                                    Ok(aish_pty::AiEvent::AskUser(request)) => {
-                                        Some(aish_pty::AiResponse {
-                                            command: None,
-                                            display_text: String::new(),
-                                            followup: None,
-                                            ask_user: Some((
-                                                request,
-                                                aish_pty::AskUserChannel {
-                                                    answer_sender: answer_tx.clone(),
-                                                    event_receiver: rx,
-                                                },
-                                            )),
-                                        })
-                                    }
-                                    Ok(aish_pty::AiEvent::Done(_)) | Err(_) => {
-                                        if let Some(drx) = done_rx.lock().unwrap().take() {
-                                            let _ = drx
-                                                .recv_timeout(std::time::Duration::from_secs(120));
-                                        }
-                                        None
-                                    }
+                            match rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                                Ok(aish_pty::AiEvent::BashExec { command, output_sender: new_sender }) => {
+                                    *event_rx.lock().unwrap() = Some(rx);
+                                    Some(aish_pty::AiResponse {
+                                        command: Some(command),
+                                        display_text: String::new(),
+                                        followup: Some(make_chain_followup(
+                                            event_rx.clone(),
+                                            done_rx.clone(),
+                                            answer_tx.clone(),
+                                            new_sender,
+                                            cancelled.clone(),
+                                        )),
+                                        ask_user: None,
+                                    })
                                 }
-                            },
-                        )
+                                Ok(aish_pty::AiEvent::AskUser(request)) => {
+                                    Some(aish_pty::AiResponse {
+                                        command: None,
+                                        display_text: String::new(),
+                                        followup: None,
+                                        ask_user: Some((
+                                            request,
+                                            aish_pty::AskUserChannel {
+                                                answer_sender: answer_tx.clone(),
+                                                event_receiver: rx,
+                                            },
+                                        )),
+                                    })
+                                }
+                                Ok(aish_pty::AiEvent::Done(_)) | Err(_) => {
+                                    if let Some(drx) = done_rx.lock().unwrap().take() {
+                                        let _ = drx.recv_timeout(std::time::Duration::from_secs(120));
+                                    }
+                                    None
+                                }
+                            }
+                        })
                     }
 
                     let followup = make_chain_followup(
@@ -2953,6 +2927,7 @@ impl AishShell {
                         shared_done_rx,
                         answer_tx_f,
                         output_sender,
+                        cancelled_fu,
                     );
                     Some(aish_pty::AiResponse {
                         command: Some(command),
@@ -2984,7 +2959,6 @@ fn strip_tool_output_xml(output: &str) -> String {
     let re_offload = TOOL_XML_OFFLOAD_RE
         .get_or_init(|| regex::Regex::new(r"(?s)<offload>.*?</offload>").unwrap());
     let cleaned = re_offload.replace_all(output, "").to_string();
-    let cleaned = strip_return_code_block(&cleaned);
     // Remove incomplete tags (e.g. "<stdo" from truncation)
     let re_incomplete =
         TOOL_XML_INCOMPLETE_RE.get_or_init(|| regex::Regex::new(r"<[^>]*$").unwrap());
@@ -3000,13 +2974,6 @@ fn strip_tool_output_xml(output: &str) -> String {
         .filter(|l| !l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn strip_return_code_block(output: &str) -> String {
-    static RETURN_CODE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = RETURN_CODE_RE
-        .get_or_init(|| regex::Regex::new(r"(?s)<return_code>.*?</return_code>").unwrap());
-    re.replace_all(output, "").to_string()
 }
 
 /// Collapse output to first N lines for terminal display, matching Python's
@@ -3165,191 +3132,37 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     format!("{}...", truncated)
 }
 
-/// Wrap text to the given terminal display width.
-///
-/// This intentionally wraps by visible columns instead of whitespace-delimited
-/// words so mixed CJK/ASCII text like "/etc 下文件" does not break awkwardly
-/// at the ASCII token boundary.
-fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 || text.is_empty() {
-        return vec![text.to_string()];
-    }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-
-        if current_width > 0 && current_width + ch_width > max_width {
-            lines.push(current.trim_end().to_string());
-            current.clear();
-            current_width = 0;
-
-            if ch.is_whitespace() {
-                continue;
-            }
-        }
-
-        if current.is_empty() && ch.is_whitespace() {
-            continue;
-        }
-
-        current.push(ch);
-        current_width += ch_width;
-    }
-
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current.trim_end().to_string());
-    }
-    lines
-}
-
-fn render_security_panel(panel: &SecurityPanel) {
-    let terminal_width = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(80);
-    let inner_width = terminal_width.saturating_sub(4).max(20);
-    let border = "─".repeat(inner_width);
-
-    let (color, title_key) = match panel.mode {
-        SecurityPanelMode::Confirm => ("33", "shell.security.panel_title.confirm"),
-        SecurityPanelMode::Blocked => ("31", "shell.security.panel_title.blocked"),
-        SecurityPanelMode::Info => ("36", "shell.security.panel_title.notice"),
-    };
-    let title = t(title_key);
-
-    println!();
-    println!("\x1b[{color}m╭{}╮\x1b[0m", border);
-    println!(
-        "{}",
-        format_panel_line(
-            color,
-            &format!("\x1b[1;{color}m ⚠  {title}\x1b[0m"),
-            inner_width,
-        )
-    );
-    println!("{}", format_panel_line(color, "", inner_width));
-
-    if let Some(target) = panel.target.as_deref() {
-        print_wrapped_panel_field(
-            color,
-            &t("shell.security.label.command"),
-            target,
-            inner_width,
-        );
-    }
-
-    if let Some(risk_level) = panel.risk_level.as_deref() {
-        print_wrapped_panel_field(
-            color,
-            &t("shell.security.label.risk_level"),
-            risk_level,
-            inner_width,
-        );
-    }
-
-    let detail = if panel.reasons.is_empty() {
-        panel.message.clone()
+/// Pad a string with trailing spaces to fill the given width (for box borders).
+fn pad_to_width(s: &str, width: usize) -> String {
+    if s.len() >= width {
+        s.to_string()
     } else {
-        panel.reasons.join("; ")
-    };
-    print_wrapped_panel_field(
-        color,
-        &t("shell.security.label.reasons"),
-        &detail,
-        inner_width,
-    );
-
-    if !panel.alternatives.is_empty() {
-        let alternatives = panel.alternatives.join("\n");
-        print_wrapped_panel_field(
-            color,
-            &t("shell.security.label.alternatives"),
-            &alternatives,
-            inner_width,
-        );
-    }
-
-    println!("\x1b[{color}m╰{}╯\x1b[0m", border);
-}
-
-fn format_panel_line(color: &str, content: &str, inner_width: usize) -> String {
-    let content_width = visible_width(content);
-    if content_width >= inner_width {
-        format!("\x1b[{color}m│\x1b[0m{content}\x1b[{color}m│\x1b[0m")
-    } else {
-        format!(
-            "\x1b[{color}m│\x1b[0m{content}{}\x1b[{color}m│\x1b[0m",
-            " ".repeat(inner_width - content_width)
-        )
+        format!("{}{}\x1b[33m│\x1b[0m", s, " ".repeat(width - s.len()))
     }
 }
 
-fn visible_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for ch in s.chars() {
-        if ch == '\x1b' {
-            in_escape = true;
-        } else if in_escape {
-            if ch.is_ascii_alphabetic() {
-                in_escape = false;
-            }
+/// Wrap text to the given width, preserving word boundaries.
+fn wrap_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return text.to_string();
+    }
+    let mut result = String::new();
+    let mut line_len = 0;
+    for word in text.split_whitespace() {
+        if line_len == 0 {
+            result.push_str(word);
+            line_len = word.len();
+        } else if line_len + 1 + word.len() <= max_width {
+            result.push(' ');
+            result.push_str(word);
+            line_len += 1 + word.len();
         } else {
-            width += UnicodeWidthChar::width(ch).unwrap_or(0);
+            result.push('\n');
+            result.push_str(word);
+            line_len = word.len();
         }
     }
-    width
-}
-
-fn print_wrapped_panel_field(color: &str, label: &str, value: &str, inner_width: usize) {
-    let mut value_lines = value.lines().peekable();
-    let label_text = format!("{label}:");
-    let first_prefix = format!("  \x1b[1;36m{label_text}\x1b[0m ");
-    let first_prefix_width = 2 + UnicodeWidthStr::width(label_text.as_str()) + 1;
-    let continuation_prefix = " ".repeat(first_prefix_width);
-
-    if value_lines.peek().is_none() {
-        println!(
-            "{}",
-            format_panel_line(color, first_prefix.trim_end(), inner_width)
-        );
-        return;
-    }
-
-    let mut printed_first = false;
-    for raw_line in value_lines {
-        let prefix_width = first_prefix_width;
-        let wrap_width = inner_width.saturating_sub(prefix_width).max(1);
-        let wrapped_lines = wrap_text(raw_line, wrap_width);
-        if !printed_first {
-            let first_value = wrapped_lines.first().map(String::as_str).unwrap_or("");
-            println!(
-                "{}",
-                format_panel_line(color, &format!("{first_prefix}{first_value}"), inner_width)
-            );
-            printed_first = true;
-        } else {
-            let first_value = wrapped_lines.first().map(String::as_str).unwrap_or("");
-            println!(
-                "{}",
-                format_panel_line(
-                    color,
-                    &format!("{continuation_prefix}{first_value}"),
-                    inner_width,
-                )
-            );
-        }
-        for line in wrapped_lines.iter().skip(1) {
-            println!(
-                "{}",
-                format_panel_line(color, &format!("{continuation_prefix}{line}"), inner_width)
-            );
-        }
-    }
+    result
 }
 
 /// Parse a category string (from the LLM tool call) into a MemoryCategory.
@@ -3386,8 +3199,9 @@ fn print_md(text: &str) {
 
 /// Extract the first ```bash code block from AI response text.
 /// Extract the remote host from an SSH/telnet command.
-/// e.g. "ssh root@10.10.17.243" → "root@10.10.17.243"
+/// Forward-parsing version that correctly skips SSH options with arguments.
 /// e.g. "ssh -p 2222 user@example.com" → "user@example.com"
+/// e.g. "ssh -o StrictHostKeyChecking=no root@host" → "root@host"
 fn extract_remote_host(command: &str) -> Option<String> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
@@ -3397,15 +3211,26 @@ fn extract_remote_host(command: &str) -> Option<String> {
     if !matches!(cmd, "ssh" | "telnet" | "mosh" | "sftp" | "nc" | "netcat") {
         return None;
     }
-    // Find the last argument that looks like a host (contains @ or is a hostname/IP)
-    for part in parts.iter().skip(1).rev() {
+    let opts_with_arg: &[&str] = &[
+        "-p", "-l", "-i", "-o", "-L", "-R", "-S", "-W", "-J", "-b", "-c",
+        "-F", "-I", "-K", "-m", "-Q", "-q",
+    ];
+    let mut iter = parts.iter().skip(1).peekable();
+    while let Some(part) = iter.next() {
         if part.starts_with('-') {
+            let opt_name = if part.contains('=') {
+                part.split('=').next().unwrap()
+            } else {
+                *part
+            };
+            if opts_with_arg.contains(&opt_name) {
+                if !part.contains('=') {
+                    iter.next();
+                }
+            }
             continue;
         }
-        // user@host or just host
-        if part.contains('@') || part.contains('.') || !part.contains(char::is_whitespace) {
-            return Some(part.to_string());
-        }
+        return Some(part.to_string());
     }
     None
 }
@@ -3476,9 +3301,7 @@ fn extract_bash_command(text: &str) -> Option<String> {
     let start = text.find(marker)?;
     let content_start = start + marker.len();
     let content_end = text[content_start..].find("```")?;
-    let cmd = text[content_start..content_start + content_end]
-        .trim()
-        .to_string();
+    let cmd = text[content_start..content_start + content_end].trim().to_string();
     if cmd.is_empty() {
         None
     } else {
@@ -3507,52 +3330,5 @@ mod phase_tests {
     fn test_phase_equality() {
         assert_eq!(ShellPhase::Booting, ShellPhase::Booting);
         assert_ne!(ShellPhase::Booting, ShellPhase::Editing);
-    }
-
-    #[test]
-    fn test_security_panel_line_keeps_right_border_with_wide_text() {
-        let line = format_panel_line("33", "  \x1b[1;36m原因:\x1b[0m 写入 /etc/aish/789", 40);
-
-        assert!(line.ends_with("\x1b[33m│\x1b[0m"));
-        assert_eq!(visible_width(&line), 42);
-    }
-
-    #[test]
-    fn test_security_panel_wraps_long_wide_words() {
-        let lines = wrap_text("在/etc/aish/下新建一个789的空文件", 12);
-
-        assert!(lines.len() > 1);
-        assert!(lines
-            .iter()
-            .all(|line| UnicodeWidthStr::width(line.as_str()) <= 12));
-    }
-
-    #[test]
-    fn test_security_panel_wraps_mixed_cjk_ascii_naturally() {
-        let lines = wrap_text(
-            "如需修改 /etc 下文件，建议采用人工变更并配合变更管理或备份策略。",
-            20,
-        );
-
-        assert!(lines.len() > 1);
-        assert_eq!(lines[0], "如需修改 /etc 下文件");
-        assert!(lines
-            .iter()
-            .all(|line| UnicodeWidthStr::width(line.as_str()) <= 20));
-    }
-
-    #[test]
-    fn test_tool_output_preview_hides_return_code_only_output() {
-        let output = strip_tool_output_xml("<return_code>\n0\n</return_code>");
-
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn test_tool_output_preview_keeps_stdout_without_return_code() {
-        let output =
-            strip_tool_output_xml("<stdout>\nhello\n</stdout>\n<return_code>\n0\n</return_code>");
-
-        assert_eq!(output, "hello");
     }
 }

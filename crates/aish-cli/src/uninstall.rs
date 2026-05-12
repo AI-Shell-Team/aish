@@ -12,6 +12,7 @@ use aish_i18n::{t, t_with_args};
 
 // Paths used by the archive/script installer (install.sh)
 const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
+const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
 const SYSTEMD_UNIT_DIR: &str = "/lib/systemd/system";
@@ -135,9 +136,36 @@ fn run_sudo(args: &[&str]) -> Result<(), AishError> {
 }
 
 fn uninstall_archive(purge: bool) -> Result<(), AishError> {
+    // Prefer bundled uninstall script
+    let uninstall_script = PathBuf::from(ARCHIVE_BIN_DIR).join("aish-uninstall");
+    if uninstall_script.exists() {
+        let mut args = vec![uninstall_script.to_str().unwrap_or("")];
+        if purge {
+            args.push("--purge-config");
+        }
+        return run_sudo(&args);
+    }
+
+    // Fallback: remove files manually
     let mut success = true;
 
     stop_and_remove_sandbox_units();
+
+    for name in ARCHIVE_BINARY_NAMES {
+        let binary = PathBuf::from(ARCHIVE_BIN_DIR).join(name);
+        if binary.exists() {
+            if let Err(e) = run_sudo(&["rm", "-f", binary.to_str().unwrap_or("")]) {
+                let path_str = binary.display().to_string();
+                eprintln!("\x1b[31m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("path".to_string(), path_str);
+                    args.insert("error".to_string(), e.to_string());
+                    t_with_args("cli.uninstall.file_remove_failed", &args)
+                });
+                success = false;
+            }
+        }
+    }
 
     let share_dir = PathBuf::from(ARCHIVE_SHARE_DIR);
     if share_dir.exists() {
@@ -155,20 +183,6 @@ fn uninstall_archive(purge: bool) -> Result<(), AishError> {
 
     if purge {
         purge_system_config();
-    }
-
-    let archive_bin = PathBuf::from(ARCHIVE_BIN_DIR).join("aish");
-    if archive_bin.exists() {
-        if let Err(e) = run_sudo(&["rm", "-f", archive_bin.to_str().unwrap_or("")]) {
-            let path_str = archive_bin.display().to_string();
-            eprintln!("\x1b[31m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::new();
-                args.insert("path".to_string(), path_str);
-                args.insert("error".to_string(), e.to_string());
-                t_with_args("cli.uninstall.file_remove_failed", &args)
-            });
-            success = false;
-        }
     }
 
     if success {

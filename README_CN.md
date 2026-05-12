@@ -121,7 +121,7 @@ aish> ;解释一下这个命令：tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-该安装器会在 `https://www.aishell.ai/repo` 下解析最新发布目录，下载与你当前架构匹配的 bundle，并把 `aish` 安装到 `/usr/local/bin`，同时部署随包附带的 sandbox systemd 单元。
+该安装器会在 `https://www.aishell.ai/repo` 下解析最新发布目录，下载与你当前架构匹配的 bundle，并把 `aish`、`aish-sandbox` 和 `aish-uninstall` 安装到 `/usr/local/bin`。
 
 ### 从源码运行（开发/试用）
 
@@ -136,13 +136,13 @@ cargo run --bin aish
 卸载（保留配置文件）：
 
 ```bash
-sudo aish uninstall --yes
+sudo aish-uninstall
 ```
 
 彻底卸载（同时删除系统级安全策略）：
 
 ```bash
-sudo aish uninstall --yes --purge
+sudo aish-uninstall --purge-config
 ```
 
 可选：清理用户级配置（会清空模型/API Key 等）：

@@ -394,6 +394,9 @@ shell:
   session:
     tool_bash: "🔧 使用工具: bash ({command})"
     confirm_execute: "⚠ 是否执行? [Y/n]"
+    running: "执行中..."
+    ai_cancelled: "[AI 已取消]"
+    probing: "正在检测远程环境..."
     ask_user:
       custom_input_label: "输入自定义答案"
       default_hint: "[default: {default}]"
@@ -629,6 +632,21 @@ tools:
     not_found: "未找到记忆 #{id}。"
     empty: "还没有记忆。"
     not_available: "记忆功能不可用"
+
+  host_note:
+    description: "保存、查看或删除当前远程主机的备注。当用户告诉你关于此服务器的重要信息（部署的服务、已知问题、关键路径等）时使用 'store' 保存。使用 'list' 查看已有备注。使用 'forget' 并提供关键词删除匹配的备注。"
+    param:
+      action: "备注操作: store、list 或 forget"
+      content: "要保存的备注内容(用于 'store' 操作)"
+      keyword: "用于匹配删除备注的关键词(用于 'forget' 操作)"
+    missing_action: "缺少 'action' 参数"
+    unknown_action: "未知操作: {action}。请使用 store/list/forget。"
+    store_missing_content: "store 缺少 'content' 参数"
+    forget_missing_keyword: "forget 缺少 'keyword' 参数"
+    empty: "此主机暂无备注。"
+    stored: "备注已保存。"
+    forgot: "已删除 {count} 条备注。"
+    forgot_none: "未找到匹配的备注。"
 
   python:
     description: "执行任意 Python 代码并返回结果。使用 print() 输出。"

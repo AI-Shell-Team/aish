@@ -188,6 +188,7 @@ check_runtime_dependencies
 BIN_DIR="$(binary_target_dir)"
 
 install_file "$ROOTFS_DIR/usr/bin/aish" "${BIN_DIR}/aish" 0755
+install_file "$SCRIPT_DIR/uninstall.sh" "${BIN_DIR}/aish-uninstall" 0755
 install_config "$ROOTFS_DIR/etc/aish/security_policy.yaml" "/etc/aish/security_policy.yaml"
 install_file "$ROOTFS_DIR/usr/share/doc/aish/skills-guide.md" "/usr/local/share/aish/skills-guide.md" 0644
 
