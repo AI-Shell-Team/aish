@@ -9,6 +9,7 @@ from aish.config import BashOutputOffloadSettings
 from aish.security.security_manager import SecurityDecision
 from aish.security.security_policy import RiskLevel
 from aish.terminal.pty.manager import PTYManager
+from aish.tools.base import ToolExecutionContext, ToolPreflightAction
 from aish.tools.code_exec import BashTool, _needs_interactive_bash
 
 
@@ -32,7 +33,60 @@ def test_needs_interactive_bash_matches_rust_heuristic():
     assert _needs_interactive_bash("echo 3 | sudo tee /tmp/x") is True
     assert _needs_interactive_bash("su -") is True
     assert _needs_interactive_bash("cmd && su -") is True
+    assert _needs_interactive_bash("/usr/bin/sudo whoami") is True
+    assert _needs_interactive_bash("VAR=1 sudo whoami") is True
+    assert _needs_interactive_bash("command sudo whoami") is True
+    assert _needs_interactive_bash("if sudo -v; then echo ok; fi") is True
     assert _needs_interactive_bash("ls -la") is False
+    assert _needs_interactive_bash("echo sudo") is False
+    assert _needs_interactive_bash("printf 'sudo prompt:'") is False
+
+
+def test_bash_exec_interactive_stdin_requires_preflight_confirmation():
+    tool = BashTool()
+
+    with patch.object(tool.security_manager, "decide", return_value=_allow_decision()):
+        preflight = tool.prepare_invocation(
+            {"code": "sudo whoami"},
+            ToolExecutionContext(cwd=Path.cwd(), is_approved=lambda _command: False),
+        )
+
+    assert preflight.action == ToolPreflightAction.CONFIRM
+    assert preflight.panel is not None
+    assert preflight.panel.analysis["interactive_stdin"] is True
+
+
+def test_bash_exec_interactive_stdin_confirmation_overrides_fail_open():
+    tool = BashTool()
+    decision = SecurityDecision(
+        level=RiskLevel.LOW,
+        allow=True,
+        require_confirmation=False,
+        analysis={"risk_level": "LOW", "fail_open": True, "reasons": []},
+    )
+
+    with patch.object(tool.security_manager, "decide", return_value=decision):
+        preflight = tool.prepare_invocation(
+            {"code": "sudo whoami"},
+            ToolExecutionContext(cwd=Path.cwd(), is_approved=lambda _command: False),
+        )
+
+    assert preflight.action == ToolPreflightAction.CONFIRM
+
+
+def test_bash_exec_interactive_stdin_allows_exact_approved_command():
+    tool = BashTool()
+
+    with patch.object(tool.security_manager, "decide", return_value=_allow_decision()):
+        preflight = tool.prepare_invocation(
+            {"code": "sudo whoami"},
+            ToolExecutionContext(
+                cwd=Path.cwd(),
+                is_approved=lambda command: command == "sudo whoami",
+            ),
+        )
+
+    assert preflight.action == ToolPreflightAction.EXECUTE
 
 
 @pytest.mark.asyncio
