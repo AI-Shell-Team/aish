@@ -1,5 +1,11 @@
 use std::sync::LazyLock;
 
+/// Threshold for English NL keyword score.
+const NL_SCORE_THRESHOLD: usize = 2;
+
+/// Minimum CJK character ratio to classify as Chinese NL.
+const CJK_RATIO_THRESHOLD: f64 = 0.5;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -24,7 +30,7 @@ pub struct NlVerdict {
 impl NlVerdict {
     fn english(score: usize) -> Self {
         Self {
-            is_natural_language: score >= 2,
+            is_natural_language: score >= NL_SCORE_THRESHOLD,
             score,
             language: NlLanguage::English,
         }
@@ -157,6 +163,63 @@ fn wrapped_in_quotes(word: &str) -> bool {
         || (word.starts_with('\'') && word.ends_with('\''))
 }
 
+// ---------------------------------------------------------------------------
+// Main detection function
+// ---------------------------------------------------------------------------
+
+/// Check whether input looks like natural language rather than a shell command.
+pub fn detect(input: &str) -> NlVerdict {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return NlVerdict::not_nl();
+    }
+
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+
+    // Rule 1: Single token — check CJK first (CJK text has no spaces),
+    //         otherwise never NL (e.g. whoami, ls, git)
+    if tokens.len() < 2 {
+        let ratio = cjk_ratio(trimmed);
+        if ratio >= CJK_RATIO_THRESHOLD {
+            return NlVerdict::chinese();
+        }
+        return NlVerdict::not_nl();
+    }
+
+    let first_token = tokens[0];
+
+    // Rule 2: First token found in PATH → command priority
+    if which::which(first_token).is_ok() {
+        return NlVerdict::not_nl();
+    }
+
+    // Rule 3: CJK ratio check for multi-token input
+    let ratio = cjk_ratio(trimmed);
+    if ratio >= CJK_RATIO_THRESHOLD {
+        return NlVerdict::chinese();
+    }
+
+    // Rule 4: English NL keyword scoring
+    let score = english_nl_score(&tokens);
+    NlVerdict::english(score)
+}
+
+/// Calculate English NL keyword score for a list of tokens.
+fn english_nl_score(tokens: &[&str]) -> usize {
+    let mut score: usize = 0;
+    for token in tokens {
+        let lower = token.to_lowercase();
+        let simplified = simplify_word(&lower);
+
+        if is_nl_keyword(&lower) || is_nl_keyword(simplified) {
+            score = score.saturating_add(1);
+        } else if !wrapped_in_quotes(&lower) && has_shell_syntax(&lower) {
+            score = score.saturating_sub(1);
+        }
+    }
+    score
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +318,78 @@ mod tests {
         assert!(wrapped_in_quotes("'hello'"));
         assert!(!wrapped_in_quotes("hello"));
         assert!(!wrapped_in_quotes("\"hello"));
+    }
+
+    #[test]
+    fn test_detect_single_token_not_nl() {
+        let v = detect("whoami");
+        assert!(!v.is_natural_language);
+    }
+
+    #[test]
+    fn test_detect_real_command_not_nl() {
+        // "ls" exists in PATH on all systems
+        let v = detect("ls -la");
+        assert!(!v.is_natural_language);
+    }
+
+    #[test]
+    fn test_detect_english_sentence() {
+        let v = detect("list all files");
+        // On systems without "list" in PATH, this should be NL
+        if which::which("list").is_err() {
+            assert!(v.is_natural_language);
+            assert_eq!(v.language, NlLanguage::English);
+        }
+    }
+
+    #[test]
+    fn test_detect_who_am_i() {
+        let v = detect("who am i");
+        // "who" is a real command on most systems
+        if which::which("who").is_err() {
+            assert!(v.is_natural_language);
+        }
+    }
+
+    #[test]
+    fn test_detect_chinese() {
+        let v = detect("列出所有文件");
+        assert!(v.is_natural_language);
+        assert_eq!(v.language, NlLanguage::Chinese);
+    }
+
+    #[test]
+    fn test_detect_chinese_with_command_prefix() {
+        // "ls 列出文件" → first token "ls" is in PATH → not NL
+        let v = detect("ls 列出文件");
+        assert!(!v.is_natural_language);
+    }
+
+    #[test]
+    fn test_detect_empty() {
+        assert!(!detect("").is_natural_language);
+        assert!(!detect("   ").is_natural_language);
+    }
+
+    #[test]
+    fn test_detect_shell_syntax_penalty() {
+        let v = detect("FOO=bar something");
+        assert!(!v.is_natural_language);
+    }
+
+    #[test]
+    fn test_detect_git_command_not_nl() {
+        let v = detect("git status");
+        assert!(!v.is_natural_language);
+    }
+
+    #[test]
+    fn test_detect_what_time() {
+        // "what" is NOT a typical command
+        if which::which("what").is_err() {
+            let v = detect("what time is it");
+            assert!(v.is_natural_language);
+        }
     }
 }
