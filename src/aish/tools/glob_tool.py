@@ -28,18 +28,23 @@ _DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
 _DEFAULT_MAX_RESULTS: int = 200
 
 
-def _normalize_root(root: str | None) -> Path:
-    if isinstance(root, str) and root.strip():
-        return Path(root).expanduser().resolve()
-    return Path.cwd().resolve()
-
-
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
+
+
+def _normalize_root(root: str | None) -> Path:
+    workspace_root = Path.cwd().resolve()
+    if isinstance(root, str) and root.strip():
+        resolved = Path(root).expanduser().resolve()
+    else:
+        resolved = workspace_root
+    if not _is_relative_to(resolved, workspace_root):
+        raise ValueError(f"root must be within the current workspace: {workspace_root}")
+    return resolved
 
 
 class GlobTool(ToolBase):
@@ -56,9 +61,7 @@ class GlobTool(ToolBase):
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": (
-                            "Glob pattern such as **/*.py or src/**/*.md"
-                        ),
+                        "description": ("Glob pattern such as **/*.py or src/**/*.md"),
                     },
                     "root": {
                         "type": "string",
@@ -76,7 +79,10 @@ class GlobTool(ToolBase):
         if not isinstance(pattern, str) or not pattern.strip():
             return ToolResult(ok=False, output="Error: pattern is required")
 
-        base = _normalize_root(root)
+        try:
+            base = _normalize_root(root)
+        except ValueError as exc:
+            return ToolResult(ok=False, output=f"Error: {exc}")
         if not base.exists() or not base.is_dir():
             return ToolResult(
                 ok=False,
