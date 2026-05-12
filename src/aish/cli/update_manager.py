@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import platform
 import re
@@ -37,8 +38,12 @@ DEFAULT_DOWNLOAD_BASE_URL = "https://cdn.aishell.ai/download"
 GITHUB_RELEASES_PAGE_BASE = "https://github.com/AI-Shell-Team/aish/releases"
 GITHUB_API_LATEST = "https://api.github.com/repos/AI-Shell-Team/aish/releases/latest"
 GITHUB_API_LIST = "https://api.github.com/repos/AI-Shell-Team/aish/releases"
+GITHUB_API_RELEASE_TAG = (
+    "https://api.github.com/repos/AI-Shell-Team/aish/releases/tags/{tag}"
+)
 CONNECTION_TIMEOUT = 10  # seconds
 VERSION_PATTERN = re.compile(r"^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$")
+SHA256_PATTERN = re.compile(r"^[A-Fa-f0-9]{64}$")
 
 # Version from package
 CURRENT_VERSION = __version__
@@ -86,6 +91,15 @@ class UpdateManager:
         """Resolve the CDN URL for a versioned release artifact."""
         version_str = tag_name.lstrip("v")
         return f"{self.get_download_base_url()}/releases/{version_str}/{filename}"
+
+    def get_release_by_tag(self, tag_name: str) -> dict:
+        """Fetch trusted GitHub release metadata for a tag."""
+        response = self.client.get(GITHUB_API_RELEASE_TAG.format(tag=tag_name))
+        response.raise_for_status()
+        data = response.json()
+        if data.get("tag_name") != tag_name:
+            raise UpdateCheckError(f"GitHub release metadata mismatch for {tag_name}")
+        return data
 
     @staticmethod
     def normalize_tag(version_value: str) -> str:
@@ -160,18 +174,27 @@ class UpdateManager:
                 response = self.client.get(self.get_latest_version_url())
                 response.raise_for_status()
                 tag_name = self.normalize_tag(response.text)
+                data = self.get_release_by_tag(tag_name)
 
-            return {
-                "tag_name": tag_name,
-                "name": tag_name,
-                "body": "",
-                "html_url": f"{GITHUB_RELEASES_PAGE_BASE}/tag/{tag_name}",
-                "assets": [],
-            }
+                return {
+                    "tag_name": tag_name,
+                    "name": data.get("name", tag_name),
+                    "body": data.get("body", ""),
+                    "html_url": data.get(
+                        "html_url", f"{GITHUB_RELEASES_PAGE_BASE}/tag/{tag_name}"
+                    ),
+                    "assets": data.get("assets", []),
+                }
+        except UpdateCheckError:
+            raise
         except httpx.HTTPError as e:
-            raise UpdateCheckError(f"Network error while checking for updates: {e}") from e
+            raise UpdateCheckError(
+                f"Network error while checking for updates: {e}"
+            ) from e
         except Exception as e:
-            raise UpdateCheckError(f"Unexpected error while checking for updates: {e}") from e
+            raise UpdateCheckError(
+                f"Unexpected error while checking for updates: {e}"
+            ) from e
 
     def check_for_updates(self, include_pre_release: bool = False) -> Optional[dict]:
         """Check if there's a newer version available.
@@ -243,6 +266,85 @@ class UpdateManager:
 
         return True
 
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        """Calculate the SHA256 digest for a file."""
+        sha256 = hashlib.sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+
+    @staticmethod
+    def _parse_checksum_text(checksum_text: str, filename: str) -> Optional[str]:
+        """Extract the expected SHA256 digest for filename from checksum text."""
+        for line in checksum_text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            parts = stripped.replace("*", " ").split()
+            if len(parts) >= 2 and SHA256_PATTERN.fullmatch(parts[0]):
+                if any(Path(part).name == filename for part in parts[1:]):
+                    return parts[0].lower()
+
+            # Support `SHA256 (filename) = digest` output from shasum/openssl.
+            match = re.fullmatch(
+                r"SHA256 \((?P<name>.+)\) = (?P<digest>[A-Fa-f0-9]{64})", stripped
+            )
+            if match and Path(match.group("name")).name == filename:
+                return match.group("digest").lower()
+
+        return None
+
+    def get_expected_archive_sha256(self, tag_name: str, filename: str) -> str:
+        """Resolve the trusted SHA256 digest for a release archive from GitHub."""
+        release = self.get_release_by_tag(tag_name)
+        checksum_urls = []
+
+        for asset in release.get("assets", []):
+            asset_name = asset.get("name", "")
+            if asset_name == filename:
+                digest = asset.get("digest", "")
+                prefix = "sha256:"
+                if digest.startswith(prefix) and SHA256_PATTERN.fullmatch(
+                    digest[len(prefix) :]
+                ):
+                    return digest[len(prefix) :].lower()
+
+            lower_name = asset_name.lower()
+            if "sha256" in lower_name or "checksum" in lower_name:
+                checksum_url = asset.get("browser_download_url")
+                if checksum_url:
+                    checksum_urls.append(checksum_url)
+
+        for checksum_url in checksum_urls:
+            response = self.client.get(checksum_url)
+            response.raise_for_status()
+            expected = self._parse_checksum_text(response.text, filename)
+            if expected:
+                return expected
+
+        raise UpdateCheckError(
+            f"No trusted SHA256 digest found on GitHub release {tag_name} for {filename}"
+        )
+
+    def verify_archive(self, archive_path: Path, tag_name: str, filename: str) -> bool:
+        """Verify a downloaded archive against trusted GitHub release metadata."""
+        expected_sha256 = self.get_expected_archive_sha256(tag_name, filename)
+        actual_sha256 = self._sha256_file(archive_path)
+        if not hmac.compare_digest(actual_sha256, expected_sha256):
+            self.console.print(
+                "[red]Security: downloaded archive SHA256 does not match "
+                "trusted GitHub release metadata[/red]"
+            )
+            self.console.print(f"[dim]Expected: {expected_sha256}[/dim]")
+            self.console.print(f"[dim]Actual:   {actual_sha256}[/dim]")
+            return False
+
+        self.console.print(f"[dim]Verified archive SHA256: {actual_sha256}[/dim]")
+        return True
+
     def download_release(
         self, tag_name: str, dest_dir: Optional[Path] = None
     ) -> Optional[Path]:
@@ -269,6 +371,9 @@ class UpdateManager:
         try:
             self._download_with_progress(download_url, dest_path, filename)
             self.console.print(f"[green]Downloaded: {dest_path}[/green]")
+            if not self.verify_archive(dest_path, tag_name, filename):
+                dest_path.unlink(missing_ok=True)
+                return None
             return dest_path
 
         except httpx.HTTPError as e:
@@ -277,6 +382,7 @@ class UpdateManager:
 
         except Exception as e:
             self.console.print(f"[red]Unexpected error during download: {e}[/red]")
+            dest_path.unlink(missing_ok=True)
             return None
 
     def install_release(self, archive_path: Path) -> bool:
