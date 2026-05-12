@@ -93,7 +93,7 @@ def main() -> int:
     parser.add_argument(
         "--version",
         required=True,
-        help="Release version, for example 0.2.0 or 0.3.0-beta.1",
+        help="Release version, for example 0.2.0 or 1.0.0-beta.1",
     )
     parser.add_argument(
         "--date",

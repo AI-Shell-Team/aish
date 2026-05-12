@@ -29,24 +29,24 @@ cat > "$SANDBOX/CHANGELOG.md" <<'EOF'
 EOF
 
 "$PYTHON_BIN" "$SANDBOX/packaging/scripts/update_release_files.py" \
-  --version 0.3.0-beta.1 \
+  --version 1.0.0-beta.1 \
   --date 2026-05-09
 
-grep -Fq 'version = "0.3.0-beta.1"' "$SANDBOX/Cargo.toml"
-grep -Fq '## [0.3.0-beta.1] - 2026-05-09' "$SANDBOX/CHANGELOG.md"
+grep -Fq 'version = "1.0.0-beta.1"' "$SANDBOX/Cargo.toml"
+grep -Fq '## [1.0.0-beta.1] - 2026-05-09' "$SANDBOX/CHANGELOG.md"
 
 if "$PYTHON_BIN" "$SANDBOX/packaging/scripts/update_release_files.py" \
-  --version 0.3.0-beta.1 \
+  --version 1.0.0-beta.1 \
   --date 2026-05-09 > "$TMP_DIR/duplicate.out" 2>&1; then
   echo "Expected duplicate changelog version to be rejected" >&2
   exit 1
 fi
-grep -Fq 'already contains a section for version 0.3.0-beta.1' "$TMP_DIR/duplicate.out"
+grep -Fq 'already contains a section for version 1.0.0-beta.1' "$TMP_DIR/duplicate.out"
 
 cat > "$SANDBOX/CHANGELOG.md" <<'EOF'
 # Changelog
 
-## [0.3.0-beta.1] - 2026-05-09
+## [1.0.0-beta.1] - 2026-05-09
 
 ### Changed
 
@@ -60,17 +60,17 @@ cat > "$SANDBOX/CHANGELOG.md" <<'EOF'
 EOF
 
 "$PYTHON_BIN" "$SANDBOX/packaging/scripts/release_metadata.py" \
-  --expected-version v0.3.0-beta.1 \
+  --expected-version v1.0.0-beta.1 \
   --json-file "$TMP_DIR/metadata.json" \
   --summary-file "$TMP_DIR/summary.md"
 
-grep -Fq '"version": "0.3.0-beta.1"' "$TMP_DIR/metadata.json"
-grep -Fq '"tag": "v0.3.0-beta.1"' "$TMP_DIR/metadata.json"
+grep -Fq '"version": "1.0.0-beta.1"' "$TMP_DIR/metadata.json"
+grep -Fq '"tag": "v1.0.0-beta.1"' "$TMP_DIR/metadata.json"
 grep -Fq 'Beta release note' "$TMP_DIR/summary.md"
 
 "$PYTHON_BIN" "$SANDBOX/packaging/scripts/release_metadata.py" \
   --print-json > "$TMP_DIR/metadata-default.json"
-grep -Fq '"version": "0.3.0-beta.1"' "$TMP_DIR/metadata-default.json"
+grep -Fq '"version": "1.0.0-beta.1"' "$TMP_DIR/metadata-default.json"
 grep -Fq 'Beta release note' "$TMP_DIR/metadata-default.json"
 
 if "$PYTHON_BIN" "$SANDBOX/packaging/scripts/release_metadata.py" \

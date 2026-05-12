@@ -38,7 +38,7 @@ packaging-test:
 	PYTHON="$(PYTHON)" ./packaging/tests/release_scripts_smoke.sh
 
 prepare-release-files:
-	@test -n "$(VERSION)" || { echo "VERSION is required, for example: make prepare-release-files VERSION=0.3.0-beta.1" >&2; exit 2; }
+	@test -n "$(VERSION)" || { echo "VERSION is required, for example: make prepare-release-files VERSION=1.0.0-beta.1" >&2; exit 2; }
 	$(PYTHON) packaging/scripts/update_release_files.py --version "$(VERSION)" $(if $(DATE),--date "$(DATE)",)
 
 lint:

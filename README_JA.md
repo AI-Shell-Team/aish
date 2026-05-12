@@ -126,7 +126,7 @@ aish> ;このコマンドを説明して: tar -czf a.tgz ./dir
 curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ```
 
-インストーラは `https://www.aishell.ai/repo` 配下の最新リリースディレクトリを解決し、アーキテクチャに合ったバンドルをダウンロードして `aish` を `/usr/local/bin` にインストールし、同梱された sandbox systemd ユニットも配置します。
+インストーラは `https://www.aishell.ai/repo` 配下の最新リリースディレクトリを解決し、アーキテクチャに合ったバンドルをダウンロードして `aish`、`aish-sandbox`、`aish-uninstall` を `/usr/local/bin` にインストールします。
 
 ### ソースから実行（開発/試用）
 
@@ -141,13 +141,13 @@ cargo run --bin aish
 アンインストール（設定ファイルは保持）：
 
 ```bash
-sudo aish uninstall --yes
+sudo aish-uninstall
 ```
 
 完全アンインストール（システムレベルのセキュリティポリシーも削除）：
 
 ```bash
-sudo aish uninstall --yes --purge
+sudo aish-uninstall --purge-config
 ```
 
 任意：ユーザー設定のクリーンアップ（モデル/APIキーなどを削除）：

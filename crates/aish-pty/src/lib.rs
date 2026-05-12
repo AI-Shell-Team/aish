@@ -33,8 +33,9 @@ pub use offload::{
 pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use session_interceptor::{
-    AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel, AskUserOption,
-    AskUserRequest, FollowupCallback, InterceptorState, SessionInterceptor, StdinAction,
+    pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,
+    AskUserOption, AskUserRequest, FollowupCallback, InterceptorState, SessionInterceptor,
+    StdinAction,
 };
 pub use state_capture::StateChanges;
 pub use types::CancelToken;

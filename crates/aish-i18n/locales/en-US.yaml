@@ -394,6 +394,9 @@ shell:
   session:
     tool_bash: "🔧 Using tool: bash ({command})"
     confirm_execute: "⚠ Execute? [Y/n]"
+    running: "Running..."
+    ai_cancelled: "[AI cancelled]"
+    probing: "Detecting remote environment..."
     ask_user:
       custom_input_label: "Enter custom answer"
       default_hint: "[default: {default}]"
@@ -630,6 +633,21 @@ tools:
     not_found: "Memory #{id} not found."
     empty: "No memories yet."
     not_available: "memory not available"
+
+  host_note:
+    description: "Save, list, or delete notes about the current remote host. Use 'store' when the user tells you important facts about this server (services deployed, known issues, key paths, etc.). Use 'list' to review existing notes. Use 'forget' with a keyword to remove matching notes."
+    param:
+      action: "Note operation: store, list, or forget"
+      content: "Note content to save (for 'store' action)"
+      keyword: "Keyword to match notes for deletion (for 'forget' action)"
+    missing_action: "Missing 'action' parameter"
+    unknown_action: "Unknown action: {action}. Use store/list/forget."
+    store_missing_content: "Missing 'content' for store"
+    forget_missing_keyword: "Missing 'keyword' for forget"
+    empty: "No notes saved for this host yet."
+    stored: "Note saved."
+    forgot: "Removed {count} note(s)."
+    forgot_none: "No matching notes found."
 
   python:
     description: "Execute arbitrary Python code and return the result. Use print() for output."

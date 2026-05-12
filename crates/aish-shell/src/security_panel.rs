@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use aish_i18n::t_with_args;
 use aish_llm::{PreflightSecurityContext, SecurityPanel};
 

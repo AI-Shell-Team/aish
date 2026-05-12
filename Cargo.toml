@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/aish-core",
     "crates/aish-config",
+    "crates/aish-hosts",
     "crates/aish-i18n",
     "crates/aish-security",
     "crates/aish-pty",
@@ -19,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0-beta.2"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
@@ -103,6 +104,7 @@ tempfile = "3"
 # Internal crates
 aish-core = { path = "crates/aish-core" }
 aish-config = { path = "crates/aish-config" }
+aish-hosts = { path = "crates/aish-hosts" }
 aish-i18n = { path = "crates/aish-i18n" }
 aish-security = { path = "crates/aish-security" }
 aish-pty = { path = "crates/aish-pty" }
