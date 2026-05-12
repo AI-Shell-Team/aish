@@ -451,15 +451,15 @@ impl PersistentPty {
         // fires quickly instead of waiting the full FOLLOWUP_IDLE_GRACE.
         let mut followup_prompt_seen = false;
         const FOLLOWUP_PROMPT_IDLE: u32 = 10; // 500 ms after prompt detected
-        // When the user presses Ctrl+Z or Ctrl+C during followup_capturing,
-        // start a short countdown. The followup fires once the countdown
-        // reaches 0 (after FOLLOWUP_INTERRUPT_GRACE consecutive idle polls),
-        // which captures any suspension/termination output but avoids waiting
-        // for the full FOLLOWUP_IDLE_GRACE period.
+                                              // When the user presses Ctrl+Z or Ctrl+C during followup_capturing,
+                                              // start a short countdown. The followup fires once the countdown
+                                              // reaches 0 (after FOLLOWUP_INTERRUPT_GRACE consecutive idle polls),
+                                              // which captures any suspension/termination output but avoids waiting
+                                              // for the full FOLLOWUP_IDLE_GRACE period.
         let mut followup_interrupt_countdown: Option<u32> = None;
         const FOLLOWUP_INTERRUPT_GRACE: u32 = 10; // 500 ms
-        // Pending AI response — shared between TriggerAi handler and
-        // followup handler for multi-round tool chaining.
+                                                  // Pending AI response — shared between TriggerAi handler and
+                                                  // followup handler for multi-round tool chaining.
         let mut pending_response: Option<crate::AiResponse> = None;
         // Consecutive idle poll count — require N empty polls before treating
         // the shell as truly idle (prevents premature followup triggers over
@@ -516,8 +516,8 @@ impl PersistentPty {
         // injecting the probe to give SSH time to display auth prompts.
         let mut session_command_just_sent = is_session;
         const SESSION_CMD_IDLE_GRACE: u32 = 20; // extra idle polls for session commands (1 second at 50ms)
-        // Hard-cancel flag: Ctrl+C during confirmation sets this to true,
-        // preventing further followup/tool chaining until the next AI trigger.
+                                                // Hard-cancel flag: Ctrl+C during confirmation sets this to true,
+                                                // preventing further followup/tool chaining until the next AI trigger.
         let mut ai_cancelled: bool = false;
 
         while !done {
@@ -586,14 +586,10 @@ impl PersistentPty {
                             // Save a minimal profile so the host is tracked
                             // even if the probe data is incomplete.
                             if let Some(ref host_key) = remote_host_for_probe {
-                                let mut profile =
-                                    aish_hosts::get_or_create_profile(host_key);
+                                let mut profile = aish_hosts::get_or_create_profile(host_key);
                                 profile.last_updated = chrono::Utc::now();
                                 let _ = aish_hosts::save_profile(&profile);
-                                debug!(
-                                    "probe: saved minimal profile for {} on timeout",
-                                    host_key
-                                );
+                                debug!("probe: saved minimal profile for {} on timeout", host_key);
                             }
                             probe_sections.clear();
                             probe_current_section.clear();
@@ -612,27 +608,20 @@ impl PersistentPty {
                             // (with minimal profile data).
                             if probe_for_ai {
                                 probe_for_ai = false;
-                                if let Some(question) =
-                                    pending_ai_question.take()
-                                {
-                                    let resp =
-                                        interceptor.call_ai(question);
+                                if let Some(question) = pending_ai_question.take() {
+                                    let resp = interceptor.call_ai(question);
                                     interceptor.finish_ai();
                                     if let Some(response) = resp {
-                                        pending_response =
-                                            Some(response);
+                                        pending_response = Some(response);
                                     } else {
                                         let cancel_msg = format!(
                                             "\x1b[33m{}\x1b[0m\r\n",
-                                            aish_i18n::t(
-                                                "shell.session.ai_cancelled"
-                                            ),
+                                            aish_i18n::t("shell.session.ai_cancelled"),
                                         );
                                         unsafe {
                                             libc::write(
                                                 libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr()
-                                                    as *const libc::c_void,
+                                                cancel_msg.as_ptr() as *const libc::c_void,
                                                 cancel_msg.len(),
                                             );
                                         }
@@ -687,9 +676,7 @@ impl PersistentPty {
                         debug!(
                             "idle: marking probe_injected=true, \
                              was nested_probe_pending={}, host={:?}, stack={:?}",
-                            nested_probe_pending,
-                            remote_host_for_probe,
-                            nested_host_stack,
+                            nested_probe_pending, remote_host_for_probe, nested_host_stack,
                         );
                         probe_injected = true;
                         nested_probe_pending = false;
@@ -758,11 +745,7 @@ impl PersistentPty {
                         }
                         skip_leading_newline = true;
                         unsafe {
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                     }
                     continue;
@@ -794,14 +777,11 @@ impl PersistentPty {
                         continue;
                     }
                     if let Some(ref cmd) = response.command {
-                        let tool_text = aish_i18n::t_with_args(
-                            "shell.session.tool_bash",
-                            &{
-                                let mut m = std::collections::HashMap::new();
-                                m.insert("command".to_string(), cmd.clone());
-                                m
-                            },
-                        );
+                        let tool_text = aish_i18n::t_with_args("shell.session.tool_bash", &{
+                            let mut m = std::collections::HashMap::new();
+                            m.insert("command".to_string(), cmd.clone());
+                            m
+                        });
                         let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
                         unsafe {
                             libc::write(
@@ -823,11 +803,7 @@ impl PersistentPty {
                         }
                         let mut ans = [0u8; 1];
                         let approved = match unsafe {
-                            libc::read(
-                                stdin_fd,
-                                ans.as_mut_ptr() as *mut libc::c_void,
-                                1,
-                            )
+                            libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
                         } {
                             1 => {
                                 // Ctrl+C: hard abort — skip followup entirely
@@ -959,11 +935,7 @@ impl PersistentPty {
                         }
                     } else {
                         unsafe {
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                     }
                 }
@@ -1022,35 +994,26 @@ impl PersistentPty {
                                         ai_cancelled = true;
                                         followup_capturing = false;
                                         followup_captured.clear();
-                                        if let Some(followup) =
-                                            pending_followup.take()
-                                        {
+                                        if let Some(followup) = pending_followup.take() {
                                             std::thread::spawn(move || {
-                                                let _ = followup(
-                                                    "Command cancelled by user",
-                                                );
+                                                let _ = followup("Command cancelled by user");
                                             });
                                         }
                                         // Forward Ctrl+C to remote PTY
                                         write_buf.push(byte);
                                         let cancel_msg = format!(
                                             "\r\n\x1b[33m{}\x1b[0m\r\n",
-                                            aish_i18n::t(
-                                                "shell.command_cancelled"
-                                            ),
+                                            aish_i18n::t("shell.command_cancelled"),
                                         );
                                         unsafe {
                                             libc::write(
                                                 libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr()
-                                                    as *const libc::c_void,
+                                                cancel_msg.as_ptr() as *const libc::c_void,
                                                 cancel_msg.len(),
                                             );
                                         }
                                         skip_leading_newline = true;
-                                    } else if followup_capturing
-                                        && byte == 0x1A
-                                    {
+                                    } else if followup_capturing && byte == 0x1A {
                                         // Ctrl+Z: keep countdown behavior
                                         followup_interrupt_countdown =
                                             Some(FOLLOWUP_INTERRUPT_GRACE);
@@ -1065,54 +1028,34 @@ impl PersistentPty {
                                         // which can miss readline echoes.
                                         match byte {
                                             b'\r' | b'\n' => {
-                                                let line =
-                                                    String::from_utf8_lossy(
-                                                        &stdin_shadow,
-                                                    );
+                                                let line = String::from_utf8_lossy(&stdin_shadow);
                                                 if let Some(host) =
-                                                    extract_remote_host_from_cmd(
-                                                        line.trim(),
-                                                    )
+                                                    extract_remote_host_from_cmd(line.trim())
                                                 {
-                                                    if is_session_command(
-                                                        line.trim(),
-                                                    )
-                                                    {
+                                                    if is_session_command(line.trim()) {
                                                         debug!(
                                                             "stdin: nested session \
                                                              detected: {:?} -> {}",
-                                                            remote_host_for_probe,
-                                                            host,
+                                                            remote_host_for_probe, host,
                                                         );
                                                         const MAX_NESTING: usize = 8;
-                                                        if nested_host_stack.len()
-                                                            < MAX_NESTING
-                                                        {
+                                                        if nested_host_stack.len() < MAX_NESTING {
                                                             if let Some(cur) =
-                                                                remote_host_for_probe
-                                                                    .take()
+                                                                remote_host_for_probe.take()
                                                             {
-                                                                nested_host_stack
-                                                                    .push(cur);
+                                                                nested_host_stack.push(cur);
                                                             }
                                                             remote_host_for_probe =
                                                                 Some(host.clone());
-                                                            if let Some(
-                                                                ref sh,
-                                                            ) = shared_host
-                                                            {
-                                                                *sh.lock().unwrap() =
-                                                                    Some(host);
+                                                            if let Some(ref sh) = shared_host {
+                                                                *sh.lock().unwrap() = Some(host);
                                                             }
                                                             probe_injected = false;
                                                             probe_active = false;
-                                                            nested_probe_pending =
-                                                                true;
-                                                            session_command_just_sent =
-                                                                true;
+                                                            nested_probe_pending = true;
+                                                            session_command_just_sent = true;
                                                             probe_sections.clear();
-                                                            probe_current_section
-                                                                .clear();
+                                                            probe_current_section.clear();
                                                             probe_start = None;
                                                             output_ssh_scan.clear();
                                                             at_password_prompt = false;
@@ -1126,9 +1069,7 @@ impl PersistentPty {
                                                 stdin_shadow.clear();
                                             }
                                             0x7F | 0x08 => {
-                                                crate::pop_last_utf8_char(
-                                                    &mut stdin_shadow,
-                                                );
+                                                crate::pop_last_utf8_char(&mut stdin_shadow);
                                             }
                                             0x1B => {
                                                 stdin_shadow.clear();
@@ -1140,15 +1081,13 @@ impl PersistentPty {
                                         }
                                     }
                                 }
-                                crate::StdinAction::EchoLocally => {
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            &byte as *const u8 as *const libc::c_void,
-                                            1,
-                                        );
-                                    }
-                                }
+                                crate::StdinAction::EchoLocally => unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        &byte as *const u8 as *const libc::c_void,
+                                        1,
+                                    );
+                                },
                                 crate::StdinAction::TriggerAi(question) => {
                                     // Reset hard-cancel flag for a fresh AI session
                                     ai_cancelled = false;
@@ -1192,18 +1131,12 @@ impl PersistentPty {
                                                 )
                                             };
                                             if sel > 0
-                                                && unsafe {
-                                                    libc::FD_ISSET(
-                                                        self.master_fd,
-                                                        &rfds,
-                                                    )
-                                                }
+                                                && unsafe { libc::FD_ISSET(self.master_fd, &rfds) }
                                             {
                                                 let n = unsafe {
                                                     libc::read(
                                                         self.master_fd,
-                                                        drain_buf.as_mut_ptr()
-                                                            as *mut libc::c_void,
+                                                        drain_buf.as_mut_ptr() as *mut libc::c_void,
                                                         drain_buf.len(),
                                                     )
                                                 };
@@ -1237,10 +1170,7 @@ impl PersistentPty {
                                     let resp = if let Some(response) = dossier_result {
                                         // Dossier command handled, display result directly
                                         if !response.is_empty() {
-                                            let msg = format!(
-                                                "\x1b[36m{}\x1b[0m\r\n",
-                                                response
-                                            );
+                                            let msg = format!("\x1b[36m{}\x1b[0m\r\n", response);
                                             unsafe {
                                                 libc::write(
                                                     libc::STDOUT_FILENO,
@@ -1263,55 +1193,41 @@ impl PersistentPty {
                                             nested_probe_pending,
                                             nested_host_stack,
                                         );
-                                        let needs_probe =
-                                            remote_host_for_probe
-                                                .as_ref()
-                                                .map_or(false, |host_key| {
-                                                    match aish_hosts::load_profile(
-                                                        host_key,
-                                                    ) {
-                                                        None => true,
-                                                        Some(p) => p.probe_is_stale(),
-                                                    }
-                                                });
+                                        let needs_probe = remote_host_for_probe.as_ref().map_or(
+                                            false,
+                                            |host_key| match aish_hosts::load_profile(host_key) {
+                                                None => true,
+                                                Some(p) => p.probe_is_stale(),
+                                            },
+                                        );
                                         debug!(
                                             "TriggerAi: needs_probe={}, host={:?}",
-                                            needs_probe,
-                                            remote_host_for_probe,
+                                            needs_probe, remote_host_for_probe,
                                         );
-                                        if needs_probe
-                                            && remote_host_for_probe.is_some()
-                                        {
+                                        if needs_probe && remote_host_for_probe.is_some() {
                                             // Defer AI: inject probe now, call
                                             // AI after probe completes.
                                             debug!("TriggerAi: injecting on-demand probe");
-                                            let probe_cmd = format!(
-                                                "{}\n",
-                                                aish_hosts::probe_command(),
-                                            );
+                                            let probe_cmd =
+                                                format!("{}\n", aish_hosts::probe_command(),);
                                             let status = format!(
                                                 "\r\x1b[90m{}\x1b[0m\r\n",
-                                                aish_i18n::t(
-                                                    "shell.session.probing"
-                                                ),
+                                                aish_i18n::t("shell.session.probing"),
                                             );
                                             unsafe {
                                                 libc::write(
                                                     libc::STDOUT_FILENO,
-                                                    status.as_ptr()
-                                                        as *const libc::c_void,
+                                                    status.as_ptr() as *const libc::c_void,
                                                     status.len(),
                                                 );
                                                 libc::write(
                                                     self.master_fd,
-                                                    probe_cmd.as_ptr()
-                                                        as *const libc::c_void,
+                                                    probe_cmd.as_ptr() as *const libc::c_void,
                                                     probe_cmd.len(),
                                                 );
                                             }
                                             probe_active = true;
-                                            probe_start =
-                                                Some(std::time::Instant::now());
+                                            probe_start = Some(std::time::Instant::now());
                                             probe_sections.clear();
                                             probe_current_section.clear();
                                             pending_ai_question = Some(question);
@@ -1434,9 +1350,7 @@ impl PersistentPty {
                                     // current chunk (e.g. shell output between
                                     // two markers that arrive in the same chunk).
                                     probe_current_section.push_str(&remaining[..pos]);
-                                    probe_sections.push(
-                                        std::mem::take(&mut probe_current_section)
-                                    );
+                                    probe_sections.push(std::mem::take(&mut probe_current_section));
                                     remaining = &remaining[pos + marker.len()..];
                                 }
                                 probe_current_section.push_str(remaining);
@@ -1448,9 +1362,7 @@ impl PersistentPty {
                                     probe_active = false;
                                     // Append the trailing section (text after
                                     // the last marker, e.g. locale data).
-                                    probe_sections.push(
-                                        std::mem::take(&mut probe_current_section)
-                                    );
+                                    probe_sections.push(std::mem::take(&mut probe_current_section));
                                     debug!(
                                         "probe: {} sections found (incl. trailing)",
                                         probe_sections.len(),
@@ -1496,27 +1408,20 @@ impl PersistentPty {
                                     // by the AI, invoke the AI callback now.
                                     if probe_for_ai {
                                         probe_for_ai = false;
-                                        if let Some(question) =
-                                            pending_ai_question.take()
-                                        {
-                                            let resp =
-                                                interceptor.call_ai(question);
+                                        if let Some(question) = pending_ai_question.take() {
+                                            let resp = interceptor.call_ai(question);
                                             interceptor.finish_ai();
                                             if let Some(response) = resp {
-                                                pending_response =
-                                                    Some(response);
+                                                pending_response = Some(response);
                                             } else {
                                                 let cancel_msg = format!(
                                                     "\x1b[33m{}\x1b[0m\r\n",
-                                                    aish_i18n::t(
-                                                        "shell.session.ai_cancelled"
-                                                    ),
+                                                    aish_i18n::t("shell.session.ai_cancelled"),
                                                 );
                                                 unsafe {
                                                     libc::write(
                                                         libc::STDOUT_FILENO,
-                                                        cancel_msg.as_ptr()
-                                                            as *const libc::c_void,
+                                                        cancel_msg.as_ptr() as *const libc::c_void,
                                                         cancel_msg.len(),
                                                     );
                                                 }
@@ -1534,8 +1439,7 @@ impl PersistentPty {
                                 // "[root@host ~]# ").  Once seen we reduce
                                 // the idle threshold from ~5 s to ~500 ms.
                                 if !followup_prompt_seen && data.len() >= 2 {
-                                    let tail =
-                                        &data[data.len().saturating_sub(4)..];
+                                    let tail = &data[data.len().saturating_sub(4)..];
                                     if tail.ends_with(b"# ")
                                         || tail.ends_with(b"$ ")
                                         || tail.ends_with(b"#\r")
@@ -1587,9 +1491,7 @@ impl PersistentPty {
                                     let mut keep = output_ssh_scan.len() - 2048;
                                     // Align to a valid UTF-8 char boundary
                                     // to avoid panicking on multi-byte chars.
-                                    while keep > 0
-                                        && !output_ssh_scan.is_char_boundary(keep)
-                                    {
+                                    while keep > 0 && !output_ssh_scan.is_char_boundary(keep) {
                                         keep -= 1;
                                     }
                                     let drain_end = output_ssh_scan[..keep]
@@ -1598,14 +1500,10 @@ impl PersistentPty {
                                         .unwrap_or(keep);
                                     output_ssh_scan.drain(..drain_end);
                                 }
-                                if let Some(host) =
-                                    scan_output_for_ssh_host(&output_ssh_scan)
-                                {
+                                if let Some(host) = scan_output_for_ssh_host(&output_ssh_scan) {
                                     debug!(
                                         "nested SSH detected in output: {} -> {}, scan_buf_len={}",
-                                        remote_host_for_probe
-                                            .as_deref()
-                                            .unwrap_or("?"),
+                                        remote_host_for_probe.as_deref().unwrap_or("?"),
                                         host,
                                         output_ssh_scan.len(),
                                     );
@@ -1616,9 +1514,7 @@ impl PersistentPty {
                                             MAX_NESTING
                                         );
                                     } else {
-                                        if let Some(cur) =
-                                            remote_host_for_probe.take()
-                                        {
+                                        if let Some(cur) = remote_host_for_probe.take() {
                                             nested_host_stack.push(cur);
                                         }
                                         remote_host_for_probe = Some(host.clone());
@@ -1697,7 +1593,8 @@ impl PersistentPty {
                             // Display unless AI is processing or capturing probe output.
                             // Use was_probe_active to prevent leaking the chunk where
                             // probe completes (probe_active changes to false mid-parse).
-                            if !interceptor.is_ai_processing() && !probe_active && !was_probe_active {
+                            if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
+                            {
                                 let _ = unsafe {
                                     libc::write(
                                         libc::STDOUT_FILENO,
@@ -1730,11 +1627,7 @@ impl PersistentPty {
                     }
                     skip_leading_newline = true;
                     unsafe {
-                        libc::write(
-                            self.master_fd,
-                            b"\r".as_ptr() as *const libc::c_void,
-                            1,
-                        );
+                        libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                     }
                     continue;
                 }
@@ -1752,25 +1645,18 @@ impl PersistentPty {
                         pending_response = None;
                         skip_leading_newline = true;
                         unsafe {
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                     }
                     // pending_response may now contain the final AI response
                     // which will be processed on the next loop iteration.
                 } else if let Some(ref cmd) = response.command {
                     // Show tool indicator matching local aish style
-                    let tool_text = aish_i18n::t_with_args(
-                        "shell.session.tool_bash",
-                        &{
-                            let mut m = std::collections::HashMap::new();
-                            m.insert("command".to_string(), cmd.clone());
-                            m
-                        },
-                    );
+                    let tool_text = aish_i18n::t_with_args("shell.session.tool_bash", &{
+                        let mut m = std::collections::HashMap::new();
+                        m.insert("command".to_string(), cmd.clone());
+                        m
+                    });
                     let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
                     unsafe {
                         libc::write(
@@ -1796,11 +1682,7 @@ impl PersistentPty {
                     // Read one byte for confirmation (raw mode)
                     let mut ans = [0u8; 1];
                     let approved = match unsafe {
-                        libc::read(
-                            stdin_fd,
-                            ans.as_mut_ptr() as *mut libc::c_void,
-                            1,
-                        )
+                        libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
                     } {
                         1 => {
                             // Ctrl+C: hard abort — skip followup entirely
@@ -1886,11 +1768,7 @@ impl PersistentPty {
                                 cancel_msg.as_ptr() as *const libc::c_void,
                                 cancel_msg.len(),
                             );
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         if let Some(followup) = response.followup {
                             std::thread::spawn(move || {
@@ -1909,11 +1787,7 @@ impl PersistentPty {
                                 cancel_msg.as_ptr() as *const libc::c_void,
                                 cancel_msg.len(),
                             );
-                            libc::write(
-                                self.master_fd,
-                                b"\r".as_ptr() as *const libc::c_void,
-                                1,
-                            );
+                            libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         // Call the followup with a cancellation message so
                         // the LLM thread receives output instead of
@@ -1932,11 +1806,7 @@ impl PersistentPty {
                 } else {
                     // AI returned explanation only (no command)
                     unsafe {
-                        libc::write(
-                            self.master_fd,
-                            b"\r".as_ptr() as *const libc::c_void,
-                            1,
-                        );
+                        libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                     }
                 }
             }
@@ -2299,7 +2169,6 @@ impl PersistentPty {
             "timeout waiting for session_ready event".into(),
         ))
     }
-
 }
 
 // ---- ask_user helpers for SSH sessions ----
@@ -2331,7 +2200,13 @@ fn drain_stdin_trailing(stdin_fd: libc::c_int) {
     };
     if sel > 0 {
         // Drain all available bytes, not just one
-        let _ = unsafe { libc::read(stdin_fd, discard.as_mut_ptr() as *mut libc::c_void, discard.len()) };
+        let _ = unsafe {
+            libc::read(
+                stdin_fd,
+                discard.as_mut_ptr() as *mut libc::c_void,
+                discard.len(),
+            )
+        };
     }
 }
 
@@ -2367,7 +2242,7 @@ fn count_display_lines(request: &crate::AskUserRequest) -> usize {
         lines += 1;
     }
     lines += 1; // Help line
-    // Prompt line "> " only for text_input mode
+                // Prompt line "> " only for text_input mode
     if request.kind != "choice_or_text" {
         lines += 1;
     }
@@ -2424,14 +2299,11 @@ fn redraw_ask_user(request: &crate::AskUserRequest, prev_lines: usize, cursor: u
 
     // Default hint — match local aish's [default: xxx] format
     if let Some(ref default) = request.default {
-        let default_hint = aish_i18n::t_with_args(
-            "shell.session.ask_user.default_hint",
-            &{
-                let mut m = std::collections::HashMap::new();
-                m.insert("default".to_string(), default.clone());
-                m
-            },
-        );
+        let default_hint = aish_i18n::t_with_args("shell.session.ask_user.default_hint", &{
+            let mut m = std::collections::HashMap::new();
+            m.insert("default".to_string(), default.clone());
+            m
+        });
         out.extend_from_slice(b"\x1b[2m");
         out.extend_from_slice(default_hint.as_bytes());
         out.extend_from_slice(b"\x1b[0m\r\n");
@@ -2468,7 +2340,11 @@ fn redraw_ask_user(request: &crate::AskUserRequest, prev_lines: usize, cursor: u
 fn display_ask_user(request: &crate::AskUserRequest) {
     // Move to a new line to avoid garbling with previous AI output
     unsafe {
-        libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const libc::c_void, 2);
+        libc::write(
+            libc::STDOUT_FILENO,
+            b"\r\n".as_ptr() as *const libc::c_void,
+            2,
+        );
     }
     redraw_ask_user(request, 0, 0);
 }
@@ -2548,10 +2424,7 @@ fn read_line_from_stdin_raw(
     request: &crate::AskUserRequest,
 ) -> crate::AskUserAnswer {
     let is_choice = request.kind == "choice_or_text";
-    let num_options = request
-        .options
-        .as_ref()
-        .map_or(0, |o| o.len());
+    let num_options = request.options.as_ref().map_or(0, |o| o.len());
     let has_options = is_choice && num_options > 0;
     // Total selectable slots: options + 1 custom-input slot
     let total_slots = if has_options { num_options + 1 } else { 0 };
@@ -2653,8 +2526,11 @@ fn read_line_from_stdin_raw(
                         }
                         let leader = text_buf.pop().unwrap();
                         // Display width: ASCII=1, 2-byte=1, 3-byte(CJK)=2, 4-byte=2
-                        let width = if leader < 0x80 || leader & 0xE0 == 0xC0 { 1 }
-                            else { 2 };
+                        let width = if leader < 0x80 || leader & 0xE0 == 0xC0 {
+                            1
+                        } else {
+                            2
+                        };
                         let erase = format!(
                             "{}{}{}",
                             "\x08".repeat(width),
@@ -2771,11 +2647,7 @@ fn read_line_from_stdin_raw(
                         // Standalone Escape
                         if request.allow_cancel {
                             unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    b"\r\n".as_ptr() as *const _,
-                                    2,
-                                );
+                                libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const _, 2);
                             }
                             return crate::AskUserAnswer::Cancelled;
                         }
@@ -2824,13 +2696,19 @@ fn handle_ask_user_interaction(
         "choice_or_text" => {
             let n = request.options.as_ref().map_or(0, |o| o.len());
             let mut m = std::collections::HashMap::new();
-            m.insert("prompt".to_string(), truncate_str(&request.prompt, 60).to_string());
+            m.insert(
+                "prompt".to_string(),
+                truncate_str(&request.prompt, 60).to_string(),
+            );
             m.insert("count".to_string(), n.to_string());
             aish_i18n::t_with_args("shell.session.ask_user.choice_preview", &m)
         }
         _ => {
             let mut m = std::collections::HashMap::new();
-            m.insert("prompt".to_string(), truncate_str(&request.prompt, 80).to_string());
+            m.insert(
+                "prompt".to_string(),
+                truncate_str(&request.prompt, 80).to_string(),
+            );
             aish_i18n::t_with_args("shell.session.ask_user.text_preview", &m)
         }
     };
@@ -2872,23 +2750,26 @@ fn handle_ask_user_interaction(
                 );
                 display_ask_user(&next_req);
                 let answer = read_line_from_stdin_raw(stdin_fd, &next_req);
-                debug!("handle_ask_user: follow-up answer {:?}", answer_kind(&answer));
+                debug!(
+                    "handle_ask_user: follow-up answer {:?}",
+                    answer_kind(&answer)
+                );
                 if channel.answer_sender.send(answer).is_err() {
                     break;
                 }
                 continue;
             }
-            Ok(crate::AiEvent::BashExec { command, output_sender }) => {
+            Ok(crate::AiEvent::BashExec {
+                command,
+                output_sender,
+            }) => {
                 debug!("handle_ask_user: follow-up bash_exec, cmd={}", command);
                 // Show tool indicator and confirmation, then execute inline.
-                let tool_text = aish_i18n::t_with_args(
-                    "shell.session.tool_bash",
-                    &{
-                        let mut m = std::collections::HashMap::new();
-                        m.insert("command".to_string(), command.clone());
-                        m
-                    },
-                );
+                let tool_text = aish_i18n::t_with_args("shell.session.tool_bash", &{
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("command".to_string(), command.clone());
+                    m
+                });
                 let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
                 unsafe {
                     libc::write(
@@ -2910,48 +2791,48 @@ fn handle_ask_user_interaction(
                 }
                 let mut ans = [0u8; 1];
                 let mut hard_abort = false;
-                let approved = match unsafe {
-                    libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1)
-                } {
-                    1 => {
-                        // Ctrl+C: hard abort
-                        if ans[0] == 0x03 {
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    b"^C\r\n".as_ptr() as *const libc::c_void,
-                                    4,
-                                );
-                            }
-                            drain_stdin_trailing(stdin_fd);
-                            hard_abort = true;
-                            false
-                        } else {
-                            let echo = if ans[0] == b'y'
-                                || ans[0] == b'Y'
-                                || ans[0] == b'\r'
-                                || ans[0] == b'\n'
-                            {
-                                b"y\r\n"
+                let approved =
+                    match unsafe { libc::read(stdin_fd, ans.as_mut_ptr() as *mut libc::c_void, 1) }
+                    {
+                        1 => {
+                            // Ctrl+C: hard abort
+                            if ans[0] == 0x03 {
+                                unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        b"^C\r\n".as_ptr() as *const libc::c_void,
+                                        4,
+                                    );
+                                }
+                                drain_stdin_trailing(stdin_fd);
+                                hard_abort = true;
+                                false
                             } else {
-                                b"n\r\n"
-                            };
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    echo.as_ptr() as *const libc::c_void,
-                                    echo.len(),
-                                );
+                                let echo = if ans[0] == b'y'
+                                    || ans[0] == b'Y'
+                                    || ans[0] == b'\r'
+                                    || ans[0] == b'\n'
+                                {
+                                    b"y\r\n"
+                                } else {
+                                    b"n\r\n"
+                                };
+                                unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        echo.as_ptr() as *const libc::c_void,
+                                        echo.len(),
+                                    );
+                                }
+                                drain_stdin_trailing(stdin_fd);
+                                ans[0] == b'y'
+                                    || ans[0] == b'Y'
+                                    || ans[0] == b'\r'
+                                    || ans[0] == b'\n'
                             }
-                            drain_stdin_trailing(stdin_fd);
-                            ans[0] == b'y'
-                                || ans[0] == b'Y'
-                                || ans[0] == b'\r'
-                                || ans[0] == b'\n'
                         }
-                    }
-                    _ => false,
-                };
+                        _ => false,
+                    };
                 if approved {
                     // Show "Running..." feedback
                     let running_msg = format!(
@@ -3002,9 +2883,7 @@ fn handle_ask_user_interaction(
                                 &mut tv,
                             )
                         };
-                        if sel > 0
-                            && unsafe { libc::FD_ISSET(master_fd, &rfds) }
-                        {
+                        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                             let mut tmp = [0u8; 4096];
                             match unsafe {
                                 libc::read(
@@ -3091,21 +2970,15 @@ fn handle_ask_user_interaction(
                 if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                     let mut tmp = [0u8; 4096];
                     match unsafe {
-                        libc::read(
-                            master_fd,
-                            tmp.as_mut_ptr() as *mut libc::c_void,
-                            tmp.len(),
-                        )
+                        libc::read(master_fd, tmp.as_mut_ptr() as *mut libc::c_void, tmp.len())
                     } {
-                        n if n > 0 => {
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    tmp.as_ptr() as *const libc::c_void,
-                                    n as usize,
-                                );
-                            }
-                        }
+                        n if n > 0 => unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                tmp.as_ptr() as *const libc::c_void,
+                                n as usize,
+                            );
+                        },
                         _ => {}
                     }
                 }
@@ -3251,8 +3124,8 @@ fn extract_remote_host_from_cmd(command: &str) -> Option<String> {
     // SSH options that take an argument (e.g., -p 2222, -l root, -i key).
     // Options without arguments (e.g., -v, -T, -N) are not listed here.
     let opts_with_arg: &[&str] = &[
-        "-p", "-l", "-i", "-o", "-L", "-R", "-S", "-W", "-J", "-b", "-c",
-        "-F", "-I", "-K", "-m", "-Q", "-q",
+        "-p", "-l", "-i", "-o", "-L", "-R", "-S", "-W", "-J", "-b", "-c", "-F", "-I", "-K", "-m",
+        "-Q", "-q",
     ];
     let mut iter = parts.iter().skip(1).peekable();
     while let Some(part) = iter.next() {
@@ -3333,7 +3206,10 @@ fn handle_dossier_command(question: &str, remote_host: Option<&str>) -> Option<S
                 let removed = profile.remove_notes(keyword);
                 if removed > 0 {
                     let _ = aish_hosts::save_profile(&profile);
-                    Some(format!("Removed {} note(s) matching '{}'", removed, keyword))
+                    Some(format!(
+                        "Removed {} note(s) matching '{}'",
+                        removed, keyword
+                    ))
                 } else {
                     Some(format!("No notes matching '{}'", keyword))
                 }
@@ -3385,10 +3261,7 @@ fn strip_ansi_escapes(s: &str) -> String {
                             i += 1;
                             break;
                         }
-                        if bytes[i] == 0x1b
-                            && i + 1 < bytes.len()
-                            && bytes[i + 1] == b'\\'
-                        {
+                        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
                             i += 2;
                             break;
                         }
@@ -3520,10 +3393,7 @@ fn close_unclosed_heredoc(cmd: &str) -> String {
             // Extract delimiter word
             let delim_start = j;
             while j < len
-                && ![
-                    b' ', b'\n', b'\r', b';', b'&', b'|', b'<', b'>', b'#',
-                ]
-                .contains(&bytes[j])
+                && ![b' ', b'\n', b'\r', b';', b'&', b'|', b'<', b'>', b'#'].contains(&bytes[j])
                 && bytes[j] != b'\''
                 && bytes[j] != b'"'
             {
@@ -3700,7 +3570,10 @@ mod tests {
 
     #[test]
     fn test_extract_command_from_isearch_line_no_match() {
-        assert_eq!(extract_command_from_isearch_line("just a normal line"), None);
+        assert_eq!(
+            extract_command_from_isearch_line("just a normal line"),
+            None
+        );
         assert_eq!(extract_command_from_isearch_line("': "), None);
     }
 

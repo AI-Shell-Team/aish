@@ -13,7 +13,6 @@ pub struct SystemInfo {
     pub locale: String,
 }
 
-
 /// A user-authored note about a remote host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostNote {
@@ -92,7 +91,8 @@ impl HostProfile {
     pub fn remove_notes(&mut self, keyword: &str) -> usize {
         let keyword_lower = keyword.to_lowercase();
         let before = self.notes.len();
-        self.notes.retain(|n| !n.content.to_lowercase().contains(&keyword_lower));
+        self.notes
+            .retain(|n| !n.content.to_lowercase().contains(&keyword_lower));
         let removed = before - self.notes.len();
         if removed > 0 {
             self.last_updated = chrono::Utc::now();
@@ -118,12 +118,18 @@ impl HostProfile {
             lines.push(format!("  OS: {}", self.system.os));
             lines.push(format!("  Kernel: {}", self.system.kernel));
             lines.push(format!("  Shell: {}", self.system.shell));
-            lines.push(format!("  User: {} (home: {})", self.system.user, self.system.home));
+            lines.push(format!(
+                "  User: {} (home: {})",
+                self.system.user, self.system.home
+            ));
             if !self.system.tools.is_empty() {
                 lines.push(format!("  Tools: {}", self.system.tools.join(", ")));
             }
             if !self.system.package_manager.is_empty() {
-                lines.push(format!("  Package manager: {}", self.system.package_manager));
+                lines.push(format!(
+                    "  Package manager: {}",
+                    self.system.package_manager
+                ));
             }
             if !self.system.locale.is_empty() {
                 lines.push(format!("  Locale: {}", self.system.locale));

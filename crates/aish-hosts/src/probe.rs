@@ -50,7 +50,11 @@ pub fn parse_probe_output(sections: &[String]) -> SystemInfo {
     if let Some(s) = sections.get(3) {
         // Sections start with \r\n from the marker's trailing newline,
         // producing an empty first line — skip it.
-        let lines: Vec<&str> = s.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = s
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
         if let Some(first) = lines.first() {
             info.user = first.to_string();
         }
@@ -59,7 +63,8 @@ pub fn parse_probe_output(sections: &[String]) -> SystemInfo {
         }
     }
     if let Some(s) = sections.get(4) {
-        info.locale = s.lines()
+        info.locale = s
+            .lines()
             .map(|l| l.trim())
             .find(|l| !l.is_empty())
             .unwrap_or("")
@@ -97,8 +102,8 @@ fn infer_package_manager(os_release: &str) -> String {
         if let Some(val) = line.strip_prefix("ID=") {
             let id = val.trim_matches('"').to_lowercase();
             return match id.as_str() {
-                "debian" | "ubuntu" | "uos" | "deepin" | "linuxmint" | "pop"
-                | "elementary" | "kali" | "raspbian" => "apt",
+                "debian" | "ubuntu" | "uos" | "deepin" | "linuxmint" | "pop" | "elementary"
+                | "kali" | "raspbian" => "apt",
                 "rhel" | "centos" | "rocky" | "almalinux" | "ol" | "anolis" => "yum",
                 "fedora" => "dnf",
                 "arch" | "manjaro" | "endeavouros" | "garuda" => "pacman",
@@ -111,7 +116,6 @@ fn infer_package_manager(os_release: &str) -> String {
     }
     String::new()
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -122,14 +122,20 @@ impl Tool for SecureBashTool {
         if let Some(ref check) = self.security_check {
             let decision = check(effective_command);
             if !decision.allow {
-                let reason = decision.analysis.confirm_message.clone()
+                let reason = decision
+                    .analysis
+                    .confirm_message
+                    .clone()
                     .unwrap_or_else(|| decision.analysis.impact_description.clone());
                 aish_llm::PreflightResult::Block {
                     message: reason,
                     security: None,
                 }
             } else if decision.require_confirmation {
-                let reason = decision.analysis.confirm_message.clone()
+                let reason = decision
+                    .analysis
+                    .confirm_message
+                    .clone()
                     .unwrap_or_else(|| decision.analysis.impact_description.clone());
                 aish_llm::PreflightResult::Confirm {
                     message: reason,

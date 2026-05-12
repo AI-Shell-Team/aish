@@ -28,12 +28,12 @@ pub struct HostNoteTool {
 }
 
 impl HostNoteTool {
-    pub fn new(
-        store: HostNoteStoreFn,
-        list: HostNoteListFn,
-        forget: HostNoteForgetFn,
-    ) -> Self {
-        Self { store, list, forget }
+    pub fn new(store: HostNoteStoreFn, list: HostNoteListFn, forget: HostNoteForgetFn) -> Self {
+        Self {
+            store,
+            list,
+            forget,
+        }
     }
 }
 
@@ -79,9 +79,9 @@ impl Tool for HostNoteTool {
                 let content = match args.get("content").and_then(|v| v.as_str()) {
                     Some(c) => c,
                     None => {
-                        return ToolResult::error(
-                            aish_i18n::t("tools.host_note.store_missing_content"),
-                        )
+                        return ToolResult::error(aish_i18n::t(
+                            "tools.host_note.store_missing_content",
+                        ))
                     }
                 };
                 let msg = (self.store)(content);
@@ -102,9 +102,9 @@ impl Tool for HostNoteTool {
                 let keyword = match args.get("keyword").and_then(|v| v.as_str()) {
                     Some(k) => k,
                     None => {
-                        return ToolResult::error(
-                            aish_i18n::t("tools.host_note.forget_missing_keyword"),
-                        )
+                        return ToolResult::error(aish_i18n::t(
+                            "tools.host_note.forget_missing_keyword",
+                        ))
                     }
                 };
                 let msg = (self.forget)(keyword);

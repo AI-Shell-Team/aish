@@ -30,8 +30,7 @@ pub fn save_profile(profile: &HostProfile) -> std::io::Result<()> {
     let dir = hosts_dir();
     std::fs::create_dir_all(&dir)?;
     let path = profile_path(&profile.host_key);
-    let content = serde_yaml::to_string(profile)
-        .map_err(std::io::Error::other)?;
+    let content = serde_yaml::to_string(profile).map_err(std::io::Error::other)?;
     std::fs::write(path, content)
 }
 
@@ -46,7 +45,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_host_key() {
-        assert_eq!(sanitize_host_key("root@192.168.1.100"), "root@192.168.1.100");
+        assert_eq!(
+            sanitize_host_key("root@192.168.1.100"),
+            "root@192.168.1.100"
+        );
         assert_eq!(sanitize_host_key("user@example.com"), "user@example.com");
     }
 
