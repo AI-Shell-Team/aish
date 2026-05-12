@@ -1865,10 +1865,14 @@ impl AishShell {
                     };
                     let mut profile = aish_hosts::get_or_create_profile(&host);
                     let id = profile.add_note(content.to_string());
-                    let _ = aish_hosts::save_profile(&profile);
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("id".to_string(), id.to_string());
-                    t_with_args("tools.host_note.stored", &args)
+                    match aish_hosts::save_profile(&profile) {
+                        Ok(()) => {
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("id".to_string(), id.to_string());
+                            t_with_args("tools.host_note.stored", &args)
+                        }
+                        Err(e) => format!("Failed to save note: {}", e),
+                    }
                 })
             },
             {
@@ -1898,13 +1902,14 @@ impl AishShell {
                     };
                     let mut profile = aish_hosts::get_or_create_profile(&host);
                     let removed = profile.remove_notes(keyword);
-                    let _ = aish_hosts::save_profile(&profile);
-                    if removed > 0 {
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("count".to_string(), removed.to_string());
-                        t_with_args("tools.host_note.forgot", &args)
-                    } else {
-                        t("tools.host_note.forgot_none")
+                    match aish_hosts::save_profile(&profile) {
+                        Ok(()) if removed > 0 => {
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("count".to_string(), removed.to_string());
+                            t_with_args("tools.host_note.forgot", &args)
+                        }
+                        Ok(()) => t("tools.host_note.forgot_none"),
+                        Err(e) => format!("Failed to save changes: {}", e),
                     }
                 })
             },
