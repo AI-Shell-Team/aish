@@ -180,7 +180,7 @@ impl Tool for SystemDiagnoseTool {
 
             // Tools available for diagnosis
             let mut tools: Vec<Box<dyn Tool>> = vec![
-                Box::new(crate::bash::BashTool::new()),
+                Box::new(crate::SecureBashTool::new()),
                 Box::new(crate::fs::ReadFileTool::new()),
                 Box::new(crate::fs::WriteFileTool::new()),
                 Box::new(crate::fs::EditFileTool::new()),

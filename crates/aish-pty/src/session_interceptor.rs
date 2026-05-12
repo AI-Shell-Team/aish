@@ -322,7 +322,7 @@ fn starts_with_ai_prefix(line: &[u8]) -> bool {
 }
 
 /// Pop the last complete UTF-8 character from a byte buffer.
-fn pop_last_utf8_char(buf: &mut Vec<u8>) {
+pub fn pop_last_utf8_char(buf: &mut Vec<u8>) {
     // Pop trailing continuation bytes (0x80..0xBF), then the leader byte
     while buf.last().is_some_and(|b| b & 0xC0 == 0x80) {
         buf.pop();

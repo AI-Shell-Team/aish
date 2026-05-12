@@ -69,47 +69,54 @@ jobs:
           body: ${{ needs.release-meta.outputs.release_notes }}
           prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
 
-  build-release-packages:
-    name: Build release bundle (${{ matrix.arch }})
+  build-release-bundle:
+    name: Build release bundle
     needs:
       - release-meta
       - release-gate
       - create-release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            target: x86_64-unknown-linux-musl
-            runs_on: ubuntu-latest
-          - arch: arm64
-            target: aarch64-unknown-linux-musl
-            runs_on: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runs_on }}
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        env:
-          AISH_BUILD_TARGET: ${{ matrix.target }}
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-musl-cargo-v1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            linux-musl-cargo-v1-
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Build release bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" AISH_BUILD_TARGET="${{ matrix.target }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          OUTPUT_DIR="artifacts/amd64"
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          BUNDLE="aish-${VERSION}-linux-${{ matrix.arch }}"
-          EXTRACT_DIR="$PWD/build/install-smoke/${{ matrix.arch }}"
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
+          OUTPUT_DIR="artifacts/amd64"
+          BUNDLE="aish-${VERSION}-linux-amd64"
+          EXTRACT_DIR="$PWD/build/install-smoke"
+          INSTALL_ROOT="$PWD/build/install-root"
 
           rm -rf "$EXTRACT_DIR" "$INSTALL_ROOT"
           mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
@@ -118,69 +125,21 @@ jobs:
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
 
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
+          test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
-          test -f "$INSTALL_ROOT/lib/systemd/system/aish-sandbox.service"
-          test -f "$INSTALL_ROOT/lib/systemd/system/aish-sandbox.socket"
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
           prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
-          files: artifacts/${{ matrix.arch }}/*
-
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-bundle-linux-${{ matrix.arch }}
-          path: artifacts/${{ matrix.arch }}/*
-          if-no-files-found: error
-
-  publish-release-bundles:
-    name: Publish release bundles
-    needs:
-      - release-meta
-      - release-gate
-      - build-release-packages
-    runs-on: ubuntu-latest
-    environment: release
-    env:
-      VERSION: ${{ needs.release-meta.outputs.version }}
-      ARTIFACT_ROOT: artifacts/release
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-      CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
-      DOWNLOAD_PREFIX: ${{ contains(needs.release-meta.outputs.version, '-') && 'download/beta' || 'download' }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Download release artifacts
-        uses: actions/download-artifact@v6
-        with:
-          pattern: release-bundle-linux-*
-          path: ${{ env.ARTIFACT_ROOT }}
-
-      - name: Ensure aws CLI is available
-        run: |
-          if ! command -v aws >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y awscli
-          fi
-          aws --version
-
-      - name: Publish release bundles
-        run: bash ./packaging/scripts/publish_release.sh
+          files: artifacts/amd64/*
 
   release-summary:
     name: Summarize published release
     needs:
       - release-meta
-      - build-release-packages
-      - publish-release-bundles
+      - build-release-bundle
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
@@ -191,5 +150,5 @@ jobs:
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
 
-          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and the CDN channel was updated for this release.
+          GitHub Release metadata was generated from the tag push, and bundle assets were uploaded successfully.
           EOF
