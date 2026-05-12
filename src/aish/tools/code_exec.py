@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shlex
 import sys
 import threading
 from pathlib import Path
@@ -28,9 +29,48 @@ DISPLAY_ELLIPSIS = " ..."
 logger = logging.getLogger("aish.tools.code_exec")
 
 
+_INTERACTIVE_COMMANDS = {"sudo", "su"}
+_COMMAND_SEPARATORS = {";", "&", "&&", "||", "|", "(", ")"}
+
+
+def _is_shell_assignment(token: str) -> bool:
+    if "=" not in token:
+        return False
+
+    name, _value = token.split("=", 1)
+    return bool(name) and (name[0].isalpha() or name[0] == "_") and all(
+        char.isalnum() or char == "_" for char in name
+    )
+
+
 def _needs_interactive_bash(command: str) -> bool:
-    lower = command.lower()
-    return "sudo" in lower or " su " in lower or lower.startswith("su ")
+    lexer = shlex.shlex(
+        command.replace("\n", ";"),
+        posix=True,
+        punctuation_chars=";&|()",
+    )
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return False
+
+    command_position = True
+    for token in tokens:
+        if token in _COMMAND_SEPARATORS:
+            command_position = True
+            continue
+        if command_position and token == "!":
+            continue
+        if command_position and _is_shell_assignment(token):
+            continue
+        if command_position and token in _INTERACTIVE_COMMANDS:
+            return True
+        command_position = False
+
+    return False
 
 
 def _collapse_output_lines(text: str, max_lines: int = DISPLAY_MAX_LINES) -> str:

@@ -27,12 +27,17 @@ def _extract_tag(xml_text: str, tag_name: str) -> str:
     return match.group(1).strip("\n")
 
 
-def test_needs_interactive_bash_matches_rust_heuristic():
+def test_needs_interactive_bash_matches_shell_commands_only():
     assert _needs_interactive_bash("sudo apt update") is True
     assert _needs_interactive_bash("echo 3 | sudo tee /tmp/x") is True
     assert _needs_interactive_bash("su -") is True
     assert _needs_interactive_bash("cmd && su -") is True
+    assert _needs_interactive_bash("FOO=bar sudo apt update") is True
     assert _needs_interactive_bash("ls -la") is False
+    assert _needs_interactive_bash("printf 'sudo prompt'") is False
+    assert _needs_interactive_bash("echo ok # sudo") is False
+    assert _needs_interactive_bash("printf '[sudo] password: '; read pw # sudo") is False
+    assert _needs_interactive_bash("echo nosudo") is False
 
 
 @pytest.mark.asyncio
