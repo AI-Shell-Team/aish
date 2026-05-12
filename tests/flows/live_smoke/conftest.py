@@ -109,7 +109,9 @@ def _write_config_file(
     if api_base:
         config_data["api_base"] = api_base
 
-    config_file.write_text(yaml.safe_dump(config_data, sort_keys=True), encoding="utf-8")
+    config_file.write_text(
+        yaml.safe_dump(config_data, sort_keys=True), encoding="utf-8"
+    )
     return config_file
 
 
@@ -120,6 +122,77 @@ def _close_shell(child: Any, timeout: float = 5.0) -> None:
         child.expect(pexpect.EOF, timeout=timeout)
     except pexpect.TIMEOUT:
         child.close(force=True)
+
+
+def _live_smoke_secret_values() -> tuple[str, ...]:
+    return tuple(
+        value
+        for value in (os.environ.get("AISH_LIVE_SMOKE_API_KEY", "").strip(),)
+        if value
+    )
+
+
+def _redact_live_smoke_text(text: str) -> str:
+    redacted = text
+    for secret in _live_smoke_secret_values():
+        redacted = redacted.replace(secret, "<redacted>")
+    return redacted
+
+
+def _redact_live_smoke_argv(argv: list[str]) -> list[str]:
+    redacted: list[str] = []
+    redact_next = False
+    for arg in argv:
+        if redact_next:
+            redacted.append("<redacted>")
+            redact_next = False
+            continue
+        if arg == "--api-key":
+            redacted.append(arg)
+            redact_next = True
+            continue
+        if arg.startswith("--api-key="):
+            redacted.append("--api-key=<redacted>")
+            continue
+        redacted.append(_redact_live_smoke_text(arg))
+    return redacted
+
+
+def _redact_live_smoke_artifact(value: Any) -> Any:
+    if isinstance(value, LiveSmokeCommandResult):
+        return asdict(
+            LiveSmokeCommandResult(
+                argv=_redact_live_smoke_argv(value.argv),
+                cwd=value.cwd,
+                returncode=value.returncode,
+                stdout=_redact_live_smoke_text(value.stdout),
+                stderr=_redact_live_smoke_text(value.stderr),
+                duration_seconds=value.duration_seconds,
+            )
+        )
+    if isinstance(value, LiveSmokeChatResult):
+        return asdict(
+            LiveSmokeChatResult(
+                argv=_redact_live_smoke_argv(value.argv),
+                cwd=value.cwd,
+                transcript=_redact_live_smoke_text(value.transcript),
+                exitstatus=value.exitstatus,
+                signalstatus=value.signalstatus,
+                duration_seconds=value.duration_seconds,
+                expected_token_seen=value.expected_token_seen,
+            )
+        )
+    if isinstance(value, dict):
+        return {key: _redact_live_smoke_artifact(item) for key, item in value.items()}
+    if isinstance(value, list):
+        if all(isinstance(item, str) for item in value):
+            return _redact_live_smoke_argv(value)
+        return [_redact_live_smoke_artifact(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_live_smoke_artifact(item) for item in value)
+    if isinstance(value, str):
+        return _redact_live_smoke_text(value)
+    return value
 
 
 def _env_summary(env: dict[str, str]) -> dict[str, str]:
@@ -263,7 +336,11 @@ def live_smoke_artifacts(
     for index, artifact in enumerate(artifacts, start=1):
         artifact_path = artifact_dir / f"artifact-{index}.yaml"
         artifact_path.write_text(
-            yaml.safe_dump(artifact, allow_unicode=False, sort_keys=False),
+            yaml.safe_dump(
+                _redact_live_smoke_artifact(artifact),
+                allow_unicode=False,
+                sort_keys=False,
+            ),
             encoding="utf-8",
         )
 
@@ -297,11 +374,11 @@ def live_smoke_runner(
         live_smoke_artifacts.append(
             {
                 "type": "command",
-                "argv": argv,
+                "argv": _redact_live_smoke_argv(argv),
                 "cwd": str(live_smoke_paths.workspace),
                 "duration_seconds": duration_seconds,
                 "env_summary": _env_summary(live_smoke_env),
-                "result": asdict(result),
+                "result": _redact_live_smoke_artifact(result),
             }
         )
         return result
@@ -420,12 +497,12 @@ def live_smoke_chat_runner(
             live_smoke_artifacts.append(
                 {
                     "type": "chat",
-                    "argv": argv,
+                    "argv": _redact_live_smoke_argv(argv),
                     "cwd": str(live_smoke_paths.workspace),
                     "duration_seconds": duration_seconds,
                     "env_summary": _env_summary(live_smoke_env),
                     "config_file": str(live_smoke_config_file),
-                    "transcript": result.transcript,
+                    "transcript": _redact_live_smoke_text(result.transcript),
                     "exitstatus": result.exitstatus,
                     "signalstatus": result.signalstatus,
                     "expected_token_seen": result.expected_token_seen,
