@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import shlex
 import sys
 import threading
 from pathlib import Path
@@ -28,9 +29,76 @@ DISPLAY_ELLIPSIS = " ..."
 logger = logging.getLogger("aish.tools.code_exec")
 
 
+_SHELL_COMMAND_SEPARATORS = {";", "&&", "||", "|", "("}
+_SHELL_COMMAND_KEYWORDS = {
+    "if",
+    "then",
+    "while",
+    "until",
+    "do",
+    "else",
+    "elif",
+    "time",
+    "!",
+}
+_INTERACTIVE_STDIN_COMMANDS = {"sudo", "su"}
+_COMMAND_WRAPPERS = {"command", "builtin", "exec", "env", "nohup"}
+
+
+def _tokenize_bash_command(command: str) -> list[str]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer)
+    except ValueError:
+        # If the command is syntactically incomplete, fall back to the normal
+        # non-interactive executor instead of granting stdin to a substring hit.
+        return []
+
+
+def _is_assignment(token: str) -> bool:
+    name, sep, _value = token.partition("=")
+    return bool(
+        sep and name and name.replace("_", "").isalnum() and not name[0].isdigit()
+    )
+
+
+def _command_basename(token: str) -> str:
+    return os.path.basename(token).lower()
+
+
 def _needs_interactive_bash(command: str) -> bool:
-    lower = command.lower()
-    return "sudo" in lower or " su " in lower or lower.startswith("su ")
+    tokens = _tokenize_bash_command(command)
+    expect_command = True
+    wrapper_pending = False
+
+    for token in tokens:
+        normalized = token.lower()
+        if normalized in _SHELL_COMMAND_SEPARATORS:
+            expect_command = True
+            wrapper_pending = False
+            continue
+        if normalized in _SHELL_COMMAND_KEYWORDS:
+            expect_command = True
+            wrapper_pending = False
+            continue
+        if not expect_command:
+            continue
+        if _is_assignment(token):
+            continue
+
+        basename = _command_basename(token)
+        if wrapper_pending or basename not in _COMMAND_WRAPPERS:
+            if basename in _INTERACTIVE_STDIN_COMMANDS:
+                return True
+            expect_command = False
+            wrapper_pending = False
+            continue
+
+        wrapper_pending = True
+
+    return False
 
 
 def _collapse_output_lines(text: str, max_lines: int = DISPLAY_MAX_LINES) -> str:
@@ -335,6 +403,8 @@ class BashTool(ToolBase):
 
         if not self._last_decision.allow:
             return False
+        if _needs_interactive_bash(command):
+            return True
         return bool(self._last_decision.require_confirmation)
 
     def prepare_invocation(
@@ -370,12 +440,6 @@ class BashTool(ToolBase):
             remember_key=command,
         )
 
-        if isinstance(analysis_data, dict) and analysis_data.get("fail_open") is True:
-            return ToolPreflightResult(action=ToolPreflightAction.EXECUTE)
-
-        if callable(context.is_approved) and context.is_approved(command):
-            return ToolPreflightResult(action=ToolPreflightAction.EXECUTE)
-
         if not decision.allow:
             reasons = (
                 analysis_data.get("reasons", [])
@@ -405,6 +469,29 @@ class BashTool(ToolBase):
                     stop_tool_chain=True,
                 ),
             )
+
+        approved = callable(context.is_approved) and context.is_approved(command)
+        if approved:
+            return ToolPreflightResult(action=ToolPreflightAction.EXECUTE)
+
+        if _needs_interactive_bash(command):
+            panel.mode = "confirm"
+            panel.title = "Confirm interactive terminal input"
+            panel.analysis = {
+                **panel.analysis,
+                "interactive_stdin": True,
+                "reason": (
+                    "This AI-generated command may request terminal input; "
+                    "approve only if you trust the exact command shown."
+                ),
+            }
+            return ToolPreflightResult(
+                action=ToolPreflightAction.CONFIRM,
+                panel=panel,
+            )
+
+        if isinstance(analysis_data, dict) and analysis_data.get("fail_open") is True:
+            return ToolPreflightResult(action=ToolPreflightAction.EXECUTE)
 
         sandbox_info = (
             analysis_data.get("sandbox", {}) if isinstance(analysis_data, dict) else {}
