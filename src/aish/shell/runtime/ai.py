@@ -130,7 +130,9 @@ class AIHandler:
     def _run_async_in_thread(coro, cancellation_token=None) -> Any:
         """Run an async coroutine in a separate thread with its own event loop.
 
-        Uses polling-based cancellation to allow Ctrl+C interruption.
+        Uses polling-based cancellation to allow Ctrl+C interruption, and
+        forwards cancellation into the event loop so in-flight HTTP requests
+        do not keep running in the background until their timeout expires.
         """
         from concurrent.futures import (
             ThreadPoolExecutor,
@@ -139,20 +141,38 @@ class AIHandler:
 
         result_box: list[Optional[str]] = [None]
         exc_box: list[BaseException | None] = [None]
+        loop_ready = threading.Event()
+        loop_box: list[asyncio.AbstractEventLoop | None] = [None]
+        task_box: list[asyncio.Task | None] = [None]
 
         def run_in_thread() -> None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            loop_box[0] = loop
             try:
-                result_box[0] = loop.run_until_complete(coro)
+                task = loop.create_task(coro)
+                task_box[0] = task
+                loop_ready.set()
+                result_box[0] = loop.run_until_complete(task)
             except BaseException as e:
                 exc_box[0] = e
             finally:
+                loop_ready.set()
                 AIHandler._shutdown_loop(loop)
                 loop.close()
+                loop_box[0] = None
+                task_box[0] = None
 
         pool = ThreadPoolExecutor(max_workers=1)
         future = pool.submit(run_in_thread)
+
+        def _cancel_running_task() -> None:
+            loop = loop_box[0]
+            task = task_box[0]
+            if loop is None or task is None or task.done() or loop.is_closed():
+                return
+            loop.call_soon_threadsafe(task.cancel)
+
         try:
             while not future.done():
                 try:
@@ -160,6 +180,12 @@ class AIHandler:
                 except FutureTimeoutError:
                     # Check if cancellation was requested
                     if cancellation_token and cancellation_token.is_cancelled():
+                        if loop_ready.wait(timeout=0.2):
+                            _cancel_running_task()
+                        try:
+                            future.result(timeout=2.0)
+                        except FutureTimeoutError:
+                            pass
                         raise KeyboardInterrupt("AI operation cancelled by user")
         finally:
             pool.shutdown(wait=False)

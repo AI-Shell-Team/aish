@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import threading
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ import pytest
 from unittest.mock import Mock
 from unittest.mock import call
 
+from aish.state.cancellation import CancellationToken
 from aish.memory.config import MemoryConfig
 from aish.memory.models import MemoryCategory
 from aish.i18n import t
@@ -174,6 +176,39 @@ def test_ai_handler_marks_cancelled_operation_and_notifies_shell():
     assert response is None
     assert was_cancelled is True
     shell.handle_processing_cancelled.assert_called_once_with()
+
+
+@pytest.mark.timeout(5)
+def test_run_async_in_thread_cancels_running_coroutine():
+    token = CancellationToken()
+    started = threading.Event()
+    cleaned_up = threading.Event()
+    error_box: list[BaseException | None] = [None]
+
+    async def _hang_until_cancelled():
+        started.set()
+        try:
+            while True:
+                await asyncio.sleep(1)
+        finally:
+            cleaned_up.set()
+
+    def _run() -> None:
+        try:
+            AIHandler._run_async_in_thread(_hang_until_cancelled(), token)
+        except BaseException as exc:
+            error_box[0] = exc
+
+    thread = threading.Thread(target=_run)
+    thread.start()
+
+    assert started.wait(timeout=1)
+    token.cancel()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert isinstance(error_box[0], KeyboardInterrupt)
+    assert cleaned_up.wait(timeout=1)
 
 
 def test_ai_handler_auto_retain_persists_explicit_fact():
