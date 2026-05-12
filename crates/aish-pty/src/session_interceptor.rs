@@ -116,6 +116,9 @@ pub enum StdinAction {
     EchoLocally,
     /// AI input line is complete. Caller should invoke AI callback.
     TriggerAi(String),
+    /// Line looks like natural language. Caller should show confirmation,
+    /// then either trigger AI or forward the buffered line.
+    PossibleNl(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +191,15 @@ impl SessionInterceptor {
                             self.cancel_pty_line = true;
                             self.state = InterceptorState::AiProcessing;
                             return StdinAction::TriggerAi(question);
+                        }
+                        // NL detection: check if the line looks like natural language.
+                        if self.ai_callback.is_some() && !self.line_shadow.is_empty() {
+                            let line = String::from_utf8_lossy(&self.line_shadow).to_string();
+                            if crate::nl_detect::looks_like_natural_language_safe(&line) {
+                                self.cancel_pty_line = true;
+                                self.state = InterceptorState::AiProcessing;
+                                return StdinAction::PossibleNl(line);
+                            }
                         }
                         self.line_shadow.clear();
                     }

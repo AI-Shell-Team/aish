@@ -1275,6 +1275,175 @@ impl PersistentPty {
                                         }
                                     }
                                 }
+                                crate::StdinAction::PossibleNl(line) => {
+                                    // NL detected — show confirmation prompt in raw mode.
+                                    ai_cancelled = false;
+                                    stdin_shadow.clear();
+
+                                    // Cancel the echoed line on the remote PTY
+                                    if interceptor.take_cancel_pty_line() {
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                b"\x03".as_ptr() as *const libc::c_void,
+                                                1,
+                                            );
+                                        }
+                                        // Drain Ctrl+C output from PTY
+                                        let mut drain_buf = [0u8; 4096];
+                                        loop {
+                                            let mut rfds: libc::fd_set =
+                                                unsafe { std::mem::zeroed() };
+                                            unsafe {
+                                                libc::FD_ZERO(&mut rfds);
+                                                libc::FD_SET(self.master_fd, &mut rfds);
+                                            }
+                                            let mut tv = libc::timeval {
+                                                tv_sec: 0,
+                                                tv_usec: 100_000,
+                                            };
+                                            let sel = unsafe {
+                                                libc::select(
+                                                    self.master_fd + 1,
+                                                    &mut rfds,
+                                                    std::ptr::null_mut(),
+                                                    std::ptr::null_mut(),
+                                                    &mut tv,
+                                                )
+                                            };
+                                            if sel > 0
+                                                && unsafe {
+                                                    libc::FD_ISSET(self.master_fd, &rfds)
+                                                }
+                                            {
+                                                let n = unsafe {
+                                                    libc::read(
+                                                        self.master_fd,
+                                                        drain_buf.as_mut_ptr()
+                                                            as *mut libc::c_void,
+                                                        drain_buf.len(),
+                                                    )
+                                                };
+                                                if n <= 0 {
+                                                    break;
+                                                }
+                                                interceptor
+                                                    .feed_pty_output(&drain_buf[..n as usize]);
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                    }
+
+                                    // Show NL confirmation prompt
+                                    let confirm = format!(
+                                        "\r\n\x1b[33m{}\x1b[0m ",
+                                        aish_i18n::t("shell.nl_detection.confirm_ask_ai")
+                                    );
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            confirm.as_ptr() as *const libc::c_void,
+                                            confirm.len(),
+                                        );
+                                    }
+
+                                    // Read one byte for confirmation (raw mode)
+                                    let mut ans = [0u8; 1];
+                                    let confirmed = match unsafe {
+                                        libc::read(
+                                            stdin_fd,
+                                            ans.as_mut_ptr() as *mut libc::c_void,
+                                            1,
+                                        )
+                                    } {
+                                        1 => {
+                                            let echo = if ans[0] == b'y'
+                                                || ans[0] == b'Y'
+                                                || ans[0] == b'\r'
+                                                || ans[0] == b'\n'
+                                            {
+                                                b"Y\r\n"
+                                            } else {
+                                                b"N\r\n"
+                                            };
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    echo.as_ptr() as *const libc::c_void,
+                                                    echo.len(),
+                                                );
+                                            }
+                                            ans[0] == b'y'
+                                                || ans[0] == b'Y'
+                                                || ans[0] == b'\r'
+                                                || ans[0] == b'\n'
+                                        }
+                                        _ => false,
+                                    };
+
+                                    if confirmed {
+                                        // Route to AI — re-enter as TriggerAi
+                                        let question = line.trim().to_string();
+                                        // Check for dossier commands
+                                        let dossier_result = handle_dossier_command(
+                                            &question,
+                                            remote_host_for_probe.as_deref(),
+                                        );
+                                        let dossier_was_handled =
+                                            dossier_result.is_some();
+                                        let resp = if let Some(response) = dossier_result {
+                                            if !response.is_empty() {
+                                                let msg =
+                                                    format!("\x1b[36m{}\x1b[0m\r\n", response);
+                                                unsafe {
+                                                    libc::write(
+                                                        libc::STDOUT_FILENO,
+                                                        msg.as_ptr() as *const libc::c_void,
+                                                        msg.len(),
+                                                    );
+                                                }
+                                            }
+                                            None
+                                        } else {
+                                            interceptor.call_ai(question)
+                                        };
+                                        interceptor.finish_ai();
+                                        skip_leading_newline = true;
+                                        if let Some(response) = resp {
+                                            pending_response = Some(response);
+                                        } else if !dossier_was_handled {
+                                            unsafe {
+                                                libc::write(
+                                                    self.master_fd,
+                                                    b"\r".as_ptr() as *const libc::c_void,
+                                                    1,
+                                                );
+                                            }
+                                        } else {
+                                            unsafe {
+                                                libc::write(
+                                                    self.master_fd,
+                                                    b"\r".as_ptr() as *const libc::c_void,
+                                                    1,
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        // User declined — re-send the line to PTY
+                                        interceptor.finish_ai();
+                                        let mut replay = line.into_bytes();
+                                        replay.push(b'\n');
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                replay.as_ptr() as *const libc::c_void,
+                                                replay.len(),
+                                            );
+                                        }
+                                        skip_leading_newline = true;
+                                    }
+                                }
                             }
                         }
                     }

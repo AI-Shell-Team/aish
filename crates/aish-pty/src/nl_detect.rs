@@ -173,6 +173,48 @@ fn english_nl_score(tokens: &[&str]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Common commands (for SSH sessions without PATH access)
+// ---------------------------------------------------------------------------
+
+/// Commands so common that they should never trigger NL detection, even on
+/// remote hosts where we cannot check PATH.  Covers POSIX coreutils, popular
+/// dev tools, and package managers.
+const COMMON_COMMANDS: &[&str] = &[
+    // POSIX / coreutils
+    "ls", "cd", "pwd", "mkdir", "rmdir", "rm", "cp", "mv", "ln", "touch",
+    "cat", "head", "tail", "more", "less", "wc", "sort", "uniq", "diff",
+    "grep", "sed", "awk", "find", "xargs", "tee", "tr", "cut", "paste",
+    "chmod", "chown", "chgrp", "umask", "stat", "file", "du", "df",
+    "echo", "printf", "yes", "true", "false", "test", "expr",
+    "ps", "kill", "top", "htop", "nice", "renice", "nohup", "bg", "fg",
+    "jobs", "wait", "sleep", "crontab", "at", "watch",
+    "tar", "gzip", "gunzip", "bzip2", "xz", "zip", "unzip",
+    "ssh", "scp", "rsync", "sftp", "ftp", "curl", "wget", "nc", "telnet",
+    "ping", "traceroute", "dig", "nslookup", "host", "ifconfig", "ip",
+    "netstat", "ss", "iptables", "route",
+    "su", "sudo", "passwd", "useradd", "userdel", "groupadd",
+    "mount", "umount", "fdisk", "mkfs", "fsck", "blkid", "lsblk",
+    "date", "cal", "uptime", "hostname", "uname", "whoami", "id", "env",
+    "which", "whereis", "type", "alias", "unalias", "export", "unset",
+    "source", "sh", "bash", "zsh", "fish", "dash", "ksh", "csh",
+    "man", "info", "apropos", "help",
+    "vim", "vi", "nano", "emacs", "ed",
+    // Dev tools
+    "git", "make", "cmake", "cargo", "rustc", "rustup",
+    "npm", "npx", "yarn", "pnpm", "node", "deno", "bun",
+    "pip", "pip3", "python", "python3", "ruby", "gem", "bundle",
+    "java", "javac", "mvn", "gradle", "go",
+    "docker", "podman", "kubectl", "helm", "terraform",
+    "systemctl", "service", "journalctl", "logrotate",
+    "apt", "apt-get", "yum", "dnf", "pacman", "brew", "nix",
+    // Editors / pagers (short forms)
+    "vi", "nvim", "view", "bat",
+];
+
+static COMMON_COMMANDS_SET: LazyLock<std::collections::HashSet<&'static str>> =
+    LazyLock::new(|| COMMON_COMMANDS.iter().copied().collect());
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -200,6 +242,25 @@ pub fn looks_like_natural_language(line: &str) -> bool {
     // English NL keyword scoring
     let score = english_nl_score(&tokens);
     score >= NL_SCORE_THRESHOLD
+}
+
+/// SSH-session-safe variant: also checks against a hardcoded list of common
+/// commands so that `git status` etc. are not falsely classified as NL on
+/// remote hosts where PATH is unavailable.
+pub fn looks_like_natural_language_safe(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // If first token is a common command → not NL
+    if let Some(first) = trimmed.split_whitespace().next() {
+        if COMMON_COMMANDS_SET.contains(first) {
+            return false;
+        }
+    }
+
+    looks_like_natural_language(line)
 }
 
 #[cfg(test)]
@@ -252,5 +313,32 @@ mod tests {
         assert_eq!(simplify_word("running"), "runn");
         assert_eq!(simplify_word("listed"), "list");
         assert_eq!(simplify_word("list"), "list");
+    }
+
+    #[test]
+    fn test_safe_git_status_not_nl() {
+        assert!(!looks_like_natural_language_safe("git status"));
+    }
+
+    #[test]
+    fn test_safe_common_commands_not_nl() {
+        assert!(!looks_like_natural_language_safe("ls -la"));
+        assert!(!looks_like_natural_language_safe("docker ps"));
+        assert!(!looks_like_natural_language_safe("cargo build"));
+        assert!(!looks_like_natural_language_safe("vim file.txt"));
+        assert!(!looks_like_natural_language_safe("pip install requests"));
+    }
+
+    #[test]
+    fn test_safe_nl_still_detected() {
+        assert!(looks_like_natural_language_safe("list all files"));
+        assert!(looks_like_natural_language_safe("what time is it"));
+        assert!(looks_like_natural_language_safe("列出所有文件"));
+    }
+
+    #[test]
+    fn test_safe_empty() {
+        assert!(!looks_like_natural_language_safe(""));
+        assert!(!looks_like_natural_language_safe("   "));
     }
 }
