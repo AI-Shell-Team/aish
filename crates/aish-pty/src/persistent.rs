@@ -1193,13 +1193,14 @@ impl PersistentPty {
                                             nested_probe_pending,
                                             nested_host_stack,
                                         );
-                                        let needs_probe = remote_host_for_probe.as_ref().map_or(
-                                            false,
-                                            |host_key| match aish_hosts::load_profile(host_key) {
-                                                None => true,
-                                                Some(p) => p.probe_is_stale(),
-                                            },
-                                        );
+                                        let needs_probe =
+                                            remote_host_for_probe.as_ref().is_some_and(
+                                                |host_key| match aish_hosts::load_profile(host_key)
+                                                {
+                                                    None => true,
+                                                    Some(p) => p.probe_is_stale(),
+                                                },
+                                            );
                                         debug!(
                                             "TriggerAi: needs_probe={}, host={:?}",
                                             needs_probe, remote_host_for_probe,
@@ -1572,7 +1573,7 @@ impl PersistentPty {
                                         // outermost SSH session dying).
                                         let is_current = remote_host_for_probe
                                             .as_deref()
-                                            .map_or(false, |h| h == closed_host);
+                                            .is_some_and(|h| h == closed_host);
                                         if is_current {
                                             if let Some(prev) = nested_host_stack.pop() {
                                                 remote_host_for_probe = Some(prev.clone());
@@ -2908,7 +2909,7 @@ fn handle_ask_user_interaction(
                             }
                         } else {
                             idle_count += 1;
-                            if idle_count >= BASH_EXEC_IDLE_THRESHOLD {
+                            if idle_count == BASH_EXEC_IDLE_THRESHOLD {
                                 break;
                             }
                         }
@@ -3437,20 +3438,6 @@ fn looks_like_continuation_prompt(output: &[u8]) -> bool {
 }
 
 /// Scan PTY output for an SSH command and extract the target host.
-/// Extract the command portion from a readline reverse-i-search display line.
-/// Format: `(reverse-i-search)\`pattern': command text`
-/// The line may contain multiple updates separated by `\r`; use rfind to
-/// get the most recent command.
-fn extract_command_from_isearch_line(line: &str) -> Option<&str> {
-    let pos = line.rfind("': ")?;
-    let command = &line[pos + 3..];
-    let trimmed = command.trim_end_matches('\r').trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed)
-}
-
 /// Only checks complete lines (terminated by \r\n) so that partial
 /// typing echoes don't trigger false positives.
 fn scan_output_for_ssh_host(output: &str) -> Option<String> {

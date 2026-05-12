@@ -12,8 +12,7 @@ pub fn probe_command() -> String {
     // some systems and the AI can discover tools on demand.  Only the
     // 5 essential sections are probed: os, kernel, shell, user/home, locale.
     // This reduces the probe from 6 markers to 5, making it faster.
-    format!(
-        "M=$(printf '\\137\\137\\137AISH_PROBE\\137\\137\\137'); \
+    "M=$(printf '\\137\\137\\137AISH_PROBE\\137\\137\\137'); \
          echo \"$M\"; \
          cat /etc/os-release 2>/dev/null | head -5; \
          echo \"$M\"; \
@@ -24,7 +23,7 @@ pub fn probe_command() -> String {
          whoami; echo \"$HOME\"; \
          echo \"$M\"; \
          echo \"$LANG\""
-    )
+        .to_string()
 }
 
 pub fn probe_marker() -> &'static str {

@@ -3397,10 +3397,8 @@ fn extract_remote_host(command: &str) -> Option<String> {
             } else {
                 *part
             };
-            if opts_with_arg.contains(&opt_name) {
-                if !part.contains('=') {
-                    iter.next();
-                }
+            if opts_with_arg.contains(&opt_name) && !part.contains('=') {
+                iter.next();
             }
             continue;
         }
