@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import termios
+import threading
 import time
 import pytest
 from unittest.mock import patch
@@ -10,6 +11,10 @@ from rich.console import Console
 
 from aish.plan.approval import PlanApprovalRequestBuilder
 from aish.terminal.interaction import AskUserRequestBuilder
+from aish.terminal.interaction import InteractionAnswer
+from aish.terminal.interaction import InteractionAnswerType
+from aish.terminal.interaction import InteractionResponse
+from aish.terminal.interaction import InteractionStatus
 from aish.llm import LLMCallbackResult, LLMEvent, LLMEventType
 from aish.shell.ui.prompt_io import (
     display_security_panel,
@@ -250,6 +255,60 @@ def test_handle_interaction_required_prefills_text_input_default():
     assert isinstance(response_payload, dict)
     assert response_payload.get("interaction_id") == request.id
     assert response_payload.get("answer", {}).get("value") == "kiwi"
+
+
+def test_handle_interaction_required_yields_stdin_monitor_while_modal_is_open():
+    shell = _DummyShell()
+    shell._stdin_yield_event = threading.Event()
+    shell._stdin_yield_ack_event = threading.Event()
+    wake_calls: list[str] = []
+
+    def _wake_stdin_monitor() -> None:
+        wake_calls.append("wake")
+        shell._stdin_yield_ack_event.set()
+
+    shell._wake_stdin_monitor = _wake_stdin_monitor
+    request = AskUserRequestBuilder.from_tool_args(
+        kind="choice_or_text",
+        prompt="Pick one",
+        options=[
+            {"value": "opt1", "label": "Option 1"},
+            {"value": "opt2", "label": "Option 2"},
+        ],
+        default="opt1",
+    )
+    event = LLMEvent(
+        event_type=LLMEventType.INTERACTION_REQUIRED,
+        data={"interaction_request": request.to_dict()},
+        timestamp=time.time(),
+    )
+
+    def _fake_render_interaction_modal(shell_obj, request_obj):
+        assert shell_obj is shell
+        assert request_obj.id == request.id
+        assert shell._stdin_yield_event.is_set() is True
+        return InteractionResponse(
+            interaction_id=request.id,
+            status=InteractionStatus.SUBMITTED,
+            answer=InteractionAnswer(
+                type=InteractionAnswerType.OPTION,
+                value="opt2",
+                label="Option 2",
+            ),
+        )
+
+    with patch(
+        "aish.shell.ui.prompt_io.render_interaction_modal",
+        side_effect=_fake_render_interaction_modal,
+    ):
+        result = handle_interaction_required(shell, event)
+
+    assert result == LLMCallbackResult.CONTINUE
+    assert shell._stdin_yield_event.is_set() is False
+    assert len(wake_calls) == 2
+    response_payload = event.data.get("interaction_response")
+    assert isinstance(response_payload, dict)
+    assert response_payload.get("answer", {}).get("value") == "opt2"
 
 
 @pytest.mark.timeout(5)
