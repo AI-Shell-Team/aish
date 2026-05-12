@@ -1273,6 +1273,62 @@ impl AishShell {
                     self.record_history(input, 0);
                 }
                 crate::types::InputIntent::OperatorCommand | crate::types::InputIntent::Command => {
+                    // NL detection: check if input looks like natural language
+                    // and offer to route to AI instead of executing as a command.
+                    let nl_verdict = crate::nl_detect::detect(input);
+                    if nl_verdict.is_natural_language {
+                        let prompt_msg = t("shell.nl_detection.confirm_ask_ai");
+                        print!("{} ", prompt_msg);
+                        let _ = std::io::stdout().flush();
+                        let mut answer = String::new();
+                        if std::io::stdin().read_line(&mut answer).is_err() {
+                            // Fall through to command execution on read error
+                        } else {
+                            let ans = answer.trim().to_lowercase();
+                            if ans != "n" && ans != "no" {
+                                // Route to AI
+                                let question = input.trim().to_string();
+                                let old_sigint = self.install_ai_sigint_handler();
+                                let token_ptr =
+                                    self.ai_handler.cancellation_token() as *const CancellationToken;
+                                let result = runtime.block_on(async {
+                                    tokio::select! {
+                                        r = self.ai_handler.handle_question(&question) => r,
+                                        _ = poll_cancelled(token_ptr) => {
+                                            Err(aish_core::AishError::Cancelled)
+                                        }
+                                    }
+                                });
+                                Self::restore_ai_sigint_handler(old_sigint);
+
+                                let did_stream = self.streamed_content.load(Ordering::SeqCst);
+                                match result {
+                                    Ok(response) => {
+                                        if !did_stream && !response.is_empty() {
+                                            let mut sep_renderer = ShellRenderer::new();
+                                            sep_renderer.render_separator();
+                                            print_md(&response);
+                                            sep_renderer.render_separator();
+                                        }
+                                        self.record_history(input, 0);
+                                    }
+                                    Err(aish_core::AishError::Cancelled) => {
+                                        self.animation.stop();
+                                        println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                                    }
+                                    Err(e) => {
+                                        if !matches!(e, aish_core::AishError::Llm(_)) {
+                                            let msg = t("shell.error.llm_error_message")
+                                                .replace("{error}", &e.to_string());
+                                            eprintln!("\x1b[31m{}\x1b[0m", msg);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     self.set_phase(ShellPhase::Running);
                     let exit_code = self.execute_external_command(input);
                     self.set_phase(ShellPhase::Editing);
