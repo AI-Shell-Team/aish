@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import anyio
 import asyncio
+import io
 import os
 import re
 import select
@@ -379,21 +380,87 @@ class AIHandler:
         # stdin, they set this event so _stdin_loop pauses and stops
         # competing for sys.stdin reads.
         stdin_yield_event = threading.Event()
+        stdin_yield_ack_event = threading.Event()
+        stdin_wakeup_read: int | None = None
+        stdin_wakeup_write: int | None = None
+
+        try:
+            stdin_wakeup_read, stdin_wakeup_write = os.pipe()
+            os.set_blocking(stdin_wakeup_read, False)
+            os.set_blocking(stdin_wakeup_write, False)
+        except (AttributeError, OSError):
+            if stdin_wakeup_read is not None:
+                try:
+                    os.close(stdin_wakeup_read)
+                except OSError:
+                    pass
+            if stdin_wakeup_write is not None:
+                try:
+                    os.close(stdin_wakeup_write)
+                except OSError:
+                    pass
+            stdin_wakeup_read = None
+            stdin_wakeup_write = None
+
+        def _wake_stdin_monitor() -> None:
+            if stdin_wakeup_write is None:
+                return
+            try:
+                os.write(stdin_wakeup_write, b"\0")
+            except BlockingIOError:
+                pass
+            except OSError:
+                pass
+
+        shell._stdin_yield_event = stdin_yield_event
+        shell._stdin_yield_ack_event = stdin_yield_ack_event
+        shell._wake_stdin_monitor = _wake_stdin_monitor
+
         bash_tool = getattr(self.llm_session, "bash_tool", None)
         if bash_tool is not None:
             bash_tool.stdin_yield_event = stdin_yield_event
 
+        try:
+            stdin_fd = sys.stdin.fileno()
+        except (AttributeError, io.UnsupportedOperation, OSError, ValueError):
+            stdin_fd = None
+
         def _stdin_loop():
+            if stdin_fd is None:
+                return
+
+            def _drain_wakeup_pipe() -> None:
+                if stdin_wakeup_read is None:
+                    return
+                while True:
+                    try:
+                        if not os.read(stdin_wakeup_read, 1024):
+                            break
+                    except BlockingIOError:
+                        break
+                    except OSError:
+                        break
+
             while not cancel_requested.is_set():
                 # Yield stdin to PTY-based tools when requested.
                 if stdin_yield_event.is_set():
+                    stdin_yield_ack_event.set()
                     cancel_requested.wait(0.05)
                     continue
+                stdin_yield_ack_event.clear()
                 try:
-                    ready, _, _ = select.select([sys.stdin.fileno()], [], [], 0.5)
+                    read_fds = [stdin_fd]
+                    if stdin_wakeup_read is not None:
+                        read_fds.append(stdin_wakeup_read)
+                    ready, _, _ = select.select(read_fds, [], [], 0.5)
                     if not ready:
                         continue
-                    data = os.read(sys.stdin.fileno(), 1)
+                    if stdin_wakeup_read is not None and stdin_wakeup_read in ready:
+                        _drain_wakeup_pipe()
+                        continue
+                    if stdin_yield_event.is_set():
+                        continue
+                    data = os.read(stdin_fd, 1)
                     if not data:  # EOF — stdin closed
                         break
                     if data == b"\x03":  # Ctrl+C — cancel AI operation
@@ -425,8 +492,10 @@ class AIHandler:
             shell.handle_processing_cancelled()
         finally:
             cancel_requested.set()
+            _wake_stdin_monitor()
             # Clear yield event so _stdin_loop doesn't block forever.
             stdin_yield_event.clear()
+            stdin_yield_ack_event.clear()
             if bash_tool is not None:
                 bash_tool.stdin_yield_event = None
             monitor_thread.join(timeout=1.0)
@@ -436,6 +505,16 @@ class AIHandler:
                 logging.getLogger(__name__).warning(
                     "stdin monitor thread did not exit in time"
                 )
+            for fd in (stdin_wakeup_read, stdin_wakeup_write):
+                if fd is None:
+                    continue
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            shell._stdin_yield_event = None
+            shell._stdin_yield_ack_event = None
+            shell._wake_stdin_monitor = None
             # Flush stale input (escape sequences, cursor reports) so they
             # don't confuse the next prompt_toolkit render.
             try:
