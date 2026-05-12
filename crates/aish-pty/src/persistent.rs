@@ -287,14 +287,13 @@ impl PersistentPty {
                         tmp.len(),
                     )
                 } {
-                    n if n > 0 => {
-                        if self.exec_mode.load(Ordering::SeqCst) {
-                            self.exec_buffer
-                                .lock()
-                                .unwrap()
-                                .extend_from_slice(&tmp[..n as usize]);
-                        }
+                    n if n > 0 && self.exec_mode.load(Ordering::SeqCst) => {
+                        self.exec_buffer
+                            .lock()
+                            .unwrap()
+                            .extend_from_slice(&tmp[..n as usize]);
                     }
+                    n if n > 0 => {}
                     0 => {
                         self.running.store(false, Ordering::SeqCst);
                         break;
@@ -2558,64 +2557,60 @@ fn read_line_from_stdin_raw(
                             Some(b'[') => {
                                 // CSI sequence
                                 match consume_csi(stdin_fd) {
-                                    Some(b'A') | Some(b'k') => {
+                                    Some(b'A') | Some(b'k') if total_slots > 0 => {
                                         // Up arrow — navigate in choice mode
-                                        if total_slots > 0 {
-                                            if cursor > 0 {
-                                                cursor -= 1;
-                                            } else {
-                                                cursor = total_slots - 1;
-                                            }
-                                            // Clear text buffer when navigating
-                                            if !text_buf.is_empty() {
-                                                let erase = "\x08".repeat(text_buf.len())
-                                                    + &" ".repeat(text_buf.len())
-                                                    + &"\x08".repeat(text_buf.len());
-                                                unsafe {
-                                                    libc::write(
-                                                        libc::STDOUT_FILENO,
-                                                        erase.as_ptr() as *const _,
-                                                        erase.len(),
-                                                    );
-                                                }
-                                                text_buf.clear();
-                                            }
-                                            let prev = if request.kind == "choice_or_text" {
-                                                count_display_lines(request)
-                                            } else {
-                                                count_display_lines(request).saturating_sub(1)
-                                            };
-                                            redraw_ask_user(request, prev, cursor);
+                                        if cursor > 0 {
+                                            cursor -= 1;
+                                        } else {
+                                            cursor = total_slots - 1;
                                         }
+                                        // Clear text buffer when navigating
+                                        if !text_buf.is_empty() {
+                                            let erase = "\x08".repeat(text_buf.len())
+                                                + &" ".repeat(text_buf.len())
+                                                + &"\x08".repeat(text_buf.len());
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    erase.as_ptr() as *const _,
+                                                    erase.len(),
+                                                );
+                                            }
+                                            text_buf.clear();
+                                        }
+                                        let prev = if request.kind == "choice_or_text" {
+                                            count_display_lines(request)
+                                        } else {
+                                            count_display_lines(request).saturating_sub(1)
+                                        };
+                                        redraw_ask_user(request, prev, cursor);
                                     }
-                                    Some(b'B') | Some(b'j') => {
+                                    Some(b'B') | Some(b'j') if total_slots > 0 => {
                                         // Down arrow — navigate in choice mode
-                                        if total_slots > 0 {
-                                            if cursor + 1 < total_slots {
-                                                cursor += 1;
-                                            } else {
-                                                cursor = 0;
-                                            }
-                                            if !text_buf.is_empty() {
-                                                let erase = "\x08".repeat(text_buf.len())
-                                                    + &" ".repeat(text_buf.len())
-                                                    + &"\x08".repeat(text_buf.len());
-                                                unsafe {
-                                                    libc::write(
-                                                        libc::STDOUT_FILENO,
-                                                        erase.as_ptr() as *const _,
-                                                        erase.len(),
-                                                    );
-                                                }
-                                                text_buf.clear();
-                                            }
-                                            let prev = if request.kind == "choice_or_text" {
-                                                count_display_lines(request)
-                                            } else {
-                                                count_display_lines(request).saturating_sub(1)
-                                            };
-                                            redraw_ask_user(request, prev, cursor);
+                                        if cursor + 1 < total_slots {
+                                            cursor += 1;
+                                        } else {
+                                            cursor = 0;
                                         }
+                                        if !text_buf.is_empty() {
+                                            let erase = "\x08".repeat(text_buf.len())
+                                                + &" ".repeat(text_buf.len())
+                                                + &"\x08".repeat(text_buf.len());
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    erase.as_ptr() as *const _,
+                                                    erase.len(),
+                                                );
+                                            }
+                                            text_buf.clear();
+                                        }
+                                        let prev = if request.kind == "choice_or_text" {
+                                            count_display_lines(request)
+                                        } else {
+                                            count_display_lines(request).saturating_sub(1)
+                                        };
+                                        redraw_ask_user(request, prev, cursor);
                                     }
                                     _ => {
                                         // Other CSI sequences (Home, End, PgUp, etc.) — ignore
