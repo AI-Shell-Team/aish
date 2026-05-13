@@ -6,7 +6,7 @@ SYSCONFDIR ?= /etc
 SHAREDIR ?= $(PREFIX)/share
 DATADIR ?= $(SHAREDIR)/aish
 DOCDIR ?= $(SHAREDIR)/doc/aish
-SYSTEMD_UNITDIR ?= /lib/systemd/system
+SYSTEMD_UNITDIR ?= /etc/systemd/system
 DESTDIR ?=
 
 TARGET ?= x86_64-unknown-linux-musl
