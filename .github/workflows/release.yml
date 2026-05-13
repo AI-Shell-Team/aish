@@ -127,6 +127,8 @@ jobs:
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
           test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
+          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
+          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2

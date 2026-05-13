@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOTFS_DIR="${SCRIPT_DIR}/rootfs"
 SYSTEMD_DIR="${SCRIPT_DIR}/systemd"
 MIN_GLIBC_VERSION="2.28"
+BUNDLE_SYSTEMD_UNITDIR="/etc/systemd/system"
 FORCE_CONFIG_OVERWRITE=0
 INSTALL_ROOT="${AISH_INSTALL_ROOT:-}"
 INSTALL_PREFIX=""
@@ -134,7 +135,7 @@ install_systemd_units() {
 		return
 	fi
 
-	local unit_dir="/lib/systemd/system"
+	local unit_dir="$BUNDLE_SYSTEMD_UNITDIR"
 	local service_target socket_target
 	service_target="$(target_path "${unit_dir}/aish-sandbox.service")"
 	socket_target="$(target_path "${unit_dir}/aish-sandbox.socket")"

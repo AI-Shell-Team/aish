@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PURGE_CONFIG=0
+BUNDLE_SYSTEMD_UNITDIR="/etc/systemd/system"
 INSTALL_ROOT="${AISH_INSTALL_ROOT:-}"
 INSTALL_PREFIX=""
 SKIP_SYSTEMD="${AISH_SKIP_SYSTEMD:-0}"
@@ -50,8 +51,8 @@ remove_systemd_units() {
 	fi
 
 	rm -f \
-		"$(target_path "/lib/systemd/system/aish-sandbox.service")" \
-		"$(target_path "/lib/systemd/system/aish-sandbox.socket")"
+		"$(target_path "${BUNDLE_SYSTEMD_UNITDIR}/aish-sandbox.service")" \
+		"$(target_path "${BUNDLE_SYSTEMD_UNITDIR}/aish-sandbox.socket")"
 
 	if [[ -z "$INSTALL_ROOT" && "$SKIP_SYSTEMD" != "1" && -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
 		systemctl daemon-reload >/dev/null 2>&1 || true
