@@ -427,11 +427,10 @@ def update(
         "-c",
         help=t("cli.update.check_only"),
     ),
-    pre_release: bool = typer.Option(
+    beta: bool = typer.Option(
         False,
-        "--pre-release",
-        "-p",
-        help=t("cli.update.pre_release"),
+        "--beta",
+        help=t("cli.update.beta"),
     ),
 ):
     """Update aish to the latest version."""
@@ -439,7 +438,7 @@ def update(
         # Check for updates
         console.print(f"[bold cyan]{t('cli.update.checking')}[/bold cyan]")
         try:
-            update_info = manager.check_for_updates(include_pre_release=pre_release)
+            update_info = manager.check_for_updates(beta=beta)
         except UpdateCheckError as e:
             console.print(f"[red]Update check failed: {e}[/red]")
             raise typer.Exit(1)
@@ -464,7 +463,7 @@ def update(
             return
 
         # Download
-        archive_path = manager.download_release(update_info["tag_name"])
+        archive_path = manager.download_release(update_info["tag_name"], beta=beta)
         if not archive_path:
             console.print(f"[red]{t('cli.update.download_failed')}[/red]")
             raise typer.Exit(1)
