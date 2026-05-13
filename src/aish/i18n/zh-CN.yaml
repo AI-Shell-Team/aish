@@ -11,7 +11,7 @@ cli:
 
   update:
     check_only: "仅检查更新，不执行安装"
-    pre_release: "包括预发布版本"
+    beta: "使用 beta 更新通道"
     checking: "正在检查更新..."
     current_version: "当前版本: {version}"
     latest_version: "最新版本: {version}"
