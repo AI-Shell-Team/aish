@@ -15,7 +15,7 @@ const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
 const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
-const SYSTEMD_UNIT_DIR: &str = "/lib/systemd/system";
+const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
 
 // ---------------------------------------------------------------------------
 // Installation method detection
