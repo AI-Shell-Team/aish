@@ -11,12 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `aish update` command for self-updating to latest version from GitHub releases
-- `aish uninstall` command for uninstalling aish with optional `--purge` flag
-- UpdateManager class for handling update logic with GitHub API integration
-- UninstallManager class for handling uninstall logic and data cleanup
-- i18n support for update and uninstall commands in Chinese and English
-- DejaGnu integration tests for update and uninstall commands
+- No unreleased changes yet.
+
+## [0.3.0-beta.3] - 2026-05-13
+
+### Added
+
+- Added nested SSH session detection with stronger interrupt handling so remote interactive sessions can be identified and interrupted more reliably.
+- Added a host dossier pipeline and the `host_note` AI tool so per-host notes and profile data can persist across sessions.
+
+### Changed
+
+- Changed the Rust PTY and secure-bash flow to better support nested remote session execution and follow-up tool work.
+
+### Fixed
+
+- Fixed `host_note` persistence so profile-save failures are surfaced instead of being reported as success.
+- Fixed Rust CI and clippy regressions introduced by the SSH and host-dossier changes.
 
 ## [0.2.0] - 2026-04-03
 
