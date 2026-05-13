@@ -7,6 +7,11 @@ on:
         description: "Target release version, for example 0.2.0 or 1.0.0-beta.1"
         required: true
         type: string
+      ref:
+        description: "Git ref to validate, for example release/v0.3.0-beta.1-prep or a commit SHA"
+        required: false
+        default: rust
+        type: string
 
 permissions:
   contents: read
@@ -29,6 +34,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Compute release metadata
         id: metadata
@@ -53,6 +59,7 @@ jobs:
 
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
+          - Ref: ${{ github.event.inputs.ref }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
           ## Release Notes
@@ -61,50 +68,45 @@ jobs:
           EOF
 
   dry-run-package-validation:
-    name: Dry-run package validation
+    name: Dry-run package validation (${{ matrix.arch }})
     needs: release-meta
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            runs_on: ubuntu-latest
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          ref: ${{ github.event.inputs.ref }}
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Cache Cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: linux-musl-cargo-v1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            linux-musl-cargo-v1-
-
-      - name: Build release binary
-        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Set up build environment
+        env:
+          AISH_BUILD_TARGET: ${{ matrix.target }}
+        run: ./packaging/scripts/setup-ci-env.sh
 
       - name: Build bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/amd64"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
+          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" AISH_BUILD_TARGET="${{ matrix.target }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
-          OUTPUT_DIR="artifacts/amd64"
-          BUNDLE="aish-${VERSION}-linux-amd64"
-          EXTRACT_DIR="$PWD/build/install-smoke"
-          INSTALL_ROOT="$PWD/build/install-root"
+          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
+          BUNDLE="aish-${VERSION}-linux-${{ matrix.arch }}"
+          EXTRACT_DIR="$PWD/build/install-smoke/${{ matrix.arch }}"
+          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
 
           rm -rf "$EXTRACT_DIR" "$INSTALL_ROOT"
           mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
@@ -120,8 +122,8 @@ jobs:
       - name: Upload dry-run artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: release-preparation-aish-linux-amd64
-          path: artifacts/amd64/*
+          name: release-preparation-aish-linux-${{ matrix.arch }}
+          path: artifacts/${{ matrix.arch }}/*
           if-no-files-found: error
 
   release-preparation-summary:
@@ -139,7 +141,8 @@ jobs:
 
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
+          - Ref: ${{ github.event.inputs.ref }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
-          Release metadata artifacts and dry-run bundle validation have completed successfully.
+          Release metadata artifacts and dry-run bundle validation have completed successfully for all configured architectures.
           EOF
