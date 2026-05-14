@@ -89,7 +89,22 @@ impl Tool for ChannelBashTool {
         };
 
         // If output was offloaded to a local file, return preview with the path.
-        if let Some(ref offload_path) = result.offload_path {
+        if let Some(ref raw_offload_path) = result.offload_path {
+            // Prefer .clean (ANSI-stripped, valid UTF-8) over .raw for
+            // read_file compatibility.
+            let offload_path = {
+                let p = std::path::PathBuf::from(raw_offload_path);
+                if p.extension().is_some_and(|ext| ext == "raw") {
+                    let clean = p.with_extension("clean");
+                    if clean.exists() {
+                        clean.to_str().unwrap_or(raw_offload_path).to_string()
+                    } else {
+                        raw_offload_path.clone()
+                    }
+                } else {
+                    raw_offload_path.clone()
+                }
+            };
             let preview = if result.output.len() > 1024 {
                 let (truncated, _) = truncate_utf8_safe(
                     result.output.as_bytes(),
@@ -102,7 +117,7 @@ impl Tool for ChannelBashTool {
             let offload_payload = serde_json::json!({
                 "status": "offloaded",
                 "stdout_path": offload_path,
-                "hint": "Read offload paths for full output"
+                "hint": "Use read_file tool to read the offload path for full output (file is on the LOCAL machine)"
             });
             let output_text = crate::registry::format_tagged_result(
                 &preview,

@@ -247,17 +247,31 @@ impl PtyOutputOffload {
     ) -> OffloadResult {
         let _ = self.ensure_offload_dir();
 
+        // Combine internal buffers with external tails.
+        // stdout_buf holds the most recent keep_bytes retained in memory;
+        // stdout_tail is extra data appended after the stream ended.
+        let stdout_combined: Vec<u8> = {
+            let mut v = self.stdout_buf.clone();
+            v.extend_from_slice(stdout_tail);
+            v
+        };
+        let stderr_combined: Vec<u8> = {
+            let mut v = self.stderr_buf.clone();
+            v.extend_from_slice(stderr_tail);
+            v
+        };
+
         // Read overflow file contents for hashing and preview.
         let stdout_overflow = self.read_overflow(&self.stdout_overflow_path);
         let stderr_overflow = self.read_overflow(&self.stderr_overflow_path);
 
-        // Compute hashes.
-        let stdout_hash = compute_hash(&stdout_overflow, stdout_tail);
-        let stderr_hash = compute_hash(&stderr_overflow, stderr_tail);
+        // Compute hashes over overflow + combined tail.
+        let stdout_hash = compute_hash(&stdout_overflow, &stdout_combined);
+        let stderr_hash = compute_hash(&stderr_overflow, &stderr_combined);
 
         // Build previews (up to 50 lines).
-        let stdout_preview = build_preview(&stdout_overflow, stdout_tail, 50);
-        let stderr_preview = build_preview(&stderr_overflow, stderr_tail, 50);
+        let stdout_preview = build_preview(&stdout_overflow, &stdout_combined, 50);
+        let stderr_preview = build_preview(&stderr_overflow, &stderr_combined, 50);
 
         // Calculate duration.
         let duration_ms = self.started_at.elapsed().as_millis() as u64;
@@ -272,8 +286,8 @@ impl PtyOutputOffload {
         };
 
         // Build states for stdout and stderr.
-        let stdout_state = build_state(&self.stdout_overflow_path, stdout_tail);
-        let stderr_state = build_state(&self.stderr_overflow_path, stderr_tail);
+        let stdout_state = build_state(&self.stdout_overflow_path, &stdout_combined);
+        let stderr_state = build_state(&self.stderr_overflow_path, &stderr_combined);
 
         // Enriched meta.json — always write even when no overflow occurred.
         let offload_dir = self.offload_dir();
@@ -463,27 +477,28 @@ fn build_state(overflow_path: &Option<PathBuf>, tail: &[u8]) -> OffloadState {
         },
         Some(path) => {
             let path_str = path.to_str().unwrap_or("").to_string();
-            let clean_path = {
+            let (clean_path, clean_error) = {
                 let p = path.with_extension("clean");
                 // Read overflow, combine with tail, strip ANSI, write clean.
                 let overflow_data = fs::read(path).unwrap_or_default();
                 let mut combined = overflow_data;
                 combined.extend_from_slice(tail);
                 let cleaned = strip_ansi_escapes(&combined);
-                let clean_error = match fs::write(&p, &cleaned) {
+                // Ensure valid UTF-8 — PTY output may contain broken
+                // multi-byte sequences or other non-UTF-8 bytes.
+                let cleaned_str = String::from_utf8_lossy(&cleaned).into_owned();
+                let err = match fs::write(&p, cleaned_str.as_bytes()) {
                     Ok(()) => None,
                     Err(e) => Some(e.to_string()),
                 };
-                // Also update the OffloadState's clean_error
-                let _ = clean_error; // handled below
-                p.to_str().map(|s| s.to_string())
+                (p.to_str().map(|s| s.to_string()), err)
             };
             OffloadState {
                 status: "offloaded".to_string(),
                 path: Some(path_str),
                 clean_path,
                 error: None,
-                clean_error: None,
+                clean_error,
             }
         }
     }

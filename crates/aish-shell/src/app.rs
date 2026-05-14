@@ -2523,6 +2523,38 @@ impl AishShell {
         let max_tokens = config.max_tokens;
         let animation = animation.clone();
 
+        // Load skills snapshot for SSH sessions (same as local session).
+        // Stored in Arc so each AI query closure can create a fresh SkillTool.
+        let ssh_skills_snapshot: std::sync::Arc<
+            std::collections::HashMap<String, aish_tools::SkillInfo>,
+        > = {
+            let mut sm = aish_skills::SkillManager::new();
+            let _ = sm.load_all_skills();
+            std::sync::Arc::new(
+                sm.list_skills()
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.metadata.name.clone(),
+                            aish_tools::SkillInfo {
+                                name: s.metadata.name.clone(),
+                                content: s.content.clone(),
+                                description: s.metadata.description.clone(),
+                                base_dir: s.base_dir.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+        };
+        let ssh_skill_names: Vec<String> =
+            ssh_skills_snapshot.keys().cloned().collect();
+        let ssh_skills_description: String = ssh_skills_snapshot
+            .values()
+            .map(|s| format!("- **{}**: {}", s.name, s.description))
+            .collect::<Vec<String>>()
+            .join("\n");
+
         // Build oracle system prompt with remote host context
         let mut prompt_manager = aish_prompts::PromptManager::default_dir();
         prompt_manager.load_all();
@@ -2563,12 +2595,15 @@ impl AishShell {
                 system_msg_with_dossier.push_str(&format!(
                     "\n\n**SSH Remote Session Context (overrides tool list above):** \
                      \n- The user is connected to a remote host **{host}** via SSH. \
-                     \n- **Available tools:** `bash`, `ask_user`, and `host_note`. \
-                     \n- **DO NOT** call python_exec, read_file, write_file, edit_file, \
+                     \n- **Available tools:** `bash`, `ask_user`, `host_note`, `read_file`, and `skill`. \
+                     \n- **DO NOT** call python_exec, write_file, edit_file, \
                      grep, glob, or any other tool — they do NOT exist in this session. \
                      \n- `bash` tool runs commands on the remote host. The command will be \
                      shown to the user for confirmation before execution. After execution, \
                      the output will be automatically returned to you for analysis. \
+                     \n- `read_file` reads files on the LOCAL machine (where aish runs). \
+                     Use it to read offload paths when bash output was offloaded to a local file. \
+                     Do NOT use it for files on the remote host — use `bash` with `cat` for those. \
                      \n- `ask_user` asks the user a clarifying question (text_input or choice). \
                      \n- `host_note` tool saves, lists, or deletes notes about this remote host. \
                      When the user shares durable facts about this server (deployed services, \
@@ -2578,8 +2613,15 @@ impl AishShell {
                      automatically see them in the host dossier above. \
                      Do NOT save transient info like current directory, running process PIDs, \
                      or temporary file contents. \
-                     \n- **For reading/writing/searching files:** use `bash` tool with \
+                     \n- `skill` tool invokes a loaded skill plugin by name (use `skill_name` parameter). \
+                     Do NOT use 'list' as a skill name — list the skills below instead. \
+                     When the user's request matches a skill, invoke it BEFORE generating any other response. \
+                     \n- **Available skills:**\n{ssh_skills_description} \
+                     \n- **For reading/writing/searching files on the REMOTE host:** use `bash` tool with \
                      `cat`, `head`, `tail`, `echo`, `tee`, `grep`, `find`, `awk`, etc. \
+                     \n- **IMPORTANT about offload:** when bash output is offloaded (status=offloaded), \
+                     the file path is on the LOCAL machine. You MUST use `read_file` tool to read it. \
+                     NEVER use `bash` to cat/wc/tail an offload path — that file does NOT exist on the remote host. \
                      \n- When the user asks to run a command, execute it, or check something, \
                      call the `bash` tool directly — do NOT just show the command in a code block."
                 ));
@@ -2701,6 +2743,8 @@ impl AishShell {
             let conversation_history_th = conversation_history.clone();
             let system_msg_th = effective_system_msg.clone();
             let shared_host_th = dossier_host.clone();
+            let skills_snapshot_th = ssh_skills_snapshot.clone();
+            let skill_names_th = ssh_skill_names.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -2884,6 +2928,53 @@ impl AishShell {
                                     .unwrap_or("Unknown error");
                                 eprintln!("\x1b[31mLLM error: {}\x1b[0m", error_msg);
                             }
+                            LlmEventType::ToolExecutionStart => {
+                                let tool_name = event
+                                    .data
+                                    .get("tool_name")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("unknown");
+                                if tool_name == "read_file" {
+                                    anim.stop();
+                                    clear_reasoning();
+                                    let path = event
+                                        .data
+                                        .get("tool_args")
+                                        .and_then(|a| a.get("path"))
+                                        .and_then(|p| p.as_str())
+                                        .unwrap_or("?");
+                                    use std::io::Write;
+                                    print!(
+                                        "\x1b[90m📖 read_file({})\x1b[0m\n",
+                                        path
+                                    );
+                                    let _ = std::io::stdout().flush();
+                                }
+                            }
+                            LlmEventType::ToolExecutionEnd => {
+                                let tool_name = event
+                                    .data
+                                    .get("tool_name")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("unknown");
+                                if tool_name == "read_file" {
+                                    let ok = event
+                                        .data
+                                        .get("ok")
+                                        .and_then(|b| b.as_bool())
+                                        .unwrap_or(false);
+                                    if !ok {
+                                        let preview = event
+                                            .data
+                                            .get("output_preview")
+                                            .and_then(|p| p.as_str())
+                                            .unwrap_or("error");
+                                        use std::io::Write;
+                                        print!("\x1b[31m{}\x1b[0m\n", preview);
+                                        let _ = std::io::stdout().flush();
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         None
@@ -2899,6 +2990,19 @@ impl AishShell {
                     )));
                     // Register host_note tool for SSH sessions
                     session.register_tool(Self::make_host_note_tool(shared_host_th.clone()));
+                    // Register read_file for reading LOCAL offload files
+                    session.register_tool(Box::new(aish_tools::fs::ReadFileTool::new()));
+                    // Register skill tool with loaded skills snapshot
+                    {
+                        let snap = skills_snapshot_th.clone();
+                        let names = skill_names_th.clone();
+                        let lookup =
+                            Box::new(move |name: &str| snap.get(name).cloned());
+                        let list = Box::new(move || names.clone());
+                        session.register_tool(Box::new(
+                            aish_tools::SkillTool::new(lookup, list),
+                        ));
+                    }
 
                     session
                         .process_input(
@@ -3160,16 +3264,33 @@ impl AishShell {
                         answer_tx: std::sync::mpsc::Sender<aish_pty::AskUserAnswer>,
                         output_sender: std::sync::mpsc::Sender<aish_pty::BashExecResult>,
                         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+                        cancel_token: Option<std::sync::Arc<CancellationToken>>,
                     ) -> Box<aish_pty::FollowupCallback> {
                         Box::new(
                             move |captured_output: &str,
                                   offload_path: Option<&str>|
                                   -> Option<aish_pty::AiResponse> {
                                 // When the forwarding loop hard-aborts (Ctrl+C
-                                // during bashexec), set the cancelled flag so
-                                // the LLM event callback stops writing to stdout.
-                                if captured_output.contains("cancelled by user") {
+                                // during bashexec) or the user rejects the
+                                // command, cancel the LLM session and stop
+                                // the tool chain immediately.
+                                if captured_output.contains("cancelled by user")
+                                    || captured_output.contains("rejected by user")
+                                {
                                     cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    let _ = output_sender.send(aish_pty::BashExecResult {
+                                        output: captured_output.to_string(),
+                                        offload_path: offload_path.map(|p| p.to_string()),
+                                    });
+                                    if let Some(ref token) = cancel_token {
+                                        token.cancel();
+                                    }
+                                    // Drain remaining events so the LLM thread
+                                    // can finish cleanly.
+                                    if let Some(rx) = event_rx.lock().unwrap().take() {
+                                        drop(rx);
+                                    }
+                                    return None;
                                 }
                                 let _ = output_sender.send(aish_pty::BashExecResult {
                                     output: captured_output.to_string(),
@@ -3197,6 +3318,7 @@ impl AishShell {
                                                 answer_tx.clone(),
                                                 new_sender,
                                                 cancelled.clone(),
+                                                cancel_token.clone(),
                                             )),
                                             ask_user: None,
                                         })
@@ -3233,6 +3355,7 @@ impl AishShell {
                         answer_tx_f,
                         output_sender,
                         cancelled_fu,
+                        session_cancel_token,
                     );
                     Some(aish_pty::AiResponse {
                         command: Some(command),

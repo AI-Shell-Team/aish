@@ -3065,8 +3065,14 @@ fn handle_ask_user_interaction(
 
                     // Finalize local offload
                     let offload_result = offloader.finalize(&[], &[], 0);
+                    // Prefer clean_path (ANSI-stripped, valid UTF-8) over raw
+                    // path so read_file can decode it correctly.
                     let offload_path = if offload_result.stdout.status == "offloaded" {
-                        offload_result.stdout.path.clone()
+                        offload_result
+                            .stdout
+                            .clean_path
+                            .clone()
+                            .or(offload_result.stdout.path.clone())
                     } else {
                         None
                     };
