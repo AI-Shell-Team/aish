@@ -396,6 +396,7 @@ shell:
     confirm_execute: "⚠ Execute? [Y/n]"
     running: "Running..."
     ai_cancelled: "[AI cancelled]"
+    ai_error: "[AI error: no response returned]"
     probing: "Detecting remote environment..."
     ask_user:
       custom_input_label: "Enter custom answer"
@@ -408,6 +409,9 @@ shell:
       text_preview: "text_input: {prompt}"
     thinking: "Thinking"
     thinking_elapsed: "Thinking {elapsed}s"
+    iteration_limit_reached: "{count} tool call iterations completed."
+    iteration_limit_title: "⏸ Tool Call Limit Reached"
+    iteration_continue_prompt: "Continue? [Y/n]"
 
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; and press Enter to auto-analyze and fix, or enter the next command directly."
@@ -417,6 +421,9 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "Unable to determine correct command"
     retry_hint: "Type ';' to tell AI what you want to do, and it will help find the right command"
+
+  nl_detection:
+    confirm_ask_ai: "This looks like a natural language question. Ask AI? (Y/n)"
 
   error:
     execution_error: "❌ Error during execution: {error}"
@@ -538,7 +545,7 @@ tools:
     no_logs_found: "No logs or matching information found."
 
   bash:
-    description: "Execute a bash command and return the output. Use this tool to run shell commands."
+    description: "Execute a bash command and return the output. Use this tool to run shell commands. IMPORTANT: Each command requires user confirmation. If the user rejects (N) or cancels (Ctrl+C) a command, you MUST NOT retry the same or similar command — acknowledge the cancellation and adjust your approach instead."
     security_handling_required: "bash command requires {level} security handling"
     param:
       command: "The bash command to execute"

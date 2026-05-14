@@ -214,6 +214,22 @@ impl PtyOutputOffload {
         buf.extend_from_slice(data);
     }
 
+    /// Cancel offload and clean up any temporary files.
+    /// Call this when the command is aborted (e.g., Ctrl+C) to prevent
+    /// temp file leaks. After calling this, the offloader should be dropped.
+    pub fn cancel(self) {
+        // Remove any overflow files that were created
+        if let Some(ref path) = self.stdout_overflow_path {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(ref path) = self.stderr_overflow_path {
+            let _ = fs::remove_file(path);
+        }
+        // Remove the offload directory if it exists and is empty
+        let dir = self.offload_dir();
+        let _ = fs::remove_dir(&dir);
+    }
+
     /// Read the full contents of an overflow file.
     fn read_overflow(&self, path: &Option<PathBuf>) -> Vec<u8> {
         match path {

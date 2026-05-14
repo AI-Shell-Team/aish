@@ -174,6 +174,18 @@ impl ChatMessage {
     }
 }
 
+/// Result of processing an LLM turn, including tool execution messages
+/// generated during the tool calling loop.
+#[derive(Debug, Clone)]
+pub struct ProcessResult {
+    /// Final text response from the assistant.
+    pub text: String,
+    /// New messages appended during this turn (assistant+tool_calls,
+    /// tool_result pairs). Callers should extend their conversation
+    /// history with these to preserve tool execution context.
+    pub new_messages: Vec<ChatMessage>,
+}
+
 /// Specification of a function tool exposed to the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {

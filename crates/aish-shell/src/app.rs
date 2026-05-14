@@ -748,6 +748,53 @@ impl AishShell {
 
         llm_session.set_confirmation_callback(confirmation_callback);
 
+        // Set iteration limit callback: ask user whether to continue after 20 tool-call rounds
+        let iteration_limit_callback: Arc<dyn Fn(u32) -> bool + Send + Sync> =
+            Arc::new(|iterations: u32| {
+                let width = std::env::var("COLUMNS")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(80);
+                let border = "─".repeat(width.saturating_sub(4));
+                println!();
+                println!("\x1b[33m╭{}╮\x1b[0m", border);
+                println!(
+                    "\x1b[33m│\x1b[1;33m {}\x1b[0m{}",
+                    aish_i18n::t("shell.session.iteration_limit_title"),
+                    pad_to_width("", width.saturating_sub(38))
+                );
+                println!("\x1b[33m│\x1b[0m");
+                println!(
+                    "\x1b[33m│\x1b[0m  {} {}",
+                    aish_i18n::t_with_args(
+                        "shell.session.iteration_limit_reached",
+                        &{
+                            let mut m = std::collections::HashMap::new();
+                            m.insert("count".to_string(), iterations.to_string());
+                            m
+                        },
+                    ),
+                    pad_to_width("", 0)
+                );
+                println!("\x1b[33m│\x1b[0m");
+                println!(
+                    "\x1b[33m│\x1b[0m  \x1b[36m{}\x1b[0m",
+                    aish_i18n::t("shell.session.iteration_continue_prompt")
+                );
+                println!("\x1b[33m╰{}╯\x1b[0m", border);
+                print!("  ");
+                let _ = std::io::stdout().flush();
+
+                let mut answer = String::new();
+                if std::io::stdin().read_line(&mut answer).is_err() {
+                    return false;
+                }
+                let answer = answer.trim().to_lowercase();
+                answer == "y" || answer == "yes" || answer.is_empty()
+            });
+
+        llm_session.set_iteration_limit_callback(iteration_limit_callback);
+
         // Build AI handler with all subsystems
         let ai_handler = AiHandler::new(
             llm_session,
@@ -1273,6 +1320,62 @@ impl AishShell {
                     self.record_history(input, 0);
                 }
                 crate::types::InputIntent::OperatorCommand | crate::types::InputIntent::Command => {
+                    // NL detection: check if input looks like natural language
+                    // and offer to route to AI instead of executing as a command.
+                    let nl_verdict = crate::nl_detect::detect(input);
+                    if nl_verdict.is_natural_language {
+                        let prompt_msg = t("shell.nl_detection.confirm_ask_ai");
+                        print!("{} ", prompt_msg);
+                        let _ = std::io::stdout().flush();
+                        let mut answer = String::new();
+                        if std::io::stdin().read_line(&mut answer).is_err() {
+                            // Fall through to command execution on read error
+                        } else {
+                            let ans = answer.trim().to_lowercase();
+                            if ans != "n" && ans != "no" {
+                                // Route to AI
+                                let question = input.trim().to_string();
+                                let old_sigint = self.install_ai_sigint_handler();
+                                let token_ptr =
+                                    self.ai_handler.cancellation_token() as *const CancellationToken;
+                                let result = runtime.block_on(async {
+                                    tokio::select! {
+                                        r = self.ai_handler.handle_question(&question) => r,
+                                        _ = poll_cancelled(token_ptr) => {
+                                            Err(aish_core::AishError::Cancelled)
+                                        }
+                                    }
+                                });
+                                Self::restore_ai_sigint_handler(old_sigint);
+
+                                let did_stream = self.streamed_content.load(Ordering::SeqCst);
+                                match result {
+                                    Ok(response) => {
+                                        if !did_stream && !response.is_empty() {
+                                            let mut sep_renderer = ShellRenderer::new();
+                                            sep_renderer.render_separator();
+                                            print_md(&response);
+                                            sep_renderer.render_separator();
+                                        }
+                                        self.record_history(input, 0);
+                                    }
+                                    Err(aish_core::AishError::Cancelled) => {
+                                        self.animation.stop();
+                                        println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                                    }
+                                    Err(e) => {
+                                        if !matches!(e, aish_core::AishError::Llm(_)) {
+                                            let msg = t("shell.error.llm_error_message")
+                                                .replace("{error}", &e.to_string());
+                                            eprintln!("\x1b[31m{}\x1b[0m", msg);
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     self.set_phase(ShellPhase::Running);
                     let exit_code = self.execute_external_command(input);
                     self.set_phase(ShellPhase::Editing);
@@ -1944,7 +2047,7 @@ impl AishShell {
         let history_f = history.clone();
         let shared_host_f = shared_host.clone();
 
-        Box::new(move |output: &str| -> Option<aish_pty::AiResponse> {
+        Box::new(move |output: &str, _offload_path: Option<&str>| -> Option<aish_pty::AiResponse> {
             let followup_prompt = format!(
                 "I ran the command on the remote host. Here is the output:\n\
                 ```\n{}\n```\n\n\
@@ -2202,14 +2305,18 @@ impl AishShell {
                         )
                         .await
                 });
-                let text = result.ok();
+                let process_result = result.ok();
+                let text = process_result.as_ref().map(|r| r.text.clone());
 
                 // Update conversation history
                 {
                     let mut h = conversation_history_th.lock().unwrap();
                     h.push(ChatMessage::user(&followup_prompt));
-                    if let Some(ref t) = text {
-                        h.push(ChatMessage::assistant(t));
+                    if let Some(ref pr) = process_result {
+                        h.extend(pr.new_messages.clone());
+                        if pr.new_messages.is_empty() {
+                            h.push(ChatMessage::assistant(&pr.text));
+                        }
                     }
                     let excess = h.len().saturating_sub(50);
                     if excess > 0 {
@@ -2287,7 +2394,9 @@ impl AishShell {
                         let done_rx = std::sync::Mutex::new(llm_done_rx);
                         let cancelled_f = cancelled_fu.clone();
                         let followup: Box<aish_pty::FollowupCallback> = Box::new(
-                            move |captured_output: &str| -> Option<aish_pty::AiResponse> {
+                            move |captured_output: &str,
+                                  offload_path: Option<&str>|
+                                  -> Option<aish_pty::AiResponse> {
                                 // When the forwarding loop hard-aborts a
                                 // followup (Ctrl+C during bashexec), it
                                 // passes "Command cancelled by user".  Set
@@ -2297,7 +2406,11 @@ impl AishShell {
                                 if captured_output.contains("cancelled by user") {
                                     cancelled_f.store(true, std::sync::atomic::Ordering::SeqCst);
                                 }
-                                let _ = osender.send(captured_output.to_string());
+                                let _ = osender.send(aish_pty::BashExecResult {
+                                    output: captured_output.to_string(),
+                                    offload_path: offload_path
+                                        .map(|p| p.to_string()),
+                                });
                                 // Block until LLM thread finishes all rendering
                                 let _ = done_rx
                                     .lock()
@@ -2799,14 +2912,18 @@ impl AishShell {
                 if cancelled_t.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                let text = result.ok();
+                let process_result = result.ok();
+                let text = process_result.as_ref().map(|r| r.text.clone());
 
                 // Update conversation history
                 {
                     let mut h = conversation_history_t.lock().unwrap();
                     h.push(ChatMessage::user(&context_for_thread));
-                    if let Some(ref response_text) = text {
-                        h.push(ChatMessage::assistant(response_text));
+                    if let Some(ref pr) = process_result {
+                        h.extend(pr.new_messages.clone());
+                        if pr.new_messages.is_empty() {
+                            h.push(ChatMessage::assistant(&pr.text));
+                        }
                     }
                     let excess = h.len().saturating_sub(50);
                     if excess > 0 {
@@ -2880,7 +2997,15 @@ impl AishShell {
                             ask_user: None,
                         })
                     }
-                    None => None,
+                    None => Some(aish_pty::AiResponse {
+                        command: None,
+                        display_text: format!(
+                            "\x1b[33m{}\x1b[0m",
+                            aish_i18n::t("shell.session.ai_error")
+                        ),
+                        followup: None,
+                        ask_user: None,
+                    }),
                 };
                 let _ = event_tx.send(aish_pty::AiEvent::Done(ai_response));
                 let _ = llm_done_tx.send(()); // signal rendering complete
@@ -2893,7 +3018,7 @@ impl AishShell {
                 AskUser(aish_pty::AskUserRequest, aish_pty::AskUserChannel),
                 BashExec {
                     command: String,
-                    output_sender: std::sync::mpsc::Sender<String>,
+                    output_sender: std::sync::mpsc::Sender<aish_pty::BashExecResult>,
                     event_receiver: std::sync::mpsc::Receiver<aish_pty::AiEvent>,
                 },
             }
@@ -3033,18 +3158,24 @@ impl AishShell {
                             std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
                         >,
                         answer_tx: std::sync::mpsc::Sender<aish_pty::AskUserAnswer>,
-                        output_sender: std::sync::mpsc::Sender<String>,
+                        output_sender: std::sync::mpsc::Sender<aish_pty::BashExecResult>,
                         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
                     ) -> Box<aish_pty::FollowupCallback> {
                         Box::new(
-                            move |captured_output: &str| -> Option<aish_pty::AiResponse> {
+                            move |captured_output: &str,
+                                  offload_path: Option<&str>|
+                                  -> Option<aish_pty::AiResponse> {
                                 // When the forwarding loop hard-aborts (Ctrl+C
                                 // during bashexec), set the cancelled flag so
                                 // the LLM event callback stops writing to stdout.
                                 if captured_output.contains("cancelled by user") {
                                     cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
                                 }
-                                let _ = output_sender.send(captured_output.to_string());
+                                let _ = output_sender.send(aish_pty::BashExecResult {
+                                    output: captured_output.to_string(),
+                                    offload_path: offload_path
+                                        .map(|p| p.to_string()),
+                                });
 
                                 let rx = match event_rx.lock().unwrap().take() {
                                     Some(rx) => rx,

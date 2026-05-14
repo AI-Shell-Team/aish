@@ -187,6 +187,8 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "No se pudo determinar el comando correcto"
     retry_hint: "Escribe ';' para decirle a la IA qué quieres hacer y te ayudará a encontrar el comando adecuado"
+  nl_detection:
+    confirm_ask_ai: "Esto parece una pregunta en lenguaje natural. ¿Preguntar a IA? (Y/n)"
   error:
     execution_error: "❌ Error durante la ejecución: {error}"
     pty_decode_error: "Error al decodificar la salida PTY: {error}"
@@ -216,6 +218,10 @@ shell:
     no_config_manager: "No se puede reconfigurar: el gestor de configuración no está disponible"
     cancelled: "Configuración cancelada; se conservan los ajustes actuales"
     applied: "Configuración actualizada; modelo actual: {model}"
+  session:
+    iteration_limit_reached: "Se han completado {count} iteraciones de llamadas a herramientas."
+    iteration_limit_title: "⏸ Límite de llamadas a herramientas alcanzado"
+    iteration_continue_prompt: "¿Continuar? [Y/n]"
   ask_user:
     title: "Selecciona una opción"
     custom_label: "Personalizado:"

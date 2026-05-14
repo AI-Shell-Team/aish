@@ -366,7 +366,10 @@ impl PersistentPty {
             Ok((cleaned, result_exit_code))
         }
     }
+}
 
+
+impl PersistentPty {
     /// Send a user command and enter raw stdin forwarding mode until
     /// prompt_ready is received. Returns (exit_code, cwd, output).
     pub fn send_command_interactive(
@@ -444,6 +447,8 @@ impl PersistentPty {
         let mut pending_followup: Option<Box<crate::FollowupCallback>> = None;
         let mut followup_captured: Vec<u8> = Vec::new();
         let mut followup_capturing = false;
+        // Offloader for followup output (created when capturing starts)
+        let mut followup_offloader: Option<crate::PtyOutputOffload> = None;
         // Set to true when output that looks like a remote shell prompt
         // (ending with "# " or "$ ") is seen during followup_capturing.
         // Once detected the idle threshold is reduced so the followup
@@ -699,17 +704,32 @@ impl PersistentPty {
                             // instead of "Channel closed".
                             if let Some(followup) = pending_followup.take() {
                                 std::thread::spawn(move || {
-                                    let _ = followup("");
+                                    let _ = followup("", None);
                                 });
                             }
                             followup_captured.clear();
+                            // Clean up offloader
+                            if let Some(offloader) = followup_offloader.take() {
+                                offloader.cancel();
+                            }
                         } else {
                             followup_capturing = false;
+                            // Finalize offloader and get path
+                            let offload_path = if let Some(offloader) = followup_offloader.take() {
+                                let result = offloader.finalize(&[], &[], 0);
+                                if result.stdout.status == "offloaded" {
+                                    result.stdout.path.clone()
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
                             if let Some(followup) = pending_followup.take() {
                                 let output =
                                     String::from_utf8_lossy(&followup_captured).to_string();
                                 let clean = strip_ansi_and_prompt(&output);
-                                let next_response = followup(&clean);
+                                let next_response = followup(&clean, offload_path.as_deref());
                                 if let Some(resp) = next_response {
                                     pending_response = Some(resp);
                                 } else {
@@ -739,7 +759,7 @@ impl PersistentPty {
                     if let Some(response) = pending_response.take() {
                         if let Some(followup) = response.followup {
                             std::thread::spawn(move || {
-                                let _ = followup("Command cancelled by user");
+                                let _ = followup("Command cancelled by user", None);
                             });
                         }
                         skip_leading_newline = true;
@@ -874,6 +894,24 @@ impl PersistentPty {
                                 followup_capturing = true;
                                 followup_prompt_seen = false;
                                 pending_followup = response.followup;
+                                // Create offloader for followup output
+                                let session_uuid = uuid::Uuid::new_v4().to_string();
+                                let base_dir = std::env::temp_dir()
+                                    .to_str()
+                                    .unwrap_or("/tmp")
+                                    .to_string();
+                                followup_offloader = Some(crate::PtyOutputOffload::new(
+                                    &safe_cmd,
+                                    &session_uuid,
+                                    "",
+                                    1024,
+                                    &base_dir,
+                                ));
+                                // Reset idle counter so the new command
+                                // gets a fresh grace period instead of
+                                // inheriting the stale count from the
+                                // previous followup round.
+                                idle_poll_count = 0;
                             }
                         } else if ai_cancelled {
                             // Hard abort: print cancel and return to shell.
@@ -897,7 +935,7 @@ impl PersistentPty {
                             }
                             if let Some(followup) = response.followup {
                                 std::thread::spawn(move || {
-                                    let _ = followup("Command cancelled by user");
+                                    let _ = followup("Command cancelled by user", None);
                                 });
                             }
                             skip_leading_newline = true;
@@ -918,21 +956,30 @@ impl PersistentPty {
                                     1,
                                 );
                             }
-                            // Call the followup with a cancellation message so
-                            // the LLM thread receives output instead of
-                            // "Channel closed" when the sender is dropped.
+                            // User rejected the command — terminate the
+                            // entire tool chain, not just this command.
+                            // Fire-and-forget the followup so the LLM
+                            // thread receives output instead of "Channel
+                            // closed" when the sender is dropped.
                             if let Some(followup) = response.followup {
-                                let next_response = followup("Command cancelled by user");
-                                if let Some(resp) = next_response {
-                                    pending_response = Some(resp);
-                                } else {
-                                    skip_leading_newline = true;
-                                }
-                            } else {
-                                skip_leading_newline = true;
+                                std::thread::spawn(move || {
+                                    let _ = followup("Command rejected by user. Stop calling bash tools and adjust your approach.", None);
+                                });
                             }
+                            skip_leading_newline = true;
                         }
                     } else {
+                        if !response.display_text.is_empty() {
+                            let mut msg = response.display_text.clone();
+                            msg.push_str("\r\n");
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    msg.as_ptr() as *const libc::c_void,
+                                    msg.len(),
+                                );
+                            }
+                        }
                         unsafe {
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
@@ -995,7 +1042,7 @@ impl PersistentPty {
                                         followup_captured.clear();
                                         if let Some(followup) = pending_followup.take() {
                                             std::thread::spawn(move || {
-                                                let _ = followup("Command cancelled by user");
+                                                let _ = followup("Command cancelled by user", None);
                                             });
                                         }
                                         // Forward Ctrl+C to remote PTY
@@ -1433,13 +1480,24 @@ impl PersistentPty {
                             // Capture output for followup analysis
                             if followup_capturing {
                                 followup_captured.extend_from_slice(data);
+                                // Stream to followup offloader if active
+                                if let Some(ref mut offloader) = followup_offloader {
+                                    offloader.append_overflow(
+                                        crate::types::StreamName::Stdout,
+                                        data,
+                                    );
+                                }
                                 // Detect remote shell prompt to speed up
                                 // followup completion.  After the command
                                 // finishes the shell prints a prompt (e.g.
                                 // "[root@host ~]# ").  Once seen we reduce
                                 // the idle threshold from ~5 s to ~500 ms.
-                                if !followup_prompt_seen && data.len() >= 2 {
-                                    let tail = &data[data.len().saturating_sub(4)..];
+                                // Check the accumulated buffer tail (not just
+                                // the current chunk) so prompt patterns split
+                                // across SSH packets are still detected.
+                                if !followup_prompt_seen && followup_captured.len() >= 2 {
+                                    let tail =
+                                        &followup_captured[followup_captured.len().saturating_sub(4)..];
                                     if tail.ends_with(b"# ")
                                         || tail.ends_with(b"$ ")
                                         || tail.ends_with(b"#\r")
@@ -1593,7 +1651,9 @@ impl PersistentPty {
                             // Display unless AI is processing or capturing probe output.
                             // Use was_probe_active to prevent leaking the chunk where
                             // probe completes (probe_active changes to false mid-parse).
-                            if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
+                            if !interceptor.is_ai_processing()
+                                && !probe_active
+                                && !was_probe_active
                             {
                                 let _ = unsafe {
                                     libc::write(
@@ -1622,7 +1682,7 @@ impl PersistentPty {
                 if ai_cancelled {
                     if let Some(followup) = response.followup {
                         std::thread::spawn(move || {
-                            let _ = followup("Command cancelled by user");
+                            let _ = followup("Command cancelled by user", None);
                         });
                     }
                     skip_leading_newline = true;
@@ -1753,6 +1813,22 @@ impl PersistentPty {
                             followup_capturing = true;
                             followup_prompt_seen = false;
                             pending_followup = response.followup;
+                            // Create offloader for followup output
+                            let session_uuid = uuid::Uuid::new_v4().to_string();
+                            let base_dir = std::env::temp_dir()
+                                .to_str()
+                                .unwrap_or("/tmp")
+                                .to_string();
+                            followup_offloader = Some(crate::PtyOutputOffload::new(
+                                &safe_cmd,
+                                &session_uuid,
+                                "",
+                                1024,
+                                &base_dir,
+                            ));
+                            // Reset idle counter for the new command
+                            // (see the other injection site for rationale).
+                            idle_poll_count = 0;
                         }
                     } else if ai_cancelled {
                         // Hard abort: print cancel and return to shell.
@@ -1772,7 +1848,7 @@ impl PersistentPty {
                         }
                         if let Some(followup) = response.followup {
                             std::thread::spawn(move || {
-                                let _ = followup("Command cancelled by user");
+                                let _ = followup("Command cancelled by user", None);
                             });
                         }
                         skip_leading_newline = true;
@@ -1789,19 +1865,16 @@ impl PersistentPty {
                             );
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
-                        // Call the followup with a cancellation message so
-                        // the LLM thread receives output instead of
-                        // "Channel closed" when the sender is dropped.
+                        // User rejected the command — terminate the
+                        // entire tool chain.  Fire-and-forget so the
+                        // LLM thread receives output instead of
+                        // "Channel closed".
                         if let Some(followup) = response.followup {
-                            let next_response = followup("Command cancelled by user");
-                            if let Some(resp) = next_response {
-                                pending_response = Some(resp);
-                            } else {
-                                skip_leading_newline = true;
-                            }
-                        } else {
-                            skip_leading_newline = true;
+                            std::thread::spawn(move || {
+                                let _ = followup("Command rejected by user. Stop calling bash tools and adjust your approach.", None);
+                            });
                         }
+                        skip_leading_newline = true;
                     }
                 } else {
                     // AI returned explanation only (no command)
@@ -2852,19 +2925,35 @@ fn handle_ask_user_interaction(
                             inject.len(),
                         );
                     }
-                    // Wait for command output. No real timeout - the command may run
-                    // for a very long time (hours for build processes, etc.). The user
-                    // can interrupt with Ctrl+C at any time. Using u32::MAX as threshold
-                    // (approximately 715 minutes at 50ms per poll) to effectively disable
-                    // the idle timeout for BashExec.
+                    // Create local offloader for streaming output capture
+                    let session_uuid = uuid::Uuid::new_v4().to_string();
+                    let base_dir = std::env::temp_dir()
+                        .to_str()
+                        .unwrap_or("/tmp")
+                        .to_string();
+                    let mut offloader = crate::PtyOutputOffload::new(
+                        &command,
+                        &session_uuid,
+                        "",
+                        1024,  // keep_bytes - data below this stays in memory
+                        &base_dir,
+                    );
+                    // Wait for command output. Long-running commands are
+                    // supported — prompt detection fires quickly when the
+                    // shell returns to an idle prompt, otherwise a 5 s grace
+                    // period is used. The user can interrupt with Ctrl+C.
                     let mut captured = Vec::new();
                     let mut idle_count: u32 = 0;
-                    const BASH_EXEC_IDLE_THRESHOLD: u32 = u32::MAX; // effectively no timeout
+                    let mut prompt_seen = false;
+                    const BASH_EXEC_PROMPT_IDLE: u32 = 10; // 500 ms after prompt
+                    const BASH_EXEC_GRACE_IDLE: u32 = 100; // 5 s without prompt
+                    let max_fd = master_fd.max(stdin_fd);
                     loop {
                         let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
                         unsafe {
                             libc::FD_ZERO(&mut rfds);
                             libc::FD_SET(master_fd, &mut rfds);
+                            libc::FD_SET(stdin_fd, &mut rfds);
                         }
                         let mut tv = libc::timeval {
                             tv_sec: 0,
@@ -2872,13 +2961,32 @@ fn handle_ask_user_interaction(
                         };
                         let sel = unsafe {
                             libc::select(
-                                master_fd + 1,
+                                max_fd + 1,
                                 &mut rfds,
                                 std::ptr::null_mut(),
                                 std::ptr::null_mut(),
                                 &mut tv,
                             )
                         };
+                        // Check stdin for Ctrl+C
+                        if sel > 0 && unsafe { libc::FD_ISSET(stdin_fd, &rfds) } {
+                            let mut tmp = [0u8; 1];
+                            if unsafe {
+                                libc::read(
+                                    stdin_fd,
+                                    tmp.as_mut_ptr() as *mut libc::c_void,
+                                    1,
+                                )
+                            } == 1
+                                && tmp[0] == 0x03
+                            {
+                                unsafe {
+                                    libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+                                }
+                                hard_abort = true;
+                                break;
+                            }
+                        }
                         if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                             let mut tmp = [0u8; 4096];
                             match unsafe {
@@ -2891,6 +2999,11 @@ fn handle_ask_user_interaction(
                                 n if n > 0 => {
                                     let data = &tmp[..n as usize];
                                     captured.extend_from_slice(data);
+                                    // Stream to local offloader
+                                    offloader.append_overflow(
+                                        crate::types::StreamName::Stdout,
+                                        data,
+                                    );
                                     unsafe {
                                         libc::write(
                                             libc::STDOUT_FILENO,
@@ -2898,20 +3011,70 @@ fn handle_ask_user_interaction(
                                             data.len(),
                                         );
                                     }
+                                    // Detect shell prompt to end capture quickly
+                                    if !prompt_seen && data.len() >= 2 {
+                                        let tail =
+                                            &data[data.len().saturating_sub(4)..];
+                                        if tail.ends_with(b"# ")
+                                            || tail.ends_with(b"$ ")
+                                            || tail.ends_with(b"#\r")
+                                            || tail.ends_with(b"$\r")
+                                        {
+                                            prompt_seen = true;
+                                        }
+                                    }
                                     idle_count = 0;
                                 }
                                 _ => break,
                             }
                         } else {
                             idle_count += 1;
-                            if idle_count == BASH_EXEC_IDLE_THRESHOLD {
+                            let threshold = if prompt_seen {
+                                BASH_EXEC_PROMPT_IDLE
+                            } else {
+                                BASH_EXEC_GRACE_IDLE
+                            };
+                            if idle_count >= threshold {
                                 break;
                             }
                         }
                     }
+                    if hard_abort {
+                        // Ctrl+C during execution — cancel all tool chaining
+                        // Clean up any temp files created by offloader
+                        offloader.cancel();
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                        }
+                        let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                            output: format!("(cancelled: {})", command),
+                            offload_path: None,
+                        });
+                        return true;
+                    }
                     let output = String::from_utf8_lossy(&captured).to_string();
                     let clean = strip_ansi_and_prompt(&output);
-                    let _ = output_sender.send(clean);
+
+                    // Finalize local offload
+                    let offload_result = offloader.finalize(&[], &[], 0);
+                    let offload_path = if offload_result.stdout.status == "offloaded" {
+                        offload_result.stdout.path.clone()
+                    } else {
+                        None
+                    };
+
+                    let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                        output: clean,
+                        offload_path,
+                    });
                 } else if hard_abort {
                     // Ctrl+C hard abort: signal caller to stop all tool chaining
                     let cancel_msg = format!(
@@ -2925,7 +3088,10 @@ fn handle_ask_user_interaction(
                             cancel_msg.len(),
                         );
                     }
-                    let _ = output_sender.send(format!("(cancelled: {})", command));
+                    let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                        output: format!("(cancelled: {})", command),
+                        offload_path: None,
+                    });
                     return true;
                 } else {
                     let cancel_msg = format!(
@@ -2939,16 +3105,22 @@ fn handle_ask_user_interaction(
                             cancel_msg.len(),
                         );
                     }
-                    let _ = output_sender.send(format!("(cancelled: {})", command));
+                    let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                        output: format!("(cancelled: {})", command),
+                        offload_path: None,
+                    });
                 }
                 continue;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Forward PTY output while waiting for LLM
+                // Forward PTY output while waiting for LLM.
+                // Also monitor stdin for Ctrl+C cancellation.
+                let max_fd = master_fd.max(stdin_fd);
                 let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
                 unsafe {
                     libc::FD_ZERO(&mut rfds);
                     libc::FD_SET(master_fd, &mut rfds);
+                    libc::FD_SET(stdin_fd, &mut rfds);
                 }
                 let mut tv = libc::timeval {
                     tv_sec: 0,
@@ -2956,13 +3128,43 @@ fn handle_ask_user_interaction(
                 };
                 let sel = unsafe {
                     libc::select(
-                        master_fd + 1,
+                        max_fd + 1,
                         &mut rfds,
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
                         &mut tv,
                     )
                 };
+                // Check stdin for Ctrl+C
+                if sel > 0 && unsafe { libc::FD_ISSET(stdin_fd, &rfds) } {
+                    let mut tmp = [0u8; 1];
+                    if unsafe {
+                        libc::read(
+                            stdin_fd,
+                            tmp.as_mut_ptr() as *mut libc::c_void,
+                            1,
+                        )
+                    } == 1
+                        && tmp[0] == 0x03
+                    {
+                        unsafe {
+                            libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+                        }
+                        // Signal the LLM thread to stop
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                        }
+                        return true;
+                    }
+                }
                 if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                     let mut tmp = [0u8; 4096];
                     match unsafe {

@@ -21,6 +21,7 @@ pub mod autosuggest;
 pub mod commands;
 pub mod environment;
 pub mod input;
+pub mod nl_detect;
 pub mod prompt;
 pub mod readline;
 pub mod renderer;
