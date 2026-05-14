@@ -17,6 +17,9 @@ fn is_short_circuit_result(result: &ToolResult) -> bool {
         .is_some_and(|status| status.eq_ignore_ascii_case("short_circuit"))
 }
 
+/// Maximum consecutive tool failures before pausing for user confirmation.
+const MAX_CONSECUTIVE_FAILURES: usize = 3;
+
 /// Main LLM session that orchestrates the chat loop with tool calling.
 pub struct LlmSession {
     client: LlmClient,
@@ -25,6 +28,9 @@ pub struct LlmSession {
     event_callback: Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>>,
     confirmation_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync>>,
     security_notice_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync>>,
+    /// Callback invoked when the tool-call iteration limit is reached.
+    /// Receives the current iteration count and returns true to reset and continue.
+    iteration_limit_callback: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
@@ -51,6 +57,7 @@ impl LlmSession {
             event_callback: None,
             confirmation_callback: None,
             security_notice_callback: None,
+            iteration_limit_callback: None,
             temperature,
             max_tokens,
             langfuse: None,
@@ -86,6 +93,13 @@ impl LlmSession {
         cb: Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync>,
     ) {
         self.security_notice_callback = Some(cb);
+    }
+
+    /// Set the callback invoked when the tool-call iteration limit is reached.
+    /// The callback receives the current iteration count and returns true to
+    /// reset the counter and continue, or false to stop.
+    pub fn set_iteration_limit_callback(&mut self, cb: Arc<dyn Fn(u32) -> bool + Send + Sync>) {
+        self.iteration_limit_callback = Some(cb);
     }
 
     pub fn cancellation_token(&self) -> &CancellationToken {
@@ -203,7 +217,7 @@ impl LlmSession {
         context_messages: &[ChatMessage],
         system_message: Option<&str>,
         stream: bool,
-    ) -> Result<String, AishError> {
+    ) -> Result<crate::types::ProcessResult, AishError> {
         self.cancellation_token.reset();
 
         // Emit operation start event
@@ -241,13 +255,15 @@ impl LlmSession {
 
         // Trim messages if they exceed the context token budget
         messages = trim_messages(messages, self.max_context_tokens, 5);
+        let initial_len = messages.len();
 
         let tool_specs = self.filtered_tool_specs();
         let has_tools = !tool_specs.is_empty();
 
         // Tool calling loop (max iterations to prevent infinite loops)
-        let mut iterations = 0;
-        let max_iterations = 20;
+        let mut iterations = 0u32;
+        let max_iterations = 20u32;
+        let mut consecutive_failures = 0usize;
 
         loop {
             if self.cancellation_token.is_cancelled() {
@@ -266,19 +282,33 @@ impl LlmSession {
                 return Err(AishError::Cancelled);
             }
             if iterations >= max_iterations {
-                self.emit_event(LlmEvent {
-                    event_type: LlmEventType::Error,
-                    data: serde_json::json!({"error": "Max tool call iterations reached"}),
-                    timestamp: now_timestamp(),
-                    metadata: None,
-                });
-                self.emit_event(LlmEvent {
-                    event_type: LlmEventType::OpEnd,
-                    data: serde_json::json!({"reason": "max_iterations"}),
-                    timestamp: now_timestamp(),
-                    metadata: None,
-                });
-                return Err(AishError::Llm("Max tool call iterations reached".into()));
+                // Ask user whether to continue instead of hard-erroring
+                let should_continue = if let Some(ref cb) = self.iteration_limit_callback {
+                    cb(iterations)
+                } else {
+                    false
+                };
+                if should_continue {
+                    tracing::info!(
+                        iterations,
+                        "User approved continuing past iteration limit, resetting counter"
+                    );
+                    iterations = 0;
+                } else {
+                    self.emit_event(LlmEvent {
+                        event_type: LlmEventType::Error,
+                        data: serde_json::json!({"error": "Max tool call iterations reached"}),
+                        timestamp: now_timestamp(),
+                        metadata: None,
+                    });
+                    self.emit_event(LlmEvent {
+                        event_type: LlmEventType::OpEnd,
+                        data: serde_json::json!({"reason": "max_iterations"}),
+                        timestamp: now_timestamp(),
+                        metadata: None,
+                    });
+                    return Err(AishError::Llm("Max tool call iterations reached".into()));
+                }
             }
             iterations += 1;
 
@@ -368,7 +398,11 @@ impl LlmSession {
                             timestamp: now_timestamp(),
                             metadata: None,
                         });
-                        return Ok(content.unwrap_or_default());
+                        let new_messages = messages[initial_len..].to_vec();
+                        return Ok(crate::types::ProcessResult {
+                            text: content.unwrap_or_default(),
+                            new_messages,
+                        });
                     }
 
                     // Add assistant message with tool calls
@@ -394,6 +428,7 @@ impl LlmSession {
                         let result = self.execute_tool(tc).await;
                         let short_circuit = is_short_circuit_result(&result);
                         let output = result.output.clone();
+
                         // Log tool call span to Langfuse
                         if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
                             langfuse
@@ -413,12 +448,55 @@ impl LlmSession {
                                 timestamp: now_timestamp(),
                                 metadata: None,
                             });
-                            return Ok(if self.security_notice_callback.is_some() {
+                            let text = if self.security_notice_callback.is_some() {
                                 String::new()
                             } else {
                                 output
-                            });
+                            };
+                            let new_messages = messages[initial_len..].to_vec();
+                            return Ok(crate::types::ProcessResult { text, new_messages });
                         }
+
+                        // Track consecutive failures for early termination.
+                        // short_circuit results (security blocked) are excluded.
+                        if result.ok {
+                            consecutive_failures = 0;
+                        } else {
+                            consecutive_failures += 1;
+                        }
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                            tracing::warn!(
+                                consecutive_failures,
+                                "Too many consecutive tool failures, stopping loop"
+                            );
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::Error,
+                                data: serde_json::json!({
+                                    "error": format!(
+                                        "Stopped: {} consecutive tool failures",
+                                        consecutive_failures
+                                    ),
+                                    "consecutive_failures": consecutive_failures,
+                                }),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::OpEnd,
+                                data: serde_json::json!({"reason": "consecutive_failures"}),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            messages.push(ChatMessage::tool_result(&tc.id, output));
+                            let text = format!(
+                                "Stopped after {} consecutive tool execution failures. \
+                                 Please check your connection and retry.",
+                                consecutive_failures
+                            );
+                            let new_messages = messages[initial_len..].to_vec();
+                            return Ok(crate::types::ProcessResult { text, new_messages });
+                        }
+
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
                 }
@@ -616,7 +694,11 @@ impl LlmSession {
                             timestamp: now_timestamp(),
                             metadata: None,
                         });
-                        return Ok(accumulated);
+                        let new_messages = messages[initial_len..].to_vec();
+                        return Ok(crate::types::ProcessResult {
+                            text: accumulated,
+                            new_messages,
+                        });
                     }
 
                     // Build sorted tool calls from accumulated deltas.
@@ -678,7 +760,11 @@ impl LlmSession {
                             timestamp: now_timestamp(),
                             metadata: None,
                         });
-                        return Ok(accumulated);
+                        let new_messages = messages[initial_len..].to_vec();
+                        return Ok(crate::types::ProcessResult {
+                            text: accumulated,
+                            new_messages,
+                        });
                     }
 
                     // Add assistant message
@@ -699,6 +785,7 @@ impl LlmSession {
                         let result = self.execute_tool(tc).await;
                         let short_circuit = is_short_circuit_result(&result);
                         let output = result.output.clone();
+
                         // Log tool call span to Langfuse
                         if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
                             langfuse
@@ -718,12 +805,55 @@ impl LlmSession {
                                 timestamp: now_timestamp(),
                                 metadata: None,
                             });
-                            return Ok(if self.security_notice_callback.is_some() {
+                            let text = if self.security_notice_callback.is_some() {
                                 String::new()
                             } else {
                                 output
-                            });
+                            };
+                            let new_messages = messages[initial_len..].to_vec();
+                            return Ok(crate::types::ProcessResult { text, new_messages });
                         }
+
+                        // Track consecutive failures for early termination.
+                        // short_circuit results (security blocked) are excluded.
+                        if result.ok {
+                            consecutive_failures = 0;
+                        } else {
+                            consecutive_failures += 1;
+                        }
+                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                            tracing::warn!(
+                                consecutive_failures,
+                                "Too many consecutive tool failures, stopping loop"
+                            );
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::Error,
+                                data: serde_json::json!({
+                                    "error": format!(
+                                        "Stopped: {} consecutive tool failures",
+                                        consecutive_failures
+                                    ),
+                                    "consecutive_failures": consecutive_failures,
+                                }),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            self.emit_event(LlmEvent {
+                                event_type: LlmEventType::OpEnd,
+                                data: serde_json::json!({"reason": "consecutive_failures"}),
+                                timestamp: now_timestamp(),
+                                metadata: None,
+                            });
+                            messages.push(ChatMessage::tool_result(&tc.id, output));
+                            let text = format!(
+                                "Stopped after {} consecutive tool execution failures. \
+                                 Please check your connection and retry.",
+                                consecutive_failures
+                            );
+                            let new_messages = messages[initial_len..].to_vec();
+                            return Ok(crate::types::ProcessResult { text, new_messages });
+                        }
+
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
                 }
@@ -759,7 +889,10 @@ impl LlmSession {
             }
             LlmResponse::Stream(_) => {
                 // Delegate to process_input for streaming handling
-                self.process_input(prompt, &[], system_message, true).await
+                let result = self
+                    .process_input(prompt, &[], system_message, true)
+                    .await?;
+                Ok(result.text)
             }
         }
     }
@@ -934,6 +1067,7 @@ impl LlmSession {
             event_callback: self.event_callback.clone(),
             confirmation_callback: self.confirmation_callback.clone(),
             security_notice_callback: self.security_notice_callback.clone(),
+            iteration_limit_callback: self.iteration_limit_callback.clone(),
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             langfuse: self.langfuse.clone(),

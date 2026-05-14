@@ -148,6 +148,77 @@ impl Tool for ReadFileTool {
     }
 }
 
+/// Path-restricted wrapper around [`ReadFileTool`] for SSH sessions.
+///
+/// Only allows reading files under the system temp directory's
+/// `aish-offload/` subdirectory. Rejects any path outside that prefix
+/// to prevent a remote LLM from reading arbitrary local files.
+pub struct SshReadFileTool {
+    inner: ReadFileTool,
+    /// Canonicalized offload root (e.g. `/tmp/aish-offload`).
+    offload_root: std::path::PathBuf,
+}
+
+impl SshReadFileTool {
+    pub fn new() -> Self {
+        let offload_root = std::env::temp_dir().join("aish-offload");
+        // Best-effort canonicalize; if the dir doesn't exist yet, use
+        // the non-canonical form (first offload will create it).
+        let canonical_root = std::fs::canonicalize(&offload_root).unwrap_or(offload_root);
+        Self {
+            inner: ReadFileTool::new(),
+            offload_root: canonical_root,
+        }
+    }
+}
+
+impl Tool for SshReadFileTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.inner.parameters()
+    }
+
+    fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let path = match args.get("path").and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error(aish_i18n::t("tools.fs.read_file.missing_path")),
+        };
+        // Canonicalize to resolve symlinks and '..' traversal.
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(c) => c,
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.read_failed",
+                    &args_map,
+                ));
+            }
+        };
+        // Enforce exact offload root boundary.
+        if !canonical.starts_with(&self.offload_root) {
+            return ToolResult::error("Access denied: path is not inside offload directory");
+        }
+        // Use the validated canonical path to avoid TOCTOU.
+        let mut safe_args = args;
+        if let Some(obj) = safe_args.as_object_mut() {
+            obj.insert(
+                "path".to_string(),
+                serde_json::Value::String(canonical.to_string_lossy().into_owned()),
+            );
+        }
+        self.inner.execute(safe_args)
+    }
+}
+
 /// Write file tool (creates or overwrites).
 pub struct WriteFileTool;
 

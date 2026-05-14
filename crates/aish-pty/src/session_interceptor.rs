@@ -63,6 +63,17 @@ pub enum AskUserAnswer {
     Cancelled,
 }
 
+/// Result of a bash command executed via PTY (local or SSH).
+#[derive(Debug, Clone)]
+pub struct BashExecResult {
+    /// The captured command output (cleaned of ANSI/prompt).
+    pub output: String,
+    /// If the output exceeded the offload threshold, this is the local path
+    /// where the full output was written
+    /// (e.g. "/tmp/aish-offload/{uuid}/stdout.raw").
+    pub offload_path: Option<String>,
+}
+
 /// Event from the LLM thread to the forwarding loop.
 pub enum AiEvent {
     /// The LLM wants to ask the user a question.
@@ -70,7 +81,7 @@ pub enum AiEvent {
     /// The LLM wants to execute a bash command on the remote host.
     BashExec {
         command: String,
-        output_sender: std::sync::mpsc::Sender<String>,
+        output_sender: std::sync::mpsc::Sender<BashExecResult>,
     },
     /// The LLM has finished processing. Payload is a fully processed AiResponse
     /// (with command, followup, etc. already populated).
@@ -87,10 +98,11 @@ pub struct AskUserChannel {
 }
 
 /// Second-stage callback invoked after the injected command finishes on
-/// the remote host.  Receives the captured command output, streams the
-/// AI analysis to the terminal, and optionally returns a new `AiResponse`
-/// to chain another command execution (multi-round tool use).
-pub type FollowupCallback = dyn Fn(&str) -> Option<AiResponse> + Send + Sync;
+/// the remote host.  Receives the captured command output and an optional
+/// remote offload path, streams the AI analysis to the terminal, and
+/// optionally returns a new `AiResponse` to chain another command
+/// execution (multi-round tool use).
+pub type FollowupCallback = dyn Fn(&str, Option<&str>) -> Option<AiResponse> + Send + Sync;
 
 /// AI callback type: receives an AiQuery and returns an optional AiResponse.
 pub type AiCallback = dyn Fn(AiQuery) -> Option<AiResponse> + Send + Sync;
@@ -138,6 +150,12 @@ pub struct SessionInterceptor {
     /// terminal escape sequence (arrow keys, function keys, etc.) so they
     /// don't corrupt line_shadow.
     escape_seq: Option<EscSeqPhase>,
+    /// Bracketed paste mode: when true, we're receiving pasted content
+    /// (between ESC [ 200 ~ and ESC [ 201 ~). Pasted content should not
+    /// be added to line_shadow to avoid false NL/AI triggers.
+    in_bracketed_paste: bool,
+    /// Buffer to collect CSI sequence parameters for bracketed paste detection.
+    csi_params: Vec<u8>,
 }
 
 /// Phase of an escape sequence being consumed.
@@ -161,6 +179,8 @@ impl SessionInterceptor {
             output_buffer: OutputBuffer::new(8192),
             ai_callback,
             escape_seq: None,
+            in_bracketed_paste: false,
+            csi_params: Vec::with_capacity(16),
         }
     }
 
@@ -179,6 +199,11 @@ impl SessionInterceptor {
             InterceptorState::Passthrough => {
                 match byte {
                     b'\r' | b'\n' => {
+                        // In bracketed paste mode, don't trigger AI/NL detection
+                        // for pasted newlines — just forward them.
+                        if self.in_bracketed_paste {
+                            return StdinAction::Forward;
+                        }
                         // End of line — check whether the accumulated input
                         // starts with `;` or `；` to trigger AI.
                         if self.ai_callback.is_some() && starts_with_ai_prefix(&self.line_shadow) {
@@ -211,8 +236,10 @@ impl SessionInterceptor {
                         // Ctrl+D — don't add to shadow
                     }
                     _ => {
-                        // Regular character — add to shadow
-                        self.line_shadow.push(byte);
+                        // Regular character — add to shadow unless in bracketed paste
+                        if !self.in_bracketed_paste {
+                            self.line_shadow.push(byte);
+                        }
                     }
                 }
                 StdinAction::Forward
@@ -230,6 +257,7 @@ impl SessionInterceptor {
                 b'[' => {
                     // CSI sequence — consume parameter/intermediate bytes
                     self.escape_seq = Some(EscSeqPhase::Csi);
+                    self.csi_params.clear();
                 }
                 // Two-byte escape (ESC O, ESC (, etc.) — consume final byte
                 _ => {
@@ -240,11 +268,26 @@ impl SessionInterceptor {
             EscSeqPhase::Csi => {
                 if (0x40..=0x7E).contains(&byte) {
                     // Final byte — sequence complete
+                    // Check for bracketed paste: ESC [ 200 ~ or ESC [ 201 ~
+                    if byte == b'~' {
+                        let params: String = String::from_utf8_lossy(&self.csi_params).to_string();
+                        if params == "200" {
+                            // Bracketed paste start
+                            self.in_bracketed_paste = true;
+                        } else if params == "201" {
+                            // Bracketed paste end
+                            self.in_bracketed_paste = false;
+                        }
+                    }
                     self.escape_seq = None;
                 }
                 // Otherwise still consuming parameters (0x30-0x3F) or
                 // intermediate bytes (0x20-0x2F).
                 else {
+                    // Collect parameter bytes for bracketed paste detection
+                    if byte.is_ascii_digit() || byte == b';' {
+                        self.csi_params.push(byte);
+                    }
                     self.escape_seq = Some(EscSeqPhase::Csi);
                 }
             }
@@ -265,6 +308,7 @@ impl SessionInterceptor {
         self.state = InterceptorState::Passthrough;
         self.line_shadow.clear();
         self.cancel_pty_line = false;
+        self.in_bracketed_paste = false;
     }
 
     /// Whether AI is currently processing.

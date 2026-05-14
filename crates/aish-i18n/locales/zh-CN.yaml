@@ -396,6 +396,7 @@ shell:
     confirm_execute: "⚠ 是否执行? [Y/n]"
     running: "执行中..."
     ai_cancelled: "[AI 已取消]"
+    ai_error: "[AI 处理出错，未返回结果]"
     probing: "正在检测远程环境..."
     ask_user:
       custom_input_label: "输入自定义答案"
@@ -408,6 +409,9 @@ shell:
       text_preview: "text_input: {prompt}"
     thinking: "思考中"
     thinking_elapsed: "思考中 {elapsed}s"
+    iteration_limit_reached: "已执行 {count} 轮工具调用。"
+    iteration_limit_title: "⏸ 工具调用次数达到上限"
+    iteration_continue_prompt: "是否继续？[Y/n]"
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 后按 Enter 自动分析修复，或直接输入下一条命令。"
@@ -417,6 +421,9 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "无法确定正确的命令"
     retry_hint: "输入 ';' 告诉 AI 你想做什么，它会帮你找到正确的命令"
+
+  nl_detection:
+    confirm_ask_ai: "这看起来像自然语言问题，是否让 AI 解答？(Y/n)"
 
   error:
     execution_error: "❌ 执行过程中出错: {error}"
@@ -537,7 +544,7 @@ tools:
     no_logs_found: "未找到任何日志或匹配信息。"
 
   bash:
-    description: "执行 bash 命令并返回输出。使用此工具运行 shell 命令。"
+    description: "执行 bash 命令并返回输出。使用此工具运行 shell 命令。重要：每条命令都需要用户确认。如果用户拒绝（N）或取消（Ctrl+C），你绝对不能重试相同或类似的命令——应确认取消并调整方案。"
     security_handling_required: "bash 命令需要 {level} 级安全处理"
     param:
       command: "要执行的 bash 命令"
