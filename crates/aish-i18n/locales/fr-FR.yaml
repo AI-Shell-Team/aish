@@ -218,6 +218,10 @@ shell:
     no_config_manager: "Reconfiguration impossible : gestionnaire de configuration indisponible"
     cancelled: "Configuration annulee, les parametres actuels sont conserves"
     applied: "Configuration mise a jour, modele actuel : {model}"
+  session:
+    iteration_limit_reached: "{count} iterations d'appels d'outils terminees."
+    iteration_limit_title: "⏸ Limite d'appels d'outils atteinte"
+    iteration_continue_prompt: "Continuer ? [Y/n]"
   ask_user:
     title: "Selectionnez une option"
     custom_label: "Personnalise :"

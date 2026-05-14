@@ -221,10 +221,18 @@ static COMMON_COMMANDS_SET: LazyLock<std::collections::HashSet<&'static str>> =
 /// Quick check if a single line (from SSH session shadow buffer) looks like NL.
 /// Returns true if the line should be offered to AI instead of forwarded to PTY.
 /// Does NOT check PATH — the caller should skip known commands before calling this.
+///
+/// **Fast path**: if the first non-whitespace character is CJK, returns true
+/// immediately — shell commands never start with CJK characters.
 pub fn looks_like_natural_language(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
+    }
+
+    // Fast path: first character is CJK → always NL
+    if trimmed.chars().next().is_some_and(is_cjk) {
+        return true;
     }
 
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
@@ -247,10 +255,18 @@ pub fn looks_like_natural_language(line: &str) -> bool {
 /// SSH-session-safe variant: also checks against a hardcoded list of common
 /// commands so that `git status` etc. are not falsely classified as NL on
 /// remote hosts where PATH is unavailable.
+///
+/// **Fast path**: if the first non-whitespace character is CJK, returns true
+/// immediately — shell commands never start with CJK characters.
 pub fn looks_like_natural_language_safe(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return false;
+    }
+
+    // Fast path: first non-whitespace character is CJK → always NL
+    if trimmed.chars().next().is_some_and(is_cjk) {
+        return true;
     }
 
     // If first token is a common command → not NL
@@ -278,6 +294,9 @@ mod tests {
     fn test_looks_like_nl_chinese() {
         assert!(looks_like_natural_language("列出所有文件"));
         assert!(looks_like_natural_language("怎么查看磁盘使用情况"));
+        // CJK prefix with mixed content — first char is CJK → always NL
+        assert!(looks_like_natural_language("安装openstack train"));
+        assert!(looks_like_natural_language("安装openstack tranin"));
     }
 
     #[test]
@@ -334,6 +353,7 @@ mod tests {
         assert!(looks_like_natural_language_safe("list all files"));
         assert!(looks_like_natural_language_safe("what time is it"));
         assert!(looks_like_natural_language_safe("列出所有文件"));
+        assert!(looks_like_natural_language_safe("安装openstack train"));
     }
 
     #[test]

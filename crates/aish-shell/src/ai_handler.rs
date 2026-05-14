@@ -346,7 +346,7 @@ impl AiHandler {
         let system_message = self.system_message();
 
         // Step 5: Send to LLM
-        let response = self
+        let process_result = self
             .llm_session
             .process_input(
                 &question_processed,
@@ -355,6 +355,7 @@ impl AiHandler {
                 true,
             )
             .await?;
+        let response = process_result.text;
 
         // Step 6: Store the exchange in context
         self.context_manager
@@ -389,10 +390,11 @@ impl AiHandler {
         let context_messages = self.build_context_messages();
         let system_message = self.error_correction_system_message(command, exit_code, stderr);
 
-        let response = self
+        let process_result = self
             .llm_session
             .process_input(&prompt, &context_messages, system_message.as_deref(), true)
             .await?;
+        let response = process_result.text;
 
         // Persist token usage delta to disk
         self.persist_token_usage();

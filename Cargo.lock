@@ -167,6 +167,7 @@ dependencies = [
  "aish-core",
  "aish-hosts",
  "aish-i18n",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "libc",

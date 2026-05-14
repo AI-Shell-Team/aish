@@ -218,6 +218,10 @@ shell:
     no_config_manager: "再設定できません: 設定マネージャーを利用できません"
     cancelled: "セットアップをキャンセルしました。現在の設定を維持します"
     applied: "設定を更新しました。現在のモデル: {model}"
+  session:
+    iteration_limit_reached: "{count} 回のツール呼び出しが完了しました。"
+    iteration_limit_title: "⏸ ツール呼び出し上限に達しました"
+    iteration_continue_prompt: "続行しますか？[Y/n]"
   ask_user:
     title: "オプションを選択"
     custom_label: "カスタム:"

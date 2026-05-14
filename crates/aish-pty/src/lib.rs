@@ -28,15 +28,15 @@ pub use command_state::CommandState;
 pub use control::{decode_control_chunk, encode_control_event, BackendControlEvent};
 pub use executor::PtyExecutor;
 pub use offload::{
-    BashOffloadResult, BashOffloadSettings, BashOutputOffload, OffloadResult, OffloadState,
-    PtyOutputOffload,
+    truncate_utf8_safe, BashOffloadResult, BashOffloadSettings, BashOutputOffload, OffloadResult,
+    OffloadState, PtyOutputOffload,
 };
 pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use session_interceptor::{
     pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,
-    AskUserOption, AskUserRequest, FollowupCallback, InterceptorState, SessionInterceptor,
-    StdinAction,
+    AskUserOption, AskUserRequest, BashExecResult, FollowupCallback, InterceptorState,
+    SessionInterceptor, StdinAction,
 };
 pub use state_capture::StateChanges;
 pub use types::CancelToken;

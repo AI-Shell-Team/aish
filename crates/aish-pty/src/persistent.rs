@@ -366,7 +366,73 @@ impl PersistentPty {
             Ok((cleaned, result_exit_code))
         }
     }
+}
 
+/// Write all bytes to a file descriptor, handling partial writes.
+fn write_all_fd(fd: RawFd, mut data: &[u8]) {
+    while !data.is_empty() {
+        let n = unsafe { libc::write(fd, data.as_ptr() as *const libc::c_void, data.len()) };
+        if n <= 0 {
+            break;
+        }
+        data = &data[n as usize..];
+    }
+}
+
+/// Inject a command to write output to a file on the remote host via base64.
+/// Returns the remote file path.  The caller must wait for the injected
+/// command to complete (via idle detection) before reading the file.
+/// Uses `stty -echo` to suppress command echo so the user does not see
+/// the base64 payload.
+fn inject_remote_offload(master_fd: RawFd, data: &[u8]) -> Option<String> {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let remote_dir = format!("/tmp/aish-offload/{}", uuid);
+    let remote_path = format!("{}/stdout.txt", remote_dir);
+
+    let encoded = BASE64.encode(data);
+
+    // Build a single compound command to avoid multiple shell
+    // submissions.  Echo is suppressed by the caller setting
+    // remote_offload_pending which blocks display output while
+    // the write command runs.
+    const CHUNK_SIZE: usize = 512_000;
+    let mut cmd = format!("mkdir -p '{}'", remote_dir);
+    if encoded.len() <= CHUNK_SIZE {
+        cmd.push_str(&format!(
+            " && printf '%s' '{}' | base64 -d > '{}'",
+            encoded, remote_path
+        ));
+    } else {
+        // First chunk: write with >
+        cmd.push_str(&format!(
+            " && printf '%s' '{}' | base64 -d > '{}'",
+            &encoded[..CHUNK_SIZE],
+            remote_path
+        ));
+        // Subsequent chunks: append with >>
+        let rest = &encoded[CHUNK_SIZE..];
+        let mut pos = 0;
+        while pos < rest.len() {
+            let end = (pos + CHUNK_SIZE).min(rest.len());
+            cmd.push_str(&format!(
+                " && printf '%s' '{}' | base64 -d >> '{}'",
+                &rest[pos..end],
+                remote_path
+            ));
+            pos = end;
+        }
+    }
+    cmd.push('\n');
+
+    write_all_fd(master_fd, cmd.as_bytes());
+
+    Some(remote_path)
+}
+
+impl PersistentPty {
     /// Send a user command and enter raw stdin forwarding mode until
     /// prompt_ready is received. Returns (exit_code, cwd, output).
     pub fn send_command_interactive(
@@ -470,6 +536,16 @@ impl PersistentPty {
         // output with multi-second gaps. Without extra grace the followup
         // fires after only 150 ms of silence (IDLE_THRESHOLD * 50 ms).
         const FOLLOWUP_IDLE_GRACE: u32 = 100; // 5 s at 50 ms per poll
+        // Remote offload: when followup output exceeds this threshold, write
+        // the full output to a file on the remote host so the LLM can access
+        // it via bash commands (which run remotely in SSH sessions).
+        const REMOTE_OFFLOAD_THRESHOLD: usize = 1024;
+        // State for pending remote offload write.  Set when the followup
+        // fires with large output; the write command is injected into the
+        // PTY and the followup is deferred until the write completes.
+        let mut remote_offload_pending: Option<String> = None;
+        let mut remote_offload_followup: Option<Box<crate::FollowupCallback>> = None;
+        let mut remote_offload_captured: Vec<u8> = Vec::new();
 
         // Host probe state
         let mut probe_active = false;
@@ -699,7 +775,7 @@ impl PersistentPty {
                             // instead of "Channel closed".
                             if let Some(followup) = pending_followup.take() {
                                 std::thread::spawn(move || {
-                                    let _ = followup("");
+                                    let _ = followup("", None);
                                 });
                             }
                             followup_captured.clear();
@@ -709,22 +785,71 @@ impl PersistentPty {
                                 let output =
                                     String::from_utf8_lossy(&followup_captured).to_string();
                                 let clean = strip_ansi_and_prompt(&output);
-                                let next_response = followup(&clean);
-                                if let Some(resp) = next_response {
-                                    pending_response = Some(resp);
-                                } else {
-                                    unsafe {
-                                        libc::write(
+                                // If output is large, write it to a file on the
+                                // remote host so the LLM can access it via bash.
+                                let remote_path =
+                                    if followup_captured.len() > REMOTE_OFFLOAD_THRESHOLD {
+                                        inject_remote_offload(
                                             self.master_fd,
-                                            b"\r".as_ptr() as *const libc::c_void,
-                                            1,
-                                        );
+                                            &followup_captured,
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                if remote_path.is_some() {
+                                    // Defer followup until the write command
+                                    // completes (next idle detection).
+                                    remote_offload_pending = remote_path;
+                                    remote_offload_followup = Some(followup);
+                                    remote_offload_captured =
+                                        std::mem::take(&mut followup_captured);
+                                    // Reset idle counter so the injected write
+                                    // command has time to execute before the
+                                    // deferred followup fires.
+                                    idle_poll_count = 0;
+                                } else {
+                                    let next_response = followup(&clean, None);
+                                    if let Some(resp) = next_response {
+                                        pending_response = Some(resp);
+                                    } else {
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                b"\r".as_ptr() as *const libc::c_void,
+                                                1,
+                                            );
+                                        }
+                                        skip_leading_newline = true;
                                     }
-                                    skip_leading_newline = true;
                                 }
                             }
                             followup_captured.clear();
                         }
+                    }
+                    // If a remote offload write was injected, wait for it
+                    // to complete.  When the shell goes idle again, the
+                    // write command has finished — fire the deferred followup.
+                    if remote_offload_pending.is_some() && remote_offload_followup.is_some() {
+                        let path = remote_offload_pending.take();
+                        if let Some(followup) = remote_offload_followup.take() {
+                            let output = String::from_utf8_lossy(&remote_offload_captured)
+                                .to_string();
+                            let clean = strip_ansi_and_prompt(&output);
+                            let next_response = followup(&clean, path.as_deref());
+                            if let Some(resp) = next_response {
+                                pending_response = Some(resp);
+                            } else {
+                                unsafe {
+                                    libc::write(
+                                        self.master_fd,
+                                        b"\r".as_ptr() as *const libc::c_void,
+                                        1,
+                                    );
+                                }
+                                skip_leading_newline = true;
+                            }
+                        }
+                        remote_offload_captured.clear();
                     }
                 }
                 // Process pending AI response (multi-round chaining).
@@ -739,7 +864,7 @@ impl PersistentPty {
                     if let Some(response) = pending_response.take() {
                         if let Some(followup) = response.followup {
                             std::thread::spawn(move || {
-                                let _ = followup("Command cancelled by user");
+                                let _ = followup("Command cancelled by user", None);
                             });
                         }
                         skip_leading_newline = true;
@@ -874,6 +999,11 @@ impl PersistentPty {
                                 followup_capturing = true;
                                 followup_prompt_seen = false;
                                 pending_followup = response.followup;
+                                // Reset idle counter so the new command
+                                // gets a fresh grace period instead of
+                                // inheriting the stale count from the
+                                // previous followup round.
+                                idle_poll_count = 0;
                             }
                         } else if ai_cancelled {
                             // Hard abort: print cancel and return to shell.
@@ -897,7 +1027,7 @@ impl PersistentPty {
                             }
                             if let Some(followup) = response.followup {
                                 std::thread::spawn(move || {
-                                    let _ = followup("Command cancelled by user");
+                                    let _ = followup("Command cancelled by user", None);
                                 });
                             }
                             skip_leading_newline = true;
@@ -918,21 +1048,30 @@ impl PersistentPty {
                                     1,
                                 );
                             }
-                            // Call the followup with a cancellation message so
-                            // the LLM thread receives output instead of
-                            // "Channel closed" when the sender is dropped.
+                            // User rejected the command — terminate the
+                            // entire tool chain, not just this command.
+                            // Fire-and-forget the followup so the LLM
+                            // thread receives output instead of "Channel
+                            // closed" when the sender is dropped.
                             if let Some(followup) = response.followup {
-                                let next_response = followup("Command cancelled by user");
-                                if let Some(resp) = next_response {
-                                    pending_response = Some(resp);
-                                } else {
-                                    skip_leading_newline = true;
-                                }
-                            } else {
-                                skip_leading_newline = true;
+                                std::thread::spawn(move || {
+                                    let _ = followup("Command rejected by user. Stop calling bash tools and adjust your approach.", None);
+                                });
                             }
+                            skip_leading_newline = true;
                         }
                     } else {
+                        if !response.display_text.is_empty() {
+                            let mut msg = response.display_text.clone();
+                            msg.push_str("\r\n");
+                            unsafe {
+                                libc::write(
+                                    libc::STDOUT_FILENO,
+                                    msg.as_ptr() as *const libc::c_void,
+                                    msg.len(),
+                                );
+                            }
+                        }
                         unsafe {
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
@@ -995,7 +1134,7 @@ impl PersistentPty {
                                         followup_captured.clear();
                                         if let Some(followup) = pending_followup.take() {
                                             std::thread::spawn(move || {
-                                                let _ = followup("Command cancelled by user");
+                                                let _ = followup("Command cancelled by user", None);
                                             });
                                         }
                                         // Forward Ctrl+C to remote PTY
@@ -1374,6 +1513,7 @@ impl PersistentPty {
                                                     echo.len(),
                                                 );
                                             }
+                                            drain_stdin_trailing(stdin_fd);
                                             ans[0] == b'y'
                                                 || ans[0] == b'Y'
                                                 || ans[0] == b'\r'
@@ -1413,7 +1553,16 @@ impl PersistentPty {
                                         if let Some(response) = resp {
                                             pending_response = Some(response);
                                         } else if !dossier_was_handled {
+                                            let cancel_msg = format!(
+                                                "\x1b[33m{}\x1b[0m\r\n",
+                                                aish_i18n::t("shell.session.ai_cancelled")
+                                            );
                                             unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    cancel_msg.as_ptr() as *const libc::c_void,
+                                                    cancel_msg.len(),
+                                                );
                                                 libc::write(
                                                     self.master_fd,
                                                     b"\r".as_ptr() as *const libc::c_void,
@@ -1607,8 +1756,12 @@ impl PersistentPty {
                                 // finishes the shell prints a prompt (e.g.
                                 // "[root@host ~]# ").  Once seen we reduce
                                 // the idle threshold from ~5 s to ~500 ms.
-                                if !followup_prompt_seen && data.len() >= 2 {
-                                    let tail = &data[data.len().saturating_sub(4)..];
+                                // Check the accumulated buffer tail (not just
+                                // the current chunk) so prompt patterns split
+                                // across SSH packets are still detected.
+                                if !followup_prompt_seen && followup_captured.len() >= 2 {
+                                    let tail =
+                                        &followup_captured[followup_captured.len().saturating_sub(4)..];
                                     if tail.ends_with(b"# ")
                                         || tail.ends_with(b"$ ")
                                         || tail.ends_with(b"#\r")
@@ -1759,10 +1912,15 @@ impl PersistentPty {
                                     }
                                 }
                             }
-                            // Display unless AI is processing or capturing probe output.
+                            // Display unless AI is processing, capturing probe output,
+                            // or writing an offload file to the remote host (the base64
+                            // payload must not be shown to the user).
                             // Use was_probe_active to prevent leaking the chunk where
                             // probe completes (probe_active changes to false mid-parse).
-                            if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
+                            if !interceptor.is_ai_processing()
+                                && !probe_active
+                                && !was_probe_active
+                                && remote_offload_pending.is_none()
                             {
                                 let _ = unsafe {
                                     libc::write(
@@ -1791,7 +1949,7 @@ impl PersistentPty {
                 if ai_cancelled {
                     if let Some(followup) = response.followup {
                         std::thread::spawn(move || {
-                            let _ = followup("Command cancelled by user");
+                            let _ = followup("Command cancelled by user", None);
                         });
                     }
                     skip_leading_newline = true;
@@ -1922,6 +2080,9 @@ impl PersistentPty {
                             followup_capturing = true;
                             followup_prompt_seen = false;
                             pending_followup = response.followup;
+                            // Reset idle counter for the new command
+                            // (see the other injection site for rationale).
+                            idle_poll_count = 0;
                         }
                     } else if ai_cancelled {
                         // Hard abort: print cancel and return to shell.
@@ -1941,7 +2102,7 @@ impl PersistentPty {
                         }
                         if let Some(followup) = response.followup {
                             std::thread::spawn(move || {
-                                let _ = followup("Command cancelled by user");
+                                let _ = followup("Command cancelled by user", None);
                             });
                         }
                         skip_leading_newline = true;
@@ -1958,19 +2119,16 @@ impl PersistentPty {
                             );
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
-                        // Call the followup with a cancellation message so
-                        // the LLM thread receives output instead of
-                        // "Channel closed" when the sender is dropped.
+                        // User rejected the command — terminate the
+                        // entire tool chain.  Fire-and-forget so the
+                        // LLM thread receives output instead of
+                        // "Channel closed".
                         if let Some(followup) = response.followup {
-                            let next_response = followup("Command cancelled by user");
-                            if let Some(resp) = next_response {
-                                pending_response = Some(resp);
-                            } else {
-                                skip_leading_newline = true;
-                            }
-                        } else {
-                            skip_leading_newline = true;
+                            std::thread::spawn(move || {
+                                let _ = followup("Command rejected by user. Stop calling bash tools and adjust your approach.", None);
+                            });
                         }
+                        skip_leading_newline = true;
                     }
                 } else {
                     // AI returned explanation only (no command)
@@ -3021,19 +3179,22 @@ fn handle_ask_user_interaction(
                             inject.len(),
                         );
                     }
-                    // Wait for command output. No real timeout - the command may run
-                    // for a very long time (hours for build processes, etc.). The user
-                    // can interrupt with Ctrl+C at any time. Using u32::MAX as threshold
-                    // (approximately 715 minutes at 50ms per poll) to effectively disable
-                    // the idle timeout for BashExec.
+                    // Wait for command output. Long-running commands are
+                    // supported — prompt detection fires quickly when the
+                    // shell returns to an idle prompt, otherwise a 5 s grace
+                    // period is used. The user can interrupt with Ctrl+C.
                     let mut captured = Vec::new();
                     let mut idle_count: u32 = 0;
-                    const BASH_EXEC_IDLE_THRESHOLD: u32 = u32::MAX; // effectively no timeout
+                    let mut prompt_seen = false;
+                    const BASH_EXEC_PROMPT_IDLE: u32 = 10; // 500 ms after prompt
+                    const BASH_EXEC_GRACE_IDLE: u32 = 100; // 5 s without prompt
+                    let max_fd = master_fd.max(stdin_fd);
                     loop {
                         let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
                         unsafe {
                             libc::FD_ZERO(&mut rfds);
                             libc::FD_SET(master_fd, &mut rfds);
+                            libc::FD_SET(stdin_fd, &mut rfds);
                         }
                         let mut tv = libc::timeval {
                             tv_sec: 0,
@@ -3041,13 +3202,32 @@ fn handle_ask_user_interaction(
                         };
                         let sel = unsafe {
                             libc::select(
-                                master_fd + 1,
+                                max_fd + 1,
                                 &mut rfds,
                                 std::ptr::null_mut(),
                                 std::ptr::null_mut(),
                                 &mut tv,
                             )
                         };
+                        // Check stdin for Ctrl+C
+                        if sel > 0 && unsafe { libc::FD_ISSET(stdin_fd, &rfds) } {
+                            let mut tmp = [0u8; 1];
+                            if unsafe {
+                                libc::read(
+                                    stdin_fd,
+                                    tmp.as_mut_ptr() as *mut libc::c_void,
+                                    1,
+                                )
+                            } == 1
+                                && tmp[0] == 0x03
+                            {
+                                unsafe {
+                                    libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+                                }
+                                hard_abort = true;
+                                break;
+                            }
+                        }
                         if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                             let mut tmp = [0u8; 4096];
                             match unsafe {
@@ -3067,20 +3247,139 @@ fn handle_ask_user_interaction(
                                             data.len(),
                                         );
                                     }
+                                    // Detect shell prompt to end capture quickly
+                                    if !prompt_seen && data.len() >= 2 {
+                                        let tail =
+                                            &data[data.len().saturating_sub(4)..];
+                                        if tail.ends_with(b"# ")
+                                            || tail.ends_with(b"$ ")
+                                            || tail.ends_with(b"#\r")
+                                            || tail.ends_with(b"$\r")
+                                        {
+                                            prompt_seen = true;
+                                        }
+                                    }
                                     idle_count = 0;
                                 }
                                 _ => break,
                             }
                         } else {
                             idle_count += 1;
-                            if idle_count == BASH_EXEC_IDLE_THRESHOLD {
+                            let threshold = if prompt_seen {
+                                BASH_EXEC_PROMPT_IDLE
+                            } else {
+                                BASH_EXEC_GRACE_IDLE
+                            };
+                            if idle_count >= threshold {
                                 break;
                             }
                         }
                     }
+                    if hard_abort {
+                        // Ctrl+C during execution — cancel all tool chaining
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                        }
+                        let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                            output: format!("(cancelled: {})", command),
+                            remote_offload_path: None,
+                        });
+                        return true;
+                    }
                     let output = String::from_utf8_lossy(&captured).to_string();
                     let clean = strip_ansi_and_prompt(&output);
-                    let _ = output_sender.send(clean);
+                    // Write offload file on the remote host if output is large.
+                    let remote_path = if captured.len() > 1024 {
+                        inject_remote_offload(master_fd, &captured).and_then(|path| {
+                            // Wait for the write command to complete by
+                            // detecting idle shell prompt.
+                            let mut idle_count: u32 = 0;
+                            const WRITE_IDLE_THRESHOLD: u32 = 20; // 1 s
+                            const WRITE_TIMEOUT: u32 = 200; // 10 s
+                            loop {
+                                let mut rfds: libc::fd_set =
+                                    unsafe { std::mem::zeroed() };
+                                unsafe {
+                                    libc::FD_ZERO(&mut rfds);
+                                    libc::FD_SET(master_fd, &mut rfds);
+                                    libc::FD_SET(stdin_fd, &mut rfds);
+                                }
+                                let mut tv = libc::timeval {
+                                    tv_sec: 0,
+                                    tv_usec: 50_000,
+                                };
+                                let max_fd = master_fd.max(stdin_fd);
+                                let sel = unsafe {
+                                    libc::select(
+                                        max_fd + 1,
+                                        &mut rfds,
+                                        std::ptr::null_mut(),
+                                        std::ptr::null_mut(),
+                                        &mut tv,
+                                    )
+                                };
+                                // Ctrl+C support
+                                if sel > 0
+                                    && unsafe { libc::FD_ISSET(stdin_fd, &rfds) }
+                                {
+                                    let mut tmp = [0u8; 1];
+                                    if unsafe {
+                                        libc::read(
+                                            stdin_fd,
+                                            tmp.as_mut_ptr() as *mut libc::c_void,
+                                            1,
+                                        )
+                                    } == 1
+                                        && tmp[0] == 0x03
+                                    {
+                                        unsafe {
+                                            libc::write(
+                                                master_fd,
+                                                b"\x03".as_ptr() as *const libc::c_void,
+                                                1,
+                                            );
+                                        }
+                                        return None;
+                                    }
+                                }
+                                if sel > 0
+                                    && unsafe { libc::FD_ISSET(master_fd, &rfds) }
+                                {
+                                    let mut drain = [0u8; 4096];
+                                    unsafe {
+                                        libc::read(
+                                            master_fd,
+                                            drain.as_mut_ptr() as *mut libc::c_void,
+                                            drain.len(),
+                                        )
+                                    };
+                                    idle_count = 0;
+                                } else {
+                                    idle_count += 1;
+                                    if idle_count >= WRITE_IDLE_THRESHOLD {
+                                        break Some(path);
+                                    }
+                                    if idle_count >= WRITE_TIMEOUT {
+                                        break None;
+                                    }
+                                }
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                        output: clean,
+                        remote_offload_path: remote_path,
+                    });
                 } else if hard_abort {
                     // Ctrl+C hard abort: signal caller to stop all tool chaining
                     let cancel_msg = format!(
@@ -3094,7 +3393,10 @@ fn handle_ask_user_interaction(
                             cancel_msg.len(),
                         );
                     }
-                    let _ = output_sender.send(format!("(cancelled: {})", command));
+                    let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                        output: format!("(cancelled: {})", command),
+                        remote_offload_path: None,
+                    });
                     return true;
                 } else {
                     let cancel_msg = format!(
@@ -3108,16 +3410,22 @@ fn handle_ask_user_interaction(
                             cancel_msg.len(),
                         );
                     }
-                    let _ = output_sender.send(format!("(cancelled: {})", command));
+                    let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                        output: format!("(cancelled: {})", command),
+                        remote_offload_path: None,
+                    });
                 }
                 continue;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Forward PTY output while waiting for LLM
+                // Forward PTY output while waiting for LLM.
+                // Also monitor stdin for Ctrl+C cancellation.
+                let max_fd = master_fd.max(stdin_fd);
                 let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
                 unsafe {
                     libc::FD_ZERO(&mut rfds);
                     libc::FD_SET(master_fd, &mut rfds);
+                    libc::FD_SET(stdin_fd, &mut rfds);
                 }
                 let mut tv = libc::timeval {
                     tv_sec: 0,
@@ -3125,13 +3433,43 @@ fn handle_ask_user_interaction(
                 };
                 let sel = unsafe {
                     libc::select(
-                        master_fd + 1,
+                        max_fd + 1,
                         &mut rfds,
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
                         &mut tv,
                     )
                 };
+                // Check stdin for Ctrl+C
+                if sel > 0 && unsafe { libc::FD_ISSET(stdin_fd, &rfds) } {
+                    let mut tmp = [0u8; 1];
+                    if unsafe {
+                        libc::read(
+                            stdin_fd,
+                            tmp.as_mut_ptr() as *mut libc::c_void,
+                            1,
+                        )
+                    } == 1
+                        && tmp[0] == 0x03
+                    {
+                        unsafe {
+                            libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+                        }
+                        // Signal the LLM thread to stop
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                        }
+                        return true;
+                    }
+                }
                 if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
                     let mut tmp = [0u8; 4096];
                     match unsafe {

@@ -218,6 +218,10 @@ shell:
     no_config_manager: "Neukonfiguration nicht möglich: Konfigurationsmanager nicht verfügbar"
     cancelled: "Einrichtung abgebrochen; aktuelle Einstellungen werden beibehalten"
     applied: "Konfiguration aktualisiert, aktuelles Modell: {model}"
+  session:
+    iteration_limit_reached: "{count} Tool-Aufruf-Iterationen abgeschlossen."
+    iteration_limit_title: "⏸ Tool-Aufruf-Limit erreicht"
+    iteration_continue_prompt: "Fortfahren? [Y/n]"
   ask_user:
     title: "Option auswählen"
     custom_label: "Benutzerdefiniert:"

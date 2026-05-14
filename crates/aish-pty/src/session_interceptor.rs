@@ -63,6 +63,17 @@ pub enum AskUserAnswer {
     Cancelled,
 }
 
+/// Result of a bash command executed on a remote host.
+#[derive(Debug, Clone)]
+pub struct BashExecResult {
+    /// The captured command output (cleaned of ANSI/prompt).
+    pub output: String,
+    /// If the output exceeded the offload threshold, this is the path
+    /// where the full output was written on the remote host
+    /// (e.g. "/tmp/aish-offload/{uuid}/stdout.txt").
+    pub remote_offload_path: Option<String>,
+}
+
 /// Event from the LLM thread to the forwarding loop.
 pub enum AiEvent {
     /// The LLM wants to ask the user a question.
@@ -70,7 +81,7 @@ pub enum AiEvent {
     /// The LLM wants to execute a bash command on the remote host.
     BashExec {
         command: String,
-        output_sender: std::sync::mpsc::Sender<String>,
+        output_sender: std::sync::mpsc::Sender<BashExecResult>,
     },
     /// The LLM has finished processing. Payload is a fully processed AiResponse
     /// (with command, followup, etc. already populated).
@@ -87,10 +98,12 @@ pub struct AskUserChannel {
 }
 
 /// Second-stage callback invoked after the injected command finishes on
-/// the remote host.  Receives the captured command output, streams the
-/// AI analysis to the terminal, and optionally returns a new `AiResponse`
-/// to chain another command execution (multi-round tool use).
-pub type FollowupCallback = dyn Fn(&str) -> Option<AiResponse> + Send + Sync;
+/// the remote host.  Receives the captured command output and an optional
+/// remote offload path, streams the AI analysis to the terminal, and
+/// optionally returns a new `AiResponse` to chain another command
+/// execution (multi-round tool use).
+pub type FollowupCallback =
+    dyn Fn(&str, Option<&str>) -> Option<AiResponse> + Send + Sync;
 
 /// AI callback type: receives an AiQuery and returns an optional AiResponse.
 pub type AiCallback = dyn Fn(AiQuery) -> Option<AiResponse> + Send + Sync;

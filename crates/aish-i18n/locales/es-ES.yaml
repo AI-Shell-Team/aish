@@ -218,6 +218,10 @@ shell:
     no_config_manager: "No se puede reconfigurar: el gestor de configuración no está disponible"
     cancelled: "Configuración cancelada; se conservan los ajustes actuales"
     applied: "Configuración actualizada; modelo actual: {model}"
+  session:
+    iteration_limit_reached: "Se han completado {count} iteraciones de llamadas a herramientas."
+    iteration_limit_title: "⏸ Límite de llamadas a herramientas alcanzado"
+    iteration_continue_prompt: "¿Continuar? [Y/n]"
   ask_user:
     title: "Selecciona una opción"
     custom_label: "Personalizado:"
