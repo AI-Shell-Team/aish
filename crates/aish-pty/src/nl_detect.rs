@@ -22,6 +22,7 @@ pub struct NlVerdict {
 }
 
 impl NlVerdict {
+    #[allow(dead_code)]
     fn english(score: usize) -> Self {
         Self {
             is_natural_language: score >= NL_SCORE_THRESHOLD,
@@ -30,6 +31,7 @@ impl NlVerdict {
         }
     }
 
+    #[allow(dead_code)]
     fn chinese() -> Self {
         Self {
             is_natural_language: true,
