@@ -342,11 +342,21 @@ static NL_KEYWORDS_SET: LazyLock<std::collections::HashSet<&'static str>> =
 // ---------------------------------------------------------------------------
 
 const SHELL_SYNTAX_CHARS: &[char] = &[
-    '$', '=', '{', '}', '[', ']', '>', '<', '*', '~', '&', '(', ')', '|', '/', '-',
+    '$', '=', '{', '}', '[', ']', '>', '<', '*', '~', '&', '(', ')', '|', '/',
 ];
 
 fn has_shell_syntax(word: &str) -> bool {
-    !word.contains(' ') && word.contains(SHELL_SYNTAX_CHARS)
+    if word.contains(' ') {
+        return false;
+    }
+    if word.contains(SHELL_SYNTAX_CHARS) {
+        return true;
+    }
+    // Treat leading dashes as shell flags (e.g. -la, --help) but not
+    // internal hyphens in natural hyphenated words (e.g. well-known).
+    word.starts_with('-')
+        && word.len() > 1
+        && word.chars().nth(1).is_some_and(|c| c.is_alphanumeric())
 }
 
 fn wrapped_in_quotes(word: &str) -> bool {

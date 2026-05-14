@@ -150,17 +150,24 @@ impl Tool for ReadFileTool {
 
 /// Path-restricted wrapper around [`ReadFileTool`] for SSH sessions.
 ///
-/// Only allows reading files under directories named `aish-offload`
-/// (the local offload directory). Rejects any path outside that prefix
+/// Only allows reading files under the system temp directory's
+/// `aish-offload/` subdirectory. Rejects any path outside that prefix
 /// to prevent a remote LLM from reading arbitrary local files.
 pub struct SshReadFileTool {
     inner: ReadFileTool,
+    /// Canonicalized offload root (e.g. `/tmp/aish-offload`).
+    offload_root: std::path::PathBuf,
 }
 
 impl SshReadFileTool {
     pub fn new() -> Self {
+        let offload_root = std::env::temp_dir().join("aish-offload");
+        // Best-effort canonicalize; if the dir doesn't exist yet, use
+        // the non-canonical form (first offload will create it).
+        let canonical_root = std::fs::canonicalize(&offload_root).unwrap_or(offload_root);
         Self {
             inner: ReadFileTool::new(),
+            offload_root: canonical_root,
         }
     }
 }
@@ -196,15 +203,19 @@ impl Tool for SshReadFileTool {
                 ));
             }
         };
-        // Verify the canonical path contains an "aish-offload" directory
-        // component to restrict reads to offload files only.
-        let has_offload_component = canonical
-            .components()
-            .any(|c| c.as_os_str() == "aish-offload");
-        if !has_offload_component {
+        // Enforce exact offload root boundary.
+        if !canonical.starts_with(&self.offload_root) {
             return ToolResult::error("Access denied: path is not inside offload directory");
         }
-        self.inner.execute(args)
+        // Use the validated canonical path to avoid TOCTOU.
+        let mut safe_args = args;
+        if let Some(obj) = safe_args.as_object_mut() {
+            obj.insert(
+                "path".to_string(),
+                serde_json::Value::String(canonical.to_string_lossy().into_owned()),
+            );
+        }
+        self.inner.execute(safe_args)
     }
 }
 
