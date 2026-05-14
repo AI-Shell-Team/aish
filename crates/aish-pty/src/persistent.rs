@@ -368,7 +368,6 @@ impl PersistentPty {
     }
 }
 
-
 impl PersistentPty {
     /// Send a user command and enter raw stdin forwarding mode until
     /// prompt_ready is received. Returns (exit_code, cwd, output).
@@ -896,10 +895,8 @@ impl PersistentPty {
                                 pending_followup = response.followup;
                                 // Create offloader for followup output
                                 let session_uuid = uuid::Uuid::new_v4().to_string();
-                                let base_dir = std::env::temp_dir()
-                                    .to_str()
-                                    .unwrap_or("/tmp")
-                                    .to_string();
+                                let base_dir =
+                                    std::env::temp_dir().to_str().unwrap_or("/tmp").to_string();
                                 followup_offloader = Some(crate::PtyOutputOffload::new(
                                     &safe_cmd,
                                     &session_uuid,
@@ -1482,10 +1479,8 @@ impl PersistentPty {
                                 followup_captured.extend_from_slice(data);
                                 // Stream to followup offloader if active
                                 if let Some(ref mut offloader) = followup_offloader {
-                                    offloader.append_overflow(
-                                        crate::types::StreamName::Stdout,
-                                        data,
-                                    );
+                                    offloader
+                                        .append_overflow(crate::types::StreamName::Stdout, data);
                                 }
                                 // Detect remote shell prompt to speed up
                                 // followup completion.  After the command
@@ -1496,8 +1491,8 @@ impl PersistentPty {
                                 // the current chunk) so prompt patterns split
                                 // across SSH packets are still detected.
                                 if !followup_prompt_seen && followup_captured.len() >= 2 {
-                                    let tail =
-                                        &followup_captured[followup_captured.len().saturating_sub(4)..];
+                                    let tail = &followup_captured
+                                        [followup_captured.len().saturating_sub(4)..];
                                     if tail.ends_with(b"# ")
                                         || tail.ends_with(b"$ ")
                                         || tail.ends_with(b"#\r")
@@ -1651,9 +1646,7 @@ impl PersistentPty {
                             // Display unless AI is processing or capturing probe output.
                             // Use was_probe_active to prevent leaking the chunk where
                             // probe completes (probe_active changes to false mid-parse).
-                            if !interceptor.is_ai_processing()
-                                && !probe_active
-                                && !was_probe_active
+                            if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
                             {
                                 let _ = unsafe {
                                     libc::write(
@@ -1815,10 +1808,8 @@ impl PersistentPty {
                             pending_followup = response.followup;
                             // Create offloader for followup output
                             let session_uuid = uuid::Uuid::new_v4().to_string();
-                            let base_dir = std::env::temp_dir()
-                                .to_str()
-                                .unwrap_or("/tmp")
-                                .to_string();
+                            let base_dir =
+                                std::env::temp_dir().to_str().unwrap_or("/tmp").to_string();
                             followup_offloader = Some(crate::PtyOutputOffload::new(
                                 &safe_cmd,
                                 &session_uuid,
@@ -2927,15 +2918,12 @@ fn handle_ask_user_interaction(
                     }
                     // Create local offloader for streaming output capture
                     let session_uuid = uuid::Uuid::new_v4().to_string();
-                    let base_dir = std::env::temp_dir()
-                        .to_str()
-                        .unwrap_or("/tmp")
-                        .to_string();
+                    let base_dir = std::env::temp_dir().to_str().unwrap_or("/tmp").to_string();
                     let mut offloader = crate::PtyOutputOffload::new(
                         &command,
                         &session_uuid,
                         "",
-                        1024,  // keep_bytes - data below this stays in memory
+                        1024, // keep_bytes - data below this stays in memory
                         &base_dir,
                     );
                     // Wait for command output. Long-running commands are
@@ -2972,16 +2960,16 @@ fn handle_ask_user_interaction(
                         if sel > 0 && unsafe { libc::FD_ISSET(stdin_fd, &rfds) } {
                             let mut tmp = [0u8; 1];
                             if unsafe {
-                                libc::read(
-                                    stdin_fd,
-                                    tmp.as_mut_ptr() as *mut libc::c_void,
-                                    1,
-                                )
+                                libc::read(stdin_fd, tmp.as_mut_ptr() as *mut libc::c_void, 1)
                             } == 1
                                 && tmp[0] == 0x03
                             {
                                 unsafe {
-                                    libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+                                    libc::write(
+                                        master_fd,
+                                        b"\x03".as_ptr() as *const libc::c_void,
+                                        1,
+                                    );
                                 }
                                 hard_abort = true;
                                 break;
@@ -3000,10 +2988,8 @@ fn handle_ask_user_interaction(
                                     let data = &tmp[..n as usize];
                                     captured.extend_from_slice(data);
                                     // Stream to local offloader
-                                    offloader.append_overflow(
-                                        crate::types::StreamName::Stdout,
-                                        data,
-                                    );
+                                    offloader
+                                        .append_overflow(crate::types::StreamName::Stdout, data);
                                     unsafe {
                                         libc::write(
                                             libc::STDOUT_FILENO,
@@ -3013,8 +2999,7 @@ fn handle_ask_user_interaction(
                                     }
                                     // Detect shell prompt to end capture quickly
                                     if !prompt_seen && data.len() >= 2 {
-                                        let tail =
-                                            &data[data.len().saturating_sub(4)..];
+                                        let tail = &data[data.len().saturating_sub(4)..];
                                         if tail.ends_with(b"# ")
                                             || tail.ends_with(b"$ ")
                                             || tail.ends_with(b"#\r")
@@ -3144,13 +3129,8 @@ fn handle_ask_user_interaction(
                 // Check stdin for Ctrl+C
                 if sel > 0 && unsafe { libc::FD_ISSET(stdin_fd, &rfds) } {
                     let mut tmp = [0u8; 1];
-                    if unsafe {
-                        libc::read(
-                            stdin_fd,
-                            tmp.as_mut_ptr() as *mut libc::c_void,
-                            1,
-                        )
-                    } == 1
+                    if unsafe { libc::read(stdin_fd, tmp.as_mut_ptr() as *mut libc::c_void, 1) }
+                        == 1
                         && tmp[0] == 0x03
                     {
                         unsafe {

@@ -30,7 +30,11 @@ pub fn detect(input: &str) -> NlVerdict {
         NlVerdict {
             is_natural_language: true,
             score: 0,
-            language: if is_cjk { NlLanguage::Chinese } else { NlLanguage::English },
+            language: if is_cjk {
+                NlLanguage::Chinese
+            } else {
+                NlLanguage::English
+            },
         }
     } else {
         NlVerdict::not_nl()

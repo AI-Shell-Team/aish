@@ -30,8 +30,7 @@ pub struct LlmSession {
     security_notice_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync>>,
     /// Callback invoked when the tool-call iteration limit is reached.
     /// Receives the current iteration count and returns true to reset and continue.
-    iteration_limit_callback:
-        Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
+    iteration_limit_callback: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
@@ -99,10 +98,7 @@ impl LlmSession {
     /// Set the callback invoked when the tool-call iteration limit is reached.
     /// The callback receives the current iteration count and returns true to
     /// reset the counter and continue, or false to stop.
-    pub fn set_iteration_limit_callback(
-        &mut self,
-        cb: Arc<dyn Fn(u32) -> bool + Send + Sync>,
-    ) {
+    pub fn set_iteration_limit_callback(&mut self, cb: Arc<dyn Fn(u32) -> bool + Send + Sync>) {
         self.iteration_limit_callback = Some(cb);
     }
 
@@ -893,7 +889,9 @@ impl LlmSession {
             }
             LlmResponse::Stream(_) => {
                 // Delegate to process_input for streaming handling
-                let result = self.process_input(prompt, &[], system_message, true).await?;
+                let result = self
+                    .process_input(prompt, &[], system_message, true)
+                    .await?;
                 Ok(result.text)
             }
         }

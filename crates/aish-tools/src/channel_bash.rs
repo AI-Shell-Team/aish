@@ -75,8 +75,7 @@ impl Tool for ChannelBashTool {
             return ToolResult::error("Channel closed");
         }
 
-        let result = match output_rx.recv_timeout(std::time::Duration::from_secs(timeout_secs))
-        {
+        let result = match output_rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
             Ok(r) => r,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 return ToolResult::error(
@@ -106,10 +105,7 @@ impl Tool for ChannelBashTool {
                 }
             };
             let preview = if result.output.len() > 1024 {
-                let (truncated, _) = truncate_utf8_safe(
-                    result.output.as_bytes(),
-                    1024,
-                );
+                let (truncated, _) = truncate_utf8_safe(result.output.as_bytes(), 1024);
                 String::from_utf8_lossy(&truncated).to_string()
             } else {
                 result.output.clone()
@@ -119,12 +115,8 @@ impl Tool for ChannelBashTool {
                 "stdout_path": offload_path,
                 "hint": "Use read_file tool to read the offload path for full output (file is on the LOCAL machine)"
             });
-            let output_text = crate::registry::format_tagged_result(
-                &preview,
-                "",
-                0,
-                Some(&offload_payload),
-            );
+            let output_text =
+                crate::registry::format_tagged_result(&preview, "", 0, Some(&offload_payload));
             return ToolResult {
                 ok: true,
                 output: output_text,

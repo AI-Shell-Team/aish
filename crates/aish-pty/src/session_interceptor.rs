@@ -102,8 +102,7 @@ pub struct AskUserChannel {
 /// remote offload path, streams the AI analysis to the terminal, and
 /// optionally returns a new `AiResponse` to chain another command
 /// execution (multi-round tool use).
-pub type FollowupCallback =
-    dyn Fn(&str, Option<&str>) -> Option<AiResponse> + Send + Sync;
+pub type FollowupCallback = dyn Fn(&str, Option<&str>) -> Option<AiResponse> + Send + Sync;
 
 /// AI callback type: receives an AiQuery and returns an optional AiResponse.
 pub type AiCallback = dyn Fn(AiQuery) -> Option<AiResponse> + Send + Sync;
