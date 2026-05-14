@@ -3001,8 +3001,9 @@ impl AishShell {
                     )));
                     // Register host_note tool for SSH sessions
                     session.register_tool(Self::make_host_note_tool(shared_host_th.clone()));
-                    // Register read_file for reading LOCAL offload files
-                    session.register_tool(Box::new(aish_tools::fs::ReadFileTool::new()));
+                    // Register read_file (restricted to offload paths) for
+                    // reading LOCAL offload files in SSH sessions.
+                    session.register_tool(Box::new(aish_tools::fs::SshReadFileTool::new()));
                     // Register skill tool with loaded skills snapshot
                     {
                         let snap = skills_snapshot_th.clone();

@@ -487,11 +487,10 @@ fn build_state(overflow_path: &Option<PathBuf>, tail: &[u8]) -> OffloadState {
                 // Ensure valid UTF-8 — PTY output may contain broken
                 // multi-byte sequences or other non-UTF-8 bytes.
                 let cleaned_str = String::from_utf8_lossy(&cleaned).into_owned();
-                let err = match fs::write(&p, cleaned_str.as_bytes()) {
-                    Ok(()) => None,
-                    Err(e) => Some(e.to_string()),
-                };
-                (p.to_str().map(|s| s.to_string()), err)
+                match fs::write(&p, cleaned_str.as_bytes()) {
+                    Ok(()) => (p.to_str().map(|s| s.to_string()), None),
+                    Err(e) => (None, Some(e.to_string())),
+                }
             };
             OffloadState {
                 status: "offloaded".to_string(),

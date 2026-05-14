@@ -148,6 +148,66 @@ impl Tool for ReadFileTool {
     }
 }
 
+/// Path-restricted wrapper around [`ReadFileTool`] for SSH sessions.
+///
+/// Only allows reading files under directories named `aish-offload`
+/// (the local offload directory). Rejects any path outside that prefix
+/// to prevent a remote LLM from reading arbitrary local files.
+pub struct SshReadFileTool {
+    inner: ReadFileTool,
+}
+
+impl SshReadFileTool {
+    pub fn new() -> Self {
+        Self {
+            inner: ReadFileTool::new(),
+        }
+    }
+}
+
+impl Tool for SshReadFileTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.inner.parameters()
+    }
+
+    fn execute(&self, args: serde_json::Value) -> ToolResult {
+        let path = match args.get("path").and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => return ToolResult::error(aish_i18n::t("tools.fs.read_file.missing_path")),
+        };
+        // Canonicalize to resolve symlinks and '..' traversal.
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(c) => c,
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.read_failed",
+                    &args_map,
+                ));
+            }
+        };
+        // Verify the canonical path contains an "aish-offload" directory
+        // component to restrict reads to offload files only.
+        let has_offload_component = canonical
+            .components()
+            .any(|c| c.as_os_str() == "aish-offload");
+        if !has_offload_component {
+            return ToolResult::error("Access denied: path is not inside offload directory");
+        }
+        self.inner.execute(args)
+    }
+}
+
 /// Write file tool (creates or overwrites).
 pub struct WriteFileTool;
 
