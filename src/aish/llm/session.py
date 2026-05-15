@@ -1774,14 +1774,14 @@ class LLMSession:
                         else:
                             msg = response["choices"][0]["message"]  # type: ignore
                             finish_reason = response["choices"][0]["finish_reason"]  # type: ignore
-                except TimeoutError:
+                except TimeoutError as err:
                     if (
                         self.cancellation_token
                         and self.cancellation_token.is_cancelled()
                     ):
                         events.emit_cancelled("llm_cancelled")
                         events.emit_generation_end(status="cancelled")
-                        raise anyio.get_cancelled_exc_class()
+                        raise anyio.get_cancelled_exc_class() from err
                     events.emit_generation_end(status="timeout")
                     output = "LLM request timed out"
                     break
@@ -2016,11 +2016,11 @@ class LLMSession:
             events.emit_cancelled("llm_cancelled")
             events.emit_generation_end(status="cancelled")
             raise
-        except TimeoutError:
+        except TimeoutError as err:
             if self.cancellation_token and self.cancellation_token.is_cancelled():
                 events.emit_cancelled("llm_cancelled")
                 events.emit_generation_end(status="cancelled")
-                raise anyio.get_cancelled_exc_class()
+                raise anyio.get_cancelled_exc_class() from err
             result = "LLM request timed out"
             events.emit_generation_end(status="timeout")
         except Exception as e:
