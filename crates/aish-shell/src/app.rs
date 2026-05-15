@@ -2317,8 +2317,7 @@ impl AishShell {
                                 }
                             }
                             LlmEventType::ContextCompactionEnd => {
-                                compaction_active
-                                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
                                 if !compaction_notice_shown
                                     .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -2329,8 +2328,7 @@ impl AishShell {
                                 }
                             }
                             LlmEventType::GenerationStart => {
-                                compaction_active
-                                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
                                 reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -2998,8 +2996,7 @@ impl AishShell {
                                 }
                             }
                             LlmEventType::ContextCompactionEnd => {
-                                compaction_active
-                                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
                                 if !compaction_notice_shown
                                     .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -3010,8 +3007,7 @@ impl AishShell {
                                 }
                             }
                             LlmEventType::GenerationStart => {
-                                compaction_active
-                                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
                                 reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);
