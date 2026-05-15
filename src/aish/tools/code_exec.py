@@ -101,6 +101,10 @@ def _needs_interactive_bash(command: str) -> bool:
     return False
 
 
+def _is_multiline_bash(command: str) -> bool:
+    return "\n" in command or "\r" in command
+
+
 def _collapse_output_lines(text: str, max_lines: int = DISPLAY_MAX_LINES) -> str:
     lines = text.splitlines()
     if len(lines) <= max_lines:
@@ -634,7 +638,11 @@ class BashTool(ToolBase):
             )
             pty_rc = returncode
             used_interactive_executor = True
-        elif self.pty_manager and self.pty_manager.is_running:
+        elif (
+            self.pty_manager
+            and self.pty_manager.is_running
+            and not _is_multiline_bash(code)
+        ):
             # PTY execution: share user's bash session
             pty_stdout, pty_rc = self.pty_manager.execute_command(code)
             stdout = pty_stdout

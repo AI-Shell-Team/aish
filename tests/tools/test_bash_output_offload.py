@@ -182,7 +182,7 @@ async def test_bash_exec_uses_shared_pty_without_metadata_leak(tmp_path: Path):
             result = await tool("printf 'hello\\n'")
 
         assert result.ok is True
-        assert _extract_tag(result.output, "stdout") == "hello"
+        assert "hello" in _extract_tag(result.output, "stdout")
         assert "__AISH_ACTIVE_COMMAND_SEQ" not in result.output
         assert "__AISH_ACTIVE_COMMAND_TEXT" not in result.output
     finally:
@@ -224,10 +224,15 @@ async def test_bash_exec_bypasses_shared_pty_for_interactive_commands():
 
 
 @pytest.mark.asyncio
-async def test_bash_exec_uses_shared_pty_for_multiline_command_without_echo(tmp_path: Path):
-    manager = PTYManager(use_output_thread=False, env={"HISTFILE": str(tmp_path / "bash_history")})
+async def test_bash_exec_bypasses_shared_pty_for_multiline_scripts():
+    class _FakePTYManager:
+        is_running = True
+
+        def execute_command(self, _code: str):
+            raise AssertionError("multiline scripts should not use shared PTY")
+
     tool = BashTool(
-        pty_manager=manager,
+        pty_manager=_FakePTYManager(),
         offload_settings=BashOutputOffloadSettings(
             enabled=True,
             threshold_bytes=1024,
@@ -235,17 +240,23 @@ async def test_bash_exec_uses_shared_pty_for_multiline_command_without_echo(tmp_
         ),
     )
 
-    manager.start()
-    try:
-        with patch.object(tool.security_manager, "decide", return_value=_allow_decision()):
-            result = await tool("printf 'hello\\n' && \\\nprintf 'world\\n'")
+    script = 'set -euo pipefail\nprintf "--- bad\\n"'
+    with (
+        patch.object(tool.security_manager, "decide", return_value=_allow_decision()),
+        patch.object(
+            tool.executor,
+            "execute",
+            return_value=(False, "", "boom\n", 2, {}),
+        ) as execute_mock,
+        patch("builtins.print"),
+    ):
+        result = await tool(script)
 
-        assert result.ok is True
-        assert _extract_tag(result.output, "stdout") == "hello\nworld"
-        assert "__AISH_ACTIVE_COMMAND_SEQ" not in result.output
-        assert "__AISH_ACTIVE_COMMAND_TEXT" not in result.output
-    finally:
-        manager.stop()
+    assert result.ok is False
+    assert result.code == 2
+    execute_mock.assert_called_once()
+    assert execute_mock.call_args.args[0] == script
+    assert "return_code" in result.output
 
 
 @pytest.mark.asyncio

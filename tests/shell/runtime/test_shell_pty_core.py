@@ -1326,6 +1326,102 @@ def test_shell_does_not_restart_after_explicit_quit_when_flag_was_not_set(monkey
 
     assert shell._running is False
     shell._restart_pty.assert_not_called()
+
+
+def test_shell_restarts_on_unexpected_shell_exiting_event():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = _FakePTYManager(last_command="")
+    shell._backend_protocol_events = []
+    shell._backend_protocol_errors = []
+    shell._last_backend_event = None
+    shell._backend_session_ready = True
+    shell._shell_phase = "running_passthrough"
+    shell._next_command_seq = 1
+    shell._pending_command_seq = None
+    shell._pending_command_text = None
+    shell._running = True
+    shell._output_processor = Mock()
+    shell._user_requested_exit = False
+    shell._restart_pty = Mock(return_value=True)
+
+    PTYAIShell._track_backend_event(
+        shell,
+        BackendControlEvent(
+            version=1,
+            type="shell_exiting",
+            ts=1,
+            payload={"exit_code": 2},
+        ),
+    )
+
+    assert shell._running is True
+    assert shell._shell_phase == "recovery_exit"
+    shell._restart_pty.assert_called_once_with()
+
+
+def test_shell_exiting_event_honors_explicit_user_exit():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = SimpleNamespace(
+        last_command="exit",
+        handle_backend_event=Mock(return_value=None),
+    )
+    shell._backend_protocol_events = []
+    shell._backend_protocol_errors = []
+    shell._last_backend_event = None
+    shell._backend_session_ready = True
+    shell._shell_phase = "running_passthrough"
+    shell._next_command_seq = 1
+    shell._pending_command_seq = None
+    shell._pending_command_text = None
+    shell._running = True
+    shell._output_processor = Mock()
+    shell._user_requested_exit = False
+    shell._restart_pty = Mock(return_value=True)
+
+    PTYAIShell._track_backend_event(
+        shell,
+        BackendControlEvent(
+            version=1,
+            type="shell_exiting",
+            ts=1,
+            payload={"exit_code": 0},
+        ),
+    )
+
+    assert shell._running is False
+    shell._restart_pty.assert_not_called()
+
+
+def test_shell_stops_when_shell_exiting_recovery_fails():
+    shell = object.__new__(PTYAIShell)
+    shell._pty_manager = _FakePTYManager(last_command="")
+    shell._backend_protocol_events = []
+    shell._backend_protocol_errors = []
+    shell._last_backend_event = None
+    shell._backend_session_ready = True
+    shell._shell_phase = "running_passthrough"
+    shell._next_command_seq = 1
+    shell._pending_command_seq = None
+    shell._pending_command_text = None
+    shell._running = True
+    shell._output_processor = Mock()
+    shell._user_requested_exit = False
+    shell._restart_pty = Mock(return_value=False)
+
+    PTYAIShell._track_backend_event(
+        shell,
+        BackendControlEvent(
+            version=1,
+            type="shell_exiting",
+            ts=1,
+            payload={"exit_code": 2},
+        ),
+    )
+
+    assert shell._running is False
+    shell._restart_pty.assert_called_once_with()
+
+
 def test_backend_error_suppressed_prevents_repeated_hints(capsys):
     pty_manager = _FakePTYManager()
     processor = OutputProcessor(pty_manager)

@@ -1802,7 +1802,10 @@ class PTYAIShell:
                 self._shell_phase = "editing"
         elif event.type == "shell_exiting":
             self._shell_phase = "recovery_exit"
-            self._running = False
+            if self._should_exit_on_pty_close():
+                self._running = False
+            elif not self._restart_pty():
+                self._running = False
 
     def _handle_control_event(self) -> None:
         if not self._pty_manager or self._pty_manager.control_fd is None:
