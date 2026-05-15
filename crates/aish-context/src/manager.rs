@@ -427,6 +427,28 @@ impl ContextManager {
         &mut self.knowledge_cache
     }
 
+    /// Inject knowledge if not already present with the given tag.
+    /// Returns true if content was actually added/updated, false if unchanged.
+    /// Uses the knowledge_cache to detect changes. When content changes, the
+    /// previous cached content is used to locate and replace the old message.
+    pub fn inject_knowledge_stable(&mut self, tag: &str, content: &str) -> bool {
+        let cache_key = tag.to_string();
+        if let Some(cached) = self.knowledge_cache.get(&cache_key) {
+            if cached == content {
+                return false; // No change — cache stable
+            }
+            // Content changed — remove the old message by matching its exact content
+            let old = cached.clone();
+            self.messages
+                .retain(|m| !(m.memory_type == MemoryType::Knowledge && m.content == old));
+        }
+        if !content.is_empty() {
+            self.add_message("system", content, MemoryType::Knowledge);
+        }
+        self.knowledge_cache.insert(cache_key, content.to_string());
+        true
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
@@ -848,6 +870,66 @@ mod tests {
         let tokens = mgr.estimate_tokens("Hello, world!");
         // Should be a small positive number.
         assert!(tokens > 0 && tokens < 20);
+    }
+
+    #[test]
+    fn inject_knowledge_stable_first_call_adds() {
+        let mut mgr = ContextManager::new();
+        let result =
+            mgr.inject_knowledge_stable("skills", "<available-skills>\ntest\n</available-skills>");
+        assert!(result, "first call should return true (content added)");
+        assert_eq!(mgr.get_context_size(), 1);
+        assert_eq!(
+            mgr.messages[0].content,
+            "<available-skills>\ntest\n</available-skills>"
+        );
+    }
+
+    #[test]
+    fn inject_knowledge_stable_same_content_is_noop() {
+        let mut mgr = ContextManager::new();
+        let content = "<available-skills>\ntest\n</available-skills>";
+        mgr.inject_knowledge_stable("skills", content);
+        assert_eq!(mgr.get_context_size(), 1);
+
+        let result = mgr.inject_knowledge_stable("skills", content);
+        assert!(!result, "second call with same content should return false");
+        assert_eq!(mgr.get_context_size(), 1, "message count should remain unchanged");
+    }
+
+    #[test]
+    fn inject_knowledge_stable_different_content_updates() {
+        let mut mgr = ContextManager::new();
+        mgr.inject_knowledge_stable("skills", "<available-skills>\nold\n</available-skills>");
+        assert_eq!(mgr.get_context_size(), 1);
+
+        let result =
+            mgr.inject_knowledge_stable("skills", "<available-skills>\nnew\n</available-skills>");
+        assert!(result, "call with different content should return true");
+        assert_eq!(mgr.get_context_size(), 1, "old message replaced, count stays 1");
+        assert_eq!(
+            mgr.messages[0].content,
+            "<available-skills>\nnew\n</available-skills>"
+        );
+    }
+
+    #[test]
+    fn inject_knowledge_stable_empty_content_clears() {
+        let mut mgr = ContextManager::new();
+        mgr.inject_knowledge_stable("skills", "<available-skills>\ntest\n</available-skills>");
+        assert_eq!(mgr.get_context_size(), 1);
+
+        let result = mgr.inject_knowledge_stable("skills", "");
+        assert!(result, "clearing should return true");
+        assert_eq!(mgr.get_context_size(), 0, "message should be removed");
+    }
+
+    #[test]
+    fn inject_knowledge_stable_empty_twice_is_noop() {
+        let mut mgr = ContextManager::new();
+        mgr.inject_knowledge_stable("skills", "");
+        let result = mgr.inject_knowledge_stable("skills", "");
+        assert!(!result, "empty content called twice should return false");
     }
 
     #[test]

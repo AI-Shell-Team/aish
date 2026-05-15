@@ -1294,7 +1294,7 @@ impl AishShell {
 
                     match result {
                         Ok(response) => {
-                            if !did_stream && !response.is_empty() {
+                            if !did_stream && !response.trim().is_empty() {
                                 // Non-streaming fallback: print full response with formatting
                                 let mut sep_renderer = ShellRenderer::new();
                                 sep_renderer.render_separator();
@@ -1439,7 +1439,7 @@ impl AishShell {
                     let parts: Vec<&str> = input.split_whitespace().collect();
                     if let Some(cmd) = parts.first() {
                         let result = self.state.handle_builtin(cmd, &parts[1..]);
-                        if let Some(output) = result.output {
+                        if let Some(ref output) = result.output {
                             println!("{}", output);
                         }
                         if result.should_exit {
@@ -1468,6 +1468,19 @@ impl AishShell {
                         {
                             self.sync_command_to_pty(input);
                         }
+
+                        // Add builtin result to LLM context
+                        let builtin_output = result.output.clone().unwrap_or_default();
+                        let mut entry = format!(
+                            "[Shell] {}\n<returncode>0</returncode>\n<output>{}</output>",
+                            input, builtin_output
+                        );
+                        if crate::commands::is_state_modifying(cmd)
+                            && !crate::commands::is_rejected(cmd)
+                        {
+                            entry.push_str(&format!("\n<cwd>{}</cwd>", self.state.cwd));
+                        }
+                        self.ai_handler.add_shell_context(&entry);
                     }
                     self.record_history(input, 0);
                 }
@@ -1507,7 +1520,7 @@ impl AishShell {
                                 let did_stream = self.streamed_content.load(Ordering::SeqCst);
                                 match result {
                                     Ok(response) => {
-                                        if !did_stream && !response.is_empty() {
+                                        if !did_stream && !response.trim().is_empty() {
                                             let mut sep_renderer = ShellRenderer::new();
                                             sep_renderer.render_separator();
                                             print_md(&response);
@@ -1542,28 +1555,6 @@ impl AishShell {
                     self.state.last_command = Some(input.to_string());
                     self.state.last_exit_code = exit_code;
                     self.state.can_correct_error = exit_code != 0 && exit_code != 130;
-
-                    // Inject command result into LLM context so AI can reference
-                    // previous command output in follow-up questions.
-                    // Always add, matching main branch's unconditional add_memory.
-                    let output_preview = if self.state.last_output.len() > 4096 {
-                        // Safe UTF-8 truncation: find nearest char boundary
-                        let end = {
-                            let mut j = 4096;
-                            while j > 0 && !self.state.last_output.is_char_boundary(j) {
-                                j -= 1;
-                            }
-                            j
-                        };
-                        &self.state.last_output[..end]
-                    } else {
-                        &self.state.last_output
-                    };
-                    let entry = format!(
-                        "[Shell] {}\n<returncode>{}</returncode>\n<output>{}</output>",
-                        input, exit_code, output_preview
-                    );
-                    self.ai_handler.add_shell_context(&entry);
 
                     // Show error correction hint
                     if exit_code != 0 && exit_code != 130 {
@@ -1833,14 +1824,42 @@ impl AishShell {
         // Store captured output for error correction and LLM context
         self.state.last_output = output.clone();
 
+        // Track whether CWD changed so we can include it in the context entry
+        let mut cwd_changed_to: Option<String> = None;
+
         // Update CWD from PTY event
         if !cwd.is_empty() && cwd != self.state.cwd {
+            cwd_changed_to = Some(cwd.clone());
             self.state.prev_cwd = Some(self.state.cwd.clone());
             self.state.cwd = cwd.clone();
             // Sync the actual process CWD so that any spawned subprocesses
             // (e.g., via AI tool execution) inherit the correct directory.
             let _ = std::env::set_current_dir(&cwd);
         }
+
+        // Inject command result into LLM context so AI can reference
+        // previous command output in follow-up questions.
+        let output_preview = if output.len() > 4096 {
+            // Safe UTF-8 truncation: find nearest char boundary
+            let end = {
+                let mut j = 4096;
+                while j > 0 && !output.is_char_boundary(j) {
+                    j -= 1;
+                }
+                j
+            };
+            &output[..end]
+        } else {
+            &output
+        };
+        let mut entry = format!(
+            "[Shell] {}\n<returncode>{}</returncode>\n<output>{}</output>",
+            command, exit_code, output_preview
+        );
+        if let Some(ref new_cwd) = cwd_changed_to {
+            entry.push_str(&format!("\n<cwd>{}</cwd>", new_cwd));
+        }
+        self.ai_handler.add_shell_context(&entry);
 
         // Check if PTY is still running, restart if not
         if !self.lock_pty().is_running() {
@@ -2762,13 +2781,18 @@ impl AishShell {
         let role_prompt = prompt_manager.get("role").to_string();
         let mut vars = std::collections::HashMap::new();
         vars.insert("role_prompt".to_string(), role_prompt);
-        vars.insert("username".to_string(), crate::ai_handler::whoami());
-        vars.insert("hostname".to_string(), crate::ai_handler::hostname());
+        vars.insert("uname_info".to_string(), crate::ai_handler::uname_info());
+        vars.insert("user_nickname".to_string(), crate::ai_handler::whoami());
         vars.insert("os_info".to_string(), crate::ai_handler::os_info());
+        vars.insert(
+            "basic_env_info".to_string(),
+            crate::ai_handler::basic_env_info(),
+        );
+        vars.insert(
+            "output_language".to_string(),
+            crate::ai_handler::output_language(),
+        );
         vars.insert("cwd".to_string(), "~".to_string());
-        vars.insert("system_info".to_string(), String::new());
-        vars.insert("memory_context".to_string(), String::new());
-        vars.insert("skill_list".to_string(), String::new());
         // Static base prompt — SSH context and dossier are built dynamically
         // inside the closure so nested SSH host changes are reflected.
         let system_msg_base = prompt_manager.render("oracle", &vars);
@@ -2778,8 +2802,16 @@ impl AishShell {
         let dossier_host = shared_host.clone();
 
         // Pre-compute static values for error correction template
-        let ec_username = crate::ai_handler::whoami();
+        let ec_role_prompt = {
+            let mut pm = aish_prompts::PromptManager::default_dir();
+            pm.load_all();
+            pm.get("role").to_string()
+        };
+        let ec_uname_info = crate::ai_handler::uname_info();
+        let ec_user_nickname = crate::ai_handler::whoami();
         let ec_os_info = crate::ai_handler::os_info();
+        let ec_basic_env_info = crate::ai_handler::basic_env_info();
+        let ec_output_language = crate::ai_handler::output_language();
         let conversation_history: Arc<Mutex<Vec<ChatMessage>>> = Arc::new(Mutex::new(Vec::new()));
 
         Some(Box::new(move |query: aish_pty::AiQuery| {
@@ -2845,28 +2877,13 @@ impl AishShell {
                 // Extract the actual failed command from bash error output
                 let failed_cmd = extract_failed_command(&query.recent_output);
 
-                let stderr_section = if query.recent_output.is_empty() {
-                    String::new()
-                } else {
-                    let s = &query.recent_output;
-                    let preview = if s.len() > 2048 {
-                        let mut end = 2048;
-                        while end > 0 && !s.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        &s[..end]
-                    } else {
-                        s
-                    };
-                    format!("\n**Command Output:**\n```\n{}\n```", preview)
-                };
-
                 let mut ec_vars = std::collections::HashMap::new();
-                ec_vars.insert("username".to_string(), ec_username.clone());
+                ec_vars.insert("role_prompt".to_string(), ec_role_prompt.clone());
+                ec_vars.insert("uname_info".to_string(), ec_uname_info.clone());
+                ec_vars.insert("user_nickname".to_string(), ec_user_nickname.clone());
                 ec_vars.insert("os_info".to_string(), ec_os_info.clone());
-                ec_vars.insert("command".to_string(), failed_cmd.clone());
-                ec_vars.insert("exit_code".to_string(), "1".to_string());
-                ec_vars.insert("stderr_section".to_string(), stderr_section);
+                ec_vars.insert("basic_env_info".to_string(), ec_basic_env_info.clone());
+                ec_vars.insert("output_language".to_string(), ec_output_language.clone());
                 let mut sys = pm.render("cmd_error", &ec_vars);
 
                 // Append SSH host context (use current dynamic host)

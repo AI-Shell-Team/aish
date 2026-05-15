@@ -37,6 +37,10 @@ pub struct LlmSession {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
+    /// Stable Langfuse trace ID for the entire session (created once, reused across turns).
+    langfuse_session_id: std::sync::Mutex<Option<String>>,
+    /// Monotonic turn counter for naming spans within the session trace.
+    langfuse_turn_counter: std::sync::atomic::AtomicU32,
     /// Maximum context token budget. Messages are trimmed when exceeded.
     max_context_tokens: usize,
     context_budget_policy: ContextBudgetPolicy,
@@ -66,6 +70,8 @@ impl LlmSession {
             temperature,
             max_tokens,
             langfuse: None,
+            langfuse_session_id: std::sync::Mutex::new(None),
+            langfuse_turn_counter: std::sync::atomic::AtomicU32::new(0),
             max_context_tokens: 100_000,
             context_budget_policy: ContextBudgetPolicy::default(),
             compact_consecutive_failures: std::sync::Mutex::new(0),
@@ -251,19 +257,21 @@ impl LlmSession {
             metadata: None,
         });
 
-        // Start Langfuse trace if configured
+        // Start or reuse Langfuse session trace.
+        // The first call creates a session-level trace; subsequent turns
+        // reuse the same trace so all generations/spans are grouped together.
         let trace_id = if let Some(ref langfuse) = self.langfuse {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let id = langfuse
-                .trace_session(
-                    &format!("turn-{ts}"),
-                    &serde_json::json!({"prompt_length": prompt.len()}),
-                )
-                .await;
-            Some(id)
+            let mut session_id_guard = self.langfuse_session_id.lock().unwrap();
+            if session_id_guard.is_none() {
+                let id = langfuse
+                    .trace_session("session", &serde_json::json!({"session_start": true}))
+                    .await;
+                *session_id_guard = Some(id);
+            }
+            drop(session_id_guard);
+            self.langfuse_turn_counter
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.langfuse_session_id.lock().unwrap().clone()
         } else {
             None
         };
@@ -277,6 +285,18 @@ impl LlmSession {
         messages.push(ChatMessage::user(prompt));
 
         messages = self.prepare_messages_for_send(messages).await;
+
+        // Set cache breakpoint on system message for Anthropic models only.
+        // Non-Anthropic providers may reject unknown fields in the request body.
+        let is_anthropic = self.client.model_name().contains("claude");
+        if is_anthropic {
+            if let Some(msg) = messages.first_mut() {
+                if msg.role == "system" {
+                    msg.cache_control = Some(CacheControl::ephemeral());
+                }
+            }
+        }
+
         let initial_len = messages.len();
 
         let tool_specs = self.filtered_tool_specs();
@@ -391,20 +411,28 @@ impl LlmSession {
                         self.record_usage(u);
                     }
 
+                    // Log generation span to Langfuse for every LLM call
+                    if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
+                        let span_name = format!(
+                            "turn-{}-iter-{}",
+                            self.langfuse_turn_counter
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            iterations
+                        );
+                        langfuse
+                            .span_generation(
+                                tid,
+                                &span_name,
+                                self.client.model_name(),
+                                serde_json::json!(messages),
+                                content.as_deref().unwrap_or(""),
+                                pt,
+                                ct,
+                            )
+                            .await;
+                    }
+
                     if tool_calls.is_empty() {
-                        // Log generation span to Langfuse
-                        if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
-                            langfuse
-                                .span_generation(
-                                    tid,
-                                    self.client.model_name(),
-                                    serde_json::json!(messages),
-                                    content.as_deref().unwrap_or(""),
-                                    pt,
-                                    ct,
-                                )
-                                .await;
-                        }
                         // Flush Langfuse buffer
                         if let Some(ref langfuse) = self.langfuse {
                             langfuse.flush().await;
@@ -523,6 +551,9 @@ impl LlmSession {
 
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
+
+                    // Trim old tool-call rounds to prevent unbounded growth
+                    trim_tool_loop_messages(&mut messages, initial_len, MAX_TOOL_ROUNDS_IN_CONTEXT);
                 }
 
                 LlmResponse::Stream(resp) => {
@@ -686,21 +717,29 @@ impl LlmSession {
                         });
                     }
 
+                    // Log generation span to Langfuse for every LLM call
+                    if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
+                        let span_name = format!(
+                            "turn-{}-iter-{}",
+                            self.langfuse_turn_counter
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            iterations
+                        );
+                        langfuse
+                            .span_generation(
+                                tid,
+                                &span_name,
+                                self.client.model_name(),
+                                serde_json::json!(messages),
+                                &accumulated,
+                                stream_prompt_tokens,
+                                stream_completion_tokens,
+                            )
+                            .await;
+                    }
+
                     // No tool calls — return accumulated content
                     if tool_calls_accum.is_empty() {
-                        // Log generation span to Langfuse
-                        if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
-                            langfuse
-                                .span_generation(
-                                    tid,
-                                    self.client.model_name(),
-                                    serde_json::json!(messages),
-                                    &accumulated,
-                                    stream_prompt_tokens,
-                                    stream_completion_tokens,
-                                )
-                                .await;
-                        }
                         // Flush Langfuse buffer
                         if let Some(ref langfuse) = self.langfuse {
                             langfuse.flush().await;
@@ -880,6 +919,9 @@ impl LlmSession {
 
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
+
+                    // Trim old tool-call rounds to prevent unbounded growth
+                    trim_tool_loop_messages(&mut messages, initial_len, MAX_TOOL_ROUNDS_IN_CONTEXT);
                 }
             }
         }
@@ -1096,6 +1138,10 @@ impl LlmSession {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             langfuse: self.langfuse.clone(),
+            langfuse_session_id: std::sync::Mutex::new(
+                self.langfuse_session_id.lock().unwrap().clone(),
+            ),
+            langfuse_turn_counter: std::sync::atomic::AtomicU32::new(0),
             max_context_tokens: self.max_context_tokens,
             context_budget_policy: self.context_budget_policy.clone(),
             compact_consecutive_failures: std::sync::Mutex::new(0),
@@ -1691,15 +1737,15 @@ fn trim_messages(
         max_tokens
     );
 
-    // Split: first message (system) + middle (to trim) + last N (to keep)
-    let system = if messages[0].role == "system" {
-        vec![messages[0].clone()]
-    } else {
-        vec![]
-    };
+    // Split: all leading system messages + middle (to trim) + last N (to keep)
+    let system_count = messages.iter().take_while(|m| m.role == "system").count();
+    let system: Vec<_> = messages[..system_count].to_vec();
 
     let system_count = system.len();
-    let recent_start = messages.len().saturating_sub(preserve_recent);
+    let recent_start = messages
+        .len()
+        .saturating_sub(preserve_recent)
+        .max(system_count);
     let recent: Vec<_> = messages[recent_start..].to_vec();
 
     // Calculate how many middle messages to keep
@@ -1732,6 +1778,59 @@ fn trim_messages(
     result
 }
 
+/// Maximum number of tool-call rounds to keep in the loop before trimming.
+/// Each round is: [assistant + tool_calls] + [tool_result(s)].
+const MAX_TOOL_ROUNDS_IN_CONTEXT: usize = 8;
+
+/// Trim tool-call messages accumulated during the agent loop.
+///
+/// Preserves the stable prefix (messages before the loop started, i.e.
+/// `initial_len`) and keeps only the most recent `max_rounds` tool-call
+/// rounds.  This prevents unbounded context growth during long tool-calling
+/// sessions while retaining enough recent history for the LLM to maintain
+/// coherent multi-step reasoning.
+///
+/// A "round" starts with an assistant message that has `tool_calls`.
+fn trim_tool_loop_messages(messages: &mut Vec<ChatMessage>, initial_len: usize, max_rounds: usize) {
+    if messages.len() <= initial_len {
+        return;
+    }
+
+    // Count tool-call rounds (assistant messages with tool_calls) from the end.
+    // A round boundary is an assistant message with tool_calls set.
+    // We want to find the start of the (max_rounds+1)-th round from the end —
+    // everything before that gets trimmed.
+    let mut round_count = 0usize;
+    let mut trim_from: Option<usize> = None;
+
+    for i in (initial_len..messages.len()).rev() {
+        if messages[i].role == "assistant" && messages[i].tool_calls.is_some() {
+            round_count += 1;
+            if round_count == max_rounds {
+                // This round is the last one to keep. Everything before it
+                // (from initial_len up to this index) is trimmed.
+                trim_from = Some(i);
+                break;
+            }
+        }
+    }
+
+    let trim_from = match trim_from {
+        Some(idx) => idx,
+        None => return, // Under limit, nothing to trim
+    };
+
+    let removed = trim_from - initial_len;
+    tracing::warn!(
+        initial_len,
+        removed,
+        total = messages.len(),
+        max_rounds,
+        "Trimming old tool-call rounds from agent loop"
+    );
+    messages.drain(initial_len..trim_from);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1744,6 +1843,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            cache_control: None,
         }
     }
 
@@ -1787,6 +1887,98 @@ mod tests {
             result.last().unwrap().content.as_deref(),
             Some("message number 19 with padding content here")
         );
+    }
+
+    fn make_tool_call_msg(id: &str, name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: Some(format!("calling {}", name)),
+            tool_calls: Some(vec![ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+            cache_control: None,
+        }
+    }
+
+    fn make_tool_result_msg(id: &str, output: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: Some(output.to_string()),
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+            name: None,
+            reasoning_content: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn test_trim_tool_loop_noop_when_under_limit() {
+        // 3 rounds — under limit of 8, nothing trimmed
+        let initial_len = 2;
+        let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "hi")];
+        for i in 0..3 {
+            msgs.push(make_tool_call_msg(&format!("call_{}", i), "bash"));
+            msgs.push(make_tool_result_msg(&format!("call_{}", i), "output"));
+        }
+        let len_before = msgs.len();
+        trim_tool_loop_messages(&mut msgs, initial_len, 8);
+        assert_eq!(msgs.len(), len_before);
+    }
+
+    #[test]
+    fn test_trim_tool_loop_trims_old_rounds() {
+        // 12 rounds — should trim to keep only last 4
+        let initial_len = 2;
+        let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "hi")];
+        for i in 0..12 {
+            msgs.push(make_tool_call_msg(&format!("call_{}", i), "bash"));
+            msgs.push(make_tool_result_msg(
+                &format!("call_{}", i),
+                &format!("output_{}", i),
+            ));
+        }
+        assert_eq!(msgs.len(), 2 + 12 * 2); // 26
+
+        trim_tool_loop_messages(&mut msgs, initial_len, 4);
+
+        // Should keep: initial (2) + last 4 rounds (8) = 10
+        assert_eq!(msgs.len(), 10);
+        // First tool call should be round 8 (0-indexed)
+        assert!(msgs[2].content.as_ref().unwrap().contains("calling bash"));
+        // Last tool result should be round 11
+        let last = msgs.last().unwrap();
+        assert_eq!(last.content.as_deref(), Some("output_11"));
+    }
+
+    #[test]
+    fn test_trim_tool_loop_preserves_prefix() {
+        let initial_len = 5;
+        let mut msgs = vec![
+            make_msg("system", "sys"),
+            make_msg("system", "env"),
+            make_msg("system", "skills"),
+            make_msg("user", "previous question"),
+            make_msg("assistant", "previous answer"),
+        ];
+        for i in 0..10 {
+            msgs.push(make_tool_call_msg(&format!("c{}", i), "bash"));
+            msgs.push(make_tool_result_msg(
+                &format!("c{}", i),
+                &format!("out{}", i),
+            ));
+        }
+
+        trim_tool_loop_messages(&mut msgs, initial_len, 4);
+
+        // Prefix (first 5) unchanged
+        assert_eq!(msgs[0].content.as_deref(), Some("sys"));
+        assert_eq!(msgs[4].content.as_deref(), Some("previous answer"));
     }
 
     #[test]
