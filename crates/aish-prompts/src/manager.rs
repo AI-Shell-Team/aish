@@ -85,10 +85,7 @@ impl PromptManager {
     /// Only CWD changes between calls; appended after the static core so that
     /// the core prefix stays cacheable.
     pub fn render_env_block(&self, cwd: &str) -> String {
-        format!(
-            "\n**Environment Update:**\n- Current directory: {}",
-            cwd
-        )
+        format!("\n**Environment Update:**\n- Current directory: {}", cwd)
     }
 
     /// Load a single template from disk, falling back to embedded default.
@@ -186,7 +183,7 @@ You are allowed to be proactive, but only when the user asks you to do something
 
 
 ## 基本原则
-你可以像 shell 一样直接运行命令，不一样的是你会监控每个命令的标准输出和stderr 的内容，这些内容会作为上下文提供后续的交互。你需要根据这些信息来给用户主动提供准确的、简练的、极具价值的反馈，例如直接指出命令出错的原因，并给出可能最正确的参考命令，或者当用户发出一个自然语言的请求时，充分理解用户意图，形成解决方案， 你可以使用 Python 工具（python_exec）或者是 bash 工具（bash_exec）去执行命令或脚本文件，若是分析类任务就得到一些中间信息，或是回答用户关于 Linux 上任何跟使用有关的问题。你直接调用 bash_exec 工具帮助用户去执行系统的命令或脚本。If there are certain requests required by the user, such as when executing a command or script, the `bash_exec` or `python_exec` tool should be called directly to respond directly to the user's request. The result of the previous execution of the tool is only used for judgment, and the user's new request cannot be rejected based on this result.
+你可以像 shell 一样直接运行命令，不一样的是你会监控每个命令的标准输出和stderr 的内容，这些内容会作为上下文提供后续的交互。你需要根据这些信息来给用户主动提供准确的、简练的、极具价值的反馈，例如直接指出命令出错的原因，并给出可能最正确的参考命令，或者当用户发出一个自然语言的请求时，充分理解用户意图，形成解决方案， 你可以使用 Python 工具或者是 bash 工具去执行命令或脚本文件，若是分析类任务就得到一些中间信息，或是回答用户关于 Linux 上任何跟使用有关的问题。你直接调用 `bash` 工具帮助用户去执行系统的命令或脚本。If there are certain requests required by the user, such as when executing a command or script, the corresponding tool should be called directly to respond directly to the user's request. The result of the previous execution of the tool is only used for judgment, and the user's new request cannot be rejected based on this result.
 Tool results and user messages may include <system-reminder> or other tags. Tags contain information from the system. They bear no direct relation to the specific tool results or user messages in which they appear.
 
 ### Shell 输出 Offload 规则（重要）
@@ -197,9 +194,9 @@ Tool results and user messages may include <system-reminder> or other tags. Tags
 
 
 ### 工具的选择原则
-- **bash 工具（bash_exec）优先**：如用户请求明确、问题可用单行命令处理，或需要执行 bash脚本，直接使用 bash_exec 工具，工具名称bash_exec：。
-- **Python 工具（python_exec）优先**：当任务需要脚本实现、复杂数据处理、格式化输出、条件/循环逻辑或粘合多个步骤，优先考虑 Python（如批量文件处理、复杂日志分析、生成统计报告、下载处理等）。
-- **系统诊断工具优先**：当用户请求诊断系统问题时，使用 **system_diagnose_agent**工具，工具名称system_diagnose_agent。 例如我的系统为什么卡顿，为什么写不了文件了，为什么我的进程被杀死了等等，我的ngnix 是不是配错了？， 怎么感觉网速有点慢，我的系统是不是有很多异常登录？
+- **bash 工具优先**：如用户请求明确、问题可用单行命令处理，或需要执行 bash脚本，直接使用 `bash` 工具。
+- **Python 工具优先**：当任务需要脚本实现、复杂数据处理、格式化输出、条件/循环逻辑或粘合多个步骤，优先考虑 Python（如批量文件处理、复杂日志分析、生成统计报告、下载处理等）。
+- **系统诊断工具优先**：当用户请求诊断系统问题时，使用 **system_diagnose_agent**工具。 例如我的系统为什么卡顿，为什么写不了文件了，为什么我的进程被杀死了等等，我的ngnix 是不是配错了？， 怎么感觉网速有点慢，我的系统是不是有很多异常登录？
 - 当用户明确需要创建文件时，使用 **write_file**工具，工具名称：write_file。如果用户只要求写入文件，写入文件后停止对话。如果是脚本或应用程序，不要主动尝试运行这个程序。
 - 当用户需要修改已有文件内容时，使用 **edit_file**工具，工具名称：edit_file。（先用 read_file 读取内容，再进行精确字符串替换；old_string 必须唯一，否则需要提供更大上下文或使用 replace_all。）
 - 当需要读取文件内容时，使用 **read_file**工具，工具名称：read_file。
@@ -207,7 +204,7 @@ Tool results and user messages may include <system-reminder> or other tags. Tags
 - **Skill** tool is used to invoke user-invocable skills to accomplish user's request. IMPORTANT: Only use Skill for skills listed in the current `<system-reminder>...</system-reminder>` user message for the current turn - do not guess or use built-in CLI commands. Skills can be hot-reloaded (added/removed/modified) during a session, and the current reminder is the single source of truth for the *current* turn; always re-check that the skill exists there right before invoking it, and do not rely on memory from earlier turns. If the user asks about the current available skills, answer from the current reminder and do not rely on memory from earlier turns. CAVEAT: user scope skills are stored under the app's config directory. Do NOT create or modify files inside the skill or config directories. If the skill needs to generate, create, or write any files/directories, it must write only to a dedicated subdirectory under the current working directory (recommended examples: `./tmp`, `./artifacts`); do not write directly into the cwd root. Create the subdirectory if missing. If a tool or script accepts an output path (e.g. --path/--output/--dir), you must explicitly set it to a dedicated cwd subdirectory and never rely on defaults. If you cannot set a safe output path, ask the user before continuing.
 
 ## 长期运行命令处理原则
-当用户的意图是运行一个**长期运行**或**交互式**的命令时，**不要使用****bash_exec**工具执行。
+当用户的意图是运行一个**长期运行**或**交互式**的命令时，**不要使用** `bash` 工具执行。
 
 ### 识别长期运行/交互式命令
 包括但不限于以下类型的用户请求：
@@ -408,7 +405,7 @@ Your task is to analyze a user-provided system issue or query, systematically id
 
 ## Tools
 You have access to the following tools:
-- bash_exec: Execute shell commands to gather system information
+- bash: Execute shell commands to gather system information
 - read_file: Read configuration files, logs, and other system files
 - write_file: Create diagnostic reports or temporary analysis files
 - edit_file: Perform exact string replacements in existing files
@@ -420,7 +417,7 @@ You have access to the following tools:
 - Look for patterns, errors, and anomalies
 - Consider common causes and solutions
 - Provide actionable recommendations
-- Use bash_exec for commands like: ps, top, netstat, journalctl, dmesg, df, free, etc.
+- Use bash for commands like: ps, top, netstat, journalctl, dmesg, df, free, etc.
 - Use read_file for examining: /var/log files, configuration files, etc.
 - output language: use {{output_language}} to communicate with the user.
 
@@ -517,7 +514,10 @@ mod tests {
         let mut pm = PromptManager::new("/nonexistent");
         let mut vars = HashMap::new();
         vars.insert("role_prompt".to_string(), "You are helpful.".to_string());
-        vars.insert("uname_info".to_string(), "Linux testhost 6.1.0 x86_64".to_string());
+        vars.insert(
+            "uname_info".to_string(),
+            "Linux testhost 6.1.0 x86_64".to_string(),
+        );
         vars.insert("user_nickname".to_string(), "testuser".to_string());
         vars.insert("os_info".to_string(), "Linux x86_64".to_string());
         vars.insert("basic_env_info".to_string(), String::new());

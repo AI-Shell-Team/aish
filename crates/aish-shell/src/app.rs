@@ -2784,8 +2784,14 @@ impl AishShell {
         vars.insert("uname_info".to_string(), crate::ai_handler::uname_info());
         vars.insert("user_nickname".to_string(), crate::ai_handler::whoami());
         vars.insert("os_info".to_string(), crate::ai_handler::os_info());
-        vars.insert("basic_env_info".to_string(), crate::ai_handler::basic_env_info());
-        vars.insert("output_language".to_string(), crate::ai_handler::output_language());
+        vars.insert(
+            "basic_env_info".to_string(),
+            crate::ai_handler::basic_env_info(),
+        );
+        vars.insert(
+            "output_language".to_string(),
+            crate::ai_handler::output_language(),
+        );
         vars.insert("cwd".to_string(), "~".to_string());
         // Static base prompt — SSH context and dossier are built dynamically
         // inside the closure so nested SSH host changes are reflected.

@@ -368,7 +368,6 @@ impl AiHandler {
         let mut context_messages = self.build_context_messages();
         context_messages.insert(0, ChatMessage::system(&env_block));
 
-
         // Step 5: Send to LLM
         let process_result = self
             .llm_session
@@ -591,7 +590,8 @@ impl AiHandler {
             let results = mm.recall(&search_query, self.memory_config.recall_limit);
             if results.is_empty() {
                 // No results — clear stale recall to keep context clean
-                self.context_manager.inject_knowledge_stable("memory_recall", "");
+                self.context_manager
+                    .inject_knowledge_stable("memory_recall", "");
                 return;
             }
 
@@ -609,13 +609,10 @@ impl AiHandler {
             let text = if text.len() > budget {
                 let safe_end = floor_char_boundary(&text, budget);
                 let truncated = &text[..safe_end];
-                format!(
-                    "{}\n</long-term-memory>",
-                    truncated
-                        .rfind('\n')
-                        .map(|i| &text[..i])
-                        .unwrap_or(truncated)
-                )
+                truncated
+                    .rfind('\n')
+                    .map(|i| text[..i].to_string())
+                    .unwrap_or_else(|| truncated.to_string())
             } else {
                 text
             };
@@ -626,7 +623,8 @@ impl AiHandler {
             );
             // Stable injection — only replaces if content actually changed,
             // preserving cache prefix stability across calls.
-            self.context_manager.inject_knowledge_stable("memory_recall", &content);
+            self.context_manager
+                .inject_knowledge_stable("memory_recall", &content);
         }
     }
 
@@ -666,7 +664,8 @@ impl AiHandler {
         let text = descriptions.join("\n\n");
         let content = format!("<available-skills>\n{}\n</available-skills>", text);
 
-        self.context_manager.inject_knowledge_stable("skills", &content);
+        self.context_manager
+            .inject_knowledge_stable("skills", &content);
     }
 
     /// Build context messages from the context manager into ChatMessage format.
@@ -900,10 +899,7 @@ pub(crate) fn basic_env_info() -> String {
                 (["pacman", "--version"].as_slice(), "Pacman"),
                 (["zypper", "--version"].as_slice(), "Zypper"),
             ] {
-                if let Ok(output) = std::process::Command::new(cmd[0])
-                    .args(&cmd[1..])
-                    .output()
-                {
+                if let Ok(output) = std::process::Command::new(cmd[0]).args(&cmd[1..]).output() {
                     if output.status.success() {
                         let ver = String::from_utf8_lossy(&output.stdout);
                         if let Some(line) = ver.lines().next() {
