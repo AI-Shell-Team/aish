@@ -146,9 +146,7 @@ pub fn effective_reserved_output_tokens(
     reserved_output_tokens: usize,
 ) -> usize {
     let context_window_tokens = context_window_tokens.max(1);
-    let min_prompt_budget = (context_window_tokens / 2)
-        .max(1)
-        .min(MIN_PROMPT_BUDGET_TOKENS);
+    let min_prompt_budget = (context_window_tokens / 2).clamp(1, MIN_PROMPT_BUDGET_TOKENS);
     let max_reserve = context_window_tokens.saturating_sub(min_prompt_budget);
     reserved_output_tokens.min(max_reserve)
 }
@@ -219,12 +217,11 @@ pub fn calculate_budget_state(
     policy: &ContextBudgetPolicy,
 ) -> ContextBudgetState {
     let thresholds = calculate_thresholds(policy);
-    let percent_used = if thresholds.effective_context_window == 0 {
-        100
-    } else {
-        ((estimated_tokens.saturating_mul(100)) / thresholds.effective_context_window).min(100)
-            as u8
-    };
+    let percent_used = estimated_tokens
+        .saturating_mul(100)
+        .checked_div(thresholds.effective_context_window)
+        .unwrap_or(100)
+        .min(100) as u8;
     let percent_left = 100u8.saturating_sub(percent_used);
 
     let is_at_blocking_limit = estimated_tokens >= thresholds.blocking_threshold;

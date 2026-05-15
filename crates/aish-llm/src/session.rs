@@ -1476,18 +1476,14 @@ fn estimate_chat_tokens(messages: &[ChatMessage], policy: &ContextBudgetPolicy) 
         .sum()
 }
 
-fn estimate_one_chat_message(message: &ChatMessage, policy: &ContextBudgetPolicy) -> usize {
+fn estimate_one_chat_message(message: &ChatMessage, _policy: &ContextBudgetPolicy) -> usize {
     let content_len = message.content.as_ref().map(|c| c.len()).unwrap_or(0);
     let reasoning_len = message
         .reasoning_content
         .as_ref()
         .map(|c| c.len())
         .unwrap_or(0);
-    if policy.enable_token_estimation {
-        ((content_len + reasoning_len) / 4).max(1)
-    } else {
-        ((content_len + reasoning_len) / 4).max(1)
-    }
+    ((content_len + reasoning_len) / 4).max(1)
 }
 
 fn microcompact_chat_messages(

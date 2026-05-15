@@ -2309,13 +2309,13 @@ impl AishShell {
                         }
                         use aish_core::LlmEventType;
                         match event.event_type {
-                            LlmEventType::ContextCompactionStart => {
+                            LlmEventType::ContextCompactionStart
                                 if !compaction_active
-                                    .swap(true, std::sync::atomic::Ordering::SeqCst)
-                                {
-                                    anim.start(&t("shell.status.compacting_context"));
-                                }
+                                    .swap(true, std::sync::atomic::Ordering::SeqCst) =>
+                            {
+                                anim.start(&t("shell.status.compacting_context"));
                             }
+                            LlmEventType::ContextCompactionStart => {}
                             LlmEventType::ContextCompactionEnd => {
                                 compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
@@ -2988,13 +2988,13 @@ impl AishShell {
                         }
                         use aish_core::LlmEventType;
                         match event.event_type {
-                            LlmEventType::ContextCompactionStart => {
+                            LlmEventType::ContextCompactionStart
                                 if !compaction_active
-                                    .swap(true, std::sync::atomic::Ordering::SeqCst)
-                                {
-                                    anim.start(&t("shell.status.compacting_context"));
-                                }
+                                    .swap(true, std::sync::atomic::Ordering::SeqCst) =>
+                            {
+                                anim.start(&t("shell.status.compacting_context"));
                             }
+                            LlmEventType::ContextCompactionStart => {}
                             LlmEventType::ContextCompactionEnd => {
                                 compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
@@ -3156,7 +3156,7 @@ impl AishShell {
                                         .and_then(|p| p.as_str())
                                         .unwrap_or("?");
                                     use std::io::Write;
-                                    print!("\x1b[90m📖 read_file({})\x1b[0m\n", path);
+                                    println!("\x1b[90m📖 read_file({})\x1b[0m", path);
                                     let _ = std::io::stdout().flush();
                                 }
                             }
@@ -3179,7 +3179,7 @@ impl AishShell {
                                             .and_then(|p| p.as_str())
                                             .unwrap_or("error");
                                         use std::io::Write;
-                                        print!("\x1b[31m{}\x1b[0m\n", preview);
+                                        println!("\x1b[31m{}\x1b[0m", preview);
                                         let _ = std::io::stdout().flush();
                                     }
                                 }
