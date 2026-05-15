@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,9 +47,38 @@ fn needs_interactive(command: &str) -> bool {
     false
 }
 
+pub fn command_needs_interactive(command: &str) -> bool {
+    needs_interactive(command)
+}
+
 /// Shared slot for injecting a PersistentPty reference after tool creation.
 /// None = fall back to PtyExecutor (one-shot PTY).
 pub type PtySlot = Arc<Mutex<Option<Arc<Mutex<aish_pty::PersistentPty>>>>>;
+
+static INTERACTIVE_INPUT_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn interactive_input_active() -> bool {
+    INTERACTIVE_INPUT_COUNT.load(Ordering::SeqCst) > 0
+}
+
+struct InteractiveInputGuard;
+
+impl InteractiveInputGuard {
+    fn acquire() -> Self {
+        INTERACTIVE_INPUT_COUNT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InteractiveInputGuard {
+    fn drop(&mut self) {
+        let previous = INTERACTIVE_INPUT_COUNT.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0, "interactive input guard count underflow");
+        if previous == 0 {
+            INTERACTIVE_INPUT_COUNT.store(0, Ordering::SeqCst);
+        }
+    }
+}
 
 /// Tool for executing bash commands via PTY.
 pub struct BashTool {
@@ -222,6 +251,7 @@ impl BashTool {
         timeout_secs: Option<u64>,
         pty_arc: Arc<Mutex<aish_pty::PersistentPty>>,
     ) -> ToolResult {
+        let interactive = needs_interactive(command);
         let cancel_token = Arc::new(CancelToken::new());
 
         if let Some(timeout_secs) = timeout_secs {
@@ -252,7 +282,9 @@ impl BashTool {
 
         let mut pty = pty_arc.lock().unwrap();
         let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
-        let result = pty.execute_command(command, command_timeout, Some(&cancel_token));
+        let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
+        let result =
+            pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
         done.store(true, Ordering::SeqCst);
 
         match result {
@@ -294,7 +326,8 @@ impl BashTool {
 
     /// Execute via one-shot PtyExecutor — original behavior.
     fn execute_via_pty_executor(&self, command: &str, timeout_secs: Option<u64>) -> ToolResult {
-        let executor = if needs_interactive(command) {
+        let interactive = needs_interactive(command);
+        let executor = if interactive {
             PtyExecutor::new(CAPTURE_KEEP_BYTES)
         } else {
             PtyExecutor::new_silent(CAPTURE_KEEP_BYTES)
@@ -327,6 +360,7 @@ impl BashTool {
         }
 
         let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result = executor.execute_blocking(command, env_vars, &cancel_token);
         done.store(true, Ordering::SeqCst);
 
@@ -540,6 +574,23 @@ mod tests {
             timeout["description"].as_str(),
             Some("Timeout in seconds. If omitted, the command runs until completion or cancellation.")
         );
+    }
+
+    #[test]
+    fn test_interactive_input_guard_counts_overlapping_sessions() {
+        INTERACTIVE_INPUT_COUNT.store(0, Ordering::SeqCst);
+
+        let guard_one = InteractiveInputGuard::acquire();
+        assert!(interactive_input_active());
+
+        let guard_two = InteractiveInputGuard::acquire();
+        assert!(interactive_input_active());
+
+        drop(guard_one);
+        assert!(interactive_input_active());
+
+        drop(guard_two);
+        assert!(!interactive_input_active());
     }
 
     #[test]

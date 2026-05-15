@@ -29,6 +29,43 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
     "more", "most", "man", "screen", "tmux", "mc", "ranger",
 ];
 
+fn write_all_with_retry<F>(buf: &[u8], mut write_once: F)
+where
+    F: FnMut(&[u8]) -> Result<usize, i32>,
+{
+    let mut remaining = buf;
+    while !remaining.is_empty() {
+        match write_once(remaining) {
+            Ok(0) => break,
+            Ok(written) => remaining = &remaining[written.min(remaining.len())..],
+            Err(errno) if errno == libc::EINTR => continue,
+            Err(errno) => {
+                debug!(errno, "failed to forward PTY output to stdout");
+                break;
+            }
+        }
+    }
+}
+
+fn write_stdout_all(buf: &[u8]) {
+    write_all_with_retry(buf, |remaining| {
+        let rc = unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                remaining.as_ptr() as *const libc::c_void,
+                remaining.len(),
+            )
+        };
+        if rc < 0 {
+            Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO))
+        } else {
+            Ok(rc as usize)
+        }
+    });
+}
+
 /// Persistent PTY session managing a single long-lived bash process.
 pub struct PersistentPty {
     master_fd: RawFd,
@@ -173,6 +210,7 @@ impl PersistentPty {
         command: &str,
         timeout: Duration,
         cancel_token: Option<&CancelToken>,
+        display_output: bool,
     ) -> aish_core::Result<(String, i32)> {
         let seq = self.allocate_backend_seq();
 
@@ -288,6 +326,9 @@ impl PersistentPty {
                     )
                 } {
                     n if n > 0 && self.exec_mode.load(Ordering::SeqCst) => {
+                        if display_output {
+                            write_stdout_all(&tmp[..n as usize]);
+                        }
                         self.exec_buffer
                             .lock()
                             .unwrap()
@@ -3538,11 +3579,52 @@ fn clean_pty_output(raw: &str, command: &str) -> String {
         // Skip to next newline after the echo.
         if let Some(nl) = after.find('\n') {
             let cleaned = after[nl + 1..].to_string();
-            return cleaned.trim().to_string();
+            return strip_auth_interaction_noise(&cleaned, command);
         }
     }
 
-    text.trim().to_string()
+    strip_auth_interaction_noise(&text, command)
+}
+
+fn strip_auth_interaction_noise(text: &str, command: &str) -> String {
+    if !command_may_prompt_for_auth(command) {
+        return text.trim().to_string();
+    }
+
+    text.lines()
+        .filter(|line| !is_auth_interaction_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn command_may_prompt_for_auth(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    lower.contains("sudo")
+        || lower.starts_with("su ")
+        || lower == "su"
+        || lower.contains(" su ")
+        || lower.starts_with("ssh ")
+        || lower.contains(" ssh ")
+}
+
+fn is_auth_interaction_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lower = trimmed.to_lowercase();
+    lower.contains("password:")
+        || lower.ends_with("password")
+        || lower.contains("password for ")
+        || trimmed.contains("请输入密码")
+        || trimmed.contains("密码：")
+        || trimmed.contains("验证成功")
+        || trimmed.contains("认证成功")
+        || lower.contains("authentication successful")
+        || lower.contains("authentication succeeded")
 }
 
 fn regex_simple() -> regex::Regex {
@@ -3747,6 +3829,26 @@ mod tests {
     }
 
     #[test]
+    fn test_clean_pty_output_strips_sudo_auth_noise() {
+        let raw = "sudo ls /root\r\n请输入密码：\r\n验证成功\r\nconfig.yaml\r\n";
+        let cleaned = clean_pty_output(raw, "sudo ls /root");
+        assert_eq!(cleaned, "config.yaml");
+    }
+
+    #[test]
+    fn test_write_all_with_retry_retries_eintr_and_partial_writes() {
+        let mut calls = Vec::new();
+        let mut results = vec![Err(libc::EINTR), Ok(2usize), Ok(1usize), Ok(2usize)].into_iter();
+
+        write_all_with_retry(b"hello", |chunk| {
+            calls.push(String::from_utf8(chunk.to_vec()).unwrap());
+            results.next().expect("expected another write result")
+        });
+
+        assert_eq!(calls, vec!["hello", "hello", "llo", "lo"]);
+    }
+
+    #[test]
     fn test_shell_quote_escape() {
         assert_eq!(shell_quote_escape("ls -la"), "'ls -la'");
         assert_eq!(shell_quote_escape("it's"), "'it'\\''s'");
@@ -3771,7 +3873,7 @@ mod tests {
         let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
 
         let (output, exit_code) = pty
-            .execute_command("echo hello_world_123", Duration::from_secs(5), None)
+            .execute_command("echo hello_world_123", Duration::from_secs(5), None, false)
             .expect("execute should succeed");
         assert_eq!(exit_code, 0);
         assert!(output.contains("hello_world_123"), "output was: {}", output);
@@ -3787,13 +3889,13 @@ mod tests {
         let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
 
         let (out1, code1) = pty
-            .execute_command("echo first", Duration::from_secs(5), None)
+            .execute_command("echo first", Duration::from_secs(5), None, false)
             .expect("cmd1");
         assert_eq!(code1, 0);
         assert!(out1.contains("first"));
 
         let (out2, code2) = pty
-            .execute_command("echo second", Duration::from_secs(5), None)
+            .execute_command("echo second", Duration::from_secs(5), None, false)
             .expect("cmd2");
         assert_eq!(code2, 0);
         assert!(out2.contains("second"));

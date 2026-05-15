@@ -646,7 +646,14 @@ impl AishShell {
                                 .get("tool_name")
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("");
-                            if tool_name == "bash" && !preview.is_empty() {
+                            let interactive_bash = tool_name == "bash"
+                                && event
+                                    .data
+                                    .get("tool_args")
+                                    .and_then(|args| args.get("command"))
+                                    .and_then(|command| command.as_str())
+                                    .is_some_and(aish_tools::bash::command_needs_interactive);
+                            if tool_name == "bash" && !preview.is_empty() && !interactive_bash {
                                 let content = strip_tool_output_xml(preview);
                                 if !content.is_empty() {
                                     let collapsed = collapse_display_lines(&content, 2);
@@ -1702,6 +1709,7 @@ impl AishShell {
             command,
             std::time::Duration::from_secs(5),
             None,
+            false,
         );
     }
 
@@ -2442,6 +2450,10 @@ impl AishShell {
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
                     }
+                    if aish_tools::bash::interactive_input_active() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        continue;
+                    }
                     // Check for Ctrl+C on stdin (non-blocking)
                     let mut rfds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
                     unsafe {
@@ -2958,7 +2970,7 @@ impl AishShell {
                                         .and_then(|p| p.as_str())
                                         .unwrap_or("?");
                                     use std::io::Write;
-                                    print!("\x1b[90m📖 read_file({})\x1b[0m\n", path);
+                                    println!("\x1b[90m📖 read_file({})\x1b[0m", path);
                                     let _ = std::io::stdout().flush();
                                 }
                             }
@@ -2981,7 +2993,7 @@ impl AishShell {
                                             .and_then(|p| p.as_str())
                                             .unwrap_or("error");
                                         use std::io::Write;
-                                        print!("\x1b[31m{}\x1b[0m\n", preview);
+                                        println!("\x1b[31m{}\x1b[0m", preview);
                                         let _ = std::io::stdout().flush();
                                     }
                                 }
@@ -3165,6 +3177,10 @@ impl AishShell {
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => break None,
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+                if aish_tools::bash::interactive_input_active() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
                 }
                 // Check for Ctrl+C on stdin (non-blocking)
                 let mut rfds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
@@ -3382,8 +3398,9 @@ impl AishShell {
 
 /// Cached regex for stripping complete XML tags from tool output.
 static TOOL_XML_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-/// Cached regex for removing multi-line offload blocks (<offload>...</offload>).
-static TOOL_XML_OFFLOAD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+/// Cached regex for removing trailing tool metadata blocks.
+static TOOL_XML_TRAILING_METADATA_RE: std::sync::OnceLock<regex::Regex> =
+    std::sync::OnceLock::new();
 /// Cached regex for removing incomplete tags from truncation.
 static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
@@ -3391,10 +3408,20 @@ static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::On
 /// Handles multi-line <offload>JSON</offload> blocks, <return_code>, <stdout>,
 /// <stderr>, and any incomplete tags from truncation.
 fn strip_tool_output_xml(output: &str) -> String {
-    // Remove multi-line <offload>...</offload> blocks first (may span multiple lines)
-    let re_offload = TOOL_XML_OFFLOAD_RE
-        .get_or_init(|| regex::Regex::new(r"(?s)<offload>.*?</offload>").unwrap());
-    let cleaned = re_offload.replace_all(output, "").to_string();
+    let re_trailing_metadata = TOOL_XML_TRAILING_METADATA_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?ms)(?:^|\n)<(?:offload|return_code|exit-code)>\n.*?\n</(?:offload|return_code|exit-code)>\s*$",
+        )
+        .unwrap()
+    });
+    let mut cleaned = output.trim().to_string();
+    loop {
+        let next = re_trailing_metadata.replace(&cleaned, "").to_string();
+        if next == cleaned {
+            break;
+        }
+        cleaned = next.trim_end().to_string();
+    }
     // Remove incomplete tags (e.g. "<stdo" from truncation)
     let re_incomplete =
         TOOL_XML_INCOMPLETE_RE.get_or_init(|| regex::Regex::new(r"<[^>]*$").unwrap());
@@ -3463,6 +3490,18 @@ pub fn collapse_output(
 #[cfg(test)]
 mod collapsing_tests {
     use super::*;
+
+    #[test]
+    fn test_strip_tool_output_xml_removes_return_code_block() {
+        let output = "<stdout>\nconfig.yaml\n</stdout>\n<return_code>\n0\n</return_code>";
+        assert_eq!(strip_tool_output_xml(output), "config.yaml");
+    }
+
+    #[test]
+    fn test_strip_tool_output_xml_preserves_return_code_text_in_stdout() {
+        let output = "<stdout>\nliteral <return_code>\n0\n</return_code> block\n</stdout>\n<return_code>\n0\n</return_code>";
+        assert_eq!(strip_tool_output_xml(output), "literal \n0\n block");
+    }
 
     #[test]
     fn test_collapse_output_short() {

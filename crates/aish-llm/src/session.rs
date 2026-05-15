@@ -1032,6 +1032,7 @@ impl LlmSession {
                 "tool_name": tool_call.name,
                 "tool_call_id": tool_call.id,
                 "ok": result.ok,
+                "tool_args": args,
             });
             if let Some(preview) = output_preview {
                 event_data["output_preview"] = serde_json::Value::String(preview);
@@ -1437,5 +1438,39 @@ mod tests {
         assert!(tool_names.contains(&"read_file"));
         assert!(tool_names.contains(&"grep"));
         assert!(!tool_names.contains(&"bash_exec"));
+    }
+
+    #[tokio::test]
+    async fn tool_execution_end_event_includes_tool_args() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.register_tool(Box::new(MockTool::new("bash")));
+
+        let seen_event = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_event_cb = seen_event.clone();
+        session.set_event_callback(std::sync::Arc::new(move |event| {
+            if matches!(event.event_type, aish_core::LlmEventType::ToolExecutionEnd) {
+                *seen_event_cb.lock().unwrap() = Some(event);
+            }
+            None
+        }));
+
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "sudo ls /root" }).to_string(),
+        };
+
+        let result = session.execute_tool_external(&tool_call).await;
+        assert!(result.ok);
+
+        let event = seen_event
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("missing ToolExecutionEnd event");
+        assert_eq!(
+            event.data["tool_args"]["command"].as_str(),
+            Some("sudo ls /root")
+        );
     }
 }
