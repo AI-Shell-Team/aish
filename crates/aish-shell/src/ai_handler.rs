@@ -359,9 +359,15 @@ impl AiHandler {
             );
         }
 
-        // Step 5: Build context and system messages
-        let context_messages = self.build_context_messages();
-        let system_message = self.system_message();
+        // Step 5: Build context and system messages.
+        // Split system message into static core (cached) and dynamic env block.
+        // The static core goes as the main system_message; the env block is
+        // prepended to context_messages so the cache breakpoint lands on the
+        // stable prefix.
+        let (static_core, env_block) = self.system_message_parts();
+        let mut context_messages = self.build_context_messages();
+        context_messages.insert(0, ChatMessage::system(&env_block));
+
 
         // Step 5: Send to LLM
         let process_result = self
@@ -369,7 +375,7 @@ impl AiHandler {
             .process_input(
                 &question_processed,
                 &context_messages,
-                system_message.as_deref(),
+                Some(&static_core),
                 true,
             )
             .await?;
@@ -576,9 +582,6 @@ impl AiHandler {
         }
         let mut guard = self.memory_manager.lock().unwrap();
         if let Some(ref mut mm) = *guard {
-            // Clear previous recall
-            self.context_manager.clear_knowledge("memory_recall");
-
             let keywords = extract_keywords(query);
             let search_query = if keywords.is_empty() {
                 query.to_string()
@@ -587,6 +590,8 @@ impl AiHandler {
             };
             let results = mm.recall(&search_query, self.memory_config.recall_limit);
             if results.is_empty() {
+                // No results — clear stale recall to keep context clean
+                self.context_manager.inject_knowledge_stable("memory_recall", "");
                 return;
             }
 
@@ -602,7 +607,6 @@ impl AiHandler {
             // Enforce token budget (~4 chars per token)
             let budget = self.memory_config.recall_token_budget * 4;
             let text = if text.len() > budget {
-                // Find the nearest char boundary at or before budget
                 let safe_end = floor_char_boundary(&text, budget);
                 let truncated = &text[..safe_end];
                 format!(
@@ -616,14 +620,13 @@ impl AiHandler {
                 text
             };
 
-            self.context_manager.add_message(
-                "system",
-                &format!(
-                    "<long-term-memory source=\"recall\">\n{}\n</long-term-memory>",
-                    text
-                ),
-                MemoryType::Knowledge,
+            let content = format!(
+                "<long-term-memory source=\"recall\">\n{}\n</long-term-memory>",
+                text
             );
+            // Stable injection — only replaces if content actually changed,
+            // preserving cache prefix stability across calls.
+            self.context_manager.inject_knowledge_stable("memory_recall", &content);
         }
     }
 
@@ -643,11 +646,11 @@ impl AiHandler {
     }
 
     /// Inject loaded skill descriptions into the context so the AI can use them.
+    /// Uses stable injection — only updates when skills actually change.
     fn inject_skills(&mut self) {
-        self.context_manager.clear_knowledge("skills");
-
         let skills = self.skill_manager.list_skills();
         if skills.is_empty() {
+            self.context_manager.inject_knowledge_stable("skills", "");
             return;
         }
 
@@ -661,12 +664,9 @@ impl AiHandler {
             })
             .collect();
         let text = descriptions.join("\n\n");
+        let content = format!("<available-skills>\n{}\n</available-skills>", text);
 
-        self.context_manager.add_message(
-            "system",
-            &format!("<available-skills>\n{}\n</available-skills>", text),
-            MemoryType::Knowledge,
-        );
+        self.context_manager.inject_knowledge_stable("skills", &content);
     }
 
     /// Build context messages from the context manager into ChatMessage format.
@@ -691,49 +691,42 @@ impl AiHandler {
                     tool_call_id: None,
                     name: None,
                     reasoning_content: None,
+                    cache_control: None,
                 }
             })
             .collect()
     }
 
-    /// Return the system message for normal AI interactions.
-    fn system_message(&mut self) -> Option<String> {
-        let role_prompt = self.prompt_manager.get("role").to_string();
-        let mut vars = HashMap::new();
-        vars.insert("role_prompt".to_string(), role_prompt);
-        vars.insert("username".to_string(), whoami());
-        vars.insert("hostname".to_string(), hostname());
-        vars.insert("os_info".to_string(), os_info());
-        vars.insert("cwd".to_string(), cwd());
-        vars.insert("system_info".to_string(), String::new());
-        vars.insert("memory_context".to_string(), String::new());
-        vars.insert("skill_list".to_string(), String::new());
-        Some(self.prompt_manager.render("oracle", &vars))
+    /// Return the system message split into (static_core, env_block).
+    /// The static core is stable across calls (enabling KV-cache prefix hits).
+    /// The env_block contains per-call dynamic info (cwd).
+    fn system_message_parts(&mut self) -> (String, String) {
+        let core = self.prompt_manager.render_static_core(
+            &uname_info(),
+            &whoami(),
+            &os_info(),
+            &basic_env_info(),
+            &output_language(),
+        );
+        let env = self.prompt_manager.render_env_block(&cwd());
+        (core, env)
     }
 
     /// Return the system message for error correction mode.
     fn error_correction_system_message(
         &mut self,
-        command: &str,
-        exit_code: i32,
-        stderr: &str,
+        _command: &str,
+        _exit_code: i32,
+        _stderr: &str,
     ) -> Option<String> {
-        let stderr_section = if stderr.is_empty() {
-            String::new()
-        } else {
-            let preview = if stderr.len() > 2048 {
-                &stderr[..floor_char_boundary(stderr, 2048)]
-            } else {
-                stderr
-            };
-            format!("\n**Command Output:**\n```\n{}\n```", preview)
-        };
+        let role_prompt = self.prompt_manager.get("role").to_string();
         let mut vars = HashMap::new();
-        vars.insert("username".to_string(), whoami());
+        vars.insert("role_prompt".to_string(), role_prompt);
+        vars.insert("uname_info".to_string(), uname_info());
+        vars.insert("user_nickname".to_string(), whoami());
         vars.insert("os_info".to_string(), os_info());
-        vars.insert("command".to_string(), command.to_string());
-        vars.insert("exit_code".to_string(), exit_code.to_string());
-        vars.insert("stderr_section".to_string(), stderr_section);
+        vars.insert("basic_env_info".to_string(), basic_env_info());
+        vars.insert("output_language".to_string(), output_language());
         Some(self.prompt_manager.render("cmd_error", &vars))
     }
 }
@@ -835,6 +828,7 @@ pub(crate) fn whoami() -> String {
 }
 
 /// Get the hostname.
+#[allow(dead_code)]
 pub(crate) fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| {
@@ -875,6 +869,69 @@ fn cwd() -> String {
     std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "/".to_string())
+}
+
+/// Get uname info (kernel version, architecture, etc.).
+/// Result is cached for the process lifetime since it doesn't change.
+pub(crate) fn uname_info() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::process::Command::new("uname")
+                .arg("-a")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        })
+        .clone()
+}
+
+/// Get basic environment info (package managers, etc.).
+/// Result is cached for the process lifetime since it doesn't change.
+pub(crate) fn basic_env_info() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let mut parts = Vec::new();
+            for (cmd, label) in [
+                (["apt", "--version"].as_slice(), "APT"),
+                (["dnf", "--version"].as_slice(), "DNF"),
+                (["pacman", "--version"].as_slice(), "Pacman"),
+                (["zypper", "--version"].as_slice(), "Zypper"),
+            ] {
+                if let Ok(output) = std::process::Command::new(cmd[0])
+                    .args(&cmd[1..])
+                    .output()
+                {
+                    if output.status.success() {
+                        let ver = String::from_utf8_lossy(&output.stdout);
+                        if let Some(line) = ver.lines().next() {
+                            parts.push(format!("{}: {}", label, line));
+                        }
+                    }
+                }
+            }
+            parts.join("\n")
+        })
+        .clone()
+}
+
+/// Get output language from locale.
+/// Result is cached for the process lifetime since it doesn't change.
+pub(crate) fn output_language() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let locale = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".to_string());
+            let lang = locale.split('.').next().unwrap_or("en");
+            if lang.starts_with("zh") {
+                "Chinese".to_string()
+            } else {
+                "English".to_string()
+            }
+        })
+        .clone()
 }
 
 #[cfg(test)]

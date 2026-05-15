@@ -142,6 +142,7 @@ impl LangfuseClient {
     pub async fn span_generation(
         &self,
         trace_id: &str,
+        name: &str,
         model: &str,
         input: serde_json::Value,
         output: &str,
@@ -150,6 +151,7 @@ impl LangfuseClient {
     ) {
         let client = self.inner.clone();
         let trace_id = trace_id.to_string();
+        let name = name.to_string();
         let model = model.to_string();
         let output_val = json!(output);
         let meta = if prompt_tokens > 0 || completion_tokens > 0 {
@@ -168,7 +170,7 @@ impl LangfuseClient {
             if let Err(e) = client
                 .generation()
                 .trace_id(&trace_id)
-                .name("generation")
+                .name(&name)
                 .model(&model)
                 .input(input)
                 .output(output_val)

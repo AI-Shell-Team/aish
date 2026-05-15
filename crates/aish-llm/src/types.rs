@@ -112,6 +112,23 @@ impl<'de> Deserialize<'de> for ToolCall {
     }
 }
 
+/// Anthropic-style cache control marker for prompt caching.
+/// When set, marks this message as a cache breakpoint.
+/// Non-Anthropic providers ignore this field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub cache_type: String,
+}
+
+impl CacheControl {
+    pub fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral".to_string(),
+        }
+    }
+}
+
 /// A message in the chat conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -126,6 +143,9 @@ pub struct ChatMessage {
     /// DeepSeek thinking mode reasoning content — must be echoed back to the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Anthropic-style cache control marker. Non-Anthropic providers ignore this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 impl ChatMessage {
@@ -137,6 +157,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            cache_control: None,
         }
     }
 
@@ -148,6 +169,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            cache_control: None,
         }
     }
 
@@ -159,6 +181,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             reasoning_content: None,
+            cache_control: None,
         }
     }
 
@@ -170,6 +193,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.into()),
             name: None,
             reasoning_content: None,
+            cache_control: None,
         }
     }
 }
@@ -523,5 +547,19 @@ mod tests {
             !called.load(std::sync::atomic::Ordering::SeqCst),
             "cancel_atomic should not invoke registered callbacks"
         );
+    }
+
+    #[test]
+    fn test_cache_control_serialization() {
+        let msg = ChatMessage::system("test");
+        let json = serde_json::to_string(&msg).unwrap();
+        // cache_control should be absent when None
+        assert!(!json.contains("cache_control"));
+
+        let mut msg = ChatMessage::system("test");
+        msg.cache_control = Some(CacheControl::ephemeral());
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("cache_control"));
+        assert!(json.contains("ephemeral"));
     }
 }
