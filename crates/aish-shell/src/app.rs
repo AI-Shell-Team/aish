@@ -3399,7 +3399,8 @@ impl AishShell {
 /// Cached regex for stripping complete XML tags from tool output.
 static TOOL_XML_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 /// Cached regex for removing trailing tool metadata blocks.
-static TOOL_XML_TRAILING_METADATA_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+static TOOL_XML_TRAILING_METADATA_RE: std::sync::OnceLock<regex::Regex> =
+    std::sync::OnceLock::new();
 /// Cached regex for removing incomplete tags from truncation.
 static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
