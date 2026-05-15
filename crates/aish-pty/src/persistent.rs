@@ -29,6 +29,43 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
     "more", "most", "man", "screen", "tmux", "mc", "ranger",
 ];
 
+fn write_all_with_retry<F>(buf: &[u8], mut write_once: F)
+where
+    F: FnMut(&[u8]) -> Result<usize, i32>,
+{
+    let mut remaining = buf;
+    while !remaining.is_empty() {
+        match write_once(remaining) {
+            Ok(0) => break,
+            Ok(written) => remaining = &remaining[written.min(remaining.len())..],
+            Err(errno) if errno == libc::EINTR => continue,
+            Err(errno) => {
+                debug!(errno, "failed to forward PTY output to stdout");
+                break;
+            }
+        }
+    }
+}
+
+fn write_stdout_all(buf: &[u8]) {
+    write_all_with_retry(buf, |remaining| {
+        let rc = unsafe {
+            libc::write(
+                libc::STDOUT_FILENO,
+                remaining.as_ptr() as *const libc::c_void,
+                remaining.len(),
+            )
+        };
+        if rc < 0 {
+            Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO))
+        } else {
+            Ok(rc as usize)
+        }
+    });
+}
+
 /// Persistent PTY session managing a single long-lived bash process.
 pub struct PersistentPty {
     master_fd: RawFd,
@@ -290,13 +327,7 @@ impl PersistentPty {
                 } {
                     n if n > 0 && self.exec_mode.load(Ordering::SeqCst) => {
                         if display_output {
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    tmp.as_ptr() as *const libc::c_void,
-                                    n as usize,
-                                );
-                            }
+                            write_stdout_all(&tmp[..n as usize]);
                         }
                         self.exec_buffer
                             .lock()
@@ -3802,6 +3833,19 @@ mod tests {
         let raw = "sudo ls /root\r\n请输入密码：\r\n验证成功\r\nconfig.yaml\r\n";
         let cleaned = clean_pty_output(raw, "sudo ls /root");
         assert_eq!(cleaned, "config.yaml");
+    }
+
+    #[test]
+    fn test_write_all_with_retry_retries_eintr_and_partial_writes() {
+        let mut calls = Vec::new();
+        let mut results = vec![Err(libc::EINTR), Ok(2usize), Ok(1usize), Ok(2usize)].into_iter();
+
+        write_all_with_retry(b"hello", |chunk| {
+            calls.push(String::from_utf8(chunk.to_vec()).unwrap());
+            results.next().expect("expected another write result")
+        });
+
+        assert_eq!(calls, vec!["hello", "hello", "llo", "lo"]);
     }
 
     #[test]

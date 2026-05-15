@@ -3398,10 +3398,8 @@ impl AishShell {
 
 /// Cached regex for stripping complete XML tags from tool output.
 static TOOL_XML_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-/// Cached regex for removing multi-line offload blocks (<offload>...</offload>).
-static TOOL_XML_OFFLOAD_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-/// Cached regex for removing multi-line return_code blocks.
-static TOOL_XML_RETURN_CODE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+/// Cached regex for removing trailing tool metadata blocks.
+static TOOL_XML_TRAILING_METADATA_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 /// Cached regex for removing incomplete tags from truncation.
 static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
@@ -3409,16 +3407,20 @@ static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::On
 /// Handles multi-line <offload>JSON</offload> blocks, <return_code>, <stdout>,
 /// <stderr>, and any incomplete tags from truncation.
 fn strip_tool_output_xml(output: &str) -> String {
-    // Remove multi-line <offload>...</offload> blocks first (may span multiple lines)
-    let re_offload = TOOL_XML_OFFLOAD_RE
-        .get_or_init(|| regex::Regex::new(r"(?s)<offload>.*?</offload>").unwrap());
-    let cleaned = re_offload.replace_all(output, "").to_string();
-    // Remove multi-line <return_code>...</return_code> blocks completely.
-    let re_return_code = TOOL_XML_RETURN_CODE_RE.get_or_init(|| {
-        regex::Regex::new(r"(?s)<(?:return_code|exit-code)>.*?</(?:return_code|exit-code)>")
-            .unwrap()
+    let re_trailing_metadata = TOOL_XML_TRAILING_METADATA_RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?ms)(?:^|\n)<(?:offload|return_code|exit-code)>\n.*?\n</(?:offload|return_code|exit-code)>\s*$",
+        )
+        .unwrap()
     });
-    let cleaned = re_return_code.replace_all(&cleaned, "").to_string();
+    let mut cleaned = output.trim().to_string();
+    loop {
+        let next = re_trailing_metadata.replace(&cleaned, "").to_string();
+        if next == cleaned {
+            break;
+        }
+        cleaned = next.trim_end().to_string();
+    }
     // Remove incomplete tags (e.g. "<stdo" from truncation)
     let re_incomplete =
         TOOL_XML_INCOMPLETE_RE.get_or_init(|| regex::Regex::new(r"<[^>]*$").unwrap());
@@ -3492,6 +3494,12 @@ mod collapsing_tests {
     fn test_strip_tool_output_xml_removes_return_code_block() {
         let output = "<stdout>\nconfig.yaml\n</stdout>\n<return_code>\n0\n</return_code>";
         assert_eq!(strip_tool_output_xml(output), "config.yaml");
+    }
+
+    #[test]
+    fn test_strip_tool_output_xml_preserves_return_code_text_in_stdout() {
+        let output = "<stdout>\nliteral <return_code>\n0\n</return_code> block\n</stdout>\n<return_code>\n0\n</return_code>";
+        assert_eq!(strip_tool_output_xml(output), "literal \n0\n block");
     }
 
     #[test]

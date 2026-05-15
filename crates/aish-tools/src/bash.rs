@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -55,10 +55,29 @@ pub fn command_needs_interactive(command: &str) -> bool {
 /// None = fall back to PtyExecutor (one-shot PTY).
 pub type PtySlot = Arc<Mutex<Option<Arc<Mutex<aish_pty::PersistentPty>>>>>;
 
-static INTERACTIVE_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
+static INTERACTIVE_INPUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub fn interactive_input_active() -> bool {
-    INTERACTIVE_INPUT_ACTIVE.load(Ordering::SeqCst)
+    INTERACTIVE_INPUT_COUNT.load(Ordering::SeqCst) > 0
+}
+
+struct InteractiveInputGuard;
+
+impl InteractiveInputGuard {
+    fn acquire() -> Self {
+        INTERACTIVE_INPUT_COUNT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InteractiveInputGuard {
+    fn drop(&mut self) {
+        let previous = INTERACTIVE_INPUT_COUNT.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0, "interactive input guard count underflow");
+        if previous == 0 {
+            INTERACTIVE_INPUT_COUNT.store(0, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Tool for executing bash commands via PTY.
@@ -263,14 +282,9 @@ impl BashTool {
 
         let mut pty = pty_arc.lock().unwrap();
         let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
-        if interactive {
-            INTERACTIVE_INPUT_ACTIVE.store(true, Ordering::SeqCst);
-        }
+        let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result =
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
-        if interactive {
-            INTERACTIVE_INPUT_ACTIVE.store(false, Ordering::SeqCst);
-        }
         done.store(true, Ordering::SeqCst);
 
         match result {
@@ -346,13 +360,8 @@ impl BashTool {
         }
 
         let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
-        if interactive {
-            INTERACTIVE_INPUT_ACTIVE.store(true, Ordering::SeqCst);
-        }
+        let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result = executor.execute_blocking(command, env_vars, &cancel_token);
-        if interactive {
-            INTERACTIVE_INPUT_ACTIVE.store(false, Ordering::SeqCst);
-        }
         done.store(true, Ordering::SeqCst);
 
         match result {
@@ -565,6 +574,23 @@ mod tests {
             timeout["description"].as_str(),
             Some("Timeout in seconds. If omitted, the command runs until completion or cancellation.")
         );
+    }
+
+    #[test]
+    fn test_interactive_input_guard_counts_overlapping_sessions() {
+        INTERACTIVE_INPUT_COUNT.store(0, Ordering::SeqCst);
+
+        let guard_one = InteractiveInputGuard::acquire();
+        assert!(interactive_input_active());
+
+        let guard_two = InteractiveInputGuard::acquire();
+        assert!(interactive_input_active());
+
+        drop(guard_one);
+        assert!(interactive_input_active());
+
+        drop(guard_two);
+        assert!(!interactive_input_active());
     }
 
     #[test]
