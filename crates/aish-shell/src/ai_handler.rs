@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use aish_config::MemoryConfig;
-use aish_context::ContextManager;
+use aish_context::{
+    ContextBudgetPolicy, ContextCompactReport, ContextManager, ContextPressureLevel,
+};
 use aish_core::{LlmEvent, MemoryCategory, MemoryType, PlanModeState, PlanPhase};
 use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession};
 use aish_memory::MemoryManager;
@@ -180,6 +182,7 @@ impl AiHandler {
         max_llm_messages: usize,
         max_shell_messages: usize,
         token_budget: Option<usize>,
+        context_budget_policy: ContextBudgetPolicy,
     ) -> Self {
         let mut context_manager = ContextManager::with_limits(
             max_llm_messages,
@@ -187,6 +190,7 @@ impl AiHandler {
             10, // max_knowledge_messages
         );
         context_manager.set_token_budget(token_budget);
+        context_manager.set_budget_policy(context_budget_policy);
         Self {
             llm_session,
             context_manager,
@@ -341,7 +345,21 @@ impl AiHandler {
         // Step 3: Inject loaded skills into context as knowledge
         self.inject_skills();
 
-        // Step 4: Build context and system messages
+        // Step 4: Compact persistent context before building messages.
+        let plan_state = self.plan_state();
+        let compact_report = self.compact_context_before_send(&plan_state).await;
+        if compact_report.microcompact.changed_messages > 0 || compact_report.full_compact.is_some()
+        {
+            tracing::info!(
+                before_tokens = compact_report.before_tokens,
+                after_tokens = compact_report.after_tokens,
+                micro_changed = compact_report.microcompact.changed_messages,
+                full_compact = compact_report.full_compact.is_some(),
+                "AI context compacted before question send"
+            );
+        }
+
+        // Step 5: Build context and system messages
         let context_messages = self.build_context_messages();
         let system_message = self.system_message();
 
@@ -357,17 +375,17 @@ impl AiHandler {
             .await?;
         let response = process_result.text;
 
-        // Step 6: Store the exchange in context
+        // Step 7: Store the exchange in context
         self.context_manager
             .add_message("user", &question_processed, MemoryType::Llm);
         self.context_manager
             .add_message("assistant", &response, MemoryType::Llm);
         self.context_manager.trim();
 
-        // Step 7: Auto-retain user preferences/facts
+        // Step 8: Auto-retain user preferences/facts
         self.auto_retain_memory(&question_processed, &response);
 
-        // Step 8: Persist token usage delta to disk
+        // Step 9: Persist token usage delta to disk
         self.persist_token_usage();
 
         Ok(response)
@@ -387,6 +405,8 @@ impl AiHandler {
             command, exit_code
         );
 
+        let plan_state = self.plan_state();
+        let _ = self.compact_context_before_send(&plan_state).await;
         let context_messages = self.build_context_messages();
         let system_message = self.error_correction_system_message(command, exit_code, stderr);
 
@@ -400,6 +420,113 @@ impl AiHandler {
         self.persist_token_usage();
 
         Ok(parse_error_correction_response(&response))
+    }
+
+    async fn compact_context_before_send(
+        &mut self,
+        plan_state: &PlanModeState,
+    ) -> ContextCompactReport {
+        let before_state = self.context_manager.budget_state();
+        let before_tokens = before_state.estimated_tokens;
+        let mut emitted_compaction_start = false;
+        let mut report = ContextCompactReport {
+            before_tokens,
+            pressure_before: Some(before_state.pressure),
+            ..ContextCompactReport::default()
+        };
+
+        let policy = self.context_manager.budget_policy().clone();
+        if !policy.enabled {
+            report.after_tokens = before_tokens;
+            report.pressure_after = Some(before_state.pressure);
+            return report;
+        }
+
+        if matches!(
+            before_state.pressure,
+            ContextPressureLevel::Warning
+                | ContextPressureLevel::AutoCompact
+                | ContextPressureLevel::Blocking
+        ) {
+            report.microcompact = self.context_manager.microcompact();
+        }
+
+        let after_micro_state = self.context_manager.budget_state();
+        if after_micro_state.is_above_auto_compact_threshold && policy.full_compact_enabled {
+            self.llm_session
+                .emit_context_compaction_start("persistent_context", "full_compact");
+            emitted_compaction_start = true;
+            if self.context_manager.compact_consecutive_failures()
+                >= policy.max_consecutive_failures
+            {
+                report.skipped_full_compact_due_to_fuse = true;
+                tracing::warn!(
+                    failures = self.context_manager.compact_consecutive_failures(),
+                    "persistent context model compact skipped because failure fuse is open"
+                );
+            } else {
+                let candidates = self.context_manager.full_compact_candidate_messages();
+                if candidates.is_empty() {
+                    self.context_manager.record_compact_failure();
+                } else {
+                    match self
+                        .llm_session
+                        .summarize_context_messages(
+                            &candidates,
+                            Some(plan_state),
+                            policy.summary_max_tokens,
+                        )
+                        .await
+                    {
+                        Ok(summary) => {
+                            match self.context_manager.apply_full_compact_summary(summary) {
+                                Ok(full_report) => {
+                                    self.context_manager.reset_compact_failures();
+                                    report.full_compact = Some(full_report);
+                                }
+                                Err(err) => {
+                                    self.context_manager.record_compact_failure();
+                                    tracing::warn!(
+                                        error = %err,
+                                        failures = self.context_manager.compact_consecutive_failures(),
+                                        "persistent context model compact summary could not be applied"
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            self.context_manager.record_compact_failure();
+                            tracing::warn!(
+                                error = %err,
+                                failures = self.context_manager.compact_consecutive_failures(),
+                                "persistent context model compact failed; falling back to final trim"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let after_state = self.context_manager.budget_state();
+        report.after_tokens = after_state.estimated_tokens;
+        report.pressure_after = Some(after_state.pressure);
+        let compaction_changed =
+            report.microcompact.changed_messages > 0 || report.full_compact.is_some();
+        if emitted_compaction_start || compaction_changed {
+            let mode = if report.full_compact.is_some() {
+                "full_compact"
+            } else {
+                "microcompact"
+            };
+            self.llm_session.emit_context_compaction_end(
+                "persistent_context",
+                mode,
+                before_tokens,
+                report.after_tokens,
+                compaction_changed,
+            );
+        }
+        report
     }
 
     /// Extract @skill_name references and inject skill prefix.

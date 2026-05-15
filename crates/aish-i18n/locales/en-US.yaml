@@ -480,8 +480,13 @@ shell:
 
   diagnose_cancelled: "  └─ ❌ System diagnosis cancelled"
 
+  compaction:
+    completed: "Context compacted"
+    completed_with_tokens: "Context compacted, reclaimed about {tokens} tokens"
+
   status:
     thinking: "Thinking"
+    compacting_context: "Compacting context"
     thinking_now: "Thinking"
     processing: "Processing"
     analyzing: "  Analyzing..."

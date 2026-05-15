@@ -4,6 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use aish_config::ConfigModel;
+use aish_context::{
+    context_window_hard_min_tokens, context_window_warn_below_tokens,
+    effective_reserved_output_tokens, resolve_context_window_tokens, ContextBudgetPolicy,
+};
 use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
 use aish_llm::{
@@ -61,6 +65,130 @@ async fn poll_cancelled(token: *const CancellationToken) {
 
 /// Braille spinner frames used in the reasoning overlay.
 const DOTS_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+
+fn context_compaction_notice(event: &LlmEvent) -> Option<String> {
+    let changed = event
+        .data
+        .get("changed")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !changed {
+        return None;
+    }
+
+    Some(t("shell.compaction.completed"))
+}
+
+fn context_budget_policy_from_config(config: &ConfigModel) -> ContextBudgetPolicy {
+    let compact = &config.context_auto_compact;
+    let model_config_tokens = compact.model_context_windows.get(&config.model).copied();
+    let context_window = resolve_context_window_tokens(
+        compact.context_window_tokens,
+        model_config_tokens,
+        config.context_token_budget,
+    );
+    let mut policy =
+        ContextBudgetPolicy::from_optional_budget(None, config.enable_token_estimation);
+    policy.enabled = compact.enabled;
+    policy.full_compact_enabled = compact.full_compact_enabled;
+    policy.context_window_tokens = context_window.tokens;
+    policy.context_window_source = context_window.source;
+    if let Some(value) = compact.reserved_output_tokens {
+        policy.reserved_output_tokens = value;
+    }
+    if let Some(value) = compact.auto_compact_buffer_tokens {
+        policy.auto_compact_buffer_tokens = value;
+    }
+    if let Some(value) = compact.warning_buffer_tokens {
+        policy.warning_buffer_tokens = value;
+    }
+    if let Some(value) = compact.blocking_buffer_tokens {
+        policy.blocking_buffer_tokens = value;
+    }
+    policy.micro_keep_recent_messages = compact.micro_keep_recent_messages.max(1);
+    policy.shell_keep_recent_commands = compact.shell_keep_recent_commands.max(1);
+    policy.max_consecutive_failures = compact.max_consecutive_failures.max(1);
+    policy.summary_max_tokens = compact.summary_max_tokens.max(256);
+    if policy.context_window_tokens < context_window_hard_min_tokens() {
+        if policy.full_compact_enabled {
+            tracing::warn!(
+                model = %config.model,
+                context_window_tokens = policy.context_window_tokens,
+                source = policy.context_window_source.as_str(),
+                hard_min_tokens = context_window_hard_min_tokens(),
+                "context window is too small for model-generated full compact; falling back to microcompact-only"
+            );
+        }
+        policy.full_compact_enabled = false;
+    } else if policy.context_window_tokens < context_window_warn_below_tokens() {
+        tracing::warn!(
+            model = %config.model,
+            context_window_tokens = policy.context_window_tokens,
+            source = policy.context_window_source.as_str(),
+            warn_below_tokens = context_window_warn_below_tokens(),
+            "context window is small; context compaction may trigger early"
+        );
+    }
+    let thresholds = policy.thresholds();
+    tracing::info!(
+        model = %config.model,
+        context_window_tokens = policy.context_window_tokens,
+        context_window_source = policy.context_window_source.as_str(),
+        reserved_output_tokens = policy.reserved_output_tokens,
+        effective_reserved_output_tokens = effective_reserved_output_tokens(
+            policy.context_window_tokens,
+            policy.reserved_output_tokens,
+        ),
+        effective_context_window = thresholds.effective_context_window,
+        warning_threshold = thresholds.warning_threshold,
+        auto_compact_threshold = thresholds.auto_compact_threshold,
+        blocking_threshold = thresholds.blocking_threshold,
+        full_compact_enabled = policy.full_compact_enabled,
+        "resolved context auto-compact budget"
+    );
+    policy
+}
+
+#[cfg(test)]
+mod context_budget_tests {
+    use super::*;
+
+    #[test]
+    fn model_context_window_mapping_sets_source() {
+        let mut config = ConfigModel::default();
+        config.model = "openai/glm-5.1".to_string();
+        config.context_token_budget = Some(8_000);
+        config
+            .context_auto_compact
+            .model_context_windows
+            .insert(config.model.clone(), 128_000);
+
+        let policy = context_budget_policy_from_config(&config);
+
+        assert_eq!(policy.context_window_tokens, 128_000);
+        assert_eq!(
+            policy.context_window_source,
+            aish_context::ContextWindowSource::ModelConfig
+        );
+        assert!(policy.full_compact_enabled);
+    }
+
+    #[test]
+    fn tiny_context_window_disables_model_full_compact() {
+        let mut config = ConfigModel::default();
+        config.context_auto_compact.context_window_tokens = Some(2_000);
+        config.context_auto_compact.full_compact_enabled = true;
+
+        let policy = context_budget_policy_from_config(&config);
+
+        assert_eq!(policy.context_window_tokens, 2_000);
+        assert_eq!(
+            policy.context_window_source,
+            aish_context::ContextWindowSource::AutoCompactOverride
+        );
+        assert!(!policy.full_compact_enabled);
+    }
+}
 
 /// Shell lifecycle phases.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +289,8 @@ impl AishShell {
             Some(config.temperature),
             config.max_tokens,
         );
+        let context_budget_policy = context_budget_policy_from_config(&config);
+        llm_session.set_context_budget_policy(context_budget_policy.clone());
 
         // Initialize Langfuse observability if configured
         if config.enable_langfuse {
@@ -421,6 +551,10 @@ impl AishShell {
         let reasoning_frame_ref = reasoning_frame.clone();
         let reasoning_lines_displayed = Arc::new(AtomicUsize::new(0));
         let reasoning_lines_displayed_ref = reasoning_lines_displayed.clone();
+        let compaction_active = Arc::new(AtomicBool::new(false));
+        let compaction_active_ref = compaction_active.clone();
+        let compaction_notice_shown = Arc::new(AtomicBool::new(false));
+        let compaction_notice_shown_ref = compaction_notice_shown.clone();
         let event_callback: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
             Arc::new(move |event: LlmEvent| {
                 // Helper: clear multi-line reasoning overlay and reset state.
@@ -446,6 +580,8 @@ impl AishShell {
                         reasoning_frame_ref.store(0, Ordering::SeqCst);
                         reasoning_lines_displayed_ref.store(0, Ordering::SeqCst);
                         reasoning_active_ref.store(false, Ordering::SeqCst);
+                        compaction_active_ref.store(false, Ordering::SeqCst);
+                        compaction_notice_shown_ref.store(false, Ordering::SeqCst);
                         animation_ref.start(&t("shell.status.thinking"));
                     }
                     LlmEventType::OpEnd => {
@@ -462,7 +598,22 @@ impl AishShell {
                         }
                         *thinking_start_ref.lock().unwrap() = None;
                     }
+                    LlmEventType::ContextCompactionStart => {
+                        if !compaction_active_ref.swap(true, Ordering::SeqCst) {
+                            animation_ref.start(&t("shell.status.compacting_context"));
+                        }
+                    }
+                    LlmEventType::ContextCompactionEnd => {
+                        compaction_active_ref.store(false, Ordering::SeqCst);
+                        animation_ref.stop();
+                        if !compaction_notice_shown_ref.swap(true, Ordering::SeqCst) {
+                            if let Some(message) = context_compaction_notice(&event) {
+                                println!("\x1b[2m{}\x1b[0m", message);
+                            }
+                        }
+                    }
                     LlmEventType::GenerationStart => {
+                        compaction_active_ref.store(false, Ordering::SeqCst);
                         animation_ref.stop();
                         clear_reasoning();
                         // Reset streamed flag so it only reflects the CURRENT
@@ -808,6 +959,7 @@ impl AishShell {
             config.max_llm_messages,
             config.max_shell_messages,
             config.context_token_budget,
+            context_budget_policy,
         );
 
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
@@ -2133,6 +2285,10 @@ impl AishShell {
                         std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                     let reasoning_lines_displayed = reasoning_lines_cb.clone();
                     let reasoning_buf = std::sync::Mutex::new(String::new());
+                    let compaction_active =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let compaction_notice_shown =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let thinking_start_followup =
                         std::sync::Arc::new(std::sync::Mutex::new(Some(std::time::Instant::now())));
                     session.set_event_callback(std::sync::Arc::new(move |event| {
@@ -2161,7 +2317,26 @@ impl AishShell {
                         }
                         use aish_core::LlmEventType;
                         match event.event_type {
+                            LlmEventType::ContextCompactionStart
+                                if !compaction_active
+                                    .swap(true, std::sync::atomic::Ordering::SeqCst) =>
+                            {
+                                anim.start(&t("shell.status.compacting_context"));
+                            }
+                            LlmEventType::ContextCompactionStart => {}
+                            LlmEventType::ContextCompactionEnd => {
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                                anim.stop();
+                                if !compaction_notice_shown
+                                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                                {
+                                    if let Some(message) = context_compaction_notice(&event) {
+                                        println!("\x1b[2m{}\x1b[0m", message);
+                                    }
+                                }
+                            }
                             LlmEventType::GenerationStart => {
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
                                 reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -2794,6 +2969,10 @@ impl AishShell {
                         std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
                     let reasoning_lines_displayed = reasoning_lines_cb.clone();
                     let reasoning_buf = std::sync::Mutex::new(String::new());
+                    let compaction_active =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let compaction_notice_shown =
+                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let thinking_start_r = thinking_start_thread.clone();
                     session.set_event_callback(std::sync::Arc::new(move |event| {
                         // Helper: clear reasoning overlay from terminal
@@ -2821,7 +3000,26 @@ impl AishShell {
                         }
                         use aish_core::LlmEventType;
                         match event.event_type {
+                            LlmEventType::ContextCompactionStart
+                                if !compaction_active
+                                    .swap(true, std::sync::atomic::Ordering::SeqCst) =>
+                            {
+                                anim.start(&t("shell.status.compacting_context"));
+                            }
+                            LlmEventType::ContextCompactionStart => {}
+                            LlmEventType::ContextCompactionEnd => {
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                                anim.stop();
+                                if !compaction_notice_shown
+                                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                                {
+                                    if let Some(message) = context_compaction_notice(&event) {
+                                        println!("\x1b[2m{}\x1b[0m", message);
+                                    }
+                                }
+                            }
                             LlmEventType::GenerationStart => {
+                                compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
                                 reasoning_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 reasoning_frame.store(0, std::sync::atomic::Ordering::SeqCst);

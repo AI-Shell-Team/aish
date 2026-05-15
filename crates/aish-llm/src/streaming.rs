@@ -34,10 +34,7 @@ impl StreamParser {
         if let Some(choices) = choices {
             if let Some(choice) = choices.first() {
                 let message = choice.get("message");
-                let content = message
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string());
+                let content = extract_message_text(message.and_then(|m| m.get("content")));
                 let reasoning_content = message
                     .and_then(|m| m.get("reasoning_content"))
                     .and_then(|c| c.as_str())
@@ -129,10 +126,7 @@ impl StreamParser {
         let mut events = Vec::new();
 
         // Content delta
-        if let Some(content) = delta
-            .and_then(|d| d.get("content"))
-            .and_then(|c| c.as_str())
-        {
+        if let Some(content) = extract_message_text(delta.and_then(|d| d.get("content"))) {
             if !content.is_empty() {
                 events.push(SseEvent::ContentDelta(content.to_string()));
                 return (events, None);
@@ -187,5 +181,80 @@ impl StreamParser {
         }
 
         (Vec::new(), None)
+    }
+}
+
+fn extract_message_text(content: Option<&serde_json::Value>) -> Option<String> {
+    match content {
+        None => None,
+        Some(serde_json::Value::String(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Some(serde_json::Value::Array(items)) => {
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::String(text) => Some(text.clone()),
+                    serde_json::Value::Object(obj) => obj
+                        .get("text")
+                        .or_else(|| obj.get("content"))
+                        .and_then(|value| value.as_str())
+                        .map(|text| text.to_string()),
+                    _ => None,
+                })
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect();
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SseEvent, StreamParser};
+
+    #[test]
+    fn parse_response_accepts_array_content() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": [
+                        {"type": "output_text", "text": "第一段"},
+                        {"type": "output_text", "text": "第二段"}
+                    ]
+                }
+            }]
+        });
+
+        let (content, reasoning, tool_calls, usage) = StreamParser::parse_response(&response);
+        assert_eq!(content.as_deref(), Some("第一段\n第二段"));
+        assert!(reasoning.is_none());
+        assert!(tool_calls.is_empty());
+        assert!(usage.is_none());
+    }
+
+    #[test]
+    fn parse_sse_chunk_accepts_array_content_delta() {
+        let line = r#"data: {"choices":[{"delta":{"content":[{"type":"output_text","text":"总结已生成"}]}}]}"#;
+
+        let (events, usage) = StreamParser::parse_sse_chunk(line);
+        assert!(usage.is_none());
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::ContentDelta(text) => assert_eq!(text, "总结已生成"),
+            other => panic!("unexpected event: {:?}", other),
+        }
     }
 }

@@ -235,8 +235,13 @@ shell:
       custom_input: "Sie können auch einen beliebigen benutzerdefinierten Wert eingeben."
       how_to: "Antworten Sie mit einem Optionswert (oder einer Nummer) oder geben Sie ; continue with default ein (Standard: {default})."
   diagnose_cancelled: "  └─ ❌ Systemdiagnose abgebrochen"
+
+  compaction:
+    completed: "Kontext komprimiert"
+    completed_with_tokens: "Kontext komprimiert, etwa {tokens} Tokens freigegeben"
   status:
     thinking: "Denkt nach"
+    compacting_context: "Kontext wird komprimiert"
     thinking_now: "Denkt nach"
     processing: "Verarbeitet"
     analyzing: "  Analysiert..."

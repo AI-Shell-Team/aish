@@ -155,6 +155,8 @@ impl Default for PlanModeState {
 pub enum LlmEventType {
     OpStart,
     OpEnd,
+    ContextCompactionStart,
+    ContextCompactionEnd,
     GenerationStart,
     GenerationEnd,
     ContentDelta,

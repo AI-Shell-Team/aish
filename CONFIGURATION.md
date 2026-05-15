@@ -69,6 +69,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `max_shell_messages` | integer | `20` | Shell 历史条目最大保留数量 | 值 > 0 |
 | `context_token_budget` | integer/null | `null` | 可选的上下文 token 预算限制 | 如：4000，为 null 则仅使用消息数量限制 |
 | `enable_token_estimation` | boolean | `true` | 启用基于 tiktoken 的 token 估算 | true/false |
+| `context_auto_compact` | object | 见下方 | 自动上下文压缩配置，面向 shell/tool 输出控量 | 可选 |
 
 ### 工具输出配置
 
@@ -134,6 +135,40 @@ tool_arg_preview:
     max_items: 4
 ```
 
+#### context_auto_compact
+
+自动上下文压缩用于在发送给模型前控制 shell/tool 输出占用。默认策略偏保守：先做确定性的 microcompact，清理旧命令输出、旧 tool result、preview 和冗长 reasoning；只有在 microcompact 后仍接近窗口上限时，才启用模型生成的 full compact summary。full compact 会额外发起一次无工具、低温、非流式的摘要请求，失败时会记录失败次数并回退到最终 trim，不阻塞普通发送路径。
+
+AI Shell 不会根据模型名前缀推断 context window。对于自定义模型或不同 provider，请优先显式设置 `context_auto_compact.context_window_tokens`，或在 `context_auto_compact.model_context_windows` 中为模型 ID 配置精确窗口；否则会使用 `context_token_budget`，再回退到保守默认值。启动时会记录窗口来源、有效 reserve 和触发阈值，便于排查为什么提前压缩。
+
+| 字段 | 类型 | 默认值 | 描述 |
+|------|------|--------|------|
+| `enabled` | boolean | `true` | 启用自动上下文压力处理 |
+| `full_compact_enabled` | boolean | `true` | 允许在高压时调用模型生成结构化 summary；可关闭为 microcompact-only |
+| `context_window_tokens` | integer/null | `null` | 显式 context window 覆盖，优先级高于 `context_token_budget` |
+| `model_context_windows` | map[string, integer] | `{}` | 按精确模型 ID 配置 context window，优先级低于 `context_window_tokens`，高于 `context_token_budget` |
+| `reserved_output_tokens` | integer/null | `null` | 为模型输出和 summary 预留的 token 数 |
+| `auto_compact_buffer_tokens` | integer/null | `null` | effective window 内触发 auto compact 的保守缓冲 |
+| `warning_buffer_tokens` | integer/null | `null` | warning 阈值相对 auto compact 的提前量 |
+| `blocking_buffer_tokens` | integer/null | `null` | blocking 阈值相对 effective window 的保留量 |
+| `micro_keep_recent_messages` | integer | `6` | microcompact 时保留的最近消息数量 |
+| `shell_keep_recent_commands` | integer | `8` | microcompact 时完整保留的最近 shell 上下文条数 |
+| `max_consecutive_failures` | integer | `3` | full compact 连续失败熔断阈值 |
+| `summary_max_tokens` | integer | `4000` | 模型生成结构化 summary 的最大输出预算 |
+
+示例：
+```yaml
+context_auto_compact:
+  enabled: true
+  full_compact_enabled: true
+  context_window_tokens: null
+  model_context_windows:
+    openai/glm-5.1: 128000
+  micro_keep_recent_messages: 6
+  shell_keep_recent_commands: 8
+  max_consecutive_failures: 3
+```
+
 ## terminal_resize_mode 说明
 
 - `full`：PTY 命令、ask_user 弹层、Live 渲染都跟随终端 resize（默认）
@@ -168,6 +203,19 @@ max_llm_messages: 50
 max_shell_messages: 20
 context_token_budget: null
 enable_token_estimation: true
+context_auto_compact:
+  enabled: true
+  full_compact_enabled: true
+  context_window_tokens: null
+  model_context_windows: {}
+  reserved_output_tokens: null
+  auto_compact_buffer_tokens: null
+  warning_buffer_tokens: null
+  blocking_buffer_tokens: null
+  micro_keep_recent_messages: 6
+  shell_keep_recent_commands: 8
+  max_consecutive_failures: 3
+  summary_max_tokens: 4000
 
 # 工具输出配置
 pty_output_keep_bytes: 4096
