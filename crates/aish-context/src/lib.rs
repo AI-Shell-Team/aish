@@ -13,9 +13,18 @@
     clippy::too_many_arguments
 )]
 
+pub mod budget;
 pub mod manager;
 pub mod types;
 
-pub use manager::ContextManager;
-pub use manager::ContextStats;
+pub use budget::{
+    calculate_budget_state, calculate_thresholds, context_window_hard_min_tokens,
+    context_window_warn_below_tokens, effective_reserved_output_tokens,
+    resolve_context_window_tokens, ContextBudgetPolicy, ContextBudgetState,
+    ContextBudgetThresholds, ContextPressureLevel, ContextWindowResolution, ContextWindowSource,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+};
+pub use manager::{
+    ContextCompactReport, ContextManager, ContextStats, FullCompactReport, MicrocompactReport,
+};
 pub use types::ContextMessage;

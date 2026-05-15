@@ -235,8 +235,13 @@ shell:
       custom_input: "Vous pouvez aussi repondre avec n'importe quelle valeur personnalisee."
       how_to: "Repondez avec une valeur d'option (ou un numero) ou tapez ; continue with default (par defaut : {default})."
   diagnose_cancelled: "  └─ ❌ Diagnostic systeme annule"
+
+  compaction:
+    completed: "Contexte compressé"
+    completed_with_tokens: "Contexte compressé, environ {tokens} tokens récupérés"
   status:
     thinking: "Reflexion"
+    compacting_context: "Compression du contexte"
     thinking_now: "Reflexion"
     processing: "Traitement"
     analyzing: "  Analyse..."

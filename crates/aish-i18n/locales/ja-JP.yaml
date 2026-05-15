@@ -235,8 +235,13 @@ shell:
       custom_input: "任意の値を自由入力することもできます。"
       how_to: "選択肢の値（または番号）で返信するか、; continue with default と入力してください（既定値: {default}）。"
   diagnose_cancelled: "  └─ ❌ システム診断をキャンセルしました"
+
+  compaction:
+    completed: "コンテキストを圧縮しました"
+    completed_with_tokens: "コンテキストを圧縮し、約 {tokens} トークンを確保しました"
   status:
     thinking: "考え中"
+    compacting_context: "コンテキストを圧縮中"
     thinking_now: "考え中"
     processing: "処理中"
     analyzing: "  解析中..."
