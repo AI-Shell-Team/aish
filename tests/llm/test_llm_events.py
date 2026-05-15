@@ -242,3 +242,79 @@ async def test_process_input_litellm_error_uses_raw_message():
         text = str(details)
         assert "THIS_SHOULD_NOT_LEAK" not in text
         assert "sk-THIS_SHOULD_NOT_LEAK" not in text
+
+
+@pytest.mark.anyio
+async def test_process_input_timeout_is_not_reported_as_cancellation():
+    config = ConfigModel(model="test-model", api_key="test-key")
+    session = LLMSession(config=config, skill_manager=SkillManager())
+
+    events = []
+
+    def event_callback(event):
+        events.append(event)
+        return LLMCallbackResult.CONTINUE
+
+    session.event_callback = event_callback
+
+    async def fake_acompletion(**kwargs):
+        raise TimeoutError("request timed out")
+
+    context_manager = ContextManager()
+
+    with (
+        patch.object(session, "_get_acompletion", return_value=fake_acompletion),
+        patch.object(session, "_trim_messages", side_effect=lambda msgs: msgs),
+        patch.object(session, "_get_tools_spec", return_value=[]),
+    ):
+        result = await session.process_input(
+            prompt="hi",
+            context_manager=context_manager,
+            system_message="sys",
+        )
+
+    assert result == "LLM request timed out"
+    event_types = [event.event_type for event in events]
+    assert event_types == [
+        LLMEventType.OP_START,
+        LLMEventType.GENERATION_START,
+        LLMEventType.GENERATION_END,
+        LLMEventType.OP_END,
+    ]
+    assert events[2].data.get("status") == "timeout"
+    assert events[-1].data.get("cancelled") is False
+    assert events[-1].data.get("cancelled_reason") is None
+
+
+@pytest.mark.anyio
+async def test_completion_timeout_is_not_reported_as_cancellation():
+    config = ConfigModel(model="test-model", api_key="test-key")
+    session = LLMSession(config=config, skill_manager=SkillManager())
+
+    events = []
+
+    def event_callback(event):
+        events.append(event)
+        return LLMCallbackResult.CONTINUE
+
+    session.event_callback = event_callback
+
+    async def fake_acompletion(**kwargs):
+        raise TimeoutError("request timed out")
+
+    with patch.object(session, "_get_acompletion", return_value=fake_acompletion):
+        result = await session.completion(
+            prompt="hi", system_message="sys", stream=False
+        )
+
+    assert result == "LLM request timed out"
+    event_types = [event.event_type for event in events]
+    assert event_types == [
+        LLMEventType.OP_START,
+        LLMEventType.GENERATION_START,
+        LLMEventType.GENERATION_END,
+        LLMEventType.OP_END,
+    ]
+    assert events[2].data.get("status") == "timeout"
+    assert events[-1].data.get("cancelled") is False
+    assert events[-1].data.get("cancelled_reason") is None

@@ -1782,7 +1782,6 @@ class LLMSession:
                         events.emit_cancelled("llm_cancelled")
                         events.emit_generation_end(status="cancelled")
                         raise anyio.get_cancelled_exc_class()
-                    events.emit_cancelled("llm_timeout")
                     events.emit_generation_end(status="timeout")
                     output = "LLM request timed out"
                     break
@@ -2023,7 +2022,6 @@ class LLMSession:
                 events.emit_generation_end(status="cancelled")
                 raise anyio.get_cancelled_exc_class()
             result = "LLM request timed out"
-            events.emit_cancelled("llm_timeout")
             events.emit_generation_end(status="timeout")
         except Exception as e:
             if isinstance(e, Exception) and is_litellm_exception(e):
