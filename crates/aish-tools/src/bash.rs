@@ -47,9 +47,19 @@ fn needs_interactive(command: &str) -> bool {
     false
 }
 
+pub fn command_needs_interactive(command: &str) -> bool {
+    needs_interactive(command)
+}
+
 /// Shared slot for injecting a PersistentPty reference after tool creation.
 /// None = fall back to PtyExecutor (one-shot PTY).
 pub type PtySlot = Arc<Mutex<Option<Arc<Mutex<aish_pty::PersistentPty>>>>>;
+
+static INTERACTIVE_INPUT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn interactive_input_active() -> bool {
+    INTERACTIVE_INPUT_ACTIVE.load(Ordering::SeqCst)
+}
 
 /// Tool for executing bash commands via PTY.
 pub struct BashTool {
@@ -222,6 +232,7 @@ impl BashTool {
         timeout_secs: Option<u64>,
         pty_arc: Arc<Mutex<aish_pty::PersistentPty>>,
     ) -> ToolResult {
+        let interactive = needs_interactive(command);
         let cancel_token = Arc::new(CancelToken::new());
 
         if let Some(timeout_secs) = timeout_secs {
@@ -252,7 +263,14 @@ impl BashTool {
 
         let mut pty = pty_arc.lock().unwrap();
         let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
-        let result = pty.execute_command(command, command_timeout, Some(&cancel_token));
+        if interactive {
+            INTERACTIVE_INPUT_ACTIVE.store(true, Ordering::SeqCst);
+        }
+        let result =
+            pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
+        if interactive {
+            INTERACTIVE_INPUT_ACTIVE.store(false, Ordering::SeqCst);
+        }
         done.store(true, Ordering::SeqCst);
 
         match result {
@@ -294,7 +312,8 @@ impl BashTool {
 
     /// Execute via one-shot PtyExecutor — original behavior.
     fn execute_via_pty_executor(&self, command: &str, timeout_secs: Option<u64>) -> ToolResult {
-        let executor = if needs_interactive(command) {
+        let interactive = needs_interactive(command);
+        let executor = if interactive {
             PtyExecutor::new(CAPTURE_KEEP_BYTES)
         } else {
             PtyExecutor::new_silent(CAPTURE_KEEP_BYTES)
@@ -327,7 +346,13 @@ impl BashTool {
         }
 
         let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        if interactive {
+            INTERACTIVE_INPUT_ACTIVE.store(true, Ordering::SeqCst);
+        }
         let result = executor.execute_blocking(command, env_vars, &cancel_token);
+        if interactive {
+            INTERACTIVE_INPUT_ACTIVE.store(false, Ordering::SeqCst);
+        }
         done.store(true, Ordering::SeqCst);
 
         match result {

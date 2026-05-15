@@ -88,7 +88,7 @@ impl ShellHelper {
         let escaped_line = aish_pty::shell_quote_escape(line);
         let cmd = format!("__aish_query_completions {} {}", escaped_line, pos);
 
-        match pty.execute_command(&cmd, COMPLETION_TIMEOUT, None) {
+        match pty.execute_command(&cmd, COMPLETION_TIMEOUT, None, false) {
             Ok((output, _exit_code)) => output
                 .lines()
                 .filter(|l| !l.is_empty())
