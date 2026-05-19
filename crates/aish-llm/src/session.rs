@@ -6,7 +6,7 @@ use aish_core::{AishError, LlmEvent, LlmEventType, MemoryType, PlanModeState, Pl
 
 use crate::client::{LlmClient, LlmResponse};
 use crate::langfuse::LangfuseClient;
-use crate::streaming::{SseEvent, StreamParser};
+use crate::streaming::{extract_message_text, SseEvent, StreamParser};
 use crate::types::*;
 
 fn is_short_circuit_result(result: &ToolResult) -> bool {
@@ -466,10 +466,7 @@ impl LlmSession {
 
                     if let Some(msg) = assistant_msg {
                         let mut chat_msg = ChatMessage::assistant("");
-                        chat_msg.content = msg
-                            .get("content")
-                            .and_then(|c| c.as_str())
-                            .map(|s| s.to_string());
+                        chat_msg.content = extract_message_text(msg.get("content"));
                         chat_msg.tool_calls = Some(tool_calls.clone());
                         chat_msg.reasoning_content = reasoning_content;
                         messages.push(chat_msg);

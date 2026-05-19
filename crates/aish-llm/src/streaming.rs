@@ -184,15 +184,14 @@ impl StreamParser {
     }
 }
 
-fn extract_message_text(content: Option<&serde_json::Value>) -> Option<String> {
+pub fn extract_message_text(content: Option<&serde_json::Value>) -> Option<String> {
     match content {
         None => None,
         Some(serde_json::Value::String(text)) => {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
+            if text.is_empty() {
                 None
             } else {
-                Some(trimmed.to_string())
+                Some(text.clone())
             }
         }
         Some(serde_json::Value::Array(items)) => {

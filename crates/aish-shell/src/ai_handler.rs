@@ -410,8 +410,6 @@ impl AiHandler {
             command, exit_code
         );
 
-        let plan_state = self.plan_state();
-        let _ = self.compact_context_before_send(&plan_state).await;
         let context_messages = self.build_context_messages();
         let system_message = self.error_correction_system_message(command, exit_code, stderr);
 
