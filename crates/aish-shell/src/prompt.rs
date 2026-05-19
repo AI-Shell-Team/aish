@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::path::Path;
 
-use aish_i18n::t;
+use aish_i18n::{t, t_with_args};
 
 /// Walk up from `cwd` to find a `.git/HEAD` file and extract the branch name.
 ///
@@ -133,14 +134,15 @@ pub fn render_prompt(cwd: &str, _model: &str, last_exit_code: i32, mode: &str) -
 /// Render the welcome banner shown when the shell starts.
 ///
 /// Matches the Python version with:
-/// - ASCII art logo with grayscale gradient
+/// - ASCII art logo in the terminal default foreground color
 /// - Rounded box info panel
 /// - Quick start tips
 /// - Risk warning
-pub fn render_welcome(_version: &str, model: &str, skill_count: usize) -> String {
+pub fn render_welcome(version: &str, model: &str, skill_count: usize) -> String {
     let mut out = String::new();
+    out.push('\n');
 
-    // ASCII art logo with grayscale gradient
+    // Keep the logo in the terminal default foreground color to match Python.
     let logo_lines = [
         " █████╗ ██╗███████╗██╗  ██╗",
         "██╔══██╗██║██╔════╝██║  ██║",
@@ -149,9 +151,9 @@ pub fn render_welcome(_version: &str, model: &str, skill_count: usize) -> String
         "██║  ██║██║███████║██║  ██║",
         "╚═╝  ╚═╝╚═╝╚══════╝╚═╝  ╚═╝",
     ];
-    let gray_colors: [u8; 6] = [250, 248, 245, 243, 240, 238];
-    for (i, line) in logo_lines.iter().enumerate() {
-        out.push_str(&format!("\x1b[38;5;{}m{}\x1b[0m\n", gray_colors[i], line));
+    for line in logo_lines {
+        out.push_str(line);
+        out.push('\n');
     }
 
     out.push('\n');
@@ -159,6 +161,9 @@ pub fn render_welcome(_version: &str, model: &str, skill_count: usize) -> String
     // Rounded box panel (fixed width 60 chars)
     let panel_width: usize = 60;
     let inner_width = panel_width - 2; // minus the two │ chars
+    let mut header_args = HashMap::new();
+    header_args.insert("version".to_string(), format!("v{}", version));
+    let header = t_with_args("shell.welcome2.header", &header_args);
 
     // Panel content lines
     let model_label = t("shell.welcome2.label.model");
@@ -182,8 +187,15 @@ pub fn render_welcome(_version: &str, model: &str, skill_count: usize) -> String
         String::new(),
     ];
 
-    // Render rounded box top
-    out.push_str(&format!("\x1b[37m╭{}╮\x1b[0m\n", "─".repeat(inner_width)));
+    // Render rounded box top with the same title as the Python panel.
+    let title = format!(" {} ", header);
+    let title_len = strip_ansi_len(&title);
+    let top_fill = inner_width.saturating_sub(title_len + 1);
+    out.push_str(&format!(
+        "\x1b[37m╭─{}{}╮\x1b[0m\n",
+        title,
+        "─".repeat(top_fill)
+    ));
 
     // Render content lines
     for line in &content_lines {
@@ -206,27 +218,71 @@ pub fn render_welcome(_version: &str, model: &str, skill_count: usize) -> String
     out.push_str(&format!("\x1b[1m{}\x1b[0m\n", qs_title));
 
     let item1_prefix = t("shell.welcome2.quick_start.item1_prefix");
+    let cmd_ls = t("shell.welcome2.quick_start.cmd_ls");
+    let cmd_top = t("shell.welcome2.quick_start.cmd_top");
+    let cmd_vim = t("shell.welcome2.quick_start.cmd_vim");
+    let cmd_ssh = t("shell.welcome2.quick_start.cmd_ssh");
     let item1_suffix = t("shell.welcome2.quick_start.item1_suffix");
-    out.push_str(&format!(
-        " \x1b[1;36m•\x1b[0m {} \x1b[1;36m{}\x1b[0m {}\n",
-        item1_prefix, "ls, top, vim, ssh", item1_suffix
-    ));
-
     let item2_prefix = t("shell.welcome2.quick_start.item2_prefix");
     let item2_example = t("shell.welcome2.quick_start.item2_example");
-    out.push_str(&format!(
-        " \x1b[1;36m•\x1b[0m {} \x1b[1;36m{}\x1b[0m\n",
-        item2_prefix, item2_example
-    ));
-
     let item3_prefix = t("shell.welcome2.quick_start.item3_prefix");
     let item3_suffix_1 = t("shell.welcome2.quick_start.item3_suffix_1");
     let item3_keyword = t("shell.welcome2.quick_start.item3_keyword");
     let item3_suffix_2 = t("shell.welcome2.quick_start.item3_suffix_2");
-    out.push_str(&format!(
-        " \x1b[1;36m•\x1b[0m {} \x1b[1;36m{} {}\x1b[0m {}\n",
-        item3_prefix, item3_suffix_1, item3_keyword, item3_suffix_2
-    ));
+
+    let quick_1_prefix = format!(" • {}", item1_prefix);
+    let quick_2_prefix = format!(" • {}", item2_prefix);
+    let quick_3_prefix = format!(" • {}", item3_prefix);
+    let content_start = [
+        strip_ansi_len(&quick_1_prefix),
+        strip_ansi_len(&quick_2_prefix),
+        strip_ansi_len(&quick_3_prefix),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0)
+        + 1;
+
+    let mut quick_1 = String::new();
+    quick_1.push_str(&quick_1_prefix);
+    quick_1.push_str(&" ".repeat(content_start.saturating_sub(strip_ansi_len(&quick_1_prefix))));
+    quick_1.push_str("\x1b[1;36m");
+    quick_1.push_str(&cmd_ls);
+    quick_1.push_str("\x1b[0m, \x1b[1;36m");
+    quick_1.push_str(&cmd_top);
+    quick_1.push_str("\x1b[0m, \x1b[1;36m");
+    quick_1.push_str(&cmd_vim);
+    quick_1.push_str("\x1b[0m, \x1b[1;36m");
+    quick_1.push_str(&cmd_ssh);
+    quick_1.push_str("\x1b[0m");
+    quick_1.push_str(&item1_suffix);
+    out.push_str(&quick_1);
+    out.push('\n');
+
+    let mut quick_2 = String::new();
+    quick_2.push_str(&quick_2_prefix);
+    quick_2.push_str(&" ".repeat(content_start.saturating_sub(strip_ansi_len(&quick_2_prefix))));
+    let item2_parts: Vec<&str> = item2_example.split(';').collect();
+    if let Some(first_part) = item2_parts.first() {
+        quick_2.push_str(first_part);
+        for part in item2_parts.iter().skip(1) {
+            quick_2.push_str("\x1b[1;36m;\x1b[0m");
+            quick_2.push_str(part);
+        }
+    }
+    out.push_str(&quick_2);
+    out.push('\n');
+
+    let mut quick_3 = String::new();
+    quick_3.push_str(&quick_3_prefix);
+    quick_3.push_str(&" ".repeat(content_start.saturating_sub(strip_ansi_len(&quick_3_prefix))));
+    quick_3.push_str(&item3_suffix_1);
+    quick_3.push_str("\x1b[1;36m");
+    quick_3.push_str(&item3_keyword);
+    quick_3.push_str("\x1b[0m");
+    quick_3.push_str(&item3_suffix_2);
+    out.push_str(&quick_3);
+    out.push('\n');
 
     out.push('\n');
 
@@ -405,6 +461,10 @@ mod tests {
             "should contain rounded box bottom-right"
         );
         assert!(result.contains("gpt-4"), "should contain model name");
+        assert!(
+            result.contains(">_ AI Shell v0.1.0"),
+            "should contain titled panel with version"
+        );
         assert!(result.contains("#3"), "should contain skill count");
     }
 
@@ -412,9 +472,69 @@ mod tests {
     fn test_render_welcome_contains_quick_start() {
         let result = render_welcome("0.1.0", "gpt-4", 0);
         assert!(result.contains("•"), "should contain bullet points");
+        assert!(result.contains("ls"), "should contain ls example command");
+        assert!(result.contains("top"), "should contain top example command");
+        assert!(result.contains("vim"), "should contain vim example command");
+        assert!(result.contains("ssh"), "should contain ssh example command");
+    }
+
+    #[test]
+    fn test_render_welcome_uses_default_logo_color() {
+        let result = render_welcome("0.1.0", "gpt-4", 0);
         assert!(
-            result.contains("ls, top, vim, ssh"),
-            "should contain example commands"
+            !result.contains("\x1b[38;5;250m"),
+            "logo should not use grayscale gradient colors"
         );
+    }
+
+    #[test]
+    fn test_render_welcome_starts_with_blank_line() {
+        let result = render_welcome("0.1.0", "gpt-4", 0);
+        assert!(
+            result.starts_with('\n'),
+            "welcome banner should leave a blank line above the logo"
+        );
+    }
+
+    #[test]
+    fn test_render_welcome_aligns_quick_start_content() {
+        let result = render_welcome("0.1.0", "gpt-4", 0);
+        let item1_prefix = t("shell.welcome2.quick_start.item1_prefix");
+        let item2_prefix = t("shell.welcome2.quick_start.item2_prefix");
+        let item3_prefix = t("shell.welcome2.quick_start.item3_prefix");
+        let item2_example = t("shell.welcome2.quick_start.item2_example");
+        let item3_suffix_1 = t("shell.welcome2.quick_start.item3_suffix_1");
+
+        let item1_line = result
+            .lines()
+            .find(|line| line.contains(&item1_prefix))
+            .expect("item1 line should exist");
+        let item2_line = result
+            .lines()
+            .find(|line| line.contains(&item2_prefix))
+            .expect("item2 line should exist");
+        let item3_line = result
+            .lines()
+            .find(|line| line.contains(&item3_prefix))
+            .expect("item3 line should exist");
+
+        let item1_anchor = item1_line.find("ls").expect("item1 content should exist");
+        let item2_first_part = item2_example
+            .split(';')
+            .next()
+            .expect("item2 example should have content");
+        let item2_anchor = item2_line
+            .find(item2_first_part)
+            .expect("item2 content should exist");
+        let item3_anchor = item3_line
+            .find(&item3_suffix_1)
+            .expect("item3 content should exist");
+
+        let item1_column = strip_ansi_len(&item1_line[..item1_anchor]);
+        let item2_column = strip_ansi_len(&item2_line[..item2_anchor]);
+        let item3_column = strip_ansi_len(&item3_line[..item3_anchor]);
+
+        assert_eq!(item1_column, item2_column);
+        assert_eq!(item1_column, item3_column);
     }
 }

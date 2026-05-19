@@ -302,7 +302,7 @@ shell:
       item2_prefix: "Ask AI: "
       item2_example: "Start with ; (e.g., ; how to find large files)"
       item3_prefix: "Get help:"
-      item3_suffix_1: "Type"
+      item3_suffix_1: "Type "
       item3_keyword: "help"
       item3_suffix_2: " to see built-in help and usage."
     risk: "AI-generated content may be risky, please verify carefully."
