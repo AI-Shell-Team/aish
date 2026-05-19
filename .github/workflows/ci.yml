@@ -68,10 +68,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: clippy, rustfmt
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: clippy,rustfmt
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -84,10 +92,10 @@ jobs:
             ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: make format-check
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: make lint
 
       - name: Run tests
         run: cargo test --workspace
@@ -96,7 +104,7 @@ jobs:
         run: ./packaging/tests/release_scripts_smoke.sh
 
       - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl --toolchain "${{ steps.rust_toolchain.outputs.channel }}"
 
       - name: Build release binary (musl)
         run: cargo build --release --target x86_64-unknown-linux-musl
@@ -123,9 +131,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
           targets: x86_64-unknown-linux-musl
 
       - name: Install musl tools

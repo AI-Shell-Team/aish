@@ -31,8 +31,10 @@ Welcome to make Shell smarter!
 - Test locally with the Rust binary: `cargo run --bin aish -- --help`
 - Run Rust tests: `cargo test --workspace`
 - Run packaging script smoke tests: `./packaging/tests/release_scripts_smoke.sh`
-- Run formatting: `cargo fmt --all`
-- Run linting: `cargo clippy --all-targets -- -D warnings`
+- Use the pinned repo toolchain from `rust-toolchain.toml` for local validation
+- Run formatting: `make format`
+- Run linting: `make lint`
+- Run the full local CI baseline: `make ci-check`
 - Ensure CI checks pass (if configured)
 - Keep PRs focused (one thing per PR; do not mix unrelated concerns)
 - Describe what & why in your PR description
