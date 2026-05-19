@@ -261,17 +261,19 @@ impl LlmSession {
         // The first call creates a session-level trace; subsequent turns
         // reuse the same trace so all generations/spans are grouped together.
         let trace_id = if let Some(ref langfuse) = self.langfuse {
-            let mut session_id_guard = self.langfuse_session_id.lock().unwrap();
-            if session_id_guard.is_none() {
+            let existing_trace_id = self.langfuse_session_id.lock().unwrap().clone();
+            let trace_id = if let Some(id) = existing_trace_id {
+                Some(id)
+            } else {
                 let id = langfuse
                     .trace_session("session", &serde_json::json!({"session_start": true}))
                     .await;
-                *session_id_guard = Some(id);
-            }
-            drop(session_id_guard);
+                let mut session_id_guard = self.langfuse_session_id.lock().unwrap();
+                Some(session_id_guard.get_or_insert_with(|| id.clone()).clone())
+            };
             self.langfuse_turn_counter
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.langfuse_session_id.lock().unwrap().clone()
+            trace_id
         } else {
             None
         };
