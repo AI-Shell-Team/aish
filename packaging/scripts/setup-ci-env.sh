@@ -23,6 +23,21 @@ default_build_target() {
 
 TARGET="${AISH_BUILD_TARGET:-$(default_build_target)}"
 
+resolve_rust_toolchain() {
+    local toolchain_file="${AISH_RUST_TOOLCHAIN_FILE:-rust-toolchain.toml}"
+
+    if [[ -n "${AISH_RUST_TOOLCHAIN:-}" ]]; then
+        printf '%s\n' "$AISH_RUST_TOOLCHAIN"
+        return 0
+    fi
+
+    if [[ -f "$toolchain_file" ]]; then
+        sed -n 's/^channel = "\(.*\)"$/\1/p' "$toolchain_file" | head -n 1
+    fi
+}
+
+RUST_TOOLCHAIN="$(resolve_rust_toolchain)"
+
 run_as_root() {
     if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
         "$@"
@@ -54,9 +69,14 @@ target_cc_wrapper_name() {
 
 ensure_rust_target() {
     local target="$1"
+    local toolchain="${2:-}"
 
     if command -v rustup >/dev/null 2>&1; then
-        rustup target add "$target"
+        if [[ -n "$toolchain" ]]; then
+            rustup target add "$target" --toolchain "$toolchain"
+        else
+            rustup target add "$target"
+        fi
         return 0
     fi
 
@@ -142,7 +162,16 @@ if [[ -n "${GITHUB_PATH:-}" && -d "$HOME/.cargo/bin" ]]; then
     echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 fi
 
-ensure_rust_target "$TARGET"
+if [[ -n "$RUST_TOOLCHAIN" ]] && command -v rustup >/dev/null 2>&1; then
+    rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+    export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+fi
+
+if [[ -n "${GITHUB_ENV:-}" && -n "$RUST_TOOLCHAIN" ]]; then
+    echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+fi
+
+ensure_rust_target "$TARGET" "$RUST_TOOLCHAIN"
 configure_musl_cc "$TARGET"
 
 cargo --version

@@ -1,4 +1,4 @@
-.PHONY: help test packaging-test prepare-release-files lint format build build-binary build-bundle install clean
+.PHONY: help test packaging-test prepare-release-files lint format format-check ci-check build build-binary build-bundle install clean
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
@@ -28,6 +28,7 @@ help:
 	@echo "  make lint           Run clippy"
 	@echo "  make format         Format code"
 	@echo "  make format-check   Check code formatting"
+	@echo "  make ci-check       Run the same local validation gates as CI"
 	@echo "  make clean          Clean build artifacts"
 
 test:
@@ -49,6 +50,8 @@ format:
 
 format-check:
 	cargo fmt --all -- --check
+
+ci-check: format-check lint test
 
 build:
 	./build.sh
