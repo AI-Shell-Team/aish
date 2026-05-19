@@ -302,9 +302,9 @@ shell:
       item2_prefix: "向 AI 提问："
       item2_example: "以 `;` 开头提问(如：; 如何查找大文件？)"
       item3_prefix: "获取帮助："
-      item3_suffix_1: "输入"
+      item3_suffix_1: "输入 "
       item3_keyword: "help"
-      item3_suffix_2: "查看内置帮助与用法"
+      item3_suffix_2: " 查看内置帮助与用法"
     risk: "AI 生成内容有风险，请仔细甄别！"
     skills_loaded_suffix: " 已加载"
 
