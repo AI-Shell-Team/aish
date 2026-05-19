@@ -894,7 +894,11 @@ mod tests {
 
         let result = mgr.inject_knowledge_stable("skills", content);
         assert!(!result, "second call with same content should return false");
-        assert_eq!(mgr.get_context_size(), 1, "message count should remain unchanged");
+        assert_eq!(
+            mgr.get_context_size(),
+            1,
+            "message count should remain unchanged"
+        );
     }
 
     #[test]
@@ -906,7 +910,11 @@ mod tests {
         let result =
             mgr.inject_knowledge_stable("skills", "<available-skills>\nnew\n</available-skills>");
         assert!(result, "call with different content should return true");
-        assert_eq!(mgr.get_context_size(), 1, "old message replaced, count stays 1");
+        assert_eq!(
+            mgr.get_context_size(),
+            1,
+            "old message replaced, count stays 1"
+        );
         assert_eq!(
             mgr.messages[0].content,
             "<available-skills>\nnew\n</available-skills>"
