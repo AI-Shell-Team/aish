@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Verifier la configuration de Langfuse"
   setup_command_help: "Executer la configuration interactive et quitter"
   check_tool_support_command_help: "Depanner la verification en direct de la prise en charge des appels d'outils"
+  resume_failed: "Echec de la reprise de session : {error}"
 
   option:
     model: "Modele LLM a utiliser ; peut aussi etre defini via AISH_MODEL ou le fichier de configuration."
@@ -222,6 +223,17 @@ shell:
     iteration_limit_reached: "{count} iterations d'appels d'outils terminees."
     iteration_limit_title: "⏸ Limite d'appels d'outils atteinte"
     iteration_continue_prompt: "Continuer ? [Y/n]"
+  resume:
+    exit_command: "Reprendre avec : aish resume {session_id}"
+    usage: "Utilisation : /resume [session_id]"
+    session_store_unavailable: "Le stockage des sessions n'est pas disponible."
+    no_sessions: "Aucune session precedente trouvee."
+    recent_header: "Sessions recentes ({limit} max) :"
+    list_hint: "Reprendre avec : /resume <session_id>"
+    list_failed: "Impossible de lister les sessions : {error}"
+    not_found: "Session introuvable : {session_id}"
+    cwd_missing: "Le repertoire de travail enregistre n'existe plus ; conservation du repertoire courant : {cwd}"
+    resumed: "Session reprise : {session_id}"
   ask_user:
     title: "Selectionnez une option"
     custom_label: "Personnalise :"

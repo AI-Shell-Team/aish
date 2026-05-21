@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Langfuse の設定を確認します"
   setup_command_help: "対話式セットアップを実行して終了します"
   check_tool_support_command_help: "ツール呼び出しのライブ検証をデバッグします"
+  resume_failed: "セッションの復元に失敗しました: {error}"
 
   option:
     model: "使用する LLM モデル。AISH_MODEL または設定ファイルでも指定できます。"
@@ -222,6 +223,17 @@ shell:
     iteration_limit_reached: "{count} 回のツール呼び出しが完了しました。"
     iteration_limit_title: "⏸ ツール呼び出し上限に達しました"
     iteration_continue_prompt: "続行しますか？[Y/n]"
+  resume:
+    exit_command: "復元するには: aish resume {session_id}"
+    usage: "使い方: /resume [session_id]"
+    session_store_unavailable: "セッションストアを利用できません。"
+    no_sessions: "以前のセッションは見つかりませんでした。"
+    recent_header: "最近のセッション（最大 {limit} 件）:"
+    list_hint: "復元するには: /resume <session_id>"
+    list_failed: "セッション一覧の取得に失敗しました: {error}"
+    not_found: "セッションが見つかりません: {session_id}"
+    cwd_missing: "保存された作業ディレクトリは存在しません。現在のディレクトリに留まります: {cwd}"
+    resumed: "セッションを復元しました: {session_id}"
   ask_user:
     title: "オプションを選択"
     custom_label: "カスタム:"

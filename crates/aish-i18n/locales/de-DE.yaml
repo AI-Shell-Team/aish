@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Langfuse-Konfiguration prüfen"
   setup_command_help: "Interaktive Einrichtung ausführen und beenden"
   check_tool_support_command_help: "Live-Prüfung der Tool-Call-Unterstützung debuggen"
+  resume_failed: "Sitzung konnte nicht fortgesetzt werden: {error}"
 
   option:
     model: "Zu verwendendes LLM-Modell; kann auch über AISH_MODEL oder die Konfigurationsdatei gesetzt werden."
@@ -222,6 +223,17 @@ shell:
     iteration_limit_reached: "{count} Tool-Aufruf-Iterationen abgeschlossen."
     iteration_limit_title: "⏸ Tool-Aufruf-Limit erreicht"
     iteration_continue_prompt: "Fortfahren? [Y/n]"
+  resume:
+    exit_command: "Fortsetzen mit: aish resume {session_id}"
+    usage: "Verwendung: /resume [session_id]"
+    session_store_unavailable: "Sitzungsspeicher ist nicht verfügbar."
+    no_sessions: "Keine früheren Sitzungen gefunden."
+    recent_header: "Letzte Sitzungen (max. {limit}):"
+    list_hint: "Fortsetzen mit: /resume <session_id>"
+    list_failed: "Sitzungen konnten nicht aufgelistet werden: {error}"
+    not_found: "Sitzung nicht gefunden: {session_id}"
+    cwd_missing: "Das gespeicherte Arbeitsverzeichnis existiert nicht mehr; aktuelles Verzeichnis wird beibehalten: {cwd}"
+    resumed: "Sitzung fortgesetzt: {session_id}"
   ask_user:
     title: "Option auswählen"
     custom_label: "Benutzerdefiniert:"

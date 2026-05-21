@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Comprobar la configuración de Langfuse"
   setup_command_help: "Ejecutar la configuración interactiva y salir"
   check_tool_support_command_help: "Depurar la comprobación en vivo de soporte de llamadas a herramientas"
+  resume_failed: "No se pudo reanudar la sesión: {error}"
 
   option:
     model: "Modelo LLM que se va a usar; también puede definirse mediante AISH_MODEL o el archivo de configuración."
@@ -222,6 +223,17 @@ shell:
     iteration_limit_reached: "Se han completado {count} iteraciones de llamadas a herramientas."
     iteration_limit_title: "⏸ Límite de llamadas a herramientas alcanzado"
     iteration_continue_prompt: "¿Continuar? [Y/n]"
+  resume:
+    exit_command: "Reanudar con: aish resume {session_id}"
+    usage: "Uso: /resume [session_id]"
+    session_store_unavailable: "El almacén de sesiones no está disponible."
+    no_sessions: "No se encontraron sesiones anteriores."
+    recent_header: "Sesiones recientes ({limit} máx.):"
+    list_hint: "Reanudar con: /resume <session_id>"
+    list_failed: "No se pudieron listar las sesiones: {error}"
+    not_found: "Sesión no encontrada: {session_id}"
+    cwd_missing: "El directorio de trabajo guardado ya no existe; se conserva el directorio actual: {cwd}"
+    resumed: "Sesión reanudada: {session_id}"
   ask_user:
     title: "Selecciona una opción"
     custom_label: "Personalizado:"

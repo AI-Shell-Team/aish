@@ -152,6 +152,8 @@ fn test_classify_input_special_command() {
     // Test 11: Special command classification
     assert_eq!(classify_input("/model gpt-4"), InputIntent::SpecialCommand);
     assert_eq!(classify_input("/setup"), InputIntent::SpecialCommand);
+    assert_eq!(classify_input("/resume"), InputIntent::SpecialCommand);
+    assert_eq!(classify_input("/resume 1234"), InputIntent::SpecialCommand);
     assert_eq!(
         classify_input("  /model claude-3"),
         InputIntent::SpecialCommand

@@ -62,6 +62,12 @@ enum Commands {
     /// Run the AI Shell (default)
     Run,
 
+    /// Resume a previous AI Shell session
+    Resume {
+        /// Session UUID to resume
+        session_id: String,
+    },
+
     /// Show information about AI Shell
     Info,
 
@@ -188,6 +194,7 @@ fn main() {
 
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => run_shell(config),
+        Commands::Resume { session_id } => run_shell_resume(config, &session_id),
         Commands::Info => show_info(&config),
         Commands::Setup => run_setup(&mut config),
         Commands::ModelsUsage => show_models_usage(&config),
@@ -261,6 +268,38 @@ fn run_shell(mut config: aish_config::ConfigModel) {
         }
         Err(e) => {
             eprintln!("Failed to initialize shell: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_shell_resume(mut config: aish_config::ConfigModel, session_id: &str) {
+    // Auto-trigger setup wizard on first run if config is incomplete
+    if aish_shell::needs_interactive_setup(&config) {
+        println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
+        run_setup(&mut config);
+        let config_path = aish_config::ConfigLoader::default_config_path();
+        if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
+            config = loaded;
+        }
+    }
+
+    match aish_shell::AishShell::resume(config, session_id) {
+        Ok(mut shell) => {
+            if let Err(e) = shell.run() {
+                eprintln!("Shell error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "{}",
+                aish_i18n::t_with_args("cli.resume_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            );
             std::process::exit(1);
         }
     }

@@ -17,6 +17,7 @@ cli:
   auth_configured: "Auth configured for {provider}."
   default_model_set_success: "Default model set to: {model}"
   save_config_failed: "Failed to save config: {error}"
+  resume_failed: "Failed to resume session: {error}"
 
   uninstall:
     title: "AI Shell Uninstall"
@@ -422,6 +423,18 @@ shell:
     iteration_limit_reached: "{count} tool call iterations completed."
     iteration_limit_title: "⏸ Tool Call Limit Reached"
     iteration_continue_prompt: "Continue? [Y/n]"
+
+  resume:
+    exit_command: "Resume with: aish resume {session_id}"
+    usage: "Usage: /resume [session_id]"
+    session_store_unavailable: "Session store is not available."
+    no_sessions: "No previous sessions found."
+    recent_header: "Recent sessions ({limit} max):"
+    list_hint: "Resume with: /resume <session_id>"
+    list_failed: "Failed to list sessions: {error}"
+    not_found: "Session not found: {session_id}"
+    cwd_missing: "Saved cwd no longer exists, staying in current directory: {cwd}"
+    resumed: "Resumed session: {session_id}"
 
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; and press Enter to auto-analyze and fix, or enter the next command directly."

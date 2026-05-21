@@ -16,5 +16,5 @@
 pub mod models;
 pub mod store;
 
-pub use models::{HistoryEntry, SessionRecord};
+pub use models::{HistoryEntry, SessionContextMessage, SessionRecord, SessionStateSnapshot};
 pub use store::SessionStore;

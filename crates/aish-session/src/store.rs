@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use aish_core::{AishError, Result};
 
-use crate::models::{HistoryEntry, SessionRecord};
+use crate::models::{HistoryEntry, SessionRecord, SessionStateSnapshot};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -84,7 +84,10 @@ impl SessionStore {
         let uuid = Uuid::new_v4().to_string();
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let state = serde_json::Value::Object(Default::default());
+        let state = serde_json::to_value(SessionStateSnapshot {
+            updated_at: Some(now),
+            ..SessionStateSnapshot::default()
+        })?;
         let state_str = serde_json::to_string(&state)?;
         let user = std::env::var("USER").ok();
 
@@ -104,6 +107,40 @@ impl SessionStore {
             run_user: user,
             state,
         })
+    }
+
+    /// Update the persisted state snapshot for a session.
+    pub fn update_session_state(&self, uuid: &str, snapshot: &SessionStateSnapshot) -> Result<()> {
+        let state_str = serde_json::to_string(snapshot)?;
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE sessions SET state = ?2 WHERE session_uuid = ?1",
+                params![uuid, state_str],
+            )
+            .map_err(|e| AishError::Session(format!("failed to update session state: {e}")))?;
+
+        if updated == 0 {
+            return Err(AishError::Session(format!(
+                "session not found for state update: {uuid}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Delete a session and its command history.
+    pub fn delete_session(&self, uuid: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM history WHERE session_uuid = ?1", params![uuid])
+            .map_err(|e| AishError::Session(format!("failed to delete session history: {e}")))?;
+        self.conn
+            .execute(
+                "DELETE FROM sessions WHERE session_uuid = ?1",
+                params![uuid],
+            )
+            .map_err(|e| AishError::Session(format!("failed to delete session: {e}")))?;
+        Ok(())
     }
 
     /// Retrieve a session by its UUID.
@@ -135,18 +172,18 @@ impl SessionStore {
         }
     }
 
-    /// List the most recent sessions, ordered by creation time descending.
+    /// List the most recent sessions, ordered by last state update descending.
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionRecord>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT session_uuid, created_at, model, api_base, run_user, state
-             FROM sessions ORDER BY created_at DESC LIMIT ?1",
+             FROM sessions",
             )
             .map_err(|e| AishError::Session(format!("failed to prepare list_sessions: {e}")))?;
 
         let rows = stmt
-            .query_map(params![limit], |row| {
+            .query_map([], |row| {
                 Ok(SessionRecord {
                     session_uuid: row.get(0)?,
                     created_at: parse_datetime(&row.get::<_, String>(1)?),
@@ -165,6 +202,13 @@ impl SessionStore {
                 row.map_err(|e| AishError::Session(format!("failed to read session row: {e}")))?,
             );
         }
+
+        sessions.sort_by(|a, b| {
+            let a_updated = a.state_snapshot().updated_at.unwrap_or(a.created_at);
+            let b_updated = b.state_snapshot().updated_at.unwrap_or(b.created_at);
+            b_updated.cmp(&a_updated)
+        });
+        sessions.truncate(limit);
 
         Ok(sessions)
     }
@@ -189,7 +233,18 @@ impl SessionStore {
             format!("failed to insert history entry: {e}")
         ))?;
 
+        self.touch_session(&entry.session_uuid, entry.created_at)?;
+
         Ok(self.conn.last_insert_rowid())
+    }
+
+    fn touch_session(&self, uuid: &str, updated_at: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        if let Some(record) = self.get_session(uuid)? {
+            let mut snapshot = record.state_snapshot();
+            snapshot.updated_at = Some(updated_at);
+            self.update_session_state(uuid, &snapshot)?;
+        }
+        Ok(())
     }
 
     /// Retrieve command history for a session, newest first.
@@ -241,4 +296,66 @@ fn parse_datetime(s: &str) -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(|_| chrono::Utc::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{SessionContextMessage, SessionStateSnapshot};
+    use aish_core::MemoryType;
+
+    #[test]
+    fn update_session_state_round_trips_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        let record = store
+            .create_session("test-model", Some("http://localhost"))
+            .unwrap();
+        let snapshot = SessionStateSnapshot {
+            cwd: Some("/tmp".to_string()),
+            summary_preview: Some("summary".to_string()),
+            context_messages_snapshot: vec![SessionContextMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+            }],
+            updated_at: Some(Utc::now()),
+        };
+
+        store
+            .update_session_state(&record.session_uuid, &snapshot)
+            .unwrap();
+
+        let loaded = store.get_session(&record.session_uuid).unwrap().unwrap();
+        let loaded_snapshot = loaded.state_snapshot();
+        assert_eq!(loaded_snapshot.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(loaded_snapshot.summary_preview.as_deref(), Some("summary"));
+        assert_eq!(loaded_snapshot.context_messages_snapshot.len(), 1);
+    }
+
+    #[test]
+    fn list_sessions_orders_by_snapshot_update_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        let older = store.create_session("older", None).unwrap();
+        let newer = store.create_session("newer", None).unwrap();
+
+        store
+            .update_session_state(
+                &older.session_uuid,
+                &SessionStateSnapshot {
+                    updated_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+                    ..SessionStateSnapshot::default()
+                },
+            )
+            .unwrap();
+
+        let sessions = store.list_sessions(2).unwrap();
+        assert_eq!(sessions[0].session_uuid, older.session_uuid);
+        assert_eq!(sessions[1].session_uuid, newer.session_uuid);
+    }
 }
