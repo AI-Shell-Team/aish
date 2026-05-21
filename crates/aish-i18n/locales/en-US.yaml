@@ -382,6 +382,16 @@ shell:
     alternative:
       generic: "Please manually review this command and verify impact before execution."
       etc_manual: "If you must modify files under /etc, prefer a manual change process with backups/change management."
+    secret:
+      title: "Security Warning"
+      detected: "Detected sensitive data in input:\n  {reasons}\n\nChoose how to proceed:"
+      redact: "Replace with env vars (safe)"
+      allow: "Send plaintext to AI"
+      abort: "Cancel"
+      aborted: "Aborted: sensitive data detected."
+      redacted: "Replaced {count} secret(s) with env var placeholders (stored in memory only, not sent to AI)"
+      restored: "(Restored {count} env var(s) from in-memory vault, not sent to AI)"
+      option_esc: "[Enter to confirm, ↑↓ to select, Esc to cancel]"
     options_header: "Options"
     option:
       approve: "Approve"

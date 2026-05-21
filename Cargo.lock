@@ -167,6 +167,7 @@ dependencies = [
  "aish-core",
  "aish-hosts",
  "aish-i18n",
+ "aish-security",
  "base64 0.22.1",
  "chrono",
  "futures",
@@ -198,11 +199,13 @@ name = "aish-security"
 version = "0.3.0-beta.3"
 dependencies = [
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

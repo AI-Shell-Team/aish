@@ -66,6 +66,8 @@ pub struct SecurityPolicy {
     pub invalid_fallback_rules: Vec<InvalidFallbackRule>,
     #[serde(default)]
     pub validation_issues: Vec<ValidationIssue>,
+    #[serde(default)]
+    pub secret_patterns: Vec<crate::secret::CustomPattern>,
 }
 
 impl Default for SecurityPolicy {
@@ -80,6 +82,7 @@ impl Default for SecurityPolicy {
             rules: default_rules(),
             invalid_fallback_rules: Vec::new(),
             validation_issues: Vec::new(),
+            secret_patterns: Vec::new(),
         }
     }
 }
@@ -428,7 +431,7 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         .filter(|item| mapping_get(item, "path").is_some())
         .collect();
 
-    let (invalid_fallback_rules, validation_issues) = parse_invalid_fallback_rules(&v2_items);
+    let (invalid_fallback_rules, mut validation_issues) = parse_invalid_fallback_rules(&v2_items);
 
     let valid_items: Vec<&Mapping> = v2_items
         .iter()
@@ -448,6 +451,30 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
     let mut rules = default_rules();
     rules.extend(parse_v2_rules(&valid_items));
 
+    let secret_patterns: Vec<crate::secret::CustomPattern> = root
+        .and_then(|m| mapping_get(m, "secret_patterns"))
+        .and_then(Value::as_sequence)
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| {
+                    let yaml_str = serde_yaml::to_string(v).unwrap_or_default();
+                    match serde_yaml::from_value(v.clone()) {
+                        Ok(pattern) => Some(pattern),
+                        Err(e) => {
+                            validation_issues.push(ValidationIssue {
+                                rule_id: None,
+                                field: "secret_patterns".to_string(),
+                                value: Some(yaml_str.trim().to_string()),
+                                message: Some(format!("Invalid custom pattern: {e}")),
+                            });
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     SecurityPolicy {
         enable_sandbox,
         sandbox_off_action,
@@ -458,6 +485,7 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         rules,
         invalid_fallback_rules,
         validation_issues,
+        secret_patterns,
     }
 }
 

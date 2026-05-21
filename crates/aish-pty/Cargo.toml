@@ -7,6 +7,7 @@ edition.workspace = true
 aish-core.workspace = true
 aish-hosts.workspace = true
 aish-i18n.workspace = true
+aish-security.workspace = true
 nix.workspace = true
 tokio.workspace = true
 serde.workspace = true

@@ -323,9 +323,17 @@ impl SessionInterceptor {
 
     /// Run the AI callback. The callback returns an AiResponse containing
     /// an optional command and display text (or None on error).
-    pub fn call_ai(&self, question: String) -> Option<AiResponse> {
+    pub fn call_ai(
+        &self,
+        question: String,
+        secret_vault: Option<&std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
+    ) -> Option<AiResponse> {
         self.ai_callback.as_ref().and_then(|cb| {
-            let recent = self.recent_output(4000);
+            let mut recent = self.recent_output(4000);
+            if let Some(vault) = secret_vault {
+                let (redacted, _) = vault.lock().unwrap().redact_output(&recent);
+                recent = redacted;
+            }
             cb(AiQuery {
                 question,
                 recent_output: recent,
@@ -564,7 +572,7 @@ mod tests {
         let mut ic = SessionInterceptor::new(Some(noop_callback()));
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
-        let resp = ic.call_ai("test".to_string());
+        let resp = ic.call_ai("test".to_string(), None);
         assert!(resp.is_some());
         let r = resp.unwrap();
         assert_eq!(r.command, Some("echo test".to_string()));
@@ -573,7 +581,7 @@ mod tests {
     #[test]
     fn test_call_ai_returns_none() {
         let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()));
-        let cmd = ic.call_ai("test".to_string());
+        let cmd = ic.call_ai("test".to_string(), None);
         assert!(cmd.is_none());
     }
 

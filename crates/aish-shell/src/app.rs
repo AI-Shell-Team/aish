@@ -15,7 +15,7 @@ use aish_llm::{
     CancellationToken, ChatMessage, LlmCallbackResult, LlmSession,
 };
 use aish_memory::MemoryManager;
-use aish_security::{SecurityManager, SecurityPolicy};
+use aish_security::{load_policy, SecurityManager};
 use aish_session::SessionStore;
 use aish_skills::hotreload::SkillHotReloader;
 use aish_skills::SkillManager;
@@ -235,6 +235,9 @@ pub struct AishShell {
     pub config: ConfigModel,
     pub ai_handler: AiHandler,
     pub security_manager: SecurityManager,
+    secret_check_closure:
+        std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync>,
+    secret_vault: std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>,
     pub session_store: Option<SessionStore>,
     pub skill_manager: SkillManager,
     pub skill_hot_reloader: Option<SkillHotReloader>,
@@ -305,7 +308,7 @@ impl AishShell {
         }
 
         // Initialize security manager (before tool registration)
-        let security_manager = SecurityManager::new(SecurityPolicy::default());
+        let security_manager = SecurityManager::new(load_policy(None));
 
         // Register tools
         let mut tool_registry = ToolRegistry::new();
@@ -314,6 +317,11 @@ impl AishShell {
         let mut bash_tool = aish_tools::bash::BashTool::new();
         bash_tool.set_cancellation_token(llm_session.cancellation_token_arc());
         bash_tool.set_pty_slot(pty_slot.clone());
+
+        // Shared secret vault slot — populated after AishShell construction.
+        let vault_slot: aish_tools::bash::VaultSlot =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        bash_tool.set_secret_vault(vault_slot.clone());
         tool_registry.register(Box::new(bash_tool));
         tool_registry.register(Box::new(aish_tools::fs::ReadFileTool::new()));
         tool_registry.register(Box::new(aish_tools::fs::WriteFileTool::new()));
@@ -995,11 +1003,27 @@ impl AishShell {
         // inside AiHandler which needs mutable access during each turn.
         let shell_skill_manager = SkillManager::new();
 
+        let secret_check_closure =
+            Self::build_secret_check_closure(security_manager.secret_scanner().clone());
+
+        let secret_vault = std::sync::Arc::new(std::sync::Mutex::new(
+            aish_security::secret::SecretVault::new(),
+        ));
+
+        // Inject the vault into BashTool's slot so command execution can
+        // restore $SECRET_* placeholders.
+        {
+            let mut guard = vault_slot.lock().unwrap();
+            *guard = Some(secret_vault.clone());
+        }
+
         Ok(Self {
             state,
             config,
             ai_handler,
             security_manager,
+            secret_check_closure,
+            secret_vault,
             session_store,
             skill_manager: shell_skill_manager,
             skill_hot_reloader,
@@ -1174,7 +1198,7 @@ impl AishShell {
             match input::classify_input(input) {
                 crate::types::InputIntent::Empty => {}
                 crate::types::InputIntent::Ai => {
-                    let question = input::extract_ai_question(input);
+                    let mut question = input::extract_ai_question(input);
 
                     // If just ";" with no question and there's a pending error,
                     // trigger error correction instead of a normal AI query.
@@ -1274,6 +1298,50 @@ impl AishShell {
                                 }
                             }
                             continue;
+                        }
+                    }
+
+                    // Security gate: detect secrets in AI input
+                    let decision = self.security_manager.check_ai_input(&question);
+                    if decision.require_confirmation {
+                        let reasons = decision
+                            .analysis
+                            .detected_secrets
+                            .as_ref()
+                            .map(|s| {
+                                s.iter()
+                                    .map(|m| m.format_reason())
+                                    .collect::<Vec<_>>()
+                                    .join("\n  ")
+                            })
+                            .unwrap_or_default();
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("reasons".to_string(), reasons);
+                        let title = t("shell.security.secret.title");
+                        let message = t_with_args("shell.security.secret.detected", &args);
+                        let choice = crate::tui::show_secret_dialog(&title, &message);
+                        match choice {
+                            crate::tui::SecretDialogChoice::Abort => {
+                                let aborted = t("shell.security.secret.aborted");
+                                println!("\x1b[33m{}\x1b[0m", aborted);
+                                continue;
+                            }
+                            crate::tui::SecretDialogChoice::Redact => {
+                                if let Some(secrets) = decision.analysis.detected_secrets {
+                                    let count = secrets.len();
+                                    let redacted = self
+                                        .secret_vault
+                                        .lock()
+                                        .unwrap()
+                                        .redact(&secrets, &question);
+                                    let mut rargs = std::collections::HashMap::new();
+                                    rargs.insert("count".to_string(), count.to_string());
+                                    let msg = t_with_args("shell.security.secret.redacted", &rargs);
+                                    println!("\x1b[33m{}\x1b[0m", msg);
+                                    question = redacted;
+                                }
+                            }
+                            crate::tui::SecretDialogChoice::Allow => {}
                         }
                     }
 
@@ -1805,7 +1873,13 @@ impl AishShell {
             let shared_host = Arc::new(Mutex::new(remote_host.clone()));
             let ai_cb =
                 Self::build_session_ai_callback(&self.config, &self.animation, shared_host.clone());
-            pty.send_command_interactive(command, ai_cb, Some(shared_host))
+            pty.send_command_interactive(
+                command,
+                ai_cb,
+                Some(shared_host),
+                Some(self.secret_check_closure.clone()),
+                Some(self.secret_vault.clone()),
+            )
         };
         let (exit_code, cwd, output) = match result {
             Ok(result) => result,
@@ -1852,9 +1926,18 @@ impl AishShell {
         } else {
             &output
         };
+
+        // Redact secrets from shell context before injecting into LLM context.
+        let (safe_output, _) = self
+            .secret_vault
+            .lock()
+            .unwrap()
+            .redact_output(output_preview);
+        let (safe_command, _) = self.secret_vault.lock().unwrap().redact_output(command);
+
         let mut entry = format!(
             "[Shell] {}\n<returncode>{}</returncode>\n<output>{}</output>",
-            command, exit_code, output_preview
+            safe_command, exit_code, safe_output
         );
         if let Some(ref new_cwd) = cwd_changed_to {
             entry.push_str(&format!("\n<cwd>{}</cwd>", new_cwd));
@@ -2090,7 +2173,7 @@ impl AishShell {
             .pty
             .lock()
             .unwrap()
-            .send_command_interactive(segment, None, None)
+            .send_command_interactive(segment, None, None, None, None)
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
@@ -2730,6 +2813,33 @@ impl AishShell {
                 result
             },
         )
+    }
+
+    /// Build a closure that checks AI input for secrets.
+    /// Returns Some(SshSecretCheckResult) if secrets found, None if clean.
+    fn build_secret_check_closure(
+        scanner: aish_security::secret::SecretScanner,
+    ) -> std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync> {
+        std::sync::Arc::new(move |input: &str| {
+            let secrets = scanner.scan(input);
+            if secrets.is_empty() {
+                return None;
+            }
+            let reasons = secrets
+                .iter()
+                .map(|s| s.format_reason())
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            let mut args = std::collections::HashMap::new();
+            args.insert("reasons".to_string(), reasons);
+            let title = aish_i18n::t("shell.security.secret.title");
+            let message = aish_i18n::t_with_args("shell.security.secret.detected", &args);
+            let warning = format!("\x1b[33m? {}:\x1b[0m {}", title, message);
+            Some(aish_pty::SshSecretCheckResult {
+                warning,
+                detected_secrets: secrets,
+            })
+        })
     }
 
     fn build_session_ai_callback(

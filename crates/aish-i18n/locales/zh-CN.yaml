@@ -382,6 +382,16 @@ shell:
     alternative:
       generic: "请人工复核该命令并在确认影响后再执行。"
       etc_manual: "如需修改 /etc 下文件，建议采用人工变更并配合变更管理或备份策略。"
+    secret:
+      title: "安全警告"
+      detected: "检测到输入中包含敏感数据：\n  {reasons}\n\n请选择处理方式："
+      redact: "替换为环境变量发送 (安全)"
+      allow: "明文发送给 AI"
+      abort: "取消"
+      aborted: "已取消：检测到敏感数据。"
+      redacted: "已将 {count} 个敏感数据替换为环境变量占位符（仅保存在内存中，未发送给 AI）"
+      restored: "（已还原 {count} 个环境变量，仅保存在内存中，未发送给 AI）"
+      option_esc: "[Enter 确认, ↑↓ 选择, Esc 取消]"
     options_header: "选项"
     option:
       approve: "允许"

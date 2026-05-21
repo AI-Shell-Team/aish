@@ -4,6 +4,7 @@ pub mod manager;
 pub mod policy;
 pub mod risk;
 mod sandbox;
+pub mod secret;
 pub mod sudo;
 pub mod types;
 

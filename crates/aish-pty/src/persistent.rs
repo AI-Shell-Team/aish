@@ -417,6 +417,10 @@ impl PersistentPty {
         command: &str,
         ai_callback: Option<Box<crate::AiCallback>>,
         shared_host: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+        secret_check: Option<
+            std::sync::Arc<dyn Fn(&str) -> Option<crate::SshSecretCheckResult> + Send + Sync>,
+        >,
+        secret_vault: Option<std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
         let mut interceptor = if is_session {
@@ -653,7 +657,7 @@ impl PersistentPty {
                             if probe_for_ai {
                                 probe_for_ai = false;
                                 if let Some(question) = pending_ai_question.take() {
-                                    let resp = interceptor.call_ai(question);
+                                    let resp = interceptor.call_ai(question, secret_vault.as_ref());
                                     interceptor.finish_ai();
                                     if let Some(response) = resp {
                                         pending_response = Some(response);
@@ -906,6 +910,29 @@ impl PersistentPty {
                             _ => false,
                         };
                         if approved {
+                            // Restore secret placeholders in the AI-generated command
+                            let mut cmd_restored = cmd.clone();
+                            if let Some(ref vault) = secret_vault {
+                                let vault_guard = vault.lock().unwrap();
+                                let (restored, count) = vault_guard.restore(cmd);
+                                if count > 0 {
+                                    let mut rargs = std::collections::HashMap::new();
+                                    rargs.insert("count".to_string(), count.to_string());
+                                    let msg = aish_i18n::t_with_args(
+                                        "shell.security.secret.restored",
+                                        &rargs,
+                                    );
+                                    let info = format!("\x1b[2m{}\x1b[0m\r\n", msg);
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            info.as_ptr() as *const libc::c_void,
+                                            info.len(),
+                                        );
+                                    }
+                                    cmd_restored = restored;
+                                }
+                            }
                             // Show "Running..." feedback
                             let running_msg = format!(
                                 "\x1b[90m{}\x1b[0m\r\n",
@@ -918,7 +945,7 @@ impl PersistentPty {
                                     running_msg.len(),
                                 );
                             }
-                            let safe_cmd = close_unclosed_heredoc(cmd);
+                            let safe_cmd = close_unclosed_heredoc(&cmd_restored);
                             skip_echo_cmd = Some(safe_cmd.clone());
                             let mut inject = safe_cmd.as_bytes().to_vec();
                             inject.push(b'\r');
@@ -1172,7 +1199,7 @@ impl PersistentPty {
                                         1,
                                     );
                                 },
-                                crate::StdinAction::TriggerAi(question) => {
+                                crate::StdinAction::TriggerAi(mut question) => {
                                     // Reset hard-cancel flag for a fresh AI session
                                     ai_cancelled = false;
                                     // Clear stdin shadow — the AI prefix
@@ -1242,6 +1269,80 @@ impl PersistentPty {
                                             b"\r\n".as_ptr() as *const libc::c_void,
                                             2,
                                         );
+                                    }
+
+                                    // Security gate: secret detection in AI input
+                                    if let Some(ref checker) = secret_check {
+                                        if let Some(result) = checker(&question) {
+                                            let choice = show_secret_dialog(
+                                                &result.warning,
+                                                libc::STDIN_FILENO,
+                                            );
+                                            match choice {
+                                                SshSecretChoice::Abort => {
+                                                    let abort_msg = format!(
+                                                        "\x1b[33m{}\x1b[0m\r\n",
+                                                        aish_i18n::t(
+                                                            "shell.security.secret.aborted"
+                                                        )
+                                                    );
+                                                    unsafe {
+                                                        libc::write(
+                                                            libc::STDOUT_FILENO,
+                                                            abort_msg.as_ptr()
+                                                                as *const libc::c_void,
+                                                            abort_msg.len(),
+                                                        );
+                                                        libc::write(
+                                                            self.master_fd,
+                                                            b"\r".as_ptr() as *const libc::c_void,
+                                                            1,
+                                                        );
+                                                    }
+                                                    interceptor.finish_ai();
+                                                    continue;
+                                                }
+                                                SshSecretChoice::Redact => {
+                                                    if let Some(ref vault) = secret_vault {
+                                                        let mut vault_guard = vault.lock().unwrap();
+                                                        let redacted = vault_guard.redact(
+                                                            &result.detected_secrets,
+                                                            &question,
+                                                        );
+                                                        let count = result.detected_secrets.len();
+                                                        let mut rargs =
+                                                            std::collections::HashMap::new();
+                                                        rargs.insert(
+                                                            "count".to_string(),
+                                                            count.to_string(),
+                                                        );
+                                                        let msg = aish_i18n::t_with_args(
+                                                            "shell.security.secret.redacted",
+                                                            &rargs,
+                                                        );
+                                                        let info =
+                                                            format!("\x1b[33m{}\x1b[0m\r\n", msg);
+                                                        unsafe {
+                                                            libc::write(
+                                                                libc::STDOUT_FILENO,
+                                                                info.as_ptr()
+                                                                    as *const libc::c_void,
+                                                                info.len(),
+                                                            );
+                                                        }
+                                                        // Replace question with redacted version
+                                                        question = redacted;
+                                                    } else {
+                                                        // Cannot honor "Redact" safely without vault support.
+                                                        interceptor.finish_ai();
+                                                        continue;
+                                                    }
+                                                }
+                                                SshSecretChoice::Allow => {
+                                                    // Proceed with original question unchanged
+                                                }
+                                            }
+                                        }
                                     }
 
                                     // Check for dossier commands before invoking AI
@@ -1324,7 +1425,7 @@ impl PersistentPty {
                                             continue;
                                         } else {
                                             // No probe needed, call AI now.
-                                            interceptor.call_ai(question)
+                                            interceptor.call_ai(question, secret_vault.as_ref())
                                         }
                                     };
                                     interceptor.finish_ai();
@@ -1494,7 +1595,8 @@ impl PersistentPty {
                                     if probe_for_ai {
                                         probe_for_ai = false;
                                         if let Some(question) = pending_ai_question.take() {
-                                            let resp = interceptor.call_ai(question);
+                                            let resp = interceptor
+                                                .call_ai(question, secret_vault.as_ref());
                                             interceptor.finish_ai();
                                             if let Some(response) = resp {
                                                 pending_response = Some(response);
@@ -1831,7 +1933,29 @@ impl PersistentPty {
                                 running_msg.len(),
                             );
                         }
-                        let safe_cmd = close_unclosed_heredoc(cmd);
+                        // Restore secret placeholders before execution.
+                        let mut cmd_restored = cmd.clone();
+                        if let Some(ref vault) = secret_vault {
+                            let (restored, count) = vault.lock().unwrap().restore(cmd);
+                            if count > 0 {
+                                let mut rargs = std::collections::HashMap::new();
+                                rargs.insert("count".to_string(), count.to_string());
+                                let msg = aish_i18n::t_with_args(
+                                    "shell.security.secret.restored",
+                                    &rargs,
+                                );
+                                let info = format!("\x1b[2m{}\x1b[0m\r\n", msg);
+                                unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        info.as_ptr() as *const libc::c_void,
+                                        info.len(),
+                                    );
+                                }
+                                cmd_restored = restored;
+                            }
+                        }
+                        let safe_cmd = close_unclosed_heredoc(&cmd_restored);
                         skip_echo_cmd = Some(safe_cmd.clone());
                         let mut inject = safe_cmd.as_bytes().to_vec();
                         inject.push(b'\r');
@@ -2276,6 +2400,143 @@ impl PersistentPty {
     }
 }
 
+// ---- secret detection confirmation for SSH sessions ----
+
+/// Render the warning + options + help into a byte buffer.
+/// Returns the buffer and the exact number of `\r\n` sequences it contains,
+/// which equals the number of cursor-up moves needed to return to the first row.
+fn render_secret_confirmation(warning: &str, options: &[&str], cursor: usize) -> (Vec<u8>, usize) {
+    let mut out = Vec::new();
+
+    // Warning message — replace \n with \r\n for terminal correctness
+    let warning_display = warning.replace('\n', "\r\n");
+    out.extend_from_slice(warning_display.as_bytes());
+    out.extend_from_slice(b"\r\n");
+
+    // Options with cursor highlight (inquire-style)
+    for (i, opt) in options.iter().enumerate() {
+        if i == cursor {
+            out.extend_from_slice(b"\x1b[36m> \x1b[1m");
+        } else {
+            out.extend_from_slice(b"  ");
+        }
+        out.extend_from_slice(opt.as_bytes());
+        out.extend_from_slice(b"\x1b[0m\r\n");
+    }
+
+    // Help line (no trailing \r\n — cursor stays on this row)
+    let esc_hint = aish_i18n::t("shell.security.secret.option_esc");
+    out.extend_from_slice(b"\x1b[2m");
+    out.extend_from_slice(esc_hint.as_bytes());
+    out.extend_from_slice(b"\x1b[0m");
+
+    // Count \r\n occurrences = exact up-movement needed from last row to first row
+    let up_moves = out.windows(2).filter(|w| w == b"\r\n").count();
+
+    (out, up_moves)
+}
+
+/// Choice for SSH secret dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SshSecretChoice {
+    Redact,
+    Allow,
+    Abort,
+}
+
+/// Display a three-option secret dialog with up/down selection (SSH path).
+fn show_secret_dialog(warning: &str, stdin_fd: libc::c_int) -> SshSecretChoice {
+    let option_redact = aish_i18n::t("shell.security.secret.redact");
+    let option_allow = aish_i18n::t("shell.security.secret.allow");
+    let option_abort = aish_i18n::t("shell.security.secret.abort");
+    let options = [
+        option_redact.as_str(),
+        option_allow.as_str(),
+        option_abort.as_str(),
+    ];
+    let choice_values = [
+        SshSecretChoice::Redact,
+        SshSecretChoice::Allow,
+        SshSecretChoice::Abort,
+    ];
+    // Default cursor on "Redact" (index 0, safest)
+    let mut cursor: usize = 0;
+
+    let (buf, up_moves) = render_secret_confirmation(warning, &options, cursor);
+    unsafe {
+        libc::write(
+            libc::STDOUT_FILENO,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+        );
+    }
+
+    loop {
+        match read_byte(stdin_fd) {
+            Some(byte) => match byte {
+                0x03 => {
+                    unsafe {
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            b"^C\r\n".as_ptr() as *const _,
+                            b"^C\r\n".len(),
+                        );
+                    }
+                    return SshSecretChoice::Abort;
+                }
+                0x1B => {
+                    if stdin_poll(stdin_fd, 50_000) {
+                        let next = read_byte(stdin_fd);
+                        if next == Some(b'[') {
+                            if let Some(final_byte) = consume_csi(stdin_fd) {
+                                match final_byte {
+                                    b'A' => {
+                                        if cursor > 0 {
+                                            cursor -= 1;
+                                        }
+                                    }
+                                    b'B' => {
+                                        if cursor < options.len() - 1 {
+                                            cursor += 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                let (buf, up) =
+                                    render_secret_confirmation(warning, &options, cursor);
+                                let mut redraw = Vec::new();
+                                redraw
+                                    .extend_from_slice(format!("\x1b[{}A\r\x1b[J", up).as_bytes());
+                                redraw.extend_from_slice(&buf);
+                                unsafe {
+                                    libc::write(
+                                        libc::STDOUT_FILENO,
+                                        redraw.as_ptr() as *const libc::c_void,
+                                        redraw.len(),
+                                    );
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    unsafe {
+                        libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const _, 2);
+                    }
+                    return SshSecretChoice::Abort;
+                }
+                b'\r' | b'\n' => {
+                    unsafe {
+                        libc::write(libc::STDOUT_FILENO, b"\r\n".as_ptr() as *const _, 2);
+                    }
+                    return choice_values[cursor];
+                }
+                _ => {}
+            },
+            None => return SshSecretChoice::Abort,
+        }
+    }
+}
+
 // ---- ask_user helpers for SSH sessions ----
 
 /// Drain trailing bytes (e.g. `\n` or `\r`) from stdin after a single-byte
@@ -2544,7 +2805,11 @@ fn read_line_from_stdin_raw(
                 // Ctrl+C → always cancel
                 0x03 => {
                     unsafe {
-                        libc::write(libc::STDOUT_FILENO, b"^C\r\n".as_ptr() as *const _, 5);
+                        libc::write(
+                            libc::STDOUT_FILENO,
+                            b"^C\r\n".as_ptr() as *const _,
+                            b"^C\r\n".len(),
+                        );
                     }
                     return crate::AskUserAnswer::Cancelled;
                 }

@@ -9,7 +9,9 @@ use aish_llm::{
     ToolResult,
 };
 use aish_pty::{BashOffloadSettings, BashOutputOffload, CancelToken, PtyExecutor};
-use aish_security::{load_policy, SecurityDecision, SecurityManager, SecurityRequest};
+use aish_security::{
+    load_policy, secret::SecretVault, SecurityDecision, SecurityManager, SecurityRequest,
+};
 
 /// Large keep_bytes for the silent PTY executor to capture full command output.
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
@@ -80,6 +82,9 @@ impl Drop for InteractiveInputGuard {
     }
 }
 
+/// Shared vault slot for secret placeholder restoration.
+pub type VaultSlot = Arc<Mutex<Option<Arc<Mutex<SecretVault>>>>>;
+
 /// Tool for executing bash commands via PTY.
 pub struct BashTool {
     /// Shared cancellation token from the AI handler.
@@ -88,6 +93,8 @@ pub struct BashTool {
     cancellation_token: Option<Arc<CancellationToken>>,
     /// Shared slot for PersistentPty — set after PTY creation.
     pty_slot: PtySlot,
+    /// Shared vault for restoring $SECRET_* placeholders before command execution.
+    secret_vault: VaultSlot,
 }
 
 /// Cached translated description.
@@ -230,6 +237,7 @@ impl BashTool {
         Self {
             cancellation_token: None,
             pty_slot: Arc::new(Mutex::new(None)),
+            secret_vault: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -242,6 +250,41 @@ impl BashTool {
     /// Set the shared PersistentPty slot for Ctrl+Z/bg/fg support.
     pub fn set_pty_slot(&mut self, slot: PtySlot) {
         self.pty_slot = slot;
+    }
+
+    /// Set the shared secret vault for placeholder restoration.
+    pub fn set_secret_vault(&mut self, vault: VaultSlot) {
+        self.secret_vault = vault;
+    }
+
+    /// Restore `$SECRET_*` placeholders in the command to their actual values.
+    /// Returns `(restored_command, restore_count)`.
+    fn restore_secrets(&self, command: &str) -> (String, usize) {
+        let vault_arc = {
+            let guard = self.secret_vault.lock().unwrap();
+            guard.clone()
+        };
+        if let Some(vault) = vault_arc {
+            let vault = vault.lock().unwrap();
+            vault.restore(command)
+        } else {
+            (command.to_string(), 0)
+        }
+    }
+
+    /// Redact secret values from command output before sending to AI.
+    /// Returns `(redacted_text, count)`.
+    fn redact_output(&self, text: &str) -> (String, usize) {
+        let vault_arc = {
+            let guard = self.secret_vault.lock().unwrap();
+            guard.clone()
+        };
+        if let Some(vault) = vault_arc {
+            let vault = vault.lock().unwrap();
+            vault.redact_output(text)
+        } else {
+            (text.to_string(), 0)
+        }
     }
 
     /// Execute via PersistentPty — supports Ctrl+Z/bg/fg job control.
@@ -435,12 +478,15 @@ impl Tool for BashTool {
             return PreflightResult::Allow;
         };
 
+        // Restore secret placeholders so security checks run on the actual command.
+        let (command, _) = self.restore_secrets(command);
+
         let cwd = std::env::current_dir().ok();
-        security_preflight(command, cwd.as_deref(), None)
+        security_preflight(&command, cwd.as_deref(), None)
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
-        let command = match args.get("command").and_then(|c| c.as_str()) {
+        let raw_command = match args.get("command").and_then(|c| c.as_str()) {
             Some(cmd) => cmd,
             None => return ToolResult::error(aish_i18n::t("tools.bash.missing_command")),
         };
@@ -449,17 +495,28 @@ impl Tool for BashTool {
             Err(error) => return error,
         };
 
+        // Restore secret placeholders before execution.
+        let (command, _restore_count) = self.restore_secrets(raw_command);
+
         // Try PersistentPty path first (supports Ctrl+Z/bg/fg).
         let pty_arc = {
             let guard = self.pty_slot.lock().unwrap();
             guard.clone()
         };
-        if let Some(pty_arc) = pty_arc {
-            return self.execute_via_persistent_pty(command, timeout_secs, pty_arc);
+        let mut result = if let Some(pty_arc) = pty_arc {
+            self.execute_via_persistent_pty(&command, timeout_secs, pty_arc)
+        } else {
+            // Fallback: one-shot PtyExecutor.
+            self.execute_via_pty_executor(&command, timeout_secs)
+        };
+
+        // Redact secret values from output before returning to AI.
+        if result.ok {
+            let (redacted, _) = self.redact_output(&result.output);
+            result.output = redacted;
         }
 
-        // Fallback: one-shot PtyExecutor.
-        self.execute_via_pty_executor(command, timeout_secs)
+        result
     }
 }
 

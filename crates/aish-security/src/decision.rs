@@ -96,6 +96,8 @@ pub struct SecurityAnalysis {
     pub sandbox_off_action: Option<SandboxOffAction>,
     #[serde(default)]
     pub sandbox: SandboxStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_secrets: Option<Vec<crate::secret::SecretMatch>>,
 }
 
 impl Default for SecurityAnalysis {
@@ -113,6 +115,7 @@ impl Default for SecurityAnalysis {
             matched_paths: Vec::new(),
             sandbox_off_action: None,
             sandbox: SandboxStatus::default(),
+            detected_secrets: None,
         }
     }
 }
@@ -195,5 +198,26 @@ mod tests {
         assert_eq!(SandboxStatus::default().reason, None);
         assert_eq!(SandboxStatus::default().error, None);
         assert_eq!(SandboxStatus::default().exit_code, None);
+    }
+
+    #[test]
+    fn security_analysis_default_has_no_detected_secrets() {
+        let analysis = SecurityAnalysis::default();
+        assert!(analysis.detected_secrets.is_none());
+    }
+
+    #[test]
+    fn security_analysis_serializes_detected_secrets_roundtrip() {
+        let mut analysis = SecurityAnalysis::default();
+        analysis.detected_secrets = Some(vec![crate::secret::SecretMatch {
+            pattern_name: "Test Key".to_string(),
+            start: 5,
+            end: 20,
+            secret_type: crate::secret::SecretType::ApiKey,
+        }]);
+        let json = serde_json::to_string(&analysis).unwrap();
+        let deserialized: SecurityAnalysis = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.detected_secrets.is_some());
+        assert_eq!(deserialized.detected_secrets.unwrap().len(), 1);
     }
 }

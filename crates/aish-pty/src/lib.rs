@@ -24,6 +24,14 @@ pub mod session_interceptor;
 pub mod state_capture;
 pub mod types;
 
+/// Result returned by the SSH secret-check closure.
+pub struct SshSecretCheckResult {
+    /// Formatted warning message (title + detected secrets).
+    pub warning: String,
+    /// Detected secret matches for vault redaction.
+    pub detected_secrets: Vec<aish_security::secret::SecretMatch>,
+}
+
 pub use command_state::CommandState;
 pub use control::{decode_control_chunk, encode_control_event, BackendControlEvent};
 pub use executor::PtyExecutor;

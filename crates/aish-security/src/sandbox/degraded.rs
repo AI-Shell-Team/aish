@@ -154,6 +154,7 @@ fn analysis_from_fallback(
         matched_paths: assessment.matched_paths.clone(),
         sandbox_off_action: Some(policy.sandbox_off_action),
         sandbox: sandbox_status(reason, details),
+        detected_secrets: None,
     }
 }
 
