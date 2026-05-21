@@ -29,6 +29,7 @@ use crate::input;
 use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
+use crate::resume_selector::{select_resume_session, ResumeSessionItem};
 use crate::types::ShellState;
 
 // ---------------------------------------------------------------------------
@@ -1394,6 +1395,8 @@ impl AishShell {
                                 // No additional output needed here.
                             }
 
+                            self.persist_session_snapshot();
+
                             // Check if plan mode was exited during this AI turn.
                             // If exit_plan_mode tool was called, show plan approval UI.
                             let plan_state = self.ai_handler.plan_state();
@@ -1619,6 +1622,7 @@ impl AishShell {
                                             print_md(&response);
                                             sep_renderer.render_separator();
                                         }
+                                        self.persist_session_snapshot();
                                         self.record_history(input, 0);
                                     }
                                     Err(aish_core::AishError::Cancelled) => {
@@ -1744,9 +1748,46 @@ impl AishShell {
 
     fn handle_resume_command(&mut self, parts: &[&str]) {
         match parts.len() {
-            1 => self.print_recent_sessions(),
+            1 => self.select_recent_session(),
             2 => self.resume_session(parts[1]),
             _ => eprintln!("{}", t("shell.resume.usage")),
+        }
+    }
+
+    fn select_recent_session(&mut self) {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.resume.session_store_unavailable"));
+            return;
+        };
+
+        let sessions = match store.list_sessions(RESUME_LIST_LIMIT) {
+            Ok(sessions) if sessions.is_empty() => {
+                println!("{}", t("shell.resume.no_sessions"));
+                return;
+            }
+            Ok(sessions) => sessions,
+            Err(err) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.resume.list_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), err.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+
+        let items: Vec<ResumeSessionItem> = sessions
+            .iter()
+            .map(|session| ResumeSessionItem::from_record(session, &self.session_uuid))
+            .collect();
+
+        match select_resume_session(&items) {
+            Ok(Some(session_id)) => self.resume_session(&session_id),
+            Ok(None) => {}
+            Err(_) => self.print_recent_sessions(),
         }
     }
 
@@ -2349,6 +2390,7 @@ impl AishShell {
                     match rt.block_on(self.ai_handler.handle_question(prompt_str)) {
                         Ok(response) => {
                             print_md(&response);
+                            self.persist_session_snapshot();
                             script_env.insert("AISH_LAST_OUTPUT".to_string(), response);
                         }
                         Err(e) => {

@@ -435,6 +435,11 @@ shell:
     not_found: "未找到会话: {session_id}"
     cwd_missing: "保存的工作目录已不存在，将停留在当前目录: {cwd}"
     resumed: "已恢复会话: {session_id}"
+    selector_title: "恢复会话"
+    search_placeholder: "搜索..."
+    no_matches: "没有匹配的会话。"
+    current_marker: "(当前)"
+    selector_footer: "输入以搜索 · ↑/↓ 选择 · Enter 恢复 · Esc 取消"
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 后按 Enter 自动分析修复，或直接输入下一条命令。"

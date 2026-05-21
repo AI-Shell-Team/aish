@@ -234,6 +234,11 @@ shell:
     not_found: "Session introuvable : {session_id}"
     cwd_missing: "Le repertoire de travail enregistre n'existe plus ; conservation du repertoire courant : {cwd}"
     resumed: "Session reprise : {session_id}"
+    selector_title: "Reprendre une session"
+    search_placeholder: "Rechercher..."
+    no_matches: "Aucune session correspondante."
+    current_marker: "(actuelle)"
+    selector_footer: "Tapez pour rechercher · ↑/↓ pour selectionner · Enter pour reprendre · Esc pour annuler"
   ask_user:
     title: "Selectionnez une option"
     custom_label: "Personnalise :"

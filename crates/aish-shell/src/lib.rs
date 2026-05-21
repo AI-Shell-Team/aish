@@ -26,6 +26,7 @@ pub mod nl_detect;
 pub mod prompt;
 pub mod readline;
 pub mod renderer;
+pub mod resume_selector;
 pub mod security_panel;
 pub mod token_store;
 pub mod tui;

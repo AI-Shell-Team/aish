@@ -293,9 +293,19 @@ impl SessionStore {
 
 /// Parse an RFC 3339 datetime string, falling back to UTC now on failure.
 fn parse_datetime(s: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now())
+    let normalized = if let Some(prefix) = s.strip_suffix('Z') {
+        format!("{}+00:00", prefix.replace('T', " "))
+    } else if s.contains('T') {
+        s.replace('T', " ")
+    } else if s.contains('+') || s.rfind('-').is_some_and(|idx| idx > 10) {
+        s.to_string()
+    } else {
+        format!("{s}+00:00")
+    };
+
+    chrono::DateTime::parse_from_str(&normalized, "%Y-%m-%d %H:%M:%S%.f%:z")
+        .unwrap_or_else(|_| chrono::Utc::now().fixed_offset())
+        .with_timezone(&chrono::Utc)
 }
 
 #[cfg(test)]
@@ -303,6 +313,7 @@ mod tests {
     use super::*;
     use crate::models::{SessionContextMessage, SessionStateSnapshot};
     use aish_core::MemoryType;
+    use chrono::{Datelike, Timelike};
 
     #[test]
     fn update_session_state_round_trips_snapshot() {
@@ -357,5 +368,18 @@ mod tests {
         let sessions = store.list_sessions(2).unwrap();
         assert_eq!(sessions[0].session_uuid, older.session_uuid);
         assert_eq!(sessions[1].session_uuid, newer.session_uuid);
+    }
+
+    #[test]
+    fn parse_datetime_supports_legacy_sqlite_format() {
+        let parsed = parse_datetime("2026-05-18 09:55:56.246970");
+
+        assert_eq!(parsed.year(), 2026);
+        assert_eq!(parsed.month(), 5);
+        assert_eq!(parsed.day(), 18);
+        assert_eq!(parsed.hour(), 9);
+        assert_eq!(parsed.minute(), 55);
+        assert_eq!(parsed.second(), 56);
+        assert_eq!(parsed.timestamp_subsec_micros(), 246970);
     }
 }
