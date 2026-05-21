@@ -234,6 +234,11 @@ shell:
     not_found: "Sitzung nicht gefunden: {session_id}"
     cwd_missing: "Das gespeicherte Arbeitsverzeichnis existiert nicht mehr; aktuelles Verzeichnis wird beibehalten: {cwd}"
     resumed: "Sitzung fortgesetzt: {session_id}"
+    selector_title: "Sitzung fortsetzen"
+    search_placeholder: "Suchen..."
+    no_matches: "Keine passenden Sitzungen."
+    current_marker: "(aktuell)"
+    selector_footer: "Tippen zum Suchen · ↑/↓ zum Auswählen · Enter zum Fortsetzen · Esc zum Abbrechen"
   ask_user:
     title: "Option auswählen"
     custom_label: "Benutzerdefiniert:"

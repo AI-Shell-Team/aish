@@ -435,6 +435,11 @@ shell:
     not_found: "Session not found: {session_id}"
     cwd_missing: "Saved cwd no longer exists, staying in current directory: {cwd}"
     resumed: "Resumed session: {session_id}"
+    selector_title: "Resume session"
+    search_placeholder: "Search..."
+    no_matches: "No matching sessions."
+    current_marker: "(current)"
+    selector_footer: "Type to search · ↑/↓ to select · Enter to resume · Esc to cancel"
 
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; and press Enter to auto-analyze and fix, or enter the next command directly."

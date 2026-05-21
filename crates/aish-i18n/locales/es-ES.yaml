@@ -234,6 +234,11 @@ shell:
     not_found: "Sesión no encontrada: {session_id}"
     cwd_missing: "El directorio de trabajo guardado ya no existe; se conserva el directorio actual: {cwd}"
     resumed: "Sesión reanudada: {session_id}"
+    selector_title: "Reanudar sesión"
+    search_placeholder: "Buscar..."
+    no_matches: "No hay sesiones coincidentes."
+    current_marker: "(actual)"
+    selector_footer: "Escribe para buscar · ↑/↓ para seleccionar · Enter para reanudar · Esc para cancelar"
   ask_user:
     title: "Selecciona una opción"
     custom_label: "Personalizado:"

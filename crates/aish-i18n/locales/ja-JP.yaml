@@ -234,6 +234,11 @@ shell:
     not_found: "セッションが見つかりません: {session_id}"
     cwd_missing: "保存された作業ディレクトリは存在しません。現在のディレクトリに留まります: {cwd}"
     resumed: "セッションを復元しました: {session_id}"
+    selector_title: "セッションを復元"
+    search_placeholder: "検索..."
+    no_matches: "一致するセッションはありません。"
+    current_marker: "(現在)"
+    selector_footer: "入力して検索 · ↑/↓ で選択 · Enter で復元 · Esc でキャンセル"
   ask_user:
     title: "オプションを選択"
     custom_label: "カスタム:"
