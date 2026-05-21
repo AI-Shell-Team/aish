@@ -1,3 +1,4 @@
+use aish_core::MemoryType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,30 @@ pub struct SessionRecord {
     pub api_base: Option<String>,
     pub run_user: Option<String>,
     pub state: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionContextMessage {
+    pub role: String,
+    pub content: String,
+    pub memory_type: MemoryType,
+    pub name: Option<String>,
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionStateSnapshot {
+    pub cwd: Option<String>,
+    pub summary_preview: Option<String>,
+    #[serde(default)]
+    pub context_messages_snapshot: Vec<SessionContextMessage>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+impl SessionRecord {
+    pub fn state_snapshot(&self) -> SessionStateSnapshot {
+        serde_json::from_value(self.state.clone()).unwrap_or_default()
+    }
 }
 
 /// A single command history entry associated with a session.

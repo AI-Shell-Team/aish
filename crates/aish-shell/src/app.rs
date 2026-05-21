@@ -16,7 +16,7 @@ use aish_llm::{
 };
 use aish_memory::MemoryManager;
 use aish_security::{load_policy, SecurityManager};
-use aish_session::SessionStore;
+use aish_session::{SessionContextMessage, SessionRecord, SessionStateSnapshot, SessionStore};
 use aish_skills::hotreload::SkillHotReloader;
 use aish_skills::SkillManager;
 use aish_tools::ToolRegistry;
@@ -66,6 +66,7 @@ async fn poll_cancelled(token: *const CancellationToken) {
 
 /// Braille spinner frames used in the reasoning overlay.
 const DOTS_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
+const RESUME_LIST_LIMIT: usize = 20;
 
 fn context_compaction_notice(event: &LlmEvent) -> Option<String> {
     let changed = event
@@ -1041,6 +1042,19 @@ impl AishShell {
         })
     }
 
+    /// Create a new shell instance and immediately restore an existing session.
+    pub fn resume(config: ConfigModel, session_id: &str) -> aish_core::Result<Self> {
+        let mut shell = Self::new(config)?;
+        let transient_session_uuid = shell.session_uuid.clone();
+        shell.resume_session_with_options(session_id, false, false)?;
+        if shell.session_uuid != transient_session_uuid {
+            if let Some(ref store) = shell.session_store {
+                let _ = store.delete_session(&transient_session_uuid);
+            }
+        }
+        Ok(shell)
+    }
+
     /// Install a POSIX SIGINT handler that atomically sets the LLM
     /// session's cancellation flag. Returns the previous `SigAction`
     /// so it can be restored via `restore_ai_sigint_handler`.
@@ -1560,8 +1574,9 @@ impl AishShell {
                     self.record_history(input, 0);
                 }
                 crate::types::InputIntent::SpecialCommand => {
-                    self.handle_special_command(input);
-                    self.record_history(input, 0);
+                    if self.handle_special_command(input) {
+                        self.record_history(input, 0);
+                    }
                 }
                 crate::types::InputIntent::OperatorCommand | crate::types::InputIntent::Command => {
                     // NL detection: check if input looks like natural language
@@ -1649,6 +1664,16 @@ impl AishShell {
 
         // Save history on exit
         rl.save_history(&history_path);
+        self.persist_session_snapshot();
+
+        println!(
+            "{}",
+            t_with_args("shell.resume.exit_command", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("session_id".to_string(), self.session_uuid.clone());
+                args
+            })
+        );
 
         self.set_phase(ShellPhase::Exiting);
 
@@ -1658,6 +1683,7 @@ impl AishShell {
     /// Record a command to the session store.
     fn record_history(&self, command: &str, returncode: i32) {
         if let Some(ref store) = self.session_store {
+            let now = chrono::Utc::now();
             let _ = store.add_history_entry(&aish_session::HistoryEntry {
                 id: None,
                 session_uuid: self.session_uuid.clone(),
@@ -1666,19 +1692,45 @@ impl AishShell {
                 returncode: Some(returncode),
                 stdout: None,
                 stderr: None,
-                created_at: chrono::Utc::now(),
+                created_at: now,
             });
+            let snapshot = self.session_state_snapshot(now);
+            let _ = store.update_session_state(&self.session_uuid, &snapshot);
+        }
+    }
+
+    fn persist_session_snapshot(&self) {
+        if let Some(ref store) = self.session_store {
+            let snapshot = self.session_state_snapshot(chrono::Utc::now());
+            let _ = store.update_session_state(&self.session_uuid, &snapshot);
+        }
+    }
+
+    fn session_state_snapshot(
+        &self,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> SessionStateSnapshot {
+        let context_messages = self.ai_handler.export_session_context_snapshot();
+        SessionStateSnapshot {
+            cwd: Some(self.state.cwd.clone()),
+            summary_preview: summary_preview_from_context(&context_messages),
+            context_messages_snapshot: context_messages,
+            updated_at: Some(updated_at),
         }
     }
 
     /// Handle special slash commands (/model, /setup, /plan, etc.).
-    fn handle_special_command(&mut self, input: &str) {
+    fn handle_special_command(&mut self, input: &str) -> bool {
         let parts: Vec<&str> = input.split_whitespace().collect();
         match parts.first().copied() {
             Some("/model") => self.handle_model_command(&parts),
             Some("/setup") => self.run_setup_wizard(),
             Some("/plan") => self.handle_plan_command(&parts),
             Some("/token") => self.handle_token_command(),
+            Some("/resume") => {
+                self.handle_resume_command(&parts);
+                return false;
+            }
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -1687,6 +1739,144 @@ impl AishShell {
                 });
             }
         }
+        true
+    }
+
+    fn handle_resume_command(&mut self, parts: &[&str]) {
+        match parts.len() {
+            1 => self.print_recent_sessions(),
+            2 => self.resume_session(parts[1]),
+            _ => eprintln!("{}", t("shell.resume.usage")),
+        }
+    }
+
+    fn print_recent_sessions(&self) {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.resume.session_store_unavailable"));
+            return;
+        };
+
+        match store.list_sessions(RESUME_LIST_LIMIT) {
+            Ok(sessions) if sessions.is_empty() => {
+                println!("{}", t("shell.resume.no_sessions"));
+            }
+            Ok(sessions) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.resume.recent_header", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("limit".to_string(), RESUME_LIST_LIMIT.to_string());
+                        args
+                    })
+                );
+                for session in sessions {
+                    println!("{}", format_resume_session_row(&session));
+                }
+                println!("{}", t("shell.resume.list_hint"));
+            }
+            Err(err) => eprintln!(
+                "{}",
+                t_with_args("shell.resume.list_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), err.to_string());
+                    args
+                })
+            ),
+        }
+    }
+
+    fn resume_session(&mut self, session_id: &str) {
+        if let Err(err) = self.resume_session_with_options(session_id, true, true) {
+            eprintln!("{}", err);
+        }
+    }
+
+    fn resume_session_with_options(
+        &mut self,
+        session_id: &str,
+        persist_current: bool,
+        print_success: bool,
+    ) -> aish_core::Result<()> {
+        if persist_current {
+            self.persist_session_snapshot();
+        }
+
+        let Some(store) = self.session_store.as_ref() else {
+            return Err(aish_core::AishError::Session(t(
+                "shell.resume.session_store_unavailable",
+            )));
+        };
+
+        let session = match store.get_session(session_id) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                return Err(aish_core::AishError::Session(t_with_args(
+                    "shell.resume.not_found",
+                    &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("session_id".to_string(), session_id.to_string());
+                        args
+                    },
+                )))
+            }
+            Err(err) => return Err(err),
+        };
+
+        let snapshot = session.state_snapshot();
+        let saved_cwd = snapshot.cwd.clone();
+        self.ai_handler
+            .restore_session_context_snapshot(snapshot.context_messages_snapshot);
+
+        if self.config.model != session.model
+            || session.api_base.as_deref() != Some(&self.config.api_base)
+        {
+            self.config.model = session.model.clone();
+            if let Some(api_base) = session.api_base.clone() {
+                self.config.api_base = api_base;
+            }
+            self.ai_handler.update_model(
+                &self.config.model,
+                Some(&self.config.api_base),
+                Some(&self.config.api_key),
+            );
+        }
+
+        let target_cwd = saved_cwd
+            .filter(|cwd| std::path::Path::new(cwd).is_dir())
+            .unwrap_or_else(|| {
+                if let Some(missing) = session.state_snapshot().cwd {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.resume.cwd_missing", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("cwd".to_string(), missing);
+                            args
+                        })
+                    );
+                }
+                self.state.cwd.clone()
+            });
+
+        self.session_uuid = session.session_uuid.clone();
+        if target_cwd != self.state.cwd {
+            self.state.prev_cwd = Some(self.state.cwd.clone());
+            self.state.cwd = target_cwd.clone();
+            let _ = std::env::set_current_dir(&target_cwd);
+        }
+
+        self.restart_pty_with_notice(false);
+        self.persist_session_snapshot();
+        if print_success {
+            println!(
+                "{}",
+                t_with_args("shell.resume.resumed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("session_id".to_string(), self.session_uuid.clone());
+                    args
+                })
+            );
+        }
+        Ok(())
     }
 
     /// Handle `/model [name]` — show current model or switch to a new one.
@@ -1979,11 +2169,17 @@ impl AishShell {
 
     /// Restart the PTY session (e.g., after bash exits or crashes).
     fn restart_pty(&mut self) {
+        self.restart_pty_with_notice(true);
+    }
+
+    fn restart_pty_with_notice(&mut self, show_notice: bool) {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         match aish_pty::PersistentPty::start(&self.state.cwd, rows, cols) {
             Ok(new_pty) => {
                 *self.lock_pty() = new_pty;
-                println!("\x1b[33mbash session restarted\x1b[0m");
+                if show_notice {
+                    println!("\x1b[33mbash session restarted\x1b[0m");
+                }
             }
             Err(e) => {
                 eprintln!("{}", {
@@ -4447,6 +4643,67 @@ fn wrap_text(text: &str, max_width: usize) -> String {
         }
     }
     result
+}
+
+fn summary_preview_from_context(messages: &[SessionContextMessage]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if message.content.starts_with("<conversation-summary") {
+                first_summary_line(&message.content)
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            messages.iter().rev().find_map(|message| {
+                (message.memory_type == aish_core::MemoryType::Llm && message.role == "user")
+                    .then(|| truncate_resume_field(&message.content, 120))
+            })
+        })
+}
+
+fn first_summary_line(content: &str) -> Option<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with("<conversation-summary")
+                && !line.starts_with("</conversation-summary")
+                && *line != "Summary:"
+        })
+        .map(|line| line.trim_start_matches("- "))
+        .map(|line| truncate_resume_field(line, 120))
+}
+
+fn format_resume_session_row(session: &SessionRecord) -> String {
+    let snapshot = session.state_snapshot();
+    let updated_at = snapshot.updated_at.unwrap_or(session.created_at);
+    let cwd = snapshot.cwd.as_deref().unwrap_or("-");
+    let summary = snapshot.summary_preview.as_deref().unwrap_or("-");
+    format!(
+        "{}  {}  {}  {}  {}",
+        updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
+        session.session_uuid,
+        session.model,
+        truncate_resume_field(cwd, 48),
+        truncate_resume_field(summary, 96)
+    )
+}
+
+fn truncate_resume_field(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= max_chars {
+        return normalized;
+    }
+    let mut truncated: String = normalized
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect();
+    truncated.push_str("...");
+    truncated
 }
 
 /// Parse a category string (from the LLM tool call) into a MemoryCategory.

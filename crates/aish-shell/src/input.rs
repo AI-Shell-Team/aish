@@ -16,7 +16,7 @@ pub fn classify_input(input: &str) -> InputIntent {
         && trimmed
             .split_whitespace()
             .next()
-            .is_some_and(|cmd| matches!(cmd, "/model" | "/setup" | "/plan" | "/token"))
+            .is_some_and(|cmd| matches!(cmd, "/model" | "/setup" | "/plan" | "/token" | "/resume"))
     {
         return InputIntent::SpecialCommand;
     }
@@ -93,6 +93,8 @@ mod tests {
         assert_eq!(classify_input("/plan start"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/plan status"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/token"), InputIntent::SpecialCommand);
+        assert_eq!(classify_input("/resume"), InputIntent::SpecialCommand);
+        assert_eq!(classify_input("/resume 1234"), InputIntent::SpecialCommand);
     }
 
     #[test]

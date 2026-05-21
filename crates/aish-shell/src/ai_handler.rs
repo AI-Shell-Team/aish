@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use aish_config::MemoryConfig;
+use aish_context::ContextMessage;
 use aish_context::{
     ContextBudgetPolicy, ContextCompactReport, ContextManager, ContextPressureLevel,
 };
@@ -9,6 +10,7 @@ use aish_core::{LlmEvent, MemoryCategory, MemoryType, PlanModeState, PlanPhase};
 use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession};
 use aish_memory::MemoryManager;
 use aish_prompts::PromptManager;
+use aish_session::SessionContextMessage;
 use aish_skills::SkillManager;
 
 /// Shared handle for the memory manager, accessible from both AiHandler and tools.
@@ -233,6 +235,43 @@ impl AiHandler {
         self.context_manager
             .add_message("user", entry, MemoryType::Shell);
         self.context_manager.trim();
+    }
+
+    pub fn context_messages_snapshot(&self) -> Vec<ContextMessage> {
+        self.context_manager.messages_snapshot()
+    }
+
+    pub fn restore_context_messages(&mut self, messages: Vec<ContextMessage>) {
+        self.context_manager.replace_messages(messages);
+        self.context_manager.trim();
+    }
+
+    pub fn export_session_context_snapshot(&self) -> Vec<SessionContextMessage> {
+        self.context_manager
+            .messages_snapshot()
+            .into_iter()
+            .map(|message| SessionContextMessage {
+                role: message.role,
+                content: message.content,
+                memory_type: message.memory_type,
+                name: message.name,
+                tool_call_id: message.tool_call_id,
+            })
+            .collect()
+    }
+
+    pub fn restore_session_context_snapshot(&mut self, messages: Vec<SessionContextMessage>) {
+        let restored = messages
+            .into_iter()
+            .map(|message| ContextMessage {
+                role: message.role,
+                content: message.content,
+                memory_type: message.memory_type,
+                name: message.name,
+                tool_call_id: message.tool_call_id,
+            })
+            .collect();
+        self.restore_context_messages(restored);
     }
 
     /// Get the current plan phase from the LLM session.

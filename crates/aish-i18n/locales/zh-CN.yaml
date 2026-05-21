@@ -17,6 +17,7 @@ cli:
   auth_configured: "已配置 {provider} 的认证。"
   default_model_set_success: "默认模型已设置为: {model}"
   save_config_failed: "保存配置失败: {error}"
+  resume_failed: "恢复会话失败: {error}"
 
   uninstall:
     title: "AI Shell 卸载"
@@ -422,6 +423,18 @@ shell:
     iteration_limit_reached: "已执行 {count} 轮工具调用。"
     iteration_limit_title: "⏸ 工具调用次数达到上限"
     iteration_continue_prompt: "是否继续？[Y/n]"
+
+  resume:
+    exit_command: "恢复会话: aish resume {session_id}"
+    usage: "用法: /resume [session_id]"
+    session_store_unavailable: "会话存储不可用。"
+    no_sessions: "未找到历史会话。"
+    recent_header: "最近会话(最多 {limit} 条):"
+    list_hint: "使用 /resume <session_id> 恢复会话"
+    list_failed: "列出会话失败: {error}"
+    not_found: "未找到会话: {session_id}"
+    cwd_missing: "保存的工作目录已不存在，将停留在当前目录: {cwd}"
+    resumed: "已恢复会话: {session_id}"
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 后按 Enter 自动分析修复，或直接输入下一条命令。"
