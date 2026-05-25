@@ -73,10 +73,7 @@ pub fn select_resume_session(items: &[ResumeSessionItem]) -> io::Result<Option<S
     .with_footer(t("shell.resume.selector_footer"))
     .with_max_visible_items(MAX_VISIBLE_ITEMS);
 
-    match PanelRuntime::new()
-        .run(panel)
-        .map_err(io::Error::other)?
-    {
+    match PanelRuntime::new().run(panel).map_err(io::Error::other)? {
         PanelOutcome::Submitted(SearchSelectOutcome::Selected(session_id)) => Ok(Some(session_id)),
         PanelOutcome::Submitted(SearchSelectOutcome::Custom) | PanelOutcome::Cancelled => Ok(None),
     }
