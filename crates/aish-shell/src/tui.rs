@@ -75,16 +75,53 @@ pub fn show_selection_dialog(
     }
 }
 
-/// Show a simple Yes/No confirmation dialog.
-pub fn show_confirmation_dialog(title: &str, message: &str) -> bool {
+/// Show a simple Yes/No confirmation dialog with custom labels.
+pub fn show_confirmation_dialog(
+    title: &str,
+    message: &str,
+    yes_label: &str,
+    no_label: &str,
+) -> bool {
     let options = vec![
-        DialogOption::new("yes", "Yes"),
-        DialogOption::new("no", "No"),
+        DialogOption::new("yes", yes_label),
+        DialogOption::new("no", no_label),
     ];
     matches!(
         show_selection_dialog(title, message, &options, false, true),
         DialogResult::Selected(v) if v == "yes"
     )
+}
+
+/// Choice returned by the three-option secret detection dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretDialogChoice {
+    /// Replace secrets with env var placeholders.
+    Redact,
+    /// Send original plaintext to AI.
+    Allow,
+    /// Cancel / abort.
+    Abort,
+}
+
+/// Show a three-option dialog for secret detection (TUI path).
+/// Default selection is "Redact" (safest option).
+pub fn show_secret_dialog(title: &str, message: &str) -> SecretDialogChoice {
+    let redact_label = aish_i18n::t("shell.security.secret.redact");
+    let allow_label = aish_i18n::t("shell.security.secret.allow");
+    let abort_label = aish_i18n::t("shell.security.secret.abort");
+    let options = vec![
+        DialogOption::new("redact", redact_label),
+        DialogOption::new("allow", allow_label),
+        DialogOption::new("abort", abort_label),
+    ];
+    match show_selection_dialog(title, message, &options, false, true) {
+        DialogResult::Selected(v) => match v.as_str() {
+            "redact" => SecretDialogChoice::Redact,
+            "allow" => SecretDialogChoice::Allow,
+            _ => SecretDialogChoice::Abort,
+        },
+        _ => SecretDialogChoice::Abort,
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ use crate::sandbox::degraded::{analyze_sandbox_degraded, SandboxDegradedDetails}
 use crate::sandbox::error::{SandboxError, SandboxReason};
 use crate::sandbox::ipc::client::SandboxRunner;
 use crate::sandbox::types::SandboxRunRequest;
+use crate::secret::SecretScanner;
 use crate::SandboxClient;
 
 const DEFAULT_SANDBOX_SOCKET_PATH: &str = "/run/aish/sandbox.sock";
@@ -87,6 +88,7 @@ pub struct SecurityManager {
     policy: SecurityPolicy,
     fallback_engine: FallbackRuleEngine,
     sandbox_runner: Option<Arc<dyn SandboxRunner>>,
+    secret_scanner: SecretScanner,
 }
 
 impl SecurityManager {
@@ -95,15 +97,21 @@ impl SecurityManager {
         let sandbox_runner = policy.enable_sandbox.then(|| {
             Arc::new(SandboxClient::new(DEFAULT_SANDBOX_SOCKET_PATH)) as Arc<dyn SandboxRunner>
         });
+        let secret_scanner = SecretScanner::new(&policy.secret_patterns);
         Self {
             policy,
             fallback_engine,
             sandbox_runner,
+            secret_scanner,
         }
     }
 
     pub fn policy(&self) -> &SecurityPolicy {
         &self.policy
+    }
+
+    pub fn secret_scanner(&self) -> &SecretScanner {
+        &self.secret_scanner
     }
 
     pub fn with_sandbox_client(mut self, client: SandboxClient) -> Self {
@@ -157,6 +165,23 @@ impl SecurityManager {
     ) -> SecurityDecision {
         let (level, analysis) = self.analyze_with_request(command, request);
         decision_from_risk(level, analysis)
+    }
+
+    /// Check AI input text for sensitive data.
+    /// Returns `Confirm` if secrets are detected, `Allow` otherwise.
+    pub fn check_ai_input(&self, input: &str) -> SecurityDecision {
+        let secrets = self.secret_scanner.scan(input);
+        if secrets.is_empty() {
+            return SecurityDecision::allow(RiskLevel::Low, SecurityAnalysis::default());
+        }
+
+        let analysis = SecurityAnalysis {
+            risk_level: RiskLevel::Medium,
+            reasons: secrets.iter().map(|s| s.format_reason()).collect(),
+            detected_secrets: Some(secrets),
+            ..SecurityAnalysis::default()
+        };
+        SecurityDecision::confirm(RiskLevel::Medium, analysis)
     }
 
     fn analyze_with_sandbox(&self, command: &str, request: &SecurityRequest) -> SecurityAnalysis {
@@ -226,6 +251,7 @@ impl std::fmt::Debug for SecurityManager {
             .field("policy", &self.policy)
             .field("fallback_engine", &self.fallback_engine)
             .field("sandbox_runner", &self.sandbox_runner.is_some())
+            .field("secret_scanner", &"<SecretScanner>")
             .finish()
     }
 }
@@ -576,5 +602,41 @@ mod tests {
             decision.analysis.sandbox.repo_root.as_deref(),
             Some("/repo")
         );
+    }
+
+    #[test]
+    fn check_ai_input_allows_clean_text() {
+        let manager = SecurityManager::new(SecurityPolicy::default());
+        let decision = manager.check_ai_input("list files in current directory");
+        assert!(decision.allow);
+        assert!(!decision.require_confirmation);
+    }
+
+    #[test]
+    fn check_ai_input_confirms_on_secret() {
+        let manager = SecurityManager::new(SecurityPolicy::default());
+        let decision = manager.check_ai_input(
+            "use key sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+        );
+        assert!(decision.allow);
+        assert!(decision.require_confirmation);
+        let secrets = decision.analysis.detected_secrets.unwrap();
+        assert!(!secrets.is_empty());
+        assert_eq!(secrets[0].secret_type, crate::secret::SecretType::ApiKey);
+    }
+
+    #[test]
+    fn check_ai_input_with_custom_pattern() {
+        let mut policy = SecurityPolicy::default();
+        policy.secret_patterns = vec![crate::secret::CustomPattern {
+            name: "MyToken".to_string(),
+            pattern: r"mytoken_[a-z]{8}".to_string(),
+            secret_type: crate::secret::SecretType::Token,
+        }];
+        let manager = SecurityManager::new(policy);
+        let decision = manager.check_ai_input("here is mytoken_abcdefgh ok");
+        assert!(decision.require_confirmation);
+        let secrets = decision.analysis.detected_secrets.unwrap();
+        assert_eq!(secrets[0].pattern_name, "MyToken");
     }
 }
