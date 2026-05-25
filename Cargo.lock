@@ -244,6 +244,7 @@ dependencies = [
  "crossterm 0.28.1",
  "dirs 5.0.1",
  "inquire",
+ "libc",
  "nix 0.29.0",
  "ratatui",
  "regex",

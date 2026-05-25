@@ -1124,6 +1124,66 @@ impl PersistentPty {
                                             );
                                         }
                                         skip_leading_newline = true;
+                                    } else if followup_capturing && byte == 0x1b {
+                                        // ESC during followup capturing —
+                                        // check for standalone ESC vs
+                                        // arrow/function key sequence.
+                                        let mut ffds: libc::fd_set = unsafe { std::mem::zeroed() };
+                                        unsafe {
+                                            libc::FD_ZERO(&mut ffds);
+                                            libc::FD_SET(stdin_fd, &mut ffds);
+                                        }
+                                        let mut ftv = libc::timeval {
+                                            tv_sec: 0,
+                                            tv_usec: 50_000,
+                                        };
+                                        let fsel = unsafe {
+                                            libc::select(
+                                                stdin_fd + 1,
+                                                &mut ffds,
+                                                std::ptr::null_mut(),
+                                                std::ptr::null_mut(),
+                                                &mut ftv,
+                                            )
+                                        };
+                                        if fsel == 0 {
+                                            // Standalone ESC — hard abort
+                                            ai_cancelled = true;
+                                            followup_capturing = false;
+                                            followup_captured.clear();
+                                            if let Some(followup) = pending_followup.take() {
+                                                std::thread::spawn(move || {
+                                                    let _ =
+                                                        followup("Command cancelled by user", None);
+                                                });
+                                            }
+                                            if let Some(offloader) = followup_offloader.take() {
+                                                offloader.cancel();
+                                            }
+                                            let cancel_msg = format!(
+                                                "\r\n\x1b[33m{}\x1b[0m\r\n",
+                                                aish_i18n::t("shell.command_cancelled"),
+                                            );
+                                            unsafe {
+                                                libc::write(
+                                                    libc::STDOUT_FILENO,
+                                                    cancel_msg.as_ptr() as *const libc::c_void,
+                                                    cancel_msg.len(),
+                                                );
+                                            }
+                                            skip_leading_newline = true;
+                                        } else {
+                                            // Follow-up bytes exist (arrow/function
+                                            // key) — consume and discard them.
+                                            let mut discard = [0u8; 16];
+                                            unsafe {
+                                                libc::read(
+                                                    stdin_fd,
+                                                    discard.as_mut_ptr() as *mut libc::c_void,
+                                                    discard.len(),
+                                                );
+                                            }
+                                        }
                                     } else if followup_capturing && byte == 0x1A {
                                         // Ctrl+Z: keep countdown behavior
                                         followup_interrupt_countdown =
