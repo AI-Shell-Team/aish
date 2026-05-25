@@ -2522,7 +2522,7 @@ fn show_secret_dialog(warning: &str, stdin_fd: libc::c_int) -> SshSecretChoice {
     // Default cursor on "Redact" (index 0, safest)
     let mut cursor: usize = 0;
 
-    let (buf, up_moves) = render_secret_confirmation(warning, &options, cursor);
+    let (buf, _) = render_secret_confirmation(warning, &options, cursor);
     unsafe {
         libc::write(
             libc::STDOUT_FILENO,
@@ -2550,15 +2550,11 @@ fn show_secret_dialog(warning: &str, stdin_fd: libc::c_int) -> SshSecretChoice {
                         if next == Some(b'[') {
                             if let Some(final_byte) = consume_csi(stdin_fd) {
                                 match final_byte {
-                                    b'A' => {
-                                        if cursor > 0 {
-                                            cursor -= 1;
-                                        }
+                                    b'A' if cursor > 0 => {
+                                        cursor = cursor.saturating_sub(1);
                                     }
-                                    b'B' => {
-                                        if cursor < options.len() - 1 {
-                                            cursor += 1;
-                                        }
+                                    b'B' if cursor < options.len() - 1 => {
+                                        cursor += 1;
                                     }
                                     _ => {}
                                 }

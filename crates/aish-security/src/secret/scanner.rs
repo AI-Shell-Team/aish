@@ -64,7 +64,7 @@ impl SecretScanner {
 
     /// Scanner that never matches anything, used as a safe fallback.
     fn empty() -> Self {
-        let set = RegexSet::new(&["^.$_never_match_"]).unwrap();
+        let set = RegexSet::new(["^.$_never_match_"]).unwrap();
         Self {
             set,
             compiled: Vec::new(),
