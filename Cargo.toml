@@ -12,6 +12,7 @@ members = [
     "crates/aish-context",
     "crates/aish-skills",
     "crates/aish-memory",
+    "crates/aish-ui",
     "crates/aish-tools",
     "crates/aish-scripts",
     "crates/aish-shell",
@@ -49,6 +50,7 @@ clap = { version = "4", features = ["derive"] }
 # Terminal
 crossterm = "0.28"
 ratatui = "0.30"
+unicode-width = "0.2"
 
 # System
 nix = { version = "0.29", features = ["term", "process", "signal", "fs", "ioctl", "poll"] }
@@ -113,6 +115,7 @@ aish-session = { path = "crates/aish-session" }
 aish-context = { path = "crates/aish-context" }
 aish-skills = { path = "crates/aish-skills" }
 aish-memory = { path = "crates/aish-memory" }
+aish-ui = { path = "crates/aish-ui" }
 aish-tools = { path = "crates/aish-tools" }
 aish-shell = { path = "crates/aish-shell" }
 aish-scripts = { path = "crates/aish-scripts" }

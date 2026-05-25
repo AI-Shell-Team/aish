@@ -1,0 +1,10 @@
+[package]
+name = "aish-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true

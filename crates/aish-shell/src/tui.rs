@@ -1,9 +1,11 @@
-//! Inline terminal prompts using the `inquire` crate.
+//! Inline terminal prompts for local shell interactions.
 //!
-//! Provides left-aligned inline selection and text input prompts.
+//! Provides shared-panel selection and text input prompts.
 //! Falls back to simple stdin prompts when a terminal is unavailable.
 
 use std::io::{self, Write};
+
+use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime, SearchSelectItem};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -57,9 +59,8 @@ pub enum DialogResult {
 
 /// Show a selection dialog with predefined options using inline prompts.
 ///
-/// Uses `inquire::Select` for option selection. If `allow_custom` is true,
-/// a "(custom input)" option is appended; selecting it triggers a second
-/// `inquire::Text` prompt for the custom value.
+/// Uses the shared inline panel for option selection. If `allow_custom` is true,
+/// a "(custom input)" option is appended and edited inline in the panel.
 ///
 /// Falls back to a simple stdin numbered list when the terminal is unavailable.
 pub fn show_selection_dialog(
@@ -69,7 +70,7 @@ pub fn show_selection_dialog(
     allow_custom: bool,
     allow_cancel: bool,
 ) -> DialogResult {
-    match run_inquire_selection(title, question, options, allow_custom, allow_cancel) {
+    match run_panel_selection(title, question, options, allow_custom, allow_cancel) {
         Ok(result) => result,
         Err(_) => fallback_stdin_selection(title, question, options, allow_custom, allow_cancel),
     }
@@ -125,61 +126,45 @@ pub fn show_secret_dialog(title: &str, message: &str) -> SecretDialogChoice {
 }
 
 // ---------------------------------------------------------------------------
-// inquire implementation
+// panel implementation
 // ---------------------------------------------------------------------------
 
 /// Label used for the custom-input entry in the select list.
 const CUSTOM_INPUT_LABEL: &str = "(type custom answer)";
 
-fn run_inquire_selection(
+fn run_panel_selection(
     title: &str,
     question: &str,
     options: &[DialogOption],
     allow_custom: bool,
     allow_cancel: bool,
-) -> Result<DialogResult, inquire::InquireError> {
-    use inquire::Select;
-
-    // Build display items. Each item is either a real option or the custom slot.
-    #[derive(Clone)]
-    enum Item {
-        Real(usize), // index into `options`
-        Custom,      // custom input slot
-    }
-
-    let mut items: Vec<(String, Item)> = options
+) -> Result<DialogResult, aish_ui::PanelError> {
+    let items: Vec<SearchSelectItem> = options
         .iter()
-        .enumerate()
-        .map(|(i, opt)| (opt.display_label(), Item::Real(i)))
+        .map(|opt| {
+            let mut item = SearchSelectItem::new(opt.value.clone(), opt.label.clone());
+            if let Some(description) = &opt.description {
+                item = item.with_detail(description.clone());
+            }
+            item.with_search_text(opt.display_label())
+        })
         .collect();
 
+    let mut panel = ChoicePanel::new(title, question, items)
+        .with_allow_cancel(allow_cancel)
+        .with_footer(ChoicePanel::default_footer(allow_cancel));
     if allow_custom {
-        items.push((CUSTOM_INPUT_LABEL.to_string(), Item::Custom));
+        panel = panel.with_custom_label(CUSTOM_INPUT_LABEL);
     }
 
-    let labels: Vec<String> = items.iter().map(|(l, _)| l.clone()).collect();
-
-    let ans = Select::new(&format!("{}: {}", title, question), labels)
-        .with_help_message(if allow_cancel { "Esc to cancel" } else { "" })
-        .prompt()?;
-
-    // Find which item was selected.
-    let idx = items.iter().position(|(l, _)| l == &ans).unwrap_or(0);
-    let (_, ref item) = items[idx];
-
-    match item {
-        Item::Real(i) => Ok(DialogResult::Selected(options[*i].value.clone())),
-        Item::Custom => {
-            // Follow up with a text prompt for the custom value.
-            let custom = inquire::Text::new(&format!("{}: enter custom value", title))
-                .prompt()
-                .unwrap_or_default();
-            if custom.trim().is_empty() {
-                Ok(DialogResult::Cancelled)
-            } else {
-                Ok(DialogResult::CustomInput(custom.trim().to_string()))
-            }
+    match PanelRuntime::new().run(panel)? {
+        PanelOutcome::Submitted(ChoiceOutcome::Selected(value)) => {
+            Ok(DialogResult::Selected(value))
         }
+        PanelOutcome::Submitted(ChoiceOutcome::CustomInput(custom)) => {
+            Ok(DialogResult::CustomInput(custom))
+        }
+        PanelOutcome::Cancelled => Ok(DialogResult::Cancelled),
     }
 }
 
