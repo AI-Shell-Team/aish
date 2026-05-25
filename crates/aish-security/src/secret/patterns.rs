@@ -1,19 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 /// Category of a detected secret.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecretType {
+    #[default]
     ApiKey,
     Token,
     Password,
     Credential,
-}
-
-impl Default for SecretType {
-    fn default() -> Self {
-        Self::ApiKey
-    }
 }
 
 pub fn default_secret_type() -> SecretType {

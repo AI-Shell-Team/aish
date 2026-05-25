@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use crate::secret::patterns::SecretMatch;
@@ -46,7 +47,6 @@ pub fn pattern_name_to_placeholder(name: &str) -> String {
     for ch in upper.chars() {
         if ch.is_ascii_alphanumeric() {
             normalized.push(ch);
-            prev_underscore = false;
         } else {
             if !prev_underscore && !normalized.is_empty() {
                 normalized.push('_');
@@ -141,7 +141,7 @@ impl SecretVault {
 
         // Sort by start position descending (right-to-left) so that replacing
         // later spans first does not shift earlier byte offsets.
-        replacements.sort_by(|a, b| b.1.cmp(&a.1));
+        replacements.sort_by_key(|entry| Reverse(entry.1));
 
         let mut result = input.to_string();
         for (placeholder, start, end) in &replacements {
@@ -163,7 +163,7 @@ impl SecretVault {
         // placeholders are replaced first, avoiding prefix collisions
         // (e.g. $SECRET_KEY_2 before $SECRET_KEY).
         let mut entries: Vec<&SecretEntry> = self.entries.values().collect();
-        entries.sort_by(|a, b| b.placeholder.len().cmp(&a.placeholder.len()));
+        entries.sort_by_key(|entry| Reverse(entry.placeholder.len()));
 
         for entry in entries {
             let occurrences = result.matches(&entry.placeholder).count();
@@ -188,7 +188,7 @@ impl SecretVault {
         let mut count = 0;
 
         let mut entries: Vec<&SecretEntry> = self.entries.values().collect();
-        entries.sort_by(|a, b| b.original.len().cmp(&a.original.len()));
+        entries.sort_by_key(|entry| Reverse(entry.original.len()));
 
         for entry in entries {
             let occurrences = result.matches(&entry.original).count();

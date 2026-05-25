@@ -627,12 +627,14 @@ mod tests {
 
     #[test]
     fn check_ai_input_with_custom_pattern() {
-        let mut policy = SecurityPolicy::default();
-        policy.secret_patterns = vec![crate::secret::CustomPattern {
-            name: "MyToken".to_string(),
-            pattern: r"mytoken_[a-z]{8}".to_string(),
-            secret_type: crate::secret::SecretType::Token,
-        }];
+        let policy = SecurityPolicy {
+            secret_patterns: vec![crate::secret::CustomPattern {
+                name: "MyToken".to_string(),
+                pattern: r"mytoken_[a-z]{8}".to_string(),
+                secret_type: crate::secret::SecretType::Token,
+            }],
+            ..Default::default()
+        };
         let manager = SecurityManager::new(policy);
         let decision = manager.check_ai_input("here is mytoken_abcdefgh ok");
         assert!(decision.require_confirmation);

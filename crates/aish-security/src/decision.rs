@@ -208,13 +208,15 @@ mod tests {
 
     #[test]
     fn security_analysis_serializes_detected_secrets_roundtrip() {
-        let mut analysis = SecurityAnalysis::default();
-        analysis.detected_secrets = Some(vec![crate::secret::SecretMatch {
-            pattern_name: "Test Key".to_string(),
-            start: 5,
-            end: 20,
-            secret_type: crate::secret::SecretType::ApiKey,
-        }]);
+        let analysis = SecurityAnalysis {
+            detected_secrets: Some(vec![crate::secret::SecretMatch {
+                pattern_name: "Test Key".to_string(),
+                start: 5,
+                end: 20,
+                secret_type: crate::secret::SecretType::ApiKey,
+            }]),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&analysis).unwrap();
         let deserialized: SecurityAnalysis = serde_json::from_str(&json).unwrap();
         assert!(deserialized.detected_secrets.is_some());
