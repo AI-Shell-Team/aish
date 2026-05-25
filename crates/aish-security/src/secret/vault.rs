@@ -47,6 +47,7 @@ pub fn pattern_name_to_placeholder(name: &str) -> String {
     for ch in upper.chars() {
         if ch.is_ascii_alphanumeric() {
             normalized.push(ch);
+            prev_underscore = false;
         } else {
             if !prev_underscore && !normalized.is_empty() {
                 normalized.push('_');
