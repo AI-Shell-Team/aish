@@ -24,6 +24,7 @@ use aish_tools::ToolRegistry;
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
 use crate::animation::SharedAnimation;
 use crate::environment;
+use crate::esc_watcher::EscWatcher;
 use crate::input;
 use crate::prompt;
 use crate::readline::ShellReadline;
@@ -1205,6 +1206,8 @@ impl AishShell {
                     if question.is_empty() && self.state.can_correct_error {
                         if let Some(ref cmd) = self.state.last_command.clone() {
                             let old_sigint = self.install_ai_sigint_handler();
+                            let mut esc_watcher =
+                                EscWatcher::start(self.ai_handler.cancellation_token_arc());
                             let token_ptr =
                                 self.ai_handler.cancellation_token() as *const CancellationToken;
                             let result = runtime.block_on(async {
@@ -1219,6 +1222,7 @@ impl AishShell {
                                     }
                                 }
                             });
+                            esc_watcher.stop();
                             Self::restore_ai_sigint_handler(old_sigint);
 
                             match result {
@@ -1346,6 +1350,8 @@ impl AishShell {
                     }
 
                     let old_sigint = self.install_ai_sigint_handler();
+                    let mut esc_watcher =
+                        EscWatcher::start(self.ai_handler.cancellation_token_arc());
                     let token_ptr =
                         self.ai_handler.cancellation_token() as *const CancellationToken;
                     let result = runtime.block_on(async {
@@ -1356,6 +1362,7 @@ impl AishShell {
                             }
                         }
                     });
+                    esc_watcher.stop();
                     Self::restore_ai_sigint_handler(old_sigint);
 
                     let did_stream = self.streamed_content.load(Ordering::SeqCst);
@@ -1573,6 +1580,8 @@ impl AishShell {
                                 // Route to AI
                                 let question = input.trim().to_string();
                                 let old_sigint = self.install_ai_sigint_handler();
+                                let mut esc_watcher =
+                                    EscWatcher::start(self.ai_handler.cancellation_token_arc());
                                 let token_ptr = self.ai_handler.cancellation_token()
                                     as *const CancellationToken;
                                 let result = runtime.block_on(async {
@@ -1583,6 +1592,7 @@ impl AishShell {
                                         }
                                     }
                                 });
+                                esc_watcher.stop();
                                 Self::restore_ai_sigint_handler(old_sigint);
 
                                 let did_stream = self.streamed_content.load(Ordering::SeqCst);
@@ -2691,6 +2701,8 @@ impl AishShell {
                             let osender = output_sender.clone();
                             let done_rx = std::sync::Mutex::new(llm_done_rx);
                             let cancelled_f = cancelled_fu.clone();
+                            let session_cancel_token_f = session_cancel_token.clone();
+                            let anim_fu = anim_f.clone();
                             let followup: Box<aish_pty::FollowupCallback> = Box::new(
                             move |captured_output: &str,
                                   offload_path: Option<&str>|
@@ -2709,11 +2721,141 @@ impl AishShell {
                                     offload_path: offload_path
                                         .map(|p| p.to_string()),
                                 });
-                                // Block until LLM thread finishes all rendering
-                                let _ = done_rx
-                                    .lock()
-                                    .unwrap()
-                                    .recv_timeout(std::time::Duration::from_secs(120));
+                                // Wait for LLM thread to finish rendering,
+                                // monitoring stdin for Ctrl+C/ESC.
+                                let wait_start = std::time::Instant::now();
+                                let wait_timeout =
+                                    std::time::Duration::from_secs(120);
+                                loop {
+                                    if done_rx
+                                        .lock()
+                                        .unwrap()
+                                        .try_recv()
+                                        .is_ok()
+                                    {
+                                        break;
+                                    }
+                                    if wait_start.elapsed() >= wait_timeout {
+                                        break;
+                                    }
+                                    let mut rfds: nix::libc::fd_set =
+                                        unsafe { std::mem::zeroed() };
+                                    unsafe {
+                                        nix::libc::FD_ZERO(&mut rfds);
+                                        nix::libc::FD_SET(
+                                            nix::libc::STDIN_FILENO,
+                                            &mut rfds,
+                                        );
+                                    }
+                                    let mut tv = nix::libc::timeval {
+                                        tv_sec: 0,
+                                        tv_usec: 100_000,
+                                    };
+                                    let sel = unsafe {
+                                        nix::libc::select(
+                                            nix::libc::STDIN_FILENO + 1,
+                                            &mut rfds,
+                                            std::ptr::null_mut(),
+                                            std::ptr::null_mut(),
+                                            &mut tv,
+                                        )
+                                    };
+                                    if sel > 0 {
+                                        let mut byte = [0u8; 1];
+                                        if unsafe {
+                                            nix::libc::read(
+                                                nix::libc::STDIN_FILENO,
+                                                byte.as_mut_ptr()
+                                                    as *mut nix::libc::c_void,
+                                                1,
+                                            )
+                                        } == 1
+                                        {
+                                            if byte[0] == 0x03 {
+                                                cancelled_f.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                if let Some(ref token) =
+                                                    session_cancel_token_f
+                                                {
+                                                    token.cancel();
+                                                }
+                                                anim_fu.stop();
+                                                let msg = format!(
+                                                    "\r\x1b[33m{}\x1b[0m\r\n",
+                                                    t("shell.command_cancelled")
+                                                );
+                                                unsafe {
+                                                    nix::libc::write(
+                                                        nix::libc::STDOUT_FILENO,
+                                                        msg.as_ptr()
+                                                            as *mut nix::libc::c_void,
+                                                        msg.len(),
+                                                    );
+                                                }
+                                                break;
+                                            } else if byte[0] == 0x1b {
+                                                let mut ffds: nix::libc::fd_set =
+                                                    unsafe { std::mem::zeroed() };
+                                                unsafe {
+                                                    nix::libc::FD_ZERO(&mut ffds);
+                                                    nix::libc::FD_SET(
+                                                        nix::libc::STDIN_FILENO,
+                                                        &mut ffds,
+                                                    );
+                                                }
+                                                let mut ftv = nix::libc::timeval {
+                                                    tv_sec: 0,
+                                                    tv_usec: 50_000,
+                                                };
+                                                let fsel = unsafe {
+                                                    nix::libc::select(
+                                                        nix::libc::STDIN_FILENO + 1,
+                                                        &mut ffds,
+                                                        std::ptr::null_mut(),
+                                                        std::ptr::null_mut(),
+                                                        &mut ftv,
+                                                    )
+                                                };
+                                                if fsel == 0 {
+                                                    cancelled_f.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    if let Some(ref token) =
+                                                        session_cancel_token_f
+                                                    {
+                                                        token.cancel();
+                                                    }
+                                                    anim_fu.stop();
+                                                    let msg = format!(
+                                                        "\r\x1b[33m{}\x1b[0m\r\n",
+                                                        t("shell.command_cancelled")
+                                                    );
+                                                    unsafe {
+                                                        nix::libc::write(
+                                                            nix::libc::STDOUT_FILENO,
+                                                            msg.as_ptr()
+                                                                as *mut nix::libc::c_void,
+                                                            msg.len(),
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+                                                let mut discard = [0u8; 16];
+                                                unsafe {
+                                                    nix::libc::read(
+                                                        nix::libc::STDIN_FILENO,
+                                                        discard.as_mut_ptr()
+                                                            as *mut nix::libc::c_void,
+                                                        discard.len(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 None
                             },
                         );
@@ -2759,23 +2901,78 @@ impl AishShell {
                                 1,
                             )
                         } == 1
-                            && byte[0] == 0x03
                         {
-                            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                            if let Some(ref token) = session_cancel_token {
-                                token.cancel();
-                            }
-                            anim_f.stop();
-                            let msg =
-                                format!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
-                            unsafe {
-                                nix::libc::write(
-                                    nix::libc::STDOUT_FILENO,
-                                    msg.as_ptr() as *mut nix::libc::c_void,
-                                    msg.len(),
+                            if byte[0] == 0x03 {
+                                // Ctrl+C — cancel
+                                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                                if let Some(ref token) = session_cancel_token {
+                                    token.cancel();
+                                }
+                                anim_f.stop();
+                                let msg = format!(
+                                    "\r\x1b[33m{}\x1b[0m\r\n",
+                                    t("shell.command_cancelled")
                                 );
+                                unsafe {
+                                    nix::libc::write(
+                                        nix::libc::STDOUT_FILENO,
+                                        msg.as_ptr() as *mut nix::libc::c_void,
+                                        msg.len(),
+                                    );
+                                }
+                                break None;
+                            } else if byte[0] == 0x1b {
+                                // ESC — check for follow-up bytes to
+                                // distinguish from arrow/function keys.
+                                let mut ffds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
+                                unsafe {
+                                    nix::libc::FD_ZERO(&mut ffds);
+                                    nix::libc::FD_SET(nix::libc::STDIN_FILENO, &mut ffds);
+                                }
+                                let mut ftv = nix::libc::timeval {
+                                    tv_sec: 0,
+                                    tv_usec: 50_000,
+                                };
+                                let fsel = unsafe {
+                                    nix::libc::select(
+                                        nix::libc::STDIN_FILENO + 1,
+                                        &mut ffds,
+                                        std::ptr::null_mut(),
+                                        std::ptr::null_mut(),
+                                        &mut ftv,
+                                    )
+                                };
+                                if fsel == 0 {
+                                    // Standalone ESC — cancel
+                                    cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    if let Some(ref token) = session_cancel_token {
+                                        token.cancel();
+                                    }
+                                    anim_f.stop();
+                                    let msg = format!(
+                                        "\r\x1b[33m{}\x1b[0m\r\n",
+                                        t("shell.command_cancelled")
+                                    );
+                                    unsafe {
+                                        nix::libc::write(
+                                            nix::libc::STDOUT_FILENO,
+                                            msg.as_ptr() as *mut nix::libc::c_void,
+                                            msg.len(),
+                                        );
+                                    }
+                                    break None;
+                                }
+                                // Follow-up bytes exist (ANSI escape
+                                // sequence) — consume and discard them.
+                                let mut discard = [0u8; 16];
+                                unsafe {
+                                    nix::libc::read(
+                                        nix::libc::STDIN_FILENO,
+                                        discard.as_mut_ptr() as *mut nix::libc::c_void,
+                                        discard.len(),
+                                    );
+                                }
                             }
-                            break None;
                         }
                     }
                     // Check timeout (60s)
@@ -3527,7 +3724,6 @@ impl AishShell {
                     )
                 };
                 if sel > 0 {
-                    // Read one byte to check for Ctrl+C
                     let mut byte = [0u8; 1];
                     if unsafe {
                         nix::libc::read(
@@ -3536,20 +3732,59 @@ impl AishShell {
                             1,
                         )
                     } == 1
-                        && byte[0] == 0x03
                     {
-                        // Ctrl+C pressed — cancel the LLM request
-                        cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-                        if let Some(ref token) = session_cancel_token {
-                            token.cancel();
+                        if byte[0] == 0x03 {
+                            // Ctrl+C pressed — cancel the LLM request
+                            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                            if let Some(ref token) = session_cancel_token {
+                                token.cancel();
+                            }
+                            animation.stop();
+                            println!("\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                            break None;
+                        } else if byte[0] == 0x1b {
+                            // ESC — check for follow-up bytes (arrow/function
+                            // keys send ESC + additional bytes).
+                            let mut ffds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
+                            unsafe {
+                                nix::libc::FD_ZERO(&mut ffds);
+                                nix::libc::FD_SET(nix::libc::STDIN_FILENO, &mut ffds);
+                            }
+                            let mut ftv = nix::libc::timeval {
+                                tv_sec: 0,
+                                tv_usec: 50_000,
+                            };
+                            let fsel = unsafe {
+                                nix::libc::select(
+                                    nix::libc::STDIN_FILENO + 1,
+                                    &mut ffds,
+                                    std::ptr::null_mut(),
+                                    std::ptr::null_mut(),
+                                    &mut ftv,
+                                )
+                            };
+                            if fsel == 0 {
+                                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                                if let Some(ref token) = session_cancel_token {
+                                    token.cancel();
+                                }
+                                animation.stop();
+                                println!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                                break None;
+                            }
+                            // Follow-up bytes exist (ANSI escape
+                            // sequence) — consume and discard them.
+                            let mut discard = [0u8; 16];
+                            unsafe {
+                                nix::libc::read(
+                                    nix::libc::STDIN_FILENO,
+                                    discard.as_mut_ptr() as *mut nix::libc::c_void,
+                                    discard.len(),
+                                );
+                            }
                         }
-                        animation.stop();
-                        println!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
-                        break None;
+                        // Other bytes during AI processing — discard.
                     }
-                    // Non-Ctrl-C byte during AI processing — discard.
-                    // The user shouldn't be typing during AI processing;
-                    // any stray bytes are not recoverable here.
                 }
                 // Check timeout (60s)
                 if thinking_start
@@ -3615,6 +3850,7 @@ impl AishShell {
                         output_sender: std::sync::mpsc::Sender<aish_pty::BashExecResult>,
                         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
                         cancel_token: Option<std::sync::Arc<CancellationToken>>,
+                        animation: std::sync::Arc<crate::animation::SharedAnimation>,
                     ) -> Box<aish_pty::FollowupCallback> {
                         Box::new(
                             move |captured_output: &str,
@@ -3652,48 +3888,295 @@ impl AishShell {
                                     None => return None,
                                 };
 
-                                match rx.recv_timeout(std::time::Duration::from_secs(120)) {
-                                    Ok(aish_pty::AiEvent::BashExec {
-                                        command,
-                                        output_sender: new_sender,
-                                    }) => {
-                                        *event_rx.lock().unwrap() = Some(rx);
-                                        Some(aish_pty::AiResponse {
-                                            command: Some(command),
-                                            display_text: String::new(),
-                                            followup: Some(make_chain_followup(
-                                                event_rx.clone(),
-                                                done_rx.clone(),
-                                                answer_tx.clone(),
-                                                new_sender,
-                                                cancelled.clone(),
-                                                cancel_token.clone(),
-                                            )),
-                                            ask_user: None,
-                                        })
-                                    }
-                                    Ok(aish_pty::AiEvent::AskUser(request)) => {
-                                        Some(aish_pty::AiResponse {
-                                            command: None,
-                                            display_text: String::new(),
-                                            followup: None,
-                                            ask_user: Some((
-                                                request,
-                                                aish_pty::AskUserChannel {
-                                                    answer_sender: answer_tx.clone(),
-                                                    event_receiver: rx,
-                                                },
-                                            )),
-                                        })
-                                    }
-                                    Ok(aish_pty::AiEvent::Done(_)) | Err(_) => {
-                                        if let Some(drx) = done_rx.lock().unwrap().take() {
-                                            let _ = drx
-                                                .recv_timeout(std::time::Duration::from_secs(120));
+                                let chain_start = std::time::Instant::now();
+                                let chain_timeout = std::time::Duration::from_secs(120);
+                                let mut chain_result: Option<Option<aish_pty::AiResponse>> = None;
+                                while chain_start.elapsed() < chain_timeout {
+                                    match rx.try_recv() {
+                                        Ok(aish_pty::AiEvent::BashExec {
+                                            command,
+                                            output_sender: new_sender,
+                                        }) => {
+                                            *event_rx.lock().unwrap() = Some(rx);
+                                            chain_result = Some(Some(aish_pty::AiResponse {
+                                                command: Some(command),
+                                                display_text: String::new(),
+                                                followup: Some(make_chain_followup(
+                                                    event_rx.clone(),
+                                                    done_rx.clone(),
+                                                    answer_tx.clone(),
+                                                    new_sender,
+                                                    cancelled.clone(),
+                                                    cancel_token.clone(),
+                                                    animation.clone(),
+                                                )),
+                                                ask_user: None,
+                                            }));
+                                            break;
                                         }
-                                        None
+                                        Ok(aish_pty::AiEvent::AskUser(request)) => {
+                                            chain_result = Some(Some(aish_pty::AiResponse {
+                                                command: None,
+                                                display_text: String::new(),
+                                                followup: None,
+                                                ask_user: Some((
+                                                    request,
+                                                    aish_pty::AskUserChannel {
+                                                        answer_sender: answer_tx.clone(),
+                                                        event_receiver: rx,
+                                                    },
+                                                )),
+                                            }));
+                                            break;
+                                        }
+                                        Ok(aish_pty::AiEvent::Done(_)) => {
+                                            if let Some(drx) = done_rx.lock().unwrap().take() {
+                                                let done_start = std::time::Instant::now();
+                                                loop {
+                                                    if drx.try_recv().is_ok() {
+                                                        break;
+                                                    }
+                                                    if done_start.elapsed() >= chain_timeout {
+                                                        break;
+                                                    }
+                                                    let mut dfds: nix::libc::fd_set =
+                                                        unsafe { std::mem::zeroed() };
+                                                    unsafe {
+                                                        nix::libc::FD_ZERO(&mut dfds);
+                                                        nix::libc::FD_SET(
+                                                            nix::libc::STDIN_FILENO,
+                                                            &mut dfds,
+                                                        );
+                                                    }
+                                                    let mut dtv = nix::libc::timeval {
+                                                        tv_sec: 0,
+                                                        tv_usec: 100_000,
+                                                    };
+                                                    let dsel = unsafe {
+                                                        nix::libc::select(
+                                                            nix::libc::STDIN_FILENO + 1,
+                                                            &mut dfds,
+                                                            std::ptr::null_mut(),
+                                                            std::ptr::null_mut(),
+                                                            &mut dtv,
+                                                        )
+                                                    };
+                                                    if dsel > 0 {
+                                                        let mut byte = [0u8; 1];
+                                                        if unsafe {
+                                                            nix::libc::read(
+                                                                nix::libc::STDIN_FILENO,
+                                                                byte.as_mut_ptr()
+                                                                    as *mut nix::libc::c_void,
+                                                                1,
+                                                            )
+                                                        } == 1
+                                                        {
+                                                            if byte[0] == 0x03 {
+                                                                cancelled.store(
+                                                                    true,
+                                                                    std::sync::atomic::Ordering::SeqCst,
+                                                                );
+                                                                if let Some(ref token) =
+                                                                    cancel_token
+                                                                {
+                                                                    token.cancel();
+                                                                }
+                                                                animation.stop();
+                                                                let msg = format!(
+                                                                    "\r\x1b[33m{}\x1b[0m\r\n",
+                                                                    t("shell.command_cancelled")
+                                                                );
+                                                                unsafe {
+                                                                    nix::libc::write(
+                                                                        nix::libc::STDOUT_FILENO,
+                                                                        msg.as_ptr()
+                                                                            as *mut nix::libc::c_void,
+                                                                        msg.len(),
+                                                                    );
+                                                                }
+                                                                break;
+                                                            } else if byte[0] == 0x1b {
+                                                                let mut ffds: nix::libc::fd_set =
+                                                                    unsafe { std::mem::zeroed() };
+                                                                unsafe {
+                                                                    nix::libc::FD_ZERO(&mut ffds);
+                                                                    nix::libc::FD_SET(
+                                                                        nix::libc::STDIN_FILENO,
+                                                                        &mut ffds,
+                                                                    );
+                                                                }
+                                                                let mut ftv = nix::libc::timeval {
+                                                                    tv_sec: 0,
+                                                                    tv_usec: 50_000,
+                                                                };
+                                                                let fsel = unsafe {
+                                                                    nix::libc::select(
+                                                                        nix::libc::STDIN_FILENO + 1,
+                                                                        &mut ffds,
+                                                                        std::ptr::null_mut(),
+                                                                        std::ptr::null_mut(),
+                                                                        &mut ftv,
+                                                                    )
+                                                                };
+                                                                if fsel == 0 {
+                                                                    cancelled.store(
+                                                                        true,
+                                                                        std::sync::atomic::Ordering::SeqCst,
+                                                                    );
+                                                                    if let Some(ref token) =
+                                                                        cancel_token
+                                                                    {
+                                                                        token.cancel();
+                                                                    }
+                                                                    animation.stop();
+                                                                    let msg = format!(
+                                                                        "\r\x1b[33m{}\x1b[0m\r\n",
+                                                                        t("shell.command_cancelled")
+                                                                    );
+                                                                    unsafe {
+                                                                        nix::libc::write(
+                                                                            nix::libc::STDOUT_FILENO,
+                                                                            msg.as_ptr()
+                                                                                as *mut nix::libc::c_void,
+                                                                            msg.len(),
+                                                                        );
+                                                                    }
+                                                                    break;
+                                                                }
+                                                                let mut discard = [0u8; 16];
+                                                                unsafe {
+                                                                    nix::libc::read(
+                                                                        nix::libc::STDIN_FILENO,
+                                                                        discard.as_mut_ptr()
+                                                                            as *mut nix::libc::c_void,
+                                                                        discard.len(),
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            chain_result = Some(None);
+                                            break;
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                            chain_result = Some(None);
+                                            break;
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                    }
+                                    let mut rfds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
+                                    unsafe {
+                                        nix::libc::FD_ZERO(&mut rfds);
+                                        nix::libc::FD_SET(nix::libc::STDIN_FILENO, &mut rfds);
+                                    }
+                                    let mut tv = nix::libc::timeval {
+                                        tv_sec: 0,
+                                        tv_usec: 100_000,
+                                    };
+                                    let sel = unsafe {
+                                        nix::libc::select(
+                                            nix::libc::STDIN_FILENO + 1,
+                                            &mut rfds,
+                                            std::ptr::null_mut(),
+                                            std::ptr::null_mut(),
+                                            &mut tv,
+                                        )
+                                    };
+                                    if sel > 0 {
+                                        let mut byte = [0u8; 1];
+                                        if unsafe {
+                                            nix::libc::read(
+                                                nix::libc::STDIN_FILENO,
+                                                byte.as_mut_ptr() as *mut nix::libc::c_void,
+                                                1,
+                                            )
+                                        } == 1
+                                        {
+                                            if byte[0] == 0x03 {
+                                                cancelled.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                if let Some(ref token) = cancel_token {
+                                                    token.cancel();
+                                                }
+                                                animation.stop();
+                                                let msg = format!(
+                                                    "\r\x1b[33m{}\x1b[0m\r\n",
+                                                    t("shell.command_cancelled")
+                                                );
+                                                unsafe {
+                                                    nix::libc::write(
+                                                        nix::libc::STDOUT_FILENO,
+                                                        msg.as_ptr() as *mut nix::libc::c_void,
+                                                        msg.len(),
+                                                    );
+                                                }
+                                                chain_result = Some(None);
+                                                break;
+                                            } else if byte[0] == 0x1b {
+                                                let mut ffds: nix::libc::fd_set =
+                                                    unsafe { std::mem::zeroed() };
+                                                unsafe {
+                                                    nix::libc::FD_ZERO(&mut ffds);
+                                                    nix::libc::FD_SET(
+                                                        nix::libc::STDIN_FILENO,
+                                                        &mut ffds,
+                                                    );
+                                                }
+                                                let mut ftv = nix::libc::timeval {
+                                                    tv_sec: 0,
+                                                    tv_usec: 50_000,
+                                                };
+                                                let fsel = unsafe {
+                                                    nix::libc::select(
+                                                        nix::libc::STDIN_FILENO + 1,
+                                                        &mut ffds,
+                                                        std::ptr::null_mut(),
+                                                        std::ptr::null_mut(),
+                                                        &mut ftv,
+                                                    )
+                                                };
+                                                if fsel == 0 {
+                                                    cancelled.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    if let Some(ref token) = cancel_token {
+                                                        token.cancel();
+                                                    }
+                                                    animation.stop();
+                                                    let msg = format!(
+                                                        "\r\x1b[33m{}\x1b[0m\r\n",
+                                                        t("shell.command_cancelled")
+                                                    );
+                                                    unsafe {
+                                                        nix::libc::write(
+                                                            nix::libc::STDOUT_FILENO,
+                                                            msg.as_ptr() as *mut nix::libc::c_void,
+                                                            msg.len(),
+                                                        );
+                                                    }
+                                                    chain_result = Some(None);
+                                                    break;
+                                                }
+                                                let mut discard = [0u8; 16];
+                                                unsafe {
+                                                    nix::libc::read(
+                                                        nix::libc::STDIN_FILENO,
+                                                        discard.as_mut_ptr()
+                                                            as *mut nix::libc::c_void,
+                                                        discard.len(),
+                                                    );
+                                                }
+                                            }
+                                        }
                                     }
                                 }
+                                chain_result.unwrap_or(None)
                             },
                         )
                     }
@@ -3705,6 +4188,7 @@ impl AishShell {
                         output_sender,
                         cancelled_fu,
                         session_cancel_token,
+                        animation.clone(),
                     );
                     Some(aish_pty::AiResponse {
                         command: Some(command),

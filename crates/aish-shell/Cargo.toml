@@ -37,6 +37,7 @@ inquire = "0.9.4"
 unicode-width = "0.2"
 which = "8.0.2"
 nix.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
