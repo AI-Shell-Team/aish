@@ -1,8 +1,6 @@
-//! Ask-user tool using the `inquire` crate for interactive prompts.
+//! Ask-user tool for local interactive prompts.
 //!
-//! choice_or_text: `inquire::Select` with a "(custom input)" entry at the
-//! bottom. Selecting it opens `inquire::Text`; pressing Esc there returns
-//! to the Select list (loop), not cancels the whole dialog.
+//! choice_or_text: shared selection panel with inline custom input.
 //!
 //! text_input: `inquire::Text` with optional default.
 
@@ -10,6 +8,7 @@ use std::io::{self, Write};
 
 use aish_i18n;
 use aish_llm::{Tool, ToolResult};
+use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime, SearchSelectItem};
 
 /// Cached translated description.
 static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -139,14 +138,6 @@ impl Tool for AskUserTool {
     }
 }
 
-// ---------- Slot for identifying which item was selected ----------
-
-#[derive(Clone)]
-enum Slot {
-    Opt(usize),
-    Custom,
-}
-
 impl AskUserTool {
     fn handle_choice_or_text(
         &self,
@@ -161,108 +152,16 @@ impl AskUserTool {
             _ => return ToolResult::error(aish_i18n::t("tools.ask_user.options_not_empty")),
         };
 
-        let display_prompt = match title {
-            Some(t) => format!("{}: {}", t, prompt),
-            None => prompt.to_string(),
-        };
-
-        // Build items: real options + custom-input slot at the bottom.
-        let mut items: Vec<(String, Slot)> = options
-            .iter()
-            .enumerate()
-            .map(|(i, opt)| {
-                let label = opt.get("label").and_then(|v| v.as_str()).unwrap_or("?");
-                let desc = opt.get("description").and_then(|v| v.as_str());
-                let display = match desc {
-                    Some(d) => format!("{} - {}", label, d),
-                    None => label.to_string(),
-                };
-                (display, Slot::Opt(i))
-            })
-            .collect();
-        items.push((get_custom_input_label(), Slot::Custom));
-
-        let labels: Vec<String> = items.iter().map(|(l, _)| l.clone()).collect();
-
-        // Default cursor position.
-        let starting_cursor = if let Some(dv) = default {
-            items
-                .iter()
-                .position(|(_, s)| {
-                    matches!(s, Slot::Opt(i)
-                        if options[*i].get("value").and_then(|v| v.as_str()) == Some(dv))
-                })
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        let help_msg = if allow_cancel {
-            aish_i18n::t("tools.ask_user.help_select_with_cancel")
-        } else {
-            aish_i18n::t("tools.ask_user.help_select_no_cancel")
-        };
-
-        // Loop: Select → (custom → Text → Esc back to Select) → done
+        // Loop only handles required prompts that cannot be cancelled.
         loop {
-            let select_result = inquire::Select::new(&display_prompt, labels.clone())
-                .with_starting_cursor(starting_cursor)
-                .with_help_message(&help_msg)
-                .prompt();
-
-            match select_result {
-                Ok(chosen_label) => {
-                    let idx = items
-                        .iter()
-                        .position(|(l, _)| l == &chosen_label)
-                        .unwrap_or(0);
-
-                    match &items[idx].1 {
-                        Slot::Opt(i) => {
-                            let value = options[*i]
-                                .get("value")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            return ToolResult::success(value.to_string());
-                        }
-                        Slot::Custom => {
-                            // Open text input; Esc returns to Select.
-                            let help_message = if allow_cancel {
-                                aish_i18n::t("tools.ask_user.custom_input_help_cancel")
-                            } else {
-                                aish_i18n::t("tools.ask_user.custom_input_help_no_cancel")
-                            };
-                            let text_result = inquire::Text::new(&aish_i18n::t(
-                                "tools.ask_user.custom_input_prompt",
-                            ))
-                            .with_help_message(&help_message)
-                            .prompt();
-
-                            match text_result {
-                                Ok(text) => {
-                                    let trimmed = text.trim().to_string();
-                                    if trimmed.is_empty() {
-                                        // Empty input — go back to select.
-                                        continue;
-                                    }
-                                    return ToolResult::success({
-                                        let mut args_map = std::collections::HashMap::new();
-                                        args_map.insert("input".to_string(), trimmed.clone());
-                                        aish_i18n::t_with_args(
-                                            "tools.ask_user.user_input_prefix",
-                                            &args_map,
-                                        )
-                                    });
-                                }
-                                Err(_) => {
-                                    // Esc pressed — go back to Select.
-                                    continue;
-                                }
-                            }
-                        }
-                    }
+            match self.run_choice_panel(title, prompt, options, default, allow_cancel) {
+                Ok(PanelOutcome::Submitted(ChoiceOutcome::Selected(value))) => {
+                    return ToolResult::success(value);
                 }
-                Err(_) => {
+                Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(text))) => {
+                    return ToolResult::success(format_custom_user_input(text));
+                }
+                Ok(PanelOutcome::Cancelled) => {
                     // Esc pressed at Select level.
                     if allow_cancel {
                         if let Some(d) = default {
@@ -273,8 +172,62 @@ impl AskUserTool {
                     // Not allowed to cancel — loop back.
                     continue;
                 }
+                Err(_) => {
+                    return self.fallback_choice_or_text(
+                        title,
+                        prompt,
+                        options,
+                        default,
+                        allow_cancel,
+                    )
+                }
             }
         }
+    }
+
+    fn run_choice_panel(
+        &self,
+        title: Option<&str>,
+        prompt: &str,
+        options: &[serde_json::Value],
+        default: Option<&str>,
+        allow_cancel: bool,
+    ) -> Result<PanelOutcome<ChoiceOutcome>, aish_ui::PanelError> {
+        let panel_items = options
+            .iter()
+            .map(|option| {
+                let value = option_value(option).to_string();
+                let label = option_label(option).to_string();
+                let mut item = SearchSelectItem::new(value.clone(), label.clone());
+                if let Some(description) = option_description(option) {
+                    item = item.with_detail(description.to_string());
+                }
+                item.with_search_text(format!(
+                    "{} {} {}",
+                    value,
+                    label,
+                    option_description(option).unwrap_or("")
+                ))
+            })
+            .collect();
+
+        let help_msg = if allow_cancel {
+            aish_i18n::t("tools.ask_user.help_select_with_cancel")
+        } else {
+            aish_i18n::t("tools.ask_user.help_select_no_cancel")
+        };
+        let panel = ChoicePanel::new(title.unwrap_or_default(), prompt, panel_items)
+            .with_custom_label(get_custom_input_label())
+            .with_selected_value(default)
+            .with_allow_cancel(allow_cancel)
+            .with_custom_input_footer(if allow_cancel {
+                aish_i18n::t("tools.ask_user.custom_input_help_cancel")
+            } else {
+                aish_i18n::t("tools.ask_user.custom_input_help_no_cancel")
+            })
+            .with_footer(help_msg);
+
+        PanelRuntime::new().run(panel)
     }
 
     fn handle_text_input(
@@ -388,4 +341,103 @@ impl AskUserTool {
             &args_map,
         ))
     }
+
+    fn fallback_choice_or_text(
+        &self,
+        title: Option<&str>,
+        prompt: &str,
+        options: &[serde_json::Value],
+        default: Option<&str>,
+        allow_cancel: bool,
+    ) -> ToolResult {
+        if let Some(t) = title {
+            println!("\x1b[1m{}\x1b[0m", t);
+        }
+        println!("\x1b[36m{}\x1b[0m", prompt);
+        for (index, option) in options.iter().enumerate() {
+            match option_description(option) {
+                Some(description) => println!(
+                    "  \x1b[33m{}.\x1b[0m {} - {}",
+                    index + 1,
+                    option_label(option),
+                    description
+                ),
+                None => println!("  \x1b[33m{}.\x1b[0m {}", index + 1, option_label(option)),
+            }
+        }
+        println!(
+            "  \x1b[33m0.\x1b[0m \x1b[2m{}\x1b[0m",
+            get_custom_input_label()
+        );
+        if allow_cancel {
+            println!("  \x1b[2m(press Enter with empty input to cancel)\x1b[0m");
+        }
+        print!("Your answer: ");
+        let _ = io::stdout().flush();
+
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).is_err() {
+            return ToolResult::error(aish_i18n::t("tools.ask_user.read_input_failed"));
+        }
+        let answer = answer.trim().to_string();
+
+        if answer.is_empty() {
+            if let Some(d) = default {
+                return ToolResult::success(d.to_string());
+            }
+            if allow_cancel {
+                return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
+            }
+            return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
+        }
+
+        if let Ok(selection) = answer.parse::<usize>() {
+            if selection > 0 && selection <= options.len() {
+                return ToolResult::success(option_value(&options[selection - 1]).to_string());
+            }
+            if selection == 0 {
+                return self.fallback_custom_input(default, allow_cancel);
+            }
+        }
+
+        ToolResult::success(format_custom_user_input(answer))
+    }
+
+    fn fallback_custom_input(&self, default: Option<&str>, allow_cancel: bool) -> ToolResult {
+        print!("{}: ", aish_i18n::t("tools.ask_user.custom_input_prompt"));
+        let _ = io::stdout().flush();
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).is_err() {
+            return ToolResult::error(aish_i18n::t("tools.ask_user.read_input_failed"));
+        }
+        let answer = answer.trim().to_string();
+        if answer.is_empty() {
+            if let Some(d) = default {
+                return ToolResult::success(d.to_string());
+            }
+            if allow_cancel {
+                return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
+            }
+            return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
+        }
+        ToolResult::success(format_custom_user_input(answer))
+    }
+}
+
+fn option_value(option: &serde_json::Value) -> &str {
+    option.get("value").and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn option_label(option: &serde_json::Value) -> &str {
+    option.get("label").and_then(|v| v.as_str()).unwrap_or("?")
+}
+
+fn option_description(option: &serde_json::Value) -> Option<&str> {
+    option.get("description").and_then(|v| v.as_str())
+}
+
+fn format_custom_user_input(input: String) -> String {
+    let mut args_map = std::collections::HashMap::new();
+    args_map.insert("input".to_string(), input);
+    aish_i18n::t_with_args("tools.ask_user.user_input_prefix", &args_map)
 }
