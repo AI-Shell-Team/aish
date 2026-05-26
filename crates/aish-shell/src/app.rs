@@ -1602,7 +1602,52 @@ impl AishShell {
                             let ans = answer.trim().to_lowercase();
                             if ans != "n" && ans != "no" {
                                 // Route to AI
-                                let question = input.trim().to_string();
+                                let mut question = input.trim().to_string();
+
+                                // Security gate: same secret check as the normal AI path
+                                let decision = self.security_manager.check_ai_input(&question);
+                                if decision.require_confirmation {
+                                    let reasons = decision
+                                        .analysis
+                                        .detected_secrets
+                                        .as_ref()
+                                        .map(|s| {
+                                            s.iter()
+                                                .map(|m| m.format_reason())
+                                                .collect::<Vec<_>>()
+                                                .join("\n  ")
+                                        })
+                                        .unwrap_or_default();
+                                    let mut args = std::collections::HashMap::new();
+                                    args.insert("reasons".to_string(), reasons);
+                                    let title = t("shell.security.secret.title");
+                                    let message = t_with_args("shell.security.secret.detected", &args);
+                                    let choice = crate::tui::show_secret_dialog_tui(&title, &message);
+                                    match choice {
+                                        crate::tui::SecretDialogChoice::Abort => {
+                                            let aborted = t("shell.security.secret.aborted");
+                                            println!("\x1b[33m{}\x1b[0m", aborted);
+                                            continue;
+                                        }
+                                        crate::tui::SecretDialogChoice::Redact => {
+                                            if let Some(secrets) = decision.analysis.detected_secrets {
+                                                let count = secrets.len();
+                                                let redacted = self
+                                                    .secret_vault
+                                                    .lock()
+                                                    .unwrap()
+                                                    .redact(&secrets, &question);
+                                                let mut rargs = std::collections::HashMap::new();
+                                                rargs.insert("count".to_string(), count.to_string());
+                                                let msg = t_with_args("shell.security.secret.redacted", &rargs);
+                                                println!("\x1b[33m{}\x1b[0m", msg);
+                                                question = redacted;
+                                            }
+                                        }
+                                        crate::tui::SecretDialogChoice::Allow => {}
+                                    }
+                                }
+
                                 let old_sigint = self.install_ai_sigint_handler();
                                 let mut esc_watcher =
                                     EscWatcher::start(self.ai_handler.cancellation_token_arc());

@@ -330,16 +330,17 @@ impl ShellRenderer {
         let segments = split_content(text);
         let mut last_was_markdown = false;
         for seg in segments {
-            last_was_markdown = matches!(seg, ContentSegment::Markdown(_));
             match seg {
                 ContentSegment::CodeBlock { lang, code } => {
                     render_code_block(&mut self.console, &lang, &code, self.terminal_width);
+                    last_was_markdown = false;
                 }
                 ContentSegment::Table(content) => {
                     let lines: Vec<&str> = content.lines().collect();
                     if let Some(segments) = render_table_to_segments(&lines, self.terminal_width) {
                         let _ = self.console.write_segments(&segments);
                     }
+                    last_was_markdown = false;
                 }
                 ContentSegment::Markdown(content) => {
                     let inline_style = Style::new()
@@ -348,6 +349,7 @@ impl ShellRenderer {
                     let md = Markdown::new(&content).inline_code_style(inline_style);
                     let segs = md.render(self.terminal_width);
                     let _ = self.console.write_segments(&segs);
+                    last_was_markdown = true;
                 }
             }
         }
