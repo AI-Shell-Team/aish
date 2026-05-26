@@ -75,7 +75,7 @@ pub fn select_resume_session(items: &[ResumeSessionItem]) -> io::Result<Option<S
 
     match PanelRuntime::new().run(panel).map_err(io::Error::other)? {
         PanelOutcome::Submitted(SearchSelectOutcome::Selected(session_id)) => Ok(Some(session_id)),
-        PanelOutcome::Submitted(SearchSelectOutcome::Custom) | PanelOutcome::Cancelled => Ok(None),
+        PanelOutcome::Cancelled => Ok(None),
     }
 }
 
