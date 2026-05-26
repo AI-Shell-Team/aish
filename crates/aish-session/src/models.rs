@@ -33,7 +33,13 @@ pub struct SessionStateSnapshot {
 
 impl SessionRecord {
     pub fn state_snapshot(&self) -> SessionStateSnapshot {
-        serde_json::from_value(self.state.clone()).unwrap_or_default()
+        match serde_json::from_value(self.state.clone()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, "failed to parse session state snapshot; using default");
+                SessionStateSnapshot::default()
+            }
+        }
     }
 }
 

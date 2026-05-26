@@ -1047,7 +1047,12 @@ impl AishShell {
     pub fn resume(config: ConfigModel, session_id: &str) -> aish_core::Result<Self> {
         let mut shell = Self::new(config)?;
         let transient_session_uuid = shell.session_uuid.clone();
-        shell.resume_session_with_options(session_id, false, false)?;
+        if let Err(err) = shell.resume_session_with_options(session_id, false, false) {
+            if let Some(ref store) = shell.session_store {
+                let _ = store.delete_session(&transient_session_uuid);
+            }
+            return Err(err);
+        }
         if shell.session_uuid != transient_session_uuid {
             if let Some(ref store) = shell.session_store {
                 let _ = store.delete_session(&transient_session_uuid);
@@ -1905,7 +1910,7 @@ impl AishShell {
             let _ = std::env::set_current_dir(&target_cwd);
         }
 
-        self.restart_pty_with_notice(false);
+        self.restart_pty_with_notice(false)?;
         self.persist_session_snapshot();
         if print_success {
             println!(
@@ -2210,10 +2215,10 @@ impl AishShell {
 
     /// Restart the PTY session (e.g., after bash exits or crashes).
     fn restart_pty(&mut self) {
-        self.restart_pty_with_notice(true);
+        let _ = self.restart_pty_with_notice(true);
     }
 
-    fn restart_pty_with_notice(&mut self, show_notice: bool) {
+    fn restart_pty_with_notice(&mut self, show_notice: bool) -> aish_core::Result<()> {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         match aish_pty::PersistentPty::start(&self.state.cwd, rows, cols) {
             Ok(new_pty) => {
@@ -2221,6 +2226,7 @@ impl AishShell {
                 if show_notice {
                     println!("\x1b[33mbash session restarted\x1b[0m");
                 }
+                Ok(())
             }
             Err(e) => {
                 eprintln!("{}", {
@@ -2229,6 +2235,7 @@ impl AishShell {
                     aish_i18n::t_with_args("shell.error.restart_bash_failed", &args)
                 });
                 self.state.should_exit = true;
+                Err(e)
             }
         }
     }

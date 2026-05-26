@@ -131,15 +131,20 @@ impl SessionStore {
 
     /// Delete a session and its command history.
     pub fn delete_session(&self, uuid: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM history WHERE session_uuid = ?1", params![uuid])
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| AishError::Session(format!("failed to start delete transaction: {e}")))?;
+
+        tx.execute("DELETE FROM history WHERE session_uuid = ?1", params![uuid])
             .map_err(|e| AishError::Session(format!("failed to delete session history: {e}")))?;
-        self.conn
-            .execute(
-                "DELETE FROM sessions WHERE session_uuid = ?1",
-                params![uuid],
-            )
-            .map_err(|e| AishError::Session(format!("failed to delete session: {e}")))?;
+        tx.execute(
+            "DELETE FROM sessions WHERE session_uuid = ?1",
+            params![uuid],
+        )
+        .map_err(|e| AishError::Session(format!("failed to delete session: {e}")))?;
+        tx.commit()
+            .map_err(|e| AishError::Session(format!("failed to commit session delete: {e}")))?;
         Ok(())
     }
 
@@ -233,7 +238,13 @@ impl SessionStore {
             format!("failed to insert history entry: {e}")
         ))?;
 
-        self.touch_session(&entry.session_uuid, entry.created_at)?;
+        if let Err(error) = self.touch_session(&entry.session_uuid, entry.created_at) {
+            tracing::warn!(
+                session_uuid = %entry.session_uuid,
+                %error,
+                "history row inserted but failed to update session timestamp"
+            );
+        }
 
         Ok(self.conn.last_insert_rowid())
     }

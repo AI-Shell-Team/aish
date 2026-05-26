@@ -86,7 +86,10 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        execute!(io::stdout(), cursor::Hide)?;
+        if let Err(err) = execute!(io::stdout(), cursor::Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(err);
+        }
         Ok(Self)
     }
 }
