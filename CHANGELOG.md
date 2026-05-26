@@ -7,6 +7,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-26
+
+### Added
+
+- Added nested SSH session detection with stronger interrupt handling so remote interactive sessions can be identified and interrupted more reliably.
+- Added a host dossier pipeline and the `host_note` AI tool so per-host notes and profile data can persist across sessions.
+
+### Changed
+
+- Changed the Rust PTY and secure-bash flow to better support nested remote session execution and follow-up tool work.
+
+### Fixed
+
+- Fixed `host_note` persistence so profile-save failures are surfaced instead of being reported as success.
+- Fixed Rust CI and clippy regressions introduced by the SSH and host-dossier changes.
+
 ## [Unreleased]
 
 ### Added
