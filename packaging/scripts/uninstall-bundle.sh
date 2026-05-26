@@ -2,14 +2,16 @@
 set -euo pipefail
 
 PURGE_CONFIG=0
+BUNDLE_SYSTEMD_UNITDIR="/etc/systemd/system"
 INSTALL_ROOT="${AISH_INSTALL_ROOT:-}"
 INSTALL_PREFIX=""
+SKIP_SYSTEMD="${AISH_SKIP_SYSTEMD:-0}"
 
 usage() {
 	cat <<'EOF'
 Usage: sudo ./uninstall.sh [--purge-config] [--prefix=PATH]
 
-Removes AI Shell binaries, systemd units, and bundled skills.
+Removes AI Shell binaries and bundled skills.
 EOF
 }
 
@@ -38,11 +40,21 @@ binary_target_dir() {
 	printf '%s\n' "/usr/local/bin"
 }
 
-disable_services() {
-	if command -v systemctl >/dev/null 2>&1; then
+remove_systemd_units() {
+	if [[ -n "$INSTALL_PREFIX" ]]; then
+		return
+	fi
+	if [[ -z "$INSTALL_ROOT" && "$SKIP_SYSTEMD" != "1" && -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
 		systemctl disable --now aish-sandbox.socket >/dev/null 2>&1 || true
 		systemctl stop --no-block aish-sandbox.service >/dev/null 2>&1 || true
 		systemctl reset-failed aish-sandbox.service >/dev/null 2>&1 || true
+	fi
+
+	rm -f \
+		"$(target_path "${BUNDLE_SYSTEMD_UNITDIR}/aish-sandbox.service")" \
+		"$(target_path "${BUNDLE_SYSTEMD_UNITDIR}/aish-sandbox.socket")"
+
+	if [[ -z "$INSTALL_ROOT" && "$SKIP_SYSTEMD" != "1" && -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
 		systemctl daemon-reload >/dev/null 2>&1 || true
 	fi
 }
@@ -70,15 +82,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_root
-disable_services
 
 BIN_DIR="$(binary_target_dir)"
 
-rm -f "$(target_path "${BIN_DIR}/aish")" "$(target_path "${BIN_DIR}/aish-sandbox")" "$(target_path "${BIN_DIR}/aish-uninstall")"
+remove_systemd_units
 
-if [[ -z "$INSTALL_PREFIX" ]]; then
-	rm -f "$(target_path "/etc/systemd/system/aish-sandbox.service")" "$(target_path "/etc/systemd/system/aish-sandbox.socket")"
-fi
+rm -f "$(target_path "${BIN_DIR}/aish")" "$(target_path "${BIN_DIR}/aish-uninstall")"
 
 rm -rf "$(target_path "/usr/local/share/aish/skills")"
 rm -f "$(target_path "/usr/local/share/aish/skills-guide.md")"

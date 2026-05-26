@@ -7,99 +7,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.7] - 2026-05-13
-
-### Changed
-
-- Changed prerelease self-update handling so beta installs stay on the beta channel instead of drifting to a broader prerelease track.
-
-### Fixed
-
-- Fixed AI-triggered Bash actions that require terminal input so they now ask for explicit confirmation before taking over the shell.
-- Fixed `ask_user` prompts during AI-driven shell runs so background stdin monitoring pauses while the assistant is waiting for your reply.
-- Fixed `grep_search` and `glob_search` workspace scoping so search results stay limited to the active workspace even after commands change directories.
-
-### Security
-
-- Hardened self-update by verifying downloaded release archives before installing them.
-- Hardened live-smoke diagnostics handling so secrets are redacted from CI artifacts.
-
-## [0.2.6] - 2026-05-07
+## [Unreleased]
 
 ### Added
 
-- Added PTY-backed Bash tab completion so interactive completion can use shell-aware suggestions, installed Bash completion scripts, and PATH command discovery.
-- Added Ctrl+Z job-control forwarding for Bash commands and AI-triggered PTY tool runs, making it possible to suspend and resume interactive jobs more reliably.
+- No unreleased changes yet.
 
-### Fixed
-
-- Fixed assistant tool-call rendering so tool responses stay attached to the invoking assistant turn instead of appearing out of order.
-- Fixed PTY completion and command-state isolation so background completion queries and repeated completion filtering no longer interfere with the active shell command.
-- Fixed AI-triggered `sudo` command handling so PTY stdin ownership is restored correctly and password prompts no longer race with background AI output monitoring.
-
-## [0.2.5] - 2026-04-24
-
-### Fixed
-
-- Fixed AI-initiated `bash_exec` commands that invoke `sudo` so they now run through a PTY-backed path instead of hanging when the system prompts for a password.
-
-## [0.2.4] - 2026-04-23
-
-### Changed
-
-- Changed stable release publishing so tagged releases now keep GitHub Release assets while also publishing versioned Linux bundles and latest-version metadata to the CDN download paths used by the installer and stable self-update.
-- Changed shell startup to reuse the PTY startup handshake, reducing duplicate initialization work and keeping startup state tracking more consistent.
-
-### Fixed
-
-- Fixed final AI answer rendering so completed responses are shown once and no longer leak startup or timing state into the visible shell session.
-
-## [0.2.3] - 2026-04-22
-
-### Changed
-
-- Changed `aish update` stable release detection to read CDN-hosted latest release metadata, and switched archive downloads to the CDN bundle path while preserving `AISH_DOWNLOAD_BASE_URL`, `AISH_LATEST_URL`, and legacy `AISH_REPO_URL` overrides.
-
-### Fixed
-
-- Fixed shared PTY commands so they no longer time out after 30 seconds unless a caller explicitly requests a timeout.
-- Fixed PTY command lifecycle tracking by moving command metadata off the shell input path onto a dedicated metadata pipe, preventing metadata leaks and incorrect backend event binding.
-- Fixed PyInstaller subprocess launches by sanitizing loader environment variables before spawning child processes.
-
-## [0.2.2] - 2026-04-16
+## [0.3.0-beta.3] - 2026-05-13
 
 ### Added
 
-- Added a dedicated `Release Final Check` workflow so maintainers can confirm merged `main` release metadata before pushing a stable tag.
+- Added nested SSH session detection with stronger interrupt handling so remote interactive sessions can be identified and interrupted more reliably.
+- Added a host dossier pipeline and the `host_note` AI tool so per-host notes and profile data can persist across sessions.
 
 ### Changed
 
-- Changed release candidate validation so release PRs now run installed-binary runtime smoke checks and artifact-based live smoke against the built bundle before merge.
-- Changed the plan mode keyboard toggle from `F2` to `Shift+Tab` and `Ctrl+X P`, reducing conflicts with terminal key handling.
+- Changed the Rust PTY and secure-bash flow to better support nested remote session execution and follow-up tool work.
 
 ### Fixed
 
-- Fixed normal streamed conversations so the live reasoning display is no longer interrupted by partial content rendering while the model is still responding.
-
-## [0.2.1] - 2026-04-15
-
-### Added
-
-- Added an interactive plan mode for non-trivial tasks, including persisted plan artifacts, review and approval flow, and an explicit transition back into execution. Enter plan mode with `/plan` or `F2`, then leave it with `/plan exit` or `F2` when you want to return to normal shell execution.
-- Added persistent long-term memory backed by Markdown storage, with memory recall and store tooling that can carry forward user preferences and project context across sessions.
-- Added `aish update` and `aish uninstall` commands so archive, pip, and system-package installs have a built-in path for upgrade and removal.
-
-### Changed
-
-- Changed the terminal UI to show a visible thinking timer while the model is working, making longer requests easier to track.
-- Changed startup and session wiring so plan mode, memory, and the new CLI management flows are initialized more consistently from the current package layout.
-
-### Fixed
-
-- Fixed the interactive shell so `quit` works again as an exit alias.
-- Fixed compact prompt theme spacing and related prompt rendering regressions in the shell UI.
-- Fixed standalone bundle startup so PyInstaller builds include the lazy-loaded shell entry modules needed to launch `aish` after installation.
-- Fixed release automation paths so preparation and publishing workflows target the current repository layout.
+- Fixed `host_note` persistence so profile-save failures are surfaced instead of being reported as success.
+- Fixed Rust CI and clippy regressions introduced by the SSH and host-dossier changes.
 
 ## [0.2.0] - 2026-04-03
 

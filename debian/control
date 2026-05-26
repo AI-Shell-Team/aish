@@ -21,6 +21,5 @@ Depends:
  util-linux
 Description: AI Shell standalone binaries and sandbox service
  AI Shell is an interactive shell with built-in LLM capabilities.
- This package ships prebuilt PyInstaller binaries for the main CLI and the
- privileged sandbox daemon, along with the default security policy, bundled
- skills, and systemd unit files.
+ This package ships the Rust aish binary, default security policy, bundled
+ skills, and systemd socket/service units for the privileged sandbox runtime.

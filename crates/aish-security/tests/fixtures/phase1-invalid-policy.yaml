@@ -1,0 +1,9 @@
+global:
+  enable_sandbox: false
+  sandbox_off_action: ALLOW
+
+rules:
+  - id: X-001
+    path:
+      - /srv/**
+    risk: MIDUEM

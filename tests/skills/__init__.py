@@ -1,1 +1,0 @@
-"""Skill-related test modules."""

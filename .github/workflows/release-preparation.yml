@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Target stable release version, for example 0.1.1"
+        description: "Target release version, for example 0.3.0 or 1.0.0-beta.1"
         required: true
         type: string
       ref:
-        description: "Git ref to validate, for example release/v0.1.1-prep or a commit SHA"
+        description: "Git ref to validate, for example release/v0.3.0-prep or a commit SHA"
         required: false
         default: main
         type: string
@@ -75,15 +75,12 @@ jobs:
       matrix:
         include:
           - arch: amd64
+            target: x86_64-unknown-linux-musl
             runs_on: ubuntu-latest
           - arch: arm64
+            target: aarch64-unknown-linux-musl
             runs_on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs_on }}
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout repository
@@ -92,13 +89,15 @@ jobs:
           ref: ${{ github.event.inputs.ref }}
 
       - name: Set up build environment
+        env:
+          AISH_BUILD_TARGET: ${{ matrix.target }}
         run: ./packaging/scripts/setup-ci-env.sh
 
       - name: Build bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" AISH_BUILD_TARGET="${{ matrix.target }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
@@ -116,16 +115,9 @@ jobs:
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
 
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
-          test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
-          grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-
-      - name: Smoke test installed binary runtime
-        run: |
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
-          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
 
       - name: Upload dry-run artifacts
         uses: actions/upload-artifact@v6
@@ -163,5 +155,5 @@ jobs:
           - Ref: ${{ github.event.inputs.ref }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
-          Release metadata artifacts, dry-run bundle artifacts, and live smoke validation have completed successfully.
+          Release metadata artifacts, dry-run bundle validation, and live smoke validation have completed successfully.
           EOF

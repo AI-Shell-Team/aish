@@ -131,10 +131,7 @@ Der Installer ermittelt die neueste stabile Version, lädt das passende Bundle f
 ### Aus dem Quellcode ausführen (Entwicklung/Test)
 
 ```bash
-uv sync
-uv run aish
-# oder
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -336,9 +333,8 @@ Empfehlungen:
 ## Entwicklung & Tests
 
 ```bash
-uv sync
-uv run aish
-uv run pytest
+cargo test --workspace
+./packaging/tests/release_scripts_smoke.sh
 ```
 
 ---

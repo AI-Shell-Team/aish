@@ -1,0 +1,12 @@
+[package]
+name = "aish-scripts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aish-core = { path = "../aish-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }

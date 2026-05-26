@@ -10,7 +10,7 @@
 
 [![Official Website](https://img.shields.io/badge/官网-aishell.ai-blue.svg)](https://www.aishell.ai)
 [![GitHub](https://img.shields.io/badge/GitHub-AI--Shell--Team/aish-black.svg)](https://github.com/AI-Shell-Team/aish/)
-[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Rust Version](https://img.shields.io/badge/rust-1.80+-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey.svg)](#)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
@@ -126,10 +126,7 @@ curl -fsSL https://www.aishell.ai/repo/install.sh | bash
 ### 从源码运行（开发/试用）
 
 ```bash
-uv sync
-uv run aish
-# 或
-python -m aish
+cargo run --bin aish
 ```
 
 ---
@@ -337,11 +334,46 @@ Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优
 
 ## 开发与测试
 
+当前仓库已经是使用 Rust 完全重写后的 aish，采用 Cargo workspace 组织，共 14 个 crate。
+
 ```bash
-uv sync
-uv run aish
-uv run pytest
+# 编译
+cargo build --release
+
+# 运行测试
+cargo test --workspace
+
+# 发布脚本冒烟测试
+./packaging/tests/release_scripts_smoke.sh
+
+# 运行
+./target/release/aish
+
+# 测试
+cargo test
+
+# 代码检查
+cargo clippy
 ```
+
+#### 架构（14 个 crate）
+
+| Crate | 说明 |
+|-------|------|
+| `aish-core` | 错误类型、共享枚举（RiskLevel, MemoryCategory 等） |
+| `aish-config` | YAML 配置加载，支持 XDG 路径和环境变量覆盖 |
+| `aish-i18n` | 国际化系统，6 种语言，内嵌 en-US 回退 |
+| `aish-pty` | PTY 执行器，fork/exec、select I/O、输出卸载 |
+| `aish-llm` | OpenAI 兼容 HTTP 客户端，SSE 流式传输，工具调用 |
+| `aish-session` | SQLite 会话持久化，WAL 模式 |
+| `aish-context` | 滑动窗口上下文管理，tiktoken token 计数 |
+| `aish-security` | 安全策略引擎，glob-to-regex 模式匹配 |
+| `aish-skills` | 技能插件发现，notify 热加载 |
+| `aish-memory` | Markdown 长期记忆，相关性评分 |
+| `aish-tools` | 内置工具：bash、文件读写编辑、ask_user、memory、skill |
+| `aish-scripts` | .aish 脚本系统，frontmatter、ai "prompt" 语法、hooks |
+| `aish-shell` | 主 Shell：REPL 循环、AI 处理器、内置命令、动画 |
+| `aish-cli` | CLI 入口，clap derive 宏 |
 
 ---
 

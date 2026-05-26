@@ -4,64 +4,52 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-load_project_version() {
-  python3 - "$ROOT_DIR/pyproject.toml" <<'PY'
-from __future__ import annotations
-
-import re
-import sys
-
-
-pyproject_path = sys.argv[1]
-in_project_section = False
-
-with open(pyproject_path, encoding="utf-8") as handle:
-    for raw_line in handle:
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("["):
-            in_project_section = line == "[project]"
-            continue
-        if in_project_section:
-            match = re.match(r'^version\s*=\s*"([^"]+)"\s*$', line)
-            if match:
-                print(match.group(1))
-                raise SystemExit(0)
-
-raise SystemExit(f"Could not find project.version in {pyproject_path}")
-PY
+load_cargo_version() {
+  grep -A5 '^\[workspace\.package\]' "$ROOT_DIR/Cargo.toml" \
+    | grep '^version' \
+    | head -1 \
+    | sed 's/version.*=.*"\([^"]*\)".*/\1/'
 }
 
 VERSION="${VERSION:-${1:-}}"
 if [[ -z "$VERSION" ]]; then
-  VERSION="$(load_project_version)"
+  VERSION="$(load_cargo_version)"
 fi
-ARCH="${ARCH:-${2:-$(uname -m)}}"
+ARCH="${ARCH:-${2:-amd64}}"
 PLATFORM="${PLATFORM:-${4:-linux}}"
+TARGET="${AISH_BUILD_TARGET:-x86_64-unknown-linux-musl}"
 OUTPUT_DIR="${OUTPUT_DIR:-${3:-dist/release}}"
 BUNDLE_NAME="aish-${VERSION}-${PLATFORM}-${ARCH}"
 STAGE_DIR="build/bundle/${BUNDLE_NAME}"
 ROOTFS_DIR="${STAGE_DIR}/rootfs"
 
-if [[ ! -x "dist/aish" || ! -x "dist/aish-sandbox" ]]; then
-  echo "Binary artifacts are missing, building them first..."
-  make build-binary
+# Build if binary is missing
+BINARY="target/${TARGET}/release/aish"
+if [[ ! -x "$BINARY" ]]; then
+  echo "Binary artifact missing, building first..."
+  AISH_BUILD_TARGET="$TARGET" ./build.sh
 fi
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$ROOTFS_DIR" "$OUTPUT_DIR"
 
-make install NO_BUILD=1 DESTDIR="$ROOTFS_DIR"
+# Install into rootfs using Makefile
+make install NO_BUILD=1 DESTDIR="$ROOTFS_DIR" TARGET="$TARGET"
 
 install -m 0755 packaging/scripts/install-bundle.sh "${STAGE_DIR}/install.sh"
 install -m 0755 packaging/scripts/uninstall-bundle.sh "${STAGE_DIR}/uninstall.sh"
+mkdir -p "${STAGE_DIR}/systemd"
+install -m 0644 packaging/systemd/aish-sandbox.service.in "${STAGE_DIR}/systemd/aish-sandbox.service.in"
+install -m 0644 packaging/systemd/aish-sandbox.socket "${STAGE_DIR}/systemd/aish-sandbox.socket"
 
 cat > "${STAGE_DIR}/README.txt" <<EOF
 AI Shell bundle ${VERSION} (${ARCH})
 
 Install:
   sudo ./install.sh
+
+The installer enables aish-sandbox.socket on systemd hosts. Set
+AISH_SKIP_SYSTEMD=1 to install files without touching systemd.
 
 Uninstall:
   sudo ./uninstall.sh

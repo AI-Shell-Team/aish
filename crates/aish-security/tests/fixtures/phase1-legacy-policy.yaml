@@ -1,0 +1,27 @@
+global:
+  enable_sandbox: false
+  sandbox_fallback_risk: MEDIUM
+  default_risk_level: LOW
+  sandbox_timeout_seconds: 12
+
+rules:
+  - id: H-001
+    name: Protect etc
+    path:
+      - /etc/**
+    operations:
+      - DELETE
+    command_list:
+      - rm
+    risk: HIGH
+    reason: system config is protected
+  - id: M-001
+    name: Protect home writes
+    path:
+      - /home/**
+    operations:
+      - WRITE
+    command_list:
+      - cp
+    risk: MEDIUM
+    reason: home path is protected
