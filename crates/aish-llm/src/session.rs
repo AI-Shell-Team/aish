@@ -659,10 +659,14 @@ impl LlmSession {
                                                             )
                                                         });
                                                     if let Some(i) = id {
-                                                        entry.0 = i;
+                                                        if !i.is_empty() {
+                                                            entry.0 = i;
+                                                        }
                                                     }
                                                     if let Some(n) = name {
-                                                        entry.1 = n;
+                                                        if !n.is_empty() {
+                                                            entry.1 = n;
+                                                        }
                                                     }
                                                     if let Some(a) = arguments {
                                                         entry.2.push_str(&a);
@@ -774,8 +778,15 @@ impl LlmSession {
                     let tool_calls: Vec<ToolCall> = sorted_calls
                         .into_iter()
                         .enumerate()
-                        .filter_map(|(seq_idx, (_, (id, name, args)))| {
-                            if id.is_empty() || name.is_empty() {
+                        .filter_map(|(seq_idx, (orig_idx, (id, name, args)))| {
+                            // Some providers omit the id in streaming deltas.
+                            // Fall back to a synthetic id so the tool call can still execute.
+                            let id = if id.is_empty() {
+                                format!("tc_{orig_idx}")
+                            } else {
+                                id
+                            };
+                            if name.is_empty() {
                                 missing_ids.push(seq_idx);
                                 None
                             } else {
@@ -790,7 +801,7 @@ impl LlmSession {
 
                     if !missing_ids.is_empty() {
                         tracing::warn!(
-                            "Dropping tool calls with missing id/name at indexes: {:?}",
+                            "Dropping tool calls with missing name at indexes: {:?}",
                             missing_ids
                         );
                         // Emit error event for malformed tool calls
@@ -799,7 +810,7 @@ impl LlmSession {
                             data: serde_json::json!({
                                 "error_type": "stream_chunk_builder_error",
                                 "error_message": format!(
-                                    "tool_calls missing id/name at indexes: {:?}",
+                                    "tool_calls missing name at indexes: {:?}",
                                     missing_ids
                                 ),
                             }),

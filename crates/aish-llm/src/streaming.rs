@@ -151,7 +151,12 @@ impl StreamParser {
         {
             for tc in tcs {
                 let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                let id = tc.get("id").and_then(|i| i.as_str()).map(|s| s.to_string());
+                // Some providers send tool-call id as a number instead of a string.
+                let id = tc.get("id").and_then(|i| match i {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    _ => None,
+                });
                 let name = tc
                     .get("function")
                     .and_then(|f| f.get("name"))
