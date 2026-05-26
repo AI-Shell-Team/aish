@@ -1394,6 +1394,7 @@ impl AishShell {
                                 let mut sep_renderer = ShellRenderer::new();
                                 sep_renderer.render_separator();
                                 print_md(&response);
+                                collapse_terminal_paragraph_gap();
                                 sep_renderer.render_separator();
                             } else if did_stream {
                                 // Streaming display already handled by event callback
@@ -1625,6 +1626,7 @@ impl AishShell {
                                             let mut sep_renderer = ShellRenderer::new();
                                             sep_renderer.render_separator();
                                             print_md(&response);
+                                            collapse_terminal_paragraph_gap();
                                             sep_renderer.render_separator();
                                         }
                                         self.persist_session_snapshot();
@@ -4785,6 +4787,11 @@ fn print_md(text: &str) {
     use crate::renderer::ShellRenderer;
     let mut renderer = ShellRenderer::new();
     renderer.render_markdown(text);
+}
+
+fn collapse_terminal_paragraph_gap() {
+    print!("\x1b[1A\r\x1b[K");
+    let _ = std::io::stdout().flush();
 }
 
 /// Extract the first ```bash code block from AI response text.
