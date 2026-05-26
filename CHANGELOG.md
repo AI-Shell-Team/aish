@@ -7,6 +7,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.7] - 2026-05-13
+
+### Changed
+
+- Changed prerelease self-update handling so beta installs stay on the beta channel instead of drifting to a broader prerelease track.
+
+### Fixed
+
+- Fixed AI-triggered Bash actions that require terminal input so they now ask for explicit confirmation before taking over the shell.
+- Fixed `ask_user` prompts during AI-driven shell runs so background stdin monitoring pauses while the assistant is waiting for your reply.
+- Fixed `grep_search` and `glob_search` workspace scoping so search results stay limited to the active workspace even after commands change directories.
+
+### Security
+
+- Hardened self-update by verifying downloaded release archives before installing them.
+- Hardened live-smoke diagnostics handling so secrets are redacted from CI artifacts.
+
 ## [0.2.6] - 2026-05-07
 
 ### Added

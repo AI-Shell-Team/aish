@@ -176,6 +176,29 @@ def test_ai_handler_marks_cancelled_operation_and_notifies_shell():
     shell.handle_processing_cancelled.assert_called_once_with()
 
 
+def test_ai_handler_exposes_and_cleans_stdin_yield_controls():
+    handler, shell = _make_ai_handler()
+    dummy_coro = Mock()
+
+    def _capture_shell_state(coro, cancellation_token=None):
+        _ = cancellation_token
+        assert coro is dummy_coro
+        assert shell._stdin_yield_event is not None
+        assert shell._stdin_yield_ack_event is not None
+        assert callable(shell._wake_stdin_monitor)
+        return "ok"
+
+    handler._run_async_in_thread = Mock(side_effect=_capture_shell_state)
+
+    response, was_cancelled = handler._execute_ai_operation(dummy_coro, shell)
+
+    assert response == "ok"
+    assert was_cancelled is False
+    assert shell._stdin_yield_event is None
+    assert shell._stdin_yield_ack_event is None
+    assert shell._wake_stdin_monitor is None
+
+
 def test_ai_handler_auto_retain_persists_explicit_fact():
     handler, shell = _make_ai_handler()
     shell.memory_manager = Mock()

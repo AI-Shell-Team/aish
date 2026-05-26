@@ -11,7 +11,7 @@ cli:
 
   update:
     check_only: "Only check for updates, do not install"
-    pre_release: "Include pre-release versions"
+    beta: "Use the beta update channel"
     checking: "Checking for updates..."
     current_version: "Current version: {version}"
     latest_version: "Latest version: {version}"

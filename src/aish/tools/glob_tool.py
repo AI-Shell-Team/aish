@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import Field
+
 from aish.tools.base import ToolBase
 from aish.tools.result import ToolResult
 
@@ -28,12 +30,6 @@ _DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset(
 _DEFAULT_MAX_RESULTS: int = 200
 
 
-def _normalize_root(root: str | None) -> Path:
-    if isinstance(root, str) and root.strip():
-        return Path(root).expanduser().resolve()
-    return Path.cwd().resolve()
-
-
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -42,8 +38,28 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def _normalize_root(root: str | None, workspace_root: Path) -> Path:
+    if isinstance(root, str) and root.strip():
+        resolved = Path(root).expanduser().resolve()
+    else:
+        resolved = Path.cwd().resolve()
+    if not _is_relative_to(resolved, workspace_root):
+        raise ValueError(f"root must be within the current workspace: {workspace_root}")
+    return resolved
+
+
 class GlobTool(ToolBase):
-    def __init__(self) -> None:
+    workspace_root: Path = Field(
+        default_factory=lambda: Path.cwd().resolve(),
+        exclude=True,
+    )
+
+    def __init__(self, workspace_root: str | Path | None = None) -> None:
+        resolved_workspace_root = (
+            Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else Path.cwd().resolve()
+        )
         super().__init__(
             name="glob",
             description=(
@@ -56,9 +72,7 @@ class GlobTool(ToolBase):
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": (
-                            "Glob pattern such as **/*.py or src/**/*.md"
-                        ),
+                        "description": ("Glob pattern such as **/*.py or src/**/*.md"),
                     },
                     "root": {
                         "type": "string",
@@ -71,12 +85,16 @@ class GlobTool(ToolBase):
                 "required": ["pattern"],
             },
         )
+        self.workspace_root = resolved_workspace_root
 
     def __call__(self, pattern: str, root: str | None = None) -> ToolResult:
         if not isinstance(pattern, str) or not pattern.strip():
             return ToolResult(ok=False, output="Error: pattern is required")
 
-        base = _normalize_root(root)
+        try:
+            base = _normalize_root(root, self.workspace_root)
+        except ValueError as exc:
+            return ToolResult(ok=False, output=f"Error: {exc}")
         if not base.exists() or not base.is_dir():
             return ToolResult(
                 ok=False,

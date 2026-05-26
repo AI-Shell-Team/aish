@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import sys
 import termios
 import threading
@@ -364,6 +365,39 @@ def _prepare_interaction_prompt(shell: Any) -> None:
         finally:
             self.current_live = None
     self._finalize_content_preview()
+
+
+@contextmanager
+def _pause_ai_stdin_monitor(shell: Any):
+    stdin_yield_event = getattr(shell, "_stdin_yield_event", None)
+    if stdin_yield_event is None:
+        yield
+        return
+
+    stdin_yield_ack_event = getattr(shell, "_stdin_yield_ack_event", None)
+    wake_stdin_monitor = getattr(shell, "_wake_stdin_monitor", None)
+
+    stdin_yield_event.set()
+    if callable(wake_stdin_monitor):
+        try:
+            wake_stdin_monitor()
+        except Exception:
+            pass
+    if stdin_yield_ack_event is not None:
+        try:
+            stdin_yield_ack_event.wait(timeout=1.0)
+        except Exception:
+            pass
+
+    try:
+        yield
+    finally:
+        stdin_yield_event.clear()
+        if callable(wake_stdin_monitor):
+            try:
+                wake_stdin_monitor()
+            except Exception:
+                pass
 
 
 def _build_interaction_response(
@@ -950,7 +984,8 @@ def handle_interaction_required(shell: Any, event: LLMEvent) -> LLMCallbackResul
         return LLMCallbackResult.CONTINUE
     request = InteractionRequest.from_dict(request_payload)
     _prepare_interaction_prompt(shell)
-    response = render_interaction_modal(shell, request)
+    with _pause_ai_stdin_monitor(shell):
+        response = render_interaction_modal(shell, request)
 
     try:
         apply_interaction_response_to_data(data, response)
