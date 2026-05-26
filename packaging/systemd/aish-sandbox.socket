@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Shell sandbox socket
+PartOf=aish-sandbox.service
+
+[Socket]
+ListenStream=/run/aish/sandbox.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0666
+DirectoryMode=0755
+RemoveOnStop=true
+Service=aish-sandbox.service
+
+[Install]
+WantedBy=sockets.target

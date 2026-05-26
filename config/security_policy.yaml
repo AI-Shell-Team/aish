@@ -80,3 +80,13 @@ rules:
     risk: LOW
     reason: "临时区代码和项目文件，允许 AI 修改"
 
+# Secret detection patterns (optional).
+# Uncomment and customize to add your own patterns.
+# Built-in patterns cover: OpenAI, Anthropic, AWS, Google, GitHub, Stripe,
+# Slack, Fireworks API keys; JWT tokens; URL-embedded passwords.
+#
+# secret_patterns:
+#   - name: "My Internal Token"
+#     pattern: "int_[a-zA-Z0-9]{32}"
+#     secret_type: api_key
+

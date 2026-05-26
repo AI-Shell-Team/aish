@@ -8,9 +8,6 @@ on:
 permissions:
   contents: write
 
-env:
-  UV_CACHE_DIR: .uv-cache
-
 jobs:
   release-meta:
     name: Compute release metadata
@@ -57,12 +54,13 @@ jobs:
       - release-gate
     runs-on: ubuntu-latest
     steps:
-      - name: Create release entry with generated notes
+      - name: Create release entry with changelog notes
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
           name: aish ${{ needs.release-meta.outputs.tag }}
-          generate_release_notes: true
+          body: ${{ needs.release-meta.outputs.release_notes }}
+          prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
 
   build-release-packages:
     name: Build release bundle (${{ matrix.arch }})
@@ -75,28 +73,27 @@ jobs:
       matrix:
         include:
           - arch: amd64
+            target: x86_64-unknown-linux-musl
             runs_on: ubuntu-latest
           - arch: arm64
+            target: aarch64-unknown-linux-musl
             runs_on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs_on }}
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Set up build environment
+        env:
+          AISH_BUILD_TARGET: ${{ matrix.target }}
         run: ./packaging/scripts/setup-ci-env.sh
 
       - name: Build release bundle
         run: |
           VERSION="${{ needs.release-meta.outputs.version }}"
           OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" AISH_BUILD_TARGET="${{ matrix.target }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           ls -lah "$OUTPUT_DIR"
 
       - name: Smoke test bundle install
@@ -114,11 +111,9 @@ jobs:
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
 
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
-          test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
           test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
-          grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v6
@@ -131,6 +126,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
+          prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
           files: artifacts/${{ matrix.arch }}/*
 
   publish-release-bundles:
@@ -150,6 +146,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: auto
       CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
+      DOWNLOAD_PREFIX: ${{ contains(needs.release-meta.outputs.version, '-') && 'download/beta' || 'download' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -188,5 +185,5 @@ jobs:
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
 
-          GitHub Release metadata was generated from the tag push, bundle assets were uploaded to both GitHub Release and the release bucket, and download/latest was updated successfully.
+          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and the CDN channel was updated for this release.
           EOF

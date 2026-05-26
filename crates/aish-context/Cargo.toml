@@ -1,0 +1,11 @@
+[package]
+name = "aish-context"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aish-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiktoken-rs.workspace = true
+tracing.workspace = true

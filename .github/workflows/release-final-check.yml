@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Target stable release version, for example 0.1.1"
+        description: "Target stable release version, for example 0.3.0"
         required: true
         type: string
       ref:
@@ -50,5 +50,5 @@ jobs:
           - Version: ${{ github.event.inputs.version }}
           - Ref: ${{ github.event.inputs.ref }}
 
-          The target ref is on main and release metadata is consistent. This workflow is intentionally lightweight and does not rebuild artifacts.
+          The target ref is on main and Rust release metadata is consistent. This workflow is intentionally lightweight and does not rebuild artifacts.
           EOF

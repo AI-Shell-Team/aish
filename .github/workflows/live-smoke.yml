@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 env:
-  UV_CACHE_DIR: .uv-cache
+  CARGO_TERM_COLOR: always
 
 jobs:
   live-smoke:
@@ -53,23 +53,23 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          enable-cache: true
-
-      - name: Sync development dependencies
-        run: uv sync --group dev
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          targets: x86_64-unknown-linux-musl
 
       - name: Install live smoke runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap util-linux
+          sudo apt-get install -y musl-tools bubblewrap util-linux
 
       - name: Validate live smoke secrets
         env:
@@ -100,36 +100,40 @@ jobs:
           rm -rf "$OUTPUT_DIR" "$EXTRACT_DIR" "$INSTALL_ROOT"
           mkdir -p "$OUTPUT_DIR"
 
-          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
+          cargo build --release --target x86_64-unknown-linux-musl
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" AISH_BUILD_TARGET="x86_64-unknown-linux-musl" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
           mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
           tar -xzf "$OUTPUT_DIR/${BUNDLE}.tar.gz" -C "$EXTRACT_DIR"
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
-          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
+          test -x "$INSTALL_ROOT/usr/local/bin/aish"
           echo "AISH_LIVE_SMOKE_EXECUTABLE=$INSTALL_ROOT/usr/local/bin/aish" >> "$GITHUB_ENV"
 
-      - name: Run live smoke tests
+      - name: Smoke test installed binary
+        run: |
+          set -euo pipefail
+          "$AISH_LIVE_SMOKE_EXECUTABLE" --help >/dev/null
+
+      - name: Run live tool-call check
         env:
           AISH_LIVE_SMOKE_API_BASE: ${{ secrets.AISH_LIVE_SMOKE_API_BASE }}
           AISH_LIVE_SMOKE_API_KEY: ${{ secrets.AISH_LIVE_SMOKE_API_KEY }}
           AISH_LIVE_SMOKE_MODEL: ${{ secrets.AISH_LIVE_SMOKE_MODEL }}
         run: |
           set -euo pipefail
-          mkdir -p build
-          SUITE="${{ inputs.suite || 'blocking' }}"
-          MARK_EXPR="live_smoke and live_smoke_blocking"
-          if [[ "$SUITE" == "extended" ]]; then
-            MARK_EXPR="live_smoke and live_smoke_extended"
-          elif [[ "$SUITE" == "all" ]]; then
-            MARK_EXPR="live_smoke"
+          mkdir -p build/live-smoke
+          args=(check-tool-support --model "$AISH_LIVE_SMOKE_MODEL" --api-key "$AISH_LIVE_SMOKE_API_KEY")
+          if [[ -n "${AISH_LIVE_SMOKE_API_BASE:-}" ]]; then
+            args+=(--api-base "$AISH_LIVE_SMOKE_API_BASE")
           fi
-          uv run --group dev python -m pytest tests/flows/live_smoke -v -m "$MARK_EXPR" --run-live-smoke --basetemp build/pytest-live-smoke
+          "$AISH_LIVE_SMOKE_EXECUTABLE" "${args[@]}" | tee build/live-smoke/check-tool-support.txt
+          grep -q "Tool calling is supported" build/live-smoke/check-tool-support.txt
 
       - name: Upload live smoke diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: live-smoke-diagnostics-${{ github.run_id }}
-          path: build/pytest-live-smoke/**/live-smoke/diagnostics/**
+          path: build/live-smoke/**
           if-no-files-found: ignore
 
       - name: Write workflow summary
@@ -146,5 +150,5 @@ jobs:
           - Executable: ${AISH_LIVE_SMOKE_EXECUTABLE:-<missing>}
           - Diagnostics artifact: live-smoke-diagnostics-${{ github.run_id }}
 
-          This workflow runs the opt-in pytest live smoke suite against an installed bundle artifact with real provider credentials from the protected \`live-smoke\` environment.
+          This workflow validates the installed Rust bundle and runs a live provider tool-call check with credentials from the protected \`live-smoke\` environment.
           EOF

@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - rust
     tags:
       - 'v*'
   workflow_dispatch:
@@ -21,7 +22,8 @@ permissions:
   pull-requests: read
 
 env:
-  UV_CACHE_DIR: .uv-cache
+  CARGO_TERM_COLOR: always
+  CACHE_KEY_SUFFIX: v1
 
 jobs:
   changes:
@@ -30,7 +32,6 @@ jobs:
     outputs:
       code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || steps.default.outputs.code }}
       packaging: ${{ github.event_name == 'pull_request' && steps.filter.outputs.packaging || steps.default.outputs.packaging }}
-      release_candidate: ${{ github.event_name == 'pull_request' && steps.release_candidate.outputs.value || steps.default.outputs.release_candidate }}
     steps:
       - name: Default to full validation outside PRs
         id: default
@@ -38,20 +39,6 @@ jobs:
         run: |
           echo "code=true" >> "$GITHUB_OUTPUT"
           echo "packaging=true" >> "$GITHUB_OUTPUT"
-          echo "release_candidate=false" >> "$GITHUB_OUTPUT"
-
-      - name: Detect release candidate pull request
-        id: release_candidate
-        if: github.event_name == 'pull_request'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: |
-          if [[ "$HEAD_REF" == release/* ]] || [[ ",$PR_LABELS," == *,release-candidate,* ]]; then
-            echo "value=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=false" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Classify pull request changes
         id: filter
@@ -60,18 +47,13 @@ jobs:
         with:
           filters: |
             code:
-              - 'src/**'
-              - 'tests/**'
-              - 'main.py'
-              - 'pyproject.toml'
-              - 'Makefile'
-              - 'build.sh'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
             packaging:
               - 'packaging/**'
-              - 'debian/**'
               - 'config/**'
-              - 'aish.spec'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
               - '.github/workflows/release-preparation.yml'
@@ -79,142 +61,118 @@ jobs:
   lint-test:
     name: Lint and test
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
-      - name: Sync development dependencies
-        run: uv sync --group dev
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          components: clippy,rustfmt
 
-      - name: Run lint
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
+
+      - name: Check formatting
+        run: make format-check
+
+      - name: Run clippy
         run: make lint
 
       - name: Run tests
-        run: make test
+        run: cargo test --workspace
 
-      - name: Build Python package
-        run: make build
+      - name: Run packaging release script smoke tests
+        run: ./packaging/tests/release_scripts_smoke.sh
 
-      - name: Upload Python package artifacts
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl --toolchain "${{ steps.rust_toolchain.outputs.channel }}"
+
+      - name: Build release binary (musl)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Smoke test binary
+        run: ./target/x86_64-unknown-linux-musl/release/aish --help
+
+      - name: Upload release binary
         uses: actions/upload-artifact@v6
         with:
-          name: python-package
-          path: dist/*
+          name: aish-linux-amd64
+          path: target/x86_64-unknown-linux-musl/release/aish
           if-no-files-found: error
 
-  cross-platform-smoke:
-    name: Cross-platform smoke (${{ matrix.os }})
-    needs:
-      - changes
-      - lint-test
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Sync dependencies
-        run: uv sync --group dev
-
-      - name: Smoke test import
-        run: |
-          uv run python -c "import platform; import aish; print('ok', platform.system(), platform.machine())"
-
   build-bundle:
-    name: Build bundle (${{ matrix.arch }})
-    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true' || needs.changes.outputs.release_candidate == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runs_on: ubuntu-latest
-          - arch: arm64
-            runs_on: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runs_on }}
+    name: Build bundle
+    if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
     needs:
       - changes
       - lint-test
-      - cross-platform-smoke
-    container:
-      image: rockylinux:8
-    defaults:
-      run:
-        shell: bash
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up build environment
-        run: ./packaging/scripts/setup-ci-env.sh
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
-      - name: Build bundle
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-musl-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-musl-cargo-${{ env.CACHE_KEY_SUFFIX }}-
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Build bundle archive
         run: |
           VERSION="0.0.0+${GITHUB_SHA::8}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          VERSION="$VERSION" PLATFORM="linux" ARCH="${{ matrix.arch }}" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
-          tar -tf "$OUTPUT_DIR/aish-${VERSION}-linux-${{ matrix.arch }}.tar.gz" >/dev/null
+          OUTPUT_DIR="artifacts/amd64"
+          VERSION="$VERSION" PLATFORM="linux" ARCH="amd64" OUTPUT_DIR="$OUTPUT_DIR" ./packaging/build_bundle.sh
 
-      - name: Smoke test bundle install
-        run: |
-          VERSION="0.0.0+${GITHUB_SHA::8}"
-          OUTPUT_DIR="artifacts/${{ matrix.arch }}"
-          BUNDLE="aish-${VERSION}-linux-${{ matrix.arch }}"
-          EXTRACT_DIR="$PWD/build/install-smoke/${{ matrix.arch }}"
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
-
-          rm -rf "$EXTRACT_DIR" "$INSTALL_ROOT"
-          mkdir -p "$EXTRACT_DIR" "$INSTALL_ROOT"
-
-          tar -xzf "$OUTPUT_DIR/${BUNDLE}.tar.gz" -C "$EXTRACT_DIR"
-          AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
-
-          test -x "$INSTALL_ROOT/usr/local/bin/aish"
-          test -x "$INSTALL_ROOT/usr/local/bin/aish-sandbox"
-          test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-          test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
-          grep -q '^ExecStart=/usr/local/bin/aish-sandbox$' "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
-
-      - name: Smoke test installed binary runtime
-        run: |
-          INSTALL_ROOT="$PWD/build/install-root/${{ matrix.arch }}"
-          bash ./packaging/scripts/smoke-installed-aish.sh "$INSTALL_ROOT/usr/local/bin/aish"
+      - name: Smoke test binary
+        run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: aish-linux-${{ matrix.arch }}
+          name: aish-linux-amd64-bundle
           path: |
-            artifacts/${{ matrix.arch }}/*
+            artifacts/amd64/*
           if-no-files-found: error
