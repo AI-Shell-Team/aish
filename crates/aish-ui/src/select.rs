@@ -12,7 +12,6 @@ use crate::{PanelComponent, PanelEvent};
 const DEFAULT_VISIBLE_ITEMS: usize = 8;
 const MIN_PANEL_HEIGHT: u16 = 7;
 const SEARCH_RESERVED_LINES: u16 = 4;
-const CHOICE_RESERVED_LINES: u16 = 3;
 const PANEL_PADDING_X: u16 = 2;
 const DESCRIPTION_INDENT: &str = "    ";
 
@@ -58,7 +57,6 @@ impl SearchSelectItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchSelectOutcome {
     Selected(String),
-    Custom,
 }
 
 #[derive(Debug, Clone)]
@@ -69,9 +67,7 @@ pub struct SearchSelectPanel {
     footer: Option<String>,
     empty_message: String,
     items: Vec<SearchSelectItem>,
-    custom_label: Option<String>,
     allow_cancel: bool,
-    search_enabled: bool,
     query: String,
     selected: usize,
     max_visible_items: usize,
@@ -90,9 +86,7 @@ impl SearchSelectPanel {
             footer: None,
             empty_message: "No matches".to_string(),
             items,
-            custom_label: None,
             allow_cancel: true,
-            search_enabled: true,
             query: String::new(),
             selected: 0,
             max_visible_items: DEFAULT_VISIBLE_ITEMS,
@@ -115,19 +109,8 @@ impl SearchSelectPanel {
         self
     }
 
-    pub fn with_custom_label(mut self, custom_label: impl Into<String>) -> Self {
-        self.custom_label = Some(custom_label.into());
-        self
-    }
-
     pub fn with_allow_cancel(mut self, allow_cancel: bool) -> Self {
         self.allow_cancel = allow_cancel;
-        self
-    }
-
-    pub fn without_search(mut self) -> Self {
-        self.search_enabled = false;
-        self.query.clear();
         self
     }
 
@@ -150,12 +133,8 @@ impl SearchSelectPanel {
     }
 
     pub fn filtered_entries(&self) -> Vec<SelectEntry> {
-        let query = if self.search_enabled {
-            self.query.trim().to_lowercase()
-        } else {
-            String::new()
-        };
-        let mut entries: Vec<SelectEntry> = if query.is_empty() {
+        let query = self.query.trim().to_lowercase();
+        if query.is_empty() {
             (0..self.items.len()).map(SelectEntry::Item).collect()
         } else {
             self.items
@@ -167,13 +146,7 @@ impl SearchSelectPanel {
                         .then_some(SelectEntry::Item(index))
                 })
                 .collect()
-        };
-
-        if self.custom_label.is_some() {
-            entries.push(SelectEntry::Custom);
         }
-
-        entries
     }
 
     fn select_current(&self) -> Option<SearchSelectOutcome> {
@@ -186,7 +159,6 @@ impl SearchSelectPanel {
             SelectEntry::Item(index) => Some(SearchSelectOutcome::Selected(
                 self.items.get(*index)?.value.clone(),
             )),
-            SelectEntry::Custom => Some(SearchSelectOutcome::Custom),
         }
     }
 
@@ -236,30 +208,20 @@ impl SearchSelectPanel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectEntry {
     Item(usize),
-    Custom,
 }
 
 impl PanelComponent for SearchSelectPanel {
     type Output = SearchSelectOutcome;
 
     fn desired_height(&self, _terminal_width: u16, terminal_height: u16) -> u16 {
-        let item_count = self.items.len() + usize::from(self.custom_label.is_some());
+        let item_count = self.items.len();
         let visible_rows =
             item_count.min(self.max_visible_items).max(1) as u16 * self.estimated_entry_height();
-        let reserved_lines = if self.search_enabled {
-            SEARCH_RESERVED_LINES
-        } else {
-            CHOICE_RESERVED_LINES
-        } + u16::from(self.subtitle.is_some());
+        let reserved_lines = SEARCH_RESERVED_LINES + u16::from(self.subtitle.is_some());
         (visible_rows + reserved_lines).clamp(MIN_PANEL_HEIGHT, terminal_height.max(1))
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        if !self.search_enabled {
-            self.render_without_search(frame, area);
-            return;
-        }
-
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -332,34 +294,13 @@ impl PanelComponent for SearchSelectPanel {
                 self.selected = len.saturating_sub(1);
                 PanelEvent::Continue
             }
-            KeyCode::Char(ch)
-                if !self.search_enabled
-                    && ch.is_ascii_digit()
-                    && !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                let Some(digit) = ch.to_digit(10) else {
-                    return PanelEvent::Continue;
-                };
-                if digit == 0 {
-                    return PanelEvent::Continue;
-                }
-
-                let entries = self.filtered_entries();
-                entries
-                    .get(digit as usize - 1)
-                    .and_then(|entry| self.select_entry(entry))
-                    .map(PanelEvent::Submit)
-                    .unwrap_or(PanelEvent::Continue)
-            }
-            KeyCode::Backspace if self.search_enabled => {
+            KeyCode::Backspace => {
                 self.query.pop();
                 self.selected = 0;
                 PanelEvent::Continue
             }
             KeyCode::Char(ch)
-                if self.search_enabled
-                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
                 self.query.push(ch);
@@ -373,25 +314,6 @@ impl PanelComponent for SearchSelectPanel {
 }
 
 impl SearchSelectPanel {
-    fn render_without_search(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(u16::from(self.subtitle.is_some())),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
-        self.render_divider(frame, chunks[0]);
-        self.render_title(frame, chunks[1]);
-        self.render_subtitle(frame, chunks[2]);
-        self.render_entries(frame, chunks[3]);
-        self.render_footer(frame, chunks[4]);
-    }
-
     fn render_divider(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         let width = area.width as usize;
         if width == 0 {
@@ -491,7 +413,7 @@ impl SearchSelectPanel {
             let absolute_index = scroll + row;
             let selected = absolute_index == self.selected;
             let marker = self.entry_marker(selected, absolute_index, scroll, end, entries.len());
-            let lines = self.entry_lines(*entry, selected, absolute_index + 1, marker);
+            let lines = self.entry_lines(*entry, selected, marker);
             for line in lines {
                 if y >= bottom {
                     break;
@@ -525,7 +447,6 @@ impl SearchSelectPanel {
         &self,
         entry: SelectEntry,
         selected: bool,
-        display_index: usize,
         marker: &'static str,
     ) -> Vec<Line<'_>> {
         let marker_style = if selected {
@@ -548,12 +469,6 @@ impl SearchSelectPanel {
             SelectEntry::Item(index) => {
                 let item = &self.items[index];
                 let mut spans = vec![Span::styled(marker, marker_style)];
-                if !self.search_enabled {
-                    spans.push(Span::styled(
-                        format!("{display_index}. "),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
                 spans.push(Span::styled(item.label.as_str(), label_style));
                 if let Some(badge) = &item.badge {
                     spans.push(Span::styled(
@@ -569,27 +484,6 @@ impl SearchSelectPanel {
                     ]));
                 }
                 lines
-            }
-            SelectEntry::Custom => {
-                let custom_style = if selected {
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let mut spans = vec![Span::styled(marker, marker_style)];
-                if !self.search_enabled {
-                    spans.push(Span::styled(
-                        format!("{display_index}. "),
-                        Style::default().fg(Color::DarkGray),
-                    ));
-                }
-                spans.push(Span::styled(
-                    self.custom_label.as_deref().unwrap_or("Custom input"),
-                    custom_style,
-                ));
-                vec![Line::from(spans)]
             }
         }
     }
@@ -697,17 +591,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_slot_is_appended() {
-        let panel = SearchSelectPanel::new("Question", "Search", vec![item("a", "Alpha", "alpha")])
-            .with_custom_label("Type custom answer");
-
-        assert_eq!(
-            panel.filtered_entries(),
-            vec![SelectEntry::Item(0), SelectEntry::Custom]
-        );
-    }
-
-    #[test]
     fn escape_respects_cancel_setting() {
         let mut cancel_panel =
             SearchSelectPanel::new("Question", "Search", vec![item("a", "Alpha", "alpha")]);
@@ -722,39 +605,6 @@ mod tests {
         assert_eq!(
             required_panel.handle_event(key(KeyCode::Esc)),
             PanelEvent::Continue
-        );
-    }
-
-    #[test]
-    fn choice_panel_ignores_text_input_when_search_disabled() {
-        let mut panel = SearchSelectPanel::new(
-            "Question",
-            "Search",
-            vec![item("a", "Alpha", "alpha"), item("b", "Beta", "beta")],
-        )
-        .without_search();
-
-        panel.handle_event(key(KeyCode::Char('b')));
-
-        assert_eq!(panel.query(), "");
-        assert_eq!(
-            panel.filtered_entries(),
-            vec![SelectEntry::Item(0), SelectEntry::Item(1)]
-        );
-    }
-
-    #[test]
-    fn choice_panel_accepts_numeric_shortcut_when_search_disabled() {
-        let mut panel = SearchSelectPanel::new(
-            "Question",
-            "Search",
-            vec![item("a", "Alpha", "alpha"), item("b", "Beta", "beta")],
-        )
-        .without_search();
-
-        assert_eq!(
-            panel.handle_event(key(KeyCode::Char('2'))),
-            PanelEvent::Submit(SearchSelectOutcome::Selected("b".to_string()))
         );
     }
 }
