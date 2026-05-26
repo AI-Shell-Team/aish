@@ -1,10 +1,14 @@
-use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use aish_llm::CancellationToken;
-use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, Termios};
 
+#[allow(deprecated)]
+use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, Termios};
+#[allow(deprecated)]
+use std::os::fd::BorrowedFd;
+
+#[deprecated(note = "Use CrosstermEscWatcher instead — this will be removed in a future release")]
 /// Watches for ESC and Ctrl+C keypresses on stdin during AI operations.
 ///
 /// On `start()`, saves the current terminal settings, switches stdin to raw
@@ -191,6 +195,119 @@ impl EscWatcher {
 }
 
 impl Drop for EscWatcher {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+/// Crossterm-based ESC key watcher using the keyboard module.
+///
+/// Uses `InputRawGuard` for terminal mode switching, which preserves output
+/// processing (OPOST) so that `println!()` works correctly during AI streaming.
+pub struct CrosstermEscWatcher {
+    _guard: Option<crate::keyboard::InputRawGuard>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    stop_flag: Arc<AtomicBool>,
+}
+
+impl CrosstermEscWatcher {
+    /// Start watching for ESC keypresses using the keyboard module.
+    ///
+    /// If the terminal cannot be switched to input-raw mode (e.g. stdin is
+    /// not a tty), returns a no-op watcher.
+    pub fn start(token: Arc<CancellationToken>) -> Self {
+        let guard = match crate::keyboard::InputRawGuard::enter() {
+            Ok(g) => Some(g),
+            Err(_) => {
+                return Self {
+                    _guard: None,
+                    thread: None,
+                    stop_flag: Arc::new(AtomicBool::new(false)),
+                };
+            }
+        };
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let bindings = crate::keyboard::default_bindings();
+
+        let stop_clone = stop_flag.clone();
+        let token_clone = token.clone();
+        let handle = std::thread::Builder::new()
+            .name("crossterm-esc-watcher".into())
+            .spawn(move || {
+                use std::time::Duration;
+
+                loop {
+                    if stop_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
+
+                    match crate::keyboard::read_event(Some(Duration::from_millis(100))) {
+                        Ok(Some(crate::keyboard::ShellEvent::Key(key))) => {
+                            use crossterm::event::{KeyEventKind, KeyCode};
+
+                            // Only handle press events
+                            if key.kind != KeyEventKind::Press {
+                                continue;
+                            }
+
+                            // Check if this key maps to a cancel/interrupt action
+                            if let Some(action) = bindings.resolve(&key) {
+                                if action == "cancel" || action == "interrupt" {
+                                    if !token_clone.is_cancelled() {
+                                        token_clone.cancel();
+                                    }
+                                    return;
+                                }
+                            }
+
+                            // Also check for ESC directly (for standalone ESC detection)
+                            if key.code == KeyCode::Esc {
+                                if !token_clone.is_cancelled() {
+                                    token_clone.cancel();
+                                }
+                                return;
+                            }
+                        }
+                        Ok(Some(_)) => {
+                            // Ignore mouse and resize events
+                        }
+                        Ok(None) => {
+                            // Timeout - continue loop
+                        }
+                        Err(_) => {
+                            // Error reading event - continue loop
+                        }
+                    }
+                }
+            })
+            .ok();
+
+        Self {
+            _guard: guard,
+            thread: handle,
+            stop_flag,
+        }
+    }
+
+    /// Stop the listener thread and restore terminal settings.
+    pub fn stop(&mut self) {
+        self.cleanup();
+    }
+
+    fn cleanup(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+
+        // InputRawGuard::drop() restores the original terminal settings.
+        let _ = self._guard.take();
+    }
+}
+
+impl Drop for CrosstermEscWatcher {
     fn drop(&mut self) {
         self.cleanup();
     }

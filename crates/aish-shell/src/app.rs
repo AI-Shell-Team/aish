@@ -1343,7 +1343,7 @@ impl AishShell {
                         args.insert("reasons".to_string(), reasons);
                         let title = t("shell.security.secret.title");
                         let message = t_with_args("shell.security.secret.detected", &args);
-                        let choice = crate::tui::show_secret_dialog(&title, &message);
+                        let choice = crate::tui::show_secret_dialog_tui(&title, &message);
                         match choice {
                             crate::tui::SecretDialogChoice::Abort => {
                                 let aborted = t("shell.security.secret.aborted");
