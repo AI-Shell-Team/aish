@@ -103,7 +103,11 @@ pub fn check_connectivity(
                 // Try to extract error body for a better message.
                 let body_text = resp.text().unwrap_or_default();
                 let detail = if body_text.len() > 300 {
-                    format!("{}...", &body_text[..300])
+                    let mut end = 300;
+                    while !body_text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &body_text[..end])
                 } else {
                     body_text
                 };
@@ -204,7 +208,11 @@ pub fn check_tool_support(
                 let status_code = status.as_u16();
                 let body_text = resp.text().unwrap_or_default();
                 let detail = if body_text.len() > 300 {
-                    format!("{}...", &body_text[..300])
+                    let mut end = 300;
+                    while !body_text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &body_text[..end])
                 } else {
                     body_text
                 };
