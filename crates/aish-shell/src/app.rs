@@ -4190,8 +4190,11 @@ impl AishShell {
                                                     if done_start.elapsed() >= chain_timeout {
                                                         break;
                                                     }
-                                                    if aish_tools::bash::interactive_input_active() {
-                                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                                    if aish_tools::bash::interactive_input_active()
+                                                    {
+                                                        std::thread::sleep(
+                                                            std::time::Duration::from_millis(50),
+                                                        );
                                                         continue;
                                                     }
                                                     let mut dfds: nix::libc::fd_set =
