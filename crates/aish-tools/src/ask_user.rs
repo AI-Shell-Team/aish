@@ -10,6 +10,8 @@ use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime, SearchSelectItem};
 
+use crate::bash::acquire_interactive_input_guard;
+
 /// Cached translated description.
 static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -118,6 +120,11 @@ impl Tool for AskUserTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         let min_length = args.get("min_length").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+        let _interactive_input_guard = match kind {
+            "choice_or_text" | "text_input" => Some(acquire_interactive_input_guard()),
+            _ => None,
+        };
 
         match kind {
             "choice_or_text" => {

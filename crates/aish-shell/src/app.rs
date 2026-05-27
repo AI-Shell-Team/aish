@@ -2985,6 +2985,10 @@ impl AishShell {
                                     if wait_start.elapsed() >= wait_timeout {
                                         break;
                                     }
+                                    if aish_tools::bash::interactive_input_active() {
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                        continue;
+                                    }
                                     let mut rfds: nix::libc::fd_set =
                                         unsafe { std::mem::zeroed() };
                                     unsafe {
@@ -4186,6 +4190,10 @@ impl AishShell {
                                                     if done_start.elapsed() >= chain_timeout {
                                                         break;
                                                     }
+                                                    if aish_tools::bash::interactive_input_active() {
+                                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                                        continue;
+                                                    }
                                                     let mut dfds: nix::libc::fd_set =
                                                         unsafe { std::mem::zeroed() };
                                                     unsafe {
@@ -4313,6 +4321,10 @@ impl AishShell {
                                             break;
                                         }
                                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                    }
+                                    if aish_tools::bash::interactive_input_active() {
+                                        std::thread::sleep(std::time::Duration::from_millis(50));
+                                        continue;
                                     }
                                     let mut rfds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
                                     unsafe {
