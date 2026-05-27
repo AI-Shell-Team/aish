@@ -63,9 +63,9 @@ fn abbreviate_path(path: &str, home: &str) -> String {
         } else if i == parts.len() - 1 {
             result.push('/');
             result.push_str(part);
-        } else if !part.is_empty() {
+        } else if let Some(ch) = part.chars().next() {
             result.push('/');
-            result.push_str(&part[..1]);
+            result.push(ch);
         }
     }
     result
@@ -319,6 +319,15 @@ mod tests {
         let path = "/home/user/projects";
         let result = abbreviate_path(path, home);
         assert_eq!(result, "~/projects");
+    }
+
+    #[test]
+    fn test_abbreviate_path_chinese() {
+        // Chinese characters are 3 bytes in UTF-8, must use char-based indexing
+        let home = "/home/user";
+        let path = "/home/user/桌面/测试目录/项目文件";
+        let result = abbreviate_path(path, home);
+        assert_eq!(result, "~/桌/测/项目文件");
     }
 
     #[test]
