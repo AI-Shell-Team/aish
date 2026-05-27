@@ -1,11 +1,33 @@
 use std::{
     io::{self, Write},
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
 use crossterm::{cursor, event, execute, terminal};
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions, Viewport};
 use thiserror::Error;
+
+static TERMINAL_INPUT_CLAIMS: AtomicUsize = AtomicUsize::new(0);
+
+#[must_use]
+#[derive(Debug)]
+pub struct TerminalInputClaim;
+
+pub fn claim_terminal_input() -> TerminalInputClaim {
+    TERMINAL_INPUT_CLAIMS.fetch_add(1, Ordering::SeqCst);
+    TerminalInputClaim
+}
+
+pub fn terminal_input_active() -> bool {
+    TERMINAL_INPUT_CLAIMS.load(Ordering::SeqCst) > 0
+}
+
+impl Drop for TerminalInputClaim {
+    fn drop(&mut self) {
+        TERMINAL_INPUT_CLAIMS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub trait PanelComponent {
     type Output;
@@ -46,6 +68,7 @@ impl PanelRuntime {
     where
         C: PanelComponent,
     {
+        let _input_claim = claim_terminal_input();
         let (cols, rows) = terminal::size()?;
         let height = component.desired_height(cols, rows).clamp(1, rows.max(1));
         let _guard = TerminalGuard::enter()?;
@@ -99,5 +122,29 @@ impl Drop for TerminalGuard {
         let _ = execute!(io::stdout(), cursor::Show);
         let _ = terminal::disable_raw_mode();
         let _ = io::stdout().flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_input_claim_tracks_nested_guards() {
+        assert!(!terminal_input_active());
+
+        {
+            let _first_claim = claim_terminal_input();
+            assert!(terminal_input_active());
+
+            {
+                let _second_claim = claim_terminal_input();
+                assert!(terminal_input_active());
+            }
+
+            assert!(terminal_input_active());
+        }
+
+        assert!(!terminal_input_active());
     }
 }

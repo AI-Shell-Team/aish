@@ -77,6 +77,11 @@ impl EscWatcher {
                         return;
                     }
 
+                    if aish_ui::terminal_input_active() {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        continue;
+                    }
+
                     // Use select() with 100ms timeout so we can check
                     // stop_flag periodically without blocking indefinitely.
                     let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
