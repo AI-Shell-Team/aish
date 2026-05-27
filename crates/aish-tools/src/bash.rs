@@ -63,11 +63,22 @@ pub fn interactive_input_active() -> bool {
     INTERACTIVE_INPUT_COUNT.load(Ordering::SeqCst) > 0
 }
 
-struct InteractiveInputGuard;
+pub(crate) fn acquire_interactive_input_guard() -> InteractiveInputGuard {
+    InteractiveInputGuard::acquire()
+}
+
+#[must_use]
+pub(crate) struct InteractiveInputGuard;
 
 impl InteractiveInputGuard {
     fn acquire() -> Self {
-        INTERACTIVE_INPUT_COUNT.fetch_add(1, Ordering::SeqCst);
+        let previous = INTERACTIVE_INPUT_COUNT.fetch_add(1, Ordering::SeqCst);
+        if previous == 0 {
+            // Background stdin readers poll with 100ms timeouts. Wait a bit
+            // longer on the first acquisition so they can observe the guard
+            // before the foreground prompt starts querying the terminal.
+            std::thread::sleep(Duration::from_millis(150));
+        }
         Self
     }
 }

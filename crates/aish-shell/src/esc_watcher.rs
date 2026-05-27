@@ -1,8 +1,10 @@
 use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use aish_llm::CancellationToken;
+use aish_tools::bash::interactive_input_active;
 use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, Termios};
 
 /// Watches for ESC and Ctrl+C keypresses on stdin during AI operations.
@@ -75,6 +77,11 @@ impl EscWatcher {
                 loop {
                     if stop_clone.load(Ordering::Relaxed) {
                         return;
+                    }
+
+                    if interactive_input_active() {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
                     }
 
                     // Use select() with 100ms timeout so we can check
