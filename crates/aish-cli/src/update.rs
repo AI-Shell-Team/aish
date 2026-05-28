@@ -10,11 +10,6 @@ use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
 use semver::Version;
 
-use crate::install_source::{
-    build_pip_command, detect_installation_method, detect_pip_context, InstallMethod,
-    PIP_DISTRIBUTION_NAME,
-};
-
 const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download";
 const DEFAULT_BETA_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download/beta";
 const GITHUB_API_RELEASE_TAG_BASE: &str =
@@ -24,69 +19,6 @@ const GITHUB_RELEASES_DOWNLOAD_BASE: &str =
     "https://github.com/AI-Shell-Team/aish/releases/download";
 const CONNECTION_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
-
-fn run_pip_upgrade(pre_release: bool) -> Result<(), AishError> {
-    let pip_context = detect_pip_context();
-    let mut command = build_pip_command(pip_context.as_ref());
-    command.arg("install").arg("--upgrade");
-    if matches!(
-        pip_context,
-        Some(crate::install_source::PipContext::UserLocal)
-    ) {
-        command.arg("--user");
-    }
-    if pre_release {
-        command.arg("--pre");
-    }
-    command
-        .arg("--only-binary")
-        .arg(":all:")
-        .arg(PIP_DISTRIBUTION_NAME);
-
-    let output = command
-        .output()
-        .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("externally-managed-environment") {
-        let mut retry = build_pip_command(pip_context.as_ref());
-        retry.arg("install").arg("--upgrade");
-        if matches!(
-            pip_context,
-            Some(crate::install_source::PipContext::UserLocal)
-        ) {
-            retry.arg("--user");
-        }
-        if pre_release {
-            retry.arg("--pre");
-        }
-        retry
-            .arg("--break-system-packages")
-            .arg("--only-binary")
-            .arg(":all:")
-            .arg(PIP_DISTRIBUTION_NAME);
-
-        let retry_output = retry
-            .output()
-            .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
-        if retry_output.status.success() {
-            return Ok(());
-        }
-
-        return Err(AishError::Config(format!(
-            "pip upgrade failed: {}",
-            String::from_utf8_lossy(&retry_output.stderr).trim()
-        )));
-    }
-
-    Err(AishError::Config(format!(
-        "pip upgrade failed: {}",
-        stderr.trim()
-    )))
-}
 
 #[derive(Debug)]
 pub struct UpdateInfo {
@@ -642,7 +574,6 @@ fn cleanup() {
 
 pub fn run_update(check_only: bool, pre_release: bool) {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let install_method = detect_installation_method();
 
     println!("\x1b[1;36m{}\x1b[0m", t("cli.update.checking"));
 
@@ -657,29 +588,6 @@ pub fn run_update(check_only: bool, pre_release: bool) {
             println!("\x1b[2m{}\x1b[0m", info.html_url);
 
             if check_only {
-                return;
-            }
-
-            if install_method == InstallMethod::Pip {
-                print!("\n\x1b[33m{}\x1b[0m", t("cli.update.pip_upgrade_prompt"));
-                std::io::stdout().flush().unwrap();
-                let mut answer = String::new();
-                std::io::stdin().read_line(&mut answer).unwrap();
-                let ans = answer.trim().to_lowercase();
-                if ans != "y" && ans != "yes" {
-                    println!("{}", t("cli.update.update_cancelled"));
-                    return;
-                }
-
-                println!("\x1b[1;36m{}\x1b[0m", t("cli.update.pip_upgrading"));
-                match run_pip_upgrade(pre_release) {
-                    Ok(()) => println!("\x1b[32m{}\x1b[0m", t("cli.update.pip_upgrade_successful")),
-                    Err(e) => eprintln!("\x1b[31m{}\x1b[0m", {
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("error".to_string(), e.to_string());
-                        t_with_args("cli.update.pip_upgrade_failed", &args)
-                    }),
-                }
                 return;
             }
 
@@ -738,15 +646,6 @@ pub fn run_update(check_only: bool, pre_release: bool) {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::process::Command;
-
-    #[test]
-    fn test_pip_upgrade_uses_prerelease_flag_when_requested() {
-        let mut command = Command::new("pip");
-        command.arg("install").arg("--upgrade").arg("--pre");
-        let rendered = format!("{:?}", command);
-        assert!(rendered.contains("--pre"));
-    }
 
     #[test]
     fn test_compare_versions_equal() {

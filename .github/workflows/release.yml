@@ -43,7 +43,7 @@ jobs:
     steps:
       - name: Confirm release payload
         run: |
-          echo "Release ${RELEASE_TAG} is ready for bundle and PyPI publishing."
+          echo "Release ${RELEASE_TAG} is ready for bundle publishing."
         env:
           RELEASE_TAG: ${{ needs.release-meta.outputs.tag }}
 
@@ -168,101 +168,6 @@ jobs:
       - name: Publish release bundles
         run: bash ./packaging/scripts/publish_release.sh
 
-  build-pypi-wheels:
-    name: Build PyPI wheel (${{ matrix.arch }})
-    needs:
-      - release-meta
-      - release-gate
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runs_on: ubuntu-latest
-          - arch: arm64
-            runs_on: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runs_on }}
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Read pinned Rust toolchain
-        id: rust_toolchain
-        run: |
-          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
-          test -n "$channel"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9
-        with:
-          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-          components: clippy,rustfmt
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: '3.11'
-
-      - name: Install wheel build dependencies
-        run: python -m pip install --upgrade pip maturin
-
-      - name: Build PyPI wheel
-        run: |
-          OUTPUT_DIR="$PWD/artifacts/pypi/${{ matrix.arch }}"
-          rm -rf "$OUTPUT_DIR"
-          mkdir -p "$OUTPUT_DIR"
-          python -m maturin build --release --compatibility pypi --out "$OUTPUT_DIR"
-          ls -lah "$OUTPUT_DIR"
-
-      - name: Smoke test wheel install
-        run: |
-          VENV_DIR="$PWD/build/pypi-wheel-smoke/${{ matrix.arch }}"
-          WHEEL_DIR="$PWD/artifacts/pypi/${{ matrix.arch }}"
-          rm -rf "$VENV_DIR"
-          python -m venv "$VENV_DIR"
-          "$VENV_DIR/bin/python" -m pip install --upgrade pip
-          "$VENV_DIR/bin/python" -m pip install "$WHEEL_DIR"/*.whl
-          "$VENV_DIR/bin/aish" --version
-
-      - name: Upload PyPI wheel artifacts
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: pypi-wheel-linux-${{ matrix.arch }}
-          path: artifacts/pypi/${{ matrix.arch }}/*.whl
-          if-no-files-found: error
-
-  publish-pypi:
-    name: Publish PyPI wheels
-    needs:
-      - release-meta
-      - release-gate
-      - build-pypi-wheels
-    runs-on: ubuntu-latest
-    environment: release
-    steps:
-      - name: Download PyPI wheel artifacts
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
-        with:
-          pattern: pypi-wheel-linux-*
-          path: artifacts/pypi
-
-      - name: Collect wheels
-        run: |
-          mkdir -p dist/pypi
-          find artifacts/pypi -type f -name '*.whl' -exec cp {} dist/pypi/ \;
-          ls -lah dist/pypi
-
-      - name: Publish wheels to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: dist/pypi
-          skip-existing: true
-
   release-summary:
     name: Summarize published release
     needs:
@@ -270,8 +175,6 @@ jobs:
       - create-release
       - build-release-packages
       - publish-release-bundles
-      - build-pypi-wheels
-      - publish-pypi
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
@@ -282,5 +185,5 @@ jobs:
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
 
-          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, the CDN channel was updated, and amd64/arm64 wheel artifacts were published to PyPI.
+          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and the CDN channel was updated for this release.
           EOF
