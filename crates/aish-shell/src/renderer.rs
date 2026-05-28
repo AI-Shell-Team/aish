@@ -328,16 +328,19 @@ impl ShellRenderer {
     /// Code blocks → syntax highlighting, tables → box drawing, rest → richrs Markdown.
     pub fn render_markdown(&mut self, text: &str) {
         let segments = split_content(text);
+        let mut last_was_markdown = false;
         for seg in segments {
             match seg {
                 ContentSegment::CodeBlock { lang, code } => {
                     render_code_block(&mut self.console, &lang, &code, self.terminal_width);
+                    last_was_markdown = false;
                 }
                 ContentSegment::Table(content) => {
                     let lines: Vec<&str> = content.lines().collect();
                     if let Some(segments) = render_table_to_segments(&lines, self.terminal_width) {
                         let _ = self.console.write_segments(&segments);
                     }
+                    last_was_markdown = false;
                 }
                 ContentSegment::Markdown(content) => {
                     let inline_style = Style::new()
@@ -346,11 +349,19 @@ impl ShellRenderer {
                     let md = Markdown::new(&content).inline_code_style(inline_style);
                     let segs = md.render(self.terminal_width);
                     let _ = self.console.write_segments(&segs);
+                    last_was_markdown = true;
                 }
             }
         }
         let _ = self.console.flush();
         let _ = io::stdout().flush();
+        // richrs Markdown adds two trailing newlines at paragraph end,
+        // creating a blank line before the bottom separator.
+        // Delete it only when the last segment was a Markdown paragraph.
+        if last_was_markdown {
+            print!("\x1b[1A\x1b[M");
+            let _ = io::stdout().flush();
+        }
     }
 
     /// Append a streaming delta — prints raw text for real-time feedback.

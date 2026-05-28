@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -24,7 +24,7 @@ use aish_tools::ToolRegistry;
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
 use crate::animation::SharedAnimation;
 use crate::environment;
-use crate::esc_watcher::EscWatcher;
+use crate::esc_watcher::CrosstermEscWatcher;
 use crate::input;
 use crate::prompt;
 use crate::readline::ShellReadline;
@@ -263,9 +263,91 @@ pub struct AishShell {
     last_ctrl_c: Option<std::time::Instant>,
     /// Shared animation spinner, stored so it can be stopped on cancellation.
     animation: Arc<SharedAnimation>,
+    /// Session history of collapsed outputs for Ctrl+O browsing.
+    expand_history: Arc<Mutex<crate::expand_history::ExpandHistory>>,
 }
 
 impl AishShell {
+    /// Show expand panel for browsing collapsed output history.
+    fn show_expand_panel(&self) {
+        // Clone data out of the mutex before running the blocking TUI panel,
+        // so the EscWatcher thread can still acquire the lock.
+        let records: Vec<crate::expand_history::ExpandRecord> = {
+            let history = self.expand_history.lock().unwrap();
+            if history.is_empty() {
+                return;
+            }
+            history.clone_records()
+        };
+        let history_records: Vec<aish_ui::HistoryRecord> = records
+            .iter()
+            .map(|r| aish_ui::HistoryRecord {
+                command: r.command.clone(),
+                line_count: r.line_count,
+                time: r.time.clone(),
+            })
+            .collect();
+        let title = format!("Output History ({} records)", history_records.len());
+        let panel = aish_ui::HistoryPanel::new(&title, history_records);
+        match aish_ui::PanelRuntime::new().run(panel) {
+            Ok(aish_ui::PanelOutcome::Submitted(outcome)) => {
+                let idx = outcome.selected_index.min(records.len().saturating_sub(1));
+                let rec = &records[idx];
+                let title = format!("{} ({} lines)", rec.command, rec.line_count);
+                let expand = aish_ui::ExpandPanel::new(&title, &rec.output);
+                let _ = aish_ui::PanelRuntime::new().run(expand);
+            }
+            _ => {}
+        }
+    }
+
+    /// Security gate: check AI input for secrets and prompt the user.
+    /// Returns `true` to continue, `false` if the user aborted (caller should skip).
+    /// When secrets are detected and the user chooses "Redact", `question` is
+    /// updated in-place with the redacted version.
+    fn check_security_gate(&self, question: &mut String) -> bool {
+        let decision = self.security_manager.check_ai_input(question);
+        if !decision.require_confirmation {
+            return true;
+        }
+        let reasons = decision
+            .analysis
+            .detected_secrets
+            .as_ref()
+            .map(|s| {
+                s.iter()
+                    .map(|m| m.format_reason())
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            })
+            .unwrap_or_default();
+        let mut args = std::collections::HashMap::new();
+        args.insert("reasons".to_string(), reasons);
+        let title = t("shell.security.secret.title");
+        let message = t_with_args("shell.security.secret.detected", &args);
+        let choice = crate::tui::show_secret_dialog_tui(&title, &message);
+        match choice {
+            crate::tui::SecretDialogChoice::Abort => {
+                let aborted = t("shell.security.secret.aborted");
+                println!("\x1b[33m{}\x1b[0m", aborted);
+                false
+            }
+            crate::tui::SecretDialogChoice::Redact => {
+                if let Some(secrets) = decision.analysis.detected_secrets {
+                    let count = secrets.len();
+                    let redacted = self.secret_vault.lock().unwrap().redact(&secrets, question);
+                    let mut rargs = std::collections::HashMap::new();
+                    rargs.insert("count".to_string(), count.to_string());
+                    let msg = t_with_args("shell.security.secret.redacted", &rargs);
+                    println!("\x1b[33m{}\x1b[0m", msg);
+                    *question = redacted;
+                }
+                true
+            }
+            crate::tui::SecretDialogChoice::Allow => true,
+        }
+    }
+
     /// Lock the PTY mutex, recovering from poison if a previous holder
     /// panicked. A poisoned PTY is still usable — the lock just means
     /// a prior operation failed, not that the PTY state is corrupt.
@@ -566,6 +648,57 @@ impl AishShell {
         let compaction_active_ref = compaction_active.clone();
         let compaction_notice_shown = Arc::new(AtomicBool::new(false));
         let compaction_notice_shown_ref = compaction_notice_shown.clone();
+
+        // Shared history of collapsed bash outputs for Ctrl+O browsing.
+        let expand_history = Arc::new(Mutex::new(crate::expand_history::ExpandHistory::new()));
+        let expand_history_ref = expand_history.clone();
+
+        // Set global Ctrl+O live handler for bash output viewing during
+        // PTY command execution.
+        aish_pty::ctrl_o::set_handler(Box::new(|buffer: &[u8]| {
+            let content = String::from_utf8_lossy(buffer);
+            let lines = content.lines().count();
+            let title = format!("Live output ({} lines)", lines);
+            let panel = aish_ui::ExpandPanel::new(&title, &content);
+            let _ = aish_ui::PanelRuntime::new().run(panel);
+        }));
+
+        // Set global Ctrl+O browse handler for viewing collapsed output
+        // history during AI streaming (called from the EscWatcher thread).
+        {
+            let history = expand_history_ref.clone();
+            aish_pty::ctrl_o::set_browse_handler(Box::new(move || {
+                // Clone data first to avoid holding MutexGuard during blocking TUI.
+                let snapshot: Vec<crate::expand_history::ExpandRecord> = {
+                    let hist = history.lock().unwrap();
+                    if hist.is_empty() {
+                        return;
+                    }
+                    hist.clone_records()
+                };
+                let records: Vec<aish_ui::HistoryRecord> = snapshot
+                    .iter()
+                    .map(|r| aish_ui::HistoryRecord {
+                        command: r.command.clone(),
+                        line_count: r.line_count,
+                        time: r.time.clone(),
+                    })
+                    .collect();
+                let title = format!("Output History ({} records)", records.len());
+                let panel = aish_ui::HistoryPanel::new(&title, records);
+                match aish_ui::PanelRuntime::new().run(panel) {
+                    Ok(aish_ui::PanelOutcome::Submitted(outcome)) => {
+                        let idx = outcome.selected_index.min(snapshot.len().saturating_sub(1));
+                        let rec = &snapshot[idx];
+                        let title = format!("{} ({} lines)", rec.command, rec.line_count);
+                        let expand = aish_ui::ExpandPanel::new(&title, &rec.output);
+                        let _ = aish_ui::PanelRuntime::new().run(expand);
+                    }
+                    _ => {}
+                }
+            }));
+        }
+
         let event_callback: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
             Arc::new(move |event: LlmEvent| {
                 // Helper: clear multi-line reasoning overlay and reset state.
@@ -818,9 +951,48 @@ impl AishShell {
                             if tool_name == "bash" && !preview.is_empty() && !interactive_bash {
                                 let content = strip_tool_output_xml(preview);
                                 if !content.is_empty() {
+                                    // Use actual total line count from the full
+                                    // output (not the truncated preview) for the
+                                    // collapse hint.
+                                    let total_lines = event
+                                        .data
+                                        .get("output_total_lines")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or_else(|| {
+                                            content.lines().count() as u64
+                                        }) as usize;
                                     let collapsed = collapse_display_lines(&content, 2);
-                                    println!("\x1b[2m{}\x1b[0m", collapsed);
+                                    print!("\x1b[2m{}\x1b[0m", collapsed);
+                                    if total_lines > 2 {
+                                        let hidden = total_lines - 2;
+                                        print!(
+                                            "\x1b[2m\n  ... {} lines hidden ─── \x1b[1;36mCtrl+O\x1b[0m\x1b[2m to expand ...\x1b[0m",
+                                            hidden
+                                        );
+                                    }
+                                    println!();
                                     let _ = io::stdout().flush();
+                                    // Only record to expand history when output is
+                                    // actually collapsed (total_lines > 2).
+                                    if total_lines > 2 {
+                                        let command = event
+                                            .data
+                                            .get("tool_args")
+                                            .and_then(|args| args.get("command"))
+                                            .and_then(|c| c.as_str())
+                                            .unwrap_or("bash")
+                                            .to_string();
+                                        let full_output = event
+                                            .data
+                                            .get("output_full")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| strip_tool_output_xml(s))
+                                            .unwrap_or(content);
+                                        expand_history_ref
+                                            .lock()
+                                            .unwrap()
+                                            .add(command, full_output);
+                                    }
                                 }
                             }
                         }
@@ -907,12 +1079,41 @@ impl AishShell {
             print!("  ");
             let _ = std::io::stdout().flush();
 
-            let mut answer = String::new();
-            if std::io::stdin().read_line(&mut answer).is_err() {
-                return false;
+            // Guard: pause background stdin readers (esc_watcher).
+            let _ig = aish_tools::bash::acquire_interactive_input_guard();
+
+            // Terminal may be in input-raw mode (from CrosstermEscWatcher);
+            // read a single byte instead of read_line() which expects \n.
+            let mut byte = [0u8; 1];
+            let approved = match io::stdin().read(&mut byte) {
+                Ok(1) => {
+                    let ch = byte[0];
+                    // Echo the response on a new line for visibility.
+                    println!();
+                    ch == b'y' || ch == b'Y' || ch == b'\r' || ch == b'\n'
+                }
+                _ => false,
+            };
+            // Drain trailing bytes with timeout (e.g. \r after 'y').
+            let mut drain_buf = [0u8; 64];
+            let stdin_fd = libc::STDIN_FILENO;
+            loop {
+                let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+                unsafe {
+                    libc::FD_ZERO(&mut fds);
+                    libc::FD_SET(stdin_fd, &mut fds);
+                }
+                let mut tv = libc::timeval { tv_sec: 0, tv_usec: 10_000 }; // 10ms timeout
+                let sel = unsafe {
+                    libc::select(stdin_fd + 1, &mut fds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
+                };
+                if sel <= 0 { break; }
+                match io::stdin().read(&mut drain_buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
             }
-            let answer = answer.trim().to_lowercase();
-            answer == "y" || answer == "yes"
+            approved
         });
 
         llm_session.set_confirmation_callback(confirmation_callback);
@@ -951,12 +1152,36 @@ impl AishShell {
                 print!("  ");
                 let _ = std::io::stdout().flush();
 
-                let mut answer = String::new();
-                if std::io::stdin().read_line(&mut answer).is_err() {
-                    return false;
+                let _ig = aish_tools::bash::acquire_interactive_input_guard();
+                let mut byte = [0u8; 1];
+                let approved = match io::stdin().read(&mut byte) {
+                    Ok(1) => {
+                        let ch = byte[0];
+                        println!();
+                        ch == b'y' || ch == b'Y' || ch == b'\r' || ch == b'\n'
+                    }
+                    _ => false,
+                };
+                // Drain trailing bytes with timeout (e.g. \r after 'y').
+                let mut drain_buf = [0u8; 64];
+                let stdin_fd = libc::STDIN_FILENO;
+                loop {
+                    let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+                    unsafe {
+                        libc::FD_ZERO(&mut fds);
+                        libc::FD_SET(stdin_fd, &mut fds);
+                    }
+                    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 10_000 }; // 10ms timeout
+                    let sel = unsafe {
+                        libc::select(stdin_fd + 1, &mut fds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
+                    };
+                    if sel <= 0 { break; }
+                    match io::stdin().read(&mut drain_buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => continue,
+                    }
                 }
-                let answer = answer.trim().to_lowercase();
-                answer == "y" || answer == "yes" || answer.is_empty()
+                approved
             });
 
         llm_session.set_iteration_limit_callback(iteration_limit_callback);
@@ -1040,6 +1265,7 @@ impl AishShell {
             interruption: InterruptionState::default(),
             last_ctrl_c: None,
             animation,
+            expand_history,
         })
     }
 
@@ -1188,6 +1414,15 @@ impl AishShell {
                         }
                         continue;
                     }
+                    // Check if Ctrl+O was pressed (expand collapsed output)
+                    if matches!(e, rustyline::error::ReadlineError::Interrupted)
+                        && rl.was_ctrl_o_requested()
+                    {
+                        if !self.expand_history.lock().unwrap().is_empty() {
+                            self.show_expand_panel();
+                        }
+                        continue;
+                    }
                     // Interrupt (Ctrl-C) — handle double-press exit
                     if matches!(e, rustyline::error::ReadlineError::Interrupted) {
                         if self.handle_ctrl_c() {
@@ -1227,7 +1462,7 @@ impl AishShell {
                         if let Some(ref cmd) = self.state.last_command.clone() {
                             let old_sigint = self.install_ai_sigint_handler();
                             let mut esc_watcher =
-                                EscWatcher::start(self.ai_handler.cancellation_token_arc());
+                                CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
                             let token_ptr =
                                 self.ai_handler.cancellation_token() as *const CancellationToken;
                             let result = runtime.block_on(async {
@@ -1326,52 +1561,13 @@ impl AishShell {
                     }
 
                     // Security gate: detect secrets in AI input
-                    let decision = self.security_manager.check_ai_input(&question);
-                    if decision.require_confirmation {
-                        let reasons = decision
-                            .analysis
-                            .detected_secrets
-                            .as_ref()
-                            .map(|s| {
-                                s.iter()
-                                    .map(|m| m.format_reason())
-                                    .collect::<Vec<_>>()
-                                    .join("\n  ")
-                            })
-                            .unwrap_or_default();
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("reasons".to_string(), reasons);
-                        let title = t("shell.security.secret.title");
-                        let message = t_with_args("shell.security.secret.detected", &args);
-                        let choice = crate::tui::show_secret_dialog(&title, &message);
-                        match choice {
-                            crate::tui::SecretDialogChoice::Abort => {
-                                let aborted = t("shell.security.secret.aborted");
-                                println!("\x1b[33m{}\x1b[0m", aborted);
-                                continue;
-                            }
-                            crate::tui::SecretDialogChoice::Redact => {
-                                if let Some(secrets) = decision.analysis.detected_secrets {
-                                    let count = secrets.len();
-                                    let redacted = self
-                                        .secret_vault
-                                        .lock()
-                                        .unwrap()
-                                        .redact(&secrets, &question);
-                                    let mut rargs = std::collections::HashMap::new();
-                                    rargs.insert("count".to_string(), count.to_string());
-                                    let msg = t_with_args("shell.security.secret.redacted", &rargs);
-                                    println!("\x1b[33m{}\x1b[0m", msg);
-                                    question = redacted;
-                                }
-                            }
-                            crate::tui::SecretDialogChoice::Allow => {}
-                        }
+                    if !self.check_security_gate(&mut question) {
+                        continue;
                     }
 
                     let old_sigint = self.install_ai_sigint_handler();
                     let mut esc_watcher =
-                        EscWatcher::start(self.ai_handler.cancellation_token_arc());
+                        CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
                     let token_ptr =
                         self.ai_handler.cancellation_token() as *const CancellationToken;
                     let result = runtime.block_on(async {
@@ -1394,7 +1590,6 @@ impl AishShell {
                                 let mut sep_renderer = ShellRenderer::new();
                                 sep_renderer.render_separator();
                                 print_md(&response);
-                                collapse_terminal_paragraph_gap();
                                 sep_renderer.render_separator();
                             } else if did_stream {
                                 // Streaming display already handled by event callback
@@ -1602,10 +1797,16 @@ impl AishShell {
                             let ans = answer.trim().to_lowercase();
                             if ans != "n" && ans != "no" {
                                 // Route to AI
-                                let question = input.trim().to_string();
+                                let mut question = input.trim().to_string();
+
+                                // Security gate: same secret check as the normal AI path
+                                if !self.check_security_gate(&mut question) {
+                                    continue;
+                                }
+
                                 let old_sigint = self.install_ai_sigint_handler();
                                 let mut esc_watcher =
-                                    EscWatcher::start(self.ai_handler.cancellation_token_arc());
+                                    CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
                                 let token_ptr = self.ai_handler.cancellation_token()
                                     as *const CancellationToken;
                                 let result = runtime.block_on(async {
@@ -1626,7 +1827,6 @@ impl AishShell {
                                             let mut sep_renderer = ShellRenderer::new();
                                             sep_renderer.render_separator();
                                             print_md(&response);
-                                            collapse_terminal_paragraph_gap();
                                             sep_renderer.render_separator();
                                         }
                                         self.persist_session_snapshot();
@@ -2985,10 +3185,6 @@ impl AishShell {
                                     if wait_start.elapsed() >= wait_timeout {
                                         break;
                                     }
-                                    if aish_tools::bash::interactive_input_active() {
-                                        std::thread::sleep(std::time::Duration::from_millis(50));
-                                        continue;
-                                    }
                                     let mut rfds: nix::libc::fd_set =
                                         unsafe { std::mem::zeroed() };
                                     unsafe {
@@ -4190,13 +4386,6 @@ impl AishShell {
                                                     if done_start.elapsed() >= chain_timeout {
                                                         break;
                                                     }
-                                                    if aish_tools::bash::interactive_input_active()
-                                                    {
-                                                        std::thread::sleep(
-                                                            std::time::Duration::from_millis(50),
-                                                        );
-                                                        continue;
-                                                    }
                                                     let mut dfds: nix::libc::fd_set =
                                                         unsafe { std::mem::zeroed() };
                                                     unsafe {
@@ -4324,10 +4513,6 @@ impl AishShell {
                                             break;
                                         }
                                         Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                                    }
-                                    if aish_tools::bash::interactive_input_active() {
-                                        std::thread::sleep(std::time::Duration::from_millis(50));
-                                        continue;
                                     }
                                     let mut rfds: nix::libc::fd_set = unsafe { std::mem::zeroed() };
                                     unsafe {
@@ -4502,12 +4687,9 @@ fn strip_tool_output_xml(output: &str) -> String {
         regex::Regex::new(r"</?(?:stdout|stderr|return_code|exit-code)/?>").unwrap()
     });
     let cleaned = re.replace_all(&cleaned, "").to_string();
-    // Collapse multiple blank lines and trim
-    cleaned
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    // Trim leading/trailing whitespace but preserve blank lines
+    // (they are part of the original output, e.g. YAML section breaks)
+    cleaned.trim().to_string()
 }
 
 /// Collapse output to first N lines for terminal display, matching Python's
@@ -4802,11 +4984,6 @@ fn print_md(text: &str) {
     use crate::renderer::ShellRenderer;
     let mut renderer = ShellRenderer::new();
     renderer.render_markdown(text);
-}
-
-fn collapse_terminal_paragraph_gap() {
-    print!("\x1b[1A\r\x1b[K");
-    let _ = std::io::stdout().flush();
 }
 
 /// Extract the first ```bash code block from AI response text.

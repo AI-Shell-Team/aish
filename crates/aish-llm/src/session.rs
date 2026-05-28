@@ -1091,17 +1091,26 @@ impl LlmSession {
             }
 
             // Prepare output preview only for bash tool (used for terminal display).
-            let output_preview = if tool_call.name == "bash" {
+            let (output_preview, total_lines) = if tool_call.name == "bash" {
                 let s = &result.output;
+                // Use raw line count from PTY output (stored in meta by
+                // the bash tool) instead of counting lines in the tagged
+                // tool output which may be truncated by offload.
+                let total = result
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("raw_line_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| s.lines().count() as u64) as usize;
                 let limit = 512.min(s.len());
                 // Find safe UTF-8 boundary
                 let mut end = limit;
                 while end > 0 && end < s.len() && !s.is_char_boundary(end) {
                     end -= 1;
                 }
-                Some(s[..end].to_string())
+                (Some(s[..end].to_string()), total)
             } else {
-                None
+                (None, 0)
             };
 
             let mut event_data = serde_json::json!({
@@ -1112,6 +1121,34 @@ impl LlmSession {
             });
             if let Some(preview) = output_preview {
                 event_data["output_preview"] = serde_json::Value::String(preview);
+            }
+            if tool_call.name == "bash" && total_lines > 0 {
+                event_data["output_total_lines"] = serde_json::Value::Number(
+                    serde_json::Number::from(total_lines),
+                );
+                // Pass full output for Ctrl+O expand panel display.
+                // When output was offloaded, read full content from disk
+                // (result.output only contains a 1 KB preview in that case).
+                // Cap at 256 KB to avoid passing huge data through events.
+                const MAX_FULL_OUTPUT: usize = 256 * 1024;
+                let full = result
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("offload"))
+                    .and_then(|o| o.get("stdout_path"))
+                    .and_then(|p| p.as_str())
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_else(|| result.output.clone());
+                let full = if full.len() > MAX_FULL_OUTPUT {
+                    let mut end = MAX_FULL_OUTPUT;
+                    while end > 0 && !full.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...(truncated)", &full[..end])
+                } else {
+                    full
+                };
+                event_data["output_full"] = serde_json::Value::String(full);
             }
 
             self.emit_event(LlmEvent {

@@ -67,7 +67,7 @@ pub fn fetch_models_from_api(
             let body = response.text().unwrap_or_default();
             let detail = if body.len() > 200 {
                 let mut end = 200;
-                while !body.is_char_boundary(end) {
+                while end > 0 && !body.is_char_boundary(end) {
                     end -= 1;
                 }
                 format!("{}...", &body[..end])
