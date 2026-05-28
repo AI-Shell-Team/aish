@@ -10,104 +10,17 @@ use std::path::{Path, PathBuf};
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
 
+use crate::install_source::{
+    build_pip_command, detect_installation_method, detect_pip_context, InstallMethod,
+    AISH_BINARY_NAME, ARCHIVE_BIN_DIR, CARGO_PACKAGE_NAME, PIP_DISTRIBUTION_NAME,
+    SYSTEM_PACKAGE_NAME,
+};
+
 // Paths used by the archive/script installer (install.sh)
-const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
-const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
+const ARCHIVE_BINARY_NAMES: &[&str] = &[AISH_BINARY_NAME, "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
 const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
-
-// ---------------------------------------------------------------------------
-// Installation method detection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InstallMethod {
-    Archive,
-    Cargo,
-    Pip,
-    System,
-    Unknown,
-}
-
-impl std::fmt::Display for InstallMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Archive => write!(f, "archive"),
-            Self::Cargo => write!(f, "cargo"),
-            Self::Pip => write!(f, "pip"),
-            Self::System => write!(f, "system"),
-            Self::Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
-/// Check if a file starts with the ELF magic bytes.
-fn is_elf_binary(path: &Path) -> bool {
-    match std::fs::read(path) {
-        Ok(bytes) => bytes.len() >= 4 && bytes[..4] == [0x7f, b'E', b'L', b'F'],
-        Err(_) => false,
-    }
-}
-
-/// Detect how aish was installed.
-fn detect_installation_method() -> InstallMethod {
-    // 1. Archive install: ELF binary in /usr/local/bin/aish
-    let archive_bin = PathBuf::from(ARCHIVE_BIN_DIR).join("aish");
-    if archive_bin.exists() && is_elf_binary(&archive_bin) {
-        return InstallMethod::Archive;
-    }
-
-    // 2. Cargo install: binary under ~/.cargo/bin/
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(path_str) = exe.to_str() {
-            if path_str.contains("/.cargo/bin/") {
-                return InstallMethod::Cargo;
-            }
-        }
-    }
-
-    // 3. Pip install: check `pip show aish`
-    if is_command_available("pip") {
-        if let Ok(output) = std::process::Command::new("pip")
-            .args(["show", "aish"])
-            .output()
-        {
-            if output.status.success() {
-                return InstallMethod::Pip;
-            }
-        }
-    }
-
-    // 4. System package: dpkg or rpm
-    if is_command_available("dpkg") {
-        if let Ok(output) = std::process::Command::new("dpkg")
-            .args(["-s", "aish"])
-            .output()
-        {
-            if output.status.success() {
-                return InstallMethod::System;
-            }
-        }
-    }
-
-    if is_command_available("rpm") {
-        if let Ok(output) = std::process::Command::new("rpm")
-            .args(["-q", "aish"])
-            .output()
-        {
-            if output.status.success() {
-                return InstallMethod::System;
-            }
-        }
-    }
-
-    InstallMethod::Unknown
-}
-
-fn is_command_available(cmd: &str) -> bool {
-    which_exists(cmd)
-}
 
 fn which_exists(cmd: &str) -> bool {
     std::process::Command::new("which")
@@ -211,7 +124,7 @@ fn stop_and_remove_sandbox_units() {
 
 fn uninstall_cargo() -> Result<(), AishError> {
     let output = std::process::Command::new("cargo")
-        .args(["uninstall", "aish"])
+        .args(["uninstall", CARGO_PACKAGE_NAME])
         .output()
         .map_err(|e| AishError::Config(format!("Failed to run cargo: {e}")))?;
     if !output.status.success() {
@@ -224,8 +137,11 @@ fn uninstall_cargo() -> Result<(), AishError> {
 }
 
 fn uninstall_pip() -> Result<(), AishError> {
-    let output = std::process::Command::new("pip")
-        .args(["uninstall", "-y", "aish"])
+    let pip_context = detect_pip_context();
+    let mut command = build_pip_command(pip_context.as_ref());
+    command.args(["uninstall", "-y", PIP_DISTRIBUTION_NAME]);
+
+    let output = command
         .output()
         .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
     if output.status.success() {
@@ -235,8 +151,14 @@ fn uninstall_pip() -> Result<(), AishError> {
     // Retry with --break-system-packages for externally-managed environments
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("externally-managed-environment") {
-        let retry = std::process::Command::new("pip")
-            .args(["uninstall", "-y", "--break-system-packages", "aish"])
+        let mut retry_command = build_pip_command(pip_context.as_ref());
+        retry_command.args([
+            "uninstall",
+            "-y",
+            "--break-system-packages",
+            PIP_DISTRIBUTION_NAME,
+        ]);
+        let retry = retry_command
             .output()
             .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
         if retry.status.success() {
@@ -257,7 +179,7 @@ fn uninstall_pip() -> Result<(), AishError> {
 fn uninstall_system(purge: bool) -> Result<(), AishError> {
     if which_exists("dpkg") {
         let output = std::process::Command::new("sudo")
-            .args(["apt-get", "remove", "-y", "aish"])
+            .args(["apt-get", "remove", "-y", SYSTEM_PACKAGE_NAME])
             .output()
             .map_err(|e| AishError::Config(format!("Failed to run apt-get: {e}")))?;
         if output.status.success() {
@@ -270,7 +192,7 @@ fn uninstall_system(purge: bool) -> Result<(), AishError> {
 
     if which_exists("dnf") {
         let output = std::process::Command::new("sudo")
-            .args(["dnf", "remove", "-y", "aish"])
+            .args(["dnf", "remove", "-y", SYSTEM_PACKAGE_NAME])
             .output()
             .map_err(|e| AishError::Config(format!("Failed to run dnf: {e}")))?;
         if output.status.success() {
@@ -504,21 +426,6 @@ fn remove_current_binary() -> Result<(), AishError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_is_elf_binary_nonexistent() {
-        assert!(!is_elf_binary(Path::new("/nonexistent/file")));
-    }
-
-    #[test]
-    fn test_is_elf_binary_text_file() {
-        let dir = std::env::temp_dir().join("aish_test_elf");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("script.sh");
-        std::fs::write(&path, "#!/bin/bash\necho hello").unwrap();
-        assert!(!is_elf_binary(&path));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn test_is_safe_purge_path_valid() {

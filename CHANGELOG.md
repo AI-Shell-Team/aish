@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
+## [0.3.1-beta.1] - 2026-05-28
+
+### Added
+
+- Added PyPI wheel packaging metadata and integrated wheel-only amd64 and arm64 publishing into the main release workflow.
+
+### Changed
+
+- Changed release automation so tagged releases can smoke test and publish PyPI wheels alongside the existing bundle/CDN artifacts.
+- Changed CLI update and uninstall flows to detect the installation source and use pip or cargo when the current installation came from that source.
+
+### Fixed
+
+- Fixed package metadata to align the Rust workspace license with the Apache-2.0 repository license.
+- Fixed pip and cargo self-management commands to use the published package name `aish-cli`.
+
 ## [0.3.0-beta.3] - 2026-05-13
 
 ### Added
