@@ -29,19 +29,13 @@ fn run_pip_upgrade(pre_release: bool) -> Result<(), AishError> {
     let pip_context = detect_pip_context();
     let mut command = build_pip_command(pip_context.as_ref());
     command.arg("install").arg("--upgrade");
-    if matches!(
-        pip_context,
-        Some(crate::install_source::PipContext::UserLocal)
-    ) {
+    if matches!(pip_context, Some(crate::install_source::PipContext::UserLocal)) {
         command.arg("--user");
     }
     if pre_release {
         command.arg("--pre");
     }
-    command
-        .arg("--only-binary")
-        .arg(":all:")
-        .arg(PIP_DISTRIBUTION_NAME);
+    command.arg("--only-binary").arg(":all:").arg(PIP_DISTRIBUTION_NAME);
 
     let output = command
         .output()
@@ -54,10 +48,7 @@ fn run_pip_upgrade(pre_release: bool) -> Result<(), AishError> {
     if stderr.contains("externally-managed-environment") {
         let mut retry = build_pip_command(pip_context.as_ref());
         retry.arg("install").arg("--upgrade");
-        if matches!(
-            pip_context,
-            Some(crate::install_source::PipContext::UserLocal)
-        ) {
+        if matches!(pip_context, Some(crate::install_source::PipContext::UserLocal)) {
             retry.arg("--user");
         }
         if pre_release {
