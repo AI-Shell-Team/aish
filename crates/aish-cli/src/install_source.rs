@@ -195,7 +195,10 @@ mod tests {
         let home = dirs::home_dir().expect("home directory should exist in tests");
         let owned_path = home.join(".local").join("bin").join("aish");
         let path = owned_path.as_path();
-        assert_eq!(detect_pip_context_for_path(path), Some(PipContext::UserLocal));
+        assert_eq!(
+            detect_pip_context_for_path(path),
+            Some(PipContext::UserLocal)
+        );
     }
 
     #[test]
