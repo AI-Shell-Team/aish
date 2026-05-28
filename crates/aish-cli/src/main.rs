@@ -16,7 +16,6 @@
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-mod install_source;
 mod models_auth;
 mod uninstall;
 mod update;
