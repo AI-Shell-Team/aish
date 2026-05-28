@@ -1,0 +1,34 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "aish-cli"
+dynamic = ["version"]
+description = "AI Shell - An intelligent shell assistant powered by LLM"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [{ name = "AI Shell contributors" }]
+keywords = ["shell", "ai", "llm", "terminal"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Terminals",
+]
+
+[project.urls]
+Homepage = "https://github.com/AI-Shell-Team/aish"
+Repository = "https://github.com/AI-Shell-Team/aish"
+Issues = "https://github.com/AI-Shell-Team/aish/issues"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/aish-cli/Cargo.toml"
+strip = true
