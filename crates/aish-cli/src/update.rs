@@ -587,10 +587,6 @@ fn build_pip_command(context: &PipChannelContext) -> std::process::Command {
     }
 }
 
-fn pip_subcommand_uses_python_module(context: &PipChannelContext) -> bool {
-    context.python_executable.is_some()
-}
-
 fn parse_pip_check_info(output: &str) -> Result<Option<PipCheckInfo>, AishError> {
     let report: Value = serde_json::from_str(output)
         .map_err(|e| AishError::Config(format!("Failed to parse pip update report: {e}")))?;
@@ -629,11 +625,7 @@ fn check_for_pip_updates(
     pre_release: bool,
 ) -> Result<Option<UpdateInfo>, AishError> {
     let mut command = build_pip_command(context);
-    if pip_subcommand_uses_python_module(context) {
-        command.args(["install", "--upgrade", "--dry-run", "--report", "-", "-qq"]);
-    } else {
-        command.args(["install", "--upgrade", "--dry-run", "--report", "-", "-qq"]);
-    }
+    command.args(["install", "--upgrade", "--dry-run", "--report", "-", "-qq"]);
     if pre_release {
         command.arg("--pre");
     }
@@ -670,11 +662,7 @@ fn check_for_pip_updates(
 
 fn run_pip_update(context: &PipChannelContext, pre_release: bool) -> Result<(), AishError> {
     let mut command = build_pip_command(context);
-    if pip_subcommand_uses_python_module(context) {
-        command.args(["install", "--upgrade"]);
-    } else {
-        command.args(["install", "--upgrade"]);
-    }
+    command.args(["install", "--upgrade"]);
     if pre_release {
         command.arg("--pre");
     }
@@ -740,7 +728,10 @@ pub fn run_update(check_only: bool, pre_release: bool) {
                     return;
                 }
 
-                println!("\x1b[1;36m{}\x1b[0m", t("cli.update.running_install_script"));
+                println!(
+                    "\x1b[1;36m{}\x1b[0m",
+                    t("cli.update.running_install_script")
+                );
 
                 if let Err(error) = run_pip_update(&context, pre_release) {
                     eprintln!("\x1b[31m{}\x1b[0m", {
