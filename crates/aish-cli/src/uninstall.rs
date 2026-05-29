@@ -4,11 +4,12 @@
 //! and runs the appropriate uninstall procedure. With `--purge`, also
 //! removes user config/data/cache and system-level config files.
 
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
+
+use crate::install_channel::{current_install_channel, InstallChannel, PipChannelContext};
 
 // Paths used by the archive/script installer (install.sh)
 const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
@@ -16,6 +17,7 @@ const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
 const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
+const PIP_PACKAGE_NAMES: &[&str] = &["ai-sh", "aish"];
 
 // ---------------------------------------------------------------------------
 // Installation method detection
@@ -52,6 +54,10 @@ fn is_elf_binary(path: &Path) -> bool {
 
 /// Detect how aish was installed.
 fn detect_installation_method() -> InstallMethod {
+    if matches!(current_install_channel(), Some(InstallChannel::Pip(_))) {
+        return InstallMethod::Pip;
+    }
+
     // 1. Archive install: ELF binary in /usr/local/bin/aish
     let archive_bin = PathBuf::from(ARCHIVE_BIN_DIR).join("aish");
     if archive_bin.exists() && is_elf_binary(&archive_bin) {
@@ -67,14 +73,16 @@ fn detect_installation_method() -> InstallMethod {
         }
     }
 
-    // 3. Pip install: check `pip show aish`
+    // 3. Pip install: check supported distribution names.
     if is_command_available("pip") {
-        if let Ok(output) = std::process::Command::new("pip")
-            .args(["show", "aish"])
-            .output()
-        {
-            if output.status.success() {
-                return InstallMethod::Pip;
+        for package_name in PIP_PACKAGE_NAMES {
+            if let Ok(output) = std::process::Command::new("pip")
+                .args(["show", package_name])
+                .output()
+            {
+                if output.status.success() {
+                    return InstallMethod::Pip;
+                }
             }
         }
     }
@@ -223,35 +231,89 @@ fn uninstall_cargo() -> Result<(), AishError> {
     Ok(())
 }
 
-fn uninstall_pip() -> Result<(), AishError> {
-    let output = std::process::Command::new("pip")
-        .args(["uninstall", "-y", "aish"])
+fn uninstall_pip_with_python(
+    context: &PipChannelContext,
+    package_name: &str,
+) -> Result<(), AishError> {
+    let Some(python_executable) = context.python_executable.as_deref() else {
+        return Err(AishError::Config(
+            "pip uninstall requires a Python executable from the launcher".to_string(),
+        ));
+    };
+
+    let output = std::process::Command::new(python_executable)
+        .args(["-m", "pip", "uninstall", "-y", package_name])
         .output()
         .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
     if output.status.success() {
         return Ok(());
     }
 
-    // Retry with --break-system-packages for externally-managed environments
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("externally-managed-environment") {
-        let retry = std::process::Command::new("pip")
-            .args(["uninstall", "-y", "--break-system-packages", "aish"])
+        let retry = std::process::Command::new(python_executable)
+            .args([
+                "-m",
+                "pip",
+                "uninstall",
+                "-y",
+                "--break-system-packages",
+                package_name,
+            ])
             .output()
             .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
         if retry.status.success() {
             return Ok(());
         }
         return Err(AishError::Config(format!(
-            "pip uninstall failed: {}",
+            "pip uninstall failed for {package_name}: {}",
             String::from_utf8_lossy(&retry.stderr).trim()
         )));
     }
 
     Err(AishError::Config(format!(
-        "pip uninstall failed: {}",
+        "pip uninstall failed for {package_name}: {}",
         stderr.trim()
     )))
+}
+
+fn uninstall_pip() -> Result<(), AishError> {
+    if let Some(InstallChannel::Pip(context)) = current_install_channel() {
+        return uninstall_pip_with_python(&context, &context.package_name);
+    }
+
+    let mut last_error = String::from("pip uninstall did not match any known package name");
+
+    for package_name in PIP_PACKAGE_NAMES {
+        let output = std::process::Command::new("pip")
+            .args(["uninstall", "-y", package_name])
+            .output()
+            .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        // Retry with --break-system-packages for externally-managed environments
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("externally-managed-environment") {
+            let retry = std::process::Command::new("pip")
+                .args(["uninstall", "-y", "--break-system-packages", package_name])
+                .output()
+                .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
+            if retry.status.success() {
+                return Ok(());
+            }
+            last_error = format!(
+                "pip uninstall failed for {package_name}: {}",
+                String::from_utf8_lossy(&retry.stderr).trim()
+            );
+            continue;
+        }
+
+        last_error = format!("pip uninstall failed for {package_name}: {}", stderr.trim());
+    }
+
+    Err(AishError::Config(last_error))
 }
 
 fn uninstall_system(purge: bool) -> Result<(), AishError> {
@@ -408,15 +470,8 @@ fn purge_data() -> Result<(), AishError> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_uninstall(purge: bool, yes: bool) {
-    println!("\x1b[1;36m{}\x1b[0m\n", t("cli.uninstall.title"));
-
+pub fn run_uninstall(purge: bool) {
     let method = detect_installation_method();
-    println!("\x1b[2m{}\x1b[0m", {
-        let mut args = std::collections::HashMap::new();
-        args.insert("method".to_string(), method.to_string());
-        t_with_args("cli.uninstall.installation_method", &args)
-    });
 
     if purge {
         println!("\x1b[1;33m{}\x1b[0m", t("cli.uninstall.purge_warning"));
@@ -424,17 +479,6 @@ pub fn run_uninstall(purge: bool, yes: bool) {
             if path.exists() {
                 println!("  \x1b[2m{}\x1b[0m", path.display());
             }
-        }
-    }
-
-    if !yes {
-        print!("\n\x1b[33m{}\x1b[0m", t("cli.uninstall.proceed_uninstall"));
-        io::stdout().flush().unwrap();
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer).unwrap();
-        if answer.trim().to_lowercase() != "y" {
-            println!("{}", t("cli.uninstall.cancelled"));
-            return;
         }
     }
 
@@ -559,6 +603,12 @@ mod tests {
     fn test_detect_installation_method_runs() {
         // Just verify it doesn't panic
         let _method = detect_installation_method();
+    }
+
+    #[test]
+    fn test_pip_package_names_include_ai_sh() {
+        assert!(PIP_PACKAGE_NAMES.contains(&"ai-sh"));
+        assert!(PIP_PACKAGE_NAMES.contains(&"aish"));
     }
 
     #[test]

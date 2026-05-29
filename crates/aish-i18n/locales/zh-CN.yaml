@@ -80,6 +80,12 @@ cli:
     install_sh_not_found: "归档中未找到 install.sh"
     progress_mb: "{label}: {downloaded:.1}/{total:.1} MB ({pct}%)"
     progress_mb_no_total: "{label}: {downloaded:.1} MB"
+    pip_managed: "当前安装由 pip 管理。"
+    pip_update_command: "请使用以下命令更新: {command}"
+    pip_update_index_hint: "如果你最初是从 TestPyPI 或自定义索引安装的，请在更新时重复相同的索引参数。"
+    pip_update_prompt: "现在执行 pip 更新命令吗? [y/N]"
+    pip_update_success: "pip 更新已完成。"
+    pip_update_failed: "pip 更新失败: {error}"
 
   models:
     help: "管理模型与 Provider 认证"

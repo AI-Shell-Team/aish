@@ -2800,7 +2800,7 @@ fn read_byte(stdin_fd: libc::c_int) -> Option<u8> {
 }
 
 /// Check whether stdin has data available within `timeout_us` microseconds.
-fn stdin_poll(stdin_fd: libc::c_int, timeout_us: libc::suseconds_t) -> bool {
+fn stdin_poll(stdin_fd: libc::c_int, timeout_us: i64) -> bool {
     let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
     unsafe {
         libc::FD_ZERO(&mut rfds);
@@ -2808,7 +2808,7 @@ fn stdin_poll(stdin_fd: libc::c_int, timeout_us: libc::suseconds_t) -> bool {
     }
     let mut tv = libc::timeval {
         tv_sec: 0,
-        tv_usec: timeout_us,
+        tv_usec: timeout_us as _,
     };
     let sel = unsafe {
         libc::select(

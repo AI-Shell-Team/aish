@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-sh"
+dynamic = ["version"]
+description = "AI Shell command-line interface"
+readme = "README_PYPI.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+    { name = "AI Shell Team" }
+]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: User Interfaces",
+]
+
+[project.urls]
+Homepage = "https://github.com/AI-Shell-Team/aish"
+Repository = "https://github.com/AI-Shell-Team/aish"
+Issues = "https://github.com/AI-Shell-Team/aish/issues"
+
+[project.scripts]
+aish = "ai_sh.launcher:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ai_sh = ["bin/aish"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ai_sh._version.__version__" }

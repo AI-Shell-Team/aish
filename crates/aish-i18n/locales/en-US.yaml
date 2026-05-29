@@ -80,6 +80,12 @@ cli:
     install_sh_not_found: "install.sh not found in archive"
     progress_mb: "{label}: {downloaded:.1}/{total:.1} MB ({pct}%)"
     progress_mb_no_total: "{label}: {downloaded:.1} MB"
+    pip_managed: "This installation is managed by pip."
+    pip_update_command: "Update with: {command}"
+    pip_update_index_hint: "If you installed from TestPyPI or a custom index, repeat the same index options."
+    pip_update_prompt: "Run the pip update command now? [y/N]"
+    pip_update_success: "pip update completed."
+    pip_update_failed: "pip update failed: {error}"
 
   models:
     help: "Manage models and provider auth"

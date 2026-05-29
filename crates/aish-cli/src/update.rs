@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
 use semver::Version;
+use serde_json::Value;
+
+use crate::install_channel::{current_install_channel, InstallChannel, PipChannelContext};
 
 const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download";
 const DEFAULT_BETA_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download/beta";
@@ -28,6 +31,12 @@ pub struct UpdateInfo {
     pub html_url: String,
     #[allow(dead_code)]
     pub release_notes: String,
+}
+
+#[derive(Debug)]
+struct PipCheckInfo {
+    latest_version: String,
+    html_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +577,143 @@ fn cleanup() {
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
+fn build_pip_command(context: &PipChannelContext) -> std::process::Command {
+    if let Some(python_executable) = context.python_executable.as_deref() {
+        let mut command = std::process::Command::new(python_executable);
+        command.args(["-m", "pip"]);
+        command
+    } else {
+        std::process::Command::new("pip")
+    }
+}
+
+fn pip_subcommand_uses_python_module(context: &PipChannelContext) -> bool {
+    context.python_executable.is_some()
+}
+
+fn parse_pip_check_info(output: &str) -> Result<Option<PipCheckInfo>, AishError> {
+    let report: Value = serde_json::from_str(output)
+        .map_err(|e| AishError::Config(format!("Failed to parse pip update report: {e}")))?;
+
+    let Some(installs) = report.get("install").and_then(|value| value.as_array()) else {
+        return Err(AishError::Config(
+            "Invalid pip update report: missing install list".to_string(),
+        ));
+    };
+
+    let Some(first) = installs.first() else {
+        return Ok(None);
+    };
+
+    let latest_version = first
+        .get("metadata")
+        .and_then(|value| value.get("version"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| AishError::Config("Invalid pip update report: missing version".into()))?
+        .to_string();
+    let html_url = first
+        .get("download_info")
+        .and_then(|value| value.get("url"))
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned);
+
+    Ok(Some(PipCheckInfo {
+        latest_version,
+        html_url,
+    }))
+}
+
+fn check_for_pip_updates(
+    context: &PipChannelContext,
+    current_version: &str,
+    pre_release: bool,
+) -> Result<Option<UpdateInfo>, AishError> {
+    let mut command = build_pip_command(context);
+    if pip_subcommand_uses_python_module(context) {
+        command.args(["install", "--upgrade", "--dry-run", "--report", "-", "-qq"]);
+    } else {
+        command.args(["install", "--upgrade", "--dry-run", "--report", "-", "-qq"]);
+    }
+    if pre_release {
+        command.arg("--pre");
+    }
+    command.arg(&context.package_name);
+
+    let output = command
+        .output()
+        .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
+    if !output.status.success() {
+        return Err(AishError::Config(format!(
+            "pip update check failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let report_stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(check_info) = parse_pip_check_info(&report_stdout)? else {
+        return Ok(None);
+    };
+
+    let current = current_version.strip_prefix('v').unwrap_or(current_version);
+    if compare_versions(&check_info.latest_version, current) != std::cmp::Ordering::Greater {
+        return Ok(None);
+    }
+
+    Ok(Some(UpdateInfo {
+        tag_name: format!("v{}", check_info.latest_version),
+        current_version: current.to_string(),
+        latest_version: check_info.latest_version,
+        html_url: check_info.html_url.unwrap_or_default(),
+        release_notes: String::new(),
+    }))
+}
+
+fn run_pip_update(context: &PipChannelContext, pre_release: bool) -> Result<(), AishError> {
+    let mut command = build_pip_command(context);
+    if pip_subcommand_uses_python_module(context) {
+        command.args(["install", "--upgrade"]);
+    } else {
+        command.args(["install", "--upgrade"]);
+    }
+    if pre_release {
+        command.arg("--pre");
+    }
+    command.arg(&context.package_name);
+
+    let output = command
+        .output()
+        .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("externally-managed-environment") {
+        let mut retry = build_pip_command(context);
+        retry.args(["install", "--upgrade", "--break-system-packages"]);
+        if pre_release {
+            retry.arg("--pre");
+        }
+        retry.arg(&context.package_name);
+
+        let retry_output = retry
+            .output()
+            .map_err(|e| AishError::Config(format!("Failed to run pip: {e}")))?;
+        if retry_output.status.success() {
+            return Ok(());
+        }
+        return Err(AishError::Config(format!(
+            "pip update failed: {}",
+            String::from_utf8_lossy(&retry_output.stderr).trim()
+        )));
+    }
+
+    Err(AishError::Config(format!(
+        "pip update failed: {}",
+        stderr.trim()
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -576,6 +722,54 @@ pub fn run_update(check_only: bool, pre_release: bool) {
     let current = env!("CARGO_PKG_VERSION").to_string();
 
     println!("\x1b[1;36m{}\x1b[0m", t("cli.update.checking"));
+
+    if let Some(InstallChannel::Pip(context)) = current_install_channel() {
+        match check_for_pip_updates(&context, &current, pre_release) {
+            Ok(Some(info)) => {
+                println!("\x1b[1;33m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("current".to_string(), info.current_version.clone());
+                    args.insert("latest".to_string(), info.latest_version.clone());
+                    t_with_args("cli.update.update_available", &args)
+                });
+                if !info.html_url.is_empty() {
+                    println!("\x1b[2m{}\x1b[0m", info.html_url);
+                }
+
+                if check_only {
+                    return;
+                }
+
+                println!("\x1b[1;36m{}\x1b[0m", t("cli.update.running_install_script"));
+
+                if let Err(error) = run_pip_update(&context, pre_release) {
+                    eprintln!("\x1b[31m{}\x1b[0m", {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), error.to_string());
+                        t_with_args("cli.update.installation_error", &args)
+                    });
+                    return;
+                }
+
+                println!("\x1b[32m{}\x1b[0m", t("cli.update.installation_successful"));
+            }
+            Ok(None) => {
+                println!("\x1b[32m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("version".to_string(), current);
+                    t_with_args("cli.update.already_latest", &args)
+                });
+            }
+            Err(error) => {
+                eprintln!("\x1b[31m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), error.to_string());
+                    t_with_args("cli.update.update_check_failed", &args)
+                });
+            }
+        }
+        return;
+    }
 
     match check_for_updates(&current, pre_release) {
         Ok(Some(info)) => {

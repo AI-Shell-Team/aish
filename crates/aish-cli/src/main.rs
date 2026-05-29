@@ -16,6 +16,7 @@
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod install_channel;
 mod models_auth;
 mod uninstall;
 mod update;
@@ -119,8 +120,6 @@ enum Commands {
     Uninstall {
         #[arg(long)]
         purge: bool,
-        #[arg(long, short = 'y')]
-        yes: bool,
     },
 
     /// Manage provider authentication
@@ -214,8 +213,8 @@ fn main() {
         } => {
             update::run_update(check_only, pre_release);
         }
-        Commands::Uninstall { purge, yes } => {
-            uninstall::run_uninstall(purge, yes);
+        Commands::Uninstall { purge } => {
+            uninstall::run_uninstall(purge);
         }
         Commands::ModelsAuth {
             provider,
