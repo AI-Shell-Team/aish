@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - No unreleased changes yet.
 
+## [0.3.2] - 2026-05-29
+
+### Added
+
+- Added official PyPI packaging for stable Linux amd64 and arm64 releases, including a packaged `aish` launcher that installs via `pip`.
+- Added release workflow steps to build, smoke test, and publish PyPI artifacts alongside the existing bundle release assets.
+
+### Changed
+
+- Changed self-update and uninstall flows to detect pip-based installations and preserve the original install channel details when upgrading.
+
+### Fixed
+
+- Fixed release CI follow-up issues around formatting, lint gates, and the sandbox worker test so the new PyPI release path can pass the full validation pipeline reliably.
+
 ## [0.3.1] - 2026-05-29
 
 ### Fixed
