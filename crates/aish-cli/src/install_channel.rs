@@ -28,24 +28,18 @@ fn current_exe_path() -> Option<String> {
         .and_then(|path| path.to_str().map(ToOwned::to_owned))
 }
 
-fn resolve_install_channel_with<F>(
-    env_get: F,
-    exe_path: Option<String>,
-) -> Option<InstallChannel>
+fn resolve_install_channel_with<F>(env_get: F, exe_path: Option<String>) -> Option<InstallChannel>
 where
     F: Fn(&str) -> Option<String>,
 {
-    match env_get(INSTALL_CHANNEL_ENV).as_deref() {
-        Some(PIP_CHANNEL) => {
-            return Some(InstallChannel::Pip(PipChannelContext {
-                package_name: env_get(PIP_PACKAGE_NAME_ENV)
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| DEFAULT_PIP_PACKAGE_NAME.to_string()),
-                python_executable: env_get(PYTHON_EXECUTABLE_ENV)
-                    .filter(|value| !value.trim().is_empty()),
-            }));
-        }
-        Some(_) | None => {}
+    if let Some(PIP_CHANNEL) = env_get(INSTALL_CHANNEL_ENV).as_deref() {
+        return Some(InstallChannel::Pip(PipChannelContext {
+            package_name: env_get(PIP_PACKAGE_NAME_ENV)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_PIP_PACKAGE_NAME.to_string()),
+            python_executable: env_get(PYTHON_EXECUTABLE_ENV)
+                .filter(|value| !value.trim().is_empty()),
+        }));
     }
 
     if exe_path.as_deref().is_some_and(is_pip_binary_path) {
@@ -68,7 +62,11 @@ fn is_pip_binary_path(path: &str) -> bool {
         return false;
     }
 
-    let Some(parent_name) = path.parent().and_then(|value| value.file_name()).and_then(|value| value.to_str()) else {
+    let Some(parent_name) = path
+        .parent()
+        .and_then(|value| value.file_name())
+        .and_then(|value| value.to_str())
+    else {
         return false;
     };
     if parent_name != "bin" {

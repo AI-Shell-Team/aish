@@ -670,6 +670,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -910,7 +911,27 @@ mod tests {
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).unwrap();
 
-        let result = spawn_worker_process(&script_path, &sample_context("echo hi")).unwrap();
+        let mut result = None;
+        for attempt in 0..3 {
+            match spawn_worker_process(&script_path, &sample_context("echo hi")) {
+                Ok(worker_result) => {
+                    result = Some(worker_result);
+                    break;
+                }
+                Err(error)
+                    if error.reason() == SandboxReason::SandboxExecuteFailed
+                        && error
+                            .details()
+                            .is_some_and(|details| details.contains("Text file busy"))
+                        && attempt < 2 =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("unexpected worker spawn failure: {error:?}"),
+            }
+        }
+
+        let result = result.expect("worker process should succeed");
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "worker");
