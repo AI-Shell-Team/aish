@@ -7,6 +7,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- No unreleased changes yet.
+
+## [0.3.1] - 2026-05-29
+
+### Fixed
+
+- Fixed competing stdin readers around `ask_user` and related interactive flows so prompts no longer fight with shell input watchers.
+- Fixed UTF-8 slicing bugs that could panic on non-ASCII paths or truncated error bodies during setup and prompt rendering.
+
 ## [0.3.0] - 2026-05-26
 
 ### Added
@@ -22,12 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed `host_note` persistence so profile-save failures are surfaced instead of being reported as success.
 - Fixed Rust CI and clippy regressions introduced by the SSH and host-dossier changes.
-
-## [Unreleased]
-
-### Added
-
-- No unreleased changes yet.
 
 ## [0.3.0-beta.3] - 2026-05-13
 
