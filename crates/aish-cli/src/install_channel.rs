@@ -6,6 +6,7 @@ pub const PYTHON_EXECUTABLE_ENV: &str = "AISH_PYTHON_EXECUTABLE";
 
 const PIP_CHANNEL: &str = "pip";
 const DEFAULT_PIP_PACKAGE_NAME: &str = "aish-rust";
+const PIP_PACKAGE_DIRS: &[&str] = &["aish_rust", "ai_sh"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipChannelContext {
@@ -82,7 +83,7 @@ fn is_pip_binary_path(path: &str) -> bool {
         return false;
     };
 
-    package_name == "ai_sh"
+    PIP_PACKAGE_DIRS.contains(&package_name)
 }
 
 #[cfg(test)]
@@ -115,6 +116,22 @@ mod tests {
 
     #[test]
     fn test_resolve_pip_channel_from_binary_path() {
+        let channel = resolve_install_channel_with(
+            |_| None,
+            Some("/tmp/venv/lib/python3.12/site-packages/aish_rust/bin/aish".to_string()),
+        );
+
+        assert_eq!(
+            channel,
+            Some(InstallChannel::Pip(PipChannelContext {
+                package_name: "aish-rust".to_string(),
+                python_executable: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn test_resolve_pip_channel_from_legacy_binary_path() {
         let channel = resolve_install_channel_with(
             |_| None,
             Some("/tmp/venv/lib/python3.12/site-packages/ai_sh/bin/aish".to_string()),

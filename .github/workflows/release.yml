@@ -282,6 +282,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/pypi-upload
+          skip-existing: true
 
   release-summary:
     name: Summarize published release

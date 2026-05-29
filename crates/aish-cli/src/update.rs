@@ -737,12 +737,12 @@ pub fn run_update(check_only: bool, pre_release: bool) {
                     eprintln!("\x1b[31m{}\x1b[0m", {
                         let mut args = std::collections::HashMap::new();
                         args.insert("error".to_string(), error.to_string());
-                        t_with_args("cli.update.installation_error", &args)
+                        t_with_args("cli.update.pip_update_failed", &args)
                     });
                     return;
                 }
 
-                println!("\x1b[32m{}\x1b[0m", t("cli.update.installation_successful"));
+                println!("\x1b[32m{}\x1b[0m", t("cli.update.pip_update_success"));
             }
             Ok(None) => {
                 println!("\x1b[32m{}\x1b[0m", {
