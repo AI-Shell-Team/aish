@@ -279,7 +279,9 @@ fn uninstall_pip_with_python(
 
 fn uninstall_pip() -> Result<(), AishError> {
     if let Some(InstallChannel::Pip(context)) = current_install_channel() {
-        return uninstall_pip_with_python(&context, &context.package_name);
+        if context.python_executable.is_some() {
+            return uninstall_pip_with_python(&context, &context.package_name);
+        }
     }
 
     let mut last_error = String::from("pip uninstall did not match any known package name");
