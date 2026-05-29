@@ -25,6 +25,6 @@ def main() -> None:
     ensure_executable(binary_path)
     exec_env = os.environ.copy()
     exec_env["AISH_INSTALL_CHANNEL"] = "pip"
-    exec_env["AISH_PIP_PACKAGE_NAME"] = "ai-sh"
+    exec_env["AISH_PIP_PACKAGE_NAME"] = "aish-rust"
     exec_env["AISH_PYTHON_EXECUTABLE"] = sys.executable
     os.execve(str(binary_path), [str(binary_path), *sys.argv[1:]], exec_env)

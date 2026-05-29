@@ -126,6 +126,81 @@ jobs:
           path: artifacts/${{ matrix.arch }}/*
           if-no-files-found: error
 
+  dry-run-pypi-validation:
+    name: Dry-run PyPI validation (${{ matrix.arch }})
+    needs: release-meta
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            runs_on: ubuntu-latest
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+
+    steps:
+      - name: Skip PyPI validation for prerelease versions
+        if: ${{ contains(needs.release-meta.outputs.version, '-') }}
+        run: |
+          echo "Skipping PyPI wheel validation for prerelease version ${{ needs.release-meta.outputs.version }}."
+
+      - name: Checkout repository
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Set up build environment
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        env:
+          AISH_BUILD_TARGET: ${{ matrix.target }}
+        run: ./packaging/scripts/setup-ci-env.sh
+
+      - name: Set up Python
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python build tooling
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        run: python -m pip install --upgrade pip build
+
+      - name: Build PyPI wheel
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        run: |
+          VERSION="${{ needs.release-meta.outputs.version }}"
+          DIST_DIR="$PWD/artifacts/pypi/${{ matrix.arch }}"
+          VERSION="$VERSION" DIST_DIR="$DIST_DIR" AISH_PYPI_REPOSITORY_LABEL="PyPI" AISH_BUILD_TARGET="${{ matrix.target }}" ./packaging/scripts/build_testpypi_package.sh
+          ls -lah "$DIST_DIR"
+
+      - name: Smoke test wheel install
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        shell: bash
+        run: |
+          DIST_DIR="$PWD/artifacts/pypi/${{ matrix.arch }}"
+          VENV_DIR="$PWD/build/pypi-smoke/${{ matrix.arch }}"
+
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          source "$VENV_DIR/bin/activate"
+
+          python -m pip install --upgrade pip
+          python -m pip install "$DIST_DIR"/aish_rust-*.whl
+          aish --version >/dev/null
+          python -m pip uninstall -y aish-rust
+
+      - name: Upload PyPI dry-run artifacts
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-preparation-pypi-linux-${{ matrix.arch }}
+          path: artifacts/pypi/${{ matrix.arch }}/*
+          if-no-files-found: error
+
   live-smoke-validation:
     name: Live smoke validation
     needs:
@@ -142,6 +217,7 @@ jobs:
       - release-meta
       - prepare-release
       - dry-run-package-validation
+      - dry-run-pypi-validation
       - live-smoke-validation
     runs-on: ubuntu-latest
     steps:
@@ -155,5 +231,5 @@ jobs:
           - Ref: ${{ github.event.inputs.ref }}
           - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
 
-          Release metadata artifacts, dry-run bundle validation, and live smoke validation have completed successfully.
+          Release metadata artifacts, dry-run bundle validation, stable-only PyPI wheel validation, and live smoke validation have completed successfully.
           EOF
