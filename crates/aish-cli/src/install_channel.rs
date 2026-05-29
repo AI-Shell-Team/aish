@@ -5,7 +5,7 @@ pub const PIP_PACKAGE_NAME_ENV: &str = "AISH_PIP_PACKAGE_NAME";
 pub const PYTHON_EXECUTABLE_ENV: &str = "AISH_PYTHON_EXECUTABLE";
 
 const PIP_CHANNEL: &str = "pip";
-const DEFAULT_PIP_PACKAGE_NAME: &str = "ai-sh";
+const DEFAULT_PIP_PACKAGE_NAME: &str = "aish-rust";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipChannelContext {
@@ -99,7 +99,7 @@ mod tests {
         let channel = resolve_install_channel_with(
             |name| match name {
                 INSTALL_CHANNEL_ENV => Some("pip".to_string()),
-                PIP_PACKAGE_NAME_ENV => Some("ai-sh".to_string()),
+                PIP_PACKAGE_NAME_ENV => Some("aish-rust".to_string()),
                 PYTHON_EXECUTABLE_ENV => Some("/tmp/venv/bin/python".to_string()),
                 _ => None,
             },
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(
             channel,
             Some(InstallChannel::Pip(PipChannelContext {
-                package_name: "ai-sh".to_string(),
+                package_name: "aish-rust".to_string(),
                 python_executable: Some("/tmp/venv/bin/python".to_string()),
             }))
         );
@@ -125,7 +125,7 @@ mod tests {
         assert_eq!(
             channel,
             Some(InstallChannel::Pip(PipChannelContext {
-                package_name: "ai-sh".to_string(),
+                package_name: "aish-rust".to_string(),
                 python_executable: None,
             }))
         );

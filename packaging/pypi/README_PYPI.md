@@ -1,12 +1,12 @@
-# ai-sh
+# aish-rust
 
 This package installs the AI Shell command line tool as `aish`.
 
 Current packaging scope:
 
-- Linux x86_64 only
-- Bundles the prebuilt `aish` executable
-- Intended for TestPyPI validation before enabling a full PyPI release flow
+- Linux x86_64 and arm64
+- Bundles the prebuilt `aish` executable for the target platform
+- Intended for official stable PyPI releases
 
 After installation, run:
 

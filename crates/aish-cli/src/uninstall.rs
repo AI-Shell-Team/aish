@@ -17,7 +17,7 @@ const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
 const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
-const PIP_PACKAGE_NAMES: &[&str] = &["ai-sh", "aish"];
+const PIP_PACKAGE_NAMES: &[&str] = &["aish-rust", "aish"];
 
 // ---------------------------------------------------------------------------
 // Installation method detection
@@ -606,8 +606,8 @@ mod tests {
     }
 
     #[test]
-    fn test_pip_package_names_include_ai_sh() {
-        assert!(PIP_PACKAGE_NAMES.contains(&"ai-sh"));
+    fn test_pip_package_names_include_supported_names() {
+        assert!(PIP_PACKAGE_NAMES.contains(&"aish-rust"));
         assert!(PIP_PACKAGE_NAMES.contains(&"aish"));
     }
 

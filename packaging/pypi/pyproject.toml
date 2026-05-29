@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-sh"
+name = "aish-rust"
 dynamic = ["version"]
 description = "AI Shell command-line interface"
 readme = "README_PYPI.md"
@@ -26,7 +26,7 @@ Repository = "https://github.com/AI-Shell-Team/aish"
 Issues = "https://github.com/AI-Shell-Team/aish/issues"
 
 [project.scripts]
-aish = "ai_sh.launcher:main"
+aish = "aish_rust.launcher:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -38,7 +38,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-ai_sh = ["bin/aish"]
+aish_rust = ["bin/aish"]
 
 [tool.setuptools.dynamic]
-version = { attr = "ai_sh._version.__version__" }
+version = { attr = "aish_rust._version.__version__" }

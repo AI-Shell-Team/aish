@@ -129,6 +129,82 @@ jobs:
           prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
           files: artifacts/${{ matrix.arch }}/*
 
+  build-pypi-packages:
+    name: Build PyPI package (${{ matrix.arch }})
+    needs:
+      - release-meta
+      - release-gate
+      - create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            runs_on: ubuntu-latest
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+
+    steps:
+      - name: Skip PyPI package build for prerelease versions
+        if: ${{ contains(needs.release-meta.outputs.version, '-') }}
+        run: |
+          echo "Skipping PyPI package build for prerelease version ${{ needs.release-meta.outputs.version }}."
+
+      - name: Checkout repository
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/checkout@v6
+
+      - name: Set up build environment
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        env:
+          AISH_BUILD_TARGET: ${{ matrix.target }}
+        run: ./packaging/scripts/setup-ci-env.sh
+
+      - name: Set up Python
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Python build tooling
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        run: python -m pip install --upgrade pip build
+
+      - name: Build PyPI wheel
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        run: |
+          VERSION="${{ needs.release-meta.outputs.version }}"
+          DIST_DIR="$PWD/artifacts/pypi/${{ matrix.arch }}"
+          VERSION="$VERSION" DIST_DIR="$DIST_DIR" AISH_PYPI_REPOSITORY_LABEL="PyPI" AISH_BUILD_TARGET="${{ matrix.target }}" ./packaging/scripts/build_testpypi_package.sh
+          ls -lah "$DIST_DIR"
+
+      - name: Smoke test wheel install
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        shell: bash
+        run: |
+          DIST_DIR="$PWD/artifacts/pypi/${{ matrix.arch }}"
+          VENV_DIR="$PWD/build/pypi-release-smoke/${{ matrix.arch }}"
+
+          rm -rf "$VENV_DIR"
+          python -m venv "$VENV_DIR"
+          source "$VENV_DIR/bin/activate"
+
+          python -m pip install --upgrade pip
+          python -m pip install "$DIST_DIR"/aish_rust-*.whl
+          aish --version >/dev/null
+          python -m pip uninstall -y aish-rust
+
+      - name: Upload PyPI artifacts
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-pypi-linux-${{ matrix.arch }}
+          path: artifacts/pypi/${{ matrix.arch }}/*
+          if-no-files-found: error
+
   publish-release-bundles:
     name: Publish release bundles
     needs:
@@ -168,13 +244,54 @@ jobs:
       - name: Publish release bundles
         run: bash ./packaging/scripts/publish_release.sh
 
+  publish-pypi:
+    name: Publish PyPI package
+    needs:
+      - release-meta
+      - release-gate
+      - build-pypi-packages
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Skip PyPI publish for prerelease versions
+        if: ${{ contains(needs.release-meta.outputs.version, '-') }}
+        run: |
+          echo "Skipping PyPI publish for prerelease version ${{ needs.release-meta.outputs.version }}."
+
+      - name: Download PyPI artifacts
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: actions/download-artifact@v6
+        with:
+          pattern: release-pypi-linux-*
+          path: artifacts/pypi
+
+      - name: Prepare upload directory
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        shell: bash
+        run: |
+          UPLOAD_DIR="$PWD/dist/pypi-upload"
+          rm -rf "$UPLOAD_DIR"
+          mkdir -p "$UPLOAD_DIR"
+          find "$PWD/artifacts/pypi" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} "$UPLOAD_DIR"/ \;
+          ls -lah "$UPLOAD_DIR"
+
+      - name: Publish package to PyPI
+        if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/pypi-upload
+
   release-summary:
     name: Summarize published release
     needs:
       - release-meta
       - create-release
       - build-release-packages
+      - build-pypi-packages
       - publish-release-bundles
+      - publish-pypi
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
@@ -185,5 +302,5 @@ jobs:
           - Version: ${{ needs.release-meta.outputs.version }}
           - Tag: ${{ needs.release-meta.outputs.tag }}
 
-          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and the CDN channel was updated for this release.
+          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, stable releases were published to PyPI via Trusted Publishing, and the CDN channel was updated for this release.
           EOF

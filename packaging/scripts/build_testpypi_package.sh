@@ -3,11 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PACKAGE_TEMPLATE_DIR="$ROOT_DIR/packaging/pypi"
-STAGE_DIR="$ROOT_DIR/build/testpypi/package"
-DIST_DIR="$ROOT_DIR/dist/testpypi"
+STAGE_DIR="${STAGE_DIR:-$ROOT_DIR/build/testpypi/package}"
+DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist/testpypi}"
 TARGET="${AISH_BUILD_TARGET:-x86_64-unknown-linux-musl}"
 PYTHON_BIN="${PYTHON:-python3}"
 NO_BUILD="${NO_BUILD:-0}"
+REPOSITORY_LABEL="${AISH_PYPI_REPOSITORY_LABEL:-PyPI}"
 
 platform_tag_for_target() {
   case "$1" in
@@ -47,11 +48,11 @@ elif [[ ! -x "$BINARY" ]]; then
 fi
 
 rm -rf "$STAGE_DIR" "$DIST_DIR"
-mkdir -p "$STAGE_DIR/src/ai_sh/bin" "$DIST_DIR"
+mkdir -p "$STAGE_DIR/src/aish_rust/bin" "$DIST_DIR"
 cp -a "$PACKAGE_TEMPLATE_DIR/." "$STAGE_DIR/"
 
-printf '__version__ = "%s"\n' "$VERSION" > "$STAGE_DIR/src/ai_sh/_version.py"
-install -m 0755 "$BINARY" "$STAGE_DIR/src/ai_sh/bin/aish"
+printf '__version__ = "%s"\n' "$VERSION" > "$STAGE_DIR/src/aish_rust/_version.py"
+install -m 0755 "$BINARY" "$STAGE_DIR/src/aish_rust/bin/aish"
 
 env \
   -u PIP_INDEX_URL \
@@ -62,5 +63,5 @@ env \
   AISH_PYPI_PLATFORM_TAG="$PLATFORM_TAG" \
   "$PYTHON_BIN" -m build --wheel --outdir "$DIST_DIR" "$STAGE_DIR"
 
-echo "Built TestPyPI package(s):"
+echo "Built ${REPOSITORY_LABEL} package(s):"
 ls -1 "$DIST_DIR"
