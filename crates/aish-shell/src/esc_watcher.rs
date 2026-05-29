@@ -83,7 +83,6 @@ impl CrosstermEscWatcher {
                                     continue;
                                 }
                             }
-
                         }
                         Ok(Some(_)) => {
                             // Ignore mouse and resize events
@@ -127,7 +126,22 @@ impl CrosstermEscWatcher {
         self.stop_flag.store(true, Ordering::Release);
 
         if let Some(handle) = self.thread.take() {
-            let _ = handle.join();
+            // Wait up to 2 s for the thread to exit.  If it is blocked
+            // inside a Ctrl+O panel the user must close it first; once
+            // the panel closes the loop will see stop_flag and return.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                // Thread is stuck in a Ctrl+O panel — detach it so the
+                // main thread is not blocked.  It will exit once the user
+                // closes the panel and the stop_flag check fires.
+                tracing::warn!("esc-watcher thread stuck in Ctrl+O panel, detaching");
+                std::mem::forget(handle);
+            }
         }
 
         // InputRawGuard::drop() restores the original terminal settings.

@@ -37,12 +37,8 @@ impl InputRawGuard {
         raw.control_chars[libc::VMIN] = 1;
         raw.control_chars[libc::VTIME] = 0;
 
-        nix::sys::termios::tcsetattr(
-            borrowed,
-            nix::sys::termios::SetArg::TCSANOW,
-            &raw,
-        )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotConnected, e))?;
+        nix::sys::termios::tcsetattr(borrowed, nix::sys::termios::SetArg::TCSANOW, &raw)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotConnected, e))?;
 
         Ok(Self {
             saved: Some(saved),

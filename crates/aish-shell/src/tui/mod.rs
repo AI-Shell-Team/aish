@@ -2,7 +2,7 @@
 //! stdin fallback.
 
 // Re-export public API from inline prompts
-pub use crate::tui::inline_prompts::{show_selection_dialog, DialogResult, DialogOption};
+pub use crate::tui::inline_prompts::{show_selection_dialog, DialogOption, DialogResult};
 
 mod inline_prompts;
 

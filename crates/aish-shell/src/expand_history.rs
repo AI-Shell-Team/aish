@@ -37,7 +37,11 @@ impl ExpandHistory {
     /// Evicts oldest records if over the limit.
     pub fn add(&mut self, command: String, mut output: String) -> usize {
         if output.len() > MAX_OUTPUT_BYTES {
-            output.truncate(MAX_OUTPUT_BYTES);
+            let mut end = MAX_OUTPUT_BYTES;
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            output.truncate(end);
             output.push_str("\n... (truncated)");
         }
         let line_count = output.lines().count();
@@ -85,6 +89,23 @@ mod tests {
         let records = h.clone_records();
         assert_eq!(records[0].command, "ls -la");
         assert_eq!(records[0].line_count, 3);
+    }
+
+    #[test]
+    fn truncation_at_multibyte_boundary() {
+        let mut h = ExpandHistory::new();
+        // Build a string slightly over 64KB where the byte boundary falls
+        // inside a multi-byte character.
+        // Each CJK char is 3 bytes; 64*1024 / 3 = 21845.33, so 21846 chars
+        // exceeds the limit and the truncation point lands mid-character.
+        let cjk: String = "中".repeat(21846);
+        assert!(cjk.len() > MAX_OUTPUT_BYTES);
+        h.add("cat big.txt".into(), cjk.clone());
+        let records = h.clone_records();
+        assert!(records[0].output.len() <= MAX_OUTPUT_BYTES + 20);
+        assert!(records[0].output.ends_with("... (truncated)"));
+        // Verify no panic — the string is valid UTF-8 after truncation.
+        let _ = records[0].output.chars().count();
     }
 
     #[test]

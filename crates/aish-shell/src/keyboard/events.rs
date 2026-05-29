@@ -142,10 +142,7 @@ mod tests {
 
     #[test]
     fn test_key_event_with_modifiers() {
-        let key_event = KeyEvent::new(
-            KeyCode::Char('c'),
-            KeyModifiers::CONTROL,
-        );
+        let key_event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         let shell_event = ShellEvent::from_crossterm(event::Event::Key(key_event));
 
         assert!(shell_event.is_some());

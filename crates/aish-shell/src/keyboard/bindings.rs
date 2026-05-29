@@ -41,7 +41,6 @@ impl KeyCombination {
     pub fn shift(code: KeyCode) -> Self {
         Self::new(code, KeyModifiers::SHIFT)
     }
-
 }
 
 impl From<KeyCode> for KeyCombination {
@@ -114,7 +113,6 @@ impl KeyBindings {
         let combo = KeyCombination::new(event.code, event.modifiers);
         self.bindings.get(&combo).map(|s| s.as_str())
     }
-
 }
 
 impl Default for KeyBindings {
@@ -224,10 +222,16 @@ mod tests {
         let combo = KeyCombination::ctrl(KeyCode::Char('c'));
 
         bindings.bind(combo.clone(), "action1");
-        assert_eq!(bindings.resolve(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some("action1"));
+        assert_eq!(
+            bindings.resolve(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some("action1")
+        );
 
         bindings.bind(combo.clone(), "action2");
-        assert_eq!(bindings.resolve(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Some("action2"));
+        assert_eq!(
+            bindings.resolve(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some("action2")
+        );
     }
 
     #[test]
@@ -307,5 +311,4 @@ mod tests {
             assert_eq!(combo.modifiers, KeyModifiers::empty());
         }
     }
-
 }

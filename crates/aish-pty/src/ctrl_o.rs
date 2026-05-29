@@ -76,10 +76,7 @@ pub fn invoke_browse() {
 /// mutex so it is not permanently lost. The [`HandlerGuard`] guarantees
 /// put-back even if code after the handler call panics before the guard is
 /// dropped.
-fn take_invoke_put_back<H>(
-    static_ref: &'static Mutex<Option<H>>,
-    run: impl FnOnce(&mut H),
-) {
+fn take_invoke_put_back<H>(static_ref: &'static Mutex<Option<H>>, run: impl FnOnce(&mut H)) {
     let handler = {
         let mut guard = static_ref.lock().unwrap_or_else(|e| e.into_inner());
         guard.take()

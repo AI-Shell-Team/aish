@@ -958,9 +958,8 @@ impl AishShell {
                                         .data
                                         .get("output_total_lines")
                                         .and_then(|v| v.as_u64())
-                                        .unwrap_or_else(|| {
-                                            content.lines().count() as u64
-                                        }) as usize;
+                                        .unwrap_or_else(|| content.lines().count() as u64)
+                                        as usize;
                                     let collapsed = collapse_display_lines(&content, 2);
                                     print!("\x1b[2m{}\x1b[0m", collapsed);
                                     if total_lines > 2 {
@@ -1079,41 +1078,7 @@ impl AishShell {
             print!("  ");
             let _ = std::io::stdout().flush();
 
-            // Guard: pause background stdin readers (esc_watcher).
-            let _ig = aish_tools::bash::acquire_interactive_input_guard();
-
-            // Terminal may be in input-raw mode (from CrosstermEscWatcher);
-            // read a single byte instead of read_line() which expects \n.
-            let mut byte = [0u8; 1];
-            let approved = match io::stdin().read(&mut byte) {
-                Ok(1) => {
-                    let ch = byte[0];
-                    // Echo the response on a new line for visibility.
-                    println!();
-                    ch == b'y' || ch == b'Y' || ch == b'\r' || ch == b'\n'
-                }
-                _ => false,
-            };
-            // Drain trailing bytes with timeout (e.g. \r after 'y').
-            let mut drain_buf = [0u8; 64];
-            let stdin_fd = libc::STDIN_FILENO;
-            loop {
-                let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
-                unsafe {
-                    libc::FD_ZERO(&mut fds);
-                    libc::FD_SET(stdin_fd, &mut fds);
-                }
-                let mut tv = libc::timeval { tv_sec: 0, tv_usec: 10_000 }; // 10ms timeout
-                let sel = unsafe {
-                    libc::select(stdin_fd + 1, &mut fds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
-                };
-                if sel <= 0 { break; }
-                match io::stdin().read(&mut drain_buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => continue,
-                }
-            }
-            approved
+            read_raw_confirmation()
         });
 
         llm_session.set_confirmation_callback(confirmation_callback);
@@ -1152,36 +1117,7 @@ impl AishShell {
                 print!("  ");
                 let _ = std::io::stdout().flush();
 
-                let _ig = aish_tools::bash::acquire_interactive_input_guard();
-                let mut byte = [0u8; 1];
-                let approved = match io::stdin().read(&mut byte) {
-                    Ok(1) => {
-                        let ch = byte[0];
-                        println!();
-                        ch == b'y' || ch == b'Y' || ch == b'\r' || ch == b'\n'
-                    }
-                    _ => false,
-                };
-                // Drain trailing bytes with timeout (e.g. \r after 'y').
-                let mut drain_buf = [0u8; 64];
-                let stdin_fd = libc::STDIN_FILENO;
-                loop {
-                    let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
-                    unsafe {
-                        libc::FD_ZERO(&mut fds);
-                        libc::FD_SET(stdin_fd, &mut fds);
-                    }
-                    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 10_000 }; // 10ms timeout
-                    let sel = unsafe {
-                        libc::select(stdin_fd + 1, &mut fds, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
-                    };
-                    if sel <= 0 { break; }
-                    match io::stdin().read(&mut drain_buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => continue,
-                    }
-                }
-                approved
+                read_raw_confirmation()
             });
 
         llm_session.set_iteration_limit_callback(iteration_limit_callback);
@@ -1461,8 +1397,9 @@ impl AishShell {
                     if question.is_empty() && self.state.can_correct_error {
                         if let Some(ref cmd) = self.state.last_command.clone() {
                             let old_sigint = self.install_ai_sigint_handler();
-                            let mut esc_watcher =
-                                CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
+                            let mut esc_watcher = CrosstermEscWatcher::start(
+                                self.ai_handler.cancellation_token_arc(),
+                            );
                             let token_ptr =
                                 self.ai_handler.cancellation_token() as *const CancellationToken;
                             let result = runtime.block_on(async {
@@ -1805,8 +1742,9 @@ impl AishShell {
                                 }
 
                                 let old_sigint = self.install_ai_sigint_handler();
-                                let mut esc_watcher =
-                                    CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
+                                let mut esc_watcher = CrosstermEscWatcher::start(
+                                    self.ai_handler.cancellation_token_arc(),
+                                );
                                 let token_ptr = self.ai_handler.cancellation_token()
                                     as *const CancellationToken;
                                 let result = runtime.block_on(async {
@@ -4977,6 +4915,56 @@ fn format_number(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+/// Read a single-byte confirmation from stdin in raw mode.
+///
+/// Acquires the interactive input guard (pauses esc_watcher), reads one
+/// byte, and drains any trailing bytes (e.g. `\r` after `y`).  Returns
+/// `true` for 'y', 'Y', Enter.
+fn read_raw_confirmation() -> bool {
+    let _ig = aish_tools::bash::acquire_interactive_input_guard();
+
+    let mut byte = [0u8; 1];
+    let approved = match io::stdin().read(&mut byte) {
+        Ok(1) => {
+            let ch = byte[0];
+            println!();
+            ch == b'y' || ch == b'Y' || ch == b'\r' || ch == b'\n'
+        }
+        _ => false,
+    };
+    // Drain trailing bytes with timeout (e.g. \r after 'y').
+    let mut drain_buf = [0u8; 64];
+    let stdin_fd = libc::STDIN_FILENO;
+    loop {
+        let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut fds);
+            libc::FD_SET(stdin_fd, &mut fds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 10_000,
+        };
+        let sel = unsafe {
+            libc::select(
+                stdin_fd + 1,
+                &mut fds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel <= 0 {
+            break;
+        }
+        match io::stdin().read(&mut drain_buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => continue,
+        }
+    }
+    approved
 }
 
 /// Render markdown-formatted text to the terminal using richrs.

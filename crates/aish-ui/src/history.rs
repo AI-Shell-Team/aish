@@ -109,7 +109,11 @@ impl PanelComponent for HistoryPanel {
 
             let max_cmd = (inner.width as usize).saturating_sub(30);
             let cmd_display = if rec.command.chars().count() > max_cmd && max_cmd > 3 {
-                let trunc: String = rec.command.chars().take(max_cmd.saturating_sub(3)).collect();
+                let trunc: String = rec
+                    .command
+                    .chars()
+                    .take(max_cmd.saturating_sub(3))
+                    .collect();
                 format!("{trunc}...")
             } else {
                 rec.command.clone()
@@ -201,9 +205,9 @@ impl PanelComponent for HistoryPanel {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use super::*;
     use crate::PanelEvent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode, mods: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, mods))
@@ -211,9 +215,21 @@ mod tests {
 
     fn sample_records() -> Vec<HistoryRecord> {
         vec![
-            HistoryRecord { command: "ls -la".into(), line_count: 45, time: "12:30:15".into() },
-            HistoryRecord { command: "cat README.md".into(), line_count: 120, time: "12:31:42".into() },
-            HistoryRecord { command: "make build".into(), line_count: 200, time: "12:35:10".into() },
+            HistoryRecord {
+                command: "ls -la".into(),
+                line_count: 45,
+                time: "12:30:15".into(),
+            },
+            HistoryRecord {
+                command: "cat README.md".into(),
+                line_count: 120,
+                time: "12:31:42".into(),
+            },
+            HistoryRecord {
+                command: "make build".into(),
+                line_count: 200,
+                time: "12:35:10".into(),
+            },
         ]
     }
 

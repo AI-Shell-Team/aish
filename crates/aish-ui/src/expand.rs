@@ -45,11 +45,7 @@ impl PanelComponent for ExpandPanel {
 
     fn desired_height(&self, _terminal_width: u16, terminal_height: u16) -> u16 {
         // +2 for top/bottom borders; leave 3 rows for the shell prompt
-        let needed = self
-            .lines
-            .len()
-            .saturating_add(2)
-            .min(u16::MAX as usize) as u16;
+        let needed = self.lines.len().saturating_add(2).min(u16::MAX as usize) as u16;
         let available = terminal_height.saturating_sub(3);
         let desired = needed.min(available);
         // When content would fill the panel exactly (max_scroll=0), the user
@@ -99,7 +95,9 @@ impl PanelComponent for ExpandPanel {
         }
 
         match key.code {
-            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => PanelEvent::Cancel,
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                PanelEvent::Cancel
+            }
             KeyCode::Esc => PanelEvent::Cancel,
             KeyCode::Up => {
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
@@ -140,9 +138,9 @@ impl PanelComponent for ExpandPanel {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use super::*;
     use crate::PanelEvent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn ctrl_o() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))
