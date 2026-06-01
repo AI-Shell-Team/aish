@@ -27,8 +27,26 @@ struct AskUserSession<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TextResolution {
     Answer(String),
-    Retry,
+    Invalid(TextValidationError),
     Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TextValidationError {
+    Required,
+    MinLength(usize),
+}
+
+impl TextValidationError {
+    fn message(&self) -> String {
+        match self {
+            Self::Required => t("shell.ask_user.required_error"),
+            Self::MinLength(min) => t_with_args(
+                "shell.ask_user.min_length_error",
+                &std::collections::HashMap::from([("min".to_string(), min.to_string())]),
+            ),
+        }
+    }
 }
 
 impl<'a> AskUserSession<'a> {
@@ -118,14 +136,20 @@ impl<'a> AskUserSession<'a> {
 
                     match self.resolve_text_answer(value) {
                         TextResolution::Answer(answer) => return Ok(AskUserResponse::Text(answer)),
-                        TextResolution::Retry => continue,
+                        TextResolution::Invalid(error) => {
+                            print_validation_error(&error);
+                            continue;
+                        }
                         TextResolution::Cancelled => return Ok(AskUserResponse::Cancelled),
                     }
                 }
                 PanelOutcome::Submitted(ChoiceOutcome::CustomInput(input)) => {
                     match self.resolve_text_answer(input) {
                         TextResolution::Answer(answer) => return Ok(AskUserResponse::Text(answer)),
-                        TextResolution::Retry => continue,
+                        TextResolution::Invalid(error) => {
+                            print_validation_error(&error);
+                            continue;
+                        }
                         TextResolution::Cancelled => return Ok(AskUserResponse::Cancelled),
                     }
                 }
@@ -190,12 +214,8 @@ impl<'a> TextInputPanel<'a> {
             self.request.min_length,
         ) {
             TextResolution::Answer(answer) => PanelEvent::Submit(answer),
-            TextResolution::Retry => {
-                self.error = Some(validation_error_message(
-                    self.input.trim(),
-                    self.request.required,
-                    self.request.min_length,
-                ));
+            TextResolution::Invalid(error) => {
+                self.error = Some(error.message());
                 PanelEvent::Continue
             }
             TextResolution::Cancelled => PanelEvent::Cancel,
@@ -351,36 +371,21 @@ fn resolve_text_answer(
         } else if allow_cancel {
             return TextResolution::Cancelled;
         } else {
-            println!("\x1b[31m{}\x1b[0m", t("shell.ask_user.required_error"));
-            return TextResolution::Retry;
+            return TextResolution::Invalid(TextValidationError::Required);
         }
     } else {
         input
     };
 
     if answer.len() < min_length {
-        println!(
-            "\x1b[31m{}\x1b[0m",
-            t_with_args(
-                "shell.ask_user.min_length_error",
-                &std::collections::HashMap::from([("min".to_string(), min_length.to_string())]),
-            )
-        );
-        return TextResolution::Retry;
+        return TextResolution::Invalid(TextValidationError::MinLength(min_length));
     }
 
     TextResolution::Answer(answer)
 }
 
-fn validation_error_message(input: &str, required: bool, min_length: usize) -> String {
-    if input.is_empty() && required {
-        t("shell.ask_user.required_error")
-    } else {
-        t_with_args(
-            "shell.ask_user.min_length_error",
-            &std::collections::HashMap::from([("min".to_string(), min_length.to_string())]),
-        )
-    }
+fn print_validation_error(error: &TextValidationError) {
+    println!("\x1b[31m{}\x1b[0m", error.message());
 }
 
 #[cfg(test)]
@@ -415,7 +420,7 @@ mod tests {
     fn empty_required_text_retries_when_cancel_is_disabled() {
         assert_eq!(
             resolve_text_answer("".to_string(), None, true, false, 0),
-            TextResolution::Retry
+            TextResolution::Invalid(TextValidationError::Required)
         );
     }
 
@@ -423,7 +428,15 @@ mod tests {
     fn short_text_retries() {
         assert_eq!(
             resolve_text_answer("ab".to_string(), None, true, true, 3),
-            TextResolution::Retry
+            TextResolution::Invalid(TextValidationError::MinLength(3))
+        );
+    }
+
+    #[test]
+    fn default_that_is_too_short_returns_min_length_error() {
+        assert_eq!(
+            resolve_text_answer("".to_string(), Some("ok"), true, true, 3),
+            TextResolution::Invalid(TextValidationError::MinLength(3))
         );
     }
 
