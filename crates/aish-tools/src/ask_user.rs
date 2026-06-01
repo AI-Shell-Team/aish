@@ -249,10 +249,11 @@ pub(crate) fn parse_args(value: serde_json::Value) -> Result<AskUserRequest, Str
 
     if !request.options.is_empty() {
         if let Some(default) = &request.default {
+            let default = default.trim();
             if !request
                 .options
                 .iter()
-                .any(|option| option.value == *default)
+                .any(|option| option.value.trim() == default)
             {
                 return Err(t("tools.ask_user.validation.default_must_match_option"));
             }
@@ -474,6 +475,19 @@ mod tests {
             err,
             t("tools.ask_user.validation.default_must_match_option")
         );
+    }
+
+    #[test]
+    fn option_default_matches_trimmed_option_value() {
+        let request = parse_args(serde_json::json!({
+            "prompt": "Pick one",
+            "options": [{"value": "a ", "label": "A"}],
+            "default": "a"
+        }))
+        .unwrap();
+
+        assert_eq!(request.default.as_deref(), Some("a"));
+        assert_eq!(request.options[0].value, "a ");
     }
 
     #[test]
