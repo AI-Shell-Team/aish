@@ -524,7 +524,7 @@ shell:
     default_hint: "[默认: {value}]"
     custom_input_label: "（输入自定义答案）"
     footer: "Enter 确认 · ↑/↓ 导航 · Esc 取消"
-    cancel_hint: "直接回车可取消。"
+    cancel_hint: "按 Esc 或 Ctrl+C 可取消。"
     required_error: "必须提供答案。"
     min_length_error: "答案太短（至少 {min} 个字符）。"
     interactive_terminal_required: "ask_user 需要交互式终端"

@@ -252,7 +252,7 @@ shell:
     default_hint: "[既定値: {value}]"
     custom_input_label: "（カスタム回答を入力）"
     footer: "Enter で確定 · ↑/↓ で移動 · Esc でキャンセル"
-    cancel_hint: "空入力のまま Enter でキャンセルします。"
+    cancel_hint: "Esc または Ctrl+C でキャンセルします。"
     required_error: "回答は必須です。"
     min_length_error: "回答が短すぎます（最小 {min} 文字）。"
     interactive_terminal_required: "ask_user には対話型端末が必要です"

@@ -524,7 +524,7 @@ shell:
     default_hint: "[default: {value}]"
     custom_input_label: "(type custom answer)"
     footer: "Enter to confirm · ↑/↓ to navigate · Esc to cancel"
-    cancel_hint: "Press Enter with empty input to cancel."
+    cancel_hint: "Press Esc or Ctrl+C to cancel."
     required_error: "Answer is required."
     min_length_error: "Answer too short (minimum {min} characters)."
     interactive_terminal_required: "ask_user requires an interactive terminal"
