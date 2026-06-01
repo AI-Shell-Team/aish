@@ -244,7 +244,7 @@ shell:
     default_hint: "[Standard: {value}]"
     custom_input_label: "(eigene Antwort eingeben)"
     footer: "Enter zum Bestätigen · ↑/↓ zum Navigieren · Esc zum Abbrechen"
-    cancel_hint: "Mit leerer Eingabe und Enter abbrechen."
+    cancel_hint: "Mit Esc oder Strg+C abbrechen."
     required_error: "Eine Antwort ist erforderlich."
     min_length_error: "Antwort zu kurz (mindestens {min} Zeichen)."
     interactive_terminal_required: "ask_user erfordert ein interaktives Terminal"

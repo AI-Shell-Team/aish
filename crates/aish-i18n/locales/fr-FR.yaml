@@ -244,7 +244,7 @@ shell:
     default_hint: "[defaut : {value}]"
     custom_input_label: "(saisir une reponse personnalisee)"
     footer: "Enter pour confirmer · ↑/↓ pour naviguer · Esc pour annuler"
-    cancel_hint: "Appuyez sur Entree avec une saisie vide pour annuler."
+    cancel_hint: "Appuyez sur Echap ou Ctrl+C pour annuler."
     required_error: "Une reponse est requise."
     min_length_error: "Reponse trop courte (minimum {min} caracteres)."
     interactive_terminal_required: "ask_user requiert un terminal interactif"
