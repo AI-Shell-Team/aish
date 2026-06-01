@@ -439,7 +439,9 @@ impl AishShell {
         tool_registry.register(Box::new(aish_tools::fs::ReadFileTool::new()));
         tool_registry.register(Box::new(aish_tools::fs::WriteFileTool::new()));
         tool_registry.register(Box::new(aish_tools::fs::EditFileTool::new()));
-        tool_registry.register(Box::new(aish_tools::AskUserTool::new()));
+        tool_registry.register(Box::new(aish_tools::AskUserTool::with_runtime(Arc::new(
+            crate::tui::run_ask_user_request,
+        ))));
         tool_registry.register(Box::new(aish_tools::PythonTool::new()));
         tool_registry.register(Box::new(aish_tools::GlobTool::new()));
         tool_registry.register(Box::new(aish_tools::GrepTool::new()));

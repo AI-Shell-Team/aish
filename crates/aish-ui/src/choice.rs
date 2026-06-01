@@ -16,7 +16,7 @@ const PANEL_PADDING_X: u16 = 2;
 const DESCRIPTION_INDENT: &str = "    ";
 const FOOTER_WITH_CANCEL: &str = "1-9 quick select | Up/Down navigate | Enter select | Esc cancel";
 const FOOTER_NO_CANCEL: &str = "1-9 quick select | Up/Down navigate | Enter select";
-const CUSTOM_INPUT_FOOTER: &str = "Type custom answer | Enter submit | Esc back";
+const CUSTOM_INPUT_FOOTER: &str = "Type custom answer | Enter submit | Esc cancel";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChoiceOutcome {
@@ -182,8 +182,12 @@ impl ChoicePanel {
     ) -> PanelEvent<ChoiceOutcome> {
         match code {
             KeyCode::Esc => {
-                self.custom_input_active = false;
-                PanelEvent::Continue
+                if self.allow_cancel {
+                    PanelEvent::Cancel
+                } else {
+                    self.custom_input_active = false;
+                    PanelEvent::Continue
+                }
             }
             KeyCode::Enter => self.submit_custom_input(),
             KeyCode::Backspace => {
@@ -608,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn escape_in_inline_input_returns_to_choice_list() {
+    fn escape_in_inline_input_cancels_panel() {
         let mut panel = ChoicePanel::new(
             "Question",
             "Pick one",
@@ -619,7 +623,6 @@ mod tests {
         panel.handle_event(key(KeyCode::Char('2')));
         panel.handle_event(key(KeyCode::Char('h')));
 
-        assert_eq!(panel.handle_event(key(KeyCode::Esc)), PanelEvent::Continue);
         assert_eq!(panel.handle_event(key(KeyCode::Esc)), PanelEvent::Cancel);
     }
 }

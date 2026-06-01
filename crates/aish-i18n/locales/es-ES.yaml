@@ -248,6 +248,15 @@ shell:
     current_marker: "(actual)"
     selector_footer: "Escribe para buscar · ↑/↓ para seleccionar · Enter para reanudar · Esc para cancelar"
   ask_user:
+    default_title: "Se requiere entrada del usuario"
+    default_hint: "[predeterminado: {value}]"
+    custom_input_label: "(escribir respuesta personalizada)"
+    footer: "Enter para confirmar · ↑/↓ para navegar · Esc para cancelar"
+    cancel_hint: "Pulsa Enter con la entrada vacía para cancelar."
+    required_error: "La respuesta es obligatoria."
+    min_length_error: "Respuesta demasiado corta (mínimo {min} caracteres)."
+    interactive_terminal_required: "ask_user requiere un terminal interactivo"
+    recommended_badge: "Recomendado"
     title: "Selecciona una opción"
     custom_label: "Personalizado:"
     hint_select: "Enter para elegir · ↑/↓ para navegar · Esc para cancelar"
@@ -312,6 +321,41 @@ security:
   command_blocked_with_reason: "Error: el comando fue bloqueado por el sistema de seguridad: {reason}"
 
 tools:
+  ask_user:
+    description: "Haz al usuario una pregunta de aclaración enfocada. Con solo prompt se usa texto libre; con options se ofrecen elecciones."
+    unknown_kind: "Tipo desconocido: {kind}"
+    runtime_not_configured: "el runtime de ask_user no está configurado"
+    execute_failed: "ask_user falló: {error}"
+    param:
+      kind: "Tipo de interacción: text_input para texto libre, choice_or_text para opciones con entrada personalizada"
+      prompt: "La pregunta que se le hará al usuario."
+      options: "Opciones que se pueden ofrecer al usuario. Si faltan o están vacías, ask_user usa entrada de texto."
+      option_value: "Valor estable de la opción que se devuelve en los metadatos de la herramienta."
+      option_label: "Etiqueta visible para el usuario en la lista de opciones."
+      option_description: "Detalle opcional que se muestra debajo de la opción."
+      option_recommended: "Marca esta opción visiblemente como la recomendada."
+      title: "Título opcional para la pregunta"
+      default: "Valor predeterminado"
+      placeholder: "Texto de marcador"
+      allow_freeform_input: "Cuando hay opciones, permite elegir otra respuesta y escribirla. El valor predeterminado es true."
+      required: "Si el usuario debe proporcionar una respuesta (predeterminado: true)"
+      allow_cancel: "Si el usuario puede cancelar/omitir (predeterminado: true)"
+      min_length: "Longitud mínima para entrada de texto (predeterminado: 0)"
+    validation:
+      prompt_empty: "prompt no puede estar vacío"
+      option_value_empty: "option value no puede estar vacío"
+      option_label_empty: "option label no puede estar vacío"
+      option_values_unique: "option value debe ser único"
+      option_labels_unique: "option label debe ser único"
+      recommended_unique: "como máximo una opción puede marcarse como recomendada"
+      default_must_match_option: "default debe coincidir con uno de los option value"
+      legacy_choice_requires_options: "options debe ser una lista no vacía para choice_or_text"
+    result:
+      selected: "El usuario seleccionó: {label} (valor: {value})"
+      text: "Entrada del usuario: {value}"
+      empty_answer: "El usuario proporcionó una respuesta vacía."
+      cancelled: "El usuario canceló la pregunta."
+
   smart_log:
     description: "Determina automáticamente las fuentes de registros, analiza los logs según la consulta y devuelve un resumen coincidente."
     param:
