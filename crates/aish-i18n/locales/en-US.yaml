@@ -445,6 +445,13 @@ shell:
     current_marker: "(current)"
     selector_footer: "Type to search · ↑/↓ to select · Enter to resume · Esc to cancel"
 
+  panel:
+    history_title: "Output History ({count} records)"
+    expand_title: "{command} ({count} lines)"
+    lines_label: "lines"
+    expand_footer: " ↑↓/PgUp/PgDn scroll · Ctrl+O/Esc close "
+    history_footer: " ↑↓ Select · Enter View · Ctrl+O/Esc Close "
+
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; and press Enter to auto-analyze and fix, or enter the next command directly."
     corrected_command_label: "Suggested fix:"

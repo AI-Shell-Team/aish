@@ -445,6 +445,13 @@ shell:
     current_marker: "(当前)"
     selector_footer: "输入以搜索 · ↑/↓ 选择 · Enter 恢复 · Esc 取消"
 
+  panel:
+    history_title: "输出历史（{count} 条记录）"
+    expand_title: "{command}（{count} 行）"
+    lines_label: "行"
+    expand_footer: " ↑↓/PgUp/PgDn 滚动 · Ctrl+O/Esc 关闭 "
+    history_footer: " ↑↓ 选择 · Enter 查看 · Ctrl+O/Esc 关闭 "
+
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 后按 Enter 自动分析修复，或直接输入下一条命令。"
     corrected_command_label: "修复建议:"

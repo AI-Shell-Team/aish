@@ -446,7 +446,7 @@ impl BashTool {
                     offload_result.offload_payload.as_ref(),
                 );
 
-                let raw_line_count = result.stdout.lines().count();
+                let raw_line_count = result.stdout.lines().count() + result.stderr.lines().count();
                 let mut meta = serde_json::json!({
                     "raw_line_count": raw_line_count,
                 });

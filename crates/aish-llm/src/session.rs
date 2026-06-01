@@ -1945,7 +1945,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 /// - System messages and the stable prefix are never touched.
 /// - The most recent `SMART_TRIM_PROTECT_RECENT_ROUNDS` rounds are kept verbatim.
 /// - tool_call / tool_result pairing integrity is preserved.
-fn smart_trim_tool_loop(messages: &mut Vec<ChatMessage>, initial_len: usize) {
+fn smart_trim_tool_loop(messages: &mut [ChatMessage], initial_len: usize) {
     if messages.len() <= initial_len {
         return;
     }
@@ -1992,8 +1992,7 @@ fn smart_trim_tool_loop(messages: &mut Vec<ChatMessage>, initial_len: usize) {
     // portion, but only before the protected tail).
     let mut summarized = 0usize;
     let placeholder = "[old tool output cleared by context microcompact; key metadata retained]";
-    for i in initial_len..protect_from {
-        let msg = &mut messages[i];
+    for msg in messages.iter_mut().take(protect_from).skip(initial_len) {
         if msg.role != "tool" {
             continue;
         }

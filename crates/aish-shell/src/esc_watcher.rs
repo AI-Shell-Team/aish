@@ -84,9 +84,6 @@ impl CrosstermEscWatcher {
                                 }
                             }
                         }
-                        Ok(Some(_)) => {
-                            // Ignore mouse and resize events
-                        }
                         Ok(None) => {
                             // Timeout - continue loop
                         }

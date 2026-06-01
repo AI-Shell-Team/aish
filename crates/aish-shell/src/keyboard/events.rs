@@ -59,7 +59,11 @@ pub fn read_event(timeout: Option<Duration>) -> Result<Option<ShellEvent>, std::
         // the remaining timeout so the total wait does not exceed the original.
         let deadline = std::time::Instant::now() + duration;
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            let remaining = deadline.saturating_duration_since(now);
             if event::poll(remaining)? {
                 let evt = event::read()?;
                 if let Some(shell_evt) = ShellEvent::from_crossterm(evt) {
@@ -93,13 +97,9 @@ mod tests {
         let shell_event = ShellEvent::from_crossterm(event::Event::Key(key_event));
 
         assert!(shell_event.is_some());
-        match shell_event.unwrap() {
-            ShellEvent::Key(key) => {
-                assert_eq!(key.code, KeyCode::Char('a'));
-                assert_eq!(key.modifiers, KeyModifiers::empty());
-            }
-            _ => panic!("Expected key event"),
-        }
+        let ShellEvent::Key(key) = shell_event.unwrap();
+        assert_eq!(key.code, KeyCode::Char('a'));
+        assert_eq!(key.modifiers, KeyModifiers::empty());
     }
 
     #[test]
@@ -146,13 +146,9 @@ mod tests {
         let shell_event = ShellEvent::from_crossterm(event::Event::Key(key_event));
 
         assert!(shell_event.is_some());
-        match shell_event.unwrap() {
-            ShellEvent::Key(key) => {
-                assert_eq!(key.code, KeyCode::Char('c'));
-                assert_eq!(key.modifiers, KeyModifiers::CONTROL);
-            }
-            _ => panic!("Expected key event"),
-        }
+        let ShellEvent::Key(key) = shell_event.unwrap();
+        assert_eq!(key.code, KeyCode::Char('c'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
     }
 
     #[test]
@@ -180,12 +176,8 @@ mod tests {
             let shell_event = ShellEvent::from_crossterm(event::Event::Key(key_event));
 
             assert!(shell_event.is_some(), "Failed for {:?}", code);
-            match shell_event.unwrap() {
-                ShellEvent::Key(key) => {
-                    assert_eq!(key.code, code);
-                }
-                _ => panic!("Expected key event for {:?}", code),
-            }
+            let ShellEvent::Key(key) = shell_event.unwrap();
+            assert_eq!(key.code, code);
         }
     }
 }

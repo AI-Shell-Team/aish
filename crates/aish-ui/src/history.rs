@@ -10,7 +10,6 @@ use ratatui::{
 
 use crate::{PanelComponent, PanelEvent};
 
-const FOOTER_HINT: &str = " ↑↓ Select · Enter View · Ctrl+O/Esc Close ";
 const MAX_VISIBLE: usize = 8;
 
 /// Record for display in the history panel.
@@ -33,6 +32,8 @@ pub struct HistoryPanel {
     selected: usize,
     scroll_offset: usize,
     title: String,
+    footer_hint: String,
+    lines_label: String,
     /// Visible row count saved during the last render, used for scroll calculations.
     last_visible_limit: Cell<usize>,
 }
@@ -44,15 +45,28 @@ impl HistoryPanel {
             scroll_offset: 0,
             title: title.into(),
             records,
+            footer_hint: " ↑↓ Select · Enter View · Ctrl+O/Esc Close ".into(),
+            lines_label: "lines".into(),
             last_visible_limit: Cell::new(MAX_VISIBLE),
         }
+    }
+
+    /// Set custom footer hint (for i18n).
+    pub fn with_footer_hint(mut self, hint: impl Into<String>) -> Self {
+        self.footer_hint = hint.into();
+        self
+    }
+
+    /// Set custom lines label, e.g. "行" instead of "lines" (for i18n).
+    pub fn with_lines_label(mut self, label: impl Into<String>) -> Self {
+        self.lines_label = label.into();
+        self
     }
 
     fn visible_limit(&self, height: u16) -> usize {
         // height is already the inner area (borders removed by block.inner)
         (height as usize)
-            .max(1)
-            .min(MAX_VISIBLE)
+            .clamp(1, MAX_VISIBLE)
             .min(self.records.len())
     }
 
@@ -79,7 +93,7 @@ impl PanelComponent for HistoryPanel {
                 .add_modifier(Modifier::BOLD),
         );
         let footer_span =
-            ratatui::text::Span::styled(FOOTER_HINT, Style::default().fg(Color::DarkGray));
+            ratatui::text::Span::styled(&self.footer_hint, Style::default().fg(Color::DarkGray));
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title_span)
@@ -119,7 +133,7 @@ impl PanelComponent for HistoryPanel {
                 rec.command.clone()
             };
 
-            let badge = format!("{} lines", rec.line_count);
+            let badge = format!("{} {}", rec.line_count, self.lines_label);
 
             lines.push(Line::from(vec![
                 Span::styled(marker, style),

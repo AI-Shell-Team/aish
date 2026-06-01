@@ -287,17 +287,27 @@ impl AishShell {
                 time: r.time.clone(),
             })
             .collect();
-        let title = format!("Output History ({} records)", history_records.len());
-        let panel = aish_ui::HistoryPanel::new(&title, history_records);
-        match aish_ui::PanelRuntime::new().run(panel) {
-            Ok(aish_ui::PanelOutcome::Submitted(outcome)) => {
-                let idx = outcome.selected_index.min(records.len().saturating_sub(1));
-                let rec = &records[idx];
-                let title = format!("{} ({} lines)", rec.command, rec.line_count);
-                let expand = aish_ui::ExpandPanel::new(&title, &rec.output);
-                let _ = aish_ui::PanelRuntime::new().run(expand);
-            }
-            _ => {}
+        let mut panel_args = std::collections::HashMap::new();
+        panel_args.insert("count".into(), history_records.len().to_string());
+        let title = aish_i18n::t_with_args("shell.panel.history_title", &panel_args);
+        let panel = aish_ui::HistoryPanel::new(&title, history_records)
+            .with_footer_hint(aish_i18n::t("shell.panel.history_footer"))
+            .with_lines_label(aish_i18n::t("shell.panel.lines_label"));
+        if let Ok(aish_ui::PanelOutcome::Submitted(outcome)) =
+            aish_ui::PanelRuntime::new().run(panel)
+        {
+            let idx = outcome.selected_index.min(records.len().saturating_sub(1));
+            let rec = &records[idx];
+            let mut expand_args = std::collections::HashMap::new();
+            expand_args.insert("command".into(), rec.command.clone());
+            expand_args.insert("count".into(), rec.line_count.to_string());
+            let title = aish_i18n::t_with_args("shell.panel.expand_title", &expand_args);
+            let expand = aish_ui::ExpandPanel::with_footer(
+                &title,
+                &rec.output,
+                aish_i18n::t("shell.panel.expand_footer"),
+            );
+            let _ = aish_ui::PanelRuntime::new().run(expand);
         }
     }
 
@@ -684,17 +694,27 @@ impl AishShell {
                         time: r.time.clone(),
                     })
                     .collect();
-                let title = format!("Output History ({} records)", records.len());
-                let panel = aish_ui::HistoryPanel::new(&title, records);
-                match aish_ui::PanelRuntime::new().run(panel) {
-                    Ok(aish_ui::PanelOutcome::Submitted(outcome)) => {
-                        let idx = outcome.selected_index.min(snapshot.len().saturating_sub(1));
-                        let rec = &snapshot[idx];
-                        let title = format!("{} ({} lines)", rec.command, rec.line_count);
-                        let expand = aish_ui::ExpandPanel::new(&title, &rec.output);
-                        let _ = aish_ui::PanelRuntime::new().run(expand);
-                    }
-                    _ => {}
+                let mut panel_args = std::collections::HashMap::new();
+                panel_args.insert("count".into(), records.len().to_string());
+                let title = aish_i18n::t_with_args("shell.panel.history_title", &panel_args);
+                let panel = aish_ui::HistoryPanel::new(&title, records)
+                    .with_footer_hint(aish_i18n::t("shell.panel.history_footer"))
+                    .with_lines_label(aish_i18n::t("shell.panel.lines_label"));
+                if let Ok(aish_ui::PanelOutcome::Submitted(outcome)) =
+                    aish_ui::PanelRuntime::new().run(panel)
+                {
+                    let idx = outcome.selected_index.min(snapshot.len().saturating_sub(1));
+                    let rec = &snapshot[idx];
+                    let mut expand_args = std::collections::HashMap::new();
+                    expand_args.insert("command".into(), rec.command.clone());
+                    expand_args.insert("count".into(), rec.line_count.to_string());
+                    let title = aish_i18n::t_with_args("shell.panel.expand_title", &expand_args);
+                    let expand = aish_ui::ExpandPanel::with_footer(
+                        &title,
+                        &rec.output,
+                        aish_i18n::t("shell.panel.expand_footer"),
+                    );
+                    let _ = aish_ui::PanelRuntime::new().run(expand);
                 }
             }));
         }

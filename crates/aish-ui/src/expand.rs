@@ -10,24 +10,33 @@ use ratatui::{
 
 use crate::{PanelComponent, PanelEvent};
 
-const FOOTER_HINT: &str = " ↑↓/PgUp/PgDn scroll · Ctrl+O/Esc close ";
-
 /// A scrollable text viewer panel for displaying collapsed/expanded output.
 pub struct ExpandPanel {
     lines: Vec<Line<'static>>,
     scroll_offset: u16,
     title: String,
+    footer_hint: String,
     /// Inner area height saved during the last render, used for scroll clamping.
     last_visible_height: Cell<u16>,
 }
 
 impl ExpandPanel {
     pub fn new(title: impl Into<String>, content: &str) -> Self {
+        Self::with_footer(title, content, " ↑↓/PgUp/PgDn scroll · Ctrl+O/Esc close ")
+    }
+
+    /// Create with a custom footer hint (for i18n).
+    pub fn with_footer(
+        title: impl Into<String>,
+        content: &str,
+        footer_hint: impl Into<String>,
+    ) -> Self {
         let lines = content.lines().map(|l| Line::from(l.to_owned())).collect();
         Self {
             lines,
             scroll_offset: 0,
             title: title.into(),
+            footer_hint: footer_hint.into(),
             last_visible_height: Cell::new(1),
         }
     }
@@ -72,7 +81,7 @@ impl PanelComponent for ExpandPanel {
                 .add_modifier(Modifier::BOLD),
         );
         let footer_span =
-            ratatui::text::Span::styled(FOOTER_HINT, Style::default().fg(Color::DarkGray));
+            ratatui::text::Span::styled(&self.footer_hint, Style::default().fg(Color::DarkGray));
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title_span)
@@ -111,12 +120,12 @@ impl PanelComponent for ExpandPanel {
                 PanelEvent::Continue
             }
             KeyCode::PageUp => {
-                let step = self.last_visible_height.get().max(1) as u16;
+                let step = self.last_visible_height.get().max(1);
                 self.scroll_offset = self.scroll_offset.saturating_sub(step);
                 PanelEvent::Continue
             }
             KeyCode::PageDown => {
-                let step = self.last_visible_height.get().max(1) as u16;
+                let step = self.last_visible_height.get().max(1);
                 self.scroll_offset = self
                     .scroll_offset
                     .saturating_add(step)
