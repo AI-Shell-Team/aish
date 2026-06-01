@@ -1539,6 +1539,7 @@ impl AishShell {
                     });
                     esc_watcher.stop();
                     Self::restore_ai_sigint_handler(old_sigint);
+                    self.sync_state_from_pty_cwd();
 
                     let did_stream = self.streamed_content.load(Ordering::SeqCst);
 
@@ -1779,6 +1780,7 @@ impl AishShell {
                                 });
                                 esc_watcher.stop();
                                 Self::restore_ai_sigint_handler(old_sigint);
+                                self.sync_state_from_pty_cwd();
 
                                 let did_stream = self.streamed_content.load(Ordering::SeqCst);
                                 match result {
@@ -2373,6 +2375,29 @@ impl AishShell {
             None,
             false,
         );
+    }
+
+    fn sync_state_from_pty_cwd(&mut self) {
+        if !self.lock_pty().is_running() {
+            return;
+        }
+
+        let result = self.pty.lock().unwrap().execute_command(
+            "pwd",
+            std::time::Duration::from_secs(2),
+            None,
+            false,
+        );
+
+        let Ok((_output, _exit_code, cwd)) = result else {
+            return;
+        };
+
+        if !cwd.is_empty() && cwd != self.state.cwd {
+            self.state.prev_cwd = Some(self.state.cwd.clone());
+            self.state.cwd = cwd.clone();
+            let _ = std::env::set_current_dir(&cwd);
+        }
     }
 
     /// Restart the PTY session (e.g., after bash exits or crashes).

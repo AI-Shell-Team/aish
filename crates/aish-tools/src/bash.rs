@@ -342,7 +342,10 @@ impl BashTool {
         done.store(true, Ordering::SeqCst);
 
         match result {
-            Ok((output, exit_code)) => {
+            Ok((output, exit_code, cwd)) => {
+                if !cwd.is_empty() {
+                    let _ = std::env::set_current_dir(&cwd);
+                }
                 let raw_line_count = output.lines().count();
                 let session_uuid = uuid::Uuid::new_v4().to_string();
                 let cwd = std::env::current_dir()
