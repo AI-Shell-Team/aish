@@ -2578,5 +2578,4 @@ mod tests {
             Some("sudo ls /root")
         );
     }
-
 }
