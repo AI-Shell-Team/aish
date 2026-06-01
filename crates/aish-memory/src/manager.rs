@@ -210,7 +210,10 @@ impl MemoryManager {
 
     /// Persist the full entry list to the MEMORY.md file.
     fn persist(&self) -> aish_core::Result<()> {
-        let mut out = String::from(HEADER);
+        // Pre-allocate: header + entries with average size ~100 chars each
+        let estimated_size = HEADER.len() + self.entries.len() * 100;
+        let mut out = String::with_capacity(estimated_size);
+        out.push_str(HEADER);
 
         for entry in &self.entries {
             let category = format_category(&entry.category);

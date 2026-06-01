@@ -311,6 +311,24 @@ impl AishShell {
         }
     }
 
+    /// Show inline slash command popup with real-time filtering.
+    fn run_slash_input_session(&self, prompt: &str) -> aish_ui::SlashInputOutcome {
+        let commands: Vec<(String, String)> = crate::readline::SLASH_COMMANDS
+            .iter()
+            .map(|(name, _desc)| {
+                let cmd = name
+                    .strip_prefix('/')
+                    .expect("slash commands must start with /");
+                let i18n_key = format!("shell.slash.{cmd}");
+                (name.to_string(), aish_i18n::t(&i18n_key))
+            })
+            .collect();
+        match aish_ui::SlashInputSession::new(commands, prompt.to_string()).run() {
+            Ok(outcome) => outcome,
+            Err(_) => aish_ui::SlashInputOutcome::Cancelled,
+        }
+    }
+
     /// Security gate: check AI input for secrets and prompt the user.
     /// Returns `true` to continue, `false` if the user aborted (caller should skip).
     /// When secrets are detected and the user chooses "Redact", `question` is
@@ -1379,6 +1397,120 @@ impl AishShell {
                         }
                         continue;
                     }
+                    // Check if `/` on empty line triggered slash command popup
+                    if matches!(e, rustyline::error::ReadlineError::Interrupted)
+                        && rl.was_slash_requested()
+                    {
+                        match self.run_slash_input_session(&prompt_str) {
+                            aish_ui::SlashInputOutcome::Command(cmd) => {
+                                // Execute the selected command directly (avoids raw mode
+                                // conflict between crossterm and rustyline).
+                                let input = cmd.trim();
+                                if !input.is_empty() {
+                                    self.state.history.push(input.to_string());
+                                    if self.handle_special_command(input) {
+                                        self.record_history(input, 0);
+                                    }
+                                }
+                            }
+                            aish_ui::SlashInputOutcome::Dismissed(text) => {
+                                // No match — pre-fill readline so user can continue
+                                // typing (e.g. /bin/ls).
+                                match rl.read_line_with_initial(&prompt_str, (&text, "")) {
+                                    Ok(Some(line)) => {
+                                        let input = line.trim();
+                                        if !input.is_empty() {
+                                            self.state.history.push(input.to_string());
+                                            match input::classify_input(input) {
+                                                crate::types::InputIntent::SpecialCommand => {
+                                                    if self.handle_special_command(input) {
+                                                        self.record_history(input, 0);
+                                                    }
+                                                }
+                                                crate::types::InputIntent::Command
+                                                | crate::types::InputIntent::OperatorCommand => {
+                                                    self.set_phase(ShellPhase::Running);
+                                                    let exit_code =
+                                                        self.execute_external_command(input);
+                                                    self.set_phase(ShellPhase::Editing);
+                                                    self.record_history(input, exit_code);
+                                                    self.reset_interruption();
+                                                }
+                                                crate::types::InputIntent::BuiltinCommand => {
+                                                    let parts: Vec<&str> =
+                                                        input.split_whitespace().collect();
+                                                    if let Some(cmd) = parts.first() {
+                                                        let result = self
+                                                            .state
+                                                            .handle_builtin(cmd, &parts[1..]);
+                                                        if let Some(ref output) = result.output {
+                                                            println!("{}", output);
+                                                        }
+                                                        if result.should_exit {
+                                                            self.record_history(input, 0);
+                                                            break;
+                                                        }
+                                                    }
+                                                    self.record_history(input, 0);
+                                                }
+                                                crate::types::InputIntent::Help => {
+                                                    let result =
+                                                        self.state.handle_builtin("help", &[]);
+                                                    if let Some(output) = result.output {
+                                                        println!("{}", output);
+                                                    }
+                                                    self.record_history(input, 0);
+                                                }
+                                                crate::types::InputIntent::ScriptCall => {
+                                                    let exit_code = self.execute_script(input);
+                                                    self.record_history(input, exit_code);
+                                                }
+                                                _ => {
+                                                    eprintln!("Unknown: {}", input);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(None) => {}
+                                    Err(ref e)
+                                        if matches!(
+                                            e,
+                                            rustyline::error::ReadlineError::Interrupted
+                                        ) =>
+                                    {
+                                        if rl.was_slash_requested() {
+                                            // User pressed `/` inside the
+                                            // pre-filled readline — re-trigger
+                                            // the slash popup.
+                                            match self.run_slash_input_session(&prompt_str) {
+                                                aish_ui::SlashInputOutcome::Command(cmd) => {
+                                                    let input = cmd.trim();
+                                                    if !input.is_empty() {
+                                                        self.state.history.push(input.to_string());
+                                                        if self.handle_special_command(input) {
+                                                            self.record_history(input, 0);
+                                                        }
+                                                    }
+                                                }
+                                                aish_ui::SlashInputOutcome::Dismissed(text) => {
+                                                    let _ = rl.read_line_with_initial(
+                                                        &prompt_str,
+                                                        (&text, ""),
+                                                    );
+                                                }
+                                                aish_ui::SlashInputOutcome::Cancelled => {}
+                                            }
+                                        } else if self.handle_ctrl_c() {
+                                            break;
+                                        }
+                                    }
+                                    Err(_) => {}
+                                }
+                            }
+                            aish_ui::SlashInputOutcome::Cancelled => {}
+                        }
+                        continue;
+                    }
                     // Interrupt (Ctrl-C) — handle double-press exit
                     if matches!(e, rustyline::error::ReadlineError::Interrupted) {
                         if self.handle_ctrl_c() {
@@ -1899,6 +2031,14 @@ impl AishShell {
             Some("/resume") => {
                 self.handle_resume_command(&parts);
                 return false;
+            }
+            Some("/feedback") => {
+                let url = "https://github.com/AI-Shell-Team/aish/issues";
+                println!("Opening GitHub Issues...");
+                if let Err(e) = open::that(url) {
+                    eprintln!("Failed to open browser: {e}");
+                    println!("Visit: {url}");
+                }
             }
             _ => {
                 eprintln!("{}", {

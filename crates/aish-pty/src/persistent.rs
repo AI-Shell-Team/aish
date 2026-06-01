@@ -144,7 +144,7 @@ impl PersistentPty {
             control_fd: control_raw,
             child_pid,
             command_state: CommandState::new(),
-            control_buffer: String::new(),
+            control_buffer: String::with_capacity(1024),
             output_callback: None,
             rows,
             cols,

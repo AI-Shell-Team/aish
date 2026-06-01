@@ -260,7 +260,7 @@ fn normalize_string_list(values: Vec<&Value>) -> Option<Vec<String>> {
 }
 
 fn parse_v2_rules(raw_rules: &[&Mapping]) -> Vec<PolicyRule> {
-    let mut rules = Vec::new();
+    let mut rules = Vec::with_capacity(raw_rules.len());
 
     for item in raw_rules {
         let patterns = normalize_string_list(ensure_list(mapping_get(item, "path")));
@@ -315,8 +315,9 @@ fn parse_v2_rules(raw_rules: &[&Mapping]) -> Vec<PolicyRule> {
 fn parse_invalid_fallback_rules(
     raw_rules: &[&Mapping],
 ) -> (Vec<InvalidFallbackRule>, Vec<ValidationIssue>) {
-    let mut invalid_rules = Vec::new();
-    let mut issues = Vec::new();
+    // Pre-allocate: estimate up to half of rules may be invalid
+    let mut invalid_rules = Vec::with_capacity(raw_rules.len() / 2);
+    let mut issues = Vec::with_capacity(raw_rules.len() / 2);
 
     for item in raw_rules {
         let patterns = normalize_string_list(ensure_list(mapping_get(item, "path")));

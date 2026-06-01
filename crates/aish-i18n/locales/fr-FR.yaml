@@ -143,6 +143,14 @@ shell:
     risk: "Le contenu genere par l'IA peut etre risque ; verifiez-le attentivement."
     skills_loaded_suffix: " charges"
 
+  slash:
+    model: "Afficher ou changer le modèle IA"
+    setup: "Ouvrir l'assistant de configuration"
+    plan: "Contrôle du mode plan"
+    token: "Afficher l'utilisation des tokens"
+    resume: "Reprendre la session précédente"
+    feedback: "Ouvrir les Issues GitHub"
+
   security:
     panel_title:
       blocked: "🛑 Blocage de securite"

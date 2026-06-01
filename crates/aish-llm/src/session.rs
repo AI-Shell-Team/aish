@@ -61,7 +61,7 @@ impl LlmSession {
     ) -> Self {
         Self {
             client: LlmClient::new(api_base, api_key, model),
-            tools: HashMap::new(),
+            tools: HashMap::with_capacity(16),
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: None,
             confirmation_callback: None,
@@ -556,13 +556,13 @@ impl LlmSession {
                 }
 
                 LlmResponse::Stream(resp) => {
-                    let mut accumulated = String::new();
-                    let mut reasoning_accumulated = String::new();
+                    let mut accumulated = String::with_capacity(4096);
+                    let mut reasoning_accumulated = String::with_capacity(1024);
                     let mut tool_calls_accum: HashMap<usize, (String, String, String)> =
-                        HashMap::new(); // index -> (id, name, args)
+                        HashMap::with_capacity(8); // index -> (id, name, args)
 
                     let mut stream_done = false;
-                    let mut text_buffer = String::new();
+                    let mut text_buffer = String::with_capacity(4096);
                     let mut stream = resp;
                     let mut reasoning_started = false;
                     // Track whether tool calls have been seen in this stream,
@@ -1176,7 +1176,7 @@ impl LlmSession {
                 self.client.api_key(),
                 self.client.model_name(),
             ),
-            tools: HashMap::new(),
+            tools: HashMap::with_capacity(16),
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: self.event_callback.clone(),
             confirmation_callback: self.confirmation_callback.clone(),

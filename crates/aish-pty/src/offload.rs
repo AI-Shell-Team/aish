@@ -194,7 +194,7 @@ impl PtyOutputOffload {
         }
 
         // Copy data to write before mutating the buffer.
-        let mut overflow_data = Vec::new();
+        let mut overflow_data = Vec::with_capacity(excess);
         if from_buf > 0 {
             let buf = self.get_buf(stream);
             overflow_data.extend_from_slice(&buf[..from_buf]);
@@ -251,12 +251,14 @@ impl PtyOutputOffload {
         // stdout_buf holds the most recent keep_bytes retained in memory;
         // stdout_tail is extra data appended after the stream ended.
         let stdout_combined: Vec<u8> = {
-            let mut v = self.stdout_buf.clone();
+            let mut v = Vec::with_capacity(self.stdout_buf.len() + stdout_tail.len());
+            v.extend_from_slice(&self.stdout_buf);
             v.extend_from_slice(stdout_tail);
             v
         };
         let stderr_combined: Vec<u8> = {
-            let mut v = self.stderr_buf.clone();
+            let mut v = Vec::with_capacity(self.stderr_buf.len() + stderr_tail.len());
+            v.extend_from_slice(&self.stderr_buf);
             v.extend_from_slice(stderr_tail);
             v
         };

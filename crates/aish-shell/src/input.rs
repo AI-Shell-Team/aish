@@ -13,10 +13,11 @@ pub fn classify_input(input: &str) -> InputIntent {
         return InputIntent::Help;
     }
     if trimmed.starts_with('/')
-        && trimmed
-            .split_whitespace()
-            .next()
-            .is_some_and(|cmd| matches!(cmd, "/model" | "/setup" | "/plan" | "/token" | "/resume"))
+        && trimmed.split_whitespace().next().is_some_and(|cmd| {
+            crate::readline::SLASH_COMMANDS
+                .iter()
+                .any(|(name, _)| *name == cmd)
+        })
     {
         return InputIntent::SpecialCommand;
     }
@@ -95,6 +96,7 @@ mod tests {
         assert_eq!(classify_input("/token"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/resume"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/resume 1234"), InputIntent::SpecialCommand);
+        assert_eq!(classify_input("/feedback"), InputIntent::SpecialCommand);
     }
 
     #[test]
