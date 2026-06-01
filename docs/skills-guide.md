@@ -90,61 +90,70 @@ AI 在调用 Skill 时遵循以下规范：
 
 ## 在 Skill 中使用交互式选项（ask_user）
 
-当 Skill 的流程需要用户在多个选项中做选择时，AI 可以调用 `ask_user` 工具展示交互式单选 UI。
+当 Skill 的流程遇到真实歧义，且继续执行前必须由用户确认时，可以调用 `ask_user`。它只在本地交互式终端中接管输入；远程/非交互式场景不会展示本地 TUI。
 
 ### ask_user 入参
 
+`ask_user` 不再需要公开传 `kind`。交互类型由入参能力推断：没有 `options` 或 `options` 为空时是文本输入；提供 `options` 时是选项选择。`allow_freeform_input` 控制有选项时是否允许用户输入自定义答案，默认允许。
+
+文本输入示例：
+
 ```json
 {
-  "kind": "choice_or_text",
+  "prompt": "请填写要写入的目标文件路径",
+  "title": "需要确认目标路径",
+  "placeholder": "例如 docs/notes.md",
+  "required": true,
+  "allow_cancel": true,
+  "min_length": 1
+}
+```
+
+选项示例：
+
+```json
+{
   "prompt": "请选择下一步操作",
   "options": [
-    {"value": "a", "label": "方案 A", "description": "适合风险较低、改动较小的情况"},
-    {"value": "b", "label": "方案 B", "description": "适合需要更完整验证的情况"}
+    {"value": "minimal", "label": "最小修改", "description": "只处理当前问题", "recommended": true},
+    {"value": "complete", "label": "完整处理", "description": "同时补测试和文档"}
   ],
-  "default": "a",
-  "title": "选择",
-  "allow_cancel": true,
-  "custom": {
-    "label": "其他（自行输入）",
-    "placeholder": "请输入自定义内容"
-  }
+  "default": "minimal",
+  "title": "选择处理方式",
+  "allow_freeform_input": true,
+  "allow_cancel": true
 }
 ```
 
 推荐约定：
 
-- `single_select`：只能选择预设项，不要传 `custom`
-- `text_input`：只允许自由输入，不要传 `options`
-- `choice_or_text`：既给 `options`，也给 `custom`，用于“候选项可能不完整”的场景
+- 只在确实需要用户判断时调用，不要用它替代普通状态说明。
+- 能列出清晰候选项时优先传 `options`，每个选项都提供稳定的 `value` 和可读的 `label`。
+- 当候选项可能不完整时，保留 `allow_freeform_input: true`；如果必须从预设项中选择，显式传 `allow_freeform_input: false`。
+- `default` 在有选项时必须匹配某个 `option.value`；文本输入时可作为用户直接回车的默认答案。
+- 最多一个选项设置 `recommended: true`。
 
 ### ask_user 返回
 
-- 用户选中某项：返回结构化结果（`status=selected`），并保留选中的 value/label
-- 用户输入自定义内容：返回结构化结果（`status=custom`），并保留输入文本；可通过 `answer_type=text` 区分于预设选项
-- 用户取消或交互不可用：任务会暂停并提示用户继续方式。你可以：
-  - 直接回复选项 value/编号/文字
-  - 输入 `; 使用默认继续`（或 `; continue with default`）明确使用默认值继续
-- 若使用 `choice_or_text`，会显示支持自定义输入的对话框；用户可直接输入内容并回车，返回 `status=custom`
-- 若为选项提供 `description`，UI 和暂停提示会把说明展示在选项下方
+- 用户选中预设项时，结果 `meta.status` 为 `answered`，`meta.answer_type` 为 `option`，并包含 `value`、`label`、`description`。
+- 用户输入自定义文本时，结果 `meta.status` 为 `answered`，`meta.answer_type` 为 `text`，并包含 `value`。
+- 用户取消时，结果 `meta.status` 为 `cancelled`。
+- 新契约的公开 schema 和返回 meta 不包含 `kind`。旧调用方传入 `kind` 时会被兼容解析，但新 Skill 不应继续依赖它。
 
 ### 推荐调用示例
 
 ```json
 {
-  "kind": "choice_or_text",
   "prompt": "请选择一个水果，或输入列表中没有的水果",
   "title": "水果选择",
   "options": [
-    {"value": "apple", "label": "苹果"},
+    {"value": "apple", "label": "苹果", "recommended": true},
     {"value": "banana", "label": "香蕉"},
     {"value": "orange", "label": "橙子"}
   ],
   "default": "apple",
-  "custom": {
-    "label": "其他水果",
-    "placeholder": "输入自定义水果名称"
-  },
+  "placeholder": "输入自定义水果名称",
+  "allow_freeform_input": true,
   "allow_cancel": true
 }
 ```
