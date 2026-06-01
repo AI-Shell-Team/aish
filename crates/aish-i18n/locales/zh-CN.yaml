@@ -395,6 +395,10 @@ shell:
       redact: "替换为环境变量发送 (安全)"
       allow: "明文发送给 AI"
       abort: "取消"
+      redact_desc: "替换为占位符"
+      allow_desc: "发送原始内容"
+      abort_desc: "取消操作"
+      help: "← →: 移动 | Enter: 选择 | Esc: 取消"
       aborted: "已取消：检测到敏感数据。"
       redacted: "已将 {count} 个敏感数据替换为环境变量占位符（仅保存在内存中，未发送给 AI）"
       restored: "（已还原 {count} 个环境变量，仅保存在内存中，未发送给 AI）"
@@ -446,6 +450,13 @@ shell:
     no_matches: "没有匹配的会话。"
     current_marker: "(当前)"
     selector_footer: "输入以搜索 · ↑/↓ 选择 · Enter 恢复 · Esc 取消"
+
+  panel:
+    history_title: "输出历史（{count} 条记录）"
+    expand_title: "{command}（{count} 行）"
+    lines_label: "行"
+    expand_footer: " ↑↓/PgUp/PgDn 滚动 · Ctrl+O/Esc 关闭 "
+    history_footer: " ↑↓ 选择 · Enter 查看 · Ctrl+O/Esc 关闭 "
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 后按 Enter 自动分析修复，或直接输入下一条命令。"

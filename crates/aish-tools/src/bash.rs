@@ -63,12 +63,12 @@ pub fn interactive_input_active() -> bool {
     INTERACTIVE_INPUT_COUNT.load(Ordering::SeqCst) > 0
 }
 
-pub(crate) fn acquire_interactive_input_guard() -> InteractiveInputGuard {
+pub fn acquire_interactive_input_guard() -> InteractiveInputGuard {
     InteractiveInputGuard::acquire()
 }
 
 #[must_use]
-pub(crate) struct InteractiveInputGuard;
+pub struct InteractiveInputGuard;
 
 impl InteractiveInputGuard {
     fn acquire() -> Self {
@@ -77,7 +77,7 @@ impl InteractiveInputGuard {
             // Background stdin readers poll with 100ms timeouts. Wait a bit
             // longer on the first acquisition so they can observe the guard
             // before the foreground prompt starts querying the terminal.
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(150));
         }
         Self
     }
@@ -343,6 +343,7 @@ impl BashTool {
 
         match result {
             Ok((output, exit_code)) => {
+                let raw_line_count = output.lines().count();
                 let session_uuid = uuid::Uuid::new_v4().to_string();
                 let cwd = std::env::current_dir()
                     .map(|p| p.to_string_lossy().to_string())
@@ -359,12 +360,20 @@ impl BashTool {
                     offload_result.offload_payload.as_ref(),
                 );
 
+                let mut meta = serde_json::json!({
+                    "raw_line_count": raw_line_count,
+                });
+                if let Some(p) = offload_result.offload_payload {
+                    meta.as_object_mut().unwrap().insert(
+                        "offload".to_string(),
+                        serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+
                 ToolResult {
                     ok: true,
                     output: output_text,
-                    meta: offload_result
-                        .offload_payload
-                        .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null)),
+                    meta: Some(meta),
                 }
             }
             Err(e) => {
@@ -437,12 +446,20 @@ impl BashTool {
                     offload_result.offload_payload.as_ref(),
                 );
 
+                let raw_line_count = result.stdout.lines().count() + result.stderr.lines().count();
+                let mut meta = serde_json::json!({
+                    "raw_line_count": raw_line_count,
+                });
+                if let Some(p) = offload_result.offload_payload {
+                    meta.as_object_mut().unwrap().insert(
+                        "offload".to_string(),
+                        serde_json::to_value(p).unwrap_or(serde_json::Value::Null),
+                    );
+                }
                 ToolResult {
                     ok: true,
                     output,
-                    meta: offload_result
-                        .offload_payload
-                        .map(|p| serde_json::to_value(p).unwrap_or(serde_json::Value::Null)),
+                    meta: Some(meta),
                 }
             }
             Err(e) => {

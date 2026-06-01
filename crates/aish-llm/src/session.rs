@@ -552,7 +552,7 @@ impl LlmSession {
                     }
 
                     // Trim old tool-call rounds to prevent unbounded growth
-                    trim_tool_loop_messages(&mut messages, initial_len, MAX_TOOL_ROUNDS_IN_CONTEXT);
+                    smart_trim_tool_loop(&mut messages, initial_len);
                 }
 
                 LlmResponse::Stream(resp) => {
@@ -930,8 +930,8 @@ impl LlmSession {
                         messages.push(ChatMessage::tool_result(&tc.id, output));
                     }
 
-                    // Trim old tool-call rounds to prevent unbounded growth
-                    trim_tool_loop_messages(&mut messages, initial_len, MAX_TOOL_ROUNDS_IN_CONTEXT);
+                    // Smart-trim old tool outputs to prevent unbounded growth
+                    smart_trim_tool_loop(&mut messages, initial_len);
                 }
             }
         }
@@ -1091,17 +1091,27 @@ impl LlmSession {
             }
 
             // Prepare output preview only for bash tool (used for terminal display).
-            let output_preview = if tool_call.name == "bash" {
+            let (output_preview, total_lines) = if tool_call.name == "bash" {
                 let s = &result.output;
+                // Use raw line count from PTY output (stored in meta by
+                // the bash tool) instead of counting lines in the tagged
+                // tool output which may be truncated by offload.
+                let total = result
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("raw_line_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| s.lines().count() as u64)
+                    as usize;
                 let limit = 512.min(s.len());
                 // Find safe UTF-8 boundary
                 let mut end = limit;
                 while end > 0 && end < s.len() && !s.is_char_boundary(end) {
                     end -= 1;
                 }
-                Some(s[..end].to_string())
+                (Some(s[..end].to_string()), total)
             } else {
-                None
+                (None, 0)
             };
 
             let mut event_data = serde_json::json!({
@@ -1112,6 +1122,33 @@ impl LlmSession {
             });
             if let Some(preview) = output_preview {
                 event_data["output_preview"] = serde_json::Value::String(preview);
+            }
+            if tool_call.name == "bash" && total_lines > 0 {
+                event_data["output_total_lines"] =
+                    serde_json::Value::Number(serde_json::Number::from(total_lines));
+                // Pass full output for Ctrl+O expand panel display.
+                // When output was offloaded, read full content from disk
+                // (result.output only contains a 1 KB preview in that case).
+                // Cap at 256 KB to avoid passing huge data through events.
+                const MAX_FULL_OUTPUT: usize = 256 * 1024;
+                let full = result
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("offload"))
+                    .and_then(|o| o.get("stdout_path"))
+                    .and_then(|p| p.as_str())
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+                    .unwrap_or_else(|| result.output.clone());
+                let full = if full.len() > MAX_FULL_OUTPUT {
+                    let mut end = MAX_FULL_OUTPUT;
+                    while end > 0 && !full.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...(truncated)", &full[..end])
+                } else {
+                    full
+                };
+                event_data["output_full"] = serde_json::Value::String(full);
             }
 
             self.emit_event(LlmEvent {
@@ -1788,57 +1825,207 @@ fn trim_messages(
     result
 }
 
-/// Maximum number of tool-call rounds to keep in the loop before trimming.
-/// Each round is: [assistant + tool_calls] + [tool_result(s)].
-const MAX_TOOL_ROUNDS_IN_CONTEXT: usize = 8;
+/// Token budget for the agent-loop smart trim. When estimated tokens in the
+/// loop portion exceed this, old tool outputs are replaced with informative
+/// one-line summaries instead of deleting entire rounds.
+const SMART_TRIM_TOKEN_BUDGET: usize = 60_000;
 
-/// Trim tool-call messages accumulated during the agent loop.
+/// Number of most-recent tool-call rounds that are always kept verbatim.
+const SMART_TRIM_PROTECT_RECENT_ROUNDS: usize = 6;
+
+/// Generate an informative one-line summary for a tool result, preserving
+/// the most operationally useful information (command, file path, exit code).
+fn summarize_tool_output(tool_name: &str, tool_args: &str, output: &str) -> String {
+    let line_count = output.lines().count();
+    let char_count = output.len();
+
+    let args =
+        serde_json::from_str::<serde_json::Value>(tool_args).unwrap_or(serde_json::Value::Null);
+
+    match tool_name {
+        "bash" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+            let cmd_display = if cmd.len() > 80 {
+                format!("{}...", &cmd[..77])
+            } else {
+                cmd.to_string()
+            };
+            let exit_code = extract_return_code(output).unwrap_or_else(|| "?".to_string());
+            format!(
+                "[bash] `{}` -> exit {}, {} lines",
+                cmd_display, exit_code, line_count
+            )
+        }
+        "read_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
+            format!(
+                "[read_file] {} from line {} ({} chars)",
+                path, offset, char_count
+            )
+        }
+        "write_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            let content_lines = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.lines().count())
+                .unwrap_or(0);
+            format!("[write_file] wrote to {} ({} lines)", path, content_lines)
+        }
+        "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("[edit_file] edited {} ({} chars result)", path, char_count)
+        }
+        "grep" | "search_files" => {
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let matches = if output.contains("No matches found") {
+                0
+            } else {
+                output.lines().count().saturating_sub(1).max(1)
+            };
+            format!(
+                "[{}] '{}' in {} -> {} matches",
+                tool_name, pattern, path, matches
+            )
+        }
+        "glob" | "list_files" => {
+            let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("[{}] '{}' -> {} lines", tool_name, pattern, line_count)
+        }
+        "ask_user" => "[ask_user] asked user a question".to_string(),
+        "memory" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            format!("[memory] {}", action)
+        }
+        "final_answer" => "[final_answer] completed".to_string(),
+        _ => {
+            // Generic fallback: include first arg key-value pair
+            let first_arg = if let Some(obj) = args.as_object() {
+                obj.iter()
+                    .take(2)
+                    .map(|(k, v)| format!("{}={}", k, truncate_str(&v.to_string(), 40)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                String::new()
+            };
+            format!(
+                "[{}]{} ({} chars)",
+                tool_name,
+                if first_arg.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", first_arg)
+                },
+                char_count
+            )
+        }
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+/// Smart-trim tool-call messages in the agent loop.
 ///
-/// Preserves the stable prefix (messages before the loop started, i.e.
-/// `initial_len`) and keeps only the most recent `max_rounds` tool-call
-/// rounds.  This prevents unbounded context growth during long tool-calling
-/// sessions while retaining enough recent history for the LLM to maintain
-/// coherent multi-step reasoning.
+/// Instead of deleting entire rounds (which loses tool-call structure and
+/// context), this replaces old tool *outputs* with informative one-line
+/// summaries while preserving the assistant's tool_calls metadata. The
+/// trigger is a token budget rather than a fixed round count, making it
+/// adaptive to different models and tool output sizes.
 ///
-/// A "round" starts with an assistant message that has `tool_calls`.
-fn trim_tool_loop_messages(messages: &mut Vec<ChatMessage>, initial_len: usize, max_rounds: usize) {
+/// Guarantees:
+/// - System messages and the stable prefix are never touched.
+/// - The most recent `SMART_TRIM_PROTECT_RECENT_ROUNDS` rounds are kept verbatim.
+/// - tool_call / tool_result pairing integrity is preserved.
+fn smart_trim_tool_loop(messages: &mut [ChatMessage], initial_len: usize) {
     if messages.len() <= initial_len {
         return;
     }
 
-    // Count tool-call rounds (assistant messages with tool_calls) from the end.
-    // A round boundary is an assistant message with tool_calls set.
-    // We want to find the start of the (max_rounds+1)-th round from the end —
-    // everything before that gets trimmed.
-    let mut round_count = 0usize;
-    let mut trim_from: Option<usize> = None;
+    // Quick token estimate — if under budget, skip entirely.
+    let loop_tokens: usize = messages[initial_len..]
+        .iter()
+        .map(|m| {
+            let content_len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
+            let reasoning_len = m.reasoning_content.as_ref().map(|c| c.len()).unwrap_or(0);
+            (content_len + reasoning_len) / 4
+        })
+        .sum();
+    if loop_tokens <= SMART_TRIM_TOKEN_BUDGET {
+        return;
+    }
 
+    // Build index: tool_call_id -> (tool_name, arguments_json)
+    let mut call_id_to_tool: HashMap<String, (String, String)> = HashMap::new();
+    for msg in &messages[initial_len..] {
+        if msg.role == "assistant" {
+            if let Some(tcs) = &msg.tool_calls {
+                for tc in tcs {
+                    call_id_to_tool.insert(tc.id.clone(), (tc.name.clone(), tc.arguments.clone()));
+                }
+            }
+        }
+    }
+
+    // Find the boundary of protected recent rounds.
+    let mut round_count = 0usize;
+    let mut protect_from = messages.len();
     for i in (initial_len..messages.len()).rev() {
         if messages[i].role == "assistant" && messages[i].tool_calls.is_some() {
             round_count += 1;
-            if round_count == max_rounds {
-                // This round is the last one to keep. Everything before it
-                // (from initial_len up to this index) is trimmed.
-                trim_from = Some(i);
+            if round_count == SMART_TRIM_PROTECT_RECENT_ROUNDS {
+                protect_from = i;
                 break;
             }
         }
     }
 
-    let trim_from = match trim_from {
-        Some(idx) => idx,
-        None => return, // Under limit, nothing to trim
-    };
+    // Replace old tool outputs with info-summaries (within the agent loop
+    // portion, but only before the protected tail).
+    let mut summarized = 0usize;
+    let placeholder = "[old tool output cleared by context microcompact; key metadata retained]";
+    for msg in messages.iter_mut().take(protect_from).skip(initial_len) {
+        if msg.role != "tool" {
+            continue;
+        }
+        let content = match &msg.content {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => continue,
+        };
+        // Already summarized (by us or microcompact) — skip.
+        if content == placeholder || content.starts_with('[') && content.contains("] `") {
+            continue;
+        }
 
-    let removed = trim_from - initial_len;
-    tracing::warn!(
-        initial_len,
-        removed,
-        total = messages.len(),
-        max_rounds,
-        "Trimming old tool-call rounds from agent loop"
-    );
-    messages.drain(initial_len..trim_from);
+        let call_id = msg.tool_call_id.as_deref().unwrap_or("");
+        let (tool_name, tool_args) = call_id_to_tool
+            .get(call_id)
+            .cloned()
+            .unwrap_or(("unknown".to_string(), String::new()));
+
+        let summary = summarize_tool_output(&tool_name, &tool_args, &content);
+        msg.content = Some(summary);
+        summarized += 1;
+    }
+
+    if summarized > 0 {
+        tracing::info!(
+            initial_len,
+            summarized,
+            total = messages.len(),
+            loop_tokens,
+            budget = SMART_TRIM_TOKEN_BUDGET,
+            "Smart-trimmed old tool outputs in agent loop"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1899,20 +2086,24 @@ mod tests {
         );
     }
 
-    fn make_tool_call_msg(id: &str, name: &str) -> ChatMessage {
+    fn make_tool_call_msg_with_args(id: &str, name: &str, args: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
             content: Some(format!("calling {}", name)),
             tool_calls: Some(vec![ToolCall {
                 id: id.to_string(),
                 name: name.to_string(),
-                arguments: "{}".to_string(),
+                arguments: args.to_string(),
             }]),
             tool_call_id: None,
             name: None,
             reasoning_content: None,
             cache_control: None,
         }
+    }
+
+    fn make_tool_call_msg(id: &str, name: &str) -> ChatMessage {
+        make_tool_call_msg_with_args(id, name, "{}")
     }
 
     fn make_tool_result_msg(id: &str, output: &str) -> ChatMessage {
@@ -1928,46 +2119,87 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_tool_loop_noop_when_under_limit() {
-        // 3 rounds — under limit of 8, nothing trimmed
+    fn test_smart_trim_noop_when_under_budget() {
+        // Small messages — under token budget, nothing should change.
         let initial_len = 2;
         let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "hi")];
         for i in 0..3 {
             msgs.push(make_tool_call_msg(&format!("call_{}", i), "bash"));
-            msgs.push(make_tool_result_msg(&format!("call_{}", i), "output"));
+            msgs.push(make_tool_result_msg(&format!("call_{}", i), "short output"));
         }
         let len_before = msgs.len();
-        trim_tool_loop_messages(&mut msgs, initial_len, 8);
+        smart_trim_tool_loop(&mut msgs, initial_len);
         assert_eq!(msgs.len(), len_before);
+        // Content should be unchanged
+        assert_eq!(msgs[3].content.as_deref(), Some("short output"));
     }
 
     #[test]
-    fn test_trim_tool_loop_trims_old_rounds() {
-        // 12 rounds — should trim to keep only last 4
+    fn test_smart_trim_replaces_old_tool_outputs() {
+        // Create enough large tool outputs to exceed the token budget.
         let initial_len = 2;
         let mut msgs = vec![make_msg("system", "sys"), make_msg("user", "hi")];
+        let big_output: String = "x".repeat(40_000); // ~10K tokens each
         for i in 0..12 {
-            msgs.push(make_tool_call_msg(&format!("call_{}", i), "bash"));
+            msgs.push(make_tool_call_msg_with_args(
+                &format!("call_{}", i),
+                "bash",
+                &format!(r#"{{"command": "npm run test_{}"}}"#, i),
+            ));
             msgs.push(make_tool_result_msg(
                 &format!("call_{}", i),
-                &format!("output_{}", i),
+                &format!(
+                    "<stdout>\n{}\n</stdout>\n<return_code>\n0\n</return_code>",
+                    big_output
+                ),
             ));
         }
-        assert_eq!(msgs.len(), 2 + 12 * 2); // 26
+        // Total loop tokens ≈ 12 * 10K = 120K > 60K budget
 
-        trim_tool_loop_messages(&mut msgs, initial_len, 4);
+        smart_trim_tool_loop(&mut msgs, initial_len);
 
-        // Should keep: initial (2) + last 4 rounds (8) = 10
-        assert_eq!(msgs.len(), 10);
-        // First tool call should be round 8 (0-indexed)
-        assert!(msgs[2].content.as_ref().unwrap().contains("calling bash"));
-        // Last tool result should be round 11
-        let last = msgs.last().unwrap();
-        assert_eq!(last.content.as_deref(), Some("output_11"));
+        // Message count should not change (no deletion)
+        assert_eq!(msgs.len(), 2 + 12 * 2);
+
+        // Prefix must be preserved
+        assert_eq!(msgs[0].content.as_deref(), Some("sys"));
+        assert_eq!(msgs[1].content.as_deref(), Some("hi"));
+
+        // Recent rounds (last 6) should still have their full content
+        let last_tool = msgs.last().unwrap();
+        assert!(last_tool.content.as_ref().unwrap().contains(&big_output));
+
+        // Old rounds should be summarized (not the raw big output)
+        // Round 0 tool result is at index 3
+        let old_tool = &msgs[3];
+        let content = old_tool.content.as_ref().unwrap();
+        assert!(content.starts_with("[bash]"));
+        assert!(content.contains("exit 0"));
+        assert!(!content.contains(&big_output));
     }
 
     #[test]
-    fn test_trim_tool_loop_preserves_prefix() {
+    fn test_smart_trim_preserves_tool_call_structure() {
+        let initial_len = 1;
+        let mut msgs = vec![make_msg("system", "sys")];
+        let big_output: String = "y".repeat(40_000);
+        for i in 0..10 {
+            msgs.push(make_tool_call_msg(&format!("c{}", i), "read_file"));
+            msgs.push(make_tool_result_msg(&format!("c{}", i), &big_output));
+        }
+
+        smart_trim_tool_loop(&mut msgs, initial_len);
+
+        // All assistant messages should still have tool_calls
+        for msg in &msgs {
+            if msg.role == "assistant" {
+                assert!(msg.tool_calls.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn test_smart_trim_preserves_prefix_entirely() {
         let initial_len = 5;
         let mut msgs = vec![
             make_msg("system", "sys"),
@@ -1976,19 +2208,55 @@ mod tests {
             make_msg("user", "previous question"),
             make_msg("assistant", "previous answer"),
         ];
+        let big_output: String = "z".repeat(40_000);
         for i in 0..10 {
             msgs.push(make_tool_call_msg(&format!("c{}", i), "bash"));
-            msgs.push(make_tool_result_msg(
-                &format!("c{}", i),
-                &format!("out{}", i),
-            ));
+            msgs.push(make_tool_result_msg(&format!("c{}", i), &big_output));
         }
 
-        trim_tool_loop_messages(&mut msgs, initial_len, 4);
+        smart_trim_tool_loop(&mut msgs, initial_len);
 
-        // Prefix (first 5) unchanged
         assert_eq!(msgs[0].content.as_deref(), Some("sys"));
         assert_eq!(msgs[4].content.as_deref(), Some("previous answer"));
+    }
+
+    #[test]
+    fn test_summarize_bash_tool_output() {
+        let args = r#"{"command": "npm test"}"#;
+        let output = "<stdout>\nOK\n</stdout>\n<return_code>\n0\n</return_code>";
+        let summary = summarize_tool_output("bash", args, output);
+        assert!(summary.contains("[bash]"));
+        assert!(summary.contains("`npm test`"));
+        assert!(summary.contains("exit 0"));
+    }
+
+    #[test]
+    fn test_summarize_read_file_output() {
+        let args = r#"{"path": "/src/main.rs", "offset": 10}"#;
+        let output = "fn main() { ... }";
+        let summary = summarize_tool_output("read_file", args, output);
+        assert!(summary.contains("[read_file]"));
+        assert!(summary.contains("/src/main.rs"));
+        assert!(summary.contains("line 10"));
+    }
+
+    #[test]
+    fn test_summarize_grep_output() {
+        let args = r#"{"pattern": "TODO", "path": "src/"}"#;
+        let output = "file1.rs:1: TODO fix\nfile2.rs:5: TODO refactor";
+        let summary = summarize_tool_output("grep", args, output);
+        assert!(summary.contains("[grep]"));
+        assert!(summary.contains("TODO"));
+        assert!(summary.contains("src/"));
+    }
+
+    #[test]
+    fn test_summarize_unknown_tool() {
+        let args = r#"{"key": "value"}"#;
+        let output = "some result";
+        let summary = summarize_tool_output("custom_tool", args, output);
+        assert!(summary.contains("[custom_tool]"));
+        assert!(summary.contains("11 chars"));
     }
 
     #[test]

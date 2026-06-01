@@ -104,7 +104,7 @@ pub fn check_connectivity(
                 let body_text = resp.text().unwrap_or_default();
                 let detail = if body_text.len() > 300 {
                     let mut end = 300;
-                    while !body_text.is_char_boundary(end) {
+                    while end > 0 && !body_text.is_char_boundary(end) {
                         end -= 1;
                     }
                     format!("{}...", &body_text[..end])
@@ -209,7 +209,7 @@ pub fn check_tool_support(
                 let body_text = resp.text().unwrap_or_default();
                 let detail = if body_text.len() > 300 {
                     let mut end = 300;
-                    while !body_text.is_char_boundary(end) {
+                    while end > 0 && !body_text.is_char_boundary(end) {
                         end -= 1;
                     }
                     format!("{}...", &body_text[..end])

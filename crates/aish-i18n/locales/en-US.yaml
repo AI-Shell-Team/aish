@@ -395,6 +395,10 @@ shell:
       redact: "Replace with env vars (safe)"
       allow: "Send plaintext to AI"
       abort: "Cancel"
+      redact_desc: "Replace with placeholders"
+      allow_desc: "Send original content"
+      abort_desc: "Cancel operation"
+      help: "← →: Move | Enter: Select | Esc: Abort"
       aborted: "Aborted: sensitive data detected."
       redacted: "Replaced {count} secret(s) with env var placeholders (stored in memory only, not sent to AI)"
       restored: "(Restored {count} env var(s) from in-memory vault, not sent to AI)"
@@ -446,6 +450,13 @@ shell:
     no_matches: "No matching sessions."
     current_marker: "(current)"
     selector_footer: "Type to search · ↑/↓ to select · Enter to resume · Esc to cancel"
+
+  panel:
+    history_title: "Output History ({count} records)"
+    expand_title: "{command} ({count} lines)"
+    lines_label: "lines"
+    expand_footer: " ↑↓/PgUp/PgDn scroll · Ctrl+O/Esc close "
+    history_footer: " ↑↓ Select · Enter View · Ctrl+O/Esc Close "
 
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; and press Enter to auto-analyze and fix, or enter the next command directly."

@@ -121,6 +121,7 @@ impl Tool for AskUserTool {
             .unwrap_or(true);
         let min_length = args.get("min_length").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
+        // Guard: pause background stdin readers (esc_watcher) while we read.
         let _interactive_input_guard = match kind {
             "choice_or_text" | "text_input" => Some(acquire_interactive_input_guard()),
             _ => None,

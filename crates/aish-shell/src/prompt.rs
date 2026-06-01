@@ -63,9 +63,11 @@ fn abbreviate_path(path: &str, home: &str) -> String {
         } else if i == parts.len() - 1 {
             result.push('/');
             result.push_str(part);
-        } else if let Some(ch) = part.chars().next() {
+        } else if !part.is_empty() {
             result.push('/');
-            result.push(ch);
+            if let Some(ch) = part.chars().next() {
+                result.push(ch);
+            }
         }
     }
     result
@@ -322,19 +324,25 @@ mod tests {
     }
 
     #[test]
-    fn test_abbreviate_path_chinese() {
-        // Chinese characters are 3 bytes in UTF-8, must use char-based indexing
-        let home = "/home/user";
-        let path = "/home/user/桌面/测试目录/项目文件";
-        let result = abbreviate_path(path, home);
-        assert_eq!(result, "~/桌/测/项目文件");
-    }
-
-    #[test]
     fn test_abbreviate_path_outside_home() {
         // Paths outside home still get abbreviated when they have > 2 components
         let result = abbreviate_path("/usr/local/bin", "/home/user");
         assert_eq!(result, "/u/l/bin");
+    }
+
+    #[test]
+    fn test_abbreviate_path_chinese() {
+        // CJK path components should use their first character
+        let home = "/home/user";
+        let result = abbreviate_path("/home/user/桌面/测试/项目文件", home);
+        assert_eq!(result, "~/桌/测/项目文件");
+    }
+
+    #[test]
+    fn test_abbreviate_path_single_middle() {
+        // Path with only one middle component (edge case for >= 3 parts)
+        let result = abbreviate_path("/home/user/projects", "/home/user");
+        assert_eq!(result, "~/projects");
     }
 
     #[test]

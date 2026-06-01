@@ -226,7 +226,7 @@ impl PersistentPty {
         let stdin_fd = libc::STDIN_FILENO;
         let stdin_borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(stdin_fd) };
         let saved_termios = tcgetattr(stdin_borrowed).ok();
-        if let Some(ref saved) = saved_termios {
+        let pty_raw_termios = saved_termios.as_ref().map(|saved| {
             let mut raw = saved.clone();
             use nix::sys::termios::{ControlFlags, InputFlags, LocalFlags};
             raw.local_flags &= !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ISIG);
@@ -236,12 +236,12 @@ impl PersistentPty {
             raw.control_chars[libc::VMIN] = 1;
             raw.control_chars[libc::VTIME] = 0;
             let _ = tcsetattr(stdin_borrowed, SetArg::TCSANOW, &raw);
-        }
+            raw
+        });
 
         let deadline = std::time::Instant::now() + timeout;
         let mut result_exit_code: i32 = -1;
         let mut cancelled = false;
-
         // Select-based I/O loop.
         'select_loop: while std::time::Instant::now() < deadline {
             // Check external cancellation.
@@ -305,6 +305,18 @@ impl PersistentPty {
                                 ct.cancel();
                             }
                             cancelled = true;
+                        } else if data.contains(&0x0f) {
+                            // Ctrl+O: invoke the live output viewer (blocks until closed).
+                            // Restore terminal from PTY raw mode so the panel can use it.
+                            // TCSANOW: must switch immediately so invoke() gets a usable terminal.
+                            if let Some(ref saved) = saved_termios {
+                                let _ = tcsetattr(stdin_borrowed, SetArg::TCSANOW, saved);
+                            }
+                            let buf = self.exec_buffer.lock().unwrap().clone();
+                            crate::ctrl_o::invoke(&buf);
+                            if let Some(ref raw) = pty_raw_termios {
+                                let _ = tcsetattr(stdin_borrowed, SetArg::TCSADRAIN, raw);
+                            }
                         } else {
                             // Forward everything else (including Ctrl+Z = 0x1a)
                             // to the PTY so bash handles it natively.
@@ -2297,8 +2309,11 @@ impl PersistentPty {
 
     /// Drain remaining master_fd output into the exec buffer.
     /// Used by execute_command() to capture all output before returning.
+    /// Retries with a small sleep to catch data still in flight from
+    /// pipeline commands (e.g. `cat | sort | grep`).
     fn drain_master_to_exec_buffer(&self) {
         let mut tmp = [0u8; 8192];
+        let mut retries = 0;
         loop {
             match unsafe {
                 libc::read(
@@ -2308,6 +2323,7 @@ impl PersistentPty {
                 )
             } {
                 n if n > 0 => {
+                    retries = 0;
                     if self.exec_mode.load(Ordering::SeqCst) {
                         self.exec_buffer
                             .lock()
@@ -2315,7 +2331,17 @@ impl PersistentPty {
                             .extend_from_slice(&tmp[..n as usize]);
                     }
                 }
-                _ => break,
+                _ => {
+                    // No data available right now — retry a few times
+                    // to catch output still in flight from pipeline
+                    // commands.  The control event (prompt_ready) can
+                    // arrive before the last chunk of master_fd output.
+                    retries += 1;
+                    if retries >= 5 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
         }
     }

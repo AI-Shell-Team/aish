@@ -34,6 +34,9 @@ const COMPLETION_TIMEOUT: Duration = Duration::from_millis(500);
 /// Flag set by `ModeToggleHandler` when Shift+Tab or F2 is pressed.
 static MODE_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Flag set by `CtrlOHandler` when Ctrl+O is pressed.
+static CTRL_O_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// Event handler that sets a flag when Shift+Tab or F2 is pressed,
 /// then returns `Cmd::Interrupt` to break out of `read_line`.
 struct ModeToggleHandler;
@@ -47,6 +50,23 @@ impl ConditionalEventHandler for ModeToggleHandler {
         _ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
         MODE_TOGGLE_REQUESTED.store(true, Ordering::SeqCst);
+        Some(Cmd::Interrupt)
+    }
+}
+
+/// Event handler that sets a flag when Ctrl+O is pressed,
+/// then returns `Cmd::Interrupt` to break out of `read_line`.
+struct CtrlOHandler;
+
+impl ConditionalEventHandler for CtrlOHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        CTRL_O_REQUESTED.store(true, Ordering::SeqCst);
         Some(Cmd::Interrupt)
     }
 }
@@ -278,6 +298,12 @@ impl ShellReadline {
             EventHandler::Conditional(Box::new(ModeToggleHandler)),
         );
 
+        // Bind Ctrl+O for expand/collapsed output browsing
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Char('O'), Modifiers::CTRL),
+            EventHandler::Conditional(Box::new(CtrlOHandler)),
+        );
+
         Ok(Self {
             editor,
             autosuggest,
@@ -288,6 +314,12 @@ impl ShellReadline {
     /// last `Interrupted` error. The flag is consumed on read.
     pub fn was_mode_toggle_requested(&self) -> bool {
         MODE_TOGGLE_REQUESTED.swap(false, Ordering::SeqCst)
+    }
+
+    /// Check whether Ctrl+O triggered the last `Interrupted` error.
+    /// The flag is consumed on read.
+    pub fn was_ctrl_o_requested(&self) -> bool {
+        CTRL_O_REQUESTED.swap(false, Ordering::SeqCst)
     }
 
     /// Read a line with the given prompt.
