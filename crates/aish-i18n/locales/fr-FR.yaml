@@ -240,6 +240,15 @@ shell:
     current_marker: "(actuelle)"
     selector_footer: "Tapez pour rechercher · ↑/↓ pour selectionner · Enter pour reprendre · Esc pour annuler"
   ask_user:
+    default_title: "Saisie utilisateur requise"
+    default_hint: "[defaut : {value}]"
+    custom_input_label: "(saisir une reponse personnalisee)"
+    footer: "Enter pour confirmer · ↑/↓ pour naviguer · Esc pour annuler"
+    cancel_hint: "Appuyez sur Entree avec une saisie vide pour annuler."
+    required_error: "Une reponse est requise."
+    min_length_error: "Reponse trop courte (minimum {min} caracteres)."
+    interactive_terminal_required: "ask_user requiert un terminal interactif"
+    recommended_badge: "Recommande"
     title: "Selectionnez une option"
     custom_label: "Personnalise :"
     hint_select: "Entree pour confirmer · ↑/↓ pour naviguer · Esc pour annuler"
@@ -304,6 +313,41 @@ security:
   command_blocked_with_reason: "Erreur : commande bloquee par le systeme de securite : {reason}"
 
 tools:
+  ask_user:
+    description: "Poser a l'utilisateur une question de clarification ciblee. Avec seulement prompt, ask_user utilise la saisie texte ; avec options, il propose des choix."
+    unknown_kind: "Type inconnu : {kind}"
+    runtime_not_configured: "le runtime ask_user n'est pas configure"
+    execute_failed: "echec de ask_user : {error}"
+    param:
+      kind: "Type d'interaction : text_input pour saisie libre, choice_or_text pour options avec saisie personnalisee"
+      prompt: "La question a poser a l'utilisateur."
+      options: "Choix optionnels a proposer a l'utilisateur. S'ils sont absents ou vides, ask_user utilise la saisie texte."
+      option_value: "Valeur stable de l'option retournee dans les metadonnees de l'outil."
+      option_label: "Libelle affiche a l'utilisateur dans la liste."
+      option_description: "Detail optionnel affiche sous l'option."
+      option_recommended: "Marque visiblement cette option comme recommandee."
+      title: "Titre optionnel pour la question"
+      default: "Valeur par defaut"
+      placeholder: "Texte indicatif"
+      allow_freeform_input: "Quand des options sont presentes, autorise une reponse personnalisee. La valeur par defaut est true."
+      required: "Indique si l'utilisateur doit fournir une reponse (par defaut : true)"
+      allow_cancel: "Indique si l'utilisateur peut annuler/ignorer (par defaut : true)"
+      min_length: "Longueur minimale pour la saisie texte (par defaut : 0)"
+    validation:
+      prompt_empty: "prompt ne peut pas etre vide"
+      option_value_empty: "option value ne peut pas etre vide"
+      option_label_empty: "option label ne peut pas etre vide"
+      option_values_unique: "option value doit etre unique"
+      option_labels_unique: "option label doit etre unique"
+      recommended_unique: "une seule option peut etre marquee comme recommandee au maximum"
+      default_must_match_option: "default doit correspondre a un option value"
+      legacy_choice_requires_options: "options doit etre une liste non vide pour choice_or_text"
+    result:
+      selected: "L'utilisateur a choisi : {label} (valeur : {value})"
+      text: "Saisie utilisateur : {value}"
+      empty_answer: "L'utilisateur a fourni une reponse vide."
+      cancelled: "L'utilisateur a annule la question."
+
   smart_log:
     description: "Determine automatiquement les sources de journaux, analyse les logs selon la requete et renvoie un resume correspondant."
     param:

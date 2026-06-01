@@ -240,6 +240,15 @@ shell:
     current_marker: "(現在)"
     selector_footer: "入力して検索 · ↑/↓ で選択 · Enter で復元 · Esc でキャンセル"
   ask_user:
+    default_title: "ユーザー入力が必要です"
+    default_hint: "[既定値: {value}]"
+    custom_input_label: "（カスタム回答を入力）"
+    footer: "Enter で確定 · ↑/↓ で移動 · Esc でキャンセル"
+    cancel_hint: "空入力のまま Enter でキャンセルします。"
+    required_error: "回答は必須です。"
+    min_length_error: "回答が短すぎます（最小 {min} 文字）。"
+    interactive_terminal_required: "ask_user には対話型端末が必要です"
+    recommended_badge: "推奨"
     title: "オプションを選択"
     custom_label: "カスタム:"
     hint_select: "Enter で選択 ・ ↑/↓ で移動 ・ Esc でキャンセル"
@@ -304,6 +313,41 @@ security:
   command_blocked_with_reason: "エラー: コマンドはセキュリティシステムによりブロックされました: {reason}"
 
 tools:
+  ask_user:
+    description: "ユーザーに焦点を絞った確認質問をします。prompt のみならテキスト入力、options があれば選択肢を提示します。"
+    unknown_kind: "不明な種類です: {kind}"
+    runtime_not_configured: "ask_user ランタイムが構成されていません"
+    execute_failed: "ask_user に失敗しました: {error}"
+    param:
+      kind: "操作タイプ: text_input は自由入力、choice_or_text は選択肢とカスタム入力"
+      prompt: "ユーザーに尋ねる質問です。"
+      options: "ユーザーに提示する任意の選択肢です。省略または空の場合、ask_user はテキスト入力を使います。"
+      option_value: "ツールメタデータに返される安定した選択肢の値です。"
+      option_label: "選択リストに表示されるユーザー向けラベルです。"
+      option_description: "選択肢の下に表示される任意の補足説明です。"
+      option_recommended: "この選択肢を推奨として明示表示します。"
+      title: "質問の任意タイトル"
+      default: "既定値"
+      placeholder: "プレースホルダーテキスト"
+      allow_freeform_input: "選択肢がある場合にカスタム回答を許可します。既定値は true です。"
+      required: "ユーザーが回答を入力する必要があるかどうか（既定値: true）"
+      allow_cancel: "ユーザーがキャンセル/スキップできるかどうか（既定値: true）"
+      min_length: "テキスト入力の最小文字数（既定値: 0）"
+    validation:
+      prompt_empty: "prompt は空にできません"
+      option_value_empty: "option value は空にできません"
+      option_label_empty: "option label は空にできません"
+      option_values_unique: "option value は一意である必要があります"
+      option_labels_unique: "option label は一意である必要があります"
+      recommended_unique: "推奨としてマークできる選択肢は最大 1 つです"
+      default_must_match_option: "default はいずれかの option value と一致する必要があります"
+      legacy_choice_requires_options: "choice_or_text では options に空でない配列が必要です"
+    result:
+      selected: "ユーザーが選択しました: {label}（値: {value}）"
+      text: "ユーザー入力: {value}"
+      empty_answer: "ユーザーは空の回答を返しました。"
+      cancelled: "ユーザーが質問をキャンセルしました。"
+
   smart_log:
     description: "ログソースを自動判定し、問い合わせに基づいてログを解析し、一致する要約を返します。"
     param:

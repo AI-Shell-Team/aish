@@ -1,29 +1,163 @@
-//! Ask-user tool for local interactive prompts.
-//!
-//! choice_or_text: shared selection panel with inline custom input.
-//!
-//! text_input: `inquire::Text` with optional default.
+use std::io;
+use std::sync::{Arc, OnceLock};
 
-use std::io::{self, Write};
-
-use aish_i18n;
+use aish_i18n::{t, t_with_args};
 use aish_llm::{Tool, ToolResult};
-use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime, SearchSelectItem};
+use serde::Deserialize;
 
-use crate::bash::acquire_interactive_input_guard;
-
-/// Cached translated description.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.ask_user.description"))
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AskUserOption {
+    pub value: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub recommended: bool,
 }
 
-fn get_custom_input_label() -> String {
-    aish_i18n::t("tools.ask_user.custom_input_label")
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskUserRequest {
+    pub prompt: String,
+    pub options: Vec<AskUserOption>,
+    pub title: Option<String>,
+    pub default: Option<String>,
+    pub placeholder: Option<String>,
+    pub allow_freeform_input: bool,
+    pub required: bool,
+    pub allow_cancel: bool,
+    pub min_length: usize,
 }
 
-pub struct AskUserTool;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskUserResponse {
+    Selected {
+        value: String,
+        label: String,
+        description: Option<String>,
+    },
+    Text(String),
+    Cancelled,
+}
+
+pub type AskUserRuntime = Arc<dyn Fn(&AskUserRequest) -> io::Result<AskUserResponse> + Send + Sync>;
+
+#[derive(Debug, Deserialize)]
+struct RawAskUserRequest {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    options: Vec<AskUserOption>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    default: Option<String>,
+    #[serde(default)]
+    placeholder: Option<String>,
+    #[serde(default)]
+    allow_freeform_input: Option<bool>,
+    #[serde(default = "default_required")]
+    required: bool,
+    #[serde(default = "default_allow_cancel")]
+    allow_cancel: bool,
+    #[serde(default)]
+    min_length: usize,
+}
+
+fn default_required() -> bool {
+    true
+}
+
+fn default_allow_cancel() -> bool {
+    true
+}
+
+fn default_allow_freeform_input() -> bool {
+    true
+}
+
+static DESCRIPTION: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn ask_user_description() -> &'static str {
+    DESCRIPTION.get_or_init(|| t("tools.ask_user.description"))
+}
+
+pub(crate) fn ask_user_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": t("tools.ask_user.param.prompt")
+            },
+            "options": {
+                "type": "array",
+                "description": t("tools.ask_user.param.options"),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "value": {
+                            "type": "string",
+                            "description": t("tools.ask_user.param.option_value")
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": t("tools.ask_user.param.option_label")
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": t("tools.ask_user.param.option_description")
+                        },
+                        "recommended": {
+                            "type": "boolean",
+                            "description": t("tools.ask_user.param.option_recommended")
+                        }
+                    },
+                    "required": ["value", "label"]
+                }
+            },
+            "title": {
+                "type": "string",
+                "description": t("tools.ask_user.param.title")
+            },
+            "default": {
+                "type": "string",
+                "description": t("tools.ask_user.param.default")
+            },
+            "placeholder": {
+                "type": "string",
+                "description": t("tools.ask_user.param.placeholder")
+            },
+            "allow_freeform_input": {
+                "type": "boolean",
+                "description": t("tools.ask_user.param.allow_freeform_input"),
+                "default": true
+            },
+            "required": {
+                "type": "boolean",
+                "description": t("tools.ask_user.param.required"),
+                "default": true
+            },
+            "allow_cancel": {
+                "type": "boolean",
+                "description": t("tools.ask_user.param.allow_cancel"),
+                "default": true
+            },
+            "min_length": {
+                "type": "integer",
+                "minimum": 0,
+                "description": t("tools.ask_user.param.min_length"),
+                "default": 0
+            }
+        },
+        "required": ["prompt"]
+    })
+}
+
+pub struct AskUserTool {
+    runtime: Option<AskUserRuntime>,
+}
 
 impl Default for AskUserTool {
     fn default() -> Self {
@@ -33,7 +167,17 @@ impl Default for AskUserTool {
 
 impl AskUserTool {
     pub fn new() -> Self {
-        Self
+        Self { runtime: None }
+    }
+
+    pub fn with_runtime(runtime: AskUserRuntime) -> Self {
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    pub fn set_runtime(&mut self, runtime: AskUserRuntime) {
+        self.runtime = Some(runtime);
     }
 }
 
@@ -43,409 +187,317 @@ impl Tool for AskUserTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        ask_user_description()
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["text_input", "choice_or_text"],
-                    "description": "Interaction type: text_input for free-form, choice_or_text for options with custom input"
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "The question to ask the user"
-                },
-                "options": {
-                    "type": "array",
-                    "description": "Predefined options for choice_or_text",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "value": {"type": "string"},
-                            "label": {"type": "string"},
-                            "description": {"type": "string"}
-                        },
-                        "required": ["value", "label"]
-                    }
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Optional title for the question"
-                },
-                "default": {
-                    "type": "string",
-                    "description": "Default value"
-                },
-                "placeholder": {
-                    "type": "string",
-                    "description": "Placeholder text"
-                },
-                "required": {
-                    "type": "boolean",
-                    "description": "Whether the user must provide an answer (default: true)",
-                    "default": true
-                },
-                "allow_cancel": {
-                    "type": "boolean",
-                    "description": "Whether the user can cancel/skip (default: true)",
-                    "default": true
-                },
-                "min_length": {
-                    "type": "integer",
-                    "description": "Minimum length for text input (default: 0)",
-                    "default": 0
-                }
-            },
-            "required": ["kind", "prompt"]
-        })
+        ask_user_parameters()
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
-        let kind = args
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("text_input");
-        let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return ToolResult::error(aish_i18n::t("tools.ask_user.missing_prompt")),
-        };
-        let title = args.get("title").and_then(|v| v.as_str());
-        let default = args.get("default").and_then(|v| v.as_str());
-        let allow_cancel = args
-            .get("allow_cancel")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let min_length = args.get("min_length").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-        // Guard: pause background stdin readers (esc_watcher) while we read.
-        let _interactive_input_guard = match kind {
-            "choice_or_text" | "text_input" => Some(acquire_interactive_input_guard()),
-            _ => None,
+        let request = match parse_args(args) {
+            Ok(request) => request,
+            Err(message) => return ToolResult::error(message),
         };
 
-        match kind {
-            "choice_or_text" => {
-                self.handle_choice_or_text(title, prompt, &args, default, allow_cancel)
-            }
-            "text_input" => {
-                self.handle_text_input(title, prompt, default, allow_cancel, min_length)
-            }
-            _ => {
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("kind".to_string(), kind.to_string());
-                ToolResult::error(aish_i18n::t_with_args(
-                    "tools.ask_user.unknown_kind",
-                    &args_map,
-                ))
-            }
+        let Some(runtime) = self.runtime.as_ref() else {
+            return ToolResult::error(t("tools.ask_user.runtime_not_configured"));
+        };
+
+        match runtime(&request) {
+            Ok(response) => answer_to_result(response),
+            Err(err) => ToolResult::error(t_with_args(
+                "tools.ask_user.execute_failed",
+                &std::collections::HashMap::from([("error".to_string(), err.to_string())]),
+            )),
         }
     }
 }
 
-impl AskUserTool {
-    fn handle_choice_or_text(
-        &self,
-        title: Option<&str>,
-        prompt: &str,
-        args: &serde_json::Value,
-        default: Option<&str>,
-        allow_cancel: bool,
-    ) -> ToolResult {
-        let options = match args.get("options").and_then(|v| v.as_array()) {
-            Some(opts) if !opts.is_empty() => opts,
-            _ => return ToolResult::error(aish_i18n::t("tools.ask_user.options_not_empty")),
-        };
+pub(crate) fn parse_args(value: serde_json::Value) -> Result<AskUserRequest, String> {
+    let raw: RawAskUserRequest = serde_json::from_value(value).map_err(|err| err.to_string())?;
+    let request = normalize_args(raw)?;
 
-        // Loop only handles required prompts that cannot be cancelled.
-        loop {
-            match self.run_choice_panel(title, prompt, options, default, allow_cancel) {
-                Ok(PanelOutcome::Submitted(ChoiceOutcome::Selected(value))) => {
-                    return ToolResult::success(value);
-                }
-                Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(text))) => {
-                    return ToolResult::success(format_custom_user_input(text));
-                }
-                Ok(PanelOutcome::Cancelled) => {
-                    // Esc pressed at Select level.
-                    if allow_cancel {
-                        if let Some(d) = default {
-                            return ToolResult::success(d.to_string());
-                        }
-                        return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
-                    }
-                    // Not allowed to cancel — loop back.
-                    continue;
-                }
-                Err(_) => {
-                    return self.fallback_choice_or_text(
-                        title,
-                        prompt,
-                        options,
-                        default,
-                        allow_cancel,
-                    )
-                }
+    if request.prompt.trim().is_empty() {
+        return Err(t("tools.ask_user.validation.prompt_empty"));
+    }
+
+    let mut option_values = std::collections::HashSet::new();
+    let mut option_labels = std::collections::HashSet::new();
+    let mut recommended_count = 0usize;
+
+    for option in &request.options {
+        if option.value.trim().is_empty() {
+            return Err(t("tools.ask_user.validation.option_value_empty"));
+        }
+        if option.label.trim().is_empty() {
+            return Err(t("tools.ask_user.validation.option_label_empty"));
+        }
+        if !option_values.insert(option.value.trim().to_string()) {
+            return Err(t("tools.ask_user.validation.option_values_unique"));
+        }
+        if !option_labels.insert(option.label.trim().to_string()) {
+            return Err(t("tools.ask_user.validation.option_labels_unique"));
+        }
+        if option.recommended {
+            recommended_count += 1;
+        }
+        if recommended_count > 1 {
+            return Err(t("tools.ask_user.validation.recommended_unique"));
+        }
+    }
+
+    if !request.options.is_empty() {
+        if let Some(default) = &request.default {
+            if !request
+                .options
+                .iter()
+                .any(|option| option.value == *default)
+            {
+                return Err(t("tools.ask_user.validation.default_must_match_option"));
             }
         }
     }
 
-    fn run_choice_panel(
-        &self,
-        title: Option<&str>,
-        prompt: &str,
-        options: &[serde_json::Value],
-        default: Option<&str>,
-        allow_cancel: bool,
-    ) -> Result<PanelOutcome<ChoiceOutcome>, aish_ui::PanelError> {
-        let panel_items = options
-            .iter()
-            .map(|option| {
-                let value = option_value(option).to_string();
-                let label = option_label(option).to_string();
-                let mut item = SearchSelectItem::new(value.clone(), label.clone());
-                if let Some(description) = option_description(option) {
-                    item = item.with_detail(description.to_string());
+    Ok(request)
+}
+
+fn normalize_args(raw: RawAskUserRequest) -> Result<AskUserRequest, String> {
+    if let Some(kind) = raw.kind.as_deref() {
+        match kind {
+            "text_input" => {
+                if !raw.options.is_empty() {
+                    tracing::warn!(
+                        "ask_user received legacy kind=text_input with options; inferring choice mode from options"
+                    );
                 }
-                item.with_search_text(format!(
-                    "{} {} {}",
-                    value,
-                    label,
-                    option_description(option).unwrap_or("")
-                ))
-            })
-            .collect();
-
-        let help_msg = if allow_cancel {
-            aish_i18n::t("tools.ask_user.help_select_with_cancel")
-        } else {
-            aish_i18n::t("tools.ask_user.help_select_no_cancel")
-        };
-        let panel = ChoicePanel::new(title.unwrap_or_default(), prompt, panel_items)
-            .with_custom_label(get_custom_input_label())
-            .with_selected_value(default)
-            .with_allow_cancel(allow_cancel)
-            .with_custom_input_footer(if allow_cancel {
-                aish_i18n::t("tools.ask_user.custom_input_help_cancel")
-            } else {
-                aish_i18n::t("tools.ask_user.custom_input_help_no_cancel")
-            })
-            .with_footer(help_msg);
-
-        PanelRuntime::new().run(panel)
-    }
-
-    fn handle_text_input(
-        &self,
-        title: Option<&str>,
-        prompt: &str,
-        default: Option<&str>,
-        allow_cancel: bool,
-        min_length: usize,
-    ) -> ToolResult {
-        let display_prompt = match title {
-            Some(t) => format!("{}: {}", t, prompt),
-            None => prompt.to_string(),
-        };
-
-        let help_msg = if allow_cancel {
-            aish_i18n::t("tools.ask_user.custom_input_help_cancel")
-        } else {
-            String::new()
-        };
-
-        let mut text = inquire::Text::new(&display_prompt).with_help_message(&help_msg);
-        if let Some(d) = default {
-            text = text.with_default(d);
-        }
-
-        match text.prompt() {
-            Ok(answer) => {
-                let trimmed = answer.trim().to_string();
-                if trimmed.is_empty() {
-                    if let Some(d) = default {
-                        return ToolResult::success(d.to_string());
-                    }
-                    if allow_cancel {
-                        return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
-                    }
-                    return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
-                }
-                if trimmed.len() < min_length {
-                    let mut args_map = std::collections::HashMap::new();
-                    args_map.insert("min_length".to_string(), min_length.to_string());
-                    return ToolResult::error(aish_i18n::t_with_args(
-                        "tools.ask_user.answer_too_short",
-                        &args_map,
+            }
+            "choice_or_text" => {
+                if raw.options.is_empty() {
+                    return Err(t(
+                        "tools.ask_user.validation.legacy_choice_requires_options",
                     ));
                 }
-                let mut args_map = std::collections::HashMap::new();
-                args_map.insert("input".to_string(), trimmed.clone());
-                ToolResult::success(aish_i18n::t_with_args(
-                    "tools.ask_user.user_input_prefix",
-                    &args_map,
-                ))
+                if matches!(raw.allow_freeform_input, Some(false)) {
+                    tracing::warn!(
+                        "ask_user received legacy kind=choice_or_text with allow_freeform_input=false; using explicit field value"
+                    );
+                }
             }
-            Err(_) => self.fallback_text_input(title, prompt, default, allow_cancel, min_length),
+            _ => {
+                return Err(t_with_args(
+                    "tools.ask_user.unknown_kind",
+                    &std::collections::HashMap::from([("kind".to_string(), kind.to_string())]),
+                ));
+            }
         }
     }
 
-    // ---------- stdin fallback (non-interactive / pipe) ----------
+    let prompt = raw
+        .prompt
+        .ok_or_else(|| t("tools.ask_user.validation.prompt_empty"))?;
 
-    fn fallback_text_input(
-        &self,
-        title: Option<&str>,
-        prompt: &str,
-        default: Option<&str>,
-        allow_cancel: bool,
-        min_length: usize,
-    ) -> ToolResult {
-        if let Some(t) = title {
-            println!("\x1b[1m{}\x1b[0m", t);
-        }
-        println!("\x1b[36m{}\x1b[0m", prompt);
-        if allow_cancel {
-            println!("  \x1b[2m(press Enter with empty input to cancel)\x1b[0m");
-        }
-        if let Some(d) = default {
-            print!("\x1b[2m[default: {}]\x1b[0m Your answer: ", d);
-        } else {
-            print!("Your answer: ");
-        }
-        let _ = io::stdout().flush();
+    Ok(AskUserRequest {
+        prompt,
+        options: raw.options,
+        title: raw.title,
+        default: raw.default,
+        placeholder: raw.placeholder,
+        allow_freeform_input: raw
+            .allow_freeform_input
+            .unwrap_or_else(default_allow_freeform_input),
+        required: raw.required,
+        allow_cancel: raw.allow_cancel,
+        min_length: raw.min_length,
+    })
+}
 
-        let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_err() {
-            return ToolResult::error(aish_i18n::t("tools.ask_user.read_input_failed"));
-        }
-        let answer = answer.trim().to_string();
-
-        if answer.is_empty() {
-            if let Some(d) = default {
-                return ToolResult::success(d.to_string());
-            }
-            if allow_cancel {
-                return ToolResult::success("(cancelled)".to_string());
-            }
-            return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
-        }
-
-        if answer.len() < min_length {
-            let mut args_map = std::collections::HashMap::new();
-            args_map.insert("min_length".to_string(), min_length.to_string());
-            return ToolResult::error(aish_i18n::t_with_args(
-                "tools.ask_user.answer_too_short",
-                &args_map,
-            ));
-        }
-
-        let mut args_map = std::collections::HashMap::new();
-        args_map.insert("input".to_string(), answer.clone());
-        ToolResult::success(aish_i18n::t_with_args(
-            "tools.ask_user.user_input_prefix",
-            &args_map,
-        ))
+pub(crate) fn answer_to_result(answer: AskUserResponse) -> ToolResult {
+    match answer {
+        AskUserResponse::Selected {
+            value,
+            label,
+            description,
+        } => ToolResult {
+            ok: true,
+            output: t_with_args(
+                "tools.ask_user.result.selected",
+                &std::collections::HashMap::from([
+                    ("label".to_string(), label.clone()),
+                    ("value".to_string(), value.clone()),
+                ]),
+            ),
+            meta: Some(serde_json::json!({
+                "tool": "ask_user",
+                "status": "answered",
+                "answer_type": "option",
+                "value": value,
+                "label": label,
+                "description": description,
+            })),
+        },
+        AskUserResponse::Text(value) => ToolResult {
+            ok: true,
+            output: if value.is_empty() {
+                t("tools.ask_user.result.empty_answer")
+            } else {
+                t_with_args(
+                    "tools.ask_user.result.text",
+                    &std::collections::HashMap::from([("value".to_string(), value.clone())]),
+                )
+            },
+            meta: Some(serde_json::json!({
+                "tool": "ask_user",
+                "status": "answered",
+                "answer_type": "text",
+                "value": value,
+            })),
+        },
+        AskUserResponse::Cancelled => ToolResult {
+            ok: true,
+            output: t("tools.ask_user.result.cancelled"),
+            meta: Some(serde_json::json!({
+                "tool": "ask_user",
+                "status": "cancelled",
+            })),
+        },
     }
+}
 
-    fn fallback_choice_or_text(
-        &self,
-        title: Option<&str>,
-        prompt: &str,
-        options: &[serde_json::Value],
-        default: Option<&str>,
-        allow_cancel: bool,
-    ) -> ToolResult {
-        if let Some(t) = title {
-            println!("\x1b[1m{}\x1b[0m", t);
-        }
-        println!("\x1b[36m{}\x1b[0m", prompt);
-        for (index, option) in options.iter().enumerate() {
-            match option_description(option) {
-                Some(description) => println!(
-                    "  \x1b[33m{}.\x1b[0m {} - {}",
-                    index + 1,
-                    option_label(option),
-                    description
-                ),
-                None => println!("  \x1b[33m{}.\x1b[0m {}", index + 1, option_label(option)),
-            }
-        }
-        println!(
-            "  \x1b[33m0.\x1b[0m \x1b[2m{}\x1b[0m",
-            get_custom_input_label()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameters_only_require_prompt() {
+        let required = ask_user_parameters()["required"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            required,
+            vec![serde_json::Value::String("prompt".to_string())]
         );
-        if allow_cancel {
-            println!("  \x1b[2m(press Enter with empty input to cancel)\x1b[0m");
-        }
-        print!("Your answer: ");
-        let _ = io::stdout().flush();
-
-        let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_err() {
-            return ToolResult::error(aish_i18n::t("tools.ask_user.read_input_failed"));
-        }
-        let answer = answer.trim().to_string();
-
-        if answer.is_empty() {
-            if let Some(d) = default {
-                return ToolResult::success(d.to_string());
-            }
-            if allow_cancel {
-                return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
-            }
-            return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
-        }
-
-        if let Ok(selection) = answer.parse::<usize>() {
-            if selection > 0 && selection <= options.len() {
-                return ToolResult::success(option_value(&options[selection - 1]).to_string());
-            }
-            if selection == 0 {
-                return self.fallback_custom_input(default, allow_cancel);
-            }
-        }
-
-        ToolResult::success(format_custom_user_input(answer))
     }
 
-    fn fallback_custom_input(&self, default: Option<&str>, allow_cancel: bool) -> ToolResult {
-        print!("{}: ", aish_i18n::t("tools.ask_user.custom_input_prompt"));
-        let _ = io::stdout().flush();
-        let mut answer = String::new();
-        if io::stdin().read_line(&mut answer).is_err() {
-            return ToolResult::error(aish_i18n::t("tools.ask_user.read_input_failed"));
-        }
-        let answer = answer.trim().to_string();
-        if answer.is_empty() {
-            if let Some(d) = default {
-                return ToolResult::success(d.to_string());
-            }
-            if allow_cancel {
-                return ToolResult::success(aish_i18n::t("tools.ask_user.cancelled"));
-            }
-            return ToolResult::error(aish_i18n::t("tools.ask_user.answer_required"));
-        }
-        ToolResult::success(format_custom_user_input(answer))
+    #[test]
+    fn parse_text_input_defaults() {
+        let request = parse_args(serde_json::json!({
+            "prompt": "Where should I write it?"
+        }))
+        .unwrap();
+
+        assert!(request.options.is_empty());
+        assert!(request.allow_freeform_input);
+        assert!(request.required);
+        assert!(request.allow_cancel);
+        assert_eq!(request.min_length, 0);
     }
-}
 
-fn option_value(option: &serde_json::Value) -> &str {
-    option.get("value").and_then(|v| v.as_str()).unwrap_or("")
-}
+    #[test]
+    fn options_infer_choice_mode_without_kind() {
+        let request = parse_args(serde_json::json!({
+            "prompt": "Pick one",
+            "options": [{"value": "a", "label": "A"}]
+        }))
+        .unwrap();
 
-fn option_label(option: &serde_json::Value) -> &str {
-    option.get("label").and_then(|v| v.as_str()).unwrap_or("?")
-}
+        assert_eq!(request.options.len(), 1);
+    }
 
-fn option_description(option: &serde_json::Value) -> Option<&str> {
-    option.get("description").and_then(|v| v.as_str())
-}
+    #[test]
+    fn legacy_choice_or_text_requires_options() {
+        let err = parse_args(serde_json::json!({
+            "kind": "choice_or_text",
+            "prompt": "Pick one"
+        }))
+        .unwrap_err();
 
-fn format_custom_user_input(input: String) -> String {
-    let mut args_map = std::collections::HashMap::new();
-    args_map.insert("input".to_string(), input);
-    aish_i18n::t_with_args("tools.ask_user.user_input_prefix", &args_map)
+        assert_eq!(
+            err,
+            t("tools.ask_user.validation.legacy_choice_requires_options")
+        );
+    }
+
+    #[test]
+    fn option_values_must_be_unique() {
+        let err = parse_args(serde_json::json!({
+            "prompt": "Pick one",
+            "options": [
+                {"value": "a", "label": "A"},
+                {"value": "a", "label": "B"}
+            ]
+        }))
+        .unwrap_err();
+
+        assert_eq!(err, t("tools.ask_user.validation.option_values_unique"));
+    }
+
+    #[test]
+    fn option_labels_must_be_unique() {
+        let err = parse_args(serde_json::json!({
+            "prompt": "Pick one",
+            "options": [
+                {"value": "a", "label": "Same"},
+                {"value": "b", "label": "Same"}
+            ]
+        }))
+        .unwrap_err();
+
+        assert_eq!(err, t("tools.ask_user.validation.option_labels_unique"));
+    }
+
+    #[test]
+    fn only_one_recommended_option_is_allowed() {
+        let err = parse_args(serde_json::json!({
+            "prompt": "Pick one",
+            "options": [
+                {"value": "a", "label": "A", "recommended": true},
+                {"value": "b", "label": "B", "recommended": true}
+            ]
+        }))
+        .unwrap_err();
+
+        assert_eq!(err, t("tools.ask_user.validation.recommended_unique"));
+    }
+
+    #[test]
+    fn option_default_must_match_value() {
+        let err = parse_args(serde_json::json!({
+            "prompt": "Pick one",
+            "options": [{"value": "a", "label": "A"}],
+            "default": "missing"
+        }))
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            t("tools.ask_user.validation.default_must_match_option")
+        );
+    }
+
+    #[test]
+    fn selected_answer_has_structured_meta_without_kind() {
+        let result = answer_to_result(AskUserResponse::Selected {
+            value: "a".to_string(),
+            label: "A".to_string(),
+            description: Some("First".to_string()),
+        });
+
+        assert!(result.ok);
+        let meta = result.meta.unwrap();
+        assert_eq!(meta["tool"], "ask_user");
+        assert_eq!(meta["status"], "answered");
+        assert_eq!(meta["answer_type"], "option");
+        assert_eq!(meta["value"], "a");
+        assert!(meta.get("kind").is_none());
+    }
+
+    #[test]
+    fn cancelled_answer_is_successful_tool_result() {
+        let result = answer_to_result(AskUserResponse::Cancelled);
+
+        assert!(result.ok);
+        assert_eq!(result.meta.unwrap()["status"], "cancelled");
+    }
 }
