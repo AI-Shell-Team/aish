@@ -211,7 +211,7 @@ impl PersistentPty {
         timeout: Duration,
         cancel_token: Option<&CancelToken>,
         display_output: bool,
-    ) -> aish_core::Result<(String, i32)> {
+    ) -> aish_core::Result<(String, i32, String)> {
         let seq = self.allocate_backend_seq();
 
         // Enter exec mode: buffer output.
@@ -241,6 +241,7 @@ impl PersistentPty {
 
         let deadline = std::time::Instant::now() + timeout;
         let mut result_exit_code: i32 = -1;
+        let mut result_cwd = String::new();
         let mut cancelled = false;
         // Select-based I/O loop.
         'select_loop: while std::time::Instant::now() < deadline {
@@ -372,6 +373,9 @@ impl PersistentPty {
                             if let BackendControlEvent::ShellExiting { .. } = event {
                                 self.running.store(false, Ordering::SeqCst);
                             }
+                            if let BackendControlEvent::PromptReady { cwd, .. } = event {
+                                result_cwd = cwd.clone();
+                            }
                             if let Some(r) = self.command_state.handle_event(event) {
                                 if r.command_seq == Some(seq) {
                                     result_exit_code = r.exit_code;
@@ -413,10 +417,10 @@ impl PersistentPty {
 
         if cancelled {
             let cleaned = clean_pty_output(&raw_str, command);
-            Ok((cleaned, -1))
+            Ok((cleaned, -1, result_cwd))
         } else {
             let cleaned = clean_pty_output(&raw_str, command);
-            Ok((cleaned, result_exit_code))
+            Ok((cleaned, result_exit_code, result_cwd))
         }
     }
 }
@@ -4219,10 +4223,11 @@ mod tests {
             .unwrap_or_else(|_| "/tmp".to_string());
         let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
 
-        let (output, exit_code) = pty
+        let (output, exit_code, result_cwd) = pty
             .execute_command("echo hello_world_123", Duration::from_secs(5), None, false)
             .expect("execute should succeed");
         assert_eq!(exit_code, 0);
+        assert_eq!(result_cwd, cwd);
         assert!(output.contains("hello_world_123"), "output was: {}", output);
 
         pty.stop();
@@ -4235,18 +4240,56 @@ mod tests {
             .unwrap_or_else(|_| "/tmp".to_string());
         let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
 
-        let (out1, code1) = pty
+        let (out1, code1, cwd1) = pty
             .execute_command("echo first", Duration::from_secs(5), None, false)
             .expect("cmd1");
         assert_eq!(code1, 0);
+        assert_eq!(cwd1, cwd);
         assert!(out1.contains("first"));
 
-        let (out2, code2) = pty
+        let (out2, code2, cwd2) = pty
             .execute_command("echo second", Duration::from_secs(5), None, false)
             .expect("cmd2");
         assert_eq!(code2, 0);
+        assert_eq!(cwd2, cwd);
         assert!(out2.contains("second"));
 
         pty.stop();
+    }
+
+    #[test]
+    fn test_execute_command_persists_cwd_for_following_commands() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+
+        let tempdir = std::env::temp_dir().join(format!(
+            "aish-pty-cwd-persist-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&tempdir).expect("create tempdir");
+        let target = tempdir.display().to_string();
+
+        let (_output, exit_code, result_cwd) = pty
+            .execute_command(
+                &format!("cd {}", shell_quote_escape(&target)),
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("cd should succeed");
+        assert_eq!(exit_code, 0);
+        assert_eq!(result_cwd, target);
+
+        let (pwd_output, pwd_exit_code, pwd_cwd) = pty
+            .execute_command("pwd", Duration::from_secs(5), None, false)
+            .expect("pwd should succeed");
+        assert_eq!(pwd_exit_code, 0);
+        assert_eq!(pwd_cwd, target);
+        assert_eq!(pwd_output.trim(), target);
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&tempdir);
     }
 }
