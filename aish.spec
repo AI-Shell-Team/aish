@@ -92,9 +92,9 @@ block_cipher = None
 
 # Collect default skills directory
 skills_datas = []
-if os.path.exists('debian/skills'):
-    for skill_name in os.listdir('debian/skills'):
-        skill_path = os.path.join('debian/skills', skill_name)
+if os.path.exists('packaging/skills'):
+    for skill_name in os.listdir('packaging/skills'):
+        skill_path = os.path.join('packaging/skills', skill_name)
         if os.path.isdir(skill_path):
             skills_datas.append((skill_path, os.path.join('aish', 'skills', skill_name)))
 

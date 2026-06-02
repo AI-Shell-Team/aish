@@ -72,9 +72,9 @@ dev = [
 
 [tool.pytest.ini_options]
 # Limit test discovery to this project's tests. The repository also contains
-# packaging artifacts under `debian/` which include vendored third-party
-# libraries (e.g. jsonschema) with their own test suites that require extra
-# optional deps and data files.
+# bundled packaging artifacts with vendored third-party libraries (e.g.
+# jsonschema) that include their own test suites and require extra optional
+# deps and data files.
 testpaths = ["tests"]
 pythonpath = ["src"]
 norecursedirs = [

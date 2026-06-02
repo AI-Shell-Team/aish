@@ -69,7 +69,6 @@ jobs:
               - '.github/workflows/ci.yml'
             packaging:
               - 'packaging/**'
-              - 'debian/**'
               - 'config/**'
               - 'aish.spec'
               - '.github/workflows/ci.yml'

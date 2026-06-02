@@ -27,7 +27,7 @@
       - any-glob-to-any-file:
           - "src/aish/skills/**"
           - "src/aish/tools/skill.py"
-          - "debian/skills/**"
+          - "packaging/skills/**"
           - "docs/skills-guide.md"
 
 "tools":
@@ -88,7 +88,6 @@
           - "aish.spec"
           - "build.sh"
           - "Makefile"
-          - "debian/**"
           - "main.py"
 
 "tests":

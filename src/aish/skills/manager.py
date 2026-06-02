@@ -149,7 +149,7 @@ class SkillManager:
         roots: list[tuple[SkillSource, Path]] = []
 
         # 1. USER: $AISH_CONFIG_DIR/skills or ~/.config/aish/skills
-        # Skills from debian/skills are auto-installed to ~/.config/aish/skills/
+        # Bundled skills are auto-installed to ~/.config/aish/skills/
         config_dir = os.environ.get("AISH_CONFIG_DIR")
         if config_dir:
             user_skills_dir = Path(config_dir) / "skills"

@@ -88,13 +88,13 @@ install:
 	install -d "$(DESTDIR)$(SYSCONFDIR)/aish"
 	install -m 0644 config/security_policy.yaml "$(DESTDIR)$(SYSCONFDIR)/aish/security_policy.yaml"
 	install -d "$(DESTDIR)$(SYSTEMD_UNITDIR)"
-	install -m 0644 debian/aish-sandbox.service "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
-	install -m 0644 debian/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
+	install -m 0644 packaging/aish-sandbox.service "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
+	install -m 0644 packaging/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
 	install -d "$(DESTDIR)$(DOCDIR)"
 	install -m 0644 docs/skills-guide.md "$(DESTDIR)$(DOCDIR)/skills-guide.md"
-	@if [ -d debian/skills ]; then \
+	@if [ -d packaging/skills ]; then \
 		install -d "$(DESTDIR)$(DATADIR)"; \
-		cp -a debian/skills "$(DESTDIR)$(DATADIR)/"; \
+		cp -a packaging/skills "$(DESTDIR)$(DATADIR)/"; \
 	fi
 	@if [ -d src/aish/scripts/themes ]; then \
 		install -d "$(DESTDIR)$(DATADIR)/scripts/themes"; \
