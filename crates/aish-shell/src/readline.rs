@@ -147,7 +147,7 @@ impl ShellHelper {
         let cmd = format!("__aish_query_completions {} {}", escaped_line, pos);
 
         match pty.execute_command(&cmd, COMPLETION_TIMEOUT, None, false) {
-            Ok((output, _exit_code)) => output
+            Ok((output, _exit_code, _cwd)) => output
                 .lines()
                 .filter(|l| !l.is_empty())
                 .map(|l| l.to_string())
