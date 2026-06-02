@@ -2382,12 +2382,9 @@ impl AishShell {
             return;
         }
 
-        let result = self.pty.lock().unwrap().execute_command(
-            "pwd",
-            std::time::Duration::from_secs(2),
-            None,
-            false,
-        );
+        let result =
+            self.lock_pty()
+                .execute_command("pwd", std::time::Duration::from_secs(2), None, false);
 
         let Ok((_output, _exit_code, cwd)) = result else {
             return;
@@ -2583,6 +2580,7 @@ impl AishShell {
                     let rt = tokio::runtime::Runtime::new().unwrap();
                     match rt.block_on(self.ai_handler.handle_question(prompt_str)) {
                         Ok(response) => {
+                            self.sync_state_from_pty_cwd();
                             print_md(&response);
                             self.persist_session_snapshot();
                             script_env.insert("AISH_LAST_OUTPUT".to_string(), response);
