@@ -76,9 +76,9 @@ install:
 	sed 's|@AISH_BINDIR@|$(BINDIR)|g' packaging/systemd/aish-sandbox.service.in > "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	chmod 0644 "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	install -m 0644 packaging/systemd/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
-	@if [ -d debian/skills ]; then \
+	@if [ -d skills ]; then \
 		install -d "$(DESTDIR)$(DATADIR)"; \
-		cp -a debian/skills "$(DESTDIR)$(DATADIR)/"; \
+		cp -a skills "$(DESTDIR)$(DATADIR)/"; \
 	fi
 
 clean:
