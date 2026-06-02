@@ -1,5 +1,0 @@
-aish (0.1.0-1) unstable; urgency=medium
-
-  * Switch Debian packaging to debhelper staging of Rust binaries.
-
- -- AI Shell Maintainers <maintainers@example.com>  Mon, 29 Dec 2025 00:00:00 +0000
