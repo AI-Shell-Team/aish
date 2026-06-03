@@ -61,6 +61,13 @@ impl SlashInputSession {
     /// Run the session in raw mode. Returns the outcome.
     pub fn run(mut self) -> io::Result<SlashInputOutcome> {
         let _guard = RawModeGuard::enter()?;
+        // Rustyline appends a newline after returning on Cmd::Interrupt.
+        // Move back to the original prompt line before ratatui queries the
+        // cursor position for the inline viewport.
+        execute!(io::stdout(), cursor::MoveToColumn(0), cursor::MoveUp(1))?;
+        // Drain any stale keyboard events before ratatui issues DSR queries.
+        // Leftover bytes can corrupt the cursor position response parsing.
+        drain_pending_events()?;
         let backend = CrosstermBackend::new(io::stdout());
         let height = self.panel_height();
         let mut terminal = Terminal::with_options(
@@ -69,7 +76,6 @@ impl SlashInputSession {
                 viewport: Viewport::Inline(height),
             },
         )?;
-        drain_pending_events()?;
 
         let outcome = loop {
             terminal.draw(|frame| self.render(frame, frame.area()))?;
