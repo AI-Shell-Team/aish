@@ -7,6 +7,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-06-03
+
+### Added
+
+- Added a slash-command suggestion popup and a built-in `/feedback` command so interactive command discovery is faster inside the shell.
+- Added ESC interrupt handling, richer keyboard events, and improved inline dialogs and panels for interactive shell flows.
+
+### Changed
+
+- Changed `ask_user` interactions to use the new dialog flow with clearer validation, cancel handling, and localized prompt copy.
+
+### Fixed
+
+- Fixed PTY cleanup on shell shutdown so background terminal resources are released more reliably.
+- Fixed prompt cwd refresh after `ai bash` changes directory so the shell prompt stays in sync.
+- Fixed `ask_user` default matching and validation reporting so trimmed defaults and structured errors behave consistently.
+- Fixed slash popup anchoring so the menu stays attached to the active prompt line.
+
 ## [Unreleased]
 
 ### Added
