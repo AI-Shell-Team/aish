@@ -366,7 +366,7 @@ fn download_with_progress(url: &str, dest: &Path, label: &str) -> Result<(), Ais
             let downloaded_mb = downloaded as f64 / 1_048_576.0;
             let total_mb = total as f64 / 1_048_576.0;
             print!("\r\x1b[2K\x1b[1;36m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::new();
+                let mut args = std::collections::HashMap::with_capacity(4);
                 args.insert("label".to_string(), label.to_string());
                 args.insert("downloaded".to_string(), format!("{:.1}", downloaded_mb));
                 args.insert("total".to_string(), format!("{:.1}", total_mb));
@@ -376,7 +376,7 @@ fn download_with_progress(url: &str, dest: &Path, label: &str) -> Result<(), Ais
         } else {
             let downloaded_mb = downloaded as f64 / 1_048_576.0;
             print!("\r\x1b[2K\x1b[1;36m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::new();
+                let mut args = std::collections::HashMap::with_capacity(2);
                 args.insert("label".to_string(), label.to_string());
                 args.insert("downloaded".to_string(), format!("{:.1}", downloaded_mb));
                 t_with_args("cli.update.progress_mb_no_total", &args)

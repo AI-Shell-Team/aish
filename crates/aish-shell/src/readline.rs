@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
+use rustyline::config::Configurer;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
@@ -21,8 +22,15 @@ const BUILTINS: &[&str] = &[
     "quit",
 ];
 
-/// Special commands starting with /.
-const SPECIALS: &[&str] = &["/model", "/setup"];
+/// Slash commands with descriptions for popup completion.
+pub const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/model", "Show or switch AI model"),
+    ("/setup", "Open setup wizard"),
+    ("/plan", "Plan mode control"),
+    ("/token", "Show token usage"),
+    ("/resume", "Resume previous session"),
+    ("/feedback", "Open GitHub Issues"),
+];
 
 /// Timeout for PTY completion queries.
 const COMPLETION_TIMEOUT: Duration = Duration::from_millis(500);
@@ -36,6 +44,9 @@ static MODE_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Flag set by `CtrlOHandler` when Ctrl+O is pressed.
 static CTRL_O_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Flag set by `SlashHandler` when `/` is pressed on an empty line.
+static SLASH_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Event handler that sets a flag when Shift+Tab or F2 is pressed,
 /// then returns `Cmd::Interrupt` to break out of `read_line`.
@@ -68,6 +79,33 @@ impl ConditionalEventHandler for CtrlOHandler {
     ) -> Option<Cmd> {
         CTRL_O_REQUESTED.store(true, Ordering::SeqCst);
         Some(Cmd::Interrupt)
+    }
+}
+
+/// Event handler that sets a flag when `/` is typed on an empty line,
+/// then returns `Cmd::Interrupt` to break out of `read_line` for the
+/// slash command completion popup.
+struct SlashHandler;
+
+impl ConditionalEventHandler for SlashHandler {
+    fn handle(
+        &self,
+        evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        // Only trigger for plain `/` key press (no modifiers)
+        if let Event::KeySeq(keys) = evt {
+            if let Some(key) = keys.first() {
+                if key.1 == Modifiers::NONE && key.0 == KeyCode::Char('/') && ctx.line().is_empty()
+                {
+                    SLASH_REQUESTED.store(true, Ordering::SeqCst);
+                    return Some(Cmd::Interrupt);
+                }
+            }
+        }
+        None
     }
 }
 
@@ -191,8 +229,8 @@ impl Completer for ShellHelper {
                 }
             }
 
-            // Special commands
-            for cmd in SPECIALS {
+            // Slash commands
+            for (cmd, _desc) in SLASH_COMMANDS {
                 if cmd.starts_with(word) {
                     candidates.push(Pair {
                         display: cmd.to_string(),
@@ -213,9 +251,12 @@ impl Completer for ShellHelper {
             if !word.is_empty() {
                 let pty_results = self.query_pty_completions(line, pos);
                 let builtin_set: Vec<&str> = BUILTINS.to_vec();
+                let slash_set: Vec<&str> = SLASH_COMMANDS.iter().map(|(c, _)| *c).collect();
                 for candidate in &pty_results {
-                    // Skip duplicates already covered by BUILTINS/SPECIALS
-                    if builtin_set.contains(&candidate.as_str()) {
+                    // Skip duplicates already covered by BUILTINS/SLASH_COMMANDS
+                    if builtin_set.contains(&candidate.as_str())
+                        || slash_set.contains(&candidate.as_str())
+                    {
                         continue;
                     }
                     candidates.push(Pair {
@@ -225,17 +266,16 @@ impl Completer for ShellHelper {
                 }
             }
 
-            if !candidates.is_empty() {
-                return Ok((word_start, candidates));
-            }
-
-            // Fall through to file completion for path-like tokens
+            // Merge file completions for path-like tokens so slash commands
+            // don't shadow absolute paths like /usr, /tmp, /proc, etc.
             if word.starts_with("./")
                 || word.starts_with("../")
                 || word.starts_with("/")
                 || word.starts_with("~/")
             {
-                return self.file_completer.complete(line, pos, ctx);
+                if let Ok((_, file_candidates)) = self.file_completer.complete(line, pos, ctx) {
+                    candidates.extend(file_candidates);
+                }
             }
 
             return Ok((word_start, candidates));
@@ -287,6 +327,7 @@ impl ShellReadline {
 
         let mut editor = Editor::with_config(config)?;
         editor.set_helper(Some(ShellHelper::new(pty, autosuggest.clone())));
+        editor.set_max_history_size(500)?;
 
         // Bind Shift+Tab (BackTab) and F2 for mode toggle
         editor.bind_sequence(
@@ -302,6 +343,12 @@ impl ShellReadline {
         editor.bind_sequence(
             KeyEvent(KeyCode::Char('O'), Modifiers::CTRL),
             EventHandler::Conditional(Box::new(CtrlOHandler)),
+        );
+
+        // Bind `/` on empty line for slash command completion popup
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Char('/'), Modifiers::NONE),
+            EventHandler::Conditional(Box::new(SlashHandler)),
         );
 
         Ok(Self {
@@ -320,6 +367,26 @@ impl ShellReadline {
     /// The flag is consumed on read.
     pub fn was_ctrl_o_requested(&self) -> bool {
         CTRL_O_REQUESTED.swap(false, Ordering::SeqCst)
+    }
+
+    /// Check whether `/` on an empty line triggered the last `Interrupted` error.
+    /// The flag is consumed on read.
+    pub fn was_slash_requested(&self) -> bool {
+        SLASH_REQUESTED.swap(false, Ordering::SeqCst)
+    }
+
+    /// Read a line with initial text pre-filled, letting the user edit and
+    /// submit. Returns `None` on EOF (Ctrl-D).
+    pub fn read_line_with_initial(
+        &mut self,
+        prompt: &str,
+        initial: (&str, &str),
+    ) -> rustyline::Result<Option<String>> {
+        match self.editor.readline_with_initial(prompt, initial) {
+            Ok(line) => Ok(Some(line)),
+            Err(rustyline::error::ReadlineError::Eof) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Read a line with the given prompt.
@@ -414,9 +481,18 @@ mod tests {
     }
 
     #[test]
-    fn test_specials_format() {
-        for cmd in SPECIALS {
-            assert!(cmd.starts_with('/'), "special must start with /: {}", cmd);
+    fn test_slash_commands_format() {
+        for (cmd, desc) in SLASH_COMMANDS {
+            assert!(
+                cmd.starts_with('/'),
+                "slash command must start with /: {}",
+                cmd
+            );
+            assert!(
+                !desc.is_empty(),
+                "description must not be empty for {}",
+                cmd
+            );
         }
     }
 }

@@ -106,7 +106,7 @@ impl Tool for GrepTool {
             .and_then(|g| g.as_str())
             .filter(|g| !g.trim().is_empty());
 
-        let mut matches: Vec<String> = Vec::new();
+        let mut matches: Vec<String> = Vec::with_capacity(DEFAULT_MAX_RESULTS);
         let files = walk_files(&root);
 
         for file_path in files {

@@ -74,7 +74,7 @@ impl ContextManager {
     /// `max_knowledge_messages=10`.
     pub fn new() -> Self {
         Self {
-            messages: Vec::new(),
+            messages: Vec::with_capacity(64),
             max_llm_messages: 50,
             max_shell_messages: 20,
             max_knowledge_messages: 10,
@@ -573,7 +573,7 @@ impl ContextManager {
         let keep_recent = self.budget_policy.micro_keep_recent_messages.max(2);
         let recent_start = self.messages.len().saturating_sub(keep_recent);
 
-        let mut new_messages = Vec::new();
+        let mut new_messages = Vec::with_capacity(32);
         for (idx, msg) in self.messages.iter().enumerate() {
             if idx >= recent_start {
                 break;
@@ -714,9 +714,9 @@ fn build_ops_summary(
     plan_state: Option<&PlanModeState>,
     summary_max_tokens: usize,
 ) -> String {
-    let mut user_items = Vec::new();
-    let mut assistant_items = Vec::new();
-    let mut shell_items = Vec::new();
+    let mut user_items = Vec::with_capacity(32);
+    let mut assistant_items = Vec::with_capacity(32);
+    let mut shell_items = Vec::with_capacity(32);
 
     for msg in old_messages {
         let preview = summarize_line(&msg.content, 220);
@@ -731,7 +731,7 @@ fn build_ops_summary(
         }
     }
 
-    let mut lines = Vec::new();
+    let mut lines = Vec::with_capacity(32);
     lines.push("<conversation-summary source=\"auto_compact\">".to_string());
     lines.push("Summary:".to_string());
     lines.push(format!(

@@ -89,7 +89,7 @@ impl Tool for GlobTool {
             format!("{}/{}", root.display(), pattern)
         };
 
-        let mut matches: Vec<PathBuf> = Vec::new();
+        let mut matches: Vec<PathBuf> = Vec::with_capacity(DEFAULT_MAX_RESULTS);
         match glob::glob(&full_pattern) {
             Ok(paths) => {
                 for entry in paths.flatten() {

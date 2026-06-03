@@ -143,6 +143,14 @@ shell:
     risk: "Von der KI erzeugte Inhalte können riskant sein; bitte sorgfältig prüfen."
     skills_loaded_suffix: " geladen"
 
+  slash:
+    model: "KI-Modell anzeigen oder wechseln"
+    setup: "Setup-Assistenten öffnen"
+    plan: "Planmodus steuern"
+    token: "Token-Nutzung anzeigen"
+    resume: "Vorherige Sitzung fortsetzen"
+    feedback: "GitHub Issues öffnen"
+
   security:
     panel_title:
       blocked: "🛑 Sicherheitsblockierung"

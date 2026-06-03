@@ -40,6 +40,7 @@ unicode-width.workspace = true
 which = "8.0.2"
 nix.workspace = true
 libc.workspace = true
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"

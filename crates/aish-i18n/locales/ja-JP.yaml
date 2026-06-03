@@ -143,6 +143,14 @@ shell:
     risk: "AI が生成した内容にはリスクがあるため、必ず注意して確認してください。"
     skills_loaded_suffix: " 件読み込み済み"
 
+  slash:
+    model: "AI モデルの表示・切替"
+    setup: "セットアップウィザードを開く"
+    plan: "プランモードの制御"
+    token: "トークン使用量を表示"
+    resume: "前回のセッションを再開"
+    feedback: "GitHub Issues を開く"
+
   security:
     panel_title:
       blocked: "🛑 セキュリティによりブロック"

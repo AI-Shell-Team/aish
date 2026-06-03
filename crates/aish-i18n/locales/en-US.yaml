@@ -322,6 +322,15 @@ shell:
   unknown_command: "Unknown special command: {command}"
   config_save_warning: "Warning: could not save config: {error}"
 
+  # Slash command descriptions (for popup)
+  slash:
+    model: "Show or switch AI model"
+    setup: "Open setup wizard"
+    plan: "Plan mode control"
+    token: "Show token usage"
+    resume: "Resume previous session"
+    feedback: "Open GitHub Issues"
+
   # Model switching
   model_usage: "Usage: /model [model-name]"
   switching: "Validating model: {model}"

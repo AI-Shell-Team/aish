@@ -322,6 +322,15 @@ shell:
   unknown_command: "未知特殊命令: {command}"
   config_save_warning: "警告：无法保存配置: {error}"
 
+  # 斜杠命令描述（弹窗用）
+  slash:
+    model: "显示或切换 AI 模型"
+    setup: "打开设置向导"
+    plan: "计划模式控制"
+    token: "显示令牌用量"
+    resume: "恢复之前的会话"
+    feedback: "打开 GitHub Issues"
+
   # 模型切换
   model_usage: "用法: /model [模型名称]"
   switching: "正在验证模型: {model}"
