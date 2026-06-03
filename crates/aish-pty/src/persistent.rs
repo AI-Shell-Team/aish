@@ -8,6 +8,7 @@ use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::pty::openpty;
 use nix::sys::signal::{kill, Signal};
 use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, OutputFlags, SetArg};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{close, dup2, execvp, fork, pipe, ForkResult, Pid};
 
 use aish_core::AishError;
@@ -2190,15 +2191,17 @@ impl PersistentPty {
 
     /// Stop the bash session.
     pub fn stop(&mut self) {
-        if !self.running.load(Ordering::SeqCst) {
-            return; // Already stopped
+        let was_running = self.running.swap(false, Ordering::SeqCst);
+
+        if was_running || !wait_for_child_exit(self.child_pid, Duration::from_millis(200)) {
+            let _ = kill_pg(self.child_pid, Signal::SIGTERM);
+            if !wait_for_child_exit(self.child_pid, Duration::from_millis(200)) {
+                let _ = kill_pg(self.child_pid, Signal::SIGKILL);
+            }
         }
-        self.running.store(false, Ordering::SeqCst);
-        let _ = kill_pg(self.child_pid, Signal::SIGTERM);
-        std::thread::sleep(Duration::from_millis(100));
-        let _ = kill_pg(self.child_pid, Signal::SIGKILL);
-        // Reap child.
-        let _ = nix::sys::wait::waitpid(self.child_pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
+
+        reap_child(self.child_pid);
+
         // Close fds (use raw close to avoid IO Safety issues with from_raw_fd).
         if self.master_fd >= 0 {
             let _ = unsafe { libc::close(self.master_fd) };
@@ -3649,6 +3652,47 @@ fn kill_pg(pid: Pid, sig: Signal) -> nix::Result<()> {
     kill(Pid::from_raw(-pid.as_raw()), sig)
 }
 
+fn child_has_exited(pid: Pid) -> bool {
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => return true,
+            Ok(WaitStatus::StillAlive) => return false,
+            Ok(_) => return false,
+            Err(nix::errno::Errno::ECHILD) => return true,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
+fn wait_for_child_exit(pid: Pid, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if child_has_exited(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child_has_exited(pid)
+}
+
+fn reap_child(pid: Pid) {
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => return,
+            Ok(WaitStatus::StillAlive) | Ok(_) => match waitpid(pid, None) {
+                Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => return,
+                Err(nix::errno::Errno::ECHILD) => return,
+                Err(nix::errno::Errno::EINTR) => continue,
+                _ => return,
+            },
+            Err(nix::errno::Errno::ECHILD) => return,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => return,
+        }
+    }
+}
+
 /// Write the rc wrapper script to a temp file and return the path.
 fn write_rcfile_temp() -> aish_core::Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join("aish-rc");
@@ -4211,9 +4255,64 @@ mod tests {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
         let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let child_pid = pty.child_pid;
         assert!(pty.is_running());
         pty.stop();
         assert!(!pty.is_running());
+        assert!(matches!(
+            waitpid(child_pid, Some(WaitPidFlag::WNOHANG)),
+            Err(nix::errno::Errno::ECHILD)
+        ));
+    }
+
+    #[test]
+    fn test_stop_cleans_up_even_when_running_already_false() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let child_pid = pty.child_pid;
+
+        pty.running.store(false, Ordering::SeqCst);
+        pty.stop();
+
+        assert_eq!(pty.master_fd, -1);
+        assert_eq!(pty.control_fd, -1);
+        assert!(matches!(
+            waitpid(child_pid, Some(WaitPidFlag::WNOHANG)),
+            Err(nix::errno::Errno::ECHILD)
+        ));
+    }
+
+    #[test]
+    fn test_stop_allows_graceful_exit_when_running_already_false() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+
+        let tempdir = std::env::temp_dir().join(format!(
+            "aish-pty-stop-graceful-exit-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&tempdir).expect("create tempdir");
+        let marker = tempdir.join("exit-marker");
+
+        pty.send_command(
+            &format!(
+                "trap \"touch {}\" EXIT; exit",
+                shell_quote_escape(&marker.display().to_string())
+            ),
+            None,
+        )
+        .expect("send exit command");
+
+        pty.running.store(false, Ordering::SeqCst);
+        pty.stop();
+
+        assert!(marker.exists(), "expected graceful exit trap to run");
+
+        let _ = std::fs::remove_dir_all(&tempdir);
     }
 
     #[test]

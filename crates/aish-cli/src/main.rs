@@ -261,6 +261,7 @@ fn run_shell(mut config: aish_config::ConfigModel) {
     match aish_shell::AishShell::new(config) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
+                shell.shutdown();
                 eprintln!("Shell error: {}", e);
                 std::process::exit(1);
             }
@@ -286,6 +287,7 @@ fn run_shell_resume(mut config: aish_config::ConfigModel, session_id: &str) {
     match aish_shell::AishShell::resume(config, session_id) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
+                shell.shutdown();
                 eprintln!("Shell error: {}", e);
                 std::process::exit(1);
             }

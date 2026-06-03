@@ -1848,7 +1848,8 @@ impl AishShell {
             })
         );
 
-        self.set_phase(ShellPhase::Exiting);
+        drop(rl);
+        self.shutdown();
 
         Ok(())
     }
@@ -2400,6 +2401,11 @@ impl AishShell {
     /// Restart the PTY session (e.g., after bash exits or crashes).
     fn restart_pty(&mut self) {
         let _ = self.restart_pty_with_notice(true);
+    }
+
+    pub fn shutdown(&mut self) {
+        self.set_phase(ShellPhase::Exiting);
+        self.lock_pty().stop();
     }
 
     fn restart_pty_with_notice(&mut self, show_notice: bool) -> aish_core::Result<()> {
