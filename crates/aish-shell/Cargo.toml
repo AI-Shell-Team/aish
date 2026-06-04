@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 aish-core.workspace = true
+base64.workspace = true
 aish-config.workspace = true
 aish-hosts.workspace = true
 aish-i18n.workspace = true
@@ -33,6 +34,7 @@ dirs.workspace = true
 reqwest.workspace = true
 richrs.workspace = true
 regex.workspace = true
+shellexpand = "2.1"
 sysinfo.workspace = true
 rustyline.workspace = true
 inquire = "0.9.4"

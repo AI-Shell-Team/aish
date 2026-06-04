@@ -3180,13 +3180,9 @@ impl AishShell {
                     // Register host_note tool for SSH followup sessions
                     session.register_tool(Self::make_host_note_tool(shared_host_th_f.clone()));
                     let result = rt.block_on(async {
+                        let user_msg = ChatMessage::user(&followup_prompt_th);
                         session
-                            .process_input(
-                                &followup_prompt_th,
-                                &history_snapshot,
-                                Some(&system_msg_th),
-                                true,
-                            )
+                            .process_input(&user_msg, &history_snapshot, Some(&system_msg_th), true)
                             .await
                     });
                     let process_result = result.ok();
@@ -4123,13 +4119,9 @@ impl AishShell {
                         session.register_tool(Box::new(aish_tools::SkillTool::new(lookup, list)));
                     }
 
+                    let user_msg_t = ChatMessage::user(&context_for_thread);
                     session
-                        .process_input(
-                            &context_for_thread,
-                            &context_messages_t,
-                            Some(&system_msg_t),
-                            true,
-                        )
+                        .process_input(&user_msg_t, &context_messages_t, Some(&system_msg_t), true)
                         .await
                 });
                 if cancelled_t.load(std::sync::atomic::Ordering::SeqCst) {

@@ -62,20 +62,17 @@ fn test_message_conversion_all_roles() {
     let system_msg = ChatMessage::system("You are a helpful assistant");
     assert_eq!(system_msg.role, "system");
     assert_eq!(
-        system_msg.content,
-        Some("You are a helpful assistant".to_string())
+        system_msg.text_content(),
+        Some("You are a helpful assistant")
     );
 
     let user_msg = ChatMessage::user("Hello, how are you?");
     assert_eq!(user_msg.role, "user");
-    assert_eq!(user_msg.content, Some("Hello, how are you?".to_string()));
+    assert_eq!(user_msg.text_content(), Some("Hello, how are you?"));
 
     let asst_msg = ChatMessage::assistant("I'm doing well, thank you!");
     assert_eq!(asst_msg.role, "assistant");
-    assert_eq!(
-        asst_msg.content,
-        Some("I'm doing well, thank you!".to_string())
-    );
+    assert_eq!(asst_msg.text_content(), Some("I'm doing well, thank you!"));
 
     // Note: convert_message is a private method of LiteLLMClient,
     // so we can't directly test it here. The above tests verify
@@ -224,16 +221,17 @@ fn test_litellm_client_api_base_trimming() {
 #[test]
 fn test_message_with_none_content() {
     // Test 13: ChatMessage can have None content (for tool calls, etc.)
+    use aish_llm::MessageContent;
     let msg_with_content = ChatMessage {
         role: "user".to_string(),
-        content: Some("Hello".to_string()),
+        content: Some(MessageContent::Text("Hello".to_string())),
         tool_calls: None,
         tool_call_id: None,
         name: None,
         reasoning_content: None,
         cache_control: None,
     };
-    assert_eq!(msg_with_content.content, Some("Hello".to_string()));
+    assert_eq!(msg_with_content.text_content(), Some("Hello"));
 
     let msg_without_content = ChatMessage {
         role: "assistant".to_string(),
@@ -244,7 +242,7 @@ fn test_message_with_none_content() {
         reasoning_content: None,
         cache_control: None,
     };
-    assert_eq!(msg_without_content.content, None);
+    assert_eq!(msg_without_content.text_content(), None);
 }
 
 #[test]

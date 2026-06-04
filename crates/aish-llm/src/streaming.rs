@@ -189,6 +189,9 @@ impl StreamParser {
     }
 }
 
+/// Extract text from content field, handling both plain string and content-blocks array.
+/// Non-text blocks (e.g. image_url) are intentionally skipped — LLM responses don't
+/// carry image data back.
 pub fn extract_message_text(content: Option<&serde_json::Value>) -> Option<String> {
     match content {
         None => None,
