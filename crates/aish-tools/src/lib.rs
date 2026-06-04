@@ -29,6 +29,7 @@ pub mod registry;
 pub mod secure_bash;
 pub mod skill_tool;
 pub mod system_diagnose;
+pub mod web_fetch;
 
 pub use ask_user::AskUserTool;
 pub use channel_ask_user::ChannelAskUserTool;
@@ -46,3 +47,4 @@ pub use secure_bash::SecureBashTool;
 pub use skill_tool::{SkillInfo, SkillTool};
 pub use system_diagnose::SharedEventCallback;
 pub use system_diagnose::SystemDiagnoseTool;
+pub use web_fetch::WebFetchTool;

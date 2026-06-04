@@ -370,7 +370,7 @@ cargo clippy
 | `aish-security` | 安全策略引擎，glob-to-regex 模式匹配 |
 | `aish-skills` | 技能插件发现，notify 热加载 |
 | `aish-memory` | Markdown 长期记忆，相关性评分 |
-| `aish-tools` | 内置工具：bash、文件读写编辑、ask_user、memory、skill |
+| `aish-tools` | 内置工具：bash、WebFetch、文件读写编辑、ask_user、memory、skill |
 | `aish-scripts` | .aish 脚本系统，frontmatter、ai "prompt" 语法、hooks |
 | `aish-shell` | 主 Shell：REPL 循环、AI 处理器、内置命令、动画 |
 | `aish-cli` | CLI 入口，clap derive 宏 |
