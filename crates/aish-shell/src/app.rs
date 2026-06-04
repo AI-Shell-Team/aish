@@ -3180,9 +3180,10 @@ impl AishShell {
                     // Register host_note tool for SSH followup sessions
                     session.register_tool(Self::make_host_note_tool(shared_host_th_f.clone()));
                     let result = rt.block_on(async {
+                        let user_msg = ChatMessage::user(&followup_prompt_th);
                         session
                             .process_input(
-                                &followup_prompt_th,
+                                &user_msg,
                                 &history_snapshot,
                                 Some(&system_msg_th),
                                 true,
@@ -4123,9 +4124,10 @@ impl AishShell {
                         session.register_tool(Box::new(aish_tools::SkillTool::new(lookup, list)));
                     }
 
+                    let user_msg_t = ChatMessage::user(&context_for_thread);
                     session
                         .process_input(
-                            &context_for_thread,
+                            &user_msg_t,
                             &context_messages_t,
                             Some(&system_msg_t),
                             true,

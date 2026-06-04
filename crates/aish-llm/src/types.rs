@@ -129,30 +129,178 @@ impl CacheControl {
     }
 }
 
-/// A message in the chat conversation.
+/// A single block inside a structured message (OpenAI content-blocks format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrlContent },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlContent {
+    pub url: String,
+}
+
+/// Message content — serializes as a plain string or a content-blocks array.
+#[derive(Debug, Clone)]
+pub enum MessageContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+impl MessageContent {
+    /// Return a &str slice if this is plain text, else None.
+    pub fn as_text_str(&self) -> Option<&str> {
+        match self {
+            MessageContent::Text(s) => Some(s),
+            MessageContent::Blocks(_) => None,
+        }
+    }
+
+    /// Return the text content, joining block texts if structured.
+    /// Image blocks are skipped — only text is concatenated.
+    pub fn to_text(&self) -> Option<String> {
+        match self {
+            MessageContent::Text(s) => Some(s.clone()),
+            MessageContent::Blocks(blocks) => {
+                let parts: Vec<&str> = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join(""))
+                }
+            }
+        }
+    }
+
+    /// Return the byte length of the text portion (for token estimation).
+    /// Avoids allocation — iterates blocks directly.
+    pub fn text_byte_len(&self) -> usize {
+        match self {
+            MessageContent::Text(s) => s.len(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    _ => 0,
+                })
+                .sum(),
+        }
+    }
+}
+
+impl Serialize for MessageContent {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            MessageContent::Text(text) => text.serialize(s),
+            MessageContent::Blocks(blocks) => blocks.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageContent {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        match &value {
+            serde_json::Value::String(s) => Ok(MessageContent::Text(s.clone())),
+            serde_json::Value::Array(_) => {
+                let blocks: Vec<ContentBlock> = serde_json::from_value(value)
+                    .map_err(|e| serde::de::Error::custom(e.to_string()))?;
+                Ok(MessageContent::Blocks(blocks))
+            }
+            serde_json::Value::Null => Ok(MessageContent::Text(String::new())),
+            _ => Err(serde::de::Error::custom("expected string or array for content")),
+        }
+    }
+}
+
+/// A message in the chat conversation.
+#[derive(Debug, Clone)]
 pub struct ChatMessage {
     pub role: String, // "system", "user", "assistant", "tool"
-    pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<MessageContent>,
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// DeepSeek thinking mode reasoning content — must be echoed back to the API.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     /// Anthropic-style cache control marker. Non-Anthropic providers ignore this.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let field_count = 1
+            + self.content.is_some() as usize
+            + self.tool_calls.is_some() as usize
+            + self.tool_call_id.is_some() as usize
+            + self.name.is_some() as usize
+            + self.reasoning_content.is_some() as usize
+            + self.cache_control.is_some() as usize;
+        let mut st = s.serialize_struct("ChatMessage", field_count)?;
+        st.serialize_field("role", &self.role)?;
+        if let Some(content) = &self.content {
+            st.serialize_field("content", content)?;
+        }
+        if let Some(tool_calls) = &self.tool_calls {
+            st.serialize_field("tool_calls", tool_calls)?;
+        }
+        if let Some(tool_call_id) = &self.tool_call_id {
+            st.serialize_field("tool_call_id", tool_call_id)?;
+        }
+        if let Some(name) = &self.name {
+            st.serialize_field("name", name)?;
+        }
+        if let Some(reasoning) = &self.reasoning_content {
+            st.serialize_field("reasoning_content", reasoning)?;
+        }
+        if let Some(cc) = &self.cache_control {
+            st.serialize_field("cache_control", cc)?;
+        }
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct ChatMessageFields {
+            role: String,
+            content: Option<MessageContent>,
+            tool_calls: Option<Vec<ToolCall>>,
+            tool_call_id: Option<String>,
+            name: Option<String>,
+            reasoning_content: Option<String>,
+            cache_control: Option<CacheControl>,
+        }
+        let f = ChatMessageFields::deserialize(d)?;
+        Ok(ChatMessage {
+            role: f.role,
+            content: f.content,
+            tool_calls: f.tool_calls,
+            tool_call_id: f.tool_call_id,
+            name: f.name,
+            reasoning_content: f.reasoning_content,
+            cache_control: f.cache_control,
+        })
+    }
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".into(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -164,7 +312,7 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".into(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -176,7 +324,7 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".into(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -188,13 +336,54 @@ impl ChatMessage {
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".into(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
             reasoning_content: None,
             cache_control: None,
         }
+    }
+
+    /// Create a user message with both text and image URLs (content-blocks format).
+    /// Empty text is omitted — the message starts with the first image block.
+    pub fn user_with_images(text: String, image_urls: Vec<String>) -> Self {
+        let mut blocks = Vec::with_capacity(1 + image_urls.len());
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text { text });
+        }
+        for url in image_urls {
+            blocks.push(ContentBlock::ImageUrl {
+                image_url: ImageUrlContent { url },
+            });
+        }
+        Self {
+            role: "user".into(),
+            content: Some(MessageContent::Blocks(blocks)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+            cache_control: None,
+        }
+    }
+
+    /// Return the text content as a &str, or None if structured (blocks).
+    pub fn text_content(&self) -> Option<&str> {
+        self.content.as_ref().and_then(|c| c.as_text_str())
+    }
+
+    /// Return the byte length of the text portion (for token estimation).
+    pub fn text_byte_len(&self) -> usize {
+        self.content.as_ref().map(|c| c.text_byte_len()).unwrap_or(0)
+    }
+
+    /// Return true if this message contains image blocks.
+    pub fn has_images(&self) -> bool {
+        matches!(
+            &self.content,
+            Some(MessageContent::Blocks(blocks)) if blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. }))
+        )
     }
 }
 
@@ -561,5 +750,109 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("cache_control"));
         assert!(json.contains("ephemeral"));
+    }
+
+    #[test]
+    fn test_chat_message_user_serializes_text_content() {
+        let msg = ChatMessage::user("hello");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"content\":\"hello\""));
+        assert!(!json.contains("cache_control"));
+    }
+
+    #[test]
+    fn test_chat_message_user_with_images_serializes_blocks() {
+        let msg = ChatMessage::user_with_images(
+            "describe this".to_string(),
+            vec!["data:image/png;base64,abc".to_string()],
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"type\":\"image_url\""));
+    }
+
+    #[test]
+    fn test_chat_message_text_content_accessor() {
+        let msg = ChatMessage::user("hello");
+        assert_eq!(msg.text_content(), Some("hello"));
+    }
+
+    #[test]
+    fn test_chat_message_has_images() {
+        let text_msg = ChatMessage::user("hello");
+        assert!(!text_msg.has_images());
+        let img_msg = ChatMessage::user_with_images(
+            "look".to_string(),
+            vec!["data:image/png;base64,abc".to_string()],
+        );
+        assert!(img_msg.has_images());
+    }
+
+    #[test]
+    fn test_message_content_text_serializes_as_string() {
+        let content = MessageContent::Text("hello".to_string());
+        let json = serde_json::to_string(&content).unwrap();
+        assert_eq!(json, "\"hello\"");
+    }
+
+    #[test]
+    fn test_message_content_text_deserializes_from_string() {
+        let content: MessageContent = serde_json::from_str("\"hello\"").unwrap();
+        assert!(matches!(content, MessageContent::Text(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_message_content_blocks_serializes_as_array() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::Text { text: "describe this".to_string() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrlContent { url: "data:image/png;base64,abc".to_string() },
+            },
+        ]);
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.starts_with('['));
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"type\":\"image_url\""));
+        assert!(json.contains("\"url\":\"data:image/png;base64,abc\""));
+    }
+
+    #[test]
+    fn test_message_content_blocks_deserializes_from_array() {
+        let json = r#"[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,xyz"}}]"#;
+        let content: MessageContent = serde_json::from_str(json).unwrap();
+        match content {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+            }
+            _ => panic!("expected Blocks"),
+        }
+    }
+
+    #[test]
+    fn test_message_content_as_text_str() {
+        assert_eq!(MessageContent::Text("hi".into()).as_text_str(), Some("hi"));
+        assert_eq!(MessageContent::Blocks(vec![]).as_text_str(), None);
+    }
+
+    #[test]
+    fn test_message_content_to_text_from_blocks() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::Text { text: "hello ".to_string() },
+            ContentBlock::Text { text: "world".to_string() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrlContent { url: "data:...".to_string() },
+            },
+        ]);
+        assert_eq!(content.to_text(), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_content_block_roundtrip() {
+        let block = ContentBlock::ImageUrl {
+            image_url: ImageUrlContent { url: "data:image/jpeg;base64,AAA".to_string() },
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let back: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ContentBlock::ImageUrl { .. }));
     }
 }

@@ -74,11 +74,12 @@ impl LiteLLMClient {
 
     /// Convert our ChatMessage to litellm_rs message format.
     fn convert_message(msg: &ChatMessage) -> litellm_rs::Message {
+        let text = msg.text_content().unwrap_or("");
         match msg.role.as_str() {
-            "system" => litellm_rs::system_message(msg.content.as_deref().unwrap_or("")),
-            "user" => litellm_rs::user_message(msg.content.as_deref().unwrap_or("")),
-            "assistant" => litellm_rs::assistant_message(msg.content.as_deref().unwrap_or("")),
-            _ => litellm_rs::user_message(msg.content.as_deref().unwrap_or("")),
+            "system" => litellm_rs::system_message(text),
+            "user" => litellm_rs::user_message(text),
+            "assistant" => litellm_rs::assistant_message(text),
+            _ => litellm_rs::user_message(text),
         }
     }
 
@@ -219,11 +220,7 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(api_base: &str, api_key: &str, model: &str) -> Self {
-        // Strip LiteLLM-style provider prefix (e.g. "openai/gpt-5.1" → "gpt-5.1")
-        let model = match model.split_once('/') {
-            Some((_provider, name)) => name.to_string(),
-            None => model.to_string(),
-        };
+        let model = strip_provider_prefix_if_openai(model, api_base);
         Self {
             http: Client::new(),
             api_base: api_base.trim_end_matches('/').into(),
@@ -249,11 +246,7 @@ impl LlmClient {
 
     /// Update the model name (used for runtime model switching).
     pub fn update_model(&mut self, model: &str) {
-        let model = match model.split_once('/') {
-            Some((_provider, name)) => name.to_string(),
-            None => model.to_string(),
-        };
-        self.model = model;
+        self.model = strip_provider_prefix_if_openai(model, &self.api_base);
     }
 
     /// Update the API key.
@@ -395,6 +388,20 @@ impl LlmClient {
     }
 }
 
+/// Strip LiteLLM-style provider prefix only when targeting OpenAI's official API.
+/// Unified gateways (e.g. ai.uniontech.com) require the full prefixed model name.
+fn strip_provider_prefix_if_openai(model: &str, api_base: &str) -> String {
+    let is_openai = api_base.contains("api.openai.com");
+    if is_openai {
+        match model.split_once('/') {
+            Some((_provider, name)) => name.to_string(),
+            None => model.to_string(),
+        }
+    } else {
+        model.to_string()
+    }
+}
+
 /// Format an HTTP error response into a user-friendly error message.
 fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
     let hint = match status.as_u16() {
@@ -445,6 +452,19 @@ mod tests {
     fn test_new_client_strips_provider_prefix() {
         let client = LlmClient::new("https://api.openai.com/v1", "sk-test", "openai/gpt-4o");
         assert_eq!(client.model_name(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_new_client_preserves_prefix_for_non_openai() {
+        let client = LlmClient::new("https://gateway.example.com/v1", "sk-test", "provider/model-name");
+        assert_eq!(client.model_name(), "provider/model-name");
+    }
+
+    #[test]
+    fn test_update_model_preserves_prefix_for_non_openai() {
+        let mut client = LlmClient::new("https://gateway.example.com/v1", "sk-test", "gpt-4");
+        client.update_model("provider/model-name");
+        assert_eq!(client.model_name(), "provider/model-name");
     }
 
     #[test]
