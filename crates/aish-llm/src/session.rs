@@ -190,6 +190,11 @@ impl LlmSession {
         }
     }
 
+    /// Return the current model name.
+    pub fn model_name(&self) -> &str {
+        self.client.model_name()
+    }
+
     /// Low-level chat completion returning the raw API response.
     pub async fn chat_completion_raw(
         &self,
@@ -242,7 +247,7 @@ impl LlmSession {
     /// Process user input: send to LLM, handle tool calls in a loop, return final response.
     pub async fn process_input(
         &self,
-        prompt: &str,
+        user_msg: &ChatMessage,
         context_messages: &[ChatMessage],
         system_message: Option<&str>,
         stream: bool,
@@ -252,7 +257,7 @@ impl LlmSession {
         // Emit operation start event
         self.emit_event(LlmEvent {
             event_type: LlmEventType::OpStart,
-            data: serde_json::json!({"prompt_length": prompt.len()}),
+            data: serde_json::json!({"prompt_length": user_msg.text_byte_len()}),
             timestamp: now_timestamp(),
             metadata: None,
         });
@@ -284,7 +289,7 @@ impl LlmSession {
             messages.push(ChatMessage::system(sys));
         }
         messages.extend_from_slice(context_messages);
-        messages.push(ChatMessage::user(prompt));
+        messages.push(user_msg.clone());
 
         messages = self.prepare_messages_for_send(messages).await;
 
@@ -468,7 +473,8 @@ impl LlmSession {
 
                     if let Some(msg) = assistant_msg {
                         let mut chat_msg = ChatMessage::assistant("");
-                        chat_msg.content = extract_message_text(msg.get("content"));
+                        chat_msg.content =
+                            extract_message_text(msg.get("content")).map(MessageContent::Text);
                         chat_msg.tool_calls = Some(tool_calls.clone());
                         chat_msg.reasoning_content = reasoning_content;
                         messages.push(chat_msg);
@@ -845,7 +851,7 @@ impl LlmSession {
                     assistant_msg.content = if accumulated.is_empty() {
                         None
                     } else {
-                        Some(accumulated)
+                        Some(MessageContent::Text(accumulated))
                     };
                     assistant_msg.tool_calls = Some(tool_calls.clone());
                     if !reasoning_accumulated.is_empty() {
@@ -965,8 +971,9 @@ impl LlmSession {
             }
             LlmResponse::Stream(_) => {
                 // Delegate to process_input for streaming handling
+                let user_msg = ChatMessage::user(prompt);
                 let result = self
-                    .process_input(prompt, &[], system_message, true)
+                    .process_input(&user_msg, &[], system_message, true)
                     .await?;
                 Ok(result.text)
             }
@@ -1489,7 +1496,7 @@ fn build_chat_summary_prompt(messages: &[ChatMessage], summary_max_tokens: usize
     ));
     prompt.push_str("Return exactly one <conversation-summary> block.\n\n");
     for (idx, msg) in messages.iter().enumerate() {
-        let content = msg.content.as_deref().unwrap_or("");
+        let content = msg.text_content().unwrap_or("");
         prompt.push_str(&format!(
             "\n<message index=\"{}\" role=\"{}\">\n{}\n</message>\n",
             idx,
@@ -1571,7 +1578,7 @@ fn estimate_chat_tokens(messages: &[ChatMessage], policy: &ContextBudgetPolicy) 
 }
 
 fn estimate_one_chat_message(message: &ChatMessage, _policy: &ContextBudgetPolicy) -> usize {
-    let content_len = message.content.as_ref().map(|c| c.len()).unwrap_or(0);
+    let content_len = message.text_byte_len();
     let reasoning_len = message
         .reasoning_content
         .as_ref()
@@ -1597,7 +1604,7 @@ fn microcompact_chat_messages(
 
         let mut changed = false;
         if msg.role == "tool" {
-            if let Some(content) = &msg.content {
+            if let Some(content) = msg.text_content() {
                 if content.len() > 256 || is_low_value_chat_output(content) {
                     let mut replacement = String::from(
                         "[old tool output cleared by context microcompact; key metadata retained]",
@@ -1608,7 +1615,7 @@ fn microcompact_chat_messages(
                     if let Some(return_code) = extract_return_code(content) {
                         replacement.push_str(&format!("\nreturn_code: {}", return_code));
                     }
-                    msg.content = Some(replacement);
+                    msg.content = Some(MessageContent::Text(replacement));
                     changed = true;
                 }
             }
@@ -1691,7 +1698,7 @@ fn build_chat_summary(old_messages: &[ChatMessage], summary_max_tokens: usize) -
         .into_iter()
         .rev()
     {
-        let content = msg.content.as_deref().unwrap_or("");
+        let content = msg.text_content().unwrap_or("");
         lines.push(format!(
             "- {}: {}",
             msg.role,
@@ -1766,7 +1773,7 @@ fn trim_messages(
     let estimate_tokens = |msgs: &[ChatMessage]| -> usize {
         msgs.iter()
             .map(|m| {
-                let content_len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
+                let content_len = m.text_byte_len();
                 let reasoning_len = m.reasoning_content.as_ref().map(|c| c.len()).unwrap_or(0);
                 (content_len + reasoning_len) / 4
             })
@@ -1807,7 +1814,7 @@ fn trim_messages(
     // Keep newest middle messages that fit
     for msg in middle.into_iter().rev() {
         let msg_tokens = {
-            let content_len = msg.content.as_ref().map(|c| c.len()).unwrap_or(0);
+            let content_len = msg.text_byte_len();
             let reasoning_len = msg.reasoning_content.as_ref().map(|c| c.len()).unwrap_or(0);
             (content_len + reasoning_len) / 4
         };
@@ -1954,7 +1961,7 @@ fn smart_trim_tool_loop(messages: &mut [ChatMessage], initial_len: usize) {
     let loop_tokens: usize = messages[initial_len..]
         .iter()
         .map(|m| {
-            let content_len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
+            let content_len = m.text_byte_len();
             let reasoning_len = m.reasoning_content.as_ref().map(|c| c.len()).unwrap_or(0);
             (content_len + reasoning_len) / 4
         })
@@ -1997,7 +2004,21 @@ fn smart_trim_tool_loop(messages: &mut [ChatMessage], initial_len: usize) {
             continue;
         }
         let content = match &msg.content {
-            Some(c) if !c.is_empty() => c.clone(),
+            Some(MessageContent::Text(c)) if !c.is_empty() => c.clone(),
+            Some(MessageContent::Blocks(blocks)) => {
+                let text: String = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                if text.is_empty() {
+                    continue;
+                }
+                text
+            }
             _ => continue,
         };
         // Already summarized (by us or microcompact) — skip.
@@ -2012,7 +2033,7 @@ fn smart_trim_tool_loop(messages: &mut [ChatMessage], initial_len: usize) {
             .unwrap_or(("unknown".to_string(), String::new()));
 
         let summary = summarize_tool_output(&tool_name, &tool_args, &content);
-        msg.content = Some(summary);
+        msg.content = Some(MessageContent::Text(summary));
         summarized += 1;
     }
 
@@ -2035,7 +2056,7 @@ mod tests {
     fn make_msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
             role: role.to_string(),
-            content: Some(content.to_string()),
+            content: Some(MessageContent::Text(content.to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -2081,7 +2102,7 @@ mod tests {
         let result = trim_messages(msgs, 50, 3);
         // Last 3 messages should be preserved
         assert_eq!(
-            result.last().unwrap().content.as_deref(),
+            result.last().unwrap().text_content(),
             Some("message number 19 with padding content here")
         );
     }
@@ -2089,7 +2110,7 @@ mod tests {
     fn make_tool_call_msg_with_args(id: &str, name: &str, args: &str) -> ChatMessage {
         ChatMessage {
             role: "assistant".to_string(),
-            content: Some(format!("calling {}", name)),
+            content: Some(MessageContent::Text(format!("calling {}", name))),
             tool_calls: Some(vec![ToolCall {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -2109,7 +2130,7 @@ mod tests {
     fn make_tool_result_msg(id: &str, output: &str) -> ChatMessage {
         ChatMessage {
             role: "tool".to_string(),
-            content: Some(output.to_string()),
+            content: Some(MessageContent::Text(output.to_string())),
             tool_calls: None,
             tool_call_id: Some(id.to_string()),
             name: None,
@@ -2131,7 +2152,7 @@ mod tests {
         smart_trim_tool_loop(&mut msgs, initial_len);
         assert_eq!(msgs.len(), len_before);
         // Content should be unchanged
-        assert_eq!(msgs[3].content.as_deref(), Some("short output"));
+        assert_eq!(msgs[3].text_content(), Some("short output"));
     }
 
     #[test]
@@ -2162,17 +2183,17 @@ mod tests {
         assert_eq!(msgs.len(), 2 + 12 * 2);
 
         // Prefix must be preserved
-        assert_eq!(msgs[0].content.as_deref(), Some("sys"));
-        assert_eq!(msgs[1].content.as_deref(), Some("hi"));
+        assert_eq!(msgs[0].text_content(), Some("sys"));
+        assert_eq!(msgs[1].text_content(), Some("hi"));
 
         // Recent rounds (last 6) should still have their full content
         let last_tool = msgs.last().unwrap();
-        assert!(last_tool.content.as_ref().unwrap().contains(&big_output));
+        assert!(last_tool.text_content().unwrap().contains(&big_output));
 
         // Old rounds should be summarized (not the raw big output)
         // Round 0 tool result is at index 3
         let old_tool = &msgs[3];
-        let content = old_tool.content.as_ref().unwrap();
+        let content = old_tool.text_content().unwrap();
         assert!(content.starts_with("[bash]"));
         assert!(content.contains("exit 0"));
         assert!(!content.contains(&big_output));
@@ -2216,8 +2237,8 @@ mod tests {
 
         smart_trim_tool_loop(&mut msgs, initial_len);
 
-        assert_eq!(msgs[0].content.as_deref(), Some("sys"));
-        assert_eq!(msgs[4].content.as_deref(), Some("previous answer"));
+        assert_eq!(msgs[0].text_content(), Some("sys"));
+        assert_eq!(msgs[4].text_content(), Some("previous answer"));
     }
 
     #[test]
@@ -2278,15 +2299,10 @@ mod tests {
         let report = microcompact_chat_messages(&mut msgs, &policy);
         assert_eq!(report.changed_messages, 1);
         assert!(msgs[1]
-            .content
-            .as_deref()
+            .text_content()
             .unwrap()
             .contains("old tool output cleared"));
-        assert!(msgs[2]
-            .content
-            .as_deref()
-            .unwrap()
-            .contains("recent output"));
+        assert!(msgs[2].text_content().unwrap().contains("recent output"));
     }
 
     #[test]
@@ -2307,14 +2323,10 @@ mod tests {
         let result = full_compact_chat_messages(msgs, &policy).unwrap();
         assert_eq!(result[0].role, "system");
         assert!(result.iter().any(|m| m
-            .content
-            .as_deref()
+            .text_content()
             .unwrap_or("")
             .contains("conversation-summary")));
-        assert_eq!(
-            result.last().unwrap().content.as_deref(),
-            Some("recent answer")
-        );
+        assert_eq!(result.last().unwrap().text_content(), Some("recent answer"));
     }
 
     #[test]
@@ -2356,12 +2368,11 @@ mod tests {
 
         let prepared = session.prepare_messages_for_send(msgs).await;
         assert!(prepared.iter().any(|m| m
-            .content
-            .as_deref()
+            .text_content()
             .unwrap_or("")
             .contains("old tool output cleared")));
         assert_eq!(
-            prepared.last().unwrap().content.as_deref(),
+            prepared.last().unwrap().text_content(),
             Some("recent answer")
         );
     }

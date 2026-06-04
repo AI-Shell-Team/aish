@@ -7,7 +7,7 @@ use aish_context::{
     ContextBudgetPolicy, ContextCompactReport, ContextManager, ContextPressureLevel,
 };
 use aish_core::{LlmEvent, MemoryCategory, MemoryType, PlanModeState, PlanPhase};
-use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession};
+use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent};
 use aish_memory::MemoryManager;
 use aish_prompts::PromptManager;
 use aish_session::SessionContextMessage;
@@ -407,15 +407,43 @@ impl AiHandler {
         let mut context_messages = self.build_context_messages();
         context_messages.insert(0, ChatMessage::system(&env_block));
 
-        // Step 5: Send to LLM
+        // Step 6: Extract images from the question text
+        let extracted = crate::image::extract_images(&question_processed);
+        for warning in &extracted.warnings {
+            eprintln!("{}", warning);
+        }
+        if !extracted.attached.is_empty() {
+            for img in &extracted.attached {
+                if img.size_bytes >= 1024 {
+                    eprintln!(
+                        "\x1b[2m📎 Attached image: {} ({:.1} KB)\x1b[0m",
+                        img.filename,
+                        img.size_bytes as f64 / 1024.0
+                    );
+                } else {
+                    eprintln!(
+                        "\x1b[2m📎 Attached image: {} ({} B)\x1b[0m",
+                        img.filename, img.size_bytes
+                    );
+                }
+            }
+            if extracted.attached.len() > 1 {
+                eprintln!(
+                    "\x1b[2m📎 {} images attached\x1b[0m",
+                    extracted.attached.len()
+                );
+            }
+        }
+
+        // Step 7: Build user message (with or without images)
+        let user_msg = if extracted.image_urls.is_empty() {
+            ChatMessage::user(&question_processed)
+        } else {
+            ChatMessage::user_with_images(extracted.cleaned_text, extracted.image_urls)
+        };
         let process_result = self
             .llm_session
-            .process_input(
-                &question_processed,
-                &context_messages,
-                Some(&static_core),
-                true,
-            )
+            .process_input(&user_msg, &context_messages, Some(&static_core), true)
             .await?;
         let response = process_result.text;
 
@@ -452,9 +480,15 @@ impl AiHandler {
         let context_messages = self.build_context_messages();
         let system_message = self.error_correction_system_message(command, exit_code, stderr);
 
+        let user_msg = ChatMessage::user(&prompt);
         let process_result = self
             .llm_session
-            .process_input(&prompt, &context_messages, system_message.as_deref(), true)
+            .process_input(
+                &user_msg,
+                &context_messages,
+                system_message.as_deref(),
+                true,
+            )
             .await?;
         let response = process_result.text;
 
@@ -719,7 +753,7 @@ impl AiHandler {
                 let content = v
                     .get("content")
                     .and_then(|c| c.as_str())
-                    .map(|s| s.to_string());
+                    .map(|s| MessageContent::Text(s.to_string()));
                 ChatMessage {
                     role,
                     content,
