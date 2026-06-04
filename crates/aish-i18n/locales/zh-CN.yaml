@@ -805,6 +805,17 @@ tools:
     missing_pattern: "缺少 'pattern' 参数"
     invalid_glob: "错误：无效的 glob 模式: {error}"
 
+  web_fetch:
+    description: "从指定 URL 抓取内容，将可读 HTML 转为文本，并使用二级模型按 prompt 分析页面。重要：WebFetch 无法访问需要认证或私有的 URL。对于 GitHub URL，如可用请优先通过 bash 使用 gh。"
+    missing_url: "缺少 'url' 参数"
+    missing_prompt: "缺少 'prompt' 参数"
+    invalid_url: "错误：无效 URL。请提供完整的 http 或 https URL，且不要包含凭据。"
+    blocked_private_host: "已阻止访问私有或本地主机的 WebFetch 请求: {host}"
+    confirm_fetch: "允许 WebFetch 从 {host} 抓取内容吗？"
+    content_too_large: "WebFetch 响应超过 10MB 限制"
+    binary_unsupported: "当前版本的 WebFetch 不支持二进制内容"
+    secondary_model_failed: "WebFetch 已抓取页面，但使用二级模型处理失败: {error}"
+
 help:
   labels:
     usage: "用法"

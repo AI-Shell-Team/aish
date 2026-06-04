@@ -368,7 +368,7 @@ cargo clippy --all-targets -- -D warnings
 | `aish-security` | Security policy engine with glob-to-regex pattern matching |
 | `aish-skills` | Skill plugin discovery with hot-reload via notify |
 | `aish-memory` | Markdown-based long-term memory with relevance scoring |
-| `aish-tools` | Built-in tools: bash, fs (read/write/edit), ask_user, memory, skill |
+| `aish-tools` | Built-in tools: bash, WebFetch, fs (read/write/edit), ask_user, memory, skill |
 | `aish-scripts` | .aish script system with frontmatter, ai "prompt" syntax, hooks |
 | `aish-shell` | Main shell: REPL loop, AI handler, built-in commands, animation |
 | `aish-cli` | CLI entry point with clap derive macros |

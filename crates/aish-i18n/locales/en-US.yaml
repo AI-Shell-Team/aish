@@ -806,6 +806,17 @@ tools:
     missing_pattern: "Missing 'pattern' parameter"
     invalid_glob: "Error: invalid glob pattern: {error}"
 
+  web_fetch:
+    description: "Fetch content from a specified URL, convert readable HTML to text, and answer a prompt about the page using a secondary model. IMPORTANT: WebFetch will fail for authenticated or private URLs. For GitHub URLs, prefer gh via bash when available."
+    missing_url: "Missing 'url' parameter"
+    missing_prompt: "Missing 'prompt' parameter"
+    invalid_url: "Error: invalid URL. Provide a fully-qualified http or https URL without credentials."
+    blocked_private_host: "Blocked WebFetch request to private or local host: {host}"
+    confirm_fetch: "Allow WebFetch to fetch content from {host}?"
+    content_too_large: "WebFetch response exceeded the 10MB limit"
+    binary_unsupported: "WebFetch does not support binary content in this version"
+    secondary_model_failed: "WebFetch fetched the page but failed to process it with the secondary model: {error}"
+
 help:
   labels:
     usage: "Usage"

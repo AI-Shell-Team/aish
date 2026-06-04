@@ -445,6 +445,13 @@ impl AishShell {
         tool_registry.register(Box::new(aish_tools::PythonTool::new()));
         tool_registry.register(Box::new(aish_tools::GlobTool::new()));
         tool_registry.register(Box::new(aish_tools::GrepTool::new()));
+        tool_registry.register(Box::new(aish_tools::WebFetchTool::new(
+            &config.api_base,
+            &config.api_key,
+            &config.model,
+            Some(config.temperature),
+            config.max_tokens,
+        )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
 
