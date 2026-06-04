@@ -1088,31 +1088,38 @@ impl AishShell {
                 .ok()
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(80);
-            let border = "─".repeat(width.saturating_sub(4));
+            let inner_width = width.saturating_sub(4).max(20);
+            let border = "─".repeat(inner_width);
             println!();
             println!("\x1b[33m╭{}╮\x1b[0m", border);
-            println!(
-                "\x1b[33m│\x1b[1;33m ⚠  Security Confirmation Required\x1b[0m{}",
-                pad_to_width("", width.saturating_sub(38))
+            print_panel_line(
+                "\x1b[1;33m ⚠  Security Confirmation Required\x1b[0m",
+                inner_width,
             );
-            println!("\x1b[33m│\x1b[0m");
-            println!(
-                "\x1b[33m│\x1b[0m  \x1b[1;36m{}\x1b[0m   {}",
-                t("shell.confirm_dialog_tool"),
-                ctx.tool_name
+            print_panel_line("", inner_width);
+            print_panel_line(
+                &format!(
+                    "  \x1b[1;36m{}\x1b[0m   {}",
+                    t("shell.confirm_dialog_tool"),
+                    ctx.tool_name
+                ),
+                inner_width,
             );
             let reason_lines = wrap_text(&ctx.message, width.saturating_sub(14));
-            println!(
-                "\x1b[33m│\x1b[0m  \x1b[1;36mReason:\x1b[0m {}",
-                reason_lines.lines().next().unwrap_or("")
+            print_panel_line(
+                &format!(
+                    "  \x1b[1;36mReason:\x1b[0m {}",
+                    reason_lines.lines().next().unwrap_or("")
+                ),
+                inner_width,
             );
             for line in reason_lines.lines().skip(1) {
-                println!("\x1b[33m│\x1b[0m         {}", line);
+                print_panel_line(&format!("         {}", line), inner_width);
             }
-            println!("\x1b[33m│\x1b[0m");
-            println!(
-                "\x1b[33m│\x1b[0m  \x1b[36m{}\x1b[0m",
-                t("shell.confirm_dialog_question")
+            print_panel_line("", inner_width);
+            print_panel_line(
+                &format!("  \x1b[36m{}\x1b[0m", t("shell.confirm_dialog_question")),
+                inner_width,
             );
             println!("\x1b[33m╰{}╯\x1b[0m", border);
             print!("  ");
@@ -1130,28 +1137,36 @@ impl AishShell {
                     .ok()
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(80);
-                let border = "─".repeat(width.saturating_sub(4));
+                let inner_width = width.saturating_sub(4).max(20);
+                let border = "─".repeat(inner_width);
                 println!();
                 println!("\x1b[33m╭{}╮\x1b[0m", border);
-                println!(
-                    "\x1b[33m│\x1b[1;33m {}\x1b[0m{}",
-                    aish_i18n::t("shell.session.iteration_limit_title"),
-                    pad_to_width("", width.saturating_sub(38))
+                print_panel_line(
+                    &format!(
+                        "\x1b[1;33m {}\x1b[0m",
+                        aish_i18n::t("shell.session.iteration_limit_title")
+                    ),
+                    inner_width,
                 );
-                println!("\x1b[33m│\x1b[0m");
-                println!(
-                    "\x1b[33m│\x1b[0m  {} {}",
-                    aish_i18n::t_with_args("shell.session.iteration_limit_reached", &{
-                        let mut m = std::collections::HashMap::new();
-                        m.insert("count".to_string(), iterations.to_string());
-                        m
-                    },),
-                    pad_to_width("", 0)
+                print_panel_line("", inner_width);
+                print_panel_line(
+                    &format!(
+                        "  {}",
+                        aish_i18n::t_with_args("shell.session.iteration_limit_reached", &{
+                            let mut m = std::collections::HashMap::new();
+                            m.insert("count".to_string(), iterations.to_string());
+                            m
+                        },)
+                    ),
+                    inner_width,
                 );
-                println!("\x1b[33m│\x1b[0m");
-                println!(
-                    "\x1b[33m│\x1b[0m  \x1b[36m{}\x1b[0m",
-                    aish_i18n::t("shell.session.iteration_continue_prompt")
+                print_panel_line("", inner_width);
+                print_panel_line(
+                    &format!(
+                        "  \x1b[36m{}\x1b[0m",
+                        aish_i18n::t("shell.session.iteration_continue_prompt")
+                    ),
+                    inner_width,
                 );
                 println!("\x1b[33m╰{}╯\x1b[0m", border);
                 print!("  ");
@@ -4976,13 +4991,32 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     format!("{}...", truncated)
 }
 
-/// Pad a string with trailing spaces to fill the given width (for box borders).
-fn pad_to_width(s: &str, width: usize) -> String {
-    if s.len() >= width {
-        s.to_string()
-    } else {
-        format!("{}{}\x1b[33m│\x1b[0m", s, " ".repeat(width - s.len()))
+fn print_panel_line(content: &str, inner_width: usize) {
+    let visible = ansi_display_width(content);
+    let padding = inner_width.saturating_sub(visible);
+    println!(
+        "\x1b[33m│\x1b[0m{}{}\x1b[33m│\x1b[0m",
+        content,
+        " ".repeat(padding)
+    );
+}
+
+fn ansi_display_width(s: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for code_ch in chars.by_ref() {
+                if code_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
     }
+    width
 }
 
 /// Wrap text to the given width, preserving word boundaries.
