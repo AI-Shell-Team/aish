@@ -173,6 +173,9 @@ fn generate_issue_url(
 /// Compose the Markdown body for the GitHub issue with environment info and optional logs.
 fn build_body(info: &SystemInfo, include_logs: bool) -> String {
     let mut body = String::from("## Summary\n\n");
+    body.push_str("## Steps to reproduce\n\n1.\n2.\n3.\n\n");
+    body.push_str("## Expected behavior\n\n");
+    body.push_str("## Actual behavior\n\n");
     body.push_str("## Environment\n");
     body.push_str(&format!("- AISH version: {}\n", info.version));
     body.push_str(&format!("- Operating system: {}\n", info.os));
@@ -405,6 +408,10 @@ mod tests {
         };
 
         let body = build_body(&info, true);
+        assert!(body.contains("## Summary"));
+        assert!(body.contains("## Steps to reproduce"));
+        assert!(body.contains("## Expected behavior"));
+        assert!(body.contains("## Actual behavior"));
         assert!(body.contains("AISH version: 0.3.3"));
         assert!(body.contains("Operating system: Linux 6.12"));
         assert!(body.contains("AI Model / Provider: claude-sonnet / Anthropic"));
