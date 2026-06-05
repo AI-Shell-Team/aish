@@ -329,7 +329,23 @@ shell:
     plan: "Plan mode control"
     token: "Show token usage"
     resume: "Resume previous session"
-    feedback: "Open GitHub Issues"
+    feedback: "Submit feedback"
+
+  feedback:
+    select_type: "Select feedback type"
+    type_bug: "Bug Report"
+    type_feature: "Feature Request"
+    type_question: "Question"
+    confirm_title: "Review collected information"
+    confirm_question: "The following information will be attached to the issue. Logs may contain sensitive information."
+    confirm: "Confirm and open"
+    without_logs: "Open without logs"
+    cancel: "Cancel"
+    opening: "Opening GitHub Issue..."
+    failed: "Failed to open browser: {error}"
+    visit: "Visit: {url}"
+    log_unavailable: "(log file not found)"
+    logs_included: "included (last 30 lines, redacted)"
 
   # Model switching
   model_usage: "Usage: /model [model-name]"

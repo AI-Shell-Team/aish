@@ -329,7 +329,23 @@ shell:
     plan: "计划模式控制"
     token: "显示令牌用量"
     resume: "恢复之前的会话"
-    feedback: "打开 GitHub Issues"
+    feedback: "提交反馈"
+
+  feedback:
+    select_type: "选择反馈类型"
+    type_bug: "Bug 报告"
+    type_feature: "功能建议"
+    type_question: "问题咨询"
+    confirm_title: "确认收集的信息"
+    confirm_question: "以下信息将附加到 Issue 中。日志可能包含敏感信息。"
+    confirm: "确认并打开"
+    without_logs: "不包含日志直接打开"
+    cancel: "取消"
+    opening: "正在打开 GitHub Issue..."
+    failed: "无法打开浏览器: {error}"
+    visit: "访问: {url}"
+    log_unavailable: "（未找到日志文件）"
+    logs_included: "已包含（最近 30 行，已脱敏）"
 
   # 模型切换
   model_usage: "用法: /model [模型名称]"

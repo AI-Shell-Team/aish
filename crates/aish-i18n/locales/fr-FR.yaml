@@ -149,7 +149,23 @@ shell:
     plan: "Contrôle du mode plan"
     token: "Afficher l'utilisation des tokens"
     resume: "Reprendre la session précédente"
-    feedback: "Ouvrir les Issues GitHub"
+    feedback: "Envoyer un commentaire"
+
+  feedback:
+    select_type: "Sélectionner le type de commentaire"
+    type_bug: "Rapport de bug"
+    type_feature: "Demande de fonctionnalité"
+    type_question: "Question"
+    confirm_title: "Vérifier les informations collectées"
+    confirm_question: "Les informations suivantes seront jointes à l'issue. Les journaux peuvent contenir des informations sensibles."
+    confirm: "Confirmer et ouvrir"
+    without_logs: "Ouvrir sans les journaux"
+    cancel: "Annuler"
+    opening: "Ouverture du GitHub Issue..."
+    failed: "Impossible d'ouvrir le navigateur : {error}"
+    visit: "Visiter : {url}"
+    log_unavailable: "(fichier journal introuvable)"
+    logs_included: "inclus (30 dernières lignes, expurgés)"
 
   security:
     panel_title:

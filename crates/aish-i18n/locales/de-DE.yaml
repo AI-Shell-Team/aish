@@ -149,7 +149,23 @@ shell:
     plan: "Planmodus steuern"
     token: "Token-Nutzung anzeigen"
     resume: "Vorherige Sitzung fortsetzen"
-    feedback: "GitHub Issues öffnen"
+    feedback: "Feedback geben"
+
+  feedback:
+    select_type: "Feedback-Typ auswählen"
+    type_bug: "Fehlerbericht"
+    type_feature: "Feature-Wunsch"
+    type_question: "Frage"
+    confirm_title: "Gesammelte Informationen überprüfen"
+    confirm_question: "Die folgenden Informationen werden an das Issue angehängt. Protokolle können sensible Daten enthalten."
+    confirm: "Bestätigen und öffnen"
+    without_logs: "Ohne Protokolle öffnen"
+    cancel: "Abbrechen"
+    opening: "GitHub Issue wird geöffnet..."
+    failed: "Browser konnte nicht geöffnet werden: {error}"
+    visit: "Besuchen: {url}"
+    log_unavailable: "(Protokolldatei nicht gefunden)"
+    logs_included: "enthalten (letzte 30 Zeilen, bereinigt)"
 
   security:
     panel_title:

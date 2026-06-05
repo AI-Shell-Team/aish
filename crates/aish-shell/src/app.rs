@@ -2038,12 +2038,7 @@ impl AishShell {
                 return false;
             }
             Some("/feedback") => {
-                let url = "https://github.com/AI-Shell-Team/aish/issues";
-                println!("Opening GitHub Issues...");
-                if let Err(e) = open::that(url) {
-                    eprintln!("Failed to open browser: {e}");
-                    println!("Visit: {url}");
-                }
+                crate::feedback::run_feedback(&self.config.model, &self.config.api_base);
             }
             _ => {
                 eprintln!("{}", {
