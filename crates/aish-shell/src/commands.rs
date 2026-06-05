@@ -1,6 +1,6 @@
 use crate::types::ShellState;
 use crate::wizard::SetupWizard;
-use aish_i18n::t;
+use aish_i18n::{t, t_with_args};
 
 /// Result of handling a built-in command.
 pub struct BuiltinResult {
@@ -89,7 +89,7 @@ impl ShellState {
             "pushd" => self.handle_pushd(args),
             "popd" => self.handle_popd(),
             "dirs" => self.handle_dirs(args),
-            "help" => self.handle_help(),
+            "help" => self.handle_help(args),
             "clear" => self.handle_clear(),
             "exit" | "quit" => self.handle_exit(),
             "su" | "sudo" => self.handle_pty_command(cmd, args),
@@ -469,27 +469,34 @@ impl ShellState {
 
     // -- help ----------------------------------------------------------------
 
-    fn handle_help(&self) -> BuiltinResult {
-        let help_text = r#"AI Shell - Built-in Commands
+    fn handle_help(&self, args: &[&str]) -> BuiltinResult {
+        match args.first() {
+            Some(topic) => self.render_topic_help(topic),
+            None => {
+                let title = t("help.general.title");
+                println!("\n\x1b[1;36m{}\x1b[0m\n", title);
+                let markdown = t("help.general.markdown");
+                crate::renderer::ShellRenderer::new().render_markdown(&markdown);
+                BuiltinResult::handled_no_output()
+            }
+        }
+    }
 
-  ; <question>       Ask the AI assistant a question
-  cd [-L|-P] [dir]   Change directory (~, - supported)
-  pwd [-L|-P]        Print working directory
-  export [-p|-n]     Set or list environment variables
-  unset [-v|-f]      Remove environment variables
-  pushd <dir>        Push directory onto stack and cd
-  popd               Pop directory from stack and cd
-  dirs [-c|-v|-l]    Show (or clear) directory stack
-  history [N]        Show last N commands
-  clear              Clear the terminal screen
-  help               Show this help text
-  exit / quit        Exit the shell
-  /model [name]      Show or switch the AI model
-  /setup             Open setup wizard
-  /token             Show token usage statistics (last 7 days)
-
-Any other input is executed as an external command via /bin/bash."#;
-        BuiltinResult::handled(help_text)
+    fn render_topic_help(&self, topic: &str) -> BuiltinResult {
+        let title_key = format!("help.topics.{}.title", topic);
+        let title = t(&title_key);
+        // If the returned value equals the key itself, the topic doesn't exist
+        if title == title_key {
+            let mut args = std::collections::HashMap::new();
+            args.insert("topic".to_string(), topic.to_string());
+            eprintln!("{}", t_with_args("help.topics.unknown", &args));
+            return BuiltinResult::handled_no_output();
+        }
+        println!("\n\x1b[1;36m{}\x1b[0m\n", title);
+        let md_key = format!("help.topics.{}.markdown", topic);
+        let markdown = t(&md_key);
+        crate::renderer::ShellRenderer::new().render_markdown(&markdown);
+        BuiltinResult::handled_no_output()
     }
 
     // -- clear ---------------------------------------------------------------

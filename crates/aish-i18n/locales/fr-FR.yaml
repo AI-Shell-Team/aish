@@ -144,12 +144,14 @@ shell:
     skills_loaded_suffix: " charges"
 
   slash:
+    help: "Afficher les informations d'aide"
     model: "Afficher ou changer le modèle IA"
     setup: "Ouvrir l'assistant de configuration"
     plan: "Contrôle du mode plan"
     token: "Afficher l'utilisation des tokens"
     resume: "Reprendre la session précédente"
     feedback: "Envoyer un commentaire"
+    quit: "Quitter AI Shell"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -353,9 +355,25 @@ security:
 
 tools:
   ask_user:
+    description: "Poser a l'utilisateur une question de clarification ciblee. Avec seulement prompt, ask_user utilise la saisie texte ; avec options, il propose des choix."
     unknown_kind: "Type inconnu : {kind}"
     runtime_not_configured: "le runtime ask_user n'est pas configure"
     execute_failed: "echec de ask_user : {error}"
+    param:
+      kind: "Type d'interaction : text_input pour saisie libre, choice_or_text pour options avec saisie personnalisee"
+      prompt: "La question a poser a l'utilisateur."
+      options: "Choix optionnels a proposer a l'utilisateur. S'ils sont absents ou vides, ask_user utilise la saisie texte."
+      option_value: "Valeur stable de l'option retournee dans les metadonnees de l'outil."
+      option_label: "Libelle affiche a l'utilisateur dans la liste."
+      option_description: "Detail optionnel affiche sous l'option."
+      option_recommended: "Marque visiblement cette option comme recommandee."
+      title: "Titre optionnel pour la question"
+      default: "Valeur par defaut"
+      placeholder: "Texte indicatif"
+      allow_freeform_input: "Quand des options sont presentes, autorise une reponse personnalisee. La valeur par defaut est true."
+      required: "Indique si l'utilisateur doit fournir une reponse (par defaut : true)"
+      allow_cancel: "Indique si l'utilisateur peut annuler/ignorer (par defaut : true)"
+      min_length: "Longueur minimale pour la saisie texte (par defaut : 0)"
     validation:
       prompt_empty: "prompt ne peut pas etre vide"
       option_value_empty: "option value ne peut pas etre vide"
@@ -390,54 +408,269 @@ help:
     notes: "Notes"
     brief_usage: "Utilisation : {usage}"
   general:
-    title: "📖 Aide AI Shell"
+    title: "Aide AI Shell"
     markdown: |-
-      ## Commandes disponibles :
+      ## Démarrage rapide
+      - **Commandes Shell** — saisissez directement : `ls`, `cd`, `vim`, `ssh`, `top` …
+      - **Demander à l'IA** — préfixez par `;` : `;comment trouver les gros fichiers`
+      - **Commandes slash** — appuyez sur `/` sur une ligne vide pour le sélecteur interactif
 
-      ### Navigation dans les repertoires
-      - `cd [-L|[-P [-e]]] [directory]` - Changer de repertoire avec prise en charge complete des parametres
-      - `pushd [directory]` - Empiler un repertoire
-      - `popd` - Depiler un repertoire
-      - `dirs [-c]` - Afficher la pile de repertoires
+      ## Commandes Slash
+      | Commande | Description |
+      |----------|-------------|
+      | `/help [page]` | Afficher l'aide (`/help` pour les pages) |
+      | `/quit` | Quitter AI Shell |
+      | `/model [nom]` | Afficher ou changer le modèle IA |
+      | `/setup` | Reconfigurer les paramètres API |
+      | `/plan [start\|status\|exit]` | Contrôle du mode plan |
+      | `/token` | Afficher l'utilisation des tokens (7 derniers jours) |
+      | `/resume [id]` | Reprendre une session précédente |
+      | `/feedback` | Envoyer un commentaire ou signaler un bug |
 
-      ### Historique
-      - `history [options] [n]` - Afficher l'historique des commandes
-      - `history -c` - Effacer l'historique
-      - `history -d offset` - Supprimer une entree de l'historique
+      ## Configuration
+      - Fichier de configuration : `~/.config/aish/config.yaml`
+      - Priorité : arguments CLI > variables d'environnement (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > fichier de config
+      - Exécutez `/setup` ou `aish setup` pour la configuration interactive
 
-      ### Variables d'environnement
-      - `export [-fn] [name[=value] ...]` - Definir ou exporter des variables d'environnement
-      - `export -p` - Afficher les variables exportees
-      - `unset [-fv] [name ...]` - Supprimer des variables d'environnement
-      - `pwd [-L|-P]` - Afficher le repertoire courant
+      ## Raccourcis clavier
+      | Touche | Action |
+      |--------|--------|
+      | `Ctrl+C` | Annuler l'opération en cours (appuyer deux fois pour quitter) |
+      | `Ctrl+D` | Quitter le shell |
+      | `Shift+Tab` / `F2` | Basculer le mode plan |
+      | `Ctrl+O` | Parcourir l'historique de sortie |
+      | `/` sur ligne vide | Sélecteur de commandes slash |
 
-      ### Commandes generales
-      - `help` - Afficher cette aide
-      - `clear` - Effacer l'ecran
-      - `exit` - Quitter le shell
-      - `/model [model]` - Afficher ou changer le modele
-      - `/setup` - Reconfigurer les parametres API
+      ## Pages d'aide
+      `/help <page>` pour les détails sur les fonctions spécifiques d'aish :
 
-      ### Commandes IA
-      - `; <question>` - Interroger l'assistant IA
+      | Page | Contenu |
+      |------|---------|
+      | `ai` | Assistant IA (préfixe `;`, contexte, conversation) |
+      | `model` | Gestion des modèles (afficher, changer, fournisseurs) |
+      | `plan` | Mode plan (flux, approbation, vs mode normal) |
+      | `config` | Configuration (fichiers, variables, priorité) |
+      | `shortcuts` | Raccourcis clavier (édition, contrôle, changement de mode) |
+      | `security` | Politique de sécurité (niveaux, règles, détection) |
 
-      ### Fonctionnalites
-      - ✅ Prise en charge PTY complete pour toutes les commandes
-      - ✅ Integration de l'historique des commandes et du contexte IA
-      - ✅ Sortie terminal enrichie pour les reponses IA
-      - ✅ Gestion des signaux et nettoyage propre
+      ## Plus
+      - Politique de sécurité : `~/.config/aish/security_policy.yaml`
+      - Base de données de sessions : `~/.local/share/aish/sessions.db`
+      - Journaux : `~/.config/aish/logs/aish.log`
+      - Documentation : https://github.com/AI-Shell-Team/aish
 
-      ### Obtenir plus d'aide
-      Utilisez `<command> --help` ou `<command> -h` pour afficher l'aide detaillee de n'importe quelle commande.
+  topics:
+    unknown: "Page d'aide inconnue '{topic}'. Pages disponibles : ai, model, plan, config, shortcuts, security"
 
-      ### Exemples
-      ```bash
-      history --help       # Afficher l'aide detaillee de history
-      cd --help            # Afficher l'aide detaillee de cd
-      export JAVA_HOME="/usr/lib/jvm/java-11"  # Definir une variable d'environnement
-      unset TEMP_VAR       # Supprimer une variable d'environnement
-      ; explique ls -la    # Demander a l'IA d'expliquer une commande
-      ```
+    ai:
+      title: "Assistant IA"
+      markdown: |-
+        ## Poser une question à l'IA
+
+        Préfixez votre question avec `;` (point-virgule) ou `；` (point-virgule pleine chasse) :
+
+        ```
+        ; comment trouver les gros fichiers ?
+        ; explique cette commande : ls -la
+        ; suggère une meilleure méthode de compression
+        ```
+
+        L'IA voit le contexte de votre conversation, y compris les commandes shell précédentes et les réponses de l'IA.
+
+        ## Fonctionnement
+
+        - Votre question est envoyée au modèle LLM configuré
+        - L'IA reçoit l'historique de conversation comme contexte
+        - Les réponses sont affichées avec coloration syntaxique et formatage de tableaux
+
+        ## Gestion du contexte
+
+        - L'historique de conversation est maintenu automatiquement
+        - Le compactage automatique se déclenche quand le budget de tokens est dépassé
+        - Les anciens messages sont résumés pour garder le contexte récent
+
+    model:
+      title: "Gestion des modèles"
+      markdown: |-
+        ## Afficher et changer de modèle
+
+        ```
+        /model                    # Afficher le modèle actuel
+        /model gpt-4o             # Passer à GPT-4o
+        /model claude-sonnet-4-6  # Passer à Claude
+        ```
+
+        ## Fournisseurs pris en charge
+
+        | Fournisseur | Préfixe du modèle |
+        |-------------|------------------|
+        | OpenAI | `gpt-*`, `o1-*`, `o3-*`, `o4-*` |
+        | Anthropic | `claude-*` |
+        | Google | `gemini-*`, `gemma-*` |
+        | DeepSeek | `deepseek-*` |
+        | Qwen | `qwen-*`, `qwq-*` |
+        | Mistral | `mistral-*`, `mixtral-*`, `codestral-*` |
+        | xAI | `grok-*` |
+        | Moonshot | `kimi-*`, `moonshot-*` |
+        | Zhipu | `glm-*` |
+        | Local | Ollama, vLLM, API locale |
+
+        ## Comportement du changement
+
+        - Le fournisseur est détecté automatiquement selon le nom du modèle
+        - La connectivité est validée avant le changement
+        - En cas d'échec, le modèle actuel est conservé
+        - La config est sauvegardée automatiquement dans `~/.config/aish/config.yaml`
+
+    plan:
+      title: "Mode Plan"
+      markdown: |-
+        ## Qu'est-ce que le mode Plan ?
+
+        Le mode Plan permet à l'IA d'analyser votre base de code et de créer un plan d'implémentation détaillé avant d'écrire du code. Les modifications ne sont appliquées qu'après votre approbation.
+
+        ## Commandes
+
+        ```
+        /plan start     # Entrer en mode plan
+        /plan status    # Afficher l'état du plan actuel
+        /plan exit      # Quitter le mode plan
+        ```
+
+        Vous pouvez aussi basculer le mode plan avec `Shift+Tab` ou `F2`.
+
+        ## Utilisation
+
+        1. Entrer en mode plan : `/plan start`
+        2. Demander à l'IA de planifier : `; refactoriser le module auth pour utiliser JWT`
+        3. L'IA génère un plan avec des étapes et des modifications de fichiers
+        4. Examiner le plan et approuver ou rejeter chaque étape
+        5. Une fois approuvé, les modifications sont appliquées
+        6. Quitter le mode plan : `/plan exit`
+
+        ## Mode Plan vs Mode Normal
+
+        | | Mode Normal | Mode Plan |
+        |---|---|---|
+        | Outils IA | Accès complet | Lecture seule + écriture du plan |
+        | Modifications | Immédiates | Après approbation |
+        | Idéal pour | Corrections rapides, questions | Refactorisation, nouvelles fonctionnalités |
+
+    config:
+      title: "Configuration"
+      markdown: |-
+        ## Fichier de configuration
+
+        Emplacement : `~/.config/aish/config.yaml`
+
+        Remplaçable avec `$AISH_CONFIG_DIR` ou `$XDG_CONFIG_HOME`.
+
+        ## Priorité
+
+        Arguments CLI > variables d'environnement > fichier de configuration
+
+        ## Variables d'environnement
+
+        | Variable | Usage |
+        |----------|-------|
+        | `AISH_MODEL` | Remplacer le modèle par défaut |
+        | `AISH_API_KEY` | Remplacer la clé API |
+        | `AISH_API_BASE` | Remplacer l'URL de base de l'API |
+        | `AISH_CONFIG_DIR` | Remplacer le répertoire de configuration |
+
+        ## Paramètres principaux
+
+        ```
+        model: gpt-4o                    # Modèle LLM par défaut
+        api_key: sk-xxx                  # Clé API
+        api_base: https://api.openai.com/v1  # Point d'accès API
+        temperature: 0.3                 # Aléatoire des réponses
+        theme: dark                      # Thème UI (dark/light)
+        output_language: fr              # Forcer la langue de sortie
+        ```
+
+        ## Assistant de configuration
+
+        Exécutez `/setup` ou `aish setup` pour une configuration interactive. Les paramètres prennent effet immédiatement sans redémarrage.
+
+        ## Autres fichiers
+
+        - Politique de sécurité : `~/.config/aish/security_policy.yaml`
+        - Base de données de sessions : `~/.local/share/aish/sessions.db`
+        - Journaux : `~/.config/aish/logs/aish.log`
+
+    shortcuts:
+      title: "Raccourcis clavier"
+      markdown: |-
+        ## Édition
+
+        | Touche | Action |
+        |--------|--------|
+        | `Tab` | Auto-complétion |
+        | `↑` / `↓` | Naviguer dans l'historique |
+        | `Ctrl+R` | Rechercher dans l'historique |
+        | `Ctrl+L` | Effacer l'écran |
+        | `Backspace` / `Delete` | Supprimer un caractère |
+
+        ## Contrôle du shell
+
+        | Touche | Action |
+        |--------|--------|
+        | `Ctrl+C` | Annuler l'opération en cours (appuyer deux fois pour quitter) |
+        | `Ctrl+D` | Quitter le shell |
+        | `Ctrl+O` | Parcourir l'historique de sortie |
+        | `Échap` | Annuler la saisie en cours |
+
+        ## Changement de mode
+
+        | Touche | Action |
+        |--------|--------|
+        | `Shift+Tab` / `F2` | Basculer le mode plan |
+        | `/` sur ligne vide | Ouvrir le sélecteur de commandes |
+
+    security:
+      title: "Politique de sécurité"
+      markdown: |-
+        ## Aperçu
+
+        aish utilise un fichier de politique de sécurité pour contrôler quelles commandes et opérations de fichiers nécessitent une confirmation ou sont bloquées.
+
+        ## Emplacement de la configuration
+
+        Priorité :
+        1. Chemin explicitement spécifié
+        2. `/etc/aish/security_policy.yaml`
+        3. `~/.config/aish/security_policy.yaml`
+
+        ## Niveaux de risque
+
+        | Niveau | Comportement |
+        |--------|-------------|
+        | `LOW` | Autorisé, journalisé |
+        | `MEDIUM` | Demande de confirmation |
+        | `HIGH` | Bloqué ou nécessite une confirmation explicite |
+
+        ## Structure des règles
+
+        ```yaml
+        rules:
+          - id: protect-system
+            name: Protéger les répertoires système
+            path: ["/boot/**", "/etc/passwd"]
+            operations: [WRITE, DELETE]
+            risk: HIGH
+            reason: "Les fichiers système ne doivent pas être modifiés"
+        ```
+
+        ## Motifs de chemin
+
+        - `*` correspond à un seul segment de chemin
+        - `**` correspond à zéro ou plusieurs segments de chemin
+        - Variables : `$HOME`, `$PWD`
+
+        ## Détection de secrets
+
+        Motifs intégrés pour la détection de clés API (OpenAI, Anthropic, AWS, Google, GitHub, Stripe, Slack), de tokens JWT et d'URL avec mots de passe intégrés. Motifs personnalisés via `secret_patterns`.
 
   command:
     history:
