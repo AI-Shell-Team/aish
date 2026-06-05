@@ -2,6 +2,7 @@
 #![allow(
     clippy::type_complexity,
     clippy::redundant_closure,
+    clippy::module_inception,
     clippy::match_like_matches_macro,
     clippy::option_as_ref_deref,
     clippy::field_reassign_with_default,
