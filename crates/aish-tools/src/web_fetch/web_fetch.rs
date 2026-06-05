@@ -62,9 +62,11 @@ impl WebFetchTool {
             self.temperature.or(Some(0.1)),
             self.max_tokens.or(Some(2048)),
         );
-        let messages = vec![ChatMessage::system(""), ChatMessage::user(model_prompt)];
+        let temperature = self.temperature.or(Some(0.1));
+        let max_tokens = self.max_tokens.or(Some(2048));
+        let messages = vec![ChatMessage::user(model_prompt)];
         match session
-            .chat_completion_raw(&messages, None, false, Some(0.1), Some(2048))
+            .chat_completion_raw(&messages, None, false, temperature, max_tokens)
             .await
             .map_err(|error| error.to_string())?
         {

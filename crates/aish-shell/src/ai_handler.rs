@@ -7,7 +7,7 @@ use aish_context::{
     ContextBudgetPolicy, ContextCompactReport, ContextManager, ContextPressureLevel,
 };
 use aish_core::{LlmEvent, MemoryCategory, MemoryType, PlanModeState, PlanPhase};
-use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent};
+use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent, Tool};
 use aish_memory::MemoryManager;
 use aish_prompts::PromptManager;
 use aish_session::SessionContextMessage;
@@ -324,6 +324,10 @@ impl AiHandler {
     /// Update the model in the underlying LLM session.
     pub fn update_model(&mut self, model: &str, api_base: Option<&str>, api_key: Option<&str>) {
         self.llm_session.update_model(model, api_base, api_key);
+    }
+
+    pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
+        self.llm_session.register_tool(tool);
     }
 
     /// Return a snapshot of token usage statistics for the last 7 days.
