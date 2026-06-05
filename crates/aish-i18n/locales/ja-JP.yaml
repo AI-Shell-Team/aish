@@ -166,6 +166,21 @@ shell:
     visit: "アクセス: {url}"
     log_unavailable: "（ログファイルが見つかりません）"
     logs_included: "含まれる（最後の30行、秘匿済み）"
+    logs_truncated: "注：URL長さ制限のためログが切り詰められました"
+    body_summary: "## Summary"
+    body_steps: "## Steps to reproduce"
+    body_expected: "## Expected behavior"
+    body_actual: "## Actual behavior"
+    body_environment: "## Environment"
+    body_version: "- AISH version: {version}"
+    body_os: "- Operating system: {os}"
+    body_model: "- AI Model / Provider: {model} / {provider}"
+    body_logs: "## Logs"
+    body_feature_summary: "## Feature summary"
+    body_use_case: "## Use case"
+    body_proposed_solution: "## Proposed solution"
+    body_alternatives: "## Alternatives considered"
+    body_question: "## Question"
 
   security:
     panel_title:
