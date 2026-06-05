@@ -166,6 +166,21 @@ shell:
     visit: "Visitar: {url}"
     log_unavailable: "(archivo de registro no encontrado)"
     logs_included: "incluidos (últimas 30 líneas, redactados)"
+    logs_truncated: "Nota: los registros se truncaron para cumplir con el límite de longitud de URL"
+    body_summary: "## Summary"
+    body_steps: "## Steps to reproduce"
+    body_expected: "## Expected behavior"
+    body_actual: "## Actual behavior"
+    body_environment: "## Environment"
+    body_version: "- AISH version: {version}"
+    body_os: "- Operating system: {os}"
+    body_model: "- AI Model / Provider: {model} / {provider}"
+    body_logs: "## Logs"
+    body_feature_summary: "## Feature summary"
+    body_use_case: "## Use case"
+    body_proposed_solution: "## Proposed solution"
+    body_alternatives: "## Alternatives considered"
+    body_question: "## Question"
 
   security:
     panel_title:
