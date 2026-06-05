@@ -13,6 +13,8 @@ use aish_security::{
     load_policy, secret::SecretVault, SecurityDecision, SecurityManager, SecurityRequest,
 };
 
+use super::prompt;
+
 /// Large keep_bytes for the silent PTY executor to capture full command output.
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
 const CAPTURE_KEEP_BYTES: usize = 10 * 1024 * 1024; // 10MB
@@ -106,13 +108,6 @@ pub struct BashTool {
     pty_slot: PtySlot,
     /// Shared vault for restoring $SECRET_* placeholders before command execution.
     secret_vault: VaultSlot,
-}
-
-/// Cached translated description.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.bash.description"))
 }
 
 fn timeout_secs(args: &serde_json::Value) -> Result<Option<u64>, ToolResult> {
@@ -483,25 +478,15 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": "The bash command to execute"
-                },
-                "timeout": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Timeout in seconds. If omitted, the command runs until completion or cancellation."
-                }
-            },
-            "required": ["command"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn preflight(&self, args: &serde_json::Value) -> PreflightResult {

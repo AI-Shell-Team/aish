@@ -3,15 +3,10 @@ use std::process::Command;
 use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
+use super::prompt;
+
 /// Maximum output length (matches main branch's 1000 chars).
 const MAX_OUTPUT_CHARS: usize = 1000;
-
-/// Cached translated description.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.python.description"))
-}
 
 /// Tool for executing Python code.
 pub struct PythonTool;
@@ -34,20 +29,15 @@ impl Tool for PythonTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "The Python code to execute."
-                }
-            },
-            "required": ["code"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

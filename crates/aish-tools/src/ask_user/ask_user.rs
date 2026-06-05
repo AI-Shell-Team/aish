@@ -1,9 +1,11 @@
 use std::io;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use aish_i18n::{t, t_with_args};
 use aish_llm::{Tool, ToolResult};
 use serde::Deserialize;
+
+use super::prompt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AskUserOption {
@@ -77,82 +79,12 @@ fn default_allow_freeform_input() -> bool {
     true
 }
 
-static DESCRIPTION: OnceLock<String> = OnceLock::new();
-
 pub(crate) fn ask_user_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| t("tools.ask_user.description"))
+    prompt::DESCRIPTION
 }
 
 pub(crate) fn ask_user_parameters() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "prompt": {
-                "type": "string",
-                "description": t("tools.ask_user.param.prompt")
-            },
-            "options": {
-                "type": "array",
-                "description": t("tools.ask_user.param.options"),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "value": {
-                            "type": "string",
-                            "description": t("tools.ask_user.param.option_value")
-                        },
-                        "label": {
-                            "type": "string",
-                            "description": t("tools.ask_user.param.option_label")
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": t("tools.ask_user.param.option_description")
-                        },
-                        "recommended": {
-                            "type": "boolean",
-                            "description": t("tools.ask_user.param.option_recommended")
-                        }
-                    },
-                    "required": ["value", "label"]
-                }
-            },
-            "title": {
-                "type": "string",
-                "description": t("tools.ask_user.param.title")
-            },
-            "default": {
-                "type": "string",
-                "description": t("tools.ask_user.param.default")
-            },
-            "placeholder": {
-                "type": "string",
-                "description": t("tools.ask_user.param.placeholder")
-            },
-            "allow_freeform_input": {
-                "type": "boolean",
-                "description": t("tools.ask_user.param.allow_freeform_input"),
-                "default": true
-            },
-            "required": {
-                "type": "boolean",
-                "description": t("tools.ask_user.param.required"),
-                "default": true
-            },
-            "allow_cancel": {
-                "type": "boolean",
-                "description": t("tools.ask_user.param.allow_cancel"),
-                "default": true
-            },
-            "min_length": {
-                "type": "integer",
-                "minimum": 0,
-                "description": t("tools.ask_user.param.min_length"),
-                "default": 0
-            }
-        },
-        "required": ["prompt"]
-    })
+    prompt::parameters()
 }
 
 pub struct AskUserTool {
@@ -192,6 +124,10 @@ impl Tool for AskUserTool {
 
     fn parameters(&self) -> serde_json::Value {
         ask_user_parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

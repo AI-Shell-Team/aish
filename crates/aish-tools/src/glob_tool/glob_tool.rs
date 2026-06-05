@@ -3,12 +3,7 @@ use std::path::PathBuf;
 use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
-/// Cached translated description.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.glob.description"))
-}
+use super::prompt;
 
 /// Directories excluded by default (VCS and common large generated trees).
 const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -48,24 +43,15 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Glob pattern such as **/*.py or src/**/*.md"
-                },
-                "root": {
-                    "type": "string",
-                    "description": "Optional search root directory. Defaults to the current working directory."
-                }
-            },
-            "required": ["pattern"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

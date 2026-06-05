@@ -505,6 +505,10 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn parameters(&self) -> serde_json::Value;
 
+    fn prompt(&self) -> &str {
+        ""
+    }
+
     fn to_spec(&self) -> ToolSpec {
         ToolSpec {
             r#type: "function".into(),

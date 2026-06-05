@@ -10,11 +10,7 @@
 use aish_llm::{Tool, ToolResult};
 use aish_pty::{truncate_utf8_safe, AiEvent, BashExecResult};
 
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.bash.description"))
-}
+use super::prompt;
 
 pub struct ChannelBashTool {
     event_sender: std::sync::mpsc::Sender<AiEvent>,
@@ -32,25 +28,15 @@ impl Tool for ChannelBashTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {
-                    "type": "string",
-                    "description": aish_i18n::t("tools.bash.param.command")
-                },
-                "timeout": {
-                    "type": "integer",
-                    "description": aish_i18n::t("tools.bash.param.timeout"),
-                    "default": 120
-                }
-            },
-            "required": ["command"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

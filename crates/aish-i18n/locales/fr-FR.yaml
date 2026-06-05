@@ -353,25 +353,9 @@ security:
 
 tools:
   ask_user:
-    description: "Poser a l'utilisateur une question de clarification ciblee. Avec seulement prompt, ask_user utilise la saisie texte ; avec options, il propose des choix."
     unknown_kind: "Type inconnu : {kind}"
     runtime_not_configured: "le runtime ask_user n'est pas configure"
     execute_failed: "echec de ask_user : {error}"
-    param:
-      kind: "Type d'interaction : text_input pour saisie libre, choice_or_text pour options avec saisie personnalisee"
-      prompt: "La question a poser a l'utilisateur."
-      options: "Choix optionnels a proposer a l'utilisateur. S'ils sont absents ou vides, ask_user utilise la saisie texte."
-      option_value: "Valeur stable de l'option retournee dans les metadonnees de l'outil."
-      option_label: "Libelle affiche a l'utilisateur dans la liste."
-      option_description: "Detail optionnel affiche sous l'option."
-      option_recommended: "Marque visiblement cette option comme recommandee."
-      title: "Titre optionnel pour la question"
-      default: "Valeur par defaut"
-      placeholder: "Texte indicatif"
-      allow_freeform_input: "Quand des options sont presentes, autorise une reponse personnalisee. La valeur par defaut est true."
-      required: "Indique si l'utilisateur doit fournir une reponse (par defaut : true)"
-      allow_cancel: "Indique si l'utilisateur peut annuler/ignorer (par defaut : true)"
-      min_length: "Longueur minimale pour la saisie texte (par defaut : 0)"
     validation:
       prompt_empty: "prompt ne peut pas etre vide"
       option_value_empty: "option value ne peut pas etre vide"
@@ -388,10 +372,6 @@ tools:
       cancelled: "L'utilisateur a annule la question."
 
   smart_log:
-    description: "Determine automatiquement les sources de journaux, analyse les logs selon la requete et renvoie un resume correspondant."
-    param:
-      query: "Votre requete de diagnostic, par exemple 'nginx est-il correctement configure' ou 'y a-t-il des connexions suspectes'."
-      path: "Optionnel. Chemin du journal (fichier/repertoire) ou nom d'une unite systemd. S'il est omis, il sera deduit de la requete."
     summary:
       file: "[FICHIER] {ident} : {matched}/{total} lignes correspondantes\nExemple :\n{sample}"
       dir: "[REP] {path} : {matched}/{total} lignes correspondantes\nExemple :\n{sample}"

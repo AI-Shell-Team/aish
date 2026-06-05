@@ -255,7 +255,8 @@ impl<'a> ReActAgent<'a> {
         cancel.reset();
 
         let mut messages: Vec<ChatMessage> = Vec::new();
-        messages.push(ChatMessage::system(system_prompt));
+        let system_prompt = self.session.system_prompt_with_tool_prompts(system_prompt);
+        messages.push(ChatMessage::system(&system_prompt));
         messages.push(ChatMessage::user(query));
 
         let tool_specs: Vec<ToolSpec> = self.session.tool_specs();

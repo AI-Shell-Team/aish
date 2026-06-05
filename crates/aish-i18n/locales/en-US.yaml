@@ -632,10 +632,6 @@ security:
 
 tools:
   smart_log:
-    description: "Automatically determine log sources, analyze logs based on the query, and return a matched summary."
-    param:
-      query: "Your diagnostic query, e.g. 'is nginx configured correctly' or 'are there suspicious logins'."
-      path: "Optional. Log path (file/dir) or a systemd unit name. If omitted, it will be inferred from the query."
     summary:
       file: "[FILE] {ident}: matched {matched}/{total} lines\nSample:\n{sample}"
       dir: "[DIR] {path}: matched {matched}/{total} lines\nSample:\n{sample}"
@@ -644,11 +640,7 @@ tools:
     no_logs_found: "No logs or matching information found."
 
   bash:
-    description: "Execute a bash command and return the output. Use this tool to run shell commands. IMPORTANT: Each command requires user confirmation. If the user rejects (N) or cancels (Ctrl+C) a command, you MUST NOT retry the same or similar command — acknowledge the cancellation and adjust your approach instead."
     security_handling_required: "bash command requires {level} security handling"
-    param:
-      command: "The bash command to execute"
-      timeout: "Timeout in seconds (default: 120)"
     missing_command: "Missing 'command' parameter"
     execute_failed: "Failed to execute: {error}"
     output_truncated: "[...{bytes} bytes truncated...]\n{tail}"
@@ -656,11 +648,6 @@ tools:
 
   fs:
     read_file:
-      description: "Read the content of a file"
-      param:
-        path: "Path to the file to read"
-        offset: "Line offset to start reading from (0-based)"
-        limit: "Maximum number of lines to read"
       missing_path: "Missing 'path' parameter"
       read_failed: "Failed to read {path}: {error}"
       file_too_large: "File {path} is {size} bytes, exceeding the {limit} byte (32KB) limit"
@@ -668,22 +655,12 @@ tools:
       empty_file: "(empty file)"
       offset_exceeds_length: "Offset {offset} exceeds file length ({length})"
     write_file:
-      description: "Write content to a file (creates or overwrites)"
-      param:
-        path: "Path to the file to write"
-        content: "Content to write"
       missing_path: "Missing 'path' parameter"
       missing_content: "Missing 'content' parameter"
       create_dirs_failed: "Failed to create parent dirs: {error}"
       write_success: "Wrote {bytes} bytes to {path}"
       write_failed: "Failed to write {path}: {error}"
     edit_file:
-      description: "Edit a file by replacing a specific string with a new string"
-      param:
-        path: "Path to the file"
-        old_string: "The text to replace"
-        new_string: "The replacement text"
-        replace_all: "Replace all occurrences (default: false)"
       missing_path: "Missing 'path' parameter"
       missing_old_string: "Missing 'old_string' parameter"
       missing_new_string: "Missing 'new_string' parameter"
@@ -694,24 +671,8 @@ tools:
       edit_write_failed: "Failed to write {path}: {error}"
 
   ask_user:
-    description: "Ask the user a focused clarifying question. Use prompt for text input, and add options when you can offer choices."
     runtime_not_configured: "ask_user runtime is not configured"
     execute_failed: "ask_user failed: {error}"
-    param:
-      kind: "Interaction type: text_input for free-form, choice_or_text for options with custom input"
-      prompt: "The question to ask the user."
-      options: "Optional choices to offer the user. If omitted or empty, ask_user uses text input."
-      option_value: "Stable option value returned in tool metadata."
-      option_label: "User-facing label shown in the choice list."
-      option_description: "Optional extra detail shown below the option."
-      option_recommended: "Mark this option visibly as the recommended default."
-      title: "Optional title for the question"
-      default: "Default value"
-      placeholder: "Placeholder text"
-      allow_freeform_input: "When options are present, allow the user to choose Other and type a custom answer. Defaults to true."
-      required: "Whether the user must provide an answer (default: true)"
-      allow_cancel: "Whether the user can cancel/skip (default: true)"
-      min_length: "Minimum length for text input (default: 0)"
     validation:
       prompt_empty: "prompt cannot be empty"
       option_value_empty: "option value cannot be empty"
@@ -742,13 +703,6 @@ tools:
     options_not_empty: "options must be a non-empty list for choice_or_text"
 
   memory:
-    description: "Search, store, or manage long-term memories. Use 'search' to find relevant past knowledge, 'store' to save important information, 'list' to see recent memories, 'forget' to remove outdated info."
-    param:
-      action: "Memory operation to perform"
-      query: "Search query (for 'search' action)"
-      content: "Content to store (for 'store' action)"
-      category: "Category for stored memory (default: other)"
-      memory_id: "Memory ID to forget (for 'forget' action)"
     missing_action: "Missing 'action' parameter"
     unknown_action: "Unknown action: {action}. Use search/store/forget/list."
     search_missing_query: "Missing 'query' for search"
@@ -762,11 +716,6 @@ tools:
     not_available: "memory not available"
 
   host_note:
-    description: "Save, list, or delete notes about the current remote host. Use 'store' when the user tells you important facts about this server (services deployed, known issues, key paths, etc.). Use 'list' to review existing notes. Use 'forget' with a keyword to remove matching notes."
-    param:
-      action: "Note operation: store, list, or forget"
-      content: "Note content to save (for 'store' action)"
-      keyword: "Keyword to match notes for deletion (for 'forget' action)"
     missing_action: "Missing 'action' parameter"
     unknown_action: "Unknown action: {action}. Use store/list/forget."
     store_missing_content: "Missing 'content' for store"
@@ -777,37 +726,20 @@ tools:
     forgot_none: "No matching notes found."
 
   python:
-    description: "Execute arbitrary Python code and return the result. Use print() for output."
-    param:
-      code: "The Python code to execute."
     missing_code: "Missing 'code' parameter"
     not_installed: "Python 3 is not installed or not in PATH."
     execute_failed: "Failed to execute Python: {error}"
     no_output: "Python code executed successfully with no output."
 
   grep:
-    description: "Search for patterns in files using regex"
-    param:
-      pattern: "Regular expression pattern to search for"
-      path: "File or directory to search in"
-      recursive: "Search recursively in directories"
-      case_insensitive: "Case insensitive search"
-      invert_match: "Show lines that do not match"
-      line_numbers: "Show line numbers"
-      count_only: "Only show count of matching lines"
     missing_pattern: "Missing 'pattern' parameter"
     invalid_regex: "Error: invalid regex pattern: {error}"
 
   glob:
-    description: "Find files matching glob patterns"
-    param:
-      pattern: "Glob pattern to match files"
-      path: "Base directory to search in (default: current directory)"
     missing_pattern: "Missing 'pattern' parameter"
     invalid_glob: "Error: invalid glob pattern: {error}"
 
   web_fetch:
-    description: "Fetch content from a specified URL, convert readable HTML to text, and answer a prompt about the page using a secondary model. IMPORTANT: WebFetch will fail for authenticated or private URLs. For GitHub URLs, prefer gh via bash when available."
     missing_url: "Missing 'url' parameter"
     missing_prompt: "Missing 'prompt' parameter"
     invalid_url: "Error: invalid URL. Provide a fully-qualified http or https URL without credentials."
