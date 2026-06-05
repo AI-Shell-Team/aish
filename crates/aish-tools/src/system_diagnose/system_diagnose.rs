@@ -12,6 +12,8 @@ use aish_llm::diagnose_agent::build_diagnose_prompt;
 use aish_llm::types::LlmCallbackResult;
 use aish_llm::{DiagnoseAgent, LlmSession, SubSessionConfig, Tool, ToolResult};
 
+use super::prompt;
+
 /// Shared event callback holder that can be set after tool construction.
 ///
 /// Uses `Mutex<Option<Arc<...>>>` because the event callback is created
@@ -77,22 +79,15 @@ impl Tool for SystemDiagnoseTool {
     }
 
     fn description(&self) -> &str {
-        "Advanced log analysis and system diagnosis agent that can read files, \
-         analyze patterns, and provide detailed diagnostic reports"
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The diagnostic query or system issue to analyze. \
-                                    Describe the problem, symptoms, or specific logs to investigate."
-                }
-            },
-            "required": ["query"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, _args: serde_json::Value) -> ToolResult {

@@ -8,12 +8,7 @@
 use aish_llm::{Tool, ToolResult};
 use aish_pty::{AiEvent, AskUserAnswer, AskUserOption, AskUserRequest};
 
-/// Shared translated description — same as AskUserTool.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.ask_user.description"))
-}
+use super::prompt;
 
 pub struct ChannelAskUserTool {
     question_sender: std::sync::mpsc::Sender<AiEvent>,
@@ -65,56 +60,15 @@ impl Tool for ChannelAskUserTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["text_input", "choice_or_text"],
-                    "description": "Interaction type: text_input for free-form, choice_or_text for options with custom input"
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "The question to ask the user"
-                },
-                "options": {
-                    "type": "array",
-                    "description": "Predefined options for choice_or_text",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "value": {"type": "string"},
-                            "label": {"type": "string"},
-                            "description": {"type": "string"}
-                        },
-                        "required": ["value", "label"]
-                    }
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Optional title for the question"
-                },
-                "default": {
-                    "type": "string",
-                    "description": "Default value"
-                },
-                "allow_cancel": {
-                    "type": "boolean",
-                    "description": "Whether the user can cancel/skip (default: true)",
-                    "default": true
-                },
-                "min_length": {
-                    "type": "integer",
-                    "description": "Minimum length for text input (default: 0)",
-                    "default": 0
-                }
-            },
-            "required": ["kind", "prompt"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

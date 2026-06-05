@@ -5,12 +5,7 @@ use std::path::PathBuf;
 use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
-/// Cached translated description.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.grep.description"))
-}
+use super::prompt;
 
 /// Directories excluded by default (shared with GlobTool).
 const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -51,28 +46,15 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Regex pattern to search for"
-                },
-                "root": {
-                    "type": "string",
-                    "description": "Optional search root directory. Defaults to the current working directory."
-                },
-                "include": {
-                    "type": "string",
-                    "description": "Optional glob filter for file names, e.g. *.py or *.rs"
-                }
-            },
-            "required": ["pattern"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

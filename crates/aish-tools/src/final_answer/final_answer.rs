@@ -1,5 +1,7 @@
 use aish_llm::{Tool, ToolResult};
 
+use super::prompt;
+
 /// Tool that signals the agent has reached a final answer.
 ///
 /// When the LLM calls this tool, the agent loop should terminate and return
@@ -25,20 +27,15 @@ impl Tool for FinalAnswerTool {
     }
 
     fn description(&self) -> &str {
-        "Submit the final answer to the user's question. Call this tool when you have completed your analysis and have a definitive answer. The answer will be shown to the user directly."
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "answer": {
-                    "type": "string",
-                    "description": "The complete final answer to present to the user"
-                }
-            },
-            "required": ["answer"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

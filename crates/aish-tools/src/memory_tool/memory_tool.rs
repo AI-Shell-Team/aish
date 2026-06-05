@@ -1,12 +1,7 @@
 use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
-/// Cached translated description.
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.memory.description"))
-}
+use super::prompt;
 
 /// Callback type for memory operations.
 pub type MemorySearchFn = Box<dyn Fn(&str, usize) -> Vec<MemorySearchResult> + Send + Sync>;
@@ -62,38 +57,15 @@ impl Tool for MemoryTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["search", "store", "forget", "list"],
-                    "description": "Memory operation to perform"
-                },
-                "query": {
-                    "type": "string",
-                    "description": "Search query (for 'search' action)"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content to store (for 'store' action)"
-                },
-                "category": {
-                    "type": "string",
-                    "enum": ["preference", "environment", "solution", "pattern", "other"],
-                    "description": "Category for stored memory (default: other)"
-                },
-                "memory_id": {
-                    "type": "integer",
-                    "description": "Memory ID to forget (for 'forget' action)"
-                }
-            },
-            "required": ["action"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

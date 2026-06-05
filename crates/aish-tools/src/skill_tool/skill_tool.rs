@@ -1,5 +1,7 @@
 use aish_llm::{Tool, ToolResult};
 
+use super::prompt;
+
 /// Callback type for looking up a skill by name.
 pub type SkillLookupFn = Box<dyn Fn(&str) -> Option<SkillInfo> + Send + Sync>;
 pub type SkillListFn = Box<dyn Fn() -> Vec<String> + Send + Sync>;
@@ -39,26 +41,15 @@ impl Tool for SkillTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a skill within the main conversation. Skills provide specialized capabilities \
-         and domain knowledge. When a skill matches the user's request, invoke this tool BEFORE \
-         generating any other response."
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "skill_name": {
-                    "type": "string",
-                    "description": "The skill name to invoke. E.g., 'commit', 'review-pr', etc."
-                },
-                "args": {
-                    "type": "string",
-                    "description": "Optional arguments for the skill"
-                }
-            },
-            "required": ["skill_name"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

@@ -13,23 +13,144 @@
     clippy::too_many_arguments
 )]
 
-pub mod ask_user;
-pub mod bash;
-pub mod channel_ask_user;
-pub mod channel_bash;
-pub mod final_answer;
-pub mod fs;
-pub mod glob_tool;
-pub mod grep_tool;
-pub mod host_note;
-pub mod memory_tool;
-pub mod plan_tool;
-pub mod python;
 pub mod registry;
-pub mod secure_bash;
-pub mod skill_tool;
-pub mod system_diagnose;
-pub mod web_fetch;
+
+pub mod ask_user {
+    mod ask_user;
+    mod prompt;
+
+    pub use self::ask_user::*;
+}
+
+pub mod bash {
+    mod bash;
+    mod prompt;
+
+    pub use self::bash::*;
+}
+
+pub mod channel_ask_user {
+    mod channel_ask_user;
+    mod prompt;
+
+    pub use self::channel_ask_user::*;
+}
+
+pub mod channel_bash {
+    mod channel_bash;
+    mod prompt;
+
+    pub use self::channel_bash::*;
+}
+
+pub mod final_answer {
+    mod final_answer;
+    mod prompt;
+
+    pub use self::final_answer::*;
+}
+
+pub mod edit_file {
+    mod edit_file;
+    mod prompt;
+
+    pub use self::edit_file::*;
+}
+
+pub mod fs {
+    pub use crate::edit_file::EditFileTool;
+    pub use crate::read_file::{ReadFileTool, SshReadFileTool};
+    pub use crate::write_file::WriteFileTool;
+}
+
+pub mod glob_tool {
+    mod glob_tool;
+    mod prompt;
+
+    pub use self::glob_tool::*;
+}
+
+pub mod grep_tool {
+    mod grep_tool;
+    mod prompt;
+
+    pub use self::grep_tool::*;
+}
+
+pub mod host_note {
+    mod host_note;
+    mod prompt;
+
+    pub use self::host_note::*;
+}
+
+pub mod memory_tool {
+    mod memory_tool;
+    mod prompt;
+
+    pub use self::memory_tool::*;
+}
+
+pub mod plan_tool {
+    mod enter_plan_mode;
+    mod exit_plan_mode;
+    mod list_plan_templates;
+    mod prompt;
+
+    pub use self::enter_plan_mode::EnterPlanModeTool;
+    pub use self::exit_plan_mode::ExitPlanModeTool;
+    pub use self::list_plan_templates::ListTemplatesTool;
+}
+
+pub mod python {
+    mod prompt;
+    mod python;
+
+    pub use self::python::*;
+}
+
+pub mod read_file {
+    mod prompt;
+    mod read_file;
+
+    pub use self::read_file::*;
+}
+
+pub mod secure_bash {
+    mod secure_bash;
+
+    pub use self::secure_bash::*;
+}
+
+pub mod skill_tool {
+    mod prompt;
+    mod skill_tool;
+
+    pub use self::skill_tool::*;
+}
+
+pub mod system_diagnose {
+    mod prompt;
+    mod system_diagnose;
+
+    pub use self::system_diagnose::*;
+}
+
+pub mod web_fetch {
+    mod preapproved;
+    mod prompt;
+    mod utils;
+    mod web_fetch;
+
+    pub use self::web_fetch::*;
+}
+
+pub mod write_file {
+    mod prompt;
+    mod write_file;
+
+    pub use self::write_file::*;
+}
 
 pub use ask_user::AskUserTool;
 pub use channel_ask_user::ChannelAskUserTool;

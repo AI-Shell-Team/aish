@@ -5,11 +5,7 @@
 
 use aish_llm::{Tool, ToolResult};
 
-static DESCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn get_description() -> &'static str {
-    DESCRIPTION.get_or_init(|| aish_i18n::t("tools.host_note.description"))
-}
+use super::prompt;
 
 pub type HostNoteStoreFn = Box<dyn Fn(&str) -> String + Send + Sync>;
 pub type HostNoteListFn = Box<dyn Fn() -> Vec<HostNoteEntry> + Send + Sync>;
@@ -43,29 +39,15 @@ impl Tool for HostNoteTool {
     }
 
     fn description(&self) -> &str {
-        get_description()
+        prompt::DESCRIPTION
     }
 
     fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["store", "list", "forget"],
-                    "description": aish_i18n::t("tools.host_note.param.action")
-                },
-                "content": {
-                    "type": "string",
-                    "description": aish_i18n::t("tools.host_note.param.content")
-                },
-                "keyword": {
-                    "type": "string",
-                    "description": aish_i18n::t("tools.host_note.param.keyword")
-                }
-            },
-            "required": ["action"]
-        })
+        prompt::parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        prompt::PROMPT
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {

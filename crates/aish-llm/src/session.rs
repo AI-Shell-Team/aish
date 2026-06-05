@@ -164,6 +164,53 @@ impl LlmSession {
         }
     }
 
+    fn tool_visible_in_phase(tool_name: &str, phase: &PlanPhase) -> bool {
+        match phase {
+            PlanPhase::Normal => true,
+            PlanPhase::Planning => aish_core::PLANNING_VISIBLE_TOOLS.contains(&tool_name),
+        }
+    }
+
+    pub fn filtered_tool_prompt_section(&self) -> Option<String> {
+        let phase = self.plan_state.lock().unwrap().phase.clone();
+        let mut prompts: Vec<(&str, &str)> = self
+            .tools
+            .values()
+            .filter(|tool| Self::tool_visible_in_phase(tool.name(), &phase))
+            .filter_map(|tool| {
+                let prompt = tool.prompt().trim();
+                if prompt.is_empty() {
+                    None
+                } else {
+                    Some((tool.name(), prompt))
+                }
+            })
+            .collect();
+
+        if prompts.is_empty() {
+            return None;
+        }
+
+        prompts.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut section = String::from("## Tool Instructions\n");
+        for (name, prompt) in prompts {
+            section.push_str("\n### ");
+            section.push_str(name);
+            section.push('\n');
+            section.push_str(prompt);
+            section.push('\n');
+        }
+        Some(section)
+    }
+
+    pub fn system_prompt_with_tool_prompts(&self, system_prompt: &str) -> String {
+        match self.filtered_tool_prompt_section() {
+            Some(section) => format!("{}\n\n{}", system_prompt.trim_end(), section),
+            None => system_prompt.to_string(),
+        }
+    }
+
     /// Get a reference to the plan state (for external coordination).
     pub fn plan_state(&self) -> Arc<Mutex<PlanModeState>> {
         Arc::clone(&self.plan_state)
@@ -286,7 +333,9 @@ impl LlmSession {
         // Build initial message list
         let mut messages: Vec<ChatMessage> = Vec::new();
         if let Some(sys) = system_message {
-            messages.push(ChatMessage::system(sys));
+            messages.push(ChatMessage::system(
+                &self.system_prompt_with_tool_prompts(sys),
+            ));
         }
         messages.extend_from_slice(context_messages);
         messages.push(user_msg.clone());
@@ -2499,12 +2548,21 @@ mod tests {
     // Mock tool for testing
     struct MockTool {
         name: String,
+        prompt: String,
     }
 
     impl MockTool {
         fn new(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                prompt: String::new(),
+            }
+        }
+
+        fn with_prompt(name: &str, prompt: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                prompt: prompt.to_string(),
             }
         }
     }
@@ -2522,9 +2580,68 @@ mod tests {
             serde_json::json!({"type": "object", "properties": {}})
         }
 
+        fn prompt(&self) -> &str {
+            &self.prompt
+        }
+
         fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
             crate::types::ToolResult::success("mock result")
         }
+    }
+
+    #[test]
+    fn test_tool_prompt_section_uses_only_non_empty_prompts() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.register_tool(Box::new(MockTool::new("empty_tool")));
+        session.register_tool(Box::new(MockTool::with_prompt(
+            "prompt_tool",
+            "Use carefully.",
+        )));
+
+        let section = session.filtered_tool_prompt_section().unwrap();
+
+        assert!(section.contains("## Tool Instructions"));
+        assert!(section.contains("### prompt_tool"));
+        assert!(section.contains("Use carefully."));
+        assert!(!section.contains("empty_tool"));
+    }
+
+    #[test]
+    fn test_tool_prompt_section_respects_planning_filter() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.register_tool(Box::new(MockTool::with_prompt(
+            "read_file",
+            "Read files during planning.",
+        )));
+        session.register_tool(Box::new(MockTool::with_prompt(
+            "bash_exec",
+            "Run commands.",
+        )));
+
+        {
+            let mut state = session.plan_state.lock().unwrap();
+            state.phase = aish_core::PlanPhase::Planning;
+        }
+
+        let section = session.filtered_tool_prompt_section().unwrap();
+
+        assert!(section.contains("### read_file"));
+        assert!(section.contains("Read files during planning."));
+        assert!(!section.contains("bash_exec"));
+        assert!(!section.contains("Run commands."));
+    }
+
+    #[test]
+    fn test_system_prompt_with_tool_prompts_appends_section() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.register_tool(Box::new(MockTool::with_prompt("mock", "Mock guidance.")));
+
+        let system_prompt = session.system_prompt_with_tool_prompts("Base prompt.\n");
+
+        assert!(system_prompt.starts_with("Base prompt."));
+        assert!(system_prompt.contains("## Tool Instructions"));
+        assert!(system_prompt.contains("### mock"));
+        assert!(system_prompt.contains("Mock guidance."));
     }
 
     #[test]

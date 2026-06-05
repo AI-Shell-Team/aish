@@ -3,7 +3,7 @@ use std::sync::Arc;
 use aish_llm::{CancellationToken, Tool, ToolResult};
 use aish_security::SecurityDecision;
 
-use super::bash::PtySlot;
+use crate::bash::PtySlot;
 
 /// Type of the security check callback.
 type SecurityCheckFn = Box<dyn Fn(&str) -> SecurityDecision + Send + Sync>;
@@ -108,6 +108,10 @@ impl Tool for SecureBashTool {
 
     fn parameters(&self) -> serde_json::Value {
         self.inner.parameters()
+    }
+
+    fn prompt(&self) -> &str {
+        self.inner.prompt()
     }
 
     fn preflight(&self, args: &serde_json::Value) -> aish_llm::PreflightResult {

@@ -353,25 +353,9 @@ security:
 
 tools:
   ask_user:
-    description: "Stellt dem Benutzer eine gezielte Rückfrage. Nur mit prompt wird Texteingabe verwendet; mit options werden Auswahlmöglichkeiten angeboten."
     unknown_kind: "Unbekannter Typ: {kind}"
     runtime_not_configured: "ask_user-Laufzeit ist nicht konfiguriert"
     execute_failed: "ask_user fehlgeschlagen: {error}"
-    param:
-      kind: "Interaktionstyp: text_input für freie Eingabe, choice_or_text für Auswahl mit eigener Eingabe"
-      prompt: "Die Frage, die dem Benutzer gestellt wird."
-      options: "Optionale Auswahlmöglichkeiten. Wenn sie fehlen oder leer sind, verwendet ask_user Texteingabe."
-      option_value: "Stabiler Optionswert in den Tool-Metadaten."
-      option_label: "Für den Benutzer sichtbare Bezeichnung in der Auswahlliste."
-      option_description: "Optionale Zusatzbeschreibung unterhalb der Option."
-      option_recommended: "Markiert diese Option sichtbar als empfohlene Vorgabe."
-      title: "Optionaler Titel für die Frage"
-      default: "Standardwert"
-      placeholder: "Platzhaltertext"
-      allow_freeform_input: "Erlaubt bei vorhandenen Optionen eine benutzerdefinierte Antwort. Standard ist true."
-      required: "Ob der Benutzer eine Antwort geben muss (Standard: true)"
-      allow_cancel: "Ob der Benutzer abbrechen/überspringen darf (Standard: true)"
-      min_length: "Minimale Länge für Texteingabe (Standard: 0)"
     validation:
       prompt_empty: "prompt darf nicht leer sein"
       option_value_empty: "option value darf nicht leer sein"
@@ -388,10 +372,6 @@ tools:
       cancelled: "Benutzer hat die Frage abgebrochen."
 
   smart_log:
-    description: "Ermittelt automatisch Log-Quellen, analysiert Protokolle anhand der Anfrage und gibt eine passende Zusammenfassung zurück."
-    param:
-      query: "Ihre Diagnoseanfrage, z. B. 'ist nginx korrekt konfiguriert' oder 'gibt es verdächtige Anmeldungen'."
-      path: "Optional. Log-Pfad (Datei/Verzeichnis) oder ein systemd-Unit-Name. Wenn nicht angegeben, wird er aus der Anfrage abgeleitet."
     summary:
       file: "[DATEI] {ident}: {matched}/{total} Zeilen passend\nBeispiel:\n{sample}"
       dir: "[VERZ] {path}: {matched}/{total} Zeilen passend\nBeispiel:\n{sample}"

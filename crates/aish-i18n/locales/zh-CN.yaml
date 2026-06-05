@@ -631,10 +631,6 @@ security:
 
 tools:
   smart_log:
-    description: "自动判断日志来源，根据查询分析日志，并返回匹配摘要。"
-    param:
-      query: "你的诊断问题，例如\"nginx 配置是否正确\"或\"是否存在可疑登录\"。"
-      path: "可选。日志路径(文件/目录)或 systemd 单元名。若为空，将根据查询自动推断。"
     summary:
       file: "[文件] {ident}：匹配 {matched}/{total} 行\n示例：\n{sample}"
       dir: "[目录] {path}：匹配 {matched}/{total} 行\n示例：\n{sample}"
@@ -643,11 +639,7 @@ tools:
     no_logs_found: "未找到任何日志或匹配信息。"
 
   bash:
-    description: "执行 bash 命令并返回输出。使用此工具运行 shell 命令。重要：每条命令都需要用户确认。如果用户拒绝（N）或取消（Ctrl+C），你绝对不能重试相同或类似的命令——应确认取消并调整方案。"
     security_handling_required: "bash 命令需要 {level} 级安全处理"
-    param:
-      command: "要执行的 bash 命令"
-      timeout: "超时时间(秒)(默认：120)"
     missing_command: "缺少 'command' 参数"
     execute_failed: "执行失败: {error}"
     output_truncated: "[...截断了 {bytes} 字节...]\n{tail}"
@@ -655,11 +647,6 @@ tools:
 
   fs:
     read_file:
-      description: "读取文件内容"
-      param:
-        path: "要读取的文件路径"
-        offset: "开始读取的行偏移(从 0 开始)"
-        limit: "要读取的最大行数"
       missing_path: "缺少 'path' 参数"
       read_failed: "读取 {path} 失败: {error}"
       file_too_large: "文件 {path} 为 {size} 字节，超过了 {limit} 字节(32KB)的限制"
@@ -667,22 +654,12 @@ tools:
       empty_file: "(空文件)"
       offset_exceeds_length: "偏移量 {offset} 超过了文件长度({length})"
     write_file:
-      description: "将内容写入文件(创建或覆盖)"
-      param:
-        path: "要写入的文件路径"
-        content: "要写入的内容"
       missing_path: "缺少 'path' 参数"
       missing_content: "缺少 'content' 参数"
       create_dirs_failed: "创建父目录失败: {error}"
       write_success: "已写入 {bytes} 字节到 {path}"
       write_failed: "写入 {path} 失败: {error}"
     edit_file:
-      description: "通过替换特定字符串来编辑文件"
-      param:
-        path: "文件路径"
-        old_string: "要替换的文本"
-        new_string: "替换后的文本"
-        replace_all: "替换所有出现的位置(默认：false)"
       missing_path: "缺少 'path' 参数"
       missing_old_string: "缺少 'old_string' 参数"
       missing_new_string: "缺少 'new_string' 参数"
@@ -693,24 +670,8 @@ tools:
       edit_write_failed: "写入 {path} 失败: {error}"
 
   ask_user:
-    description: "向用户提出一个聚焦的澄清问题。只填 prompt 时为文本输入，提供 options 时为选项交互。"
     runtime_not_configured: "ask_user runtime 未配置"
     execute_failed: "ask_user 执行失败：{error}"
-    param:
-      kind: "交互类型：text_input 用于自由输入，choice_or_text 用于选项加自定义输入"
-      prompt: "要向用户提出的问题。"
-      options: "可选的候选项。为空或省略时，ask_user 使用文本输入。"
-      option_value: "返回到工具元数据中的稳定选项值。"
-      option_label: "展示给用户的选项标签。"
-      option_description: "显示在选项下方的附加说明。"
-      option_recommended: "显式标记该选项为推荐默认项。"
-      title: "问题的可选标题"
-      default: "默认值"
-      placeholder: "占位符文本"
-      allow_freeform_input: "当存在 options 时，允许用户选择“其他”并输入自定义答案，默认 true。"
-      required: "用户是否必须提供答案(默认：true)"
-      allow_cancel: "用户是否可以取消/跳过(默认：true)"
-      min_length: "文本输入的最小长度(默认：0)"
     validation:
       prompt_empty: "prompt 不能为空"
       option_value_empty: "option value 不能为空"
@@ -741,13 +702,6 @@ tools:
     options_not_empty: "choice_or_text 的 options 必须是非空列表"
 
   memory:
-    description: "搜索、存储或管理长期记忆。使用 'search' 查找相关的过往知识，'store' 保存重要信息，'list' 查看最近的记忆，'forget' 删除过时信息。"
-    param:
-      action: "要执行的记忆操作"
-      query: "搜索查询(用于 'search' 操作)"
-      content: "要存储的内容(用于 'store' 操作)"
-      category: "存储记忆的类别(默认：other)"
-      memory_id: "要忘记的记忆 ID(用于 'forget' 操作)"
     missing_action: "缺少 'action' 参数"
     unknown_action: "未知操作: {action}。请使用 search/store/forget/list。"
     search_missing_query: "search 缺少 'query' 参数"
@@ -761,11 +715,6 @@ tools:
     not_available: "记忆功能不可用"
 
   host_note:
-    description: "保存、查看或删除当前远程主机的备注。当用户告诉你关于此服务器的重要信息（部署的服务、已知问题、关键路径等）时使用 'store' 保存。使用 'list' 查看已有备注。使用 'forget' 并提供关键词删除匹配的备注。"
-    param:
-      action: "备注操作: store、list 或 forget"
-      content: "要保存的备注内容(用于 'store' 操作)"
-      keyword: "用于匹配删除备注的关键词(用于 'forget' 操作)"
     missing_action: "缺少 'action' 参数"
     unknown_action: "未知操作: {action}。请使用 store/list/forget。"
     store_missing_content: "store 缺少 'content' 参数"
@@ -776,37 +725,20 @@ tools:
     forgot_none: "未找到匹配的备注。"
 
   python:
-    description: "执行任意 Python 代码并返回结果。使用 print() 输出。"
-    param:
-      code: "要执行的 Python 代码。"
     missing_code: "缺少 'code' 参数"
     not_installed: "未安装 Python 3 或不在 PATH 中。"
     execute_failed: "执行 Python 失败: {error}"
     no_output: "Python 代码执行成功，无输出。"
 
   grep:
-    description: "使用正则表达式在文件中搜索模式"
-    param:
-      pattern: "要搜索的正则表达式模式"
-      path: "要搜索的文件或目录"
-      recursive: "在目录中递归搜索"
-      case_insensitive: "不区分大小写搜索"
-      invert_match: "显示不匹配的行"
-      line_numbers: "显示行号"
-      count_only: "仅显示匹配行的计数"
     missing_pattern: "缺少 'pattern' 参数"
     invalid_regex: "错误：无效的正则表达式: {error}"
 
   glob:
-    description: "查找匹配 glob 模式的文件"
-    param:
-      pattern: "匹配文件的 glob 模式"
-      path: "搜索的基础目录(默认：当前目录)"
     missing_pattern: "缺少 'pattern' 参数"
     invalid_glob: "错误：无效的 glob 模式: {error}"
 
   web_fetch:
-    description: "从指定 URL 抓取内容，将可读 HTML 转为文本，并使用二级模型按 prompt 分析页面。重要：WebFetch 无法访问需要认证或私有的 URL。对于 GitHub URL，如可用请优先通过 bash 使用 gh。"
     missing_url: "缺少 'url' 参数"
     missing_prompt: "缺少 'prompt' 参数"
     invalid_url: "错误：无效 URL。请提供完整的 http 或 https URL，且不要包含凭据。"
