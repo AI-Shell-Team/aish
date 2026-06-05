@@ -2207,6 +2207,7 @@ impl AishShell {
                 Some(&self.config.api_base),
                 Some(&self.config.api_key),
             );
+            self.refresh_config_dependent_tools();
         }
 
         let target_cwd = saved_cwd
@@ -2248,6 +2249,17 @@ impl AishShell {
     }
 
     /// Handle `/model [name]` — show current model or switch to a new one.
+    fn refresh_config_dependent_tools(&mut self) {
+        self.ai_handler
+            .register_tool(Box::new(aish_tools::WebFetchTool::new(
+                &self.config.api_base,
+                &self.config.api_key,
+                &self.config.model,
+                Some(self.config.temperature),
+                self.config.max_tokens,
+            )));
+    }
+
     fn handle_model_command(&mut self, parts: &[&str]) {
         if parts.len() == 1 {
             let mut args = std::collections::HashMap::new();
@@ -2281,6 +2293,7 @@ impl AishShell {
 
         // Update config
         self.config.model = new_model.clone();
+        self.refresh_config_dependent_tools();
 
         // Persist to config file
         let config_path = aish_config::ConfigLoader::default_config_path();
@@ -2408,6 +2421,7 @@ impl AishShell {
                     Some(&self.config.api_base),
                     Some(&self.config.api_key),
                 );
+                self.refresh_config_dependent_tools();
                 let mut args = std::collections::HashMap::new();
                 args.insert("model".to_string(), self.config.model.clone());
                 println!(
@@ -4999,13 +5013,53 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 fn print_panel_line(content: &str, inner_width: usize) {
-    let visible = ansi_display_width(content);
+    let rendered = truncate_ansi_display_width(content, inner_width);
+    let visible = ansi_display_width(&rendered);
     let padding = inner_width.saturating_sub(visible);
     println!(
         "\x1b[33m│\x1b[0m{}{}\x1b[33m│\x1b[0m",
-        content,
+        rendered,
         " ".repeat(padding)
     );
+}
+
+fn truncate_ansi_display_width(s: &str, max_cols: usize) -> String {
+    if ansi_display_width(s) <= max_cols {
+        return s.to_string();
+    }
+
+    let ellipsis = if max_cols > 3 { "..." } else { "" };
+    let target = max_cols.saturating_sub(ellipsis.len());
+    let mut width = 0usize;
+    let mut output = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            output.push(ch);
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+            for code_ch in chars.by_ref() {
+                output.push(code_ch);
+                if code_ch.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > target {
+            break;
+        }
+        width += ch_width;
+        output.push(ch);
+    }
+
+    output.push_str(ellipsis);
+    output.push_str("\x1b[0m");
+    output
 }
 
 fn ansi_display_width(s: &str) -> usize {
@@ -5032,19 +5086,20 @@ fn wrap_text(text: &str, max_width: usize) -> String {
         return text.to_string();
     }
     let mut result = String::new();
-    let mut line_len = 0;
+    let mut line_width = 0usize;
     for word in text.split_whitespace() {
-        if line_len == 0 {
+        let word_width = unicode_width::UnicodeWidthStr::width(word);
+        if line_width == 0 {
             result.push_str(word);
-            line_len = word.len();
-        } else if line_len + 1 + word.len() <= max_width {
+            line_width = word_width;
+        } else if line_width + 1 + word_width <= max_width {
             result.push(' ');
             result.push_str(word);
-            line_len += 1 + word.len();
+            line_width += 1 + word_width;
         } else {
             result.push('\n');
             result.push_str(word);
-            line_len = word.len();
+            line_width = word_width;
         }
     }
     result

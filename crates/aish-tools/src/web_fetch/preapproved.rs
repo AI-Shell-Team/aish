@@ -102,7 +102,6 @@ pub(crate) fn is_preapproved_host(hostname: &str, pathname: &str) -> bool {
                     return true;
                 }
             }
-            continue;
         }
         if hostname == *entry {
             return true;

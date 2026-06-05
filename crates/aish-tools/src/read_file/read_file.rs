@@ -3,6 +3,8 @@ use aish_llm::{Tool, ToolResult};
 
 use super::prompt;
 
+const SIZE_LIMIT: usize = 32 * 1024;
+
 /// Read file content tool.
 pub struct ReadFileTool;
 
@@ -41,6 +43,30 @@ impl Tool for ReadFileTool {
             None => return ToolResult::error(aish_i18n::t("tools.fs.read_file.missing_path")),
         };
 
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.read_failed",
+                    &args_map,
+                ));
+            }
+        };
+
+        if metadata.len() > SIZE_LIMIT as u64 {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            args_map.insert("size".to_string(), metadata.len().to_string());
+            args_map.insert("limit".to_string(), SIZE_LIMIT.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.read_file.file_too_large",
+                &args_map,
+            ));
+        }
+
         let raw_bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -53,18 +79,6 @@ impl Tool for ReadFileTool {
                 ));
             }
         };
-
-        const SIZE_LIMIT: usize = 32 * 1024;
-        if raw_bytes.len() > SIZE_LIMIT {
-            let mut args_map = std::collections::HashMap::new();
-            args_map.insert("path".to_string(), path.to_string());
-            args_map.insert("size".to_string(), raw_bytes.len().to_string());
-            args_map.insert("limit".to_string(), SIZE_LIMIT.to_string());
-            return ToolResult::error(aish_i18n::t_with_args(
-                "tools.fs.read_file.file_too_large",
-                &args_map,
-            ));
-        }
 
         let content = match String::from_utf8(raw_bytes) {
             Ok(s) => s,
@@ -100,22 +114,13 @@ impl Tool for ReadFileTool {
             ));
         }
 
-        let selected: Vec<String> = if let Some(limit) = limit {
-            lines
-                .iter()
-                .skip(offset)
-                .take(limit)
-                .enumerate()
-                .map(|(i, line)| format!("{:>6}\t{}", offset + i + 1, line))
-                .collect()
-        } else {
-            lines
-                .iter()
-                .skip(offset)
-                .enumerate()
-                .map(|(i, line)| format!("{:>6}\t{}", offset + i + 1, line))
-                .collect()
-        };
+        let selected: Vec<String> = lines
+            .iter()
+            .skip(offset)
+            .take(limit.unwrap_or(usize::MAX))
+            .enumerate()
+            .map(|(i, line)| format!("{:>6}\t{}", offset + i + 1, line))
+            .collect();
 
         ToolResult::success(selected.join("\n"))
     }
@@ -130,7 +135,9 @@ pub struct SshReadFileTool {
 impl SshReadFileTool {
     pub fn new() -> Self {
         let offload_root = std::env::temp_dir().join("aish-offload");
-        let canonical_root = std::fs::canonicalize(&offload_root).unwrap_or(offload_root);
+        std::fs::create_dir_all(&offload_root).expect("failed to create aish offload directory");
+        let canonical_root = std::fs::canonicalize(&offload_root)
+            .expect("failed to canonicalize aish offload directory");
         Self {
             inner: ReadFileTool::new(),
             offload_root: canonical_root,
@@ -173,7 +180,7 @@ impl Tool for SshReadFileTool {
             }
         };
         if !canonical.starts_with(&self.offload_root) {
-            return ToolResult::error("Access denied: path is not inside offload directory");
+            return ToolResult::error(aish_i18n::t("tools.fs.read_file.access_denied"));
         }
         let mut safe_args = args;
         if let Some(obj) = safe_args.as_object_mut() {
@@ -246,6 +253,27 @@ mod tests {
         assert!(
             result.output.contains("limit") || result.output.contains("bytes"),
             "Expected size limit error, got: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn test_ssh_read_file_rejects_paths_outside_offload_root() {
+        aish_i18n::set_locale("en-US");
+
+        let dir = temp_dir();
+        let file_path = dir.path().join("outside.txt");
+        fs::write(&file_path, "secret").unwrap();
+
+        let tool = SshReadFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap()
+        }));
+
+        assert!(!result.ok);
+        assert!(
+            result.output.contains("Access denied"),
+            "Expected access denied error, got: {}",
             result.output
         );
     }

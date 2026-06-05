@@ -5,7 +5,7 @@ pub(crate) const PROMPT: &str = r#"Use this tool to read text files.
 Usage:
 - Provide path to the file to read.
 - Use offset and limit when you only need part of a larger file.
-- Results include 1-based line numbers."#;
+- Offset is a 0-based index; results display 1-based line numbers."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({
@@ -17,11 +17,13 @@ pub(crate) fn parameters() -> serde_json::Value {
             },
             "offset": {
                 "type": "integer",
-                "description": "Line offset to start reading from, 0-based."
+                "description": "Line offset to start reading from (0-based index). Results show 1-based line numbers.",
+                "minimum": 0
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of lines to read."
+                "description": "Maximum number of lines to read.",
+                "minimum": 1
             }
         },
         "required": ["path"]

@@ -18,11 +18,11 @@ pub(crate) fn parameters() -> serde_json::Value {
             },
             "content": {
                 "type": "string",
-                "description": "Note content to save for the store action."
+                "description": "Note content to save. Required when action is store."
             },
             "keyword": {
                 "type": "string",
-                "description": "Keyword used to match notes for the forget action."
+                "description": "Keyword used to match notes. Required when action is forget."
             }
         },
         "required": ["action"]

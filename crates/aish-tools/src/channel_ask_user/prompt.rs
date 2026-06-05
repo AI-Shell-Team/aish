@@ -5,6 +5,8 @@ pub(crate) const PROMPT: &str = r#"Use this tool only when a small amount of use
 Usage:
 - Ask one focused question at a time.
 - Prefer options when the likely answers are known.
+- Use kind=text_input for open-ended answers.
+- Use kind=choice_or_text when providing options while allowing a custom answer.
 - Do not ask for secrets such as passwords, API keys, or tokens."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
@@ -14,7 +16,8 @@ pub(crate) fn parameters() -> serde_json::Value {
             "kind": {
                 "type": "string",
                 "enum": ["text_input", "choice_or_text"],
-                "description": "Interaction type: text_input for free-form, choice_or_text for options with custom input."
+                "description": "Interaction type: text_input for free-form, choice_or_text for options with custom input.",
+                "default": "text_input"
             },
             "prompt": {
                 "type": "string",
@@ -52,6 +55,6 @@ pub(crate) fn parameters() -> serde_json::Value {
                 "default": 0
             }
         },
-        "required": ["kind", "prompt"]
+        "required": ["prompt"]
     })
 }

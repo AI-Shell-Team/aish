@@ -5,6 +5,8 @@ use aish_llm::{Tool, ToolResult};
 
 use super::prompt;
 
+const MAX_WRITE_BYTES: usize = 32 * 1024;
+
 /// Write file tool (creates or overwrites).
 pub struct WriteFileTool;
 
@@ -46,6 +48,17 @@ impl Tool for WriteFileTool {
             Some(c) => c,
             None => return ToolResult::error(aish_i18n::t("tools.fs.write_file.missing_content")),
         };
+
+        if content.len() > MAX_WRITE_BYTES {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            args_map.insert("size".to_string(), content.len().to_string());
+            args_map.insert("limit".to_string(), MAX_WRITE_BYTES.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.write_file.content_too_large",
+                &args_map,
+            ));
+        }
 
         if let Some(parent) = Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
@@ -102,5 +115,27 @@ mod tests {
         assert!(result.ok);
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_write_file_size_limit() {
+        aish_i18n::set_locale("en-US");
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = dir.path().join("big.txt");
+
+        let tool = WriteFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "content": "x".repeat(33 * 1024)
+        }));
+
+        assert!(!result.ok);
+        assert!(
+            result.output.contains("limit") || result.output.contains("bytes"),
+            "Expected size limit error, got: {}",
+            result.output
+        );
+        assert!(!file_path.exists());
     }
 }
