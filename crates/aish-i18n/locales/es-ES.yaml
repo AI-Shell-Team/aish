@@ -149,7 +149,23 @@ shell:
     plan: "Control del modo plan"
     token: "Mostrar uso de tokens"
     resume: "Reanudar sesión anterior"
-    feedback: "Abrir GitHub Issues"
+    feedback: "Enviar comentarios"
+
+  feedback:
+    select_type: "Seleccionar tipo de comentario"
+    type_bug: "Informe de error"
+    type_feature: "Solicitud de función"
+    type_question: "Pregunta"
+    confirm_title: "Revisar información recopilada"
+    confirm_question: "La siguiente información se adjuntará al issue. Los registros pueden contener información sensible."
+    confirm: "Confirmar y abrir"
+    without_logs: "Abrir sin registros"
+    cancel: "Cancelar"
+    opening: "Abriendo GitHub Issue..."
+    failed: "No se pudo abrir el navegador: {error}"
+    visit: "Visitar: {url}"
+    log_unavailable: "(archivo de registro no encontrado)"
+    logs_included: "incluidos (últimas 30 líneas, redactados)"
 
   security:
     panel_title:

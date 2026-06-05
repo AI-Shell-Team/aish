@@ -29,7 +29,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "Plan mode control"),
     ("/token", "Show token usage"),
     ("/resume", "Resume previous session"),
-    ("/feedback", "Open GitHub Issues"),
+    ("/feedback", "Submit feedback"),
 ];
 
 /// Timeout for PTY completion queries.

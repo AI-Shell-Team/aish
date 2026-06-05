@@ -149,7 +149,23 @@ shell:
     plan: "プランモードの制御"
     token: "トークン使用量を表示"
     resume: "前回のセッションを再開"
-    feedback: "GitHub Issues を開く"
+    feedback: "フィードバックを送信"
+
+  feedback:
+    select_type: "フィードバックの種類を選択"
+    type_bug: "バグ報告"
+    type_feature: "機能リクエスト"
+    type_question: "質問"
+    confirm_title: "収集した情報を確認"
+    confirm_question: "以下の情報が Issue に添付されます。ログには機密情報が含まれる場合があります。"
+    confirm: "確認して開く"
+    without_logs: "ログなしで開く"
+    cancel: "キャンセル"
+    opening: "GitHub Issue を開いています..."
+    failed: "ブラウザを開けませんでした: {error}"
+    visit: "アクセス: {url}"
+    log_unavailable: "（ログファイルが見つかりません）"
+    logs_included: "含まれる（最後の30行、秘匿済み）"
 
   security:
     panel_title:
