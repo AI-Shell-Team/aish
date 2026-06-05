@@ -334,7 +334,7 @@ impl LlmSession {
         let mut messages: Vec<ChatMessage> = Vec::new();
         if let Some(sys) = system_message {
             messages.push(ChatMessage::system(
-                &self.system_prompt_with_tool_prompts(sys),
+                self.system_prompt_with_tool_prompts(sys),
             ));
         }
         messages.extend_from_slice(context_messages);
