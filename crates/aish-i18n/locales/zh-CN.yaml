@@ -324,12 +324,14 @@ shell:
 
   # 斜杠命令描述（弹窗用）
   slash:
+    help: "显示帮助信息"
     model: "显示或切换 AI 模型"
     setup: "打开设置向导"
     plan: "计划模式控制"
     token: "显示令牌用量"
     resume: "恢复之前的会话"
     feedback: "提交反馈"
+    quit: "退出 AI Shell"
 
   feedback:
     select_type: "选择反馈类型"
@@ -673,8 +675,24 @@ tools:
       edit_write_failed: "写入 {path} 失败: {error}"
 
   ask_user:
-    runtime_not_configured: "ask_user runtime 未配置"
-    execute_failed: "ask_user 执行失败：{error}"
+    description: “向用户提出一个聚焦的澄清问题。只填 prompt 时为文本输入，提供 options 时为选项交互。”
+    runtime_not_configured: “ask_user runtime 未配置”
+    execute_failed: “ask_user 执行失败：{error}”
+    param:
+      kind: “交互类型：text_input 用于自由输入，choice_or_text 用于选项加自定义输入”
+      prompt: “要向用户提出的问题。”
+      options: “可选的候选项。为空或省略时，ask_user 使用文本输入。”
+      option_value: “返回到工具元数据中的稳定选项值。”
+      option_label: “展示给用户的选项标签。”
+      option_description: “显示在选项下方的附加说明。”
+      option_recommended: “显式标记该选项为推荐默认项。”
+      title: “问题的可选标题”
+      default: “默认值”
+      placeholder: “占位符文本”
+      allow_freeform_input: “当存在 options 时，允许用户选择”其他”并输入自定义答案，默认 true。”
+      required: “用户是否必须提供答案(默认：true)”
+      allow_cancel: “用户是否可以取消/跳过(默认：true)”
+      min_length: “文本输入的最小长度(默认：0)”
     validation:
       prompt_empty: "prompt 不能为空"
       option_value_empty: "option value 不能为空"
@@ -760,54 +778,269 @@ help:
     brief_usage: "用法：{usage}"
 
   general:
-    title: "📖 AI Shell 帮助"
+    title: "AI Shell 帮助"
     markdown: |-
-      ## 可用命令：
+      ## 快速开始
+      - **Shell 命令** — 直接输入：`ls`、`cd`、`vim`、`ssh`、`top` …
+      - **向 AI 提问** — 以 `;` 或 `；` 开头：`;如何查找大文件`
+      - **斜杠命令** — 在空行按 `/` 打开交互式选择器
 
-      ### 目录导航
-      - `cd [-L|[-P [-e]]] [directory]` - 切换目录(完整参数支持)
-      - `pushd [directory]` - 将目录压入栈并切换
-      - `popd` - 弹出目录栈并切换
-      - `dirs [-c]` - 显示目录栈
+      ## 斜杠命令
+      | 命令 | 说明 |
+      |------|------|
+      | `/help [page]` | 显示帮助（`/help` 查看可用页面） |
+      | `/quit` | 退出 AI Shell |
+      | `/model [名称]` | 查看或切换 AI 模型 |
+      | `/setup` | 重新配置 API 设置 |
+      | `/plan [start\|status\|exit]` | 计划模式控制 |
+      | `/token` | 显示令牌用量（近 7 天） |
+      | `/resume [id]` | 恢复之前的会话 |
+      | `/feedback` | 提交反馈或报告问题 |
 
-      ### 历史管理
-      - `history [options] [n]` - 查看命令历史
-      - `history -c` - 清空历史
-      - `history -d offset` - 删除指定位置的历史条目
+      ## 配置
+      - 配置文件：`~/.config/aish/config.yaml`
+      - 优先级：命令行参数 > 环境变量（`AISH_MODEL`、`AISH_API_KEY`、`AISH_API_BASE`） > 配置文件
+      - 运行 `/setup` 或 `aish setup` 进行交互式配置
 
-      ### 环境变量
-      - `export [-fn] [name[=value] ...]` - 设置/导出环境变量
-      - `export -p` - 显示所有已导出的变量
-      - `unset [-fv] [name ...]` - 取消设置环境变量
-      - `pwd [-L|-P]` - 显示当前工作目录
+      ## 快捷键
+      | 按键 | 功能 |
+      |------|------|
+      | `Ctrl+C` | 取消当前操作（连按两次退出） |
+      | `Ctrl+D` | 退出 Shell |
+      | `Shift+Tab` / `F2` | 切换计划模式 |
+      | `Ctrl+O` | 浏览输出历史 |
+      | 空行按 `/` | 斜杠命令选择器 |
 
-      ### 通用命令
-      - `help` - 显示本帮助
-      - `clear` - 清屏
-      - `exit` - 退出 shell
-      - `/model [模型名称]` - 查看或切换模型
-      - `/setup` - 重新配置 API 设置
+      ## 帮助页面
+      使用 `/help <page>` 查看 aish 特有功能的详细说明：
 
-      ### AI 命令
-      - `； <question>` - 向 AI 助手提问
+      | 页面 | 内容 |
+      |------|------|
+      | `ai` | AI 助手用法（`;` 前缀、上下文、对话） |
+      | `model` | 模型管理（查看、切换、支持供应商） |
+      | `plan` | 计划模式（工作流、审批、与普通模式对比） |
+      | `config` | 配置（文件、环境变量、优先级） |
+      | `shortcuts` | 快捷键（编辑、控制、模式切换） |
+      | `security` | 安全策略（风险等级、规则、密钥检测） |
 
-      ### 功能特性
-      - ✅ 所有命令完整 PTY 支持
-      - ✅ 命令历史与 AI 上下文融合
-      - ✅ AI 输出 Rich 美化
-      - ✅ 信号处理与优雅退出
+      ## 更多
+      - 安全策略：`~/.config/aish/security_policy.yaml`
+      - 会话数据：`~/.local/share/aish/sessions.db`
+      - 日志：`~/.config/aish/logs/aish.log`
+      - 文档：https://github.com/AI-Shell-Team/aish
 
-      ### 获取更多帮助
-      对任意命令使用 `<command> --help` 或 `<command> -h` 查看详细帮助。
+  topics:
+    unknown: "未知帮助页面 '{topic}'。可用页面：ai, model, plan, config, shortcuts, security"
 
-      ### 示例
-      ```bash
-      history --help       # 查看 history 的详细帮助
-      cd --help            # 查看 cd 的详细帮助
-      export JAVA_HOME="/usr/lib/jvm/java-11"  # 设置环境变量
-      unset TEMP_VAR       # 删除环境变量
-      ； explain ls -la     # 让 AI 解释命令
-      ```
+    ai:
+      title: "AI 助手"
+      markdown: |-
+        ## 向 AI 提问
+
+        在问题前加 `;`（半角分号）或 `；`（全角分号）：
+
+        ```
+        ; 如何查找大文件？
+        ; 解释这个命令：ls -la
+        ; 推荐一个更好的压缩方式
+        ```
+
+        AI 会看到你的对话上下文，包括之前的 shell 命令和 AI 回复。
+
+        ## 工作原理
+
+        - 你的问题会发送到配置的 LLM 模型
+        - AI 接收对话历史作为上下文
+        - 回复支持语法高亮和表格渲染
+
+        ## 上下文管理
+
+        - 对话历史自动维护
+        - 超出 token 预算时自动压缩上下文
+        - 旧消息被摘要化，保留近期上下文
+
+    model:
+      title: "模型管理"
+      markdown: |-
+        ## 查看 & 切换模型
+
+        ```
+        /model                    # 查看当前模型
+        /model gpt-4o             # 切换到 GPT-4o
+        /model claude-sonnet-4-6  # 切换到 Claude
+        ```
+
+        ## 支持的供应商
+
+        | 供应商 | 模型前缀 |
+        |--------|----------|
+        | OpenAI | `gpt-*`, `o1-*`, `o3-*`, `o4-*` |
+        | Anthropic | `claude-*` |
+        | Google | `gemini-*`, `gemma-*` |
+        | DeepSeek | `deepseek-*` |
+        | 通义千问 | `qwen-*`, `qwq-*` |
+        | Mistral | `mistral-*`, `mixtral-*`, `codestral-*` |
+        | xAI | `grok-*` |
+        | Moonshot | `kimi-*`, `moonshot-*` |
+        | 智谱 | `glm-*` |
+        | 本地 | Ollama、vLLM、本地 API |
+
+        ## 切换行为
+
+        - 根据模型名自动检测供应商
+        - 切换前验证连接性
+        - 失败时保留当前模型
+        - 配置自动保存到 `~/.config/aish/config.yaml`
+
+    plan:
+      title: "计划模式"
+      markdown: |-
+        ## 什么是计划模式？
+
+        计划模式让 AI 在写代码之前先分析代码库并创建详细的实施计划。只有在审批通过后才会应用更改。
+
+        ## 命令
+
+        ```
+        /plan start     # 进入计划模式
+        /plan status    # 查看当前计划状态
+        /plan exit      # 退出计划模式
+        ```
+
+        也可以用 `Shift+Tab` 或 `F2` 切换计划模式。
+
+        ## 使用流程
+
+        1. 进入计划模式：`/plan start`
+        2. 让 AI 规划：`; 重构 auth 模块使用 JWT`
+        3. AI 生成包含步骤和文件变更的计划
+        4. 审核计划，逐步批准或拒绝
+        5. 审批通过后应用更改
+        6. 退出计划模式：`/plan exit`
+
+        ## 计划模式 vs 普通模式
+
+        | | 普通模式 | 计划模式 |
+        |---|---|---|
+        | AI 工具 | 完整访问 | 只读 + 计划写入 |
+        | 代码变更 | 立即执行 | 审批后执行 |
+        | 适合场景 | 快速修复、提问 | 重构、新功能 |
+
+    config:
+      title: "配置"
+      markdown: |-
+        ## 配置文件
+
+        位置：`~/.config/aish/config.yaml`
+
+        可通过 `$AISH_CONFIG_DIR` 或 `$XDG_CONFIG_HOME` 覆盖。
+
+        ## 优先级
+
+        命令行参数 > 环境变量 > 配置文件
+
+        ## 环境变量
+
+        | 变量 | 用途 |
+        |------|------|
+        | `AISH_MODEL` | 覆盖默认模型 |
+        | `AISH_API_KEY` | 覆盖 API 密钥 |
+        | `AISH_API_BASE` | 覆盖 API 地址 |
+        | `AISH_CONFIG_DIR` | 覆盖配置目录 |
+
+        ## 主要设置
+
+        ```
+        model: gpt-4o                    # 默认 LLM 模型
+        api_key: sk-xxx                  # API 密钥
+        api_base: https://api.openai.com/v1  # API 端点
+        temperature: 0.3                 # 回复随机性
+        theme: dark                      # UI 主题（dark/light）
+        output_language: zh              # 强制输出语言
+        ```
+
+        ## 配置向导
+
+        运行 `/setup` 或 `aish setup` 进行交互式配置。设置立即生效，无需重启。
+
+        ## 其他文件
+
+        - 安全策略：`~/.config/aish/security_policy.yaml`
+        - 会话数据库：`~/.local/share/aish/sessions.db`
+        - 日志：`~/.config/aish/logs/aish.log`
+
+    shortcuts:
+      title: "快捷键"
+      markdown: |-
+        ## 编辑
+
+        | 按键 | 功能 |
+        |------|------|
+        | `Tab` | 自动补全 |
+        | `↑` / `↓` | 浏览历史 |
+        | `Ctrl+R` | 搜索历史 |
+        | `Ctrl+L` | 清屏 |
+        | `Backspace` / `Delete` | 删除字符 |
+
+        ## Shell 控制
+
+        | 按键 | 功能 |
+        |------|------|
+        | `Ctrl+C` | 取消当前操作（连按两次退出） |
+        | `Ctrl+D` | 退出 Shell |
+        | `Ctrl+O` | 浏览输出历史 |
+        | `Esc` | 取消当前输入 |
+
+        ## 模式切换
+
+        | 按键 | 功能 |
+        |------|------|
+        | `Shift+Tab` / `F2` | 切换计划模式 |
+        | 空行按 `/` | 打开斜杠命令选择器 |
+
+    security:
+      title: "安全策略"
+      markdown: |-
+        ## 概述
+
+        aish 使用安全策略文件来控制哪些命令和文件操作需要确认或被阻止。
+
+        ## 配置位置
+
+        优先级：
+        1. 显式指定的路径
+        2. `/etc/aish/security_policy.yaml`
+        3. `~/.config/aish/security_policy.yaml`
+
+        ## 风险等级
+
+        | 等级 | 行为 |
+        |------|------|
+        | `LOW` | 允许，记录日志 |
+        | `MEDIUM` | 需要确认 |
+        | `HIGH` | 阻止或需要明确确认 |
+
+        ## 规则结构
+
+        ```yaml
+        rules:
+          - id: protect-system
+            name: 保护系统目录
+            path: ["/boot/**", "/etc/passwd"]
+            operations: [WRITE, DELETE]
+            risk: HIGH
+            reason: "不应修改系统文件"
+        ```
+
+        ## 路径模式
+
+        - `*` 匹配单个路径段
+        - `**` 匹配零或多个路径段
+        - 变量：`$HOME`、`$PWD`
+
+        ## 密钥检测
+
+        内置 API 密钥检测模式（OpenAI、Anthropic、AWS、Google、GitHub、Stripe、Slack）、JWT 令牌和嵌入密码的 URL。支持通过 `secret_patterns` 添加自定义模式。
 
   command:
     history:

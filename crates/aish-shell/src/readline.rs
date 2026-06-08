@@ -24,12 +24,14 @@ const BUILTINS: &[&str] = &[
 
 /// Slash commands with descriptions for popup completion.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/help", "Show help information"),
     ("/model", "Show or switch AI model"),
     ("/setup", "Open setup wizard"),
     ("/plan", "Plan mode control"),
     ("/token", "Show token usage"),
     ("/resume", "Resume previous session"),
     ("/feedback", "Submit feedback"),
+    ("/quit", "Exit AI Shell"),
 ];
 
 /// Timeout for PTY completion queries.

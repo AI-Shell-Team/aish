@@ -144,12 +144,14 @@ shell:
     skills_loaded_suffix: " 件読み込み済み"
 
   slash:
+    help: "ヘルプ情報を表示"
     model: "AI モデルの表示・切替"
     setup: "セットアップウィザードを開く"
     plan: "プランモードの制御"
     token: "トークン使用量を表示"
     resume: "前回のセッションを再開"
     feedback: "フィードバックを送信"
+    quit: "AI Shell を終了"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -353,9 +355,25 @@ security:
 
 tools:
   ask_user:
+    description: "ユーザーに焦点を絞った確認質問をします。prompt のみならテキスト入力、options があれば選択肢を提示します。"
     unknown_kind: "不明な種類です: {kind}"
     runtime_not_configured: "ask_user ランタイムが構成されていません"
     execute_failed: "ask_user に失敗しました: {error}"
+    param:
+      kind: "操作タイプ: text_input は自由入力、choice_or_text は選択肢とカスタム入力"
+      prompt: "ユーザーに尋ねる質問です。"
+      options: "ユーザーに提示する任意の選択肢です。省略または空の場合、ask_user はテキスト入力を使います。"
+      option_value: "ツールメタデータに返される安定した選択肢の値です。"
+      option_label: "選択リストに表示されるユーザー向けラベルです。"
+      option_description: "選択肢の下に表示される任意の補足説明です。"
+      option_recommended: "この選択肢を推奨として明示表示します。"
+      title: "質問の任意タイトル"
+      default: "既定値"
+      placeholder: "プレースホルダーテキスト"
+      allow_freeform_input: "選択肢がある場合にカスタム回答を許可します。既定値は true です。"
+      required: "ユーザーが回答を入力する必要があるかどうか（既定値: true）"
+      allow_cancel: "ユーザーがキャンセル/スキップできるかどうか（既定値: true）"
+      min_length: "テキスト入力の最小文字数（既定値: 0）"
     validation:
       prompt_empty: "prompt は空にできません"
       option_value_empty: "option value は空にできません"
@@ -390,54 +408,269 @@ help:
     notes: "補足"
     brief_usage: "使い方: {usage}"
   general:
-    title: "📖 AI Shell ヘルプ"
+    title: "AI Shell ヘルプ"
     markdown: |-
-      ## 利用可能なコマンド:
+      ## クイックスタート
+      - **シェルコマンド** — そのまま入力：`ls`、`cd`、`vim`、`ssh`、`top` …
+      - **AI に質問** — `;` または `；` で始める：`;大きなファイルを見つける方法`
+      - **スラッシュコマンド** — 空行で `/` を押すとインタラクティブピッカーが開きます
 
-      ### ディレクトリ操作
-      - `cd [-L|[-P [-e]]] [directory]` - 完全なパラメーター対応でディレクトリを変更
-      - `pushd [directory]` - ディレクトリをスタックに積む
-      - `popd` - ディレクトリをスタックから取り出す
-      - `dirs [-c]` - ディレクトリスタックを表示
+      ## スラッシュコマンド
+      | コマンド | 説明 |
+      |----------|------|
+      | `/help [page]` | ヘルプを表示（`/help` でページ一覧） |
+      | `/quit` | AI Shell を終了 |
+      | `/model [名前]` | AI モデルを表示または切り替え |
+      | `/setup` | API 設定を再構成 |
+      | `/plan [start\|status\|exit]` | プランモードの制御 |
+      | `/token` | トークン使用量を表示（過去 7 日間） |
+      | `/resume [id]` | 前回のセッションを再開 |
+      | `/feedback` | フィードバックを送信またはバグを報告 |
 
-      ### 履歴管理
-      - `history [options] [n]` - コマンド履歴を表示
-      - `history -c` - 履歴を消去
-      - `history -d offset` - 履歴エントリーを削除
+      ## 設定
+      - 設定ファイル：`~/.config/aish/config.yaml`
+      - 優先度：コマンドライン引数 > 環境変数（`AISH_MODEL`、`AISH_API_KEY`、`AISH_API_BASE`） > 設定ファイル
+      - `/setup` または `aish setup` でインタラクティブに設定
 
-      ### 環境変数
-      - `export [-fn] [name[=value] ...]` - 環境変数を設定または export
-      - `export -p` - export 済み変数を表示
-      - `unset [-fv] [name ...]` - 環境変数を解除
-      - `pwd [-L|-P]` - 現在の作業ディレクトリを表示
+      ## キーボードショートカット
+      | キー | 操作 |
+      |------|------|
+      | `Ctrl+C` | 現在の操作をキャンセル（2 回押すと終了） |
+      | `Ctrl+D` | シェルを終了 |
+      | `Shift+Tab` / `F2` | プランモード切替 |
+      | `Ctrl+O` | 出力履歴を閲覧 |
+      | 空行で `/` | スラッシュコマンドピッカー |
 
-      ### 一般コマンド
-      - `help` - このヘルプを表示
-      - `clear` - 画面を消去
-      - `exit` - シェルを終了
-      - `/model [model]` - モデルを表示または切り替え
-      - `/setup` - API 設定を再構成
+      ## ヘルプページ
+      `/help <page>` で aish 固有機能の詳細を確認：
 
-      ### AI コマンド
-      - `; <question>` - AI アシスタントに質問
+      | ページ | 内容 |
+      |--------|------|
+      | `ai` | AIアシスタントの使い方（`;`プレフィックス、コンテキスト、会話） |
+      | `model` | モデル管理（表示、切替、対応プロバイダー） |
+      | `plan` | プランモード（ワークフロー、承認、通常モードとの比較） |
+      | `config` | 設定（ファイル、環境変数、優先順位） |
+      | `shortcuts` | キーボードショートカット（編集、制御、モード切替） |
+      | `security` | セキュリティポリシー（リスクレベル、ルール、シークレット検出） |
 
-      ### 機能
-      - ✅ すべてのコマンドで完全な PTY サポート
-      - ✅ コマンド履歴と AI コンテキストの統合
-      - ✅ AI 応答のリッチなターミナル表示
-      - ✅ シグナル処理と適切なクリーンアップ
+      ## その他
+      - セキュリティポリシー：`~/.config/aish/security_policy.yaml`
+      - セッションデータ：`~/.local/share/aish/sessions.db`
+      - ログ：`~/.config/aish/logs/aish.log`
+      - ドキュメント：https://github.com/AI-Shell-Team/aish
 
-      ### さらに詳しいヘルプ
-      任意のコマンドで `<command> --help` または `<command> -h` を使うと詳細ヘルプを表示できます。
+  topics:
+    unknown: "不明なヘルプページ '{topic}'。利用可能なページ：ai, model, plan, config, shortcuts, security"
 
-      ### 例
-      ```bash
-      history --help       # history の詳細ヘルプを表示
-      cd --help            # cd の詳細ヘルプを表示
-      export JAVA_HOME="/usr/lib/jvm/java-11"  # 環境変数を設定
-      unset TEMP_VAR       # 環境変数を削除
-      ; ls -la を説明して   # AI にコマンド説明を依頼
-      ```
+    ai:
+      title: "AI アシスタント"
+      markdown: |-
+        ## AI への質問
+
+        `;`（セミコロン）または `；`（全角セミコロン）を前に付けて質問します：
+
+        ```
+        ; 大きなファイルを見つける方法は？
+        ; このコマンドを説明して：ls -la
+        ; より良い圧縮方法を提案して
+        ```
+
+        AI は以前のシェルコマンドや AI 応答を含む会話コンテキストを参照します。
+
+        ## 仕組み
+
+        - 質問は設定された LLM モデルに送信されます
+        - AI は会話履歴をコンテキストとして受け取ります
+        - 応答はシンタックスハイライトとテーブル描画で表示されます
+
+        ## コンテキスト管理
+
+        - 会話履歴は自動的に維持されます
+        - トークン予算を超えると自動的にコンテキストを圧縮します
+        - 古いメッセージは要約され、最新のコンテキストが保持されます
+
+    model:
+      title: "モデル管理"
+      markdown: |-
+        ## モデルの確認と切り替え
+
+        ```
+        /model                    # 現在のモデルを表示
+        /model gpt-4o             # GPT-4o に切り替え
+        /model claude-sonnet-4-6  # Claude に切り替え
+        ```
+
+        ## 対応プロバイダー
+
+        | プロバイダー | モデルプレフィックス |
+        |-------------|-------------------|
+        | OpenAI | `gpt-*`, `o1-*`, `o3-*`, `o4-*` |
+        | Anthropic | `claude-*` |
+        | Google | `gemini-*`, `gemma-*` |
+        | DeepSeek | `deepseek-*` |
+        | Qwen | `qwen-*`, `qwq-*` |
+        | Mistral | `mistral-*`, `mixtral-*`, `codestral-*` |
+        | xAI | `grok-*` |
+        | Moonshot | `kimi-*`, `moonshot-*` |
+        | Zhipu | `glm-*` |
+        | ローカル | Ollama, vLLM, ローカル API |
+
+        ## 切り替え動作
+
+        - モデル名からプロバイダーを自動検出
+        - 切り替え前に接続性を検証
+        - 失敗時は現在のモデルを維持
+        - 設定は `~/.config/aish/config.yaml` に自動保存
+
+    plan:
+      title: "プランモード"
+      markdown: |-
+        ## プランモードとは？
+
+        プランモードでは、AI がコードを書く前にコードベースを分析し、詳細な実装計画を作成します。変更は承認後にのみ適用されます。
+
+        ## コマンド
+
+        ```
+        /plan start     # プランモードに入る
+        /plan status    # 現在のプラン状態を表示
+        /plan exit      # プランモードを終了
+        ```
+
+        `Shift+Tab` または `F2` でプランモードを切り替えることもできます。
+
+        ## 使い方
+
+        1. プランモードに入る：`/plan start`
+        2. AI に計画を依頼：`; auth モジュールを JWT にリファクタリングして`
+        3. AI がステップとファイル変更を含む計画を生成
+        4. 計画を確認し、各ステップを承認または拒否
+        5. 承認後、変更が適用される
+        6. プランモードを終了：`/plan exit`
+
+        ## プランモード vs 通常モード
+
+        | | 通常モード | プランモード |
+        |---|---|---|
+        | AI ツール | フルアクセス | 読み取り専用 + プラン書き込み |
+        | コード変更 | 即時実行 | 承認後実行 |
+        | 適した場面 | 簡単な修正、質問 | リファクタリング、新機能 |
+
+    config:
+      title: "設定"
+      markdown: |-
+        ## 設定ファイル
+
+        場所：`~/.config/aish/config.yaml`
+
+        `$AISH_CONFIG_DIR` または `$XDG_CONFIG_HOME` で上書き可能。
+
+        ## 優先順位
+
+        コマンドライン引数 > 環境変数 > 設定ファイル
+
+        ## 環境変数
+
+        | 変数 | 用途 |
+        |------|------|
+        | `AISH_MODEL` | デフォルトモデルを上書き |
+        | `AISH_API_KEY` | API キーを上書き |
+        | `AISH_API_BASE` | API ベース URL を上書き |
+        | `AISH_CONFIG_DIR` | 設定ディレクトリを上書き |
+
+        ## 主な設定項目
+
+        ```
+        model: gpt-4o                    # デフォルト LLM モデル
+        api_key: sk-xxx                  # API キー
+        api_base: https://api.openai.com/v1  # API エンドポイント
+        temperature: 0.3                 # 応答のランダム性
+        theme: dark                      # UI テーマ（dark/light）
+        output_language: ja              # 出力言語の強制
+        ```
+
+        ## セットアップウィザード
+
+        `/setup` または `aish setup` でインタラクティブに設定できます。設定は再起動なしで即座に反映されます。
+
+        ## その他のファイル
+
+        - セキュリティポリシー：`~/.config/aish/security_policy.yaml`
+        - セッションデータベース：`~/.local/share/aish/sessions.db`
+        - ログ：`~/.config/aish/logs/aish.log`
+
+    shortcuts:
+      title: "キーボードショートカット"
+      markdown: |-
+        ## 編集
+
+        | キー | 操作 |
+        |------|------|
+        | `Tab` | 自動補完 |
+        | `↑` / `↓` | 履歴を参照 |
+        | `Ctrl+R` | 履歴検索 |
+        | `Ctrl+L` | 画面クリア |
+        | `Backspace` / `Delete` | 文字削除 |
+
+        ## シェル制御
+
+        | キー | 操作 |
+        |------|------|
+        | `Ctrl+C` | 現在の操作をキャンセル（2 回押しで終了） |
+        | `Ctrl+D` | シェルを終了 |
+        | `Ctrl+O` | 出力履歴を参照 |
+        | `Esc` | 現在の入力をキャンセル |
+
+        ## モード切替
+
+        | キー | 操作 |
+        |------|------|
+        | `Shift+Tab` / `F2` | プランモード切替 |
+        | 空行で `/` | スラッシュコマンドピッカーを開く |
+
+    security:
+      title: "セキュリティポリシー"
+      markdown: |-
+        ## 概要
+
+        aish はセキュリティポリシーファイルを使用して、確認が必要またはブロックされるコマンドやファイル操作を制御します。
+
+        ## 設定場所
+
+        優先順位：
+        1. 明示的に指定されたパス
+        2. `/etc/aish/security_policy.yaml`
+        3. `~/.config/aish/security_policy.yaml`
+
+        ## リスクレベル
+
+        | レベル | 動作 |
+        |--------|------|
+        | `LOW` | 許可、ログ記録 |
+        | `MEDIUM` | 確認プロンプト |
+        | `HIGH` | ブロックまたは明示的な確認が必要 |
+
+        ## ルール構造
+
+        ```yaml
+        rules:
+          - id: protect-system
+            name: システムディレクトリの保護
+            path: ["/boot/**", "/etc/passwd"]
+            operations: [WRITE, DELETE]
+            risk: HIGH
+            reason: "システムファイルは変更すべきではありません"
+        ```
+
+        ## パスパターン
+
+        - `*` は単一のパスセグメントにマッチ
+        - `**` はゼロ以上のパスセグメントにマッチ
+        - 変数：`$HOME`、`$PWD`
+
+        ## シークレット検出
+
+        OpenAI、Anthropic、AWS、Google、GitHub、Stripe、Slack の API キー、JWT トークン、埋め込みパスワードを含む URL の検出パターンが組み込まれています。`secret_patterns` でカスタムパターンを追加できます。
 
   command:
     history:

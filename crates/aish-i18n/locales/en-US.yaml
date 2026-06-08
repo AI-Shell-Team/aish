@@ -324,12 +324,14 @@ shell:
 
   # Slash command descriptions (for popup)
   slash:
+    help: "Show help information"
     model: "Show or switch AI model"
     setup: "Open setup wizard"
     plan: "Plan mode control"
     token: "Show token usage"
     resume: "Resume previous session"
     feedback: "Submit feedback"
+    quit: "Exit AI Shell"
 
   feedback:
     select_type: "Select feedback type"
@@ -674,8 +676,24 @@ tools:
       edit_write_failed: "Failed to write {path}: {error}"
 
   ask_user:
+    description: "Ask the user a focused clarifying question. Use prompt for text input, and add options when you can offer choices."
     runtime_not_configured: "ask_user runtime is not configured"
     execute_failed: "ask_user failed: {error}"
+    param:
+      kind: "Interaction type: text_input for free-form, choice_or_text for options with custom input"
+      prompt: "The question to ask the user."
+      options: "Optional choices to offer the user. If omitted or empty, ask_user uses text input."
+      option_value: "Stable option value returned in tool metadata."
+      option_label: "User-facing label shown in the choice list."
+      option_description: "Optional extra detail shown below the option."
+      option_recommended: "Mark this option visibly as the recommended default."
+      title: "Optional title for the question"
+      default: "Default value"
+      placeholder: "Placeholder text"
+      allow_freeform_input: "When options are present, allow the user to choose Other and type a custom answer. Defaults to true."
+      required: "Whether the user must provide an answer (default: true)"
+      allow_cancel: "Whether the user can cancel/skip (default: true)"
+      min_length: "Minimum length for text input (default: 0)"
     validation:
       prompt_empty: "prompt cannot be empty"
       option_value_empty: "option value cannot be empty"
@@ -761,54 +779,270 @@ help:
     brief_usage: "Usage: {usage}"
 
   general:
-    title: "📖 AI Shell Help"
+    title: "AI Shell Help"
     markdown: |-
-      ## Available Commands:
+      ## Quick Start
+      - **Shell commands** — type directly: `ls`, `cd`, `vim`, `ssh`, `top` ...
+      - **Ask AI** — prefix with `;` or `；`: `;how to find large files`
+      - **Slash commands** — type `/` on empty line for interactive picker
 
-      ### Directory Navigation
-      - `cd [-L|[-P [-e]]] [directory]` - Change directory with full parameter support
-      - `pushd [directory]` - Push directory onto stack
-      - `popd` - Pop directory from stack
-      - `dirs [-c]` - Show directory stack
+      ## Slash Commands
+      | Command | Description |
+      |---------|-------------|
+      | `/help [page]` | Show help (`/help` for pages) |
+      | `/quit` | Exit AI Shell |
+      | `/model [name]` | Show or switch AI model |
+      | `/setup` | Reconfigure API settings |
+      | `/plan [start\|status\|exit]` | Plan mode control |
+      | `/token` | Show token usage (last 7 days) |
+      | `/resume [id]` | Resume a previous session |
+      | `/feedback` | Submit feedback or report a bug |
 
-      ### History Management
-      - `history [options] [n]` - Show command history
-      - `history -c` - Clear history
-      - `history -d offset` - Delete history entry
+      ## Configuration
+      - Config file: `~/.config/aish/config.yaml`
+      - CLI args > env vars (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > config file
+      - Run `/setup` or `aish setup` for interactive configuration
 
-      ### Environment Variables
-      - `export [-fn] [name[=value] ...]` - Set/export environment variables
-      - `export -p` - Display exported variables
-      - `unset [-fv] [name ...]` - Unset environment variables
-      - `pwd [-L|-P]` - Print working directory
+      ## Keyboard Shortcuts
+      | Key | Action |
+      |-----|--------|
+      | `Ctrl+C` | Cancel current operation (press twice to exit) |
+      | `Ctrl+D` | Exit shell |
+      | `Shift+Tab` / `F2` | Toggle plan mode |
+      | `Ctrl+O` | Browse output history |
+      | `/` on empty line | Slash command picker |
 
-      ### General Commands
-      - `help` - Show this help message
-      - `clear` - Clear the screen
-      - `exit` - Exit the shell
-      - `/model [model]` - Show or switch model
-      - `/setup` - Reconfigure API settings
+      ## Help Pages
+      Use `/help <page>` for details on aish-specific features:
 
-      ### AI Commands
-      - `; <question>` - Ask the AI assistant
+      | Page | Content |
+      |------|---------|
+      | `ai` | AI assistant usage (`;` prefix, context, conversation) |
+      | `model` | Model management (view, switch, supported providers) |
+      | `plan` | Plan mode (workflow, approval, vs normal mode) |
+      | `config` | Configuration (files, env vars, priority) |
+      | `shortcuts` | Keyboard shortcuts (editing, control, mode switching) |
+      | `security` | Security policy (risk levels, rules, secret detection) |
 
-      ### Features
-      - ✅ Full PTY support for all commands
-      - ✅ Command history and AI context integration
-      - ✅ Rich terminal output for AI responses
-      - ✅ Signal handling and graceful cleanup
+      ## More
+      - Security policy: `~/.config/aish/security_policy.yaml`
+      - Session data: `~/.local/share/aish/sessions.db`
+      - Logs: `~/.config/aish/logs/aish.log`
+      - Docs: https://github.com/AI-Shell-Team/aish
 
-      ### Getting Help
-      Use `<command> --help` or `<command> -h` for detailed help on any command.
+  topics:
+    unknown: "Unknown help page '{topic}'. Available pages: ai, model, plan, config, shortcuts, security"
 
-      ### Examples
-      ```bash
-      history --help       # Show detailed history help
-      cd --help            # Show detailed cd help
-      export JAVA_HOME="/usr/lib/jvm/java-11"  # Set environment variable
-      unset TEMP_VAR       # Remove environment variable
-      ; explain ls -la     # Ask AI to explain a command
-      ```
+    ai:
+      title: "AI Assistant"
+      markdown: |-
+        ## Asking AI
+
+        Prefix your question with `;` (semicolon) or `；` (full-width):
+
+        ```
+        ; how do I find large files?
+        ; explain this command: ls -la
+        ; suggest a better way to compress files
+        ```
+
+        The AI sees your conversation context, including previous shell commands and AI responses.
+
+        ## How It Works
+
+        - Your question is sent to the configured LLM model
+        - The AI receives conversation history for context
+        - Responses are rendered with syntax highlighting and table formatting
+
+        ## Context Management
+
+        - Conversation history is maintained automatically
+        - Context auto-compaction triggers when token budget is exceeded
+        - Older messages are summarized to keep recent context fresh
+
+    model:
+      title: "Model Management"
+      markdown: |-
+        ## Viewing & Switching Models
+
+        ```
+        /model                # Show current model
+        /model gpt-4o         # Switch to GPT-4o
+        /model claude-sonnet-4-6  # Switch to Claude
+        ```
+
+        ## Supported Providers
+
+        | Provider | Model Prefix |
+        |----------|-------------|
+        | OpenAI | `gpt-*`, `o1-*`, `o3-*`, `o4-*` |
+        | Anthropic | `claude-*` |
+        | Google | `gemini-*`, `gemma-*` |
+        | DeepSeek | `deepseek-*` |
+        | Qwen | `qwen-*`, `qwq-*` |
+        | Mistral | `mistral-*`, `mixtral-*`, `codestral-*` |
+        | xAI | `grok-*` |
+        | Moonshot | `kimi-*`, `moonshot-*` |
+        | Zhipu | `glm-*` |
+        | Local | Ollama, vLLM, local API endpoints |
+
+        ## Switching Behavior
+
+        - Provider is auto-detected from model name
+        - Connectivity is validated before switching
+        - On failure, the current model is kept
+        - Config is persisted automatically to `~/.config/aish/config.yaml`
+
+    plan:
+      title: "Plan Mode"
+      markdown: |-
+        ## What Is Plan Mode?
+
+        Plan mode lets the AI analyze your codebase and create a detailed implementation plan before writing any code. Changes are only applied after you approve the plan.
+
+        ## Commands
+
+        ```
+        /plan start     # Enter plan mode
+        /plan status    # Show current plan status
+        /plan exit      # Exit plan mode
+        ```
+
+        You can also toggle plan mode with `Shift+Tab` or `F2`.
+
+        ## Usage
+
+        1. Enter plan mode: `/plan start`
+        2. Ask the AI to plan: `; refactor the auth module to use JWT`
+        3. The AI generates a plan with steps and file changes
+        4. Review the plan and approve or reject each step
+        5. Once approved, changes are applied
+        6. Exit plan mode: `/plan exit`
+
+        ## Plan Mode vs Normal Mode
+
+        | | Normal Mode | Plan Mode |
+        |---|---|---|
+        | AI tools | Full access | Read-only + plan writing |
+        | Code changes | Immediate | After approval |
+        | Best for | Quick fixes, questions | Refactors, new features |
+
+    config:
+      title: "Configuration"
+      markdown: |-
+        ## Config File
+
+        Location: `~/.config/aish/config.yaml`
+
+        Override with `$AISH_CONFIG_DIR` or `$XDG_CONFIG_HOME`.
+
+        ## Priority
+
+        CLI arguments > environment variables > config file
+
+        ## Environment Variables
+
+        | Variable | Purpose |
+        |----------|---------|
+        | `AISH_MODEL` | Override default model |
+        | `AISH_API_KEY` | Override API key |
+        | `AISH_API_BASE` | Override API base URL |
+        | `AISH_CONFIG_DIR` | Override config directory |
+
+        ## Key Settings
+
+        ```
+        model: gpt-4o                    # Default LLM model
+        api_key: sk-xxx                  # API key
+        api_base: https://api.openai.com/v1  # API endpoint
+        temperature: 0.3                 # Response randomness
+        theme: dark                      # UI theme (dark/light)
+        output_language: en              # Force output language
+        ```
+
+        ## Setup Wizard
+
+        Run `/setup` or `aish setup` for interactive configuration.
+        Settings take effect immediately without restart.
+
+        ## Other Files
+
+        - Security policy: `~/.config/aish/security_policy.yaml`
+        - Session database: `~/.local/share/aish/sessions.db`
+        - Logs: `~/.config/aish/logs/aish.log`
+
+    shortcuts:
+      title: "Keyboard Shortcuts"
+      markdown: |-
+        ## Editing
+
+        | Key | Action |
+        |-----|--------|
+        | `Tab` | Autocomplete |
+        | `Up` / `Down` | Navigate history |
+        | `Ctrl+R` | Search history |
+        | `Ctrl+L` | Clear screen |
+        | `Backspace` / `Delete` | Delete character |
+
+        ## Shell Control
+
+        | Key | Action |
+        |-----|--------|
+        | `Ctrl+C` | Cancel current operation (press twice to exit) |
+        | `Ctrl+D` | Exit shell |
+        | `Ctrl+O` | Browse output history |
+        | `Esc` | Cancel current input |
+
+        ## Mode Switching
+
+        | Key | Action |
+        |-----|--------|
+        | `Shift+Tab` / `F2` | Toggle plan mode |
+        | `/` on empty line | Open slash command picker |
+
+    security:
+      title: "Security Policy"
+      markdown: |-
+        ## Overview
+
+        aish uses a security policy file to control which commands and file operations require confirmation or are blocked.
+
+        ## Config Location
+
+        Priority:
+        1. Explicit path (if configured)
+        2. `/etc/aish/security_policy.yaml`
+        3. `~/.config/aish/security_policy.yaml`
+
+        ## Risk Levels
+
+        | Level | Behavior |
+        |-------|----------|
+        | `LOW` | Allowed, logged |
+        | `MEDIUM` | Confirmation prompt |
+        | `HIGH` | Blocked or requires explicit confirmation |
+
+        ## Rule Structure
+
+        ```yaml
+        rules:
+          - id: protect-system
+            name: Protect system directories
+            path: ["/boot/**", "/etc/passwd"]
+            operations: [WRITE, DELETE]
+            risk: HIGH
+            reason: "System files should not be modified"
+        ```
+
+        ## Path Patterns
+
+        - `*` matches any single path segment
+        - `**` matches zero or more path segments
+        - Variables: `$HOME`, `$PWD`
+
+        ## Secret Detection
+
+        Built-in patterns for detecting API keys (OpenAI, Anthropic, AWS, Google, GitHub, Stripe, Slack), JWT tokens, and URLs with embedded passwords. Custom patterns supported via `secret_patterns`.
 
   command:
     history:

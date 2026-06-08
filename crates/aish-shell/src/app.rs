@@ -2051,6 +2051,21 @@ impl AishShell {
     fn handle_special_command(&mut self, input: &str) -> bool {
         let parts: Vec<&str> = input.split_whitespace().collect();
         match parts.first().copied() {
+            Some("/help") => {
+                let args: Vec<&str> = if parts.len() > 1 {
+                    parts[1..].to_vec()
+                } else {
+                    vec![]
+                };
+                let result = self.state.handle_builtin("help", &args);
+                if let Some(output) = result.output {
+                    println!("{}", output);
+                }
+            }
+            Some("/quit") => {
+                self.state.should_exit = true;
+                return false;
+            }
             Some("/model") => self.handle_model_command(&parts),
             Some("/setup") => self.run_setup_wizard(),
             Some("/plan") => self.handle_plan_command(&parts),

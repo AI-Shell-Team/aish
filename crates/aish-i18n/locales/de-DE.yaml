@@ -144,12 +144,14 @@ shell:
     skills_loaded_suffix: " geladen"
 
   slash:
+    help: "Hilfeinformationen anzeigen"
     model: "KI-Modell anzeigen oder wechseln"
     setup: "Setup-Assistenten öffnen"
     plan: "Planmodus steuern"
     token: "Token-Nutzung anzeigen"
     resume: "Vorherige Sitzung fortsetzen"
     feedback: "Feedback geben"
+    quit: "AI Shell beenden"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -353,9 +355,25 @@ security:
 
 tools:
   ask_user:
+    description: "Stellt dem Benutzer eine gezielte Rückfrage. Nur mit prompt wird Texteingabe verwendet; mit options werden Auswahlmöglichkeiten angeboten."
     unknown_kind: "Unbekannter Typ: {kind}"
     runtime_not_configured: "ask_user-Laufzeit ist nicht konfiguriert"
     execute_failed: "ask_user fehlgeschlagen: {error}"
+    param:
+      kind: "Interaktionstyp: text_input für freie Eingabe, choice_or_text für Auswahl mit eigener Eingabe"
+      prompt: "Die Frage, die dem Benutzer gestellt wird."
+      options: "Optionale Auswahlmöglichkeiten. Wenn sie fehlen oder leer sind, verwendet ask_user Texteingabe."
+      option_value: "Stabiler Optionswert in den Tool-Metadaten."
+      option_label: "Für den Benutzer sichtbare Bezeichnung in der Auswahlliste."
+      option_description: "Optionale Zusatzbeschreibung unterhalb der Option."
+      option_recommended: "Markiert diese Option sichtbar als empfohlene Vorgabe."
+      title: "Optionaler Titel für die Frage"
+      default: "Standardwert"
+      placeholder: "Platzhaltertext"
+      allow_freeform_input: "Erlaubt bei vorhandenen Optionen eine benutzerdefinierte Antwort. Standard ist true."
+      required: "Ob der Benutzer eine Antwort geben muss (Standard: true)"
+      allow_cancel: "Ob der Benutzer abbrechen/überspringen darf (Standard: true)"
+      min_length: "Minimale Länge für Texteingabe (Standard: 0)"
     validation:
       prompt_empty: "prompt darf nicht leer sein"
       option_value_empty: "option value darf nicht leer sein"
@@ -390,54 +408,269 @@ help:
     notes: "Hinweise"
     brief_usage: "Verwendung: {usage}"
   general:
-    title: "📖 AI Shell Hilfe"
+    title: "AI Shell Hilfe"
     markdown: |-
-      ## Verfügbare Befehle:
+      ## Schnellstart
+      - **Shell-Befehle** — direkt eingeben: `ls`, `cd`, `vim`, `ssh`, `top` …
+      - **KI fragen** — mit `;` beginnen: `;wie finde ich große Dateien`
+      - **Slash-Befehle** — `/` in leerer Zeile drückt für interaktive Auswahl
 
-      ### Verzeichnisnavigation
-      - `cd [-L|[-P [-e]]] [directory]` - Verzeichnis mit vollständiger Parameterunterstützung wechseln
-      - `pushd [directory]` - Verzeichnis auf den Stapel legen
-      - `popd` - Verzeichnis vom Stapel nehmen
-      - `dirs [-c]` - Verzeichnisstapel anzeigen
+      ## Slash-Befehle
+      | Befehl | Beschreibung |
+      |--------|--------------|
+      | `/help [page]` | Hilfe anzeigen (`/help` für Seiten) |
+      | `/quit` | AI Shell beenden |
+      | `/model [Name]` | KI-Modell anzeigen oder wechseln |
+      | `/setup` | API-Einstellungen neu konfigurieren |
+      | `/plan [start\|status\|exit]` | Planmodus steuern |
+      | `/token` | Token-Nutzung anzeigen (letzte 7 Tage) |
+      | `/resume [id]` | Vorherige Sitzung fortsetzen |
+      | `/feedback` | Feedback geben oder Fehler melden |
 
-      ### Verlauf
-      - `history [options] [n]` - Befehlsverlauf anzeigen
-      - `history -c` - Verlauf löschen
-      - `history -d offset` - Verlaufseintrag löschen
+      ## Konfiguration
+      - Konfigurationsdatei: `~/.config/aish/config.yaml`
+      - Priorität: CLI-Argumente > Umgebungsvariablen (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > Konfigurationsdatei
+      - `/setup` oder `aish setup` für interaktive Konfiguration
 
-      ### Umgebungsvariablen
-      - `export [-fn] [name[=value] ...]` - Umgebungsvariablen setzen oder exportieren
-      - `export -p` - Exportierte Variablen anzeigen
-      - `unset [-fv] [name ...]` - Umgebungsvariablen entfernen
-      - `pwd [-L|-P]` - Aktuelles Arbeitsverzeichnis ausgeben
+      ## Tastenkombinationen
+      | Taste | Aktion |
+      |-------|--------|
+      | `Ctrl+C` | Aktuellen Vorgang abbrechen (zweimal zum Beenden) |
+      | `Ctrl+D` | Shell beenden |
+      | `Shift+Tab` / `F2` | Planmodus umschalten |
+      | `Ctrl+O` | Ausgabeverlauf durchsuchen |
+      | `/` in leerer Zeile | Slash-Befehlsauswahl |
 
-      ### Allgemeine Befehle
-      - `help` - Diese Hilfe anzeigen
-      - `clear` - Bildschirm löschen
-      - `exit` - Shell beenden
-      - `/model [model]` - Modell anzeigen oder wechseln
-      - `/setup` - API-Einstellungen neu konfigurieren
+      ## Hilfeseiten
+      `/help <page>` für Details zu aish-spezifischen Funktionen:
 
-      ### KI-Befehle
-      - `; <question>` - Den KI-Assistenten fragen
+      | Seite | Inhalt |
+      |-------|--------|
+      | `ai` | KI-Assistent (`;`-Präfix, Kontext, Gespräch) |
+      | `model` | Modellverwaltung (anzeigen, wechseln, Anbieter) |
+      | `plan` | Planmodus (Workflow, Genehmigung, vs. Normalmodus) |
+      | `config` | Konfiguration (Dateien, Umgebungsvariablen, Priorität) |
+      | `shortcuts` | Tastenkombinationen (Bearbeitung, Steuerung, Moduswechsel) |
+      | `security` | Sicherheitsrichtlinie (Risikostufen, Regeln, Erkennung) |
 
-      ### Funktionen
-      - ✅ Vollständige PTY-Unterstützung für alle Befehle
-      - ✅ Befehlsverlauf und KI-Kontextintegration
-      - ✅ Umfangreiche Terminalausgabe für KI-Antworten
-      - ✅ Signalbehandlung und sauberes Aufräumen
+      ## Mehr
+      - Sicherheitsrichtlinie: `~/.config/aish/security_policy.yaml`
+      - Sitzungsdaten: `~/.local/share/aish/sessions.db`
+      - Protokolle: `~/.config/aish/logs/aish.log`
+      - Dokumentation: https://github.com/AI-Shell-Team/aish
 
-      ### Weitere Hilfe
-      Verwenden Sie `<command> --help` oder `<command> -h`, um die detaillierte Hilfe für einen beliebigen Befehl anzuzeigen.
+  topics:
+    unknown: "Unbekannte Hilfeseite '{topic}'. Verfügbare Seiten: ai, model, plan, config, shortcuts, security"
 
-      ### Beispiele
-      ```bash
-      history --help       # Detaillierte Hilfe zu history anzeigen
-      cd --help            # Detaillierte Hilfe zu cd anzeigen
-      export JAVA_HOME="/usr/lib/jvm/java-11"  # Umgebungsvariable setzen
-      unset TEMP_VAR       # Umgebungsvariable entfernen
-      ; erkläre ls -la     # KI um Erklärung eines Befehls bitten
-      ```
+    ai:
+      title: "KI-Assistent"
+      markdown: |-
+        ## KI fragen
+
+        Stellen Sie Ihre Frage mit `;` (Semikolon) oder `；` (vollbreites Semikolon) als Präfix:
+
+        ```
+        ; Wie finde ich große Dateien?
+        ; Erkläre diesen Befehl: ls -la
+        ; Schlage eine bessere Komprimierungsmethode vor
+        ```
+
+        Die KI sieht Ihren Gesprächskontext, einschließlich vorheriger Shell-Befehle und KI-Antworten.
+
+        ## Funktionsweise
+
+        - Ihre Frage wird an das konfigurierte LLM-Modell gesendet
+        - Die KI erhält den Gesprächsverlauf als Kontext
+        - Antworten werden mit Syntaxhervorhebung und Tabellenformatierung angezeigt
+
+        ## Kontextverwaltung
+
+        - Der Gesprächsverlauf wird automatisch verwaltet
+        - Bei Überschreitung des Token-Budgets wird der Kontext automatisch komprimiert
+        - Ältere Nachrichten werden zusammengefasst, um den aktuellen Kontext zu erhalten
+
+    model:
+      title: "Modellverwaltung"
+      markdown: |-
+        ## Modell anzeigen & wechseln
+
+        ```
+        /model                    # Aktuelles Modell anzeigen
+        /model gpt-4o             # Zu GPT-4o wechseln
+        /model claude-sonnet-4-6  # Zu Claude wechseln
+        ```
+
+        ## Unterstützte Anbieter
+
+        | Anbieter | Modellpräfix |
+        |----------|-------------|
+        | OpenAI | `gpt-*`, `o1-*`, `o3-*`, `o4-*` |
+        | Anthropic | `claude-*` |
+        | Google | `gemini-*`, `gemma-*` |
+        | DeepSeek | `deepseek-*` |
+        | Qwen | `qwen-*`, `qwq-*` |
+        | Mistral | `mistral-*`, `mixtral-*`, `codestral-*` |
+        | xAI | `grok-*` |
+        | Moonshot | `kimi-*`, `moonshot-*` |
+        | Zhipu | `glm-*` |
+        | Lokal | Ollama, vLLM, lokale API |
+
+        ## Wechselverhalten
+
+        - Anbieter wird automatisch anhand des Modellnamens erkannt
+        - Konnektivität wird vor dem Wechsel überprüft
+        - Bei Fehler bleibt das aktuelle Modell bestehen
+        - Konfiguration wird automatisch in `~/.config/aish/config.yaml` gespeichert
+
+    plan:
+      title: "Planmodus"
+      markdown: |-
+        ## Was ist der Planmodus?
+
+        Im Planmodus analysiert die KI Ihre Codebasis und erstellt einen detaillierten Implementierungsplan, bevor Code geschrieben wird. Änderungen werden erst nach Ihrer Genehmigung angewendet.
+
+        ## Befehle
+
+        ```
+        /plan start     # Planmodus starten
+        /plan status    # Aktuellen Planstatus anzeigen
+        /plan exit      # Planmodus beenden
+        ```
+
+        Sie können den Planmodus auch mit `Shift+Tab` oder `F2` umschalten.
+
+        ## Verwendung
+
+        1. Planmodus starten: `/plan start`
+        2. KI um Plan bitten: `; Auth-Modul auf JWT umstellen`
+        3. KI erstellt einen Plan mit Schritten und Dateiänderungen
+        4. Plan prüfen und jeden Schritt genehmigen oder ablehnen
+        5. Nach Genehmigung werden Änderungen angewendet
+        6. Planmodus beenden: `/plan exit`
+
+        ## Planmodus vs. Normalmodus
+
+        | | Normalmodus | Planmodus |
+        |---|---|---|
+        | KI-Tools | Voller Zugriff | Schreibgeschützt + Plan erstellen |
+        | Codeänderungen | Sofort | Nach Genehmigung |
+        | Geeignet für | Schnelle Fixes, Fragen | Refactoring, neue Funktionen |
+
+    config:
+      title: "Konfiguration"
+      markdown: |-
+        ## Konfigurationsdatei
+
+        Speicherort: `~/.config/aish/config.yaml`
+
+        Kann mit `$AISH_CONFIG_DIR` oder `$XDG_CONFIG_HOME` überschrieben werden.
+
+        ## Priorität
+
+        Kommandozeilenargumente > Umgebungsvariablen > Konfigurationsdatei
+
+        ## Umgebungsvariablen
+
+        | Variable | Zweck |
+        |----------|-------|
+        | `AISH_MODEL` | Standardmodell überschreiben |
+        | `AISH_API_KEY` | API-Schlüssel überschreiben |
+        | `AISH_API_BASE` | API-Basis-URL überschreiben |
+        | `AISH_CONFIG_DIR` | Konfigurationsverzeichnis überschreiben |
+
+        ## Wichtige Einstellungen
+
+        ```
+        model: gpt-4o                    # Standard-KI-Modell
+        api_key: sk-xxx                  # API-Schlüssel
+        api_base: https://api.openai.com/v1  # API-Endpunkt
+        temperature: 0.3                 # Antwort-Zufälligkeit
+        theme: dark                      # UI-Theme (dark/light)
+        output_language: de              # Ausgabesprache erzwingen
+        ```
+
+        ## Einrichtungsassistent
+
+        `/setup` oder `aish setup` für interaktive Konfiguration. Einstellungen werden sofort ohne Neustart wirksam.
+
+        ## Weitere Dateien
+
+        - Sicherheitsrichtlinie: `~/.config/aish/security_policy.yaml`
+        - Sitzungsdatenbank: `~/.local/share/aish/sessions.db`
+        - Protokolle: `~/.config/aish/logs/aish.log`
+
+    shortcuts:
+      title: "Tastenkombinationen"
+      markdown: |-
+        ## Bearbeitung
+
+        | Taste | Aktion |
+        |-------|--------|
+        | `Tab` | Autovervollständigung |
+        | `↑` / `↓` | Verlauf navigieren |
+        | `Ctrl+R` | Verlauf durchsuchen |
+        | `Ctrl+L` | Bildschirm löschen |
+        | `Backspace` / `Delete` | Zeichen löschen |
+
+        ## Shell-Steuerung
+
+        | Taste | Aktion |
+        |-------|--------|
+        | `Ctrl+C` | Aktuelle Operation abbrechen (zweimal drücken zum Beenden) |
+        | `Ctrl+D` | Shell beenden |
+        | `Ctrl+O` | Ausgabeverlauf durchsuchen |
+        | `Esc` | Aktuelle Eingabe abbrechen |
+
+        ## Moduswechsel
+
+        | Taste | Aktion |
+        |-------|--------|
+        | `Shift+Tab` / `F2` | Planmodus umschalten |
+        | `/` in leerer Zeile | Slash-Befehlsauswahl öffnen |
+
+    security:
+      title: "Sicherheitsrichtlinie"
+      markdown: |-
+        ## Übersicht
+
+        aish verwendet eine Sicherheitsrichtlinie, um zu steuern, welche Befehle und Dateioperationen eine Bestätigung erfordern oder blockiert werden.
+
+        ## Speicherort
+
+        Priorität:
+        1. Explizit angegebener Pfad
+        2. `/etc/aish/security_policy.yaml`
+        3. `~/.config/aish/security_policy.yaml`
+
+        ## Risikostufen
+
+        | Stufe | Verhalten |
+        |-------|-----------|
+        | `LOW` | Erlaubt, protokolliert |
+        | `MEDIUM` | Bestätigung erforderlich |
+        | `HIGH` | Blockiert oder erfordert explizite Bestätigung |
+
+        ## Regelstruktur
+
+        ```yaml
+        rules:
+          - id: protect-system
+            name: Systemverzeichnisse schützen
+            path: ["/boot/**", "/etc/passwd"]
+            operations: [WRITE, DELETE]
+            risk: HIGH
+            reason: "Systemdateien sollten nicht geändert werden"
+        ```
+
+        ## Pfadmuster
+
+        - `*` passt auf ein einzelnes Pfadsegment
+        - `**` passt auf null oder mehr Pfadsegmente
+        - Variablen: `$HOME`, `$PWD`
+
+        ## Geheimnisserkennung
+
+        Eingebaute Erkennungsmuster für API-Schlüssel (OpenAI, Anthropic, AWS, Google, GitHub, Stripe, Slack), JWT-Token und URLs mit eingebetteten Passwörtern. Benutzerdefinierte Muster über `secret_patterns` möglich.
 
   command:
     history:

@@ -97,6 +97,8 @@ mod tests {
         assert_eq!(classify_input("/resume"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/resume 1234"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/feedback"), InputIntent::SpecialCommand);
+        assert_eq!(classify_input("/help"), InputIntent::SpecialCommand);
+        assert_eq!(classify_input("/quit"), InputIntent::SpecialCommand);
     }
 
     #[test]
