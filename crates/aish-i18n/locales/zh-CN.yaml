@@ -332,6 +332,17 @@ shell:
     resume: "恢复之前的会话"
     feedback: "提交反馈"
     quit: "退出 AI Shell"
+    record: "录制终端会话 (start/stop)"
+
+  record:
+    started: "⏺ 录制已开始: {path}"
+    stopped: "⏹ 录制已保存: {path} ({duration}s, {size})"
+    already_recording: "录制正在进行中。请先使用 /record stop 停止。"
+    not_recording: "当前没有进行中的录制。"
+    recording_status: "⏺ 正在录制: {path} ({duration}s)"
+    usage: "用法: /record start | /record stop"
+    auto_saved: "⏹ 录制已自动保存: {path}"
+    start_failed: "录制启动失败: {error}"
 
   feedback:
     select_type: "选择反馈类型"
@@ -796,6 +807,12 @@ help:
       | `/token` | 显示令牌用量（近 7 天） |
       | `/resume [id]` | 恢复之前的会话 |
       | `/feedback` | 提交反馈或报告问题 |
+      | `/record start\|stop` | 录制终端会话 (asciinema 格式) |
+
+      ```
+      /record start         # 开始录制
+      /record stop          # 停止并保存录制
+      ```
 
       ## 配置
       - 配置文件：`~/.config/aish/config.yaml`

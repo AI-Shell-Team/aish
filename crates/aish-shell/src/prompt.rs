@@ -100,14 +100,26 @@ fn strip_ansi_len(s: &str) -> usize {
 /// - Path is abbreviated and colored blue
 /// - Git branch in magenta with clean (green ●) or dirty (red ●) indicator
 /// - Prompt symbol: green ➜ on success, red ➜➜ on error
-pub fn render_prompt(cwd: &str, _model: &str, last_exit_code: i32, mode: &str) -> String {
+pub fn render_prompt(
+    cwd: &str,
+    _model: &str,
+    last_exit_code: i32,
+    mode: &str,
+    recording: bool,
+) -> String {
     let home = dirs::home_dir()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
 
+    // Recording indicator
+    let mut prompt = String::new();
+    if recording {
+        prompt.push_str("\x1b[31m⏺\x1b[0m ");
+    }
+
     // Mode badge (magenta for aish, yellow for plan)
     let mode_color = if mode == "plan" { "33" } else { "35" };
-    let mut prompt = format!("\x1b[{}m<{}>\x1b[0m ", mode_color, mode);
+    prompt.push_str(&format!("\x1b[{}m<{}>\x1b[0m ", mode_color, mode));
 
     // Abbreviated path in blue
     let abbreviated = abbreviate_path(cwd, &home);
@@ -368,7 +380,7 @@ mod tests {
     fn test_render_prompt_with_home_substitution() {
         let home = dirs::home_dir().expect("home dir should exist");
         let cwd = home.join("projects").to_string_lossy().to_string();
-        let result = render_prompt(&cwd, "test-model", 0, "aish");
+        let result = render_prompt(&cwd, "test-model", 0, "aish", false);
         assert!(
             result.contains("~"),
             "should substitute home with ~: {}",
@@ -381,7 +393,7 @@ mod tests {
     #[test]
     fn test_render_prompt_without_git() {
         // /tmp is very unlikely to be inside a git repo
-        let result = render_prompt("/tmp", "test-model", 0, "aish");
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
         // Should NOT contain git branch separator '|'
         assert!(
             !result.contains("|"),
@@ -392,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_success_symbol() {
-        let result = render_prompt("/tmp", "test-model", 0, "aish");
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
         assert!(
             result.contains("\x1b[32m➜\x1b[0m"),
             "should have green single arrow on success"
@@ -405,7 +417,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_error_symbol() {
-        let result = render_prompt("/tmp", "test-model", 1, "aish");
+        let result = render_prompt("/tmp", "test-model", 1, "aish", false);
         assert!(
             result.contains("\x1b[31m➜➜\x1b[0m"),
             "should have red double arrow on error"
@@ -414,7 +426,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_aish_mode_badge() {
-        let result = render_prompt("/tmp", "test-model", 0, "aish");
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
         assert!(result.contains("<aish>"), "should show aish mode badge");
         assert!(
             result.contains("\x1b[35m<aish>"),
@@ -424,11 +436,31 @@ mod tests {
 
     #[test]
     fn test_render_prompt_plan_mode_badge() {
-        let result = render_prompt("/tmp", "test-model", 0, "plan");
+        let result = render_prompt("/tmp", "test-model", 0, "plan", false);
         assert!(result.contains("<plan>"), "should show plan mode badge");
         assert!(
             result.contains("\x1b[33m<plan>"),
             "plan badge should be yellow"
+        );
+    }
+
+    #[test]
+    fn test_render_prompt_recording_indicator() {
+        let result = render_prompt("/tmp", "test-model", 0, "aish", true);
+        assert!(
+            result.contains("⏺"),
+            "should contain recording indicator: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_render_prompt_no_recording_indicator() {
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
+        assert!(
+            !result.contains("⏺"),
+            "should not contain recording indicator when not recording: {}",
+            result
         );
     }
 

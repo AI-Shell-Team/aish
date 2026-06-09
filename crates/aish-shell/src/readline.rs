@@ -31,6 +31,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/token", "Show token usage"),
     ("/resume", "Resume previous session"),
     ("/feedback", "Submit feedback"),
+    ("/record", "Record terminal session (start/stop)"),
     ("/quit", "Exit AI Shell"),
 ];
 

@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 
+use crate::recorder::SharedRecorder;
 use richrs::color::{Color, StandardColor};
 use richrs::console::Console;
 use richrs::markdown::Markdown;
@@ -278,7 +279,13 @@ fn parse_pipe_row(line: &str) -> Option<Vec<String>> {
 
 /// Render a fenced code block with syntax highlighting.
 /// Minimal style: dim bold language tag, then syntax-highlighted code, no borders.
-fn render_code_block(console: &mut Console, lang: &str, code: &str, width: usize) {
+fn render_code_block(
+    console: &mut Console,
+    lang: &str,
+    code: &str,
+    width: usize,
+    shared_recorder: &Option<SharedRecorder>,
+) {
     let code_trimmed = code.trim_end();
     if code_trimmed.is_empty() {
         return;
@@ -286,12 +293,19 @@ fn render_code_block(console: &mut Console, lang: &str, code: &str, width: usize
 
     // Dim bold language label
     if !lang.is_empty() {
+        let lang_ansi = format!("\x1b[1;2m{}\x1b[0m\n", lang);
+        if let Some(ref sr) = shared_recorder {
+            crate::recorder::shared_record_output(sr, &lang_ansi);
+        }
         println!("\x1b[1;2m{}\x1b[0m", lang);
     }
 
     // Syntax-highlighted code
     let syntax = Syntax::new(code_trimmed, lang).theme("base16-ocean.dark");
     let segments = syntax.render(width);
+    if let Some(ref sr) = shared_recorder {
+        crate::recorder::shared_record_output(sr, &segments.to_ansi());
+    }
     let _ = console.write_segments(&segments);
     let _ = console.flush();
 }
@@ -306,6 +320,8 @@ pub struct ShellRenderer {
     /// Tracks whether streaming content has been received.
     streaming_active: bool,
     terminal_width: usize,
+    /// Shared recorder — multiple renderer instances can write to the same file.
+    shared_recorder: Option<SharedRecorder>,
 }
 
 impl ShellRenderer {
@@ -316,6 +332,7 @@ impl ShellRenderer {
             console,
             streaming_active: false,
             terminal_width,
+            shared_recorder: None,
         }
     }
 
@@ -326,19 +343,30 @@ impl ShellRenderer {
 
     /// Render complete markdown text.
     /// Code blocks → syntax highlighting, tables → box drawing, rest → richrs Markdown.
+    /// Records output for cast file: raw text for markdown (preserving line breaks),
+    /// ANSI output for code blocks and tables (preserving formatting).
     pub fn render_markdown(&mut self, text: &str) {
         let segments = split_content(text);
         let mut last_was_markdown = false;
         for seg in segments {
             match seg {
                 ContentSegment::CodeBlock { lang, code } => {
-                    render_code_block(&mut self.console, &lang, &code, self.terminal_width);
+                    render_code_block(
+                        &mut self.console,
+                        &lang,
+                        &code,
+                        self.terminal_width,
+                        &self.shared_recorder,
+                    );
                     last_was_markdown = false;
                 }
                 ContentSegment::Table(content) => {
                     let lines: Vec<&str> = content.lines().collect();
-                    if let Some(segments) = render_table_to_segments(&lines, self.terminal_width) {
-                        let _ = self.console.write_segments(&segments);
+                    if let Some(segs) = render_table_to_segments(&lines, self.terminal_width) {
+                        if let Some(ref sr) = self.shared_recorder {
+                            crate::recorder::shared_record_output(sr, &segs.to_ansi());
+                        }
+                        let _ = self.console.write_segments(&segs);
                     }
                     last_was_markdown = false;
                 }
@@ -348,6 +376,17 @@ impl ShellRenderer {
                         .bold();
                     let md = Markdown::new(&content).inline_code_style(inline_style);
                     let segs = md.render(self.terminal_width);
+                    // Record ANSI-rendered output so agg/GIF shows proper formatting.
+                    // richrs adds two trailing newlines per paragraph; the terminal
+                    // removes one with \x1b[1A\x1b[M. Remove one trailing newline
+                    // from the recording to match the terminal display.
+                    if let Some(ref sr) = self.shared_recorder {
+                        let mut ansi = segs.to_ansi();
+                        if ansi.ends_with("\n\n") {
+                            ansi.truncate(ansi.len() - 1);
+                        }
+                        crate::recorder::shared_record_output(sr, &ansi);
+                    }
                     let _ = self.console.write_segments(&segs);
                     last_was_markdown = true;
                 }
@@ -364,10 +403,14 @@ impl ShellRenderer {
         }
     }
 
-    /// Append a streaming delta — prints raw text for real-time feedback.
+    /// Append a streaming delta — prints gray text for real-time feedback.
+    /// Records with ANSI color for accurate replay/GIF.
     pub fn append_delta(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
+        }
+        if let Some(ref sr) = self.shared_recorder {
+            crate::recorder::shared_record_output(sr, &format!("\x1b[1;90m{}\x1b[0m", delta));
         }
         self.streaming_active = true;
         print!("\x1b[1;90m{}\x1b[0m", delta);
@@ -389,10 +432,20 @@ impl ShellRenderer {
         self.streaming_active = false;
     }
 
+    /// Attach a shared recorder for recording rendered output.
+    pub fn set_shared_recorder(&mut self, recorder: SharedRecorder) {
+        self.shared_recorder = Some(recorder);
+    }
+
     /// Render a green horizontal separator line spanning the terminal.
+    /// Records a fixed 5-char separator with trailing newline for clean cast/GIF output.
     pub fn render_separator(&mut self) {
         let width = self.terminal_width.max(20);
-        println!("\x1b[32m{}\x1b[0m", "─".repeat(width));
+        let sep = "─".repeat(width);
+        if let Some(ref sr) = self.shared_recorder {
+            crate::recorder::shared_record_output(sr, "─────\r\n");
+        }
+        println!("\x1b[32m{}\x1b[0m", sep);
     }
 }
 
