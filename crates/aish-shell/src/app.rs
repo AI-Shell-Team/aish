@@ -265,6 +265,8 @@ pub struct AishShell {
     animation: Arc<SharedAnimation>,
     /// Session history of collapsed outputs for Ctrl+O browsing.
     expand_history: Arc<Mutex<crate::expand_history::ExpandHistory>>,
+    /// Shared terminal session recorder for asciinema v2 recording.
+    shared_recorder: crate::recorder::SharedRecorder,
 }
 
 impl AishShell {
@@ -655,8 +657,14 @@ impl AishShell {
 
         // Shared animation controlled by event callback
         let animation: Arc<SharedAnimation> = Arc::new(SharedAnimation::new());
+        // Shared recorder for terminal session recording
+        let shared_recorder = crate::recorder::new_shared_recorder();
         // Shared renderer for streaming markdown re-rendering
-        let renderer = Arc::new(std::sync::Mutex::new(ShellRenderer::new()));
+        let renderer = Arc::new(Mutex::new(ShellRenderer::new()));
+        renderer
+            .lock()
+            .unwrap()
+            .set_shared_recorder(shared_recorder.clone());
         let renderer_ref = renderer.clone();
 
         // Set up LLM event callback for real-time streaming display
@@ -746,6 +754,7 @@ impl AishShell {
             }));
         }
 
+        let shared_recorder_cb = shared_recorder.clone();
         let event_callback: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
             Arc::new(move |event: LlmEvent| {
                 // Helper: clear multi-line reasoning overlay and reset state.
@@ -844,6 +853,10 @@ impl AishShell {
                                 if !content_started_flag.load(Ordering::SeqCst) {
                                     content_started_flag.store(true, Ordering::SeqCst);
                                     renderer_ref.lock().unwrap().render_separator();
+                                    crate::recorder::shared_record_output(
+                                        &shared_recorder_cb,
+                                        "\x1b[1;90m🤖 ",
+                                    );
                                     print!("\x1b[1;90m🤖 ");
                                 }
                                 // Accumulate delta and print raw text
@@ -968,12 +981,17 @@ impl AishShell {
                             if content_started_flag.load(Ordering::SeqCst) {
                                 println!();
                             }
-                            println!(
+                            let tool_line = format!(
                                 "\x1b[36m{}: {} ({})\x1b[0m",
                                 t("shell.tool.prefix"),
                                 name,
                                 args_preview
                             );
+                            crate::recorder::shared_record_output(
+                                &shared_recorder_cb,
+                                &format!("{}\n", tool_line),
+                            );
+                            println!("{}", tool_line);
                             let _ = io::stdout().flush();
                         }
                     }
@@ -1008,15 +1026,20 @@ impl AishShell {
                                         .unwrap_or_else(|| content.lines().count() as u64)
                                         as usize;
                                     let collapsed = collapse_display_lines(&content, 2);
-                                    print!("\x1b[2m{}\x1b[0m", collapsed);
+                                    let mut preview_ansi = format!("\x1b[2m{}\x1b[0m", collapsed);
                                     if total_lines > 2 {
                                         let hidden = total_lines - 2;
-                                        print!(
+                                        preview_ansi.push_str(&format!(
                                             "\x1b[2m\n  ... {} lines hidden ─── \x1b[1;36mCtrl+O\x1b[0m\x1b[2m to expand ...\x1b[0m",
                                             hidden
-                                        );
+                                        ));
                                     }
-                                    println!();
+                                    preview_ansi.push('\n');
+                                    crate::recorder::shared_record_output(
+                                        &shared_recorder_cb,
+                                        &preview_ansi,
+                                    );
+                                    print!("{}", preview_ansi);
                                     let _ = io::stdout().flush();
                                     // Only record to expand history when output is
                                     // actually collapsed (total_lines > 2).
@@ -1264,6 +1287,7 @@ impl AishShell {
             last_ctrl_c: None,
             animation,
             expand_history,
+            shared_recorder,
         })
     }
 
@@ -1386,12 +1410,23 @@ impl AishShell {
                 aish_core::PlanPhase::Planning => "plan",
                 aish_core::PlanPhase::Normal => "aish",
             };
+            let recording = self.shared_recorder.lock().unwrap().is_some();
             let prompt_str = prompt::render_prompt(
                 &self.state.cwd,
                 &self.config.model,
                 self.state.last_exit_code,
                 mode,
+                recording,
             );
+            // Record prompt output if recording is active.
+            // \r\x1b[2K clears the current line so re-rendered prompts
+            // overwrite the previous one instead of appending after it.
+            {
+                crate::recorder::shared_record_output(
+                    &self.shared_recorder,
+                    &format!("\r\x1b[2K{}", prompt_str),
+                );
+            }
             let input = match rl.read_line(&prompt_str) {
                 Ok(Some(line)) => line,
                 Ok(None) => break, // EOF (Ctrl-D)
@@ -1427,6 +1462,11 @@ impl AishShell {
                     {
                         match self.run_slash_input_session(&prompt_str) {
                             aish_ui::SlashInputOutcome::Command(cmd) => {
+                                // Record user input if recording is active
+                                crate::recorder::shared_record_input(
+                                    &self.shared_recorder,
+                                    &format!("{}\n", cmd.trim()),
+                                );
                                 // Execute the selected command directly (avoids raw mode
                                 // conflict between crossterm and rustyline).
                                 let input = cmd.trim();
@@ -1508,6 +1548,11 @@ impl AishShell {
                                             // the slash popup.
                                             match self.run_slash_input_session(&prompt_str) {
                                                 aish_ui::SlashInputOutcome::Command(cmd) => {
+                                                    // Record user input if recording is active
+                                                    crate::recorder::shared_record_input(
+                                                        &self.shared_recorder,
+                                                        &format!("{}\n", cmd.trim()),
+                                                    );
                                                     let input = cmd.trim();
                                                     if !input.is_empty() {
                                                         self.state.history.push(input.to_string());
@@ -1678,6 +1723,12 @@ impl AishShell {
                         continue;
                     }
 
+                    // Record sanitized user input after security check passes
+                    crate::recorder::shared_record_input(
+                        &self.shared_recorder,
+                        &format!("{}\n", question),
+                    );
+
                     let old_sigint = self.install_ai_sigint_handler();
                     let mut esc_watcher =
                         CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
@@ -1702,8 +1753,9 @@ impl AishShell {
                             if !did_stream && !response.trim().is_empty() {
                                 // Non-streaming fallback: print full response with formatting
                                 let mut sep_renderer = ShellRenderer::new();
+                                sep_renderer.set_shared_recorder(self.shared_recorder.clone());
                                 sep_renderer.render_separator();
-                                print_md(&response);
+                                print_md_with_recording(&response, &self.shared_recorder);
                                 sep_renderer.render_separator();
                             } else if did_stream {
                                 // Streaming display already handled by event callback
@@ -1839,6 +1891,12 @@ impl AishShell {
                     let result = self.state.handle_builtin("help", &[]);
                     if let Some(output) = result.output {
                         println!("{}", output);
+                        if !output.is_empty() {
+                            crate::recorder::shared_record_output(
+                                &self.shared_recorder,
+                                &format!("{}\n", output),
+                            );
+                        }
                     }
                     self.record_history(input, 0);
                 }
@@ -1848,6 +1906,12 @@ impl AishShell {
                         let result = self.state.handle_builtin(cmd, &parts[1..]);
                         if let Some(ref output) = result.output {
                             println!("{}", output);
+                            if !output.is_empty() {
+                                crate::recorder::shared_record_output(
+                                    &self.shared_recorder,
+                                    &format!("{}\n", output),
+                                );
+                            }
                         }
                         if result.should_exit {
                             self.record_history(input, 0);
@@ -1941,8 +2005,13 @@ impl AishShell {
                                     Ok(response) => {
                                         if !did_stream && !response.trim().is_empty() {
                                             let mut sep_renderer = ShellRenderer::new();
+                                            sep_renderer
+                                                .set_shared_recorder(self.shared_recorder.clone());
                                             sep_renderer.render_separator();
-                                            print_md(&response);
+                                            print_md_with_recording(
+                                                &response,
+                                                &self.shared_recorder,
+                                            );
                                             sep_renderer.render_separator();
                                         }
                                         self.persist_session_snapshot();
@@ -1979,6 +2048,8 @@ impl AishShell {
                     // Show error correction hint
                     if exit_code != 0 && exit_code != 130 {
                         let hint = t("shell.error_correction.press_semicolon_hint");
+                        let hint_str = format!("\x1b[2m\x1b[37m<{}>\x1b[0m\n", hint);
+                        crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
                         eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", hint);
                     }
                 }
@@ -1992,6 +2063,24 @@ impl AishShell {
         // Save history on exit
         rl.save_history(&history_path);
         self.persist_session_snapshot();
+
+        // Auto-stop recording if active
+        {
+            let mut guard = self.shared_recorder.lock().unwrap();
+            if let Some(ref mut rec) = *guard {
+                let path = rec.file_path().to_path_buf();
+                let _ = rec.flush();
+                *guard = None;
+                println!(
+                    "\x1b[33m{}\x1b[0m",
+                    t_with_args("shell.record.auto_saved", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("path".to_string(), path.display().to_string());
+                        args
+                    })
+                );
+            }
+        }
 
         println!(
             "{}",
@@ -2077,6 +2166,7 @@ impl AishShell {
             Some("/feedback") => {
                 crate::feedback::run_feedback(&self.config.model, &self.config.api_base);
             }
+            Some("/record") => self.handle_record_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -2275,6 +2365,90 @@ impl AishShell {
             )));
     }
 
+    fn handle_record_command(&mut self, parts: &[&str]) {
+        let subcmd = parts.get(1).copied().unwrap_or("");
+        let mut guard = self.shared_recorder.lock().unwrap();
+
+        match subcmd {
+            "start" => {
+                if guard.is_some() {
+                    eprintln!("\x1b[33m{}\x1b[0m", t("shell.record.already_recording"));
+                    return;
+                }
+                let term_size = crossterm::terminal::size().unwrap_or((80, 24));
+                let file_path = crate::recorder::Recorder::generate_file_path();
+                match crate::recorder::Recorder::new(file_path.clone(), term_size) {
+                    Ok(recorder) => {
+                        *guard = Some(recorder);
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.record.started", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("path".to_string(), file_path.display().to_string());
+                                args
+                            })
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "\x1b[31m{}\x1b[0m",
+                            t_with_args("shell.record.start_failed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("error".to_string(), e.to_string());
+                                args
+                            })
+                        );
+                    }
+                }
+            }
+            "stop" => {
+                let elapsed = guard.as_ref().map(|r| r.elapsed()).unwrap_or_default();
+                if let Some(mut rec) = guard.take() {
+                    let path = rec.file_path().to_path_buf();
+                    let _ = rec.flush();
+                    let metadata = std::fs::metadata(&path).ok();
+                    let size = metadata.map(|m| m.len()).unwrap_or(0);
+                    let secs = elapsed.as_secs();
+                    let size_str = if size < 1024 {
+                        format!("{} B", size)
+                    } else {
+                        format!("{:.1} KB", size as f64 / 1024.0)
+                    };
+                    println!(
+                        "\x1b[32m{}\x1b[0m",
+                        t_with_args("shell.record.stopped", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("path".to_string(), path.display().to_string());
+                            args.insert("duration".to_string(), secs.to_string());
+                            args.insert("size".to_string(), size_str);
+                            args
+                        })
+                    );
+                } else {
+                    eprintln!("\x1b[33m{}\x1b[0m", t("shell.record.not_recording"));
+                }
+            }
+            _ => {
+                if let Some(ref rec) = *guard {
+                    let elapsed = rec.elapsed();
+                    let path = rec.file_path().display().to_string();
+                    let secs = elapsed.as_secs();
+                    println!(
+                        "\x1b[33m{}\x1b[0m",
+                        t_with_args("shell.record.recording_status", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("path".to_string(), path);
+                            args.insert("duration".to_string(), secs.to_string());
+                            args
+                        })
+                    );
+                } else {
+                    println!("{}", t("shell.record.usage"));
+                }
+            }
+        }
+    }
+
     fn handle_model_command(&mut self, parts: &[&str]) {
         if parts.len() == 1 {
             let mut args = std::collections::HashMap::new();
@@ -2468,8 +2642,12 @@ impl AishShell {
             let mut pty = self.lock_pty();
             let remote_host = extract_remote_host(command);
             let shared_host = Arc::new(Mutex::new(remote_host.clone()));
-            let ai_cb =
-                Self::build_session_ai_callback(&self.config, &self.animation, shared_host.clone());
+            let ai_cb = Self::build_session_ai_callback(
+                &self.config,
+                &self.animation,
+                shared_host.clone(),
+                self.shared_recorder.clone(),
+            );
             pty.send_command_interactive(
                 command,
                 ai_cb,
@@ -2494,6 +2672,11 @@ impl AishShell {
 
         // Store captured output for error correction and LLM context
         self.state.last_output = output.clone();
+
+        // Record command output if recording is active
+        if !output.is_empty() {
+            crate::recorder::shared_record_output(&self.shared_recorder, &output);
+        }
 
         // Track whether CWD changed so we can include it in the context entry
         let mut cwd_changed_to: Option<String> = None;
@@ -2773,7 +2956,7 @@ impl AishShell {
                     match rt.block_on(self.ai_handler.handle_question(prompt_str)) {
                         Ok(response) => {
                             self.sync_state_from_pty_cwd();
-                            print_md(&response);
+                            print_md_with_recording(&response, &self.shared_recorder);
                             self.persist_session_snapshot();
                             script_env.insert("AISH_LAST_OUTPUT".to_string(), response);
                         }
@@ -2928,6 +3111,7 @@ impl AishShell {
         animation: &Arc<crate::animation::SharedAnimation>,
         history: &Arc<Mutex<Vec<ChatMessage>>>,
         shared_host: Arc<Mutex<Option<String>>>,
+        shared_recorder: crate::recorder::SharedRecorder,
     ) -> Box<aish_pty::FollowupCallback> {
         let api_base_f = api_base.to_string();
         let api_key_f = api_key.to_string();
@@ -2937,6 +3121,7 @@ impl AishShell {
         let anim_f = animation.clone();
         let history_f = history.clone();
         let shared_host_f = shared_host.clone();
+        let shared_recorder = shared_recorder.clone();
 
         Box::new(
             move |output: &str, _offload_path: Option<&str>| -> Option<aish_pty::AiResponse> {
@@ -2987,6 +3172,7 @@ impl AishShell {
                 let question_th = question_f.clone();
                 let conversation_history_th = history_f.clone();
                 let shared_host_th_f = shared_host_f.clone();
+                let shared_recorder_th = shared_recorder.clone();
 
                 std::thread::spawn(move || {
                     let rt = match tokio::runtime::Runtime::new() {
@@ -3255,6 +3441,7 @@ impl AishShell {
                         if !t.trim().is_empty() {
                             let _ = std::io::stdout().flush();
                             let mut renderer = crate::renderer::ShellRenderer::new();
+                            renderer.set_shared_recorder(shared_recorder_th.clone());
                             renderer.render_separator();
                             renderer.render_markdown(t);
                             let _ = std::io::stdout().flush();
@@ -3275,6 +3462,7 @@ impl AishShell {
                             &anim_th,
                             &conversation_history_th,
                             shared_host_th_f.clone(),
+                            shared_recorder_th.clone(),
                         );
                         Some(aish_pty::AiResponse {
                             command: next_cmd,
@@ -3661,6 +3849,7 @@ impl AishShell {
         config: &aish_config::ConfigModel,
         animation: &Arc<crate::animation::SharedAnimation>,
         shared_host: Arc<Mutex<Option<String>>>,
+        shared_recorder: crate::recorder::SharedRecorder,
     ) -> Option<Box<aish_pty::AiCallback>> {
         let api_base = config.api_base.clone();
         let api_key = config.api_key.clone();
@@ -3668,6 +3857,7 @@ impl AishShell {
         let temperature = config.temperature;
         let max_tokens = config.max_tokens;
         let animation = animation.clone();
+        let shared_recorder = shared_recorder.clone();
 
         // Load skills snapshot for SSH sessions (same as local session).
         // Stored in Arc so each AI query closure can create a fresh SkillTool.
@@ -3888,6 +4078,7 @@ impl AishShell {
             let shared_host_th = dossier_host.clone();
             let skills_snapshot_th = ssh_skills_snapshot.clone();
             let skill_names_th = ssh_skill_names.clone();
+            let shared_recorder_th = shared_recorder.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -4201,6 +4392,7 @@ impl AishShell {
                             if !desc.trim().is_empty() {
                                 let _ = std::io::stdout().flush();
                                 let mut renderer = crate::renderer::ShellRenderer::new();
+                                renderer.set_shared_recorder(shared_recorder_th.clone());
                                 renderer.render_separator();
                                 renderer.render_markdown(desc);
                                 let _ = std::io::stdout().flush();
@@ -4218,6 +4410,7 @@ impl AishShell {
                         if !t.trim().is_empty() {
                             let _ = std::io::stdout().flush();
                             let mut renderer = crate::renderer::ShellRenderer::new();
+                            renderer.set_shared_recorder(shared_recorder_th.clone());
                             renderer.render_separator();
                             renderer.render_markdown(t.trim());
                             let elapsed = thinking_start_thread
@@ -4249,6 +4442,7 @@ impl AishShell {
                                 &animation_th,
                                 &conversation_history_th,
                                 shared_host_th.clone(),
+                                shared_recorder_th.clone(),
                             )
                         });
                         Some(aish_pty::AiResponse {
@@ -5257,9 +5451,11 @@ fn read_raw_confirmation() -> bool {
 }
 
 /// Render markdown-formatted text to the terminal using richrs.
-fn print_md(text: &str) {
+/// Print markdown with recording support.
+fn print_md_with_recording(text: &str, shared_recorder: &crate::recorder::SharedRecorder) {
     use crate::renderer::ShellRenderer;
     let mut renderer = ShellRenderer::new();
+    renderer.set_shared_recorder(shared_recorder.clone());
     renderer.render_markdown(text);
 }
 

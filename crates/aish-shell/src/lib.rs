@@ -29,6 +29,7 @@ pub mod keyboard;
 pub mod nl_detect;
 pub mod prompt;
 pub mod readline;
+pub mod recorder;
 pub mod renderer;
 pub mod resume_selector;
 pub mod security_panel;

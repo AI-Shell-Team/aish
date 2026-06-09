@@ -332,6 +332,17 @@ shell:
     resume: "Resume previous session"
     feedback: "Submit feedback"
     quit: "Exit AI Shell"
+    record: "Record terminal session (start/stop)"
+
+  record:
+    started: "⏺ Recording started: {path}"
+    stopped: "⏹ Recording saved: {path} ({duration}s, {size})"
+    already_recording: "Recording already in progress. Use /record stop first."
+    not_recording: "No recording in progress."
+    recording_status: "⏺ Recording in progress: {path} ({duration}s)"
+    usage: "Usage: /record start | /record stop"
+    auto_saved: "⏹ Recording auto-saved: {path}"
+    start_failed: "Failed to start recording: {error}"
 
   feedback:
     select_type: "Select feedback type"
@@ -797,6 +808,12 @@ help:
       | `/token` | Show token usage (last 7 days) |
       | `/resume [id]` | Resume a previous session |
       | `/feedback` | Submit feedback or report a bug |
+      | `/record start\|stop` | Record terminal session as asciinema cast |
+
+      ```
+      /record start         # Start recording
+      /record stop          # Stop and save recording
+      ```
 
       ## Configuration
       - Config file: `~/.config/aish/config.yaml`
