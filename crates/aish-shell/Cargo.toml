@@ -13,6 +13,7 @@ aish-pty.workspace = true
 aish-scripts.workspace = true
 aish-llm.workspace = true
 aish-session.workspace = true
+rusqlite.workspace = true
 aish-context.workspace = true
 aish-skills.workspace = true
 aish-memory.workspace = true

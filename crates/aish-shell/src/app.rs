@@ -1410,7 +1410,11 @@ impl AishShell {
                 aish_core::PlanPhase::Planning => "plan",
                 aish_core::PlanPhase::Normal => "aish",
             };
-            let recording = self.shared_recorder.lock().unwrap().is_some();
+            let recording = self
+                .shared_recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
             let prompt_str = prompt::render_prompt(
                 &self.state.cwd,
                 &self.config.model,
@@ -1569,8 +1573,14 @@ impl AishShell {
                                                 }
                                                 aish_ui::SlashInputOutcome::Cancelled => {}
                                             }
-                                        } else if self.handle_ctrl_c() {
-                                            break;
+                                        } else {
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                "\r\n",
+                                            );
+                                            if self.handle_ctrl_c() {
+                                                break;
+                                            }
                                         }
                                     }
                                     Err(_) => {}
@@ -1582,6 +1592,9 @@ impl AishShell {
                     }
                     // Interrupt (Ctrl-C) — handle double-press exit
                     if matches!(e, rustyline::error::ReadlineError::Interrupted) {
+                        // Record newline so cast replay moves cursor to next line
+                        // instead of filling the current line with spaces via \x1b[2K.
+                        crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");
                         if self.handle_ctrl_c() {
                             break;
                         }
@@ -1977,6 +1990,12 @@ impl AishShell {
                                 // Route to AI
                                 let mut question = input.trim().to_string();
 
+                                // Record user input for cast file
+                                crate::recorder::shared_record_input(
+                                    &self.shared_recorder,
+                                    &format!("{}\n", question),
+                                );
+
                                 // Security gate: same secret check as the normal AI path
                                 if !self.check_security_gate(&mut question) {
                                     continue;
@@ -2066,7 +2085,10 @@ impl AishShell {
 
         // Auto-stop recording if active
         {
-            let mut guard = self.shared_recorder.lock().unwrap();
+            let mut guard = self
+                .shared_recorder
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut rec) = *guard {
                 let path = rec.file_path().to_path_buf();
                 let _ = rec.flush();
@@ -2167,6 +2189,7 @@ impl AishShell {
                 crate::feedback::run_feedback(&self.config.model, &self.config.api_base);
             }
             Some("/record") => self.handle_record_command(&parts),
+            Some("/doctor") => self.handle_doctor_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -2184,6 +2207,15 @@ impl AishShell {
             2 => self.resume_session(parts[1]),
             _ => eprintln!("{}", t("shell.resume.usage")),
         }
+    }
+
+    fn handle_doctor_command(&mut self, parts: &[&str]) {
+        let doctor = crate::doctor::Doctor::new();
+        let fix = parts.iter().skip(1).any(|arg| *arg == "--fix");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            doctor.run(fix).await;
+        });
     }
 
     fn select_recent_session(&mut self) {
@@ -2367,7 +2399,10 @@ impl AishShell {
 
     fn handle_record_command(&mut self, parts: &[&str]) {
         let subcmd = parts.get(1).copied().unwrap_or("");
-        let mut guard = self.shared_recorder.lock().unwrap();
+        let mut guard = self
+            .shared_recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         match subcmd {
             "start" => {
@@ -2626,6 +2661,9 @@ impl AishShell {
 
     /// Execute an external command via the persistent PTY session.
     fn execute_external_command(&mut self, command: &str) -> i32 {
+        // Record user command input before execution
+        crate::recorder::shared_record_input(&self.shared_recorder, &format!("{}\n", command));
+
         // Sync terminal size before each command
         if let Ok((cols, rows)) = crossterm::terminal::size() {
             self.lock_pty().resize(rows, cols);
@@ -2819,6 +2857,11 @@ impl AishShell {
             InterruptionState::Normal | InterruptionState::Inputting => {
                 self.interruption = InterruptionState::ClearPending;
                 self.last_ctrl_c = Some(now);
+                let msg = format!(
+                    "\x1b[33m({})\x1b[0m\r\n",
+                    aish_i18n::t("shell.ctrl_c_again")
+                );
+                crate::recorder::shared_record_output(&self.shared_recorder, &msg);
                 println!("\x1b[33m({})\x1b[0m", aish_i18n::t("shell.ctrl_c_again"));
                 false
             }
@@ -2826,12 +2869,19 @@ impl AishShell {
                 if let Some(last) = self.last_ctrl_c {
                     if now.duration_since(last).as_secs() < 1 {
                         self.interruption = InterruptionState::ExitPending;
+                        let msg = format!("\x1b[33m{}\x1b[0m\r\n", aish_i18n::t("shell.exiting"));
+                        crate::recorder::shared_record_output(&self.shared_recorder, &msg);
                         println!("\x1b[33m{}\x1b[0m", aish_i18n::t("shell.exiting"));
                         return true;
                     }
                 }
                 self.interruption = InterruptionState::ClearPending;
                 self.last_ctrl_c = Some(now);
+                let msg = format!(
+                    "\x1b[33m({})\x1b[0m\r\n",
+                    aish_i18n::t("shell.ctrl_c_again")
+                );
+                crate::recorder::shared_record_output(&self.shared_recorder, &msg);
                 println!("\x1b[33m({})\x1b[0m", aish_i18n::t("shell.ctrl_c_again"));
                 false
             }
