@@ -326,42 +326,6 @@ _aish_is_path_like() {
     return 1
 }
 
-_aish_parse_line() {
-    local comp_line="$1"
-    local cursor="$2"
-    local -n _pl_words="$3"
-    local -n _pl_starts="$4"
-
-    _pl_words=()
-    _pl_starts=()
-    local i=0 word="" start=0 ch=""
-
-    for (( i=0; i<${#comp_line}; i++ )); do
-        ch="${comp_line:$i:1}"
-        if [[ "$ch" == " " || "$ch" == $'\t' ]]; then
-            if [[ -n "$word" ]]; then
-                _pl_words+=("$word")
-                _pl_starts+=("$start")
-                word=""
-            fi
-        else
-            if [[ -z "$word" ]]; then
-                start=$i
-            fi
-            word+="$ch"
-        fi
-    done
-    if [[ -n "$word" ]]; then
-        _pl_words+=("$word")
-        _pl_starts+=("$start")
-    fi
-
-    if (( cursor > 0 )) && [[ "${comp_line:$((cursor-1)):1}" == " " ]]; then
-        _pl_words+=("")
-        _pl_starts+=("$cursor")
-    fi
-}
-
 # Maximum candidates emitted per completion (large dirs like /usr/bin/).
 __AISH_COMPLETION_LIMIT=100
 
@@ -410,27 +374,52 @@ _aish_resolve_compreply() {
 _aish_set_comp_context() {
     local comp_line="$1"
     local cursor="$2"
-    local -n _sc_words="$3"
-    local -n _sc_starts="$4"
-    local -n _sc_cword="$5"
+    local -a words=()
+    local -a word_starts=()
+    local i=0 word="" start=0 ch="" cword=0 pos=0
 
-    _aish_parse_line "$comp_line" "$cursor" _sc_words _sc_starts
+    for (( i=0; i<${#comp_line}; i++ )); do
+        ch="${comp_line:$i:1}"
+        if [[ "$ch" == " " || "$ch" == $'\t' ]]; then
+            if [[ -n "$word" ]]; then
+                words+=("$word")
+                word_starts+=("$start")
+                word=""
+            fi
+        else
+            if [[ -z "$word" ]]; then
+                start=$i
+            fi
+            word+="$ch"
+        fi
+    done
+    if [[ -n "$word" ]]; then
+        words+=("$word")
+        word_starts+=("$start")
+    fi
+
+    if (( cursor > 0 )) && [[ "${comp_line:$((cursor-1)):1}" == " " ]]; then
+        words+=("")
+        word_starts+=("$cursor")
+    fi
 
     COMP_LINE="$comp_line"
     COMP_POINT="$cursor"
-    COMP_WORDS=("${_sc_words[@]}")
+    COMP_WORDS=("${words[@]}")
 
-    local pos=0 i=0
-    _sc_cword=0
-    for (( i=0; i<${#_sc_words[@]}; i++ )); do
-        pos=$(( pos + ${#_sc_words[i]} + 1 ))
+    for (( i=0; i<${#words[@]}; i++ )); do
+        pos=$(( pos + ${#words[i]} + 1 ))
         if (( pos > cursor )); then
-            _sc_cword=$i
+            cword=$i
             break
         fi
-        _sc_cword=$i
+        cword=$i
     done
-    COMP_CWORD=$_sc_cword
+    COMP_CWORD=$cword
+
+    __AISH_COMP_WORDS=("${words[@]}")
+    __AISH_COMP_WORD_STARTS=("${word_starts[@]}")
+    __AISH_COMP_CWORD=$cword
 }
 
 _aish_invoke_native_completion() {
@@ -507,25 +496,23 @@ __aish_complete() {
     local request_id="${1:-0}"
     local comp_line="${2:-}"
     local cursor="${3:-0}"
-    local -a words=()
-    local -a word_starts=()
-    local cword=0 cmd="" cur="" word_start=0
+    local cmd="" cur="" word_start=0
 
     _aish_reset_candidates
     __aish_load_bash_completion
 
-    _aish_set_comp_context "$comp_line" "$cursor" words word_starts cword
+    _aish_set_comp_context "$comp_line" "$cursor"
 
-    if ((${#words[@]} == 0)); then
+    if ((${#__AISH_COMP_WORDS[@]} == 0)); then
         __aish_emit_completion_result "$request_id" 0
         return 0
     fi
 
-    word_start=${word_starts[$cword]:-0}
-    cmd="${words[0]:-}"
-    cur="${words[$cword]:-}"
+    word_start=${__AISH_COMP_WORD_STARTS[$__AISH_COMP_CWORD]:-0}
+    cmd="${__AISH_COMP_WORDS[0]:-}"
+    cur="${__AISH_COMP_WORDS[$__AISH_COMP_CWORD]:-}"
 
-    _aish_invoke_native_completion "$cmd" "$cword" "$cur"
+    _aish_invoke_native_completion "$cmd" "$__AISH_COMP_CWORD" "$cur"
     _aish_sort_compreply
     _aish_compreply_to_candidates "$cur"
 
