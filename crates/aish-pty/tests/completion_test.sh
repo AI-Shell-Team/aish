@@ -13,38 +13,6 @@ if [[ ! -f "$WRAPPER" ]]; then
   exit 1
 fi
 
-# Capture control-pipe JSON lines.
-CONTROL_OUT=""
-setup_control_fd() {
-  local ctl
-  ctl="$(mktemp -u)"
-  exec {AISH_TEST_CTL}<>"$ctl"
-  rm -f "$ctl"
-  export AISH_CONTROL_FD=$AISH_TEST_CTL
-  CONTROL_OUT="$(mktemp)"
-  tail -f /dev/null &
-  local tailpid=$!
-  kill "$tailpid" 2>/dev/null || true
-}
-
-run_complete() {
-  local line="$1"
-  local cursor="$2"
-  local request_id="${3:-1}"
-  : >"$CONTROL_OUT"
-  (
-    source "$WRAPPER" 2>/dev/null
-    __aish_complete "$request_id" "$line" "$cursor"
-  ) &
-  local pid=$!
-  wait "$pid" || true
-}
-
-last_completion_json() {
-  # In test mode without real control fd wired, invoke directly:
-  true
-}
-
 # Direct invocation with mocked control fd writer.
 source_wrapper_and_complete() {
   local line="$1"
