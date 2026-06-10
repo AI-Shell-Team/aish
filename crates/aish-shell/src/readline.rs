@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rustyline::completion::{Completer, FilenameCompleter, Pair};
+use rustyline::completion::{Completer, Pair};
 use rustyline::config::Configurer;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -14,13 +14,11 @@ use rustyline::{
     EventContext, EventHandler, KeyCode, KeyEvent, Modifiers, RepeatCount,
 };
 
-use crate::autosuggest::AutoSuggest;
+use aish_pty::readline_tab::{
+    clamp_pos, is_path_like_token, to_replacement_pairs, word_start_at, TAB_PROBE_TIMEOUT,
+};
 
-/// Built-in command names for completion.
-const BUILTINS: &[&str] = &[
-    "cd", "pwd", "export", "unset", "pushd", "popd", "dirs", "history", "help", "clear", "exit",
-    "quit",
-];
+use crate::autosuggest::AutoSuggest;
 
 /// Slash commands with descriptions for popup completion.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -35,7 +33,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Timeout for PTY completion queries.
-const COMPLETION_TIMEOUT: Duration = Duration::from_millis(500);
+const COMPLETION_TIMEOUT: Duration = Duration::from_millis(1200);
 
 // ---------------------------------------------------------------------------
 // Mode toggle key binding handler
@@ -111,10 +109,8 @@ impl ConditionalEventHandler for SlashHandler {
     }
 }
 
-/// Shell command completer that delegates to the persistent PTY bash process
-/// for full bash-completion support (git add, systemctl status, etc.).
+/// Shell readline helper: tab completion delegates to PTY bash.
 struct ShellHelper {
-    file_completer: FilenameCompleter,
     /// Shared reference to the persistent PTY session.
     pty: Arc<Mutex<aish_pty::PersistentPty>>,
     /// Shared autosuggest engine.
@@ -123,39 +119,62 @@ struct ShellHelper {
 
 impl ShellHelper {
     fn new(pty: Arc<Mutex<aish_pty::PersistentPty>>, autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
-        Self {
-            file_completer: FilenameCompleter::new(),
-            pty,
-            autosuggest,
-        }
+        Self { pty, autosuggest }
     }
 
-    /// Query the PTY bash for completions using `__aish_query_completions`.
-    /// Returns a list of completion candidates on success, or an empty vec on
-    /// any error (timeout, PTY not running, etc.).
-    fn query_pty_completions(&self, line: &str, pos: usize) -> Vec<String> {
-        let mut pty = match self.pty.lock() {
-            Ok(guard) => guard,
-            Err(_) => return Vec::new(),
-        };
+    /// Drop candidates that would not change the current word (rustyline re-applies
+    /// single-candidate replacements even when the word is already complete).
+    fn filter_extending_candidates(
+        line: &str,
+        pos: usize,
+        word_start: usize,
+        candidates: Vec<aish_pty::CompletionCandidate>,
+    ) -> Vec<Pair> {
+        let current = line.get(word_start..pos).unwrap_or("");
+        candidates
+            .into_iter()
+            .filter(|c| c.replacement != current)
+            .map(|c| Pair {
+                display: c.display,
+                replacement: c.replacement,
+            })
+            .collect()
+    }
 
-        // Skip if PTY is not running.
+    fn complete_via_pty(&self, line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
+        let pos = clamp_pos(line, pos);
+        let mut pty = self.pty.lock().ok()?;
         if !pty.is_running() {
-            return Vec::new();
+            return None;
         }
 
-        // Build the completion query command.
-        let escaped_line = aish_pty::shell_quote_escape(line);
-        let cmd = format!("__aish_query_completions {} {}", escaped_line, pos);
-
-        match pty.execute_command(&cmd, COMPLETION_TIMEOUT, None, false) {
-            Ok((output, _exit_code, _cwd)) => output
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .collect(),
-            Err(_) => Vec::new(),
+        if !is_path_like_token(line.get(word_start_at(line, pos)..pos).unwrap_or("")) {
+            if let Some(tab) = pty.forward_readline_tab(line, pos, TAB_PROBE_TIMEOUT) {
+                let (word_start, raw_pairs) = to_replacement_pairs(&tab, line, pos);
+                if !raw_pairs.is_empty() {
+                    return Some((
+                        word_start,
+                        raw_pairs
+                            .into_iter()
+                            .map(|(display, replacement)| Pair {
+                                display,
+                                replacement,
+                            })
+                            .collect(),
+                    ));
+                }
+            }
         }
+
+        pty.query_completions(line, pos, COMPLETION_TIMEOUT)
+            .ok()
+            .filter(|resp| !resp.candidates.is_empty())
+            .map(|resp| {
+                (
+                    resp.word_start,
+                    Self::filter_extending_candidates(line, pos, resp.word_start, resp.candidates),
+                )
+            })
     }
 }
 
@@ -197,115 +216,27 @@ impl Completer for ShellHelper {
         &self,
         line: &str,
         pos: usize,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        // Clamp pos to nearest valid char boundary (guards against CJK misalignment)
-        let pos = if line.is_char_boundary(pos) {
-            pos
-        } else {
-            (0..=pos)
-                .rev()
-                .find(|&p| line.is_char_boundary(p))
-                .unwrap_or(0)
-        };
+        let pos = clamp_pos(line, pos);
         let before = &line[..pos];
-        let word_start = before.rfind(' ').map(|i| i + 1).unwrap_or(0);
-        let word = &before[word_start..];
 
         // Skip completion for AI queries
         if before.starts_with(';') || before.starts_with('\u{ff1b}') {
             return Ok((0, Vec::new()));
         }
 
-        // At the start of the line: mix builtins/specials with PTY results
-        if !before.contains(' ') {
-            let mut candidates: Vec<Pair> = Vec::new();
-
-            // Builtin commands (handled by Rust shell, not PTY)
-            for cmd in BUILTINS {
-                if cmd.starts_with(word) {
-                    candidates.push(Pair {
-                        display: cmd.to_string(),
-                        replacement: format!("{} ", cmd),
-                    });
-                }
-            }
-
-            // Slash commands
-            for (cmd, _desc) in SLASH_COMMANDS {
-                if cmd.starts_with(word) {
-                    candidates.push(Pair {
-                        display: cmd.to_string(),
-                        replacement: format!("{} ", cmd),
-                    });
-                }
-            }
-
-            // AI prefix
-            if ";".starts_with(word) || "\u{ff1b}".starts_with(word) {
-                candidates.push(Pair {
-                    display: "; <question>".to_string(),
-                    replacement: "; ".to_string(),
-                });
-            }
-
-            // Query PTY for all other command completions
-            if !word.is_empty() {
-                let pty_results = self.query_pty_completions(line, pos);
-                let builtin_set: Vec<&str> = BUILTINS.to_vec();
-                let slash_set: Vec<&str> = SLASH_COMMANDS.iter().map(|(c, _)| *c).collect();
-                for candidate in &pty_results {
-                    // Skip duplicates already covered by BUILTINS/SLASH_COMMANDS
-                    if builtin_set.contains(&candidate.as_str())
-                        || slash_set.contains(&candidate.as_str())
-                    {
-                        continue;
-                    }
-                    candidates.push(Pair {
-                        display: candidate.clone(),
-                        replacement: format!("{} ", candidate),
-                    });
-                }
-            }
-
-            // Merge file completions for path-like tokens so slash commands
-            // don't shadow absolute paths like /usr, /tmp, /proc, etc.
-            if word.starts_with("./")
-                || word.starts_with("../")
-                || word.starts_with("/")
-                || word.starts_with("~/")
-            {
-                if let Ok((_, file_candidates)) = self.file_completer.complete(line, pos, ctx) {
-                    candidates.extend(file_candidates);
-                }
-            }
-
-            return Ok((word_start, candidates));
+        // Empty input: no completion (bash semantics)
+        if before.trim().is_empty() {
+            return Ok((0, Vec::new()));
         }
 
-        // After a command: delegate entirely to PTY for context-aware completion
-        let pty_results = self.query_pty_completions(line, pos);
-        if !pty_results.is_empty() {
-            let candidates: Vec<Pair> = pty_results
-                .into_iter()
-                .map(|c| {
-                    // Append space for non-directory completions
-                    let replacement = if c.ends_with('/') {
-                        c.clone()
-                    } else {
-                        format!("{} ", c)
-                    };
-                    Pair {
-                        display: c,
-                        replacement,
-                    }
-                })
-                .collect();
-            return Ok((word_start, candidates));
+        if let Some((word_start, pairs)) = self.complete_via_pty(line, pos) {
+            return Ok((word_start, pairs));
         }
 
-        // Fallback: file completion
-        self.file_completer.complete(line, pos, ctx)
+        // PTY unavailable — no fallback (bash is the single source of truth).
+        Ok((0, Vec::new()))
     }
 }
 
@@ -477,9 +408,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_builtins_contains_cd() {
-        assert!(BUILTINS.contains(&"cd"));
-        assert!(BUILTINS.contains(&"exit"));
+    fn test_filter_extending_candidates_drops_unchanged() {
+        let candidates = vec![aish_pty::CompletionCandidate {
+            display: "usr/".into(),
+            replacement: "/usr/".into(),
+        }];
+        let pairs = ShellHelper::filter_extending_candidates("/usr/", 5, 0, candidates);
+        assert!(pairs.is_empty(), "unchanged replacement should be filtered");
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub mod nl_detect;
 pub mod offload;
 pub mod output_buffer;
 pub mod persistent;
+pub mod readline_tab;
 pub mod session_interceptor;
 pub mod state_capture;
 pub mod types;
@@ -34,7 +35,10 @@ pub struct SshSecretCheckResult {
 }
 
 pub use command_state::CommandState;
-pub use control::{decode_control_chunk, encode_control_event, BackendControlEvent};
+pub use control::{
+    decode_control_chunk, encode_control_event, BackendControlEvent, CompletionCandidate,
+    CompletionResponse,
+};
 pub use executor::PtyExecutor;
 pub use offload::{
     truncate_utf8_safe, BashOffloadResult, BashOffloadSettings, BashOutputOffload, OffloadResult,
@@ -42,6 +46,7 @@ pub use offload::{
 };
 pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
+pub use readline_tab::ReadlineTabResult;
 pub use session_interceptor::{
     pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,
     AskUserOption, AskUserRequest, BashExecResult, FollowupCallback, InterceptorState,

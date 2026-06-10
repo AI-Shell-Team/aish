@@ -1,6 +1,24 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Completion types (Tab completion)
+// ---------------------------------------------------------------------------
+
+/// One completion candidate with separate display and replacement text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionCandidate {
+    pub display: String,
+    pub replacement: String,
+}
+
+/// Response from bash `__aish_complete` delivered over the control pipe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletionResponse {
+    pub word_start: usize,
+    pub candidates: Vec<CompletionCandidate>,
+}
+
+// ---------------------------------------------------------------------------
 // BackendControlEvent
 // ---------------------------------------------------------------------------
 
@@ -35,6 +53,13 @@ pub enum BackendControlEvent {
 
     #[serde(rename = "command_output")]
     CommandOutput { data: String },
+
+    #[serde(rename = "completion_result")]
+    CompletionResult {
+        request_id: u64,
+        word_start: usize,
+        candidates: Vec<CompletionCandidate>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +270,67 @@ mod tests {
                 assert_eq!(*command_seq, None);
             }
             other => panic!("expected PromptReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_completion_result() {
+        let evt = BackendControlEvent::CompletionResult {
+            request_id: 42,
+            word_start: 3,
+            candidates: vec![
+                CompletionCandidate {
+                    display: "lixin/".to_string(),
+                    replacement: "/home/lixin/".to_string(),
+                },
+                CompletionCandidate {
+                    display: "crates/".to_string(),
+                    replacement: "crates/".to_string(),
+                },
+            ],
+        };
+        let encoded = encode_control_event(&evt);
+        assert!(encoded.contains("\"type\":\"completion_result\""));
+        assert!(encoded.contains("\"request_id\":42"));
+        let mut buf = String::new();
+        let decoded = decode_control_chunk(&mut buf, encoded.as_bytes());
+        match decoded.first() {
+            Some(BackendControlEvent::CompletionResult {
+                request_id,
+                word_start,
+                candidates,
+            }) => {
+                assert_eq!(*request_id, 42);
+                assert_eq!(*word_start, 3);
+                assert_eq!(candidates.len(), 2);
+                assert_eq!(candidates[0].display, "lixin/");
+                assert_eq!(candidates[0].replacement, "/home/lixin/");
+            }
+            other => panic!("expected CompletionResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_completion_result_with_escaped_json() {
+        let json = concat!(
+            "{\"version\":1,\"type\":\"completion_result\",\"request_id\":7,",
+            "\"word_start\":0,\"candidates\":[",
+            "{\"display\":\"git\",\"replacement\":\"git \"}",
+            "]}\n"
+        );
+        let mut buf = String::new();
+        let decoded = decode_control_chunk(&mut buf, json.as_bytes());
+        match &decoded[0] {
+            BackendControlEvent::CompletionResult {
+                request_id,
+                word_start,
+                candidates,
+            } => {
+                assert_eq!(*request_id, 7);
+                assert_eq!(*word_start, 0);
+                assert_eq!(candidates[0].replacement, "git ");
+            }
+            other => panic!("expected CompletionResult, got {other:?}"),
         }
     }
 }

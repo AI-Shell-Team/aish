@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -85,7 +85,12 @@ pub struct PersistentPty {
     exec_buffer: Arc<Mutex<Vec<u8>>>,
     /// Whether we are in exec mode (buffer output instead of forwarding).
     exec_mode: Arc<AtomicBool>,
+    /// Monotonic id for tab-completion requests.
+    next_completion_request_id: AtomicU64,
 }
+
+#[path = "aish_completion.rs"]
+mod aish_completion;
 
 impl PersistentPty {
     /// Start a new persistent bash session.
@@ -153,6 +158,7 @@ impl PersistentPty {
             next_backend_seq: -1,
             exec_buffer: Arc::new(Mutex::new(Vec::new())),
             exec_mode: Arc::new(AtomicBool::new(false)),
+            next_completion_request_id: AtomicU64::new(0),
         };
 
         // Wait for session_ready event.  Also returns whether the

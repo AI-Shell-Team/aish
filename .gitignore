@@ -1,6 +1,7 @@
 # Development files
 .env
 *.log
+.completion_test_tmp/
 .vscode/
 .idea/
 .claude/

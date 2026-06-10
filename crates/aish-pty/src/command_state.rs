@@ -92,6 +92,7 @@ impl CommandState {
             BackendControlEvent::SessionReady { .. } => None,
             BackendControlEvent::ShellExiting { .. } => None,
             BackendControlEvent::CommandOutput { .. } => None,
+            BackendControlEvent::CompletionResult { .. } => None,
         }
     }
 
