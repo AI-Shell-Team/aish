@@ -24,7 +24,9 @@ fn query_completions_command_prefix() {
             .query_completions("gi", 2, Duration::from_secs(5))
             .expect("query");
         assert!(
-            resp.candidates.iter().any(|c| c.replacement.starts_with("git")),
+            resp.candidates
+                .iter()
+                .any(|c| c.replacement.starts_with("git")),
             "expected git, got {:?}",
             resp.candidates
         );
@@ -59,7 +61,10 @@ fn query_completions_ls_home_lists_children() {
             .query_completions(line, line.len(), Duration::from_secs(5))
             .expect("query");
         assert!(resp.candidates.len() >= 2, "got {:?}", resp.candidates);
-        assert!(resp.candidates.iter().all(|c| !c.display.starts_with("/home/")));
+        assert!(resp
+            .candidates
+            .iter()
+            .all(|c| !c.display.starts_with("/home/")));
     });
 }
 
@@ -82,11 +87,10 @@ fn query_completions_absolute_path_at_word_zero() {
         let resp = pty
             .query_completions("/ho", 3, Duration::from_secs(5))
             .expect("query");
-        assert!(
-            resp.candidates
-                .iter()
-                .any(|c| c.replacement.starts_with("/home"))
-        );
+        assert!(resp
+            .candidates
+            .iter()
+            .any(|c| c.replacement.starts_with("/home")));
 
         let resp2 = pty
             .query_completions("/home/", 7, Duration::from_secs(5))
@@ -104,11 +108,10 @@ fn query_completions_usr_path_at_word_zero() {
         let resp = pty
             .query_completions("/us", 3, Duration::from_secs(5))
             .expect("query");
-        assert!(
-            resp.candidates
-                .iter()
-                .any(|c| c.replacement.starts_with("/usr"))
-        );
+        assert!(resp
+            .candidates
+            .iter()
+            .any(|c| c.replacement.starts_with("/usr")));
 
         let resp2 = pty
             .query_completions("/usr/", 5, Duration::from_secs(5))

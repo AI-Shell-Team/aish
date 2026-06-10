@@ -63,13 +63,9 @@ pub fn build_readline_tab_payload(line: &str, pos: usize, tabs: u8, clear_line: 
     buf.extend_from_slice(line.as_bytes());
     if pos < line.len() {
         buf.push(0x01);
-        for _ in 0..line[..pos].chars().count() {
-            buf.push(0x06);
-        }
+        buf.extend(std::iter::repeat_n(0x06, line[..pos].chars().count()));
     }
-    for _ in 0..tabs {
-        buf.push(0x09);
-    }
+    buf.extend(std::iter::repeat_n(0x09, tabs as usize));
     buf
 }
 
@@ -132,9 +128,7 @@ pub fn to_replacement_pairs(
 }
 
 fn word_replacement(word: &str) -> String {
-    if word.ends_with('/') || word.contains('/') {
-        word.to_string()
-    } else if word.ends_with(' ') {
+    if word.ends_with('/') || word.contains('/') || word.ends_with(' ') {
         word.to_string()
     } else {
         format!("{word} ")
@@ -186,7 +180,10 @@ fn parse_inline_line(text: &str, input_line: &str) -> Option<String> {
     if text.contains("Display all ") {
         return None;
     }
-    if text.split(['\r', '\n']).any(|l| l.contains("  ") && l.matches(' ').count() >= 2) {
+    if text
+        .split(['\r', '\n'])
+        .any(|l| l.contains("  ") && l.matches(' ').count() >= 2)
+    {
         return None;
     }
 
@@ -229,7 +226,9 @@ mod tests {
 
         let inline = b"\x07ls /home/";
         assert_eq!(
-            parse_readline_tab_output(inline, "ls /ho", 6).line_after.as_deref(),
+            parse_readline_tab_output(inline, "ls /ho", 6)
+                .line_after
+                .as_deref(),
             Some("ls /home/")
         );
     }
