@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
-use serde_json::{json, Value};
+use serde_json::json;
+
+#[cfg(test)]
+use serde_json::Value;
 
 /// Thread-safe shared recorder handle.
 ///
@@ -142,11 +145,10 @@ impl Recorder {
 
     fn write_event(&mut self, event_type: &str, data: &str) {
         let ts = self.start_time.elapsed().as_secs_f64();
-        let payload = Value::String(data.to_string());
-        let line = format!("[{ts:.6},\"{event_type}\",{payload}]");
+        let event = json!([ts, event_type, data]);
         // Best-effort write — recording should not crash the shell on I/O errors,
         // but we log failures so users know if recording is corrupted.
-        if let Err(e) = writeln!(self.writer, "{line}") {
+        if let Err(e) = writeln!(self.writer, "{event}") {
             eprintln!("Recording write failed: {}", e);
         }
     }
@@ -154,16 +156,26 @@ impl Recorder {
 
 /// Normalize standalone `\n` to `\r\n` so virtual terminals (agg, asciinema)
 /// correctly return the cursor to column 0 on each line break.
+/// Preserves standalone `\r` used for cursor positioning in ANSI sequences.
 fn normalize_newlines(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + s.len() / 8);
-    let chars = s.chars().peekable();
-    for c in chars {
-        if c == '\n' {
-            result.push_str("\r\n");
-        } else if c == '\r' {
-            continue;
-        } else {
-            result.push(c);
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    result.push_str("\r\n");
+                    chars.next();
+                } else {
+                    result.push('\r');
+                }
+            }
+            '\n' => {
+                result.push_str("\r\n");
+            }
+            _ => {
+                result.push(c);
+            }
         }
     }
     result
@@ -371,7 +383,7 @@ mod tests {
         assert_eq!(evt2[2].as_str().unwrap(), "\x1b[2mdim\r\nline2\x1b[0m");
     }
 
-    // 10. normalize_newlines converts \n to \r\n and skips bare \r
+    // 10. normalize_newlines converts \n to \r\n, preserves standalone \r
     #[test]
     fn test_normalize_newlines() {
         use super::normalize_newlines;
@@ -383,5 +395,7 @@ mod tests {
         );
         assert_eq!(normalize_newlines("no newline"), "no newline");
         assert_eq!(normalize_newlines(""), "");
+        // Standalone \r is preserved (used in ANSI cursor sequences)
+        assert_eq!(normalize_newlines("\r\x1b[2Kprompt"), "\r\x1b[2Kprompt");
     }
 }

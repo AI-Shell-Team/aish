@@ -141,6 +141,13 @@ enum Commands {
         #[arg(long)]
         config: Option<String>,
     },
+
+    /// Run system diagnostics
+    Doctor {
+        /// Attempt to auto-fix issues
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 fn main() {
@@ -215,6 +222,13 @@ fn main() {
         }
         Commands::Uninstall { purge } => {
             uninstall::run_uninstall(purge);
+        }
+        Commands::Doctor { fix } => {
+            let doctor = aish_shell::doctor::Doctor::new();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                doctor.run(fix).await;
+            });
         }
         Commands::ModelsAuth {
             provider,

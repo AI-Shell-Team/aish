@@ -19,6 +19,7 @@ pub mod animation;
 pub mod app;
 pub mod autosuggest;
 pub mod commands;
+pub mod doctor;
 pub mod environment;
 pub mod esc_watcher;
 pub mod expand_history;
