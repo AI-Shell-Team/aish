@@ -50,7 +50,12 @@ impl PersistentPty {
             set_fd(&mut fds, self.control_fd);
             let max_fd = self.master_fd.max(self.control_fd) + 1;
 
-            if select_fds(max_fd, &mut fds, select_tv(deadline, Duration::from_secs(1))) <= 0 {
+            if select_fds(
+                max_fd,
+                &mut fds,
+                select_tv(deadline, Duration::from_secs(1)),
+            ) <= 0
+            {
                 continue;
             }
 
@@ -116,10 +121,8 @@ impl PersistentPty {
         self.drain_master_silent();
 
         let half = timeout / 2;
-        let cap1 = self.capture_readline_probe(
-            &build_readline_tab_payload(line, pos, 1, false),
-            half,
-        );
+        let cap1 =
+            self.capture_readline_probe(&build_readline_tab_payload(line, pos, 1, false), half);
         let mut result = parse_readline_tab_output(&cap1, line, pos);
         if !result.is_useful(line) {
             let mut combined = cap1;
@@ -148,7 +151,9 @@ impl PersistentPty {
         while Instant::now() < deadline {
             let mut fds = zero_fd_set();
             set_fd(&mut fds, self.master_fd);
-            let tick = deadline.saturating_duration_since(Instant::now()).min(TAB_IDLE_QUIET);
+            let tick = deadline
+                .saturating_duration_since(Instant::now())
+                .min(TAB_IDLE_QUIET);
             if select_fds(self.master_fd + 1, &mut fds, timeval_from_duration(tick)) <= 0 {
                 if last_read.elapsed() >= TAB_IDLE_QUIET
                     && !self.exec_buffer.lock().unwrap().is_empty()
@@ -172,7 +177,10 @@ impl PersistentPty {
         self.drain_control_pipe_raw();
         self.exec_buffer.lock().unwrap().clear();
         self.exec_mode.store(true, Ordering::SeqCst);
-        if self.write_master(format!(" {command}\n").as_bytes()).is_err() {
+        if self
+            .write_master(format!(" {command}\n").as_bytes())
+            .is_err()
+        {
             self.exec_mode.store(false, Ordering::SeqCst);
             return;
         }
@@ -186,9 +194,11 @@ impl PersistentPty {
         let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(self.master_fd) };
         if let Ok(mut term) = tcgetattr(fd) {
             if enabled {
-                term.local_flags.insert(LocalFlags::ECHO | LocalFlags::ECHONL);
+                term.local_flags
+                    .insert(LocalFlags::ECHO | LocalFlags::ECHONL);
             } else {
-                term.local_flags.remove(LocalFlags::ECHO | LocalFlags::ECHONL);
+                term.local_flags
+                    .remove(LocalFlags::ECHO | LocalFlags::ECHONL);
             }
             let _ = tcsetattr(fd, SetArg::TCSANOW, &term);
         }
