@@ -1629,6 +1629,7 @@ impl AishShell {
                     // If just ";" with no question and there's a pending error,
                     // trigger error correction instead of a normal AI query.
                     if question.is_empty() && self.state.can_correct_error {
+                        crate::recorder::shared_record_input(&self.shared_recorder, ";\n");
                         if let Some(ref cmd) = self.state.last_command.clone() {
                             let old_sigint = self.install_ai_sigint_handler();
                             let mut esc_watcher = CrosstermEscWatcher::start(
@@ -1656,14 +1657,23 @@ impl AishShell {
                                     match &correction.command {
                                         Some(corrected) => {
                                             // Display corrected command and description
-                                            println!(
+                                            let corrected_line = format!(
                                                 "{} \x1b[1;36m{}\x1b[0m",
                                                 t("shell.error_correction.corrected_command_title"),
                                                 corrected
                                             );
+                                            println!("{}", corrected_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", corrected_line),
+                                            );
                                             if let Some(ref desc) = correction.description {
                                                 if !desc.is_empty() {
                                                     println!("   {}", desc);
+                                                    crate::recorder::shared_record_output(
+                                                        &self.shared_recorder,
+                                                        &format!("   {}\r\n", desc),
+                                                    );
                                                 }
                                             }
                                             // Ask user confirmation: Y/n
@@ -1674,11 +1684,19 @@ impl AishShell {
                                                 t("shell.error_correction.confirm_execute_suffix")
                                             );
                                             print!("{}", prompt);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &prompt,
+                                            );
                                             let _ = std::io::stdout().flush();
                                             let mut answer = String::new();
                                             if std::io::stdin().read_line(&mut answer).is_err() {
                                                 continue;
                                             }
+                                            crate::recorder::shared_record_input(
+                                                &self.shared_recorder,
+                                                &answer,
+                                            );
                                             let answer = answer.trim().to_lowercase();
                                             if answer == "y" || answer == "yes" || answer.is_empty()
                                             {
@@ -1690,9 +1708,14 @@ impl AishShell {
                                         }
                                         None => {
                                             // No valid command, show description if available
-                                            println!(
+                                            let warn_line = format!(
                                                 "\x1b[33m\u{26a0} {}\x1b[0m",
                                                 t("shell.error_correction.no_valid_command")
+                                            );
+                                            println!("{}", warn_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", warn_line),
                                             );
                                             if let Some(ref desc) = correction.description {
                                                 let clean = desc
@@ -1702,17 +1725,30 @@ impl AishShell {
                                                     .trim();
                                                 if !clean.is_empty() {
                                                     println!("   {}", clean);
+                                                    crate::recorder::shared_record_output(
+                                                        &self.shared_recorder,
+                                                        &format!("   {}\r\n", clean),
+                                                    );
                                                 }
                                             }
-                                            println!(
+                                            let hint_line = format!(
                                                 "   \x1b[36m{}\x1b[0m",
                                                 t("shell.error_correction.retry_hint")
+                                            );
+                                            println!("{}", hint_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", hint_line),
                                             );
                                         }
                                     }
                                 }
                                 Err(aish_core::AishError::Cancelled) => {
                                     self.animation.stop();
+                                    crate::recorder::shared_record_output(
+                                        &self.shared_recorder,
+                                        "\x1b[33mInterrupted\x1b[0m\r\n",
+                                    );
                                     println!("\x1b[33mInterrupted\x1b[0m");
                                 }
                                 Err(e) => {
@@ -1736,10 +1772,17 @@ impl AishShell {
                         continue;
                     }
 
-                    // Record sanitized user input after security check passes
+                    // Record sanitized user input after security check passes.
+                    // Use the original prefix (; or ；) so the cast replay shows
+                    // the AI trigger character.
+                    let ai_prefix = if input.starts_with('\u{ff1b}') {
+                        "\u{ff1b}"
+                    } else {
+                        ";"
+                    };
                     crate::recorder::shared_record_input(
                         &self.shared_recorder,
-                        &format!("{}\n", question),
+                        &format!("{}{}\n", ai_prefix, question),
                     );
 
                     let old_sigint = self.install_ai_sigint_handler();
@@ -2676,6 +2719,14 @@ impl AishShell {
 
         // Send command via PTY (release the lock inside the block so the
         // MutexGuard is dropped before any potential restart_pty() call).
+        //
+        // For session commands (ssh, telnet) the PTY output must be recorded
+        // in real-time so that the cast file reflects the correct timing and
+        // order.  For normal (short-lived) commands, real-time recording would
+        // suppress output during the AI processing window inside
+        // send_command_interactive, so we fall back to post-return recording
+        // instead.
+        let is_session = aish_pty::is_interactive_command(command);
         let result = {
             let mut pty = self.lock_pty();
             let remote_host = extract_remote_host(command);
@@ -2686,12 +2737,21 @@ impl AishShell {
                 shared_host.clone(),
                 self.shared_recorder.clone(),
             );
+            let on_output: Option<Box<dyn Fn(&str) + Send>> = if is_session {
+                let recorder = self.shared_recorder.clone();
+                Some(Box::new(move |data: &str| {
+                    crate::recorder::shared_record_output(&recorder, data);
+                }))
+            } else {
+                None
+            };
             pty.send_command_interactive(
                 command,
                 ai_cb,
                 Some(shared_host),
                 Some(self.secret_check_closure.clone()),
                 Some(self.secret_vault.clone()),
+                on_output,
             )
         };
         let (exit_code, cwd, output) = match result {
@@ -2711,8 +2771,9 @@ impl AishShell {
         // Store captured output for error correction and LLM context
         self.state.last_output = output.clone();
 
-        // Record command output if recording is active
-        if !output.is_empty() {
+        // For normal (non-session) commands, record output after the PTY call
+        // returns.  Session commands are recorded in real-time via on_output.
+        if !is_session && !output.is_empty() {
             crate::recorder::shared_record_output(&self.shared_recorder, &output);
         }
 
@@ -3038,7 +3099,7 @@ impl AishShell {
             .pty
             .lock()
             .unwrap()
-            .send_command_interactive(segment, None, None, None, None)
+            .send_command_interactive(segment, None, None, None, None, None)
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
