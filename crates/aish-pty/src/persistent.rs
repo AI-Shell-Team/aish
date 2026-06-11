@@ -444,6 +444,7 @@ impl PersistentPty {
             std::sync::Arc<dyn Fn(&str) -> Option<crate::SshSecretCheckResult> + Send + Sync>,
         >,
         secret_vault: Option<std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
+        on_output: Option<Box<dyn Fn(&str) + Send>>,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
         let mut interceptor = if is_session {
@@ -591,6 +592,14 @@ impl PersistentPty {
                                                 // preventing further followup/tool chaining until the next AI trigger.
         let mut ai_cancelled: bool = false;
 
+        // Helper: write to stdout and optionally record via on_output callback.
+        let show = |text: &str| {
+            write_stdout_all(text.as_bytes());
+            if let Some(ref cb) = on_output {
+                cb(text);
+            }
+        };
+
         while !done {
             // Build fd sets.
             let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
@@ -689,13 +698,7 @@ impl PersistentPty {
                                             "\x1b[33m{}\x1b[0m\r\n",
                                             aish_i18n::t("shell.session.ai_cancelled"),
                                         );
-                                        unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr() as *const libc::c_void,
-                                                cancel_msg.len(),
-                                            );
-                                        }
+                                        show(&cancel_msg);
                                     }
                                 }
                             }
@@ -894,13 +897,7 @@ impl PersistentPty {
                             1 => {
                                 // Ctrl+C: hard abort — skip followup entirely
                                 if ans[0] == 0x03 {
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            b"^C\r\n".as_ptr() as *const libc::c_void,
-                                            4,
-                                        );
-                                    }
+                                    show("^C\r\n");
                                     drain_stdin_trailing(stdin_fd);
                                     ai_cancelled = true;
                                     false
@@ -914,13 +911,7 @@ impl PersistentPty {
                                     } else {
                                         b"n\r\n"
                                     };
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            echo.as_ptr() as *const libc::c_void,
-                                            echo.len(),
-                                        );
-                                    }
+                                    show(std::str::from_utf8(echo).unwrap_or("y\r\n"));
                                     // Drain trailing newline/CR so it doesn't leak
                                     // into the next read cycle.
                                     drain_stdin_trailing(stdin_fd);
@@ -961,13 +952,7 @@ impl PersistentPty {
                                 "\x1b[90m{}\x1b[0m\r\n",
                                 aish_i18n::t("shell.session.running")
                             );
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    running_msg.as_ptr() as *const libc::c_void,
-                                    running_msg.len(),
-                                );
-                            }
+                            show(&running_msg);
                             let safe_cmd = close_unclosed_heredoc(&cmd_restored);
                             skip_echo_cmd = Some(safe_cmd.clone());
                             let mut inject = safe_cmd.as_bytes().to_vec();
@@ -1009,12 +994,8 @@ impl PersistentPty {
                                 "\x1b[33m{}\x1b[0m\r\n",
                                 aish_i18n::t("shell.command_cancelled")
                             );
+                            show(&cancel_msg);
                             unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    cancel_msg.as_ptr() as *const libc::c_void,
-                                    cancel_msg.len(),
-                                );
                                 libc::write(
                                     self.master_fd,
                                     b"\r".as_ptr() as *const libc::c_void,
@@ -1032,12 +1013,8 @@ impl PersistentPty {
                                 "\x1b[33m{}\x1b[0m\r\n",
                                 aish_i18n::t("shell.command_cancelled")
                             );
+                            show(&cancel_msg);
                             unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    cancel_msg.as_ptr() as *const libc::c_void,
-                                    cancel_msg.len(),
-                                );
                                 libc::write(
                                     self.master_fd,
                                     b"\r".as_ptr() as *const libc::c_void,
@@ -1060,13 +1037,7 @@ impl PersistentPty {
                         if !response.display_text.is_empty() {
                             let mut msg = response.display_text.clone();
                             msg.push_str("\r\n");
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    msg.as_ptr() as *const libc::c_void,
-                                    msg.len(),
-                                );
-                            }
+                            show(&msg);
                         }
                         unsafe {
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
@@ -1139,13 +1110,7 @@ impl PersistentPty {
                                             "\r\n\x1b[33m{}\x1b[0m\r\n",
                                             aish_i18n::t("shell.command_cancelled"),
                                         );
-                                        unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr() as *const libc::c_void,
-                                                cancel_msg.len(),
-                                            );
-                                        }
+                                        show(&cancel_msg);
                                         skip_leading_newline = true;
                                     } else if followup_capturing && byte == 0x1b {
                                         // ESC during followup capturing —
@@ -1187,13 +1152,7 @@ impl PersistentPty {
                                                 "\r\n\x1b[33m{}\x1b[0m\r\n",
                                                 aish_i18n::t("shell.command_cancelled"),
                                             );
-                                            unsafe {
-                                                libc::write(
-                                                    libc::STDOUT_FILENO,
-                                                    cancel_msg.as_ptr() as *const libc::c_void,
-                                                    cancel_msg.len(),
-                                                );
-                                            }
+                                            show(&cancel_msg);
                                             skip_leading_newline = true;
                                         } else {
                                             // Follow-up bytes exist (arrow/function
@@ -1483,12 +1442,8 @@ impl PersistentPty {
                                                 "\r\x1b[90m{}\x1b[0m\r\n",
                                                 aish_i18n::t("shell.session.probing"),
                                             );
+                                            show(&status);
                                             unsafe {
-                                                libc::write(
-                                                    libc::STDOUT_FILENO,
-                                                    status.as_ptr() as *const libc::c_void,
-                                                    status.len(),
-                                                );
                                                 libc::write(
                                                     self.master_fd,
                                                     probe_cmd.as_ptr() as *const libc::c_void,
@@ -1521,12 +1476,8 @@ impl PersistentPty {
                                             "\x1b[33m{}\x1b[0m\r\n",
                                             aish_i18n::t("shell.session.ai_cancelled")
                                         );
+                                        show(&cancel_msg);
                                         unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr() as *const libc::c_void,
-                                                cancel_msg.len(),
-                                            );
                                             libc::write(
                                                 self.master_fd,
                                                 b"\r".as_ptr() as *const libc::c_void,
@@ -1688,13 +1639,7 @@ impl PersistentPty {
                                                     "\x1b[33m{}\x1b[0m\r\n",
                                                     aish_i18n::t("shell.session.ai_cancelled"),
                                                 );
-                                                unsafe {
-                                                    libc::write(
-                                                        libc::STDOUT_FILENO,
-                                                        cancel_msg.as_ptr() as *const libc::c_void,
-                                                        cancel_msg.len(),
-                                                    );
-                                                }
+                                                show(&cancel_msg);
                                             }
                                         }
                                     }
@@ -1874,13 +1819,11 @@ impl PersistentPty {
                             // probe completes (probe_active changes to false mid-parse).
                             if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
                             {
-                                let _ = unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        data.as_ptr() as *const libc::c_void,
-                                        data.len(),
-                                    )
-                                };
+                                write_stdout_all(data);
+                                if let Some(ref cb) = on_output {
+                                    let text = String::from_utf8_lossy(data);
+                                    cb(&text);
+                                }
                             }
                         }
                     }
@@ -1937,12 +1880,18 @@ impl PersistentPty {
                         m
                     });
                     let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
-                    unsafe {
+                    // Display directly (terminal cursor is already on a new line
+                    // after user input).  Record with leading \r\n so the cast
+                    // replay starts the indicator on a fresh line.
+                    let _ = unsafe {
                         libc::write(
                             libc::STDOUT_FILENO,
                             tool_line.as_ptr() as *const libc::c_void,
                             tool_line.len(),
-                        );
+                        )
+                    };
+                    if let Some(ref cb) = on_output {
+                        cb(&format!("\r\n{}", tool_line));
                     }
 
                     // Confirmation prompt before execution
@@ -1950,13 +1899,7 @@ impl PersistentPty {
                         "\x1b[33m{}\x1b[0m ",
                         aish_i18n::t("shell.session.confirm_execute")
                     );
-                    unsafe {
-                        libc::write(
-                            libc::STDOUT_FILENO,
-                            confirm.as_ptr() as *const libc::c_void,
-                            confirm.len(),
-                        );
-                    }
+                    show(&confirm);
 
                     // Read one byte for confirmation (raw mode)
                     let mut ans = [0u8; 1];
@@ -1966,13 +1909,7 @@ impl PersistentPty {
                         1 => {
                             // Ctrl+C: hard abort — skip followup entirely
                             if ans[0] == 0x03 {
-                                unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        b"^C\r\n".as_ptr() as *const libc::c_void,
-                                        4,
-                                    );
-                                }
+                                show("^C\r\n");
                                 drain_stdin_trailing(stdin_fd);
                                 ai_cancelled = true;
                                 false
@@ -1982,17 +1919,11 @@ impl PersistentPty {
                                     || ans[0] == b'\r'
                                     || ans[0] == b'\n'
                                 {
-                                    b"y\r\n"
+                                    "y\r\n"
                                 } else {
-                                    b"n\r\n"
+                                    "n\r\n"
                                 };
-                                unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        echo.as_ptr() as *const libc::c_void,
-                                        echo.len(),
-                                    );
-                                }
+                                show(echo);
                                 drain_stdin_trailing(stdin_fd);
                                 ans[0] == b'y'
                                     || ans[0] == b'Y'
@@ -2009,13 +1940,7 @@ impl PersistentPty {
                             "\x1b[90m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.session.running")
                         );
-                        unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                running_msg.as_ptr() as *const libc::c_void,
-                                running_msg.len(),
-                            );
-                        }
+                        show(&running_msg);
                         // Restore secret placeholders before execution.
                         let mut cmd_restored = cmd.clone();
                         if let Some(ref vault) = secret_vault {
@@ -2028,13 +1953,7 @@ impl PersistentPty {
                                     &rargs,
                                 );
                                 let info = format!("\x1b[2m{}\x1b[0m\r\n", msg);
-                                unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        info.as_ptr() as *const libc::c_void,
-                                        info.len(),
-                                    );
-                                }
+                                show(&info);
                                 cmd_restored = restored;
                             }
                         }
@@ -2077,12 +1996,8 @@ impl PersistentPty {
                             "\x1b[33m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.command_cancelled")
                         );
+                        show(&cancel_msg);
                         unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                cancel_msg.as_ptr() as *const libc::c_void,
-                                cancel_msg.len(),
-                            );
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         if let Some(followup) = response.followup {
@@ -2096,12 +2011,8 @@ impl PersistentPty {
                             "\x1b[33m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.command_cancelled")
                         );
+                        show(&cancel_msg);
                         unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                cancel_msg.as_ptr() as *const libc::c_void,
-                                cancel_msg.len(),
-                            );
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         // User rejected the command — terminate the

@@ -450,7 +450,8 @@ impl ShellRenderer {
         let width = self.terminal_width.max(20);
         let sep = "─".repeat(width);
         self.record_output("\x1b[32m─────\x1b[0m\r\n");
-        println!("\x1b[32m{}\x1b[0m", sep);
+        print!("\r\x1b[32m{}\x1b[0m\r\n", sep);
+        let _ = std::io::stdout().flush();
     }
 }
 
