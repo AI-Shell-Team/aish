@@ -32,6 +32,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/record", "Record terminal session (start/stop)"),
     ("/quit", "Exit AI Shell"),
     ("/doctor", "Run system diagnostics"),
+    ("/status", "Show system environment status"),
 ];
 
 /// Timeout for PTY completion queries.

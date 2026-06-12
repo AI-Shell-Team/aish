@@ -2233,6 +2233,7 @@ impl AishShell {
             }
             Some("/record") => self.handle_record_command(&parts),
             Some("/doctor") => self.handle_doctor_command(&parts),
+            Some("/status") => self.handle_status_command(),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -2259,6 +2260,15 @@ impl AishShell {
         rt.block_on(async {
             doctor.run(fix).await;
         });
+    }
+
+    fn handle_status_command(&mut self) {
+        crate::status::run_status(
+            &self.pty,
+            &self.version,
+            &self.session_uuid,
+            &self.config.model,
+        );
     }
 
     fn select_recent_session(&mut self) {
@@ -2745,9 +2755,25 @@ impl AishShell {
             } else {
                 None
             };
+            let version_for_status = self.version.clone();
+            let session_for_status = self.session_uuid.clone();
+            let model_for_status = self.config.model.clone();
+            let status_cb: Option<Box<aish_pty::StatusCallback>> = if is_session {
+                Some(Box::new(move |exec: &mut aish_pty::RemoteExecFn| {
+                    crate::status::run_status_remote(
+                        exec,
+                        &version_for_status,
+                        &session_for_status,
+                        &model_for_status,
+                    )
+                }))
+            } else {
+                None
+            };
             pty.send_command_interactive(
                 command,
                 ai_cb,
+                status_cb,
                 Some(shared_host),
                 Some(self.secret_check_closure.clone()),
                 Some(self.secret_vault.clone()),
@@ -3099,7 +3125,7 @@ impl AishShell {
             .pty
             .lock()
             .unwrap()
-            .send_command_interactive(segment, None, None, None, None, None)
+            .send_command_interactive(segment, None, None, None, None, None, None)
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
