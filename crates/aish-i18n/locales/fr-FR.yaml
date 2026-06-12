@@ -152,6 +152,9 @@ shell:
     resume: "Reprendre la session précédente"
     feedback: "Envoyer un commentaire"
     quit: "Quitter AI Shell"
+    record: "Enregistrer la session terminal (start/stop)"
+    doctor: "Exécuter les diagnostics système"
+    status: "Afficher l'état de l'environnement système"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"

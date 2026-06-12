@@ -107,6 +107,14 @@ pub type FollowupCallback = dyn Fn(&str, Option<&str>) -> Option<AiResponse> + S
 /// AI callback type: receives an AiQuery and returns an optional AiResponse.
 pub type AiCallback = dyn Fn(AiQuery) -> Option<AiResponse> + Send + Sync;
 
+/// Callback for executing a command on the remote host and returning its output.
+pub type RemoteExecFn = dyn FnMut(&str) -> String;
+
+/// Callback invoked when `/status` is detected during an SSH/session.
+/// Receives a closure that can execute commands on the remote host.
+/// Returns the fully rendered status string to display.
+pub type StatusCallback = dyn Fn(&mut RemoteExecFn) -> String + Send + Sync;
+
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
@@ -128,6 +136,8 @@ pub enum StdinAction {
     EchoLocally,
     /// AI input line is complete. Caller should invoke AI callback.
     TriggerAi(String),
+    /// `/status` detected during session. Caller should run remote status scan.
+    TriggerStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +156,7 @@ pub struct SessionInterceptor {
     cancel_pty_line: bool,
     output_buffer: OutputBuffer,
     ai_callback: Option<Box<AiCallback>>,
+    status_callback: Option<Box<StatusCallback>>,
     /// Escape sequence tracker: when Some, we're consuming bytes of a
     /// terminal escape sequence (arrow keys, function keys, etc.) so they
     /// don't corrupt line_shadow.
@@ -171,13 +182,18 @@ impl SessionInterceptor {
     /// Create a new interceptor.
     /// `ai_callback` is None -> interceptor is disabled (pure passthrough).
     /// `ai_callback` is Some -> interceptor will intercept `;` input.
-    pub fn new(ai_callback: Option<Box<AiCallback>>) -> Self {
+    /// `status_callback` is Some -> interceptor will intercept `/status` input.
+    pub fn new(
+        ai_callback: Option<Box<AiCallback>>,
+        status_callback: Option<Box<StatusCallback>>,
+    ) -> Self {
         Self {
             state: InterceptorState::Passthrough,
             line_shadow: Vec::with_capacity(4096),
             cancel_pty_line: false,
             output_buffer: OutputBuffer::new(8192),
             ai_callback,
+            status_callback,
             escape_seq: None,
             in_bracketed_paste: false,
             csi_params: Vec::with_capacity(16),
@@ -204,8 +220,15 @@ impl SessionInterceptor {
                         if self.in_bracketed_paste {
                             return StdinAction::Forward;
                         }
-                        // End of line — check whether the accumulated input
-                        // starts with `;` or `；` to trigger AI.
+                        // End of line — check for /status first, then AI prefix.
+                        if self.status_callback.is_some() && is_status_command(&self.line_shadow) {
+                            self.line_shadow.clear();
+                            self.cancel_pty_line = true;
+                            self.state = InterceptorState::AiProcessing;
+                            return StdinAction::TriggerStatus;
+                        }
+                        // Check whether the accumulated input starts with
+                        // `;` or `；` to trigger AI.
                         if self.ai_callback.is_some() && starts_with_ai_prefix(&self.line_shadow) {
                             let line = String::from_utf8_lossy(&self.line_shadow).to_string();
                             let question = extract_ai_question(&line);
@@ -353,6 +376,21 @@ impl SessionInterceptor {
         let bytes = self.output_buffer.recent(max_len);
         String::from_utf8_lossy(&bytes).to_string()
     }
+
+    /// Whether a status_callback is configured.
+    pub fn has_status_callback(&self) -> bool {
+        self.status_callback.is_some()
+    }
+
+    /// Invoke the status callback with the given remote-exec function.
+    /// Panics if no status_callback is set.
+    pub fn invoke_status_callback(&self, exec_fn: &mut RemoteExecFn) -> String {
+        let cb = self
+            .status_callback
+            .as_ref()
+            .expect("invoke_status_callback called without status_callback");
+        cb(exec_fn)
+    }
 }
 
 /// Extract the question text after `;` or `；` prefix.
@@ -371,6 +409,15 @@ fn extract_ai_question(line: &str) -> String {
 /// fullwidth semicolon `；` (UTF-8: 0xEF 0xBC 0x9B).
 fn starts_with_ai_prefix(line: &[u8]) -> bool {
     line.first() == Some(&b';') || line.starts_with(&[0xEF, 0xBC, 0x9B])
+}
+
+/// Check whether the line is exactly `/status` (ignoring leading/trailing whitespace).
+fn is_status_command(line: &[u8]) -> bool {
+    let s = match std::str::from_utf8(line) {
+        Ok(s) => s.trim(),
+        Err(_) => return false,
+    };
+    s == "/status"
 }
 
 /// Pop the last complete UTF-8 character from a byte buffer.
@@ -427,14 +474,14 @@ mod tests {
 
     #[test]
     fn test_passthrough_forward_normal_bytes() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         assert_eq!(ic.feed_stdin(b'a'), StdinAction::Forward);
         assert_eq!(ic.feed_stdin(b'b'), StdinAction::Forward);
     }
 
     #[test]
     fn test_semicolon_triggers_ai_on_enter() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         // `;` alone is Forward; AI triggers when Enter is pressed
         assert_eq!(ic.feed_stdin(b';'), StdinAction::Forward);
         let action = ic.feed_stdin(b'\r');
@@ -445,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_semicolon_midline_does_not_trigger_ai() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         // pwd; → starts with 'p', not ';' → Enter should be Forward
         ic.feed_stdin(b'p');
         ic.feed_stdin(b'w');
@@ -456,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_ai_input_captures_question() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'i');
         ic.feed_stdin(b'p');
@@ -471,14 +518,14 @@ mod tests {
 
     #[test]
     fn test_no_callback_means_pure_passthrough() {
-        let mut ic = SessionInterceptor::new(None);
+        let mut ic = SessionInterceptor::new(None, None);
         assert_eq!(ic.feed_stdin(b';'), StdinAction::Forward);
         assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
     }
 
     #[test]
     fn test_fullwidth_semicolon_triggers_ai() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         // ； = 0xEF 0xBC 0x9B
         ic.feed_stdin(0xEF);
         ic.feed_stdin(0xBC);
@@ -494,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_c_clears_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'h');
         ic.feed_stdin(b'i');
@@ -506,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_backspace_pops_from_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b'l');
         ic.feed_stdin(b's');
         ic.feed_stdin(0x7F); // backspace removes 's'
@@ -516,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_u_clears_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b'a');
         ic.feed_stdin(b'b');
         ic.feed_stdin(0x15); // Ctrl+U clears shadow
@@ -526,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_escape_sequence_not_in_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         // Simulate arrow key: ESC [ A
         ic.feed_stdin(b';');
         ic.feed_stdin(0x1B); // ESC
@@ -538,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_cancel_pty_line_flag() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         assert!(!ic.take_cancel_pty_line());
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
@@ -548,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_finish_ai_resets_to_passthrough() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
         assert!(ic.is_ai_processing());
@@ -561,7 +608,7 @@ mod tests {
 
     #[test]
     fn test_recent_output_captures_pty_data() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_pty_output(b"hello ");
         ic.feed_pty_output(b"world\n");
         assert!(ic.recent_output(100).contains("hello world"));
@@ -569,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_call_ai_returns_command() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
         let resp = ic.call_ai("test".to_string(), None);
@@ -580,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_call_ai_returns_none() {
-        let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()));
+        let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()), None);
         let cmd = ic.call_ai("test".to_string(), None);
         assert!(cmd.is_none());
     }

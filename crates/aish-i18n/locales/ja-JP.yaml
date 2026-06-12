@@ -152,6 +152,9 @@ shell:
     resume: "前回のセッションを再開"
     feedback: "フィードバックを送信"
     quit: "AI Shell を終了"
+    record: "ターミナルセッションを録画 (start/stop)"
+    doctor: "システム診断を実行"
+    status: "システム環境の状態を表示"
 
   feedback:
     select_type: "フィードバックの種類を選択"

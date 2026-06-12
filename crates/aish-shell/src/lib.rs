@@ -34,6 +34,7 @@ pub mod recorder;
 pub mod renderer;
 pub mod resume_selector;
 pub mod security_panel;
+pub mod status;
 pub mod token_store;
 pub mod tui;
 pub mod types;

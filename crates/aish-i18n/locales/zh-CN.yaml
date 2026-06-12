@@ -333,7 +333,8 @@ shell:
     feedback: "提交反馈"
     quit: "退出 AI Shell"
     record: "录制终端会话 (start/stop)"
-    doctor: "基本配置诊断"
+    doctor: "运行系统诊断"
+    status: "显示系统环境状态"
 
   record:
     started: "⏺ 录制已开始: {path}"

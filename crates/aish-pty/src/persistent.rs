@@ -439,6 +439,7 @@ impl PersistentPty {
         &mut self,
         command: &str,
         ai_callback: Option<Box<crate::AiCallback>>,
+        status_callback: Option<Box<crate::StatusCallback>>,
         shared_host: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
         secret_check: Option<
             std::sync::Arc<dyn Fn(&str) -> Option<crate::SshSecretCheckResult> + Send + Sync>,
@@ -448,9 +449,9 @@ impl PersistentPty {
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
         let mut interceptor = if is_session {
-            crate::SessionInterceptor::new(ai_callback)
+            crate::SessionInterceptor::new(ai_callback, status_callback)
         } else {
-            crate::SessionInterceptor::new(None)
+            crate::SessionInterceptor::new(None, None)
         };
 
         // Drain stale data from both the PTY master fd and the control
@@ -1495,6 +1496,101 @@ impl PersistentPty {
                                         }
                                     }
                                 }
+                                crate::StdinAction::TriggerStatus => {
+                                    ai_cancelled = false;
+                                    stdin_shadow.clear();
+
+                                    // Cancel the echoed /status line on the remote side
+                                    if interceptor.take_cancel_pty_line() {
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                b"\x03".as_ptr() as *const libc::c_void,
+                                                1,
+                                            );
+                                        }
+                                        let mut drain_buf = [0u8; 4096];
+                                        loop {
+                                            let mut rfds: libc::fd_set =
+                                                unsafe { std::mem::zeroed() };
+                                            unsafe {
+                                                libc::FD_ZERO(&mut rfds);
+                                                libc::FD_SET(self.master_fd, &mut rfds);
+                                            }
+                                            let mut tv = libc::timeval {
+                                                tv_sec: 0,
+                                                tv_usec: 100_000,
+                                            };
+                                            let sel = unsafe {
+                                                libc::select(
+                                                    self.master_fd + 1,
+                                                    &mut rfds,
+                                                    std::ptr::null_mut(),
+                                                    std::ptr::null_mut(),
+                                                    &mut tv,
+                                                )
+                                            };
+                                            if sel > 0
+                                                && unsafe { libc::FD_ISSET(self.master_fd, &rfds) }
+                                            {
+                                                let n = unsafe {
+                                                    libc::read(
+                                                        self.master_fd,
+                                                        drain_buf.as_mut_ptr() as *mut libc::c_void,
+                                                        drain_buf.len(),
+                                                    )
+                                                };
+                                                if n <= 0 {
+                                                    break;
+                                                }
+                                                interceptor
+                                                    .feed_pty_output(&drain_buf[..n as usize]);
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                    }
+
+                                    // Newline after user's input
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"\r\n".as_ptr() as *const libc::c_void,
+                                            2,
+                                        );
+                                    }
+
+                                    // Execute remote status collection via callback
+                                    if interceptor.has_status_callback() {
+                                        let master_fd = self.master_fd;
+                                        let mut exec_fn: Box<crate::RemoteExecFn> =
+                                            Box::new(move |cmd: &str| {
+                                                execute_remote_command(master_fd, cmd)
+                                            });
+
+                                        let rendered =
+                                            interceptor.invoke_status_callback(&mut *exec_fn);
+
+                                        let msg = format!("{}\r\n", rendered);
+                                        unsafe {
+                                            libc::write(
+                                                libc::STDOUT_FILENO,
+                                                msg.as_ptr() as *const libc::c_void,
+                                                msg.len(),
+                                            );
+                                        }
+                                    }
+
+                                    interceptor.finish_ai();
+                                    skip_leading_newline = true;
+                                    unsafe {
+                                        libc::write(
+                                            self.master_fd,
+                                            b"\r".as_ptr() as *const libc::c_void,
+                                            1,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -2339,7 +2435,163 @@ impl PersistentPty {
         }
         Ok(())
     }
+}
 
+// ---- Remote command execution helpers ----
+
+/// Execute a command on the remote host via PTY and capture its output.
+fn execute_remote_command(master_fd: i32, command: &str) -> String {
+    let mut cmd_bytes = command.as_bytes().to_vec();
+    cmd_bytes.push(b'\r');
+    unsafe {
+        libc::write(
+            master_fd,
+            cmd_bytes.as_ptr() as *const libc::c_void,
+            cmd_bytes.len(),
+        );
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut output = Vec::new();
+    let mut drain_buf = [0u8; 4096];
+    let mut idle_count: u32 = 0;
+    let mut timed_out = false;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut rfds);
+            libc::FD_SET(master_fd, &mut rfds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 100_000,
+        };
+        let sel = unsafe {
+            libc::select(
+                master_fd + 1,
+                &mut rfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
+            let n = unsafe {
+                libc::read(
+                    master_fd,
+                    drain_buf.as_mut_ptr() as *mut libc::c_void,
+                    drain_buf.len(),
+                )
+            };
+            if n > 0 {
+                output.extend_from_slice(&drain_buf[..n as usize]);
+                idle_count = 0;
+            } else {
+                break;
+            }
+        } else {
+            idle_count += 1;
+            // Only start counting idle after receiving first byte
+            if !output.is_empty() && idle_count >= 3 {
+                break;
+            }
+        }
+    }
+
+    // On timeout, cancel the remote command and drain remaining output
+    // to restore the shell to a clean prompt state.
+    if timed_out {
+        unsafe {
+            libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+        }
+        drain_pty(master_fd, Duration::from_millis(500));
+    }
+
+    let raw = String::from_utf8_lossy(&output).to_string();
+    strip_remote_output(&raw, command)
+}
+
+/// Drain any remaining bytes from the PTY master fd for up to `timeout`.
+fn drain_pty(master_fd: i32, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf = [0u8; 4096];
+    loop {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut rfds);
+            libc::FD_SET(master_fd, &mut rfds);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let mut tv = libc::timeval {
+            tv_sec: remaining.as_secs() as libc::time_t,
+            tv_usec: remaining.subsec_micros() as libc::suseconds_t,
+        };
+        let sel = unsafe {
+            libc::select(
+                master_fd + 1,
+                &mut rfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
+            let n =
+                unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+/// Strip command echo and ANSI codes from remote command output.
+fn strip_remote_output(raw: &str, command: &str) -> String {
+    let mut clean = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !((0x40..=0x7E).contains(&bytes[i])) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else if bytes[i] == b'\r' {
+            i += 1;
+        } else {
+            clean.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    let mut lines: Vec<&str> = clean.lines().collect();
+    let cmd_trimmed = command.trim();
+    if !lines.is_empty() && lines[0].contains(cmd_trimmed) {
+        lines.remove(0);
+    }
+    while let Some(last) = lines.last() {
+        if last.is_empty() || last.contains('$') || last.contains('#') || last.contains('~') {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
+    lines.join("\n").trim().to_string()
+}
+
+impl PersistentPty {
     /// Returns Ok(true) if PromptReady was also seen in the same batch.
     fn wait_for_session_ready(&mut self, timeout: Duration) -> aish_core::Result<bool> {
         let deadline = std::time::Instant::now() + timeout;

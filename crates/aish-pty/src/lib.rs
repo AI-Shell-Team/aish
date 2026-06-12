@@ -50,7 +50,7 @@ pub use readline_tab::ReadlineTabResult;
 pub use session_interceptor::{
     pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,
     AskUserOption, AskUserRequest, BashExecResult, FollowupCallback, InterceptorState,
-    SessionInterceptor, StdinAction,
+    RemoteExecFn, SessionInterceptor, StatusCallback, StdinAction,
 };
 pub use state_capture::StateChanges;
 pub use types::CancelToken;

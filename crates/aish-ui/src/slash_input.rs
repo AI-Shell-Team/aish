@@ -214,11 +214,9 @@ impl SlashInputSession {
                 Some(SlashInputOutcome::Dismissed(self.input.clone()))
             }
             KeyCode::Tab => {
-                // Complete to selected item and submit immediately
-                if let Some(&cmd_idx) = self.filtered.get(self.selected) {
-                    let (name, _) = &self.commands[cmd_idx];
-                    return Some(SlashInputOutcome::Command(name.clone()));
-                }
+                // Sync input to selected item (like Up/Down arrows).
+                // User presses Enter to execute.
+                self.sync_input_to_selected();
                 None
             }
             KeyCode::Home => {
