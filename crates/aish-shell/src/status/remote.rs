@@ -10,8 +10,6 @@ pub struct RemoteStatus {
     pub cpu_percent: Option<f32>,
     pub mem_used: Option<u64>,
     pub mem_total: Option<u64>,
-    pub disk_used: Option<u64>,
-    pub disk_total: Option<u64>,
     pub services: Option<Vec<(String, bool)>>,
     pub error_count: Option<usize>,
 }
@@ -23,7 +21,6 @@ pub fn collect_remote(exec: &mut dyn FnMut(&str) -> String) -> RemoteStatus {
     let uptime_secs = parse_uptime(&exec("command cat /proc/uptime 2>/dev/null"));
     let cpu_percent = collect_cpu(exec);
     let (mem_used, mem_total) = parse_memory(&exec("LC_ALL=C command free -b 2>/dev/null"));
-    let (disk_used, disk_total) = parse_disk(&exec("LC_ALL=C command df -B1 / 2>/dev/null"));
     let services = parse_services(
         &exec("command systemctl list-units --type=service --all --no-pager --no-legend 2>/dev/null | awk '{print $1\":\"$3}'"),
     );
@@ -39,8 +36,6 @@ pub fn collect_remote(exec: &mut dyn FnMut(&str) -> String) -> RemoteStatus {
         cpu_percent,
         mem_used,
         mem_total,
-        disk_used,
-        disk_total,
         services,
         error_count,
     }
@@ -124,28 +119,36 @@ fn collect_cpu(exec: &mut dyn FnMut(&str) -> String) -> Option<f32> {
     }
 }
 
-fn parse_cpu_line(line: &str) -> Option<Vec<u64>> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
+fn parse_cpu_line(output: &str) -> Option<Vec<u64>> {
+    // /proc/stat has multiple lines; only parse the aggregate "cpu " line
+    for line in output.lines() {
+        let trimmed = line.trim();
+        // "cpu  " (with trailing space) is the aggregate line; "cpu0" etc. are per-core
+        if trimmed.starts_with("cpu ") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 5 {
+                return parts[1..].iter().map(|s| s.parse().ok()).collect();
+            }
+        }
     }
-    parts[1..].iter().map(|s| s.parse().ok()).collect()
+    None
 }
 
 fn parse_memory(output: &str) -> (Option<u64>, Option<u64>) {
-    let parts: Vec<&str> = output.split_whitespace().collect();
-    if parts.len() < 3 {
-        return (None, None);
+    // Find the "Mem:" line to skip the header row
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Mem:") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            // Mem: total used free shared buff/cache available
+            if parts.len() >= 3 {
+                let total = parts[1].parse().ok();
+                let used = parts[2].parse().ok();
+                return (used, total);
+            }
+        }
     }
-    (parts[2].parse().ok(), parts[1].parse().ok())
-}
-
-fn parse_disk(output: &str) -> (Option<u64>, Option<u64>) {
-    let parts: Vec<&str> = output.split_whitespace().collect();
-    if parts.len() < 4 {
-        return (None, None);
-    }
-    (parts[2].parse().ok(), parts[1].parse().ok())
+    (None, None)
 }
 
 fn parse_services(output: &str) -> Option<Vec<(String, bool)>> {

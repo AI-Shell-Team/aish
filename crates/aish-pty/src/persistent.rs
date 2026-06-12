@@ -690,7 +690,9 @@ impl PersistentPty {
                             if probe_for_ai {
                                 probe_for_ai = false;
                                 if let Some(question) = pending_ai_question.take() {
-                                    let resp = interceptor.call_ai(question, secret_vault.as_ref());
+                                    let ec = self.command_state.last_exit_code();
+                                    let resp =
+                                        interceptor.call_ai(question, ec, secret_vault.as_ref());
                                     interceptor.finish_ai();
                                     if let Some(response) = resp {
                                         pending_response = Some(response);
@@ -1464,7 +1466,8 @@ impl PersistentPty {
                                             continue;
                                         } else {
                                             // No probe needed, call AI now.
-                                            interceptor.call_ai(question, secret_vault.as_ref())
+                                            let ec = self.command_state.last_exit_code();
+                                            interceptor.call_ai(question, ec, secret_vault.as_ref())
                                         }
                                     };
                                     interceptor.finish_ai();
@@ -1725,8 +1728,12 @@ impl PersistentPty {
                                     if probe_for_ai {
                                         probe_for_ai = false;
                                         if let Some(question) = pending_ai_question.take() {
-                                            let resp = interceptor
-                                                .call_ai(question, secret_vault.as_ref());
+                                            let ec = self.command_state.last_exit_code();
+                                            let resp = interceptor.call_ai(
+                                                question,
+                                                ec,
+                                                secret_vault.as_ref(),
+                                            );
                                             interceptor.finish_ai();
                                             if let Some(response) = resp {
                                                 pending_response = Some(response);

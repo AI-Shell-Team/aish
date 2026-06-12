@@ -16,8 +16,6 @@ struct SystemInfo {
     cpu_percent: f32,
     mem_used: u64,
     mem_total: u64,
-    disk_used: u64,
-    disk_total: u64,
 }
 
 /// Status of a monitored service.
@@ -115,18 +113,12 @@ fn render(
 
     // Line 3: resources
     let mem_pct = (sys.mem_used * 100).checked_div(sys.mem_total).unwrap_or(0);
-    let disk_pct = (sys.disk_used * 100)
-        .checked_div(sys.disk_total)
-        .unwrap_or(0);
     lines.push(format!(
-        "CPU: {:.0}% │ Mem: {}/{} ({}%) │ Disk: {}/{} ({}%)",
+        "CPU: {:.0}% │ Mem: {}/{} ({}%)",
         sys.cpu_percent,
         format_bytes(sys.mem_used),
         format_bytes(sys.mem_total),
         mem_pct,
-        format_bytes(sys.disk_used),
-        format_bytes(sys.disk_total),
-        disk_pct
     ));
 
     // Line 4: services (optional)
@@ -207,10 +199,6 @@ fn render_to_string(
         (Some(u), Some(t)) if t > 0 => (u * 100).checked_div(t).unwrap_or(0),
         _ => 0,
     };
-    let disk_pct = match (rs.disk_used, rs.disk_total) {
-        (Some(u), Some(t)) if t > 0 => (u * 100).checked_div(t).unwrap_or(0),
-        _ => 0,
-    };
     let cpu_str = rs
         .cpu_percent
         .map(|p| format!("{:.0}%", p))
@@ -219,14 +207,7 @@ fn render_to_string(
         (Some(u), Some(t)) => format!("{}/{} ({}%)", format_bytes(u), format_bytes(t), mem_pct),
         _ => "?/?".into(),
     };
-    let disk_str = match (rs.disk_used, rs.disk_total) {
-        (Some(u), Some(t)) => format!("{}/{} ({}%)", format_bytes(u), format_bytes(t), disk_pct),
-        _ => "?/?".into(),
-    };
-    lines.push(format!(
-        "CPU: {} │ Mem: {} │ Disk: {}",
-        cpu_str, mem_str, disk_str
-    ));
+    lines.push(format!("CPU: {} │ Mem: {}", cpu_str, mem_str));
 
     if let Some(ref svcs) = rs.services {
         if !svcs.is_empty() {
