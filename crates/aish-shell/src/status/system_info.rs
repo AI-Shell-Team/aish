@@ -1,4 +1,4 @@
-use sysinfo::{Disks, System};
+use sysinfo::System;
 
 use super::SystemInfo;
 
@@ -19,14 +19,6 @@ pub fn collect() -> SystemInfo {
     let mem_total = sys.total_memory();
     let mem_used = sys.used_memory();
 
-    let disks = Disks::new_with_refreshed_list();
-    let mut disk_total = 0u64;
-    let mut disk_used = 0u64;
-    for disk in &disks {
-        disk_total += disk.total_space();
-        disk_used += disk.total_space() - disk.available_space();
-    }
-
     SystemInfo {
         hostname,
         os_version,
@@ -34,7 +26,5 @@ pub fn collect() -> SystemInfo {
         cpu_percent,
         mem_used,
         mem_total,
-        disk_used,
-        disk_total,
     }
 }

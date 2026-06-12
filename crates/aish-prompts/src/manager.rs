@@ -246,12 +246,15 @@ const CMD_ERROR_PROMPT: &str = r#"{{role_prompt}}
 - 发行版信息：{{os_info}}
 - 基本环境信息：
 {{basic_env_info}}
+{{remote_env_info}}
 
 ## Tone and Style
 You should be concise, direct, and to the point.  Response with {{output_language}}.
 
 ## 任务
 根据给出的执行失败(return code != 0)的命令以及相应的执行结果，分析命令失败的原因，并提供准确的解决方案。 如果没有合适的解决方案，请返回空字符串。
+
+命令执行的退出码: {{exit_code}}
 
 ### 输出格式
 - 只能输出 **一个** JSON 代码块，不得输出任何额外文字（包括解释、前后缀、Markdown 说明）。

@@ -790,7 +790,7 @@ impl AiHandler {
     fn error_correction_system_message(
         &mut self,
         _command: &str,
-        _exit_code: i32,
+        exit_code: i32,
         _stderr: &str,
     ) -> Option<String> {
         let role_prompt = self.prompt_manager.get("role").to_string();
@@ -801,6 +801,8 @@ impl AiHandler {
         vars.insert("os_info".to_string(), os_info());
         vars.insert("basic_env_info".to_string(), basic_env_info());
         vars.insert("output_language".to_string(), output_language());
+        vars.insert("exit_code".to_string(), exit_code.to_string());
+        vars.insert("remote_env_info".to_string(), String::new());
         Some(self.prompt_manager.render("cmd_error", &vars))
     }
 }

@@ -10,6 +10,8 @@ pub struct AiQuery {
     pub question: String,
     /// Recent PTY output for context (error correction).
     pub recent_output: String,
+    /// Exit code of the last command (0 if not available or success).
+    pub exit_code: i32,
 }
 
 /// Result returned by the AI callback containing an optional command to
@@ -349,6 +351,7 @@ impl SessionInterceptor {
     pub fn call_ai(
         &self,
         question: String,
+        exit_code: i32,
         secret_vault: Option<&std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
     ) -> Option<AiResponse> {
         self.ai_callback.as_ref().and_then(|cb| {
@@ -360,6 +363,7 @@ impl SessionInterceptor {
             cb(AiQuery {
                 question,
                 recent_output: recent,
+                exit_code,
             })
         })
     }
@@ -619,7 +623,7 @@ mod tests {
         let mut ic = SessionInterceptor::new(Some(noop_callback()), None);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
-        let resp = ic.call_ai("test".to_string(), None);
+        let resp = ic.call_ai("test".to_string(), 0, None);
         assert!(resp.is_some());
         let r = resp.unwrap();
         assert_eq!(r.command, Some("echo test".to_string()));
@@ -628,7 +632,7 @@ mod tests {
     #[test]
     fn test_call_ai_returns_none() {
         let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()), None);
-        let cmd = ic.call_ai("test".to_string(), None);
+        let cmd = ic.call_ai("test".to_string(), 0, None);
         assert!(cmd.is_none());
     }
 

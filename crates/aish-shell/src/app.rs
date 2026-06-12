@@ -69,6 +69,41 @@ async fn poll_cancelled(token: *const CancellationToken) {
 const DOTS_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
 const RESUME_LIST_LIMIT: usize = 20;
 
+const SSH_CONTEXT_CAP: usize = 40;
+const SSH_CONTEXT_CHAR_BUDGET: usize = 200_000;
+
+fn msg_text_len(m: &ChatMessage) -> usize {
+    m.content
+        .as_ref()
+        .and_then(|c| c.to_text())
+        .map(|t| t.len())
+        .unwrap_or(0)
+}
+
+fn truncate_ssh_history(h: &mut Vec<ChatMessage>) {
+    let excess = h.len().saturating_sub(SSH_CONTEXT_CAP);
+    if excess > 0 {
+        h.drain(..excess);
+    }
+    let lengths: Vec<usize> = h.iter().map(|m| msg_text_len(m)).collect();
+    let total_chars: usize = lengths.iter().sum();
+    if total_chars > SSH_CONTEXT_CHAR_BUDGET {
+        let min_keep = 6;
+        let mut to_remove = 0;
+        let mut running = total_chars;
+        for &len in &lengths {
+            if running <= SSH_CONTEXT_CHAR_BUDGET || h.len() - to_remove <= min_keep {
+                break;
+            }
+            running -= len;
+            to_remove += 1;
+        }
+        if to_remove > 0 {
+            h.drain(..to_remove);
+        }
+    }
+}
+
 fn context_compaction_notice(event: &LlmEvent) -> Option<String> {
     let changed = event
         .data
@@ -3567,10 +3602,7 @@ impl AishShell {
                                 h.push(ChatMessage::assistant(&pr.text));
                             }
                         }
-                        let excess = h.len().saturating_sub(50);
-                        if excess > 0 {
-                            h.drain(..excess);
-                        }
+                        truncate_ssh_history(&mut h);
                     }
 
                     // Render analysis
@@ -4104,6 +4136,8 @@ impl AishShell {
                      \n- **Available skills:**\n{ssh_skills_description} \
                      \n- **For reading/writing/searching files on the REMOTE host:** use `bash` tool with \
                      `cat`, `head`, `tail`, `echo`, `tee`, `grep`, `find`, `awk`, etc. \
+                     \n- **For editing remote files:** use `bash` with `sed -i` for replacements, \
+                     or `bash` with heredoc (`cat > file << 'EOF'`) for creating/overwriting files. \
                      \n- **IMPORTANT about offload:** when bash output is offloaded (status=offloaded), \
                      the file path is on the LOCAL machine. You MUST use `read_file` tool to read it. \
                      NEVER use `bash` to cat/wc/tail an offload path — that file does NOT exist on the remote host. \
@@ -4136,22 +4170,27 @@ impl AishShell {
                 ec_vars.insert("os_info".to_string(), ec_os_info.clone());
                 ec_vars.insert("basic_env_info".to_string(), ec_basic_env_info.clone());
                 ec_vars.insert("output_language".to_string(), ec_output_language.clone());
-                let mut sys = pm.render("cmd_error", &ec_vars);
+                ec_vars.insert("exit_code".to_string(), query.exit_code.to_string());
 
-                // Append SSH host context (use current dynamic host)
-                if let Some(ref host) = current_host {
-                    sys.push_str(&format!(
-                        "\n\n**Important:** The command was executed on remote host **{}** via SSH.",
+                // Add remote host environment info for SSH sessions
+                let remote_env_info = if let Some(ref host) = current_host {
+                    format!(
+                        "\n- **远程主机:** {} (命令在远程主机上执行，请基于远程环境进行分析和修正)",
                         host
-                    ));
-                }
+                    )
+                } else {
+                    String::new()
+                };
+                ec_vars.insert("remote_env_info".to_string(), remote_env_info);
 
-                // Same XML format as local aish's handle_error_correction
+                let sys = pm.render("cmd_error", &ec_vars);
+
+                // Include recent_output in the user message so LLM has the actual error
                 let ctx = format!(
-                    "<command_result>\nCommand: {}\nExit code: 1\n</command_result>\n\n\
-                     Please analyze the error and suggest a fix. \
-                     Check the recent terminal output above for the actual error output.",
-                    failed_cmd
+                    "<command_result>\nCommand: {}\nExit code: {}\n</command_result>\n\n\
+                     Recent terminal output:\n{}\n\n\
+                     Please analyze the error and suggest a fix.",
+                    failed_cmd, query.exit_code, query.recent_output
                 );
                 (ctx, sys)
             } else if query.recent_output.is_empty() {
@@ -4514,10 +4553,7 @@ impl AishShell {
                             h.push(ChatMessage::assistant(&pr.text));
                         }
                     }
-                    let excess = h.len().saturating_sub(50);
-                    if excess > 0 {
-                        h.drain(..excess);
-                    }
+                    truncate_ssh_history(&mut h);
                 }
 
                 // Build AiResponse from text
@@ -5632,25 +5668,28 @@ fn extract_remote_host(command: &str) -> Option<String> {
     None
 }
 
+/// Shell error prefixes used by various shells (e.g. "bash: command: not found").
+/// Each variant appears with and without the leading login-shell dash.
+const SHELL_ERROR_PREFIXES: &[&str] = &[
+    "-bash: ", "bash: ", "-ksh: ", "ksh: ", "-zsh: ", "zsh: ", "-ash: ", "ash: ", "-dash: ",
+    "dash: ", "-fish: ", "fish: ", "-csh: ", "csh: ", "-tcsh: ", "tcsh: ", "-sh: ", "sh: ",
+];
+
 /// Extract the failed command from PTY output after a command error.
 /// Strategy 1: Find the full command from the prompt line just before the
-/// bash error (preserves pipes, args, etc.).
-/// Strategy 2: Extract the command name from the bash error message.
+/// shell error (preserves pipes, args, etc.).
+/// Strategy 2: Extract the command name from the shell error message.
 fn extract_failed_command(output: &str) -> String {
     static ANSI_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap());
     let clean = re.replace_all(output, "").to_string();
     let lines: Vec<&str> = clean.lines().collect();
 
-    // Find the shell error line
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let is_shell_error = trimmed.starts_with("-bash: ")
-            || trimmed.starts_with("bash: ")
-            || trimmed.starts_with("-ksh: ")
-            || trimmed.starts_with("ksh: ")
-            || trimmed.starts_with("-zsh: ")
-            || trimmed.starts_with("zsh: ");
+        let is_shell_error = SHELL_ERROR_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix));
 
         if is_shell_error && i > 0 {
             // Look at the line before the error — it should be the prompt + command
@@ -5674,16 +5713,14 @@ fn extract_failed_command(output: &str) -> String {
     // Fallback: extract command name from the error message itself
     for line in lines.iter().rev() {
         let trimmed = line.trim();
-        let rest = trimmed
-            .strip_prefix("-bash: ")
-            .or_else(|| trimmed.strip_prefix("bash: "))
-            .or_else(|| trimmed.strip_prefix("-ksh: "))
-            .or_else(|| trimmed.strip_prefix("ksh: "))
-            .or_else(|| trimmed.strip_prefix("-zsh: "))
-            .or_else(|| trimmed.strip_prefix("zsh: "));
+        let rest = SHELL_ERROR_PREFIXES
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix));
         if let Some(rest) = rest {
-            if let Some(colon_pos) = rest.find(": ") {
-                let cmd = rest[..colon_pos].trim();
+            // Use rfind to get the LAST ": " — fish errors like
+            // "Unknown command: foo" have multiple colons.
+            if let Some(colon_pos) = rest.rfind(": ") {
+                let cmd = rest[colon_pos + 2..].trim();
                 if !cmd.is_empty() {
                     return cmd.to_string();
                 }
