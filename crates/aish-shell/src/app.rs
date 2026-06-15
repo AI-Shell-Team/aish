@@ -30,6 +30,7 @@ use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
 use crate::resume_selector::{select_resume_session, ResumeSessionItem};
+use crate::statusbar::{self, StatusBarState};
 use crate::types::ShellState;
 
 // ---------------------------------------------------------------------------
@@ -267,6 +268,16 @@ pub struct AishShell {
     expand_history: Arc<Mutex<crate::expand_history::ExpandHistory>>,
     /// Shared terminal session recorder for asciinema v2 recording.
     shared_recorder: crate::recorder::SharedRecorder,
+    /// Whether the status bar is currently visible (toggleable via Ctrl+T).
+    statusbar_visible: bool,
+    /// Atomic mirror of `statusbar_visible` for the resize-watcher thread.
+    statusbar_visible_atomic: Arc<AtomicBool>,
+    /// Whether an AI operation is currently in progress (for status bar state).
+    ai_active: bool,
+    /// Last AI API response latency in milliseconds.
+    last_api_latency_ms: Option<u64>,
+    /// Last known terminal size (cols, rows) — used to detect resize.
+    last_term_size: (u16, u16),
 }
 
 impl AishShell {
@@ -1266,6 +1277,8 @@ impl AishShell {
             *guard = Some(secret_vault.clone());
         }
 
+        let statusbar_visible = config.statusbar.visible;
+
         Ok(Self {
             state,
             config,
@@ -1288,6 +1301,11 @@ impl AishShell {
             animation,
             expand_history,
             shared_recorder,
+            statusbar_visible_atomic: Arc::new(AtomicBool::new(statusbar_visible)),
+            statusbar_visible,
+            ai_active: false,
+            last_api_latency_ms: None,
+            last_term_size: crossterm::terminal::size().unwrap_or((80, 24)),
         })
     }
 
@@ -1336,6 +1354,50 @@ impl AishShell {
             use nix::sys::signal::{self, Signal};
             let _ = unsafe { signal::sigaction(Signal::SIGINT, &old) };
         }
+    }
+
+    /// Spawn a background thread that polls terminal size every 200 ms and
+    /// re-asserts the ANSI scroll region when a resize is detected during
+    /// `read_line` (when the main loop is blocked waiting for user input).
+    ///
+    /// This prevents the status bar and prompt from being stranded mid-screen
+    /// after the user resizes the terminal window while at the input prompt.
+    ///
+    /// The thread reads `visible` to know whether the status bar is shown,
+    /// and uses DECSC/DECRC to preserve the cursor position so it does not
+    /// interfere with rustyline's prompt rendering.
+    fn spawn_resize_watcher(
+        visible: Arc<AtomicBool>,
+        lines: usize,
+        initial_h: u16,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::Builder::new()
+            .name("aish-resize-watcher".into())
+            .spawn(move || {
+                let mut last_h = initial_h;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+
+                    // Always track the terminal height so we have the
+                    // correct value when the bar is later shown.
+                    let (_, h) = crossterm::terminal::size().unwrap_or((80, 24));
+                    if h == last_h {
+                        continue;
+                    }
+
+                    if !visible.load(Ordering::SeqCst) {
+                        // Bar hidden — just remember the new height.
+                        last_h = h;
+                        continue;
+                    }
+
+                    // Resize detected while bar is visible — re-assert
+                    // scroll region and clear stale status bar rows.
+                    statusbar::reassert_after_resize(last_h, lines);
+                    last_h = h;
+                }
+            })
+            .expect("failed to spawn resize-watcher thread")
     }
 
     /// Run the main REPL loop.
@@ -1387,6 +1449,26 @@ impl AishShell {
 
         self.set_phase(ShellPhase::Editing);
 
+        // Enter fixed-bottom status bar mode (ANSI scroll region)
+        if self.statusbar_visible {
+            let lines = statusbar::statusbar_height(&self.config);
+            statusbar::enter_fixed_mode(lines);
+            self.render_statusbar_fixed();
+        }
+
+        // Spawn a background thread that re-asserts the scroll region when
+        // the terminal is resized during `read_line` (when the main loop is
+        // blocked). Without this, resizing the window while at the input
+        // prompt leaves the prompt and status bar stranded mid-screen.
+        {
+            let lines = statusbar::statusbar_height(&self.config);
+            let _watcher = Self::spawn_resize_watcher(
+                self.statusbar_visible_atomic.clone(),
+                lines,
+                self.last_term_size.1,
+            );
+        }
+
         loop {
             if self.state.should_exit {
                 break;
@@ -1403,6 +1485,28 @@ impl AishShell {
                         tracing::info!("Skill '{}' hot-reloaded", name);
                     }
                 }
+            }
+
+            // Detect terminal resize — re-establish scroll region with new
+            // dimensions so the status bar stays pinned to the new bottom.
+            // The resize-watcher thread already handles most of this during
+            // `read_line`, but this is a safety net for when the resize
+            // happened after `read_line` returned.
+            if self.statusbar_visible {
+                let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
+                if (w, h) != self.last_term_size {
+                    let lines = statusbar::statusbar_height(&self.config);
+                    // Clear stale status bar content at the old bottom.
+                    statusbar::reassert_after_resize(self.last_term_size.1, lines);
+                    self.last_term_size = (w, h);
+                    // Re-enter fixed mode to position cursor correctly.
+                    statusbar::enter_fixed_mode(lines);
+                }
+            }
+
+            // Refresh fixed status bar (token counts may have changed)
+            if self.statusbar_visible {
+                self.render_statusbar_fixed();
             }
 
             // Render prompt and read input via rustyline
@@ -1457,6 +1561,30 @@ impl AishShell {
                     {
                         if !self.expand_history.lock().unwrap().is_empty() {
                             self.show_expand_panel();
+                        }
+                        self.restore_statusbar_if_visible();
+                        continue;
+                    }
+                    // Check if Ctrl+T was pressed (status bar toggle)
+                    if matches!(e, rustyline::error::ReadlineError::Interrupted)
+                        && rl.was_status_toggle_requested()
+                    {
+                        if self.statusbar_visible {
+                            // Hiding: expand scroll region to full screen
+                            statusbar::exit_fixed_mode();
+                            self.statusbar_visible = false;
+                            self.statusbar_visible_atomic
+                                .store(false, Ordering::SeqCst);
+                            print!("{}", statusbar::render_hidden_notice());
+                            let _ = io::stdout().flush();
+                        } else {
+                            // Showing: shrink scroll region, render bar
+                            self.statusbar_visible = true;
+                            self.statusbar_visible_atomic
+                                .store(true, Ordering::SeqCst);
+                            let lines = statusbar::statusbar_height(&self.config);
+                            statusbar::enter_fixed_mode(lines);
+                            self.render_statusbar_fixed();
                         }
                         continue;
                     }
@@ -1588,6 +1716,7 @@ impl AishShell {
                             }
                             aish_ui::SlashInputOutcome::Cancelled => {}
                         }
+                        self.restore_statusbar_if_visible();
                         continue;
                     }
                     // Interrupt (Ctrl-C) — handle double-press exit
@@ -1747,6 +1876,14 @@ impl AishShell {
                         CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
                     let token_ptr =
                         self.ai_handler.cancellation_token() as *const CancellationToken;
+
+                    // Update status bar to "generating" state
+                    self.ai_active = true;
+                    if self.statusbar_visible {
+                        self.render_statusbar_fixed();
+                    }
+
+                    let api_start = std::time::Instant::now();
                     let result = runtime.block_on(async {
                         tokio::select! {
                             r = self.ai_handler.handle_question(&question) => r,
@@ -1757,6 +1894,16 @@ impl AishShell {
                     });
                     esc_watcher.stop();
                     Self::restore_ai_sigint_handler(old_sigint);
+
+                    self.last_api_latency_ms =
+                        Some(api_start.elapsed().as_millis() as u64);
+
+                    // Restore status bar to "idle" state
+                    self.ai_active = false;
+                    if self.statusbar_visible {
+                        self.render_statusbar_fixed();
+                    }
+
                     self.sync_state_from_pty_cwd();
 
                     let did_stream = self.streamed_content.load(Ordering::SeqCst);
@@ -1879,6 +2026,7 @@ impl AishShell {
                                             );
                                         }
                                     }
+                                    self.restore_statusbar_if_visible();
                                 }
                             }
 
@@ -2007,6 +2155,13 @@ impl AishShell {
                                 );
                                 let token_ptr = self.ai_handler.cancellation_token()
                                     as *const CancellationToken;
+
+                                self.ai_active = true;
+                                if self.statusbar_visible {
+                                    self.render_statusbar_fixed();
+                                }
+
+                                let api_start = std::time::Instant::now();
                                 let result = runtime.block_on(async {
                                     tokio::select! {
                                         r = self.ai_handler.handle_question(&question) => r,
@@ -2017,6 +2172,14 @@ impl AishShell {
                                 });
                                 esc_watcher.stop();
                                 Self::restore_ai_sigint_handler(old_sigint);
+
+                                self.last_api_latency_ms =
+                                    Some(api_start.elapsed().as_millis() as u64);
+                                self.ai_active = false;
+                                if self.statusbar_visible {
+                                    self.render_statusbar_fixed();
+                                }
+
                                 self.sync_state_from_pty_cwd();
 
                                 let did_stream = self.streamed_content.load(Ordering::SeqCst);
@@ -2077,6 +2240,11 @@ impl AishShell {
                     self.record_history(input, exit_code);
                 }
             }
+        }
+
+        // Exit fixed-bottom status bar mode (reset scroll region)
+        if self.statusbar_visible {
+            statusbar::exit_fixed_mode();
         }
 
         // Save history on exit
@@ -2180,7 +2348,32 @@ impl AishShell {
             Some("/model") => self.handle_model_command(&parts),
             Some("/setup") => self.run_setup_wizard(),
             Some("/plan") => self.handle_plan_command(&parts),
-            Some("/token") => self.handle_token_command(),
+            Some("/token") => {
+                if parts.len() >= 2 {
+                    match parts[1] {
+                        "hide" => {
+                            if self.statusbar_visible {
+                                statusbar::exit_fixed_mode();
+                                self.statusbar_visible = false;
+                            }
+                            println!("{}", t("shell.statusbar.hidden_msg"));
+                        }
+                        "show" => {
+                            if !self.statusbar_visible {
+                                self.statusbar_visible = true;
+                                let lines = statusbar::statusbar_height(&self.config);
+                                statusbar::enter_fixed_mode(lines);
+                            }
+                            println!("{}", t("shell.statusbar.shown_msg"));
+                        }
+                        _ => {
+                            self.handle_token_command();
+                        }
+                    }
+                } else {
+                    self.handle_token_command();
+                }
+            }
             Some("/resume") => {
                 self.handle_resume_command(&parts);
                 return false;
@@ -2595,33 +2788,57 @@ impl AishShell {
         }
     }
 
-    /// Handle `/token` — show cumulative token usage statistics (last 7 days).
+    /// Handle `/token` — show cumulative token usage with context budget and cost.
     fn handle_token_command(&self) {
         let stats = self.ai_handler.token_stats();
-        let total = stats.total_input + stats.total_output;
-        println!();
-        println!("{}", aish_i18n::t("shell.token.title"));
-        println!(
-            "  {}  {}",
-            aish_i18n::t("shell.token.input_tokens"),
-            format_number(stats.total_input)
-        );
-        println!(
-            "  {} {}",
-            aish_i18n::t("shell.token.output_tokens"),
-            format_number(stats.total_output)
-        );
-        println!(
-            "  {}     {}",
-            aish_i18n::t("shell.token.total"),
-            format_number(total)
-        );
-        println!(
-            "  {}  {}",
-            aish_i18n::t("shell.token.api_calls"),
-            format_number(stats.request_count)
-        );
-        println!();
+        let budget_state = self.ai_handler.context_budget_state();
+        let state = StatusBarState {
+            model: self.config.model.clone(),
+            token_stats: stats,
+            context_tokens: budget_state.estimated_tokens,
+            context_window: budget_state.effective_context_window,
+            budget_policy: "sliding".to_string(),
+            ai_active: false,
+            tool_call: None,
+            compacting: budget_state.is_above_auto_compact_threshold,
+            cwd: crate::statusbar::short_cwd(),
+            last_api_latency_ms: self.last_api_latency_ms,
+        };
+        print!("{}", statusbar::render_token_panel(&state, &self.config));
+    }
+
+    /// Build current status bar state from shell internals.
+    fn build_statusbar_state(&self) -> StatusBarState {
+        let stats = self.ai_handler.token_stats();
+        let budget_state = self.ai_handler.context_budget_state();
+        StatusBarState {
+            model: self.config.model.clone(),
+            token_stats: stats,
+            context_tokens: budget_state.estimated_tokens,
+            context_window: budget_state.effective_context_window,
+            budget_policy: "sliding".to_string(),
+            ai_active: self.ai_active,
+            tool_call: None,
+            compacting: budget_state.is_above_auto_compact_threshold,
+            cwd: crate::statusbar::short_cwd(),
+            last_api_latency_ms: self.last_api_latency_ms,
+        }
+    }
+
+    /// Render the status bar at the fixed bottom position (does not scroll).
+    fn render_statusbar_fixed(&self) {
+        let state = self.build_statusbar_state();
+        statusbar::render_fixed(&state, &self.config);
+    }
+
+    /// Re-enter fixed-bottom mode after a TUI panel (expand, slash popup,
+    /// plan approval) exits and resets the ANSI scroll region.
+    fn restore_statusbar_if_visible(&self) {
+        if self.statusbar_visible {
+            let lines = statusbar::statusbar_height(&self.config);
+            statusbar::enter_fixed_mode(lines);
+            self.render_statusbar_fixed();
+        }
     }
 
     /// Interactive setup wizard for configuring provider, API key, model, etc.
