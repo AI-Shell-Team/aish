@@ -91,5 +91,6 @@ Thumbs.db
 #.github
 tmp
 CLAUDE.md
+AGENTS.md
 opencode
 .worktrees/
