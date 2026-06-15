@@ -256,6 +256,14 @@ shell:
     output_tokens: "出力 tokens"
     total: "合計"
     api_calls: "API 呼び出し回数"
+  statusbar:
+    usage_title: "Token 使用量"
+    context_title: "コンテキスト予算"
+    estimated_cost: "推定コスト"
+    policy: "ポリシー: {policy}"
+    toggle_hint: "Ctrl+T でステータスバー切替 · /token hide|show"
+    hidden_msg: "ステータスバーを非表示にしました。Ctrl+T で表示。"
+    shown_msg: "ステータスバーを表示しました。"
   setup:
     no_config_manager: "再設定できません: 設定マネージャーを利用できません"
     cancelled: "セットアップをキャンセルしました。現在の設定を維持します"

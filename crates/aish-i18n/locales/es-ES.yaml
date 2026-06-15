@@ -256,6 +256,14 @@ shell:
     output_tokens: "Tokens de salida"
     total: "Total"
     api_calls: "Llamadas API"
+  statusbar:
+    usage_title: "Uso de tokens"
+    context_title: "Presupuesto de contexto"
+    estimated_cost: "Costo estimado"
+    policy: "Política: {policy}"
+    toggle_hint: "Ctrl+T alterna la barra de estado · /token hide|show"
+    hidden_msg: "Barra de estado oculta. Ctrl+T para mostrar."
+    shown_msg: "Barra de estado visible."
   setup:
     no_config_manager: "No se puede reconfigurar: el gestor de configuración no está disponible"
     cancelled: "Configuración cancelada; se conservan los ajustes actuales"

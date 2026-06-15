@@ -559,6 +559,15 @@ shell:
     total: "总计"
     api_calls: "API 调用次数"
 
+  statusbar:
+    usage_title: "Token 用量"
+    context_title: "上下文预算"
+    estimated_cost: "预计费用"
+    policy: "策略: {policy}"
+    toggle_hint: "Ctrl+T 切换状态栏 · /token hide|show"
+    hidden_msg: "状态栏已隐藏。按 Ctrl+T 显示。"
+    shown_msg: "状态栏已显示。"
+
   setup:
     no_config_manager: "无法重新配置：配置管理器不可用"
     cancelled: "配置已取消，保持当前设置不变"

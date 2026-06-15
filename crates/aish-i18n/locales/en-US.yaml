@@ -559,6 +559,15 @@ shell:
     total: "Total"
     api_calls: "API calls"
 
+  statusbar:
+    usage_title: "Token Usage"
+    context_title: "Context Budget"
+    estimated_cost: "Estimated Cost"
+    policy: "Policy: {policy}"
+    toggle_hint: "Ctrl+T toggles status bar · /token hide|show"
+    hidden_msg: "Status bar hidden. Press Ctrl+T to show."
+    shown_msg: "Status bar shown."
+
   setup:
     no_config_manager: "Cannot reconfigure: configuration manager unavailable"
     cancelled: "Setup cancelled, keeping current settings"

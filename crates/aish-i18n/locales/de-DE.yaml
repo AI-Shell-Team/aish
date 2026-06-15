@@ -256,6 +256,14 @@ shell:
     output_tokens: "Ausgabe-Tokens"
     total: "Gesamt"
     api_calls: "API-Aufrufe"
+  statusbar:
+    usage_title: "Token-Nutzung"
+    context_title: "Kontextbudget"
+    estimated_cost: "Geschätzte Kosten"
+    policy: "Richtlinie: {policy}"
+    toggle_hint: "Ctrl+T schaltet Statusleiste um · /token hide|show"
+    hidden_msg: "Statusleiste ausgeblendet. Ctrl+T zum Einblenden."
+    shown_msg: "Statusleiste eingeblendet."
   setup:
     no_config_manager: "Neukonfiguration nicht möglich: Konfigurationsmanager nicht verfügbar"
     cancelled: "Einrichtung abgebrochen; aktuelle Einstellungen werden beibehalten"
