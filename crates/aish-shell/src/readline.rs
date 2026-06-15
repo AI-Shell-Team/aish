@@ -27,6 +27,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/setup", "Open setup wizard"),
     ("/plan", "Plan mode control"),
     ("/token", "Show token usage"),
+    ("/token hide", "Hide status bar"),
+    ("/token show", "Show status bar"),
     ("/resume", "Resume previous session"),
     ("/feedback", "Submit feedback"),
     ("/record", "Record terminal session (start/stop)"),
@@ -49,6 +51,9 @@ static CTRL_O_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Flag set by `SlashHandler` when `/` is pressed on an empty line.
 static SLASH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Flag set by `StatusToggleHandler` when Ctrl+T is pressed.
+static STATUS_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Event handler that sets a flag when Shift+Tab or F2 is pressed,
 /// then returns `Cmd::Interrupt` to break out of `read_line`.
@@ -88,6 +93,23 @@ impl ConditionalEventHandler for CtrlOHandler {
 /// then returns `Cmd::Interrupt` to break out of `read_line` for the
 /// slash command completion popup.
 struct SlashHandler;
+
+/// Event handler that sets a flag when Ctrl+T is pressed,
+/// then returns `Cmd::Interrupt` to break out of `read_line`.
+struct StatusToggleHandler;
+
+impl ConditionalEventHandler for StatusToggleHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        STATUS_TOGGLE_REQUESTED.store(true, Ordering::SeqCst);
+        Some(Cmd::Interrupt)
+    }
+}
 
 impl ConditionalEventHandler for SlashHandler {
     fn handle(
@@ -286,6 +308,12 @@ impl ShellReadline {
             EventHandler::Conditional(Box::new(SlashHandler)),
         );
 
+        // Bind Ctrl+T for status bar toggle
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Char('T'), Modifiers::CTRL),
+            EventHandler::Conditional(Box::new(StatusToggleHandler)),
+        );
+
         Ok(Self {
             editor,
             autosuggest,
@@ -308,6 +336,12 @@ impl ShellReadline {
     /// The flag is consumed on read.
     pub fn was_slash_requested(&self) -> bool {
         SLASH_REQUESTED.swap(false, Ordering::SeqCst)
+    }
+
+    /// Check whether Ctrl+T triggered the last `Interrupted` error.
+    /// The flag is consumed on read.
+    pub fn was_status_toggle_requested(&self) -> bool {
+        STATUS_TOGGLE_REQUESTED.swap(false, Ordering::SeqCst)
     }
 
     /// Read a line with initial text pre-filled, letting the user edit and
