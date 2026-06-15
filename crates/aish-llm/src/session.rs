@@ -1253,36 +1253,6 @@ impl LlmSession {
         }
     }
 
-    /// Create a sub-session pre-configured for diagnosis with the given tools.
-    ///
-    /// This is a convenience method that creates a SubSession with diagnostic
-    /// configuration and registers the provided tools.
-    ///
-    /// # Arguments
-    /// * `tools` - Tools to register in the diagnostic sub-session
-    ///
-    /// # Returns
-    /// A configured SubSession ready for diagnostic use
-    pub fn create_diagnose_subsession(
-        &self,
-        tools: Vec<Box<dyn Tool>>,
-    ) -> crate::subsession::SubSession {
-        use crate::diagnose_agent;
-        use crate::subsession::{SubSession, SubSessionConfig};
-
-        let config = SubSessionConfig {
-            max_context_messages: 30,
-            max_iterations: 10,
-            system_prompt: Some(diagnose_agent::build_diagnose_prompt()),
-        };
-
-        let mut sub = SubSession::new(self, config);
-        for tool in tools {
-            sub.inner.register_tool(tool);
-        }
-        sub
-    }
-
     fn emit_content_delta(&self, delta: &str, accumulated: &str) {
         self.emit_event(LlmEvent {
             event_type: LlmEventType::ContentDelta,

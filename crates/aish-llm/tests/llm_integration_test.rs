@@ -1,64 +1,50 @@
 // Integration tests for LLM Client, Provider Detection, and Sub-Session Isolation.
 //
 // This test module verifies:
-// 1. LiteLLMClient::new() constructs correctly
-// 2. Provider prefix stripping works
-// 3. Message conversion handles all roles (system, user, assistant, tool)
-// 4. SubSession::new() creates isolated session from parent
-// 5. Sub-session has independent cancellation
-// 6. Sub-session has empty tool registry initially
-// 7. DiagnoseAgent::new() constructs correctly
+// 1. LlmClient construction and provider prefix stripping
+// 2. Message types handle all roles (system, user, assistant, tool)
+// 3. Provider detection from model names and API bases
+// 4. DiagnoseAgent construction and system prompt
+// 5. SubSessionConfig defaults
 
 use aish_llm::{
     detect_provider, detect_provider_from_model, refine_provider_from_api_base, ChatMessage,
-    DiagnoseAgent, LiteLLMClient, LlmClient, SubSessionConfig,
+    DiagnoseAgent, LlmClient, SubSessionConfig,
 };
 
 #[test]
-fn test_litellm_client_construction() {
-    // Test 1: LiteLLMClient::new() constructs correctly
-    let client = LiteLLMClient::new(
-        Some("https://api.openai.com/v1"),
-        Some("sk-test-key"),
-        "gpt-4o",
-    );
+fn test_llm_client_construction() {
+    let client = LlmClient::new("https://api.openai.com/v1", "sk-test-key", "gpt-4o");
     assert_eq!(client.model_name(), "gpt-4o");
-    assert_eq!(client.api_base(), Some("https://api.openai.com/v1"));
-    assert_eq!(client.api_key(), Some("sk-test-key"));
-}
-
-#[test]
-fn test_litellm_client_optional_fields() {
-    // Test 2: LiteLLMClient with None for optional fields
-    let client = LiteLLMClient::new(None, None, "gpt-4o");
-    assert_eq!(client.model_name(), "gpt-4o");
-    assert_eq!(client.api_base(), None);
-    assert_eq!(client.api_key(), None);
+    assert_eq!(client.api_base(), "https://api.openai.com/v1");
+    assert_eq!(client.api_key(), "sk-test-key");
 }
 
 #[test]
 fn test_provider_prefix_stripping() {
-    // Test 3: Provider prefix stripping works
-    let client1 = LiteLLMClient::new(None, None, "openai/gpt-4o");
+    let client1 = LlmClient::new("https://api.openai.com/v1", "sk-test", "openai/gpt-4o");
     assert_eq!(client1.model_name(), "gpt-4o");
 
-    let client2 = LiteLLMClient::new(None, None, "anthropic/claude-3-opus-20240229");
+    let client2 = LlmClient::new(
+        "https://api.openai.com/v1",
+        "sk-test",
+        "anthropic/claude-3-opus-20240229",
+    );
     assert_eq!(client2.model_name(), "claude-3-opus-20240229");
 
-    let client3 = LiteLLMClient::new(None, None, "google/gemini-pro");
+    let client3 = LlmClient::new("https://api.openai.com/v1", "sk-test", "google/gemini-pro");
     assert_eq!(client3.model_name(), "gemini-pro");
 
-    let client4 = LiteLLMClient::new(None, None, "deepseek/deepseek-coder");
+    let client4 = LlmClient::new(
+        "https://api.openai.com/v1",
+        "sk-test",
+        "deepseek/deepseek-coder",
+    );
     assert_eq!(client4.model_name(), "deepseek-coder");
-
-    // Test LlmClient also strips prefixes
-    let llm_client = LlmClient::new("https://api.openai.com/v1", "sk-test", "openai/gpt-4o");
-    assert_eq!(llm_client.model_name(), "gpt-4o");
 }
 
 #[test]
 fn test_message_conversion_all_roles() {
-    // Test 4: Message conversion handles all roles
     let system_msg = ChatMessage::system("You are a helpful assistant");
     assert_eq!(system_msg.role, "system");
     assert_eq!(
@@ -73,15 +59,10 @@ fn test_message_conversion_all_roles() {
     let asst_msg = ChatMessage::assistant("I'm doing well, thank you!");
     assert_eq!(asst_msg.role, "assistant");
     assert_eq!(asst_msg.text_content(), Some("I'm doing well, thank you!"));
-
-    // Note: convert_message is a private method of LiteLLMClient,
-    // so we can't directly test it here. The above tests verify
-    // that ChatMessage can be created with all required roles.
 }
 
 #[test]
 fn test_provider_detection_from_model() {
-    // Test 5: Provider detection from model names
     let openai_provider = detect_provider_from_model("gpt-4o");
     assert_eq!(openai_provider.id, "openai");
     assert_eq!(openai_provider.display_name, "OpenAI");
@@ -101,7 +82,7 @@ fn test_provider_detection_from_model() {
     assert_eq!(deepseek_provider.display_name, "DeepSeek");
 
     let ollama_provider = detect_provider_from_model("llama3");
-    assert_eq!(ollama_provider.id, "mistral"); // llama is detected as mistral
+    assert_eq!(ollama_provider.id, "mistral");
     assert_eq!(ollama_provider.display_name, "Mistral AI");
 
     let unknown_provider = detect_provider_from_model("unknown-model");
@@ -111,7 +92,6 @@ fn test_provider_detection_from_model() {
 
 #[test]
 fn test_provider_refinement_from_api_base() {
-    // Test 6: Provider refinement from API base URL
     let mut provider = detect_provider_from_model("unknown-model");
     assert_eq!(provider.id, "unknown");
 
@@ -132,7 +112,6 @@ fn test_provider_refinement_from_api_base() {
 
 #[test]
 fn test_combined_provider_detection() {
-    // Test 7: Combined provider detection (model + API base)
     let provider1 = detect_provider("gpt-4", "https://api.openai.com/v1");
     assert_eq!(provider1.id, "openai");
 
@@ -145,25 +124,18 @@ fn test_combined_provider_detection() {
 
 #[test]
 fn test_diagnose_agent_construction() {
-    // Test 8: DiagnoseAgent::new() constructs correctly
     let _agent = DiagnoseAgent::new();
-    // Note: config and system_prompt are private fields
-    // The test verifies the API is callable and doesn't panic
 
-    // Test with custom config
     let config = SubSessionConfig {
         max_iterations: 20,
         max_context_messages: 100,
         system_prompt: Some("Custom prompt".to_string()),
     };
     let _agent2 = DiagnoseAgent::with_config(config);
-    // If we get here, construction succeeded
 }
 
 #[test]
 fn test_diagnose_system_prompt() {
-    // Test 9: Diagnose agent has proper system prompt
-    // Note: system_prompt is a private field, but we can test the helper function
     use aish_llm::diagnose_agent::build_diagnose_prompt;
     let prompt = build_diagnose_prompt();
 
@@ -181,7 +153,6 @@ fn test_diagnose_system_prompt() {
 
 #[test]
 fn test_subsession_config_default() {
-    // Test 10: SubSessionConfig::default() works
     let config = SubSessionConfig::default();
     assert_eq!(config.max_context_messages, 50);
     assert_eq!(config.max_iterations, 10);
@@ -190,7 +161,6 @@ fn test_subsession_config_default() {
 
 #[test]
 fn test_subsession_custom_config() {
-    // Test 11: Custom SubSessionConfig
     let config = SubSessionConfig {
         max_context_messages: 100,
         max_iterations: 20,
@@ -205,22 +175,13 @@ fn test_subsession_custom_config() {
 }
 
 #[test]
-fn test_litellm_client_api_base_trimming() {
-    // Test 12: API base URL trailing slash is trimmed
-    let client1 = LiteLLMClient::new(
-        Some("https://api.openai.com/v1/"),
-        Some("sk-test"),
-        "gpt-4o",
-    );
-    assert_eq!(client1.api_base(), Some("https://api.openai.com/v1"));
-
-    let client2 = LlmClient::new("https://api.openai.com/v1/", "sk-test", "gpt-4o");
-    assert_eq!(client2.api_base(), "https://api.openai.com/v1");
+fn test_llm_client_api_base_trimming() {
+    let client = LlmClient::new("https://api.openai.com/v1/", "sk-test", "gpt-4o");
+    assert_eq!(client.api_base(), "https://api.openai.com/v1");
 }
 
 #[test]
 fn test_message_with_none_content() {
-    // Test 13: ChatMessage can have None content (for tool calls, etc.)
     use aish_llm::MessageContent;
     let msg_with_content = ChatMessage {
         role: "user".to_string(),
@@ -247,7 +208,6 @@ fn test_message_with_none_content() {
 
 #[test]
 fn test_provider_dashboard_urls() {
-    // Test 14: Provider dashboard URLs are correctly set
     let openai = detect_provider_from_model("gpt-4");
     assert_eq!(
         openai.dashboard_url.as_deref(),
@@ -272,7 +232,6 @@ fn test_provider_dashboard_urls() {
 
 #[test]
 fn test_provider_tool_support_detection() {
-    // Test 15: Provider tool support detection
     let openai = detect_provider_from_model("gpt-4");
     assert!(openai.supports_tools);
 

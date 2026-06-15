@@ -71,23 +71,6 @@ impl ToolRegistry {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Create the default tool set with built-in tools.
-    pub fn default_tools() -> Self {
-        let mut reg = Self::new();
-        reg.register(Box::new(crate::bash::BashTool::new()));
-        reg.register(Box::new(crate::fs::ReadFileTool::new()));
-        reg.register(Box::new(crate::fs::WriteFileTool::new()));
-        reg.register(Box::new(crate::fs::EditFileTool::new()));
-        reg.register(Box::new(crate::ask_user::AskUserTool::new()));
-        reg.register(Box::new(crate::final_answer::FinalAnswerTool::new()));
-        reg.register(Box::new(crate::python::PythonTool::new()));
-        // MemoryTool and SkillTool require callbacks, so they use noop defaults.
-        // The shell will replace them with wired versions at startup.
-        reg.register(Box::new(crate::memory_tool::MemoryTool::noop()));
-        reg.register(Box::new(crate::skill_tool::SkillTool::noop()));
-        reg
-    }
-
     /// Drain all tools from the registry, returning them as a vector of
     /// `(name, tool)` pairs. The registry is left empty after this call.
     pub fn drain_tools(&mut self) -> Vec<(String, Box<dyn Tool>)> {

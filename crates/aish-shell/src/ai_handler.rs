@@ -903,19 +903,6 @@ pub(crate) fn whoami() -> String {
         .unwrap_or_else(|_| "user".to_string())
 }
 
-/// Get the hostname.
-#[allow(dead_code)]
-pub(crate) fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| {
-            std::process::Command::new("hostname")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .map_err(|_| "unknown".to_string())
-        })
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
 /// Get OS information string.
 pub(crate) fn os_info() -> String {
     format!(
