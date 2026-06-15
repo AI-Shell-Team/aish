@@ -125,6 +125,57 @@ pub struct OutputOffloadConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Status bar sub-config
+// ---------------------------------------------------------------------------
+
+fn default_statusbar_visible() -> bool {
+    true
+}
+
+fn default_statusbar_style() -> String {
+    "single".into()
+}
+
+fn default_refresh_interval_ms() -> u64 {
+    500
+}
+
+/// Per-model pricing override entry for cost estimation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingEntry {
+    pub input_per_1k: f64,
+    pub output_per_1k: f64,
+}
+
+/// Configuration for the bottom status bar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StatusBarConfig {
+    /// Whether the status bar is visible on startup.
+    #[serde(default = "default_statusbar_visible")]
+    pub visible: bool,
+    /// Style: "single" (detailed 1-line) or "minimal" (compact 1-line).
+    #[serde(default = "default_statusbar_style")]
+    pub style: String,
+    /// Refresh interval in milliseconds for idle-state updates.
+    #[serde(default = "default_refresh_interval_ms")]
+    pub refresh_interval_ms: u64,
+    /// Optional per-model pricing overrides (USD per 1K tokens).
+    pub pricing: HashMap<String, PricingEntry>,
+}
+
+impl Default for StatusBarConfig {
+    fn default() -> Self {
+        Self {
+            visible: default_statusbar_visible(),
+            style: default_statusbar_style(),
+            refresh_interval_ms: default_refresh_interval_ms(),
+            pricing: HashMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Context auto-compact sub-config
 // ---------------------------------------------------------------------------
 
@@ -265,6 +316,10 @@ pub struct ConfigModel {
     /// Terminal resize handling mode: full, pty_only, or off
     #[serde(default = "default_terminal_resize_mode")]
     pub terminal_resize_mode: String,
+
+    /// Status bar configuration (token usage display).
+    #[serde(default)]
+    pub statusbar: StatusBarConfig,
 }
 
 impl Default for ConfigModel {
@@ -307,6 +362,7 @@ impl Default for ConfigModel {
             enable_scripts: default_true(),
             history_size: default_history_size(),
             terminal_resize_mode: default_terminal_resize_mode(),
+            statusbar: StatusBarConfig::default(),
         }
     }
 }
