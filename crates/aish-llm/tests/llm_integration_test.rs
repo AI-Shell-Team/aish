@@ -81,9 +81,9 @@ fn test_provider_detection_from_model() {
     assert_eq!(deepseek_provider.id, "deepseek");
     assert_eq!(deepseek_provider.display_name, "DeepSeek");
 
-    let ollama_provider = detect_provider_from_model("llama3");
-    assert_eq!(ollama_provider.id, "mistral");
-    assert_eq!(ollama_provider.display_name, "Mistral AI");
+    let mistral_provider = detect_provider_from_model("llama3");
+    assert_eq!(mistral_provider.id, "mistral");
+    assert_eq!(mistral_provider.display_name, "Mistral AI");
 
     let unknown_provider = detect_provider_from_model("unknown-model");
     assert_eq!(unknown_provider.id, "unknown");
