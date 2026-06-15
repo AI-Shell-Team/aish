@@ -335,6 +335,11 @@ impl AiHandler {
         self.token_store.stats()
     }
 
+    /// Return a snapshot of the current context budget state.
+    pub fn context_budget_state(&self) -> aish_context::ContextBudgetState {
+        self.context_manager.budget_state()
+    }
+
     /// Persist token usage delta from the current session to disk.
     pub fn persist_token_usage(&mut self) {
         let stats = self.llm_session.token_stats();
