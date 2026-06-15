@@ -19,6 +19,7 @@ pub mod diagnose_agent;
 pub mod langfuse;
 pub mod models;
 pub mod oauth;
+pub mod pricing;
 pub mod provider;
 pub mod providers;
 pub mod session;
@@ -39,6 +40,7 @@ pub use oauth::{
     exchange_code_for_tokens, generate_pkce, generate_state, load_tokens, login_with_browser,
     login_with_device_code, open_url, save_tokens, OAuthProviderSpec, OAuthTokens, PkcePair,
 };
+pub use pricing::{estimate_cost, lookup_pricing, ModelPricing};
 pub use provider::{
     detect_provider, detect_provider_from_model, refine_provider_from_api_base, ProviderInfo,
 };
