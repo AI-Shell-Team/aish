@@ -742,9 +742,6 @@ impl PersistentPty {
                 if idle_poll_count >= idle_threshold {
                     // No data for N * 50ms — the remote shell is idle and
                     // sitting at a prompt waiting for input.
-                    if is_session {
-                        interceptor.mark_prompt_ready();
-                    }
                     // Mark probe as injected so we don't auto-inject on idle.
                     // Actual probing is deferred to the first AI invocation
                     // (`;` trigger) to avoid false positives from Ctrl+R

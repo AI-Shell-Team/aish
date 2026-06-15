@@ -341,11 +341,6 @@ impl SessionInterceptor {
         self.state == InterceptorState::AiProcessing
     }
 
-    /// Called when the select loop times out with no data.
-    /// Kept for backward compatibility — line-level detection no longer
-    /// needs this signal.
-    pub fn mark_prompt_ready(&mut self) {}
-
     /// Run the AI callback. The callback returns an AiResponse containing
     /// an optional command and display text (or None on error).
     pub fn call_ai(

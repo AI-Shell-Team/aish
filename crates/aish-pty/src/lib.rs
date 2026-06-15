@@ -23,7 +23,6 @@ pub mod output_buffer;
 pub mod persistent;
 pub mod readline_tab;
 pub mod session_interceptor;
-pub mod state_capture;
 pub mod types;
 
 /// Result returned by the SSH secret-check closure.
@@ -52,6 +51,5 @@ pub use session_interceptor::{
     AskUserOption, AskUserRequest, BashExecResult, FollowupCallback, InterceptorState,
     RemoteExecFn, SessionInterceptor, StatusCallback, StdinAction,
 };
-pub use state_capture::StateChanges;
 pub use types::CancelToken;
 pub use types::{CommandSource, CommandSubmission, PtyCommandResult, StreamName};

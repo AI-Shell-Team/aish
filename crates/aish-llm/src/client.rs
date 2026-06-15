@@ -3,213 +3,6 @@ use reqwest::Client;
 
 use crate::types::{ChatMessage, ToolSpec};
 
-/// HTTP client using litellm-rs for multi-provider LLM support.
-///
-/// LiteLLMClient wraps litellm-rs to support 100+ LLM providers while maintaining
-/// compatibility with our existing ChatMessage and ToolSpec types.
-///
-/// For tool calling scenarios, this client falls back to direct reqwest API calls
-/// since litellm-rs lite mode doesn't support native tool calling.
-pub struct LiteLLMClient {
-    api_base: Option<String>,
-    api_key: Option<String>,
-    model: String,
-}
-
-impl LiteLLMClient {
-    /// Create a new LiteLLMClient.
-    ///
-    /// The model name can include a provider prefix (e.g., "openai/gpt-4o") which will be
-    /// stripped automatically. API keys are read from environment variables by litellm-rs.
-    pub fn new(api_base: Option<&str>, api_key: Option<&str>, model: &str) -> Self {
-        // Strip LiteLLM-style provider prefix (e.g. "openai/gpt-5.1" → "gpt-5.1")
-        let model = match model.split_once('/') {
-            Some((_provider, name)) => name.to_string(),
-            None => model.to_string(),
-        };
-        Self {
-            api_base: api_base.map(|s| s.trim_end_matches('/').to_string()),
-            api_key: api_key.map(|s| s.to_string()),
-            model,
-        }
-    }
-
-    /// Return the API base URL, if provided.
-    pub fn api_base(&self) -> Option<&str> {
-        self.api_base.as_deref()
-    }
-
-    /// Return the API key, if provided.
-    pub fn api_key(&self) -> Option<&str> {
-        self.api_key.as_deref()
-    }
-
-    /// Return the model name used for this client.
-    pub fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    /// Test connectivity by sending a lightweight request.
-    pub async fn test_connection(&self) -> Result<(), String> {
-        // For litellm-rs, we can test by making a minimal completion request
-        let messages = vec![litellm_rs::user_message("hi")];
-        let result = litellm_rs::completion(&self.model, messages, None).await;
-
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Check if it's an auth error (server is reachable but credentials failed)
-                let err_msg = e.to_string().to_lowercase();
-                if err_msg.contains("401")
-                    || err_msg.contains("403")
-                    || err_msg.contains("unauthorized")
-                {
-                    Ok(())
-                } else {
-                    Err(format!("Connection failed: {}", e))
-                }
-            }
-        }
-    }
-
-    /// Convert our ChatMessage to litellm_rs message format.
-    fn convert_message(msg: &ChatMessage) -> litellm_rs::Message {
-        let text = msg.text_content().unwrap_or("");
-        match msg.role.as_str() {
-            "system" => litellm_rs::system_message(text),
-            "user" => litellm_rs::user_message(text),
-            "assistant" => litellm_rs::assistant_message(text),
-            _ => litellm_rs::user_message(text),
-        }
-    }
-
-    /// Send a non-streaming chat completion request.
-    ///
-    /// Falls back to reqwest for tool calling since litellm-rs lite mode doesn't support it.
-    pub async fn chat_completion(
-        &self,
-        messages: &[ChatMessage],
-        tools: Option<&[ToolSpec]>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-    ) -> Result<LlmResponse, AishError> {
-        // If tools are requested, fall back to direct API call
-        if tools.is_some() && tools.unwrap().len() > 0 {
-            return self
-                .fallback_chat_completion(messages, tools, false, temperature, max_tokens)
-                .await;
-        }
-
-        // Convert messages to litellm_rs format
-        let litellm_messages: Vec<litellm_rs::Message> =
-            messages.iter().map(Self::convert_message).collect();
-
-        // Build optional parameters using CompletionOptions
-        let litellm_options = if temperature.is_some() || max_tokens.is_some() {
-            let mut opts = litellm_rs::CompletionOptions::default();
-            opts.temperature = temperature;
-            opts.max_tokens = max_tokens;
-            Some(opts)
-        } else {
-            None
-        };
-
-        // Call litellm-rs
-        let response = litellm_rs::completion(&self.model, litellm_messages, litellm_options)
-            .await
-            .map_err(|e| AishError::Llm(format!("LiteLLM completion error: {}", e)))?;
-
-        // Convert response to our format
-        let json = serde_json::to_value(&response)
-            .map_err(|e| AishError::Llm(format!("JSON serialization error: {}", e)))?;
-
-        Ok(LlmResponse::Json(json))
-    }
-
-    /// Send a streaming chat completion request.
-    ///
-    /// Falls back to reqwest for tool calling since litellm-rs lite mode doesn't support it.
-    pub async fn chat_completion_stream(
-        &self,
-        messages: &[ChatMessage],
-        tools: Option<&[ToolSpec]>,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-    ) -> Result<LlmResponse, AishError> {
-        // For now, always fall back to direct API call for streaming
-        // to maintain compatibility with our existing StreamParser
-        self.fallback_chat_completion(messages, tools, true, temperature, max_tokens)
-            .await
-    }
-
-    /// Fallback to direct reqwest API call for tool calling scenarios.
-    async fn fallback_chat_completion(
-        &self,
-        messages: &[ChatMessage],
-        tools: Option<&[ToolSpec]>,
-        stream: bool,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-    ) -> Result<LlmResponse, AishError> {
-        // Determine API base - default to OpenAI if not provided
-        let api_base = self
-            .api_base
-            .as_deref()
-            .unwrap_or("https://api.openai.com/v1");
-
-        // Determine API key - try environment variable if not provided
-        let api_key = self.api_key.clone().unwrap_or_else(|| {
-            std::env::var("OPENAI_API_KEY").expect("No API key provided and OPENAI_API_KEY not set")
-        });
-
-        let mut body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "stream": stream,
-        });
-
-        if let Some(temp) = temperature {
-            body["temperature"] = serde_json::json!(temp);
-        }
-        if let Some(tokens) = max_tokens {
-            body["max_tokens"] = serde_json::json!(tokens);
-        }
-        if let Some(tools) = tools {
-            body["tools"] = serde_json::json!(tools);
-            body["tool_choice"] = serde_json::json!("auto");
-        }
-
-        let url = format!("{}/chat/completions", api_base);
-        let client = Client::new();
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AishError::Llm(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(AishError::Llm(format_http_error(status, &text)));
-        }
-
-        if stream {
-            Ok(LlmResponse::Stream(resp))
-        } else {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| AishError::Llm(e.to_string()))?;
-            let json: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| AishError::Llm(format!("JSON parse error: {}", e)))?;
-            Ok(LlmResponse::Json(json))
-        }
-    }
-}
-
 /// HTTP client for OpenAI-compatible chat completion APIs.
 pub struct LlmClient {
     http: Client,
@@ -423,9 +216,6 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
 pub enum LlmResponse {
     Json(serde_json::Value),
     Stream(reqwest::Response),
-    // Note: For now we don't expose a separate LitellmStream variant.
-    // We fall back to reqwest streaming for all cases to maintain compatibility.
-    // In the future, we could add dedicated litellm stream handling.
 }
 
 #[cfg(test)]
@@ -478,44 +268,33 @@ mod tests {
         assert_eq!(client.model_name(), "gpt-4o");
     }
 
-    // LiteLLMClient tests
     #[test]
-    fn test_litellm_client_construction() {
-        let client =
-            LiteLLMClient::new(Some("https://api.openai.com/v1"), Some("sk-test"), "gpt-4o");
-        assert_eq!(client.model_name(), "gpt-4o");
-        assert_eq!(client.api_base(), Some("https://api.openai.com/v1"));
-        assert_eq!(client.api_key(), Some("sk-test"));
+    fn test_llm_client_api_base_trimming() {
+        let client = LlmClient::new("https://api.openai.com/v1/", "sk-test", "gpt-4o");
+        assert_eq!(client.api_base(), "https://api.openai.com/v1");
     }
 
     #[test]
-    fn test_litellm_client_optional_fields() {
-        let client = LiteLLMClient::new(None, None, "gpt-4o");
-        assert_eq!(client.model_name(), "gpt-4o");
-        assert_eq!(client.api_base(), None);
-        assert_eq!(client.api_key(), None);
-    }
+    fn test_provider_prefix_stripping() {
+        let client1 = LlmClient::new("https://api.openai.com/v1", "sk-test", "openai/gpt-4o");
+        assert_eq!(client1.model_name(), "gpt-4o");
 
-    #[test]
-    fn test_litellm_client_strips_provider_prefix() {
-        let client = LiteLLMClient::new(None, None, "openai/gpt-4o");
-        assert_eq!(client.model_name(), "gpt-4o");
-
-        let client2 = LiteLLMClient::new(None, None, "anthropic/claude-3-opus");
+        let client2 = LlmClient::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            "anthropic/claude-3-opus",
+        );
         assert_eq!(client2.model_name(), "claude-3-opus");
-    }
 
-    #[test]
-    fn test_litellm_message_conversion() {
-        let sys_msg = ChatMessage::system("You are a helpful assistant");
-        let _litellm_sys = LiteLLMClient::convert_message(&sys_msg);
-        // The message should be converted - we can't inspect internals but it should not panic
+        let client3 = LlmClient::new("https://api.openai.com/v1", "sk-test", "google/gemini-pro");
+        assert_eq!(client3.model_name(), "gemini-pro");
 
-        let user_msg = ChatMessage::user("Hello");
-        let _litellm_user = LiteLLMClient::convert_message(&user_msg);
-
-        let asst_msg = ChatMessage::assistant("Hi there");
-        let _litellm_asst = LiteLLMClient::convert_message(&asst_msg);
+        let client4 = LlmClient::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            "deepseek/deepseek-coder",
+        );
+        assert_eq!(client4.model_name(), "deepseek-coder");
     }
 
     #[test]

@@ -27,8 +27,8 @@ pub mod subsession;
 pub mod types;
 pub mod usage;
 
-pub use agent::{AgentConfig, AgentStep, ReActAgent, SystemDiagnoseAgent};
-pub use client::{LiteLLMClient, LlmClient, LlmResponse};
+pub use agent::{AgentConfig, AgentStep, ReActAgent};
+pub use client::{LlmClient, LlmResponse};
 pub use diagnose_agent::DiagnoseAgent;
 pub use langfuse::{LangfuseClient, LangfuseConfig};
 pub use models::{
