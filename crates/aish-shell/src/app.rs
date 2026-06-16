@@ -32,6 +32,11 @@ use crate::renderer::ShellRenderer;
 use crate::resume_selector::{select_resume_session, ResumeSessionItem};
 use crate::types::ShellState;
 
+/// Format prompt + command as displayed after Enter (without trailing newline).
+fn format_user_submitted_line(prompt: &str, command: &str) -> String {
+    format!("{prompt}{command}")
+}
+
 // ---------------------------------------------------------------------------
 // SIGINT handler for AI operation cancellation
 // ---------------------------------------------------------------------------
@@ -1501,124 +1506,11 @@ impl AishShell {
                     {
                         match self.run_slash_input_session(&prompt_str) {
                             aish_ui::SlashInputOutcome::Command(cmd) => {
-                                // Record user input if recording is active
-                                crate::recorder::shared_record_input(
-                                    &self.shared_recorder,
-                                    &format!("{}\n", cmd.trim()),
-                                );
-                                // Execute the selected command directly (avoids raw mode
-                                // conflict between crossterm and rustyline).
-                                let input = cmd.trim();
-                                if !input.is_empty() {
-                                    self.state.history.push(input.to_string());
-                                    if self.handle_special_command(input) {
-                                        self.record_history(input, 0);
-                                    }
-                                }
+                                self.apply_slash_popup_command(&mut rl, &prompt_str, &cmd);
                             }
                             aish_ui::SlashInputOutcome::Dismissed(text) => {
-                                // No match — pre-fill readline so user can continue
-                                // typing (e.g. /bin/ls).
-                                match rl.read_line_with_initial(&prompt_str, (&text, "")) {
-                                    Ok(Some(line)) => {
-                                        let input = line.trim();
-                                        if !input.is_empty() {
-                                            self.state.history.push(input.to_string());
-                                            match input::classify_input(input) {
-                                                crate::types::InputIntent::SpecialCommand => {
-                                                    if self.handle_special_command(input) {
-                                                        self.record_history(input, 0);
-                                                    }
-                                                }
-                                                crate::types::InputIntent::Command
-                                                | crate::types::InputIntent::OperatorCommand => {
-                                                    self.set_phase(ShellPhase::Running);
-                                                    let exit_code =
-                                                        self.execute_external_command(input);
-                                                    self.set_phase(ShellPhase::Editing);
-                                                    self.record_history(input, exit_code);
-                                                    self.reset_interruption();
-                                                }
-                                                crate::types::InputIntent::BuiltinCommand => {
-                                                    let parts: Vec<&str> =
-                                                        input.split_whitespace().collect();
-                                                    if let Some(cmd) = parts.first() {
-                                                        let result = self
-                                                            .state
-                                                            .handle_builtin(cmd, &parts[1..]);
-                                                        if let Some(ref output) = result.output {
-                                                            println!("{}", output);
-                                                        }
-                                                        if result.should_exit {
-                                                            self.record_history(input, 0);
-                                                            break;
-                                                        }
-                                                    }
-                                                    self.record_history(input, 0);
-                                                }
-                                                crate::types::InputIntent::Help => {
-                                                    let result =
-                                                        self.state.handle_builtin("help", &[]);
-                                                    if let Some(output) = result.output {
-                                                        println!("{}", output);
-                                                    }
-                                                    self.record_history(input, 0);
-                                                }
-                                                crate::types::InputIntent::ScriptCall => {
-                                                    let exit_code = self.execute_script(input);
-                                                    self.record_history(input, exit_code);
-                                                }
-                                                _ => {
-                                                    eprintln!("Unknown: {}", input);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(ref e)
-                                        if matches!(
-                                            e,
-                                            rustyline::error::ReadlineError::Interrupted
-                                        ) =>
-                                    {
-                                        if rl.was_slash_requested() {
-                                            // User pressed `/` inside the
-                                            // pre-filled readline — re-trigger
-                                            // the slash popup.
-                                            match self.run_slash_input_session(&prompt_str) {
-                                                aish_ui::SlashInputOutcome::Command(cmd) => {
-                                                    // Record user input if recording is active
-                                                    crate::recorder::shared_record_input(
-                                                        &self.shared_recorder,
-                                                        &format!("{}\n", cmd.trim()),
-                                                    );
-                                                    let input = cmd.trim();
-                                                    if !input.is_empty() {
-                                                        self.state.history.push(input.to_string());
-                                                        if self.handle_special_command(input) {
-                                                            self.record_history(input, 0);
-                                                        }
-                                                    }
-                                                }
-                                                aish_ui::SlashInputOutcome::Dismissed(text) => {
-                                                    let _ = rl.read_line_with_initial(
-                                                        &prompt_str,
-                                                        (&text, ""),
-                                                    );
-                                                }
-                                                aish_ui::SlashInputOutcome::Cancelled => {}
-                                            }
-                                        } else {
-                                            crate::recorder::shared_record_output(
-                                                &self.shared_recorder,
-                                                "\r\n",
-                                            );
-                                            if self.handle_ctrl_c() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {}
+                                if self.read_line_after_slash_dismiss(&mut rl, &prompt_str, &text) {
+                                    break;
                                 }
                             }
                             aish_ui::SlashInputOutcome::Cancelled => {}
@@ -2195,6 +2087,131 @@ impl AishShell {
         self.shutdown();
 
         Ok(())
+    }
+
+    /// Echo prompt + submitted command the way rustyline would after Enter.
+    fn echo_user_submitted_line(&self, prompt: &str, command: &str) {
+        use std::io::Write;
+        print!("{}", format_user_submitted_line(prompt, command));
+        println!();
+        let _ = std::io::stdout().flush();
+        crate::recorder::shared_record_input(&self.shared_recorder, &format!("{command}\n"));
+    }
+
+    /// Execute a slash command selected from the popup (echo, history, handler).
+    fn apply_slash_popup_command(&mut self, rl: &mut ShellReadline, prompt: &str, cmd: &str) {
+        let input = cmd.trim();
+        if input.is_empty() {
+            return;
+        }
+        self.echo_user_submitted_line(prompt, input);
+        rl.add_history_entry(input);
+        self.state.history.push(input.to_string());
+        if self.handle_special_command(input) {
+            self.record_history(input, 0);
+        }
+    }
+
+    /// Record Tab-dismissed popup text for cast replay (e.g. `/model ` after completion).
+    fn record_slash_popup_dismissed(&self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        crate::recorder::shared_record_input(&self.shared_recorder, &format!("{text}\n"));
+    }
+
+    /// After slash popup dismisses into readline, read/edit/submit (supports nested `/`).
+    /// Returns `true` when the main shell loop should exit.
+    fn read_line_after_slash_dismiss(
+        &mut self,
+        rl: &mut ShellReadline,
+        prompt: &str,
+        initial: &str,
+    ) -> bool {
+        self.record_slash_popup_dismissed(initial);
+        let mut prefill = initial.to_string();
+        loop {
+            match rl.read_line_with_initial(prompt, (&prefill, "")) {
+                Ok(Some(line)) => return self.process_readline_submission(&line),
+                Ok(None) => return false,
+                Err(ref e) if matches!(e, rustyline::error::ReadlineError::Interrupted) => {
+                    if rl.was_slash_requested() {
+                        match self.run_slash_input_session(prompt) {
+                            aish_ui::SlashInputOutcome::Command(cmd) => {
+                                self.apply_slash_popup_command(rl, prompt, &cmd);
+                                return false;
+                            }
+                            aish_ui::SlashInputOutcome::Dismissed(text) => {
+                                self.record_slash_popup_dismissed(&text);
+                                prefill = text;
+                            }
+                            aish_ui::SlashInputOutcome::Cancelled => return false,
+                        }
+                    } else {
+                        crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");
+                        return self.handle_ctrl_c();
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Classify and run a readline submission. Returns `true` to break the main loop.
+    fn process_readline_submission(&mut self, line: &str) -> bool {
+        let input = line.trim();
+        if input.is_empty() {
+            return false;
+        }
+        self.state.history.push(input.to_string());
+        match input::classify_input(input) {
+            crate::types::InputIntent::SpecialCommand => {
+                if self.handle_special_command(input) {
+                    self.record_history(input, 0);
+                }
+                false
+            }
+            crate::types::InputIntent::Command | crate::types::InputIntent::OperatorCommand => {
+                self.set_phase(ShellPhase::Running);
+                let exit_code = self.execute_external_command(input);
+                self.set_phase(ShellPhase::Editing);
+                self.record_history(input, exit_code);
+                self.reset_interruption();
+                false
+            }
+            crate::types::InputIntent::BuiltinCommand => {
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                if let Some(cmd) = parts.first() {
+                    let result = self.state.handle_builtin(cmd, &parts[1..]);
+                    if let Some(ref output) = result.output {
+                        println!("{}", output);
+                    }
+                    if result.should_exit {
+                        self.record_history(input, 0);
+                        return true;
+                    }
+                }
+                self.record_history(input, 0);
+                false
+            }
+            crate::types::InputIntent::Help => {
+                let result = self.state.handle_builtin("help", &[]);
+                if let Some(output) = result.output {
+                    println!("{}", output);
+                }
+                self.record_history(input, 0);
+                false
+            }
+            crate::types::InputIntent::ScriptCall => {
+                let exit_code = self.execute_script(input);
+                self.record_history(input, exit_code);
+                false
+            }
+            _ => {
+                eprintln!("Unknown: {}", input);
+                false
+            }
+        }
     }
 
     /// Record a command to the session store.
@@ -5272,6 +5289,17 @@ pub fn collapse_output(
     result.push_str(&last.join("\n"));
 
     result
+}
+
+#[cfg(test)]
+mod submitted_line_tests {
+    use super::format_user_submitted_line;
+
+    #[test]
+    fn submitted_line_includes_prompt_and_command() {
+        let line = format_user_submitted_line("<aish> ", "/help");
+        assert_eq!(line, "<aish> /help");
+    }
 }
 
 #[cfg(test)]

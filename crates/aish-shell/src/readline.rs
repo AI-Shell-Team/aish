@@ -434,5 +434,6 @@ mod tests {
                 cmd
             );
         }
+        assert_eq!(SLASH_COMMANDS.len(), 11);
     }
 }
