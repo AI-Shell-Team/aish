@@ -195,6 +195,13 @@ pub struct ConfigModel {
     pub sandbox_off_action: String,
     pub sandbox_timeout_seconds: f64,
     pub default_risk_level: String,
+
+    /// Master switch for InputGuard (BLOCKED / Confirm prompts).
+    /// When false, all input passes through unchecked. Mirrors the
+    /// `input_guard.enabled` field in security_policy.yaml so users
+    /// can toggle it from the more familiar config.yaml.
+    #[serde(default = "default_true")]
+    pub input_guard_enabled: bool,
     pub langfuse_public_key: Option<String>,
     pub langfuse_secret_key: Option<String>,
     pub langfuse_host: Option<String>,
@@ -286,6 +293,7 @@ impl Default for ConfigModel {
             sandbox_off_action: "allow".to_string(),
             sandbox_timeout_seconds: 10.0,
             default_risk_level: "low".to_string(),
+            input_guard_enabled: default_true(),
             langfuse_public_key: None,
             langfuse_secret_key: None,
             langfuse_host: None,
