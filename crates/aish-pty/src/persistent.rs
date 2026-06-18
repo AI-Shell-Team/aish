@@ -446,12 +446,13 @@ impl PersistentPty {
         >,
         secret_vault: Option<std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
         on_output: Option<Box<dyn Fn(&str) + Send>>,
+        input_guard_enabled: bool,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
         let mut interceptor = if is_session {
-            crate::SessionInterceptor::new(ai_callback, status_callback)
+            crate::SessionInterceptor::new(ai_callback, status_callback, input_guard_enabled)
         } else {
-            crate::SessionInterceptor::new(None, None)
+            crate::SessionInterceptor::new(None, None, input_guard_enabled)
         };
 
         // Drain stale data from both the PTY master fd and the control
@@ -848,6 +849,7 @@ impl PersistentPty {
                             stdin_fd,
                             self.master_fd,
                             &mut pending_response,
+                            &interceptor,
                         );
                         if aborted {
                             ai_cancelled = true;
@@ -924,6 +926,29 @@ impl PersistentPty {
                             _ => false,
                         };
                         if approved {
+                            // InputGuard: AI-generated commands must clear
+                            // the same safety gate as user-typed ones,
+                            // even after the generic Y/n approval. Screen
+                            // the placeholder form (still contains <SECRET>
+                            // tokens) so any InputGuard display message
+                            // never leaks real secret values.
+                            if !screen_injected_command(&interceptor, stdin_fd, cmd) {
+                                if let Some(followup) = response.followup {
+                                    std::thread::spawn(move || {
+                                        let _ = followup("Command cancelled by user", None);
+                                    });
+                                }
+                                ai_cancelled = true;
+                                skip_leading_newline = true;
+                                unsafe {
+                                    libc::write(
+                                        self.master_fd,
+                                        b"\r".as_ptr() as *const libc::c_void,
+                                        1,
+                                    );
+                                }
+                                continue;
+                            }
                             // Restore secret placeholders in the AI-generated command
                             let mut cmd_restored = cmd.clone();
                             if let Some(ref vault) = secret_vault {
@@ -1087,6 +1112,125 @@ impl PersistentPty {
                         // Session command: route through interceptor
                         for &byte in data {
                             match interceptor.feed_stdin(byte) {
+                                crate::StdinAction::Blocked(reason) => {
+                                    // InputGuard blocked the line.
+                                    // Cancel the echoed line on the PTY
+                                    // (Ctrl+C) by sending immediately —
+                                    // don't queue, otherwise the byte sits
+                                    // in write_buf until after display().
+                                    // Also drop any forward bytes from the
+                                    // same intercepted line so they don't
+                                    // leak through after the cancel.
+                                    if interceptor.take_cancel_pty_line() {
+                                        write_buf.clear();
+                                        let cancel = [0x03u8];
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                cancel.as_ptr() as *const libc::c_void,
+                                                cancel.len(),
+                                            );
+                                        }
+                                    }
+                                    // Keep stdin_shadow in sync with the
+                                    // interceptor's line_shadow (both just
+                                    // got cleared on Block).
+                                    stdin_shadow.clear();
+                                    // Clear the current line first to erase
+                                    // Tab/completion readline redraw artifacts
+                                    // that the remote shell leaves on the
+                                    // current line. Without this, the redrawn
+                                    // `[root@... ~]# <cmd>` visually clashes
+                                    // with the BLOCKED message below it.
+                                    show(&format!("\r\x1b[2K\r\n\x1b[31m{}\x1b[0m\r\n", reason));
+                                    skip_leading_newline = true;
+                                    // N3: discard any remaining bytes in this
+                                    // stdin batch. Typeahead like
+                                    // `<destructive cmd>\n<next cmd>` would
+                                    // otherwise continue through feed_stdin
+                                    // after the block, leaking the next
+                                    // command past the just-cancelled line.
+                                    break;
+                                }
+                                crate::StdinAction::NeedConfirm { reason, line } => {
+                                    // InputGuard wants user confirmation.
+                                    // Cancel the echoed line on PTY first,
+                                    // flushing Ctrl+C immediately so the
+                                    // remote readline is reset before we
+                                    // prompt / re-inject.
+                                    if interceptor.take_cancel_pty_line() {
+                                        write_buf.clear();
+                                        let cancel = [0x03u8];
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                cancel.as_ptr() as *const libc::c_void,
+                                                cancel.len(),
+                                            );
+                                        }
+                                    }
+                                    let confirmed = read_confirm_raw(stdin_fd, &reason);
+                                    if confirmed {
+                                        // Mirror Forward-branch nested
+                                        // session detection so a confirmed
+                                        // ssh/telnet keeps probe targeting
+                                        // up to date.
+                                        let line_str = String::from_utf8_lossy(&line);
+                                        if let Some(host) =
+                                            extract_remote_host_from_cmd(line_str.trim())
+                                        {
+                                            if is_session_command(line_str.trim()) {
+                                                const MAX_NESTING: usize = 8;
+                                                if nested_host_stack.len() < MAX_NESTING {
+                                                    if let Some(cur) = remote_host_for_probe.take()
+                                                    {
+                                                        nested_host_stack.push(cur);
+                                                    }
+                                                    remote_host_for_probe = Some(host.clone());
+                                                    if let Some(ref sh) = shared_host {
+                                                        *sh.lock().unwrap() = Some(host);
+                                                    }
+                                                    probe_injected = false;
+                                                    probe_active = false;
+                                                    nested_probe_pending = true;
+                                                    session_command_just_sent = true;
+                                                    probe_sections.clear();
+                                                    probe_current_section.clear();
+                                                    probe_start = None;
+                                                    output_ssh_scan.clear();
+                                                    at_password_prompt = false;
+                                                    in_search_mode = false;
+                                                }
+                                            }
+                                        }
+                                        // Re-inject the line into PTY.
+                                        write_buf.extend_from_slice(&line);
+                                        write_buf.push(b'\r');
+                                    } else {
+                                        show("\r\n\x1b[33mCancelled\x1b[0m\r\n");
+                                    }
+                                    // Declined or confirmed, the shadow
+                                    // line is fully consumed either way.
+                                    stdin_shadow.clear();
+                                    skip_leading_newline = true;
+                                    // N3: discard remaining bytes in this
+                                    // stdin batch — same rationale as the
+                                    // Blocked branch above. Typeahead after
+                                    // a confirmation prompt must not leak
+                                    // through unscreened. NOTE: confirmed
+                                    // commands also discard typeahead, so
+                                    // if the user typed
+                                    // `<destructive>\n<safe_next>\n` and
+                                    // then approves the destructive one,
+                                    // `<safe_next>` is dropped — they must
+                                    // re-enter it after the confirmed
+                                    // command finishes. This is the
+                                    // conservative trade-off: silently
+                                    // running queued commands right after a
+                                    // confirmation would be surprising
+                                    // (and easy to miss).
+                                    break;
+                                }
                                 crate::StdinAction::Forward => {
                                     if followup_capturing && byte == 0x03 {
                                         // Hard abort: Ctrl+C during
@@ -1961,6 +2105,7 @@ impl PersistentPty {
                         stdin_fd,
                         self.master_fd,
                         &mut pending_response,
+                        &interceptor,
                     );
                     if aborted {
                         ai_cancelled = true;
@@ -2035,6 +2180,27 @@ impl PersistentPty {
                     };
 
                     if approved {
+                        // InputGuard: AI-generated commands must clear the
+                        // same safety gate as user-typed ones, even after
+                        // the generic Y/n approval. Screen the placeholder
+                        // form so any display message keeps secret tokens.
+                        if !screen_injected_command(&interceptor, stdin_fd, cmd) {
+                            if let Some(followup) = response.followup {
+                                std::thread::spawn(move || {
+                                    let _ = followup("Command cancelled by user", None);
+                                });
+                            }
+                            ai_cancelled = true;
+                            skip_leading_newline = true;
+                            unsafe {
+                                libc::write(
+                                    self.master_fd,
+                                    b"\r".as_ptr() as *const libc::c_void,
+                                    1,
+                                );
+                            }
+                            continue;
+                        }
                         // Show "Running..." feedback
                         let running_msg = format!(
                             "\x1b[90m{}\x1b[0m\r\n",
@@ -2976,6 +3142,89 @@ fn display_ask_user(request: &crate::AskUserRequest) {
     }
     redraw_ask_user(request, 0, 0);
 }
+/// Display a yellow warning and prompt `[y/N]`, then read one raw key.
+/// Returns `true` only when the user presses `y` or `Y`.
+fn read_confirm_raw(stdin_fd: libc::c_int, reason: &str) -> bool {
+    let msg = format!("\r\n\x1b[33m{}\x1b[0m\r\nExecute anyway? [y/N] ", reason);
+    unsafe {
+        libc::write(libc::STDOUT_FILENO, msg.as_ptr() as *const _, msg.len());
+    }
+    let result = match read_byte(stdin_fd) {
+        Some(b'y' | b'Y') => {
+            unsafe {
+                libc::write(libc::STDOUT_FILENO, b"y\r\n".as_ptr() as *const _, 3);
+            }
+            true
+        }
+        Some(0x03) => {
+            // Ctrl+C
+            unsafe {
+                libc::write(libc::STDOUT_FILENO, b"^C\r\n".as_ptr() as *const _, 4);
+            }
+            false
+        }
+        Some(0x1b) => {
+            // ESC could be a standalone keypress (cancel) or the start
+            // of a CSI sequence (arrow keys, etc.).  Poll briefly: if no
+            // more bytes arrive within 10ms, it was a standalone ESC.
+            if stdin_poll(stdin_fd, 10_000) {
+                if let Some(next) = read_byte(stdin_fd) {
+                    if next == b'[' {
+                        let _ = consume_csi(stdin_fd);
+                    }
+                }
+            }
+            false
+        }
+        Some(_) => {
+            // Any other key (n, Enter, etc.) → reject
+            unsafe {
+                libc::write(libc::STDOUT_FILENO, b"n\r\n".as_ptr() as *const _, 3);
+            }
+            false
+        }
+        None => false,
+    };
+    // Drain any trailing typeahead (e.g. user typed `y<Enter>` — the
+    // Enter would otherwise be forwarded to the remote PTY as the
+    // start of a new command).
+    drain_stdin_trailing(stdin_fd);
+    result
+}
+
+/// Screen an AI-injected or BashExec command via InputGuard before it
+/// reaches the remote PTY. Returns true when the command may proceed
+/// (Allow, or Confirm/Unknown that the user explicitly acknowledged);
+/// false when the command is blocked or the user declined.
+///
+/// `placeholder_cmd` is the command WITH secret placeholders still in
+/// place — screening this form keeps real secret values out of any
+/// InputGuard display message.
+fn screen_injected_command(
+    interceptor: &crate::SessionInterceptor,
+    stdin_fd: libc::c_int,
+    placeholder_cmd: &str,
+) -> bool {
+    use aish_security::input_guard::InputVerdict;
+    let verdict = interceptor.screen_command(placeholder_cmd);
+    match &verdict {
+        InputVerdict::Allow => true,
+        InputVerdict::Block { .. } => {
+            let msg = format!("\r\n\x1b[31m{}\x1b[0m\r\n", verdict.format_display());
+            unsafe {
+                libc::write(
+                    libc::STDOUT_FILENO,
+                    msg.as_ptr() as *const libc::c_void,
+                    msg.len(),
+                );
+            }
+            false
+        }
+        InputVerdict::Confirm { .. } | InputVerdict::Unknown { .. } => {
+            read_confirm_raw(stdin_fd, &verdict.format_display())
+        }
+    }
+}
 
 /// Read one raw byte from stdin with EINTR retry.
 /// Returns the byte on success, or None on EOF/error.
@@ -3313,6 +3562,7 @@ fn handle_ask_user_interaction(
     stdin_fd: libc::c_int,
     master_fd: libc::c_int,
     pending_response: &mut Option<crate::AiResponse>,
+    interceptor: &crate::SessionInterceptor,
 ) -> bool {
     debug!(
         "handle_ask_user: kind={}, prompt={}",
@@ -3462,6 +3712,29 @@ fn handle_ask_user_interaction(
                         _ => false,
                     };
                 if approved {
+                    // InputGuard: BashExec commands must clear the same
+                    // safety gate as user-typed ones. If blocked or the
+                    // user declines the InputGuard confirmation, return
+                    // an aborted result so the AI sees a clean response
+                    // and the caller stops further tool chaining.
+                    if !screen_injected_command(interceptor, stdin_fd, &command) {
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                        }
+                        let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                            output: format!("(cancelled: {})", command),
+                            offload_path: None,
+                        });
+                        return true;
+                    }
                     // Show "Running..." feedback
                     let running_msg = format!(
                         "\x1b[90m{}\x1b[0m\r\n",

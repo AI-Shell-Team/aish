@@ -40,11 +40,29 @@ __AISH_AT_PROMPT=0
 
 __aish_json_escape() {
     local value="$1"
+    # Use C locale so [:cntrl:] is exactly 0x00-0x1F + 0x7F and the
+    # substitution stays in-process (no per-call fork to tr).
+    local LC_ALL=C
     value=${value//\\/\\\\}
     value=${value//\"/\\\"}
     value=${value//$'\n'/\\n}
     value=${value//$'\r'/\\r}
     value=${value//$'\t'/\\t}
+    # Strip C0 control chars (0x00-0x1F) and DEL (0x7F).  JSON forbids
+    # their literal form (RFC 8259 §7), and command text occasionally
+    # carries stray bytes — e.g. Ctrl-U (0x15) the frontend prepends to
+    # clear stale PTY line-discipline input.  Without this strip, the
+    # Rust control-event parser rejects the whole line as malformed.
+    #
+    # Known limitation: the range is broader than strictly needed for
+    # the prefix case, so any literal control bytes embedded inside a
+    # user command (e.g. `echo "$(printf 'a\tb')"` carries a raw \t)
+    # are silently dropped from the emitted event.  This is acceptable
+    # because (a) the prefix is the dominant source of stray C0 bytes,
+    # (b) the event is for UI display/telemetry only and not authoritative,
+    # and (c) tightening the strip to "first byte only" would require
+    # bash-side state tracking not worth the complexity.
+    value=${value//[[:cntrl:]]/}
     printf '%s' "$value"
 }
 
