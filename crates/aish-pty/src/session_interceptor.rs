@@ -10,6 +10,8 @@ pub struct AiQuery {
     pub question: String,
     /// Recent PTY output for context (error correction).
     pub recent_output: String,
+    /// Exit code of the last command (0 if not available or success).
+    pub exit_code: i32,
 }
 
 /// Result returned by the AI callback containing an optional command to
@@ -107,6 +109,14 @@ pub type FollowupCallback = dyn Fn(&str, Option<&str>) -> Option<AiResponse> + S
 /// AI callback type: receives an AiQuery and returns an optional AiResponse.
 pub type AiCallback = dyn Fn(AiQuery) -> Option<AiResponse> + Send + Sync;
 
+/// Callback for executing a command on the remote host and returning its output.
+pub type RemoteExecFn = dyn FnMut(&str) -> String;
+
+/// Callback invoked when `/status` is detected during an SSH/session.
+/// Receives a closure that can execute commands on the remote host.
+/// Returns the fully rendered status string to display.
+pub type StatusCallback = dyn Fn(&mut RemoteExecFn) -> String + Send + Sync;
+
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
@@ -128,6 +138,14 @@ pub enum StdinAction {
     EchoLocally,
     /// AI input line is complete. Caller should invoke AI callback.
     TriggerAi(String),
+    /// `/status` detected during session. Caller should run remote status scan.
+    TriggerStatus,
+    /// Line blocked by InputGuard; do NOT forward to PTY.
+    Blocked(String),
+    /// Line needs user confirmation (Confirm verdict).  Caller should
+    /// display the warning, read y/N, and either re-inject `line` into
+    /// the PTY or cancel.
+    NeedConfirm { reason: String, line: Vec<u8> },
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +164,7 @@ pub struct SessionInterceptor {
     cancel_pty_line: bool,
     output_buffer: OutputBuffer,
     ai_callback: Option<Box<AiCallback>>,
+    status_callback: Option<Box<StatusCallback>>,
     /// Escape sequence tracker: when Some, we're consuming bytes of a
     /// terminal escape sequence (arrow keys, function keys, etc.) so they
     /// don't corrupt line_shadow.
@@ -156,6 +175,23 @@ pub struct SessionInterceptor {
     in_bracketed_paste: bool,
     /// Buffer to collect CSI sequence parameters for bracketed paste detection.
     csi_params: Vec<u8>,
+    /// True between a Tab keystroke and the next non-Tab stdin byte.
+    /// During this window, printable bytes arriving via feed_pty_output
+    /// are accumulated as the bash completion result.
+    awaiting_completion: bool,
+    /// Printable bytes captured from PTY output while awaiting_completion.
+    /// Merged into line_shadow on the next non-Tab stdin byte so that
+    /// InputGuard sees the fully-completed line on Enter.
+    pending_completion: Vec<u8>,
+    /// Shadow buffer used ONLY by InputGuard. Unlike `line_shadow`, this
+    /// buffer accumulates bracketed-paste bytes too, so a destructive
+    /// command pasted into readline still gets screened when the user
+    /// subsequently presses Enter. AI/NL/status triggers continue to
+    /// consult `line_shadow` (which excludes pasted bytes) so paste
+    /// cannot synthesize an AI trigger.
+    guard_shadow: Vec<u8>,
+    /// InputGuard for pre-screening dangerous commands during sessions.
+    input_guard: aish_security::input_guard::InputGuard,
 }
 
 /// Phase of an escape sequence being consumed.
@@ -171,21 +207,58 @@ impl SessionInterceptor {
     /// Create a new interceptor.
     /// `ai_callback` is None -> interceptor is disabled (pure passthrough).
     /// `ai_callback` is Some -> interceptor will intercept `;` input.
-    pub fn new(ai_callback: Option<Box<AiCallback>>) -> Self {
+    /// `status_callback` is Some -> interceptor will intercept `/status` input.
+    /// `input_guard_enabled` mirrors `config.yaml`'s `input_guard_enabled`
+    /// and overrides the same-named field in security_policy.yaml so the
+    /// user-facing toggle applies uniformly to local and PTY screening.
+    pub fn new(
+        ai_callback: Option<Box<AiCallback>>,
+        status_callback: Option<Box<StatusCallback>>,
+        input_guard_enabled: bool,
+    ) -> Self {
+        // Constructing an InputGuard recompiles 16+ regexes and re-reads
+        // security_policy.yaml from disk. Cache the policy-built guard so
+        // repeated SessionInterceptor construction (one per PTY command)
+        // only pays the cost of cloning pre-compiled rules — Regex::clone
+        // is Arc-based, so it's cheap.
+        static BASE_GUARD: std::sync::OnceLock<aish_security::input_guard::InputGuard> =
+            std::sync::OnceLock::new();
+        let mut input_guard = BASE_GUARD
+            .get_or_init(|| {
+                let policy = aish_security::policy::load_policy(None);
+                aish_security::input_guard::InputGuard::from_policy(&policy)
+            })
+            .clone();
+        input_guard.set_enabled(input_guard_enabled);
         Self {
             state: InterceptorState::Passthrough,
             line_shadow: Vec::with_capacity(4096),
             cancel_pty_line: false,
             output_buffer: OutputBuffer::new(8192),
             ai_callback,
+            status_callback,
             escape_seq: None,
             in_bracketed_paste: false,
             csi_params: Vec::with_capacity(16),
+            awaiting_completion: false,
+            pending_completion: Vec::with_capacity(256),
+            guard_shadow: Vec::with_capacity(4096),
+            input_guard,
         }
     }
 
     /// Feed a single byte from stdin. Returns the action the caller should take.
     pub fn feed_stdin(&mut self, byte: u8) -> StdinAction {
+        // Commit any pending Tab completion before processing this byte.
+        // Completion chars arrived via PTY output since the last Tab;
+        // merge them into line_shadow here so the next byte (especially
+        // Enter) sees the fully-completed line. Skip on Tab itself so
+        // consecutive Tabs reset the awaiting window (Tab handler does
+        // its own commit before re-entering awaiting mode).
+        if self.awaiting_completion && byte != 0x09 {
+            self.commit_pending_completion();
+        }
+
         // Escape sequence tracking takes precedence over state machine.
         // Input methods (Chinese IME, etc.) and terminal keys (arrows, F-keys)
         // send multi-byte escape sequences starting with 0x1B.  Consuming them
@@ -199,47 +272,150 @@ impl SessionInterceptor {
             InterceptorState::Passthrough => {
                 match byte {
                     b'\r' | b'\n' => {
-                        // In bracketed paste mode, don't trigger AI/NL detection
-                        // for pasted newlines — just forward them.
-                        if self.in_bracketed_paste {
-                            return StdinAction::Forward;
+                        // In bracketed paste mode, don't trigger AI/NL
+                        // detection for pasted newlines. But pasted \r/\n
+                        // must STILL go through InputGuard — otherwise
+                        // pasting `rm -rf /\nls\n` would let bash execute
+                        // the destructive line as soon as the embedded \n
+                        // is forwarded, before the user ever presses Enter.
+                        // The check below covers both paste and non-paste
+                        // cases; the only paste-specific behavior we keep
+                        // is skipping the AI/status prefix scan (pasted
+                        // `;` must not trigger AI mode).
+                        if !self.in_bracketed_paste {
+                            // End of line — check for /status first, then AI prefix.
+                            if self.status_callback.is_some()
+                                && is_status_command(&self.line_shadow)
+                            {
+                                self.line_shadow.clear();
+                                self.guard_shadow.clear();
+                                self.cancel_pty_line = true;
+                                self.state = InterceptorState::AiProcessing;
+                                return StdinAction::TriggerStatus;
+                            }
+                            // Check whether the accumulated input starts with
+                            // `;` or `；` to trigger AI.
+                            if self.ai_callback.is_some()
+                                && starts_with_ai_prefix(&self.line_shadow)
+                            {
+                                let line = String::from_utf8_lossy(&self.line_shadow).to_string();
+                                let question = extract_ai_question(&line);
+                                self.line_shadow.clear();
+                                self.guard_shadow.clear();
+                                self.cancel_pty_line = true;
+                                self.state = InterceptorState::AiProcessing;
+                                return StdinAction::TriggerAi(question);
+                            }
                         }
-                        // End of line — check whether the accumulated input
-                        // starts with `;` or `；` to trigger AI.
-                        if self.ai_callback.is_some() && starts_with_ai_prefix(&self.line_shadow) {
-                            let line = String::from_utf8_lossy(&self.line_shadow).to_string();
-                            let question = extract_ai_question(&line);
-                            self.line_shadow.clear();
-                            self.cancel_pty_line = true;
-                            self.state = InterceptorState::AiProcessing;
-                            return StdinAction::TriggerAi(question);
+                        // InputGuard: check for dangerous commands before
+                        // forwarding to PTY. Use guard_shadow (which includes
+                        // bracketed-paste bytes) so a pasted destructive
+                        // command is screened both on Enter AND on embedded
+                        // \r/\n inside a paste.
+                        //
+                        // NOTE: history recall (↑/↓) and other readline
+                        // escape sequences mutate bash's line in ways we
+                        // cannot reconstruct from the byte stream alone.
+                        // We deliberately do NOT fail-closed on this —
+                        // doing so made every ↑+Enter require confirmation
+                        // and broke normal shell use. A proper fix needs
+                        // PTY-echo reconstruction (read the line bash
+                        // actually rendered back from PTY output before
+                        // screening), tracked as future work.
+                        {
+                            let line = String::from_utf8_lossy(&self.guard_shadow).to_string();
+                            let verdict = self.input_guard.check(
+                                &line,
+                                aish_security::input_guard::InputContext::ShellCommand,
+                            );
+                            match &verdict {
+                                aish_security::input_guard::InputVerdict::Block { .. } => {
+                                    self.cancel_pty_line = true;
+                                    self.line_shadow.clear();
+                                    self.guard_shadow.clear();
+                                    return StdinAction::Blocked(verdict.format_display());
+                                }
+                                aish_security::input_guard::InputVerdict::Confirm { .. }
+                                | aish_security::input_guard::InputVerdict::Unknown { .. } => {
+                                    // N5: reinject guard_shadow (not line_shadow)
+                                    // on approval — line_shadow excludes
+                                    // bracketed-paste bytes, so a confirmed
+                                    // paste command would otherwise reinject
+                                    // an empty/truncated line.
+                                    let saved = self.guard_shadow.clone();
+                                    self.cancel_pty_line = true;
+                                    self.line_shadow.clear();
+                                    self.guard_shadow.clear();
+                                    return StdinAction::NeedConfirm {
+                                        reason: verdict.format_display(),
+                                        line: saved,
+                                    };
+                                }
+                                aish_security::input_guard::InputVerdict::Allow => {}
+                            }
                         }
                         self.line_shadow.clear();
+                        self.guard_shadow.clear();
                     }
                     0x03 => {
-                        // Ctrl+C — discard current shadow line
+                        // Ctrl+C — discard current shadow line and any
+                        // pending Tab completion.  Without clearing pending
+                        // here, stale completion bytes from a previous Tab
+                        // would leak into the next command's line_shadow
+                        // (e.g. Tab → Ctrl+C → "ls" + Enter → shadow="sswdls").
                         self.line_shadow.clear();
+                        self.guard_shadow.clear();
+                        self.pending_completion.clear();
+                        self.awaiting_completion = false;
                     }
                     0x7F | 0x08 => {
-                        // Backspace — pop last UTF-8 character from shadow
+                        // Backspace — pop last UTF-8 character from shadow.
+                        // Also abandon pending Tab completion: the user is
+                        // manually editing, so any PTY-output completion
+                        // captured so far may not match the new line state.
                         pop_last_utf8_char(&mut self.line_shadow);
+                        pop_last_utf8_char(&mut self.guard_shadow);
+                        self.pending_completion.clear();
+                        self.awaiting_completion = false;
                     }
                     0x15 => {
-                        // Ctrl+U — clear shadow line
+                        // Ctrl+U — clear shadow line and pending completion.
                         self.line_shadow.clear();
+                        self.guard_shadow.clear();
+                        self.pending_completion.clear();
+                        self.awaiting_completion = false;
                     }
                     0x1B => {
-                        // Start of escape sequence — don't add to shadow
+                        // Start of escape sequence — don't add to shadow.
+                        // Arrow keys, Home/End/Delete, F-keys, bracketed
+                        // paste markers, etc. all begin with ESC. The
+                        // sequence is consumed byte-by-byte in
+                        // handle_escape_seq_byte; only bracketed-paste
+                        // payload bytes feed into guard_shadow.
                         self.escape_seq = Some(EscSeqPhase::Start);
                     }
                     0x04 => {
                         // Ctrl+D — don't add to shadow
                     }
+                    0x09 => {
+                        // Tab — triggers remote bash completion.  Commit
+                        // any pending completion from a previous Tab
+                        // (handles consecutive Tabs), then enter awaiting
+                        // mode.  The completion result arrives via PTY
+                        // output and is captured by feed_pty_output.
+                        if self.awaiting_completion {
+                            self.commit_pending_completion();
+                        }
+                        self.awaiting_completion = true;
+                    }
                     _ => {
-                        // Regular character — add to shadow unless in bracketed paste
+                        // Regular character — add to shadow unless in
+                        // bracketed paste. guard_shadow always tracks the
+                        // byte so InputGuard sees pasted content on Enter.
                         if !self.in_bracketed_paste {
                             self.line_shadow.push(byte);
                         }
+                        self.guard_shadow.push(byte);
                     }
                 }
                 StdinAction::Forward
@@ -272,10 +448,13 @@ impl SessionInterceptor {
                     if byte == b'~' {
                         let params: String = String::from_utf8_lossy(&self.csi_params).to_string();
                         if params == "200" {
-                            // Bracketed paste start
+                            // Bracketed paste start. Following bytes are
+                            // paste payload; they accumulate into
+                            // guard_shadow directly.
                             self.in_bracketed_paste = true;
                         } else if params == "201" {
-                            // Bracketed paste end
+                            // Bracketed paste end. guard_shadow now holds
+                            // the full pasted line snapshot.
                             self.in_bracketed_paste = false;
                         }
                     }
@@ -298,8 +477,46 @@ impl SessionInterceptor {
         }
     }
 
+    /// Merge pending Tab completion into line_shadow and exit awaiting
+    /// mode. Called when the next non-Tab stdin byte arrives (so Enter
+    /// sees the fully-completed line) and on consecutive Tabs (so the
+    /// first Tab's completion is committed before re-entering awaiting).
+    fn commit_pending_completion(&mut self) {
+        self.line_shadow.extend_from_slice(&self.pending_completion);
+        self.guard_shadow
+            .extend_from_slice(&self.pending_completion);
+        self.pending_completion.clear();
+        self.awaiting_completion = false;
+    }
+
     /// Feed PTY output data — buffer for error correction context.
+    /// Also captures Tab completion characters when awaiting_completion
+    /// is set (between a Tab keystroke and the next non-Tab stdin byte).
     pub fn feed_pty_output(&mut self, data: &[u8]) {
+        // bash completion behavior:
+        //   - Single candidate: appends printable chars in-place (no
+        //     CR/LF/ESC sequences). This is the common case we handle.
+        //   - Multiple candidates: prints each on its own line then
+        //     redraws the prompt + current input. Output contains CR/LF.
+        //   - No completion (ambiguous/empty): bash emits a bell (0x07).
+        //
+        // Heuristic: if data contains any control char (<0x20 or 0x7f),
+        // treat as multi-candidate or no-completion and abandon pending
+        // (we can't reliably parse multi-candidate redraws). Otherwise
+        // collect printable chars as the completed text.
+        if self.awaiting_completion {
+            let has_control = data.iter().any(|&b| b < 0x20 || b == 0x7f);
+            if has_control {
+                self.pending_completion.clear();
+                self.awaiting_completion = false;
+            } else {
+                for &b in data {
+                    if b.is_ascii_graphic() || b == b' ' {
+                        self.pending_completion.push(b);
+                    }
+                }
+            }
+        }
         self.output_buffer.append(data);
     }
 
@@ -307,8 +524,11 @@ impl SessionInterceptor {
     pub fn finish_ai(&mut self) {
         self.state = InterceptorState::Passthrough;
         self.line_shadow.clear();
+        self.guard_shadow.clear();
         self.cancel_pty_line = false;
         self.in_bracketed_paste = false;
+        self.awaiting_completion = false;
+        self.pending_completion.clear();
     }
 
     /// Whether AI is currently processing.
@@ -316,16 +536,12 @@ impl SessionInterceptor {
         self.state == InterceptorState::AiProcessing
     }
 
-    /// Called when the select loop times out with no data.
-    /// Kept for backward compatibility — line-level detection no longer
-    /// needs this signal.
-    pub fn mark_prompt_ready(&mut self) {}
-
     /// Run the AI callback. The callback returns an AiResponse containing
     /// an optional command and display text (or None on error).
     pub fn call_ai(
         &self,
         question: String,
+        exit_code: i32,
         secret_vault: Option<&std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
     ) -> Option<AiResponse> {
         self.ai_callback.as_ref().and_then(|cb| {
@@ -337,6 +553,7 @@ impl SessionInterceptor {
             cb(AiQuery {
                 question,
                 recent_output: recent,
+                exit_code,
             })
         })
     }
@@ -348,10 +565,37 @@ impl SessionInterceptor {
         std::mem::replace(&mut self.cancel_pty_line, false)
     }
 
+    /// Screen a command that is about to be injected into the PTY by a
+    /// non-stdin path (e.g. AI `response.command`, BashExec tool). This
+    /// bypasses the feed_stdin state machine — the caller has already
+    /// decided to inject and just wants the InputGuard verdict so it can
+    /// gate the write to master_fd.
+    pub fn screen_command(&self, command: &str) -> aish_security::input_guard::InputVerdict {
+        self.input_guard.check(
+            command,
+            aish_security::input_guard::InputContext::ShellCommand,
+        )
+    }
+
     /// Get the recent PTY output for error correction context.
     pub fn recent_output(&self, max_len: usize) -> String {
         let bytes = self.output_buffer.recent(max_len);
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// Whether a status_callback is configured.
+    pub fn has_status_callback(&self) -> bool {
+        self.status_callback.is_some()
+    }
+
+    /// Invoke the status callback with the given remote-exec function.
+    /// Panics if no status_callback is set.
+    pub fn invoke_status_callback(&self, exec_fn: &mut RemoteExecFn) -> String {
+        let cb = self
+            .status_callback
+            .as_ref()
+            .expect("invoke_status_callback called without status_callback");
+        cb(exec_fn)
     }
 }
 
@@ -371,6 +615,15 @@ fn extract_ai_question(line: &str) -> String {
 /// fullwidth semicolon `；` (UTF-8: 0xEF 0xBC 0x9B).
 fn starts_with_ai_prefix(line: &[u8]) -> bool {
     line.first() == Some(&b';') || line.starts_with(&[0xEF, 0xBC, 0x9B])
+}
+
+/// Check whether the line is exactly `/status` (ignoring leading/trailing whitespace).
+fn is_status_command(line: &[u8]) -> bool {
+    let s = match std::str::from_utf8(line) {
+        Ok(s) => s.trim(),
+        Err(_) => return false,
+    };
+    s == "/status"
 }
 
 /// Pop the last complete UTF-8 character from a byte buffer.
@@ -427,14 +680,14 @@ mod tests {
 
     #[test]
     fn test_passthrough_forward_normal_bytes() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         assert_eq!(ic.feed_stdin(b'a'), StdinAction::Forward);
         assert_eq!(ic.feed_stdin(b'b'), StdinAction::Forward);
     }
 
     #[test]
     fn test_semicolon_triggers_ai_on_enter() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         // `;` alone is Forward; AI triggers when Enter is pressed
         assert_eq!(ic.feed_stdin(b';'), StdinAction::Forward);
         let action = ic.feed_stdin(b'\r');
@@ -445,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_semicolon_midline_does_not_trigger_ai() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         // pwd; → starts with 'p', not ';' → Enter should be Forward
         ic.feed_stdin(b'p');
         ic.feed_stdin(b'w');
@@ -456,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_ai_input_captures_question() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'i');
         ic.feed_stdin(b'p');
@@ -471,14 +724,14 @@ mod tests {
 
     #[test]
     fn test_no_callback_means_pure_passthrough() {
-        let mut ic = SessionInterceptor::new(None);
+        let mut ic = SessionInterceptor::new(None, None, true);
         assert_eq!(ic.feed_stdin(b';'), StdinAction::Forward);
         assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
     }
 
     #[test]
     fn test_fullwidth_semicolon_triggers_ai() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         // ； = 0xEF 0xBC 0x9B
         ic.feed_stdin(0xEF);
         ic.feed_stdin(0xBC);
@@ -494,7 +747,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_c_clears_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'h');
         ic.feed_stdin(b'i');
@@ -506,7 +759,7 @@ mod tests {
 
     #[test]
     fn test_backspace_pops_from_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_stdin(b'l');
         ic.feed_stdin(b's');
         ic.feed_stdin(0x7F); // backspace removes 's'
@@ -516,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_ctrl_u_clears_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_stdin(b'a');
         ic.feed_stdin(b'b');
         ic.feed_stdin(0x15); // Ctrl+U clears shadow
@@ -526,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_escape_sequence_not_in_shadow() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         // Simulate arrow key: ESC [ A
         ic.feed_stdin(b';');
         ic.feed_stdin(0x1B); // ESC
@@ -538,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_cancel_pty_line_flag() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         assert!(!ic.take_cancel_pty_line());
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
@@ -548,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_finish_ai_resets_to_passthrough() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
         assert!(ic.is_ai_processing());
@@ -561,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_recent_output_captures_pty_data() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_pty_output(b"hello ");
         ic.feed_pty_output(b"world\n");
         assert!(ic.recent_output(100).contains("hello world"));
@@ -569,10 +822,10 @@ mod tests {
 
     #[test]
     fn test_call_ai_returns_command() {
-        let mut ic = SessionInterceptor::new(Some(noop_callback()));
+        let mut ic = SessionInterceptor::new(Some(noop_callback()), None, true);
         ic.feed_stdin(b';');
         ic.feed_stdin(b'\r');
-        let resp = ic.call_ai("test".to_string(), None);
+        let resp = ic.call_ai("test".to_string(), 0, None);
         assert!(resp.is_some());
         let r = resp.unwrap();
         assert_eq!(r.command, Some("echo test".to_string()));
@@ -580,8 +833,8 @@ mod tests {
 
     #[test]
     fn test_call_ai_returns_none() {
-        let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()));
-        let cmd = ic.call_ai("test".to_string(), None);
+        let ic = SessionInterceptor::new(Some(noop_callback_no_cmd()), None, true);
+        let cmd = ic.call_ai("test".to_string(), 0, None);
         assert!(cmd.is_none());
     }
 
@@ -621,5 +874,344 @@ mod tests {
         let mut buf = vec![b'x', 0xEF, 0xBC, 0x9B];
         pop_last_utf8_char(&mut buf);
         assert_eq!(buf, b"x");
+    }
+
+    // ---- InputGuard Blocked tests ----
+
+    #[test]
+    fn test_blocked_destructive_rm_in_session() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"rm -rf /" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        assert!(matches!(action, StdinAction::Blocked(_)));
+        assert!(ic.take_cancel_pty_line());
+    }
+
+    #[test]
+    fn test_blocked_dd_device_in_session() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"dd if=/dev/zero of=/dev/sda" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        assert!(matches!(action, StdinAction::Blocked(_)));
+    }
+
+    #[test]
+    fn test_blocked_fork_bomb_in_session() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b":(){ :|:& };:" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        assert!(matches!(action, StdinAction::Blocked(_)));
+    }
+
+    #[test]
+    fn test_safe_command_forwarded_in_session() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"ls -la" {
+            ic.feed_stdin(*b);
+        }
+        assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
+    }
+
+    #[test]
+    fn test_blocked_clears_shadow_after_block() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"rm -rf /etc" {
+            ic.feed_stdin(*b);
+        }
+        let _ = ic.feed_stdin(b'\r');
+        // Shadow should be cleared — next safe line should forward
+        for b in b"ls" {
+            ic.feed_stdin(*b);
+        }
+        assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
+    }
+
+    #[test]
+    fn test_blocked_does_not_fire_for_confirm_rules() {
+        // sudo is a Confirm rule — should produce NeedConfirm, not Forward
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"sudo ls" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        assert!(matches!(action, StdinAction::NeedConfirm { .. }));
+    }
+
+    // ---- InputGuard NeedConfirm tests ----
+
+    #[test]
+    fn test_confirm_sudo_in_session() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"sudo ls" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        match action {
+            StdinAction::NeedConfirm { reason, line } => {
+                assert!(reason.contains("sudo"));
+                assert_eq!(line, b"sudo ls");
+            }
+            _ => panic!("expected NeedConfirm, got {:?}", action),
+        }
+        assert!(ic.take_cancel_pty_line());
+    }
+
+    /// Helper: feed the bracketed-paste start sequence ESC[200~
+    fn feed_paste_start(ic: &mut SessionInterceptor) {
+        for &b in b"\x1b[200~" {
+            ic.feed_stdin(b);
+        }
+    }
+
+    /// Helper: feed the bracketed-paste end sequence ESC[201~
+    fn feed_paste_end(ic: &mut SessionInterceptor) {
+        for &b in b"\x1b[201~" {
+            ic.feed_stdin(b);
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_destructive_command_is_screened_on_enter() {
+        // Regression: pasted bytes used to bypass InputGuard because they
+        // weren't added to line_shadow. After the guard_shadow fix, the
+        // Enter following a paste must still trigger Block for a pasted
+        // `rm -rf /`.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        feed_paste_start(&mut ic);
+        for &b in b"rm -rf /" {
+            ic.feed_stdin(b);
+        }
+        feed_paste_end(&mut ic);
+        let action = ic.feed_stdin(b'\r');
+        assert!(
+            matches!(action, StdinAction::Blocked(_)),
+            "pasted destructive command must be screened on Enter, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_does_not_synthesize_ai_trigger() {
+        // Pasted `;` at start of line used to be ignored by line_shadow,
+        // and that behavior is correct — paste must NOT trigger AI.
+        // Verify guard_shadow accumulation doesn't break this.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        feed_paste_start(&mut ic);
+        for &b in b"; what is the meaning of life" {
+            ic.feed_stdin(b);
+        }
+        feed_paste_end(&mut ic);
+        let action = ic.feed_stdin(b'\r');
+        assert!(
+            matches!(action, StdinAction::Forward),
+            "pasted AI-prefix content must not trigger AI, got {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_embedded_newline_screens_destructive_line() {
+        // Regression: pasting `rm -rf /\nls\n` used to forward the
+        // embedded \n to bash, which executed `rm -rf /` immediately —
+        // before the user ever pressed Enter. After the C4 fix, every
+        // \r/\n inside a paste must also pass through InputGuard.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        feed_paste_start(&mut ic);
+        let mut blocked = false;
+        for &b in b"rm -rf /etc\nls\n" {
+            let action = ic.feed_stdin(b);
+            if !matches!(action, StdinAction::Forward) {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(
+            blocked,
+            "embedded \\n inside bracketed paste with destructive content must be screened"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_embedded_newline_allows_safe_multiline() {
+        // Counter-test: safe multi-line paste must still Forward every
+        // byte (including embedded \n) so bash can execute each line.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        feed_paste_start(&mut ic);
+        for &b in b"ls\npwd\n" {
+            let action = ic.feed_stdin(b);
+            assert!(
+                matches!(action, StdinAction::Forward),
+                "safe paste byte {:?} should Forward, got {:?}",
+                b as char,
+                action
+            );
+        }
+        feed_paste_end(&mut ic);
+    }
+
+    #[test]
+    fn test_confirm_kill_in_session() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"kill -9 1234" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        assert!(matches!(action, StdinAction::NeedConfirm { .. }));
+    }
+
+    #[test]
+    fn test_confirm_clears_shadow() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"sudo ls" {
+            ic.feed_stdin(*b);
+        }
+        let _ = ic.feed_stdin(b'\r');
+        // Shadow cleared — next safe line should forward
+        for b in b"pwd" {
+            ic.feed_stdin(*b);
+        }
+        assert_eq!(ic.feed_stdin(b'\r'), StdinAction::Forward);
+    }
+
+    #[test]
+    fn test_block_takes_priority_over_confirm() {
+        // sudo rm -rf / should be Blocked, not NeedConfirm
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"sudo rm -rf /" {
+            ic.feed_stdin(*b);
+        }
+        let action = ic.feed_stdin(b'\r');
+        assert!(matches!(action, StdinAction::Blocked(_)));
+    }
+
+    // ---- Tab completion capture ----
+
+    #[test]
+    fn tab_completion_single_candidate_merged_into_shadow() {
+        // User types "rm -rf /etc/pa" + Tab + Enter.
+        // PTY outputs "sswd" between Tab and Enter (bash completes
+        // "passwd" — "pa" was already typed, so the appended part is "sswd").
+        // After capture, line_shadow should be "rm -rf /etc/passwd" → Block.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"rm -rf /etc/pa" {
+            ic.feed_stdin(*b);
+        }
+        ic.feed_stdin(0x09); // Tab
+        ic.feed_pty_output(b"sswd");
+        let action = ic.feed_stdin(b'\r'); // Enter
+        assert!(
+            matches!(action, StdinAction::Blocked(_)),
+            "Tab-completed destructive command must be blocked"
+        );
+    }
+
+    #[test]
+    fn tab_completion_multiple_candidates_abandoned() {
+        // User types "ls /etc/" + Tab; bash shows multiple candidates
+        // (output contains newlines). We abandon pending — line_shadow
+        // stays as the original "ls /etc/" which doesn't match any
+        // rule, so Allow/Forward.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"ls /etc/" {
+            ic.feed_stdin(*b);
+        }
+        ic.feed_stdin(0x09); // Tab
+        ic.feed_pty_output(b"\npasswd  profile\n[root@host ~]# ls /etc/");
+        let action = ic.feed_stdin(b'\r');
+        assert!(
+            matches!(action, StdinAction::Forward),
+            "multi-candidate completion abandoned; original line forwarded"
+        );
+    }
+
+    #[test]
+    fn consecutive_tabs_commit_first_completion() {
+        // First Tab → awaiting; PTY delivers "sswd"; second Tab should
+        // commit "sswd" into shadow then start a new awaiting window.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"rm -rf /etc/pa" {
+            ic.feed_stdin(*b);
+        }
+        ic.feed_stdin(0x09); // Tab 1
+        ic.feed_pty_output(b"sswd");
+        ic.feed_stdin(0x09); // Tab 2 — commits "sswd", starts new awaiting
+        assert_eq!(
+            String::from_utf8_lossy(&ic.line_shadow),
+            "rm -rf /etc/passwd"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_after_tab_clears_pending_completion() {
+        // Regression: pending completion used to leak across commands.
+        // Repro: type "rm -rf /etc/pa" + Tab (PTY appends "sswd"), then
+        // Ctrl+C, then "ls" + Enter. Without the abort-key fix, the
+        // next non-Tab byte merges stale "sswd" into the new line.
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"rm -rf /etc/pa" {
+            ic.feed_stdin(*b);
+        }
+        ic.feed_stdin(0x09); // Tab
+        ic.feed_pty_output(b"sswd");
+        assert!(ic.awaiting_completion);
+        assert!(!ic.pending_completion.is_empty());
+
+        // Ctrl+C should clear both the shadow and pending completion.
+        ic.feed_stdin(0x03);
+        assert!(!ic.awaiting_completion);
+        assert!(ic.pending_completion.is_empty());
+        assert!(ic.line_shadow.is_empty());
+
+        // Type "ls" — pending should NOT carry over, so shadow is just "ls".
+        for b in b"ls" {
+            ic.feed_stdin(*b);
+        }
+        assert_eq!(&ic.line_shadow, b"ls");
+        let action = ic.feed_stdin(b'\r');
+        assert_eq!(
+            std::mem::discriminant(&action),
+            std::mem::discriminant(&crate::StdinAction::Forward)
+        );
+    }
+
+    #[test]
+    fn ctrl_u_after_tab_clears_pending_completion() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        ic.feed_stdin(0x09);
+        ic.feed_pty_output(b"abc");
+        ic.feed_stdin(0x15); // Ctrl+U
+        assert!(!ic.awaiting_completion);
+        assert!(ic.pending_completion.is_empty());
+    }
+
+    #[test]
+    fn backspace_after_tab_clears_pending_completion() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        for b in b"rm -rf /etc/pa" {
+            ic.feed_stdin(*b);
+        }
+        ic.feed_stdin(0x09);
+        ic.feed_pty_output(b"sswd");
+        ic.feed_stdin(0x7F); // Backspace
+        assert!(!ic.awaiting_completion);
+        assert!(ic.pending_completion.is_empty());
+    }
+
+    #[test]
+    fn finish_ai_resets_completion_state() {
+        let mut ic = SessionInterceptor::new(None, None, true);
+        ic.feed_stdin(0x09); // Tab
+        ic.feed_pty_output(b"abc");
+        assert!(ic.awaiting_completion);
+        assert!(!ic.pending_completion.is_empty());
+        ic.finish_ai();
+        assert!(!ic.awaiting_completion);
+        assert!(ic.pending_completion.is_empty());
     }
 }

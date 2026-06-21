@@ -439,17 +439,20 @@ impl PersistentPty {
         &mut self,
         command: &str,
         ai_callback: Option<Box<crate::AiCallback>>,
+        status_callback: Option<Box<crate::StatusCallback>>,
         shared_host: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
         secret_check: Option<
             std::sync::Arc<dyn Fn(&str) -> Option<crate::SshSecretCheckResult> + Send + Sync>,
         >,
         secret_vault: Option<std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
+        on_output: Option<Box<dyn Fn(&str) + Send>>,
+        input_guard_enabled: bool,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
         let mut interceptor = if is_session {
-            crate::SessionInterceptor::new(ai_callback)
+            crate::SessionInterceptor::new(ai_callback, status_callback, input_guard_enabled)
         } else {
-            crate::SessionInterceptor::new(None)
+            crate::SessionInterceptor::new(None, None, input_guard_enabled)
         };
 
         // Drain stale data from both the PTY master fd and the control
@@ -591,6 +594,14 @@ impl PersistentPty {
                                                 // preventing further followup/tool chaining until the next AI trigger.
         let mut ai_cancelled: bool = false;
 
+        // Helper: write to stdout and optionally record via on_output callback.
+        let show = |text: &str| {
+            write_stdout_all(text.as_bytes());
+            if let Some(ref cb) = on_output {
+                cb(text);
+            }
+        };
+
         while !done {
             // Build fd sets.
             let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
@@ -680,7 +691,9 @@ impl PersistentPty {
                             if probe_for_ai {
                                 probe_for_ai = false;
                                 if let Some(question) = pending_ai_question.take() {
-                                    let resp = interceptor.call_ai(question, secret_vault.as_ref());
+                                    let ec = self.command_state.last_exit_code();
+                                    let resp =
+                                        interceptor.call_ai(question, ec, secret_vault.as_ref());
                                     interceptor.finish_ai();
                                     if let Some(response) = resp {
                                         pending_response = Some(response);
@@ -689,13 +702,7 @@ impl PersistentPty {
                                             "\x1b[33m{}\x1b[0m\r\n",
                                             aish_i18n::t("shell.session.ai_cancelled"),
                                         );
-                                        unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr() as *const libc::c_void,
-                                                cancel_msg.len(),
-                                            );
-                                        }
+                                        show(&cancel_msg);
                                     }
                                 }
                             }
@@ -736,9 +743,6 @@ impl PersistentPty {
                 if idle_poll_count >= idle_threshold {
                     // No data for N * 50ms — the remote shell is idle and
                     // sitting at a prompt waiting for input.
-                    if is_session {
-                        interceptor.mark_prompt_ready();
-                    }
                     // Mark probe as injected so we don't auto-inject on idle.
                     // Actual probing is deferred to the first AI invocation
                     // (`;` trigger) to avoid false positives from Ctrl+R
@@ -845,6 +849,7 @@ impl PersistentPty {
                             stdin_fd,
                             self.master_fd,
                             &mut pending_response,
+                            &interceptor,
                         );
                         if aborted {
                             ai_cancelled = true;
@@ -894,13 +899,7 @@ impl PersistentPty {
                             1 => {
                                 // Ctrl+C: hard abort — skip followup entirely
                                 if ans[0] == 0x03 {
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            b"^C\r\n".as_ptr() as *const libc::c_void,
-                                            4,
-                                        );
-                                    }
+                                    show("^C\r\n");
                                     drain_stdin_trailing(stdin_fd);
                                     ai_cancelled = true;
                                     false
@@ -914,13 +913,7 @@ impl PersistentPty {
                                     } else {
                                         b"n\r\n"
                                     };
-                                    unsafe {
-                                        libc::write(
-                                            libc::STDOUT_FILENO,
-                                            echo.as_ptr() as *const libc::c_void,
-                                            echo.len(),
-                                        );
-                                    }
+                                    show(std::str::from_utf8(echo).unwrap_or("y\r\n"));
                                     // Drain trailing newline/CR so it doesn't leak
                                     // into the next read cycle.
                                     drain_stdin_trailing(stdin_fd);
@@ -933,6 +926,29 @@ impl PersistentPty {
                             _ => false,
                         };
                         if approved {
+                            // InputGuard: AI-generated commands must clear
+                            // the same safety gate as user-typed ones,
+                            // even after the generic Y/n approval. Screen
+                            // the placeholder form (still contains <SECRET>
+                            // tokens) so any InputGuard display message
+                            // never leaks real secret values.
+                            if !screen_injected_command(&interceptor, stdin_fd, cmd) {
+                                if let Some(followup) = response.followup {
+                                    std::thread::spawn(move || {
+                                        let _ = followup("Command cancelled by user", None);
+                                    });
+                                }
+                                ai_cancelled = true;
+                                skip_leading_newline = true;
+                                unsafe {
+                                    libc::write(
+                                        self.master_fd,
+                                        b"\r".as_ptr() as *const libc::c_void,
+                                        1,
+                                    );
+                                }
+                                continue;
+                            }
                             // Restore secret placeholders in the AI-generated command
                             let mut cmd_restored = cmd.clone();
                             if let Some(ref vault) = secret_vault {
@@ -961,13 +977,7 @@ impl PersistentPty {
                                 "\x1b[90m{}\x1b[0m\r\n",
                                 aish_i18n::t("shell.session.running")
                             );
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    running_msg.as_ptr() as *const libc::c_void,
-                                    running_msg.len(),
-                                );
-                            }
+                            show(&running_msg);
                             let safe_cmd = close_unclosed_heredoc(&cmd_restored);
                             skip_echo_cmd = Some(safe_cmd.clone());
                             let mut inject = safe_cmd.as_bytes().to_vec();
@@ -1009,12 +1019,8 @@ impl PersistentPty {
                                 "\x1b[33m{}\x1b[0m\r\n",
                                 aish_i18n::t("shell.command_cancelled")
                             );
+                            show(&cancel_msg);
                             unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    cancel_msg.as_ptr() as *const libc::c_void,
-                                    cancel_msg.len(),
-                                );
                                 libc::write(
                                     self.master_fd,
                                     b"\r".as_ptr() as *const libc::c_void,
@@ -1032,12 +1038,8 @@ impl PersistentPty {
                                 "\x1b[33m{}\x1b[0m\r\n",
                                 aish_i18n::t("shell.command_cancelled")
                             );
+                            show(&cancel_msg);
                             unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    cancel_msg.as_ptr() as *const libc::c_void,
-                                    cancel_msg.len(),
-                                );
                                 libc::write(
                                     self.master_fd,
                                     b"\r".as_ptr() as *const libc::c_void,
@@ -1060,13 +1062,7 @@ impl PersistentPty {
                         if !response.display_text.is_empty() {
                             let mut msg = response.display_text.clone();
                             msg.push_str("\r\n");
-                            unsafe {
-                                libc::write(
-                                    libc::STDOUT_FILENO,
-                                    msg.as_ptr() as *const libc::c_void,
-                                    msg.len(),
-                                );
-                            }
+                            show(&msg);
                         }
                         unsafe {
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
@@ -1116,6 +1112,125 @@ impl PersistentPty {
                         // Session command: route through interceptor
                         for &byte in data {
                             match interceptor.feed_stdin(byte) {
+                                crate::StdinAction::Blocked(reason) => {
+                                    // InputGuard blocked the line.
+                                    // Cancel the echoed line on the PTY
+                                    // (Ctrl+C) by sending immediately —
+                                    // don't queue, otherwise the byte sits
+                                    // in write_buf until after display().
+                                    // Also drop any forward bytes from the
+                                    // same intercepted line so they don't
+                                    // leak through after the cancel.
+                                    if interceptor.take_cancel_pty_line() {
+                                        write_buf.clear();
+                                        let cancel = [0x03u8];
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                cancel.as_ptr() as *const libc::c_void,
+                                                cancel.len(),
+                                            );
+                                        }
+                                    }
+                                    // Keep stdin_shadow in sync with the
+                                    // interceptor's line_shadow (both just
+                                    // got cleared on Block).
+                                    stdin_shadow.clear();
+                                    // Clear the current line first to erase
+                                    // Tab/completion readline redraw artifacts
+                                    // that the remote shell leaves on the
+                                    // current line. Without this, the redrawn
+                                    // `[root@... ~]# <cmd>` visually clashes
+                                    // with the BLOCKED message below it.
+                                    show(&format!("\r\x1b[2K\r\n\x1b[31m{}\x1b[0m\r\n", reason));
+                                    skip_leading_newline = true;
+                                    // N3: discard any remaining bytes in this
+                                    // stdin batch. Typeahead like
+                                    // `<destructive cmd>\n<next cmd>` would
+                                    // otherwise continue through feed_stdin
+                                    // after the block, leaking the next
+                                    // command past the just-cancelled line.
+                                    break;
+                                }
+                                crate::StdinAction::NeedConfirm { reason, line } => {
+                                    // InputGuard wants user confirmation.
+                                    // Cancel the echoed line on PTY first,
+                                    // flushing Ctrl+C immediately so the
+                                    // remote readline is reset before we
+                                    // prompt / re-inject.
+                                    if interceptor.take_cancel_pty_line() {
+                                        write_buf.clear();
+                                        let cancel = [0x03u8];
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                cancel.as_ptr() as *const libc::c_void,
+                                                cancel.len(),
+                                            );
+                                        }
+                                    }
+                                    let confirmed = read_confirm_raw(stdin_fd, &reason);
+                                    if confirmed {
+                                        // Mirror Forward-branch nested
+                                        // session detection so a confirmed
+                                        // ssh/telnet keeps probe targeting
+                                        // up to date.
+                                        let line_str = String::from_utf8_lossy(&line);
+                                        if let Some(host) =
+                                            extract_remote_host_from_cmd(line_str.trim())
+                                        {
+                                            if is_session_command(line_str.trim()) {
+                                                const MAX_NESTING: usize = 8;
+                                                if nested_host_stack.len() < MAX_NESTING {
+                                                    if let Some(cur) = remote_host_for_probe.take()
+                                                    {
+                                                        nested_host_stack.push(cur);
+                                                    }
+                                                    remote_host_for_probe = Some(host.clone());
+                                                    if let Some(ref sh) = shared_host {
+                                                        *sh.lock().unwrap() = Some(host);
+                                                    }
+                                                    probe_injected = false;
+                                                    probe_active = false;
+                                                    nested_probe_pending = true;
+                                                    session_command_just_sent = true;
+                                                    probe_sections.clear();
+                                                    probe_current_section.clear();
+                                                    probe_start = None;
+                                                    output_ssh_scan.clear();
+                                                    at_password_prompt = false;
+                                                    in_search_mode = false;
+                                                }
+                                            }
+                                        }
+                                        // Re-inject the line into PTY.
+                                        write_buf.extend_from_slice(&line);
+                                        write_buf.push(b'\r');
+                                    } else {
+                                        show("\r\n\x1b[33mCancelled\x1b[0m\r\n");
+                                    }
+                                    // Declined or confirmed, the shadow
+                                    // line is fully consumed either way.
+                                    stdin_shadow.clear();
+                                    skip_leading_newline = true;
+                                    // N3: discard remaining bytes in this
+                                    // stdin batch — same rationale as the
+                                    // Blocked branch above. Typeahead after
+                                    // a confirmation prompt must not leak
+                                    // through unscreened. NOTE: confirmed
+                                    // commands also discard typeahead, so
+                                    // if the user typed
+                                    // `<destructive>\n<safe_next>\n` and
+                                    // then approves the destructive one,
+                                    // `<safe_next>` is dropped — they must
+                                    // re-enter it after the confirmed
+                                    // command finishes. This is the
+                                    // conservative trade-off: silently
+                                    // running queued commands right after a
+                                    // confirmation would be surprising
+                                    // (and easy to miss).
+                                    break;
+                                }
                                 crate::StdinAction::Forward => {
                                     if followup_capturing && byte == 0x03 {
                                         // Hard abort: Ctrl+C during
@@ -1139,13 +1254,7 @@ impl PersistentPty {
                                             "\r\n\x1b[33m{}\x1b[0m\r\n",
                                             aish_i18n::t("shell.command_cancelled"),
                                         );
-                                        unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr() as *const libc::c_void,
-                                                cancel_msg.len(),
-                                            );
-                                        }
+                                        show(&cancel_msg);
                                         skip_leading_newline = true;
                                     } else if followup_capturing && byte == 0x1b {
                                         // ESC during followup capturing —
@@ -1187,13 +1296,7 @@ impl PersistentPty {
                                                 "\r\n\x1b[33m{}\x1b[0m\r\n",
                                                 aish_i18n::t("shell.command_cancelled"),
                                             );
-                                            unsafe {
-                                                libc::write(
-                                                    libc::STDOUT_FILENO,
-                                                    cancel_msg.as_ptr() as *const libc::c_void,
-                                                    cancel_msg.len(),
-                                                );
-                                            }
+                                            show(&cancel_msg);
                                             skip_leading_newline = true;
                                         } else {
                                             // Follow-up bytes exist (arrow/function
@@ -1483,12 +1586,8 @@ impl PersistentPty {
                                                 "\r\x1b[90m{}\x1b[0m\r\n",
                                                 aish_i18n::t("shell.session.probing"),
                                             );
+                                            show(&status);
                                             unsafe {
-                                                libc::write(
-                                                    libc::STDOUT_FILENO,
-                                                    status.as_ptr() as *const libc::c_void,
-                                                    status.len(),
-                                                );
                                                 libc::write(
                                                     self.master_fd,
                                                     probe_cmd.as_ptr() as *const libc::c_void,
@@ -1508,7 +1607,8 @@ impl PersistentPty {
                                             continue;
                                         } else {
                                             // No probe needed, call AI now.
-                                            interceptor.call_ai(question, secret_vault.as_ref())
+                                            let ec = self.command_state.last_exit_code();
+                                            interceptor.call_ai(question, ec, secret_vault.as_ref())
                                         }
                                     };
                                     interceptor.finish_ai();
@@ -1521,12 +1621,8 @@ impl PersistentPty {
                                             "\x1b[33m{}\x1b[0m\r\n",
                                             aish_i18n::t("shell.session.ai_cancelled")
                                         );
+                                        show(&cancel_msg);
                                         unsafe {
-                                            libc::write(
-                                                libc::STDOUT_FILENO,
-                                                cancel_msg.as_ptr() as *const libc::c_void,
-                                                cancel_msg.len(),
-                                            );
                                             libc::write(
                                                 self.master_fd,
                                                 b"\r".as_ptr() as *const libc::c_void,
@@ -1542,6 +1638,101 @@ impl PersistentPty {
                                                 1,
                                             );
                                         }
+                                    }
+                                }
+                                crate::StdinAction::TriggerStatus => {
+                                    ai_cancelled = false;
+                                    stdin_shadow.clear();
+
+                                    // Cancel the echoed /status line on the remote side
+                                    if interceptor.take_cancel_pty_line() {
+                                        unsafe {
+                                            libc::write(
+                                                self.master_fd,
+                                                b"\x03".as_ptr() as *const libc::c_void,
+                                                1,
+                                            );
+                                        }
+                                        let mut drain_buf = [0u8; 4096];
+                                        loop {
+                                            let mut rfds: libc::fd_set =
+                                                unsafe { std::mem::zeroed() };
+                                            unsafe {
+                                                libc::FD_ZERO(&mut rfds);
+                                                libc::FD_SET(self.master_fd, &mut rfds);
+                                            }
+                                            let mut tv = libc::timeval {
+                                                tv_sec: 0,
+                                                tv_usec: 100_000,
+                                            };
+                                            let sel = unsafe {
+                                                libc::select(
+                                                    self.master_fd + 1,
+                                                    &mut rfds,
+                                                    std::ptr::null_mut(),
+                                                    std::ptr::null_mut(),
+                                                    &mut tv,
+                                                )
+                                            };
+                                            if sel > 0
+                                                && unsafe { libc::FD_ISSET(self.master_fd, &rfds) }
+                                            {
+                                                let n = unsafe {
+                                                    libc::read(
+                                                        self.master_fd,
+                                                        drain_buf.as_mut_ptr() as *mut libc::c_void,
+                                                        drain_buf.len(),
+                                                    )
+                                                };
+                                                if n <= 0 {
+                                                    break;
+                                                }
+                                                interceptor
+                                                    .feed_pty_output(&drain_buf[..n as usize]);
+                                                continue;
+                                            }
+                                            break;
+                                        }
+                                    }
+
+                                    // Newline after user's input
+                                    unsafe {
+                                        libc::write(
+                                            libc::STDOUT_FILENO,
+                                            b"\r\n".as_ptr() as *const libc::c_void,
+                                            2,
+                                        );
+                                    }
+
+                                    // Execute remote status collection via callback
+                                    if interceptor.has_status_callback() {
+                                        let master_fd = self.master_fd;
+                                        let mut exec_fn: Box<crate::RemoteExecFn> =
+                                            Box::new(move |cmd: &str| {
+                                                execute_remote_command(master_fd, cmd)
+                                            });
+
+                                        let rendered =
+                                            interceptor.invoke_status_callback(&mut *exec_fn);
+
+                                        let msg = format!("{}\r\n", rendered);
+                                        unsafe {
+                                            libc::write(
+                                                libc::STDOUT_FILENO,
+                                                msg.as_ptr() as *const libc::c_void,
+                                                msg.len(),
+                                            );
+                                        }
+                                    }
+
+                                    interceptor.finish_ai();
+                                    skip_leading_newline = true;
+                                    unsafe {
+                                        libc::write(
+                                            self.master_fd,
+                                            b"\r".as_ptr() as *const libc::c_void,
+                                            1,
+                                        );
                                     }
                                 }
                             }
@@ -1678,8 +1869,12 @@ impl PersistentPty {
                                     if probe_for_ai {
                                         probe_for_ai = false;
                                         if let Some(question) = pending_ai_question.take() {
-                                            let resp = interceptor
-                                                .call_ai(question, secret_vault.as_ref());
+                                            let ec = self.command_state.last_exit_code();
+                                            let resp = interceptor.call_ai(
+                                                question,
+                                                ec,
+                                                secret_vault.as_ref(),
+                                            );
                                             interceptor.finish_ai();
                                             if let Some(response) = resp {
                                                 pending_response = Some(response);
@@ -1688,13 +1883,7 @@ impl PersistentPty {
                                                     "\x1b[33m{}\x1b[0m\r\n",
                                                     aish_i18n::t("shell.session.ai_cancelled"),
                                                 );
-                                                unsafe {
-                                                    libc::write(
-                                                        libc::STDOUT_FILENO,
-                                                        cancel_msg.as_ptr() as *const libc::c_void,
-                                                        cancel_msg.len(),
-                                                    );
-                                                }
+                                                show(&cancel_msg);
                                             }
                                         }
                                     }
@@ -1874,13 +2063,11 @@ impl PersistentPty {
                             // probe completes (probe_active changes to false mid-parse).
                             if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
                             {
-                                let _ = unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        data.as_ptr() as *const libc::c_void,
-                                        data.len(),
-                                    )
-                                };
+                                write_stdout_all(data);
+                                if let Some(ref cb) = on_output {
+                                    let text = String::from_utf8_lossy(data);
+                                    cb(&text);
+                                }
                             }
                         }
                     }
@@ -1918,6 +2105,7 @@ impl PersistentPty {
                         stdin_fd,
                         self.master_fd,
                         &mut pending_response,
+                        &interceptor,
                     );
                     if aborted {
                         ai_cancelled = true;
@@ -1937,12 +2125,18 @@ impl PersistentPty {
                         m
                     });
                     let tool_line = format!("\x1b[36m{}\x1b[0m\r\n", tool_text);
-                    unsafe {
+                    // Display directly (terminal cursor is already on a new line
+                    // after user input).  Record with leading \r\n so the cast
+                    // replay starts the indicator on a fresh line.
+                    let _ = unsafe {
                         libc::write(
                             libc::STDOUT_FILENO,
                             tool_line.as_ptr() as *const libc::c_void,
                             tool_line.len(),
-                        );
+                        )
+                    };
+                    if let Some(ref cb) = on_output {
+                        cb(&format!("\r\n{}", tool_line));
                     }
 
                     // Confirmation prompt before execution
@@ -1950,13 +2144,7 @@ impl PersistentPty {
                         "\x1b[33m{}\x1b[0m ",
                         aish_i18n::t("shell.session.confirm_execute")
                     );
-                    unsafe {
-                        libc::write(
-                            libc::STDOUT_FILENO,
-                            confirm.as_ptr() as *const libc::c_void,
-                            confirm.len(),
-                        );
-                    }
+                    show(&confirm);
 
                     // Read one byte for confirmation (raw mode)
                     let mut ans = [0u8; 1];
@@ -1966,13 +2154,7 @@ impl PersistentPty {
                         1 => {
                             // Ctrl+C: hard abort — skip followup entirely
                             if ans[0] == 0x03 {
-                                unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        b"^C\r\n".as_ptr() as *const libc::c_void,
-                                        4,
-                                    );
-                                }
+                                show("^C\r\n");
                                 drain_stdin_trailing(stdin_fd);
                                 ai_cancelled = true;
                                 false
@@ -1982,17 +2164,11 @@ impl PersistentPty {
                                     || ans[0] == b'\r'
                                     || ans[0] == b'\n'
                                 {
-                                    b"y\r\n"
+                                    "y\r\n"
                                 } else {
-                                    b"n\r\n"
+                                    "n\r\n"
                                 };
-                                unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        echo.as_ptr() as *const libc::c_void,
-                                        echo.len(),
-                                    );
-                                }
+                                show(echo);
                                 drain_stdin_trailing(stdin_fd);
                                 ans[0] == b'y'
                                     || ans[0] == b'Y'
@@ -2004,18 +2180,33 @@ impl PersistentPty {
                     };
 
                     if approved {
+                        // InputGuard: AI-generated commands must clear the
+                        // same safety gate as user-typed ones, even after
+                        // the generic Y/n approval. Screen the placeholder
+                        // form so any display message keeps secret tokens.
+                        if !screen_injected_command(&interceptor, stdin_fd, cmd) {
+                            if let Some(followup) = response.followup {
+                                std::thread::spawn(move || {
+                                    let _ = followup("Command cancelled by user", None);
+                                });
+                            }
+                            ai_cancelled = true;
+                            skip_leading_newline = true;
+                            unsafe {
+                                libc::write(
+                                    self.master_fd,
+                                    b"\r".as_ptr() as *const libc::c_void,
+                                    1,
+                                );
+                            }
+                            continue;
+                        }
                         // Show "Running..." feedback
                         let running_msg = format!(
                             "\x1b[90m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.session.running")
                         );
-                        unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                running_msg.as_ptr() as *const libc::c_void,
-                                running_msg.len(),
-                            );
-                        }
+                        show(&running_msg);
                         // Restore secret placeholders before execution.
                         let mut cmd_restored = cmd.clone();
                         if let Some(ref vault) = secret_vault {
@@ -2028,13 +2219,7 @@ impl PersistentPty {
                                     &rargs,
                                 );
                                 let info = format!("\x1b[2m{}\x1b[0m\r\n", msg);
-                                unsafe {
-                                    libc::write(
-                                        libc::STDOUT_FILENO,
-                                        info.as_ptr() as *const libc::c_void,
-                                        info.len(),
-                                    );
-                                }
+                                show(&info);
                                 cmd_restored = restored;
                             }
                         }
@@ -2077,12 +2262,8 @@ impl PersistentPty {
                             "\x1b[33m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.command_cancelled")
                         );
+                        show(&cancel_msg);
                         unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                cancel_msg.as_ptr() as *const libc::c_void,
-                                cancel_msg.len(),
-                            );
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         if let Some(followup) = response.followup {
@@ -2096,12 +2277,8 @@ impl PersistentPty {
                             "\x1b[33m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.command_cancelled")
                         );
+                        show(&cancel_msg);
                         unsafe {
-                            libc::write(
-                                libc::STDOUT_FILENO,
-                                cancel_msg.as_ptr() as *const libc::c_void,
-                                cancel_msg.len(),
-                            );
                             libc::write(self.master_fd, b"\r".as_ptr() as *const libc::c_void, 1);
                         }
                         // User rejected the command — terminate the
@@ -2428,7 +2605,163 @@ impl PersistentPty {
         }
         Ok(())
     }
+}
 
+// ---- Remote command execution helpers ----
+
+/// Execute a command on the remote host via PTY and capture its output.
+fn execute_remote_command(master_fd: i32, command: &str) -> String {
+    let mut cmd_bytes = command.as_bytes().to_vec();
+    cmd_bytes.push(b'\r');
+    unsafe {
+        libc::write(
+            master_fd,
+            cmd_bytes.as_ptr() as *const libc::c_void,
+            cmd_bytes.len(),
+        );
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut output = Vec::new();
+    let mut drain_buf = [0u8; 4096];
+    let mut idle_count: u32 = 0;
+    let mut timed_out = false;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut rfds);
+            libc::FD_SET(master_fd, &mut rfds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 100_000,
+        };
+        let sel = unsafe {
+            libc::select(
+                master_fd + 1,
+                &mut rfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
+            let n = unsafe {
+                libc::read(
+                    master_fd,
+                    drain_buf.as_mut_ptr() as *mut libc::c_void,
+                    drain_buf.len(),
+                )
+            };
+            if n > 0 {
+                output.extend_from_slice(&drain_buf[..n as usize]);
+                idle_count = 0;
+            } else {
+                break;
+            }
+        } else {
+            idle_count += 1;
+            // Only start counting idle after receiving first byte
+            if !output.is_empty() && idle_count >= 3 {
+                break;
+            }
+        }
+    }
+
+    // On timeout, cancel the remote command and drain remaining output
+    // to restore the shell to a clean prompt state.
+    if timed_out {
+        unsafe {
+            libc::write(master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+        }
+        drain_pty(master_fd, Duration::from_millis(500));
+    }
+
+    let raw = String::from_utf8_lossy(&output).to_string();
+    strip_remote_output(&raw, command)
+}
+
+/// Drain any remaining bytes from the PTY master fd for up to `timeout`.
+fn drain_pty(master_fd: i32, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf = [0u8; 4096];
+    loop {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut rfds);
+            libc::FD_SET(master_fd, &mut rfds);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let mut tv = libc::timeval {
+            tv_sec: remaining.as_secs() as libc::time_t,
+            tv_usec: remaining.subsec_micros() as libc::suseconds_t,
+        };
+        let sel = unsafe {
+            libc::select(
+                master_fd + 1,
+                &mut rfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel > 0 && unsafe { libc::FD_ISSET(master_fd, &rfds) } {
+            let n =
+                unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if n <= 0 {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+/// Strip command echo and ANSI codes from remote command output.
+fn strip_remote_output(raw: &str, command: &str) -> String {
+    let mut clean = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && !((0x40..=0x7E).contains(&bytes[i])) {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else if bytes[i] == b'\r' {
+            i += 1;
+        } else {
+            clean.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    let mut lines: Vec<&str> = clean.lines().collect();
+    let cmd_trimmed = command.trim();
+    if !lines.is_empty() && lines[0].contains(cmd_trimmed) {
+        lines.remove(0);
+    }
+    while let Some(last) = lines.last() {
+        if last.is_empty() || last.contains('$') || last.contains('#') || last.contains('~') {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
+    lines.join("\n").trim().to_string()
+}
+
+impl PersistentPty {
     /// Returns Ok(true) if PromptReady was also seen in the same batch.
     fn wait_for_session_ready(&mut self, timeout: Duration) -> aish_core::Result<bool> {
         let deadline = std::time::Instant::now() + timeout;
@@ -2809,6 +3142,89 @@ fn display_ask_user(request: &crate::AskUserRequest) {
     }
     redraw_ask_user(request, 0, 0);
 }
+/// Display a yellow warning and prompt `[y/N]`, then read one raw key.
+/// Returns `true` only when the user presses `y` or `Y`.
+fn read_confirm_raw(stdin_fd: libc::c_int, reason: &str) -> bool {
+    let msg = format!("\r\n\x1b[33m{}\x1b[0m\r\nExecute anyway? [y/N] ", reason);
+    unsafe {
+        libc::write(libc::STDOUT_FILENO, msg.as_ptr() as *const _, msg.len());
+    }
+    let result = match read_byte(stdin_fd) {
+        Some(b'y' | b'Y') => {
+            unsafe {
+                libc::write(libc::STDOUT_FILENO, b"y\r\n".as_ptr() as *const _, 3);
+            }
+            true
+        }
+        Some(0x03) => {
+            // Ctrl+C
+            unsafe {
+                libc::write(libc::STDOUT_FILENO, b"^C\r\n".as_ptr() as *const _, 4);
+            }
+            false
+        }
+        Some(0x1b) => {
+            // ESC could be a standalone keypress (cancel) or the start
+            // of a CSI sequence (arrow keys, etc.).  Poll briefly: if no
+            // more bytes arrive within 10ms, it was a standalone ESC.
+            if stdin_poll(stdin_fd, 10_000) {
+                if let Some(next) = read_byte(stdin_fd) {
+                    if next == b'[' {
+                        let _ = consume_csi(stdin_fd);
+                    }
+                }
+            }
+            false
+        }
+        Some(_) => {
+            // Any other key (n, Enter, etc.) → reject
+            unsafe {
+                libc::write(libc::STDOUT_FILENO, b"n\r\n".as_ptr() as *const _, 3);
+            }
+            false
+        }
+        None => false,
+    };
+    // Drain any trailing typeahead (e.g. user typed `y<Enter>` — the
+    // Enter would otherwise be forwarded to the remote PTY as the
+    // start of a new command).
+    drain_stdin_trailing(stdin_fd);
+    result
+}
+
+/// Screen an AI-injected or BashExec command via InputGuard before it
+/// reaches the remote PTY. Returns true when the command may proceed
+/// (Allow, or Confirm/Unknown that the user explicitly acknowledged);
+/// false when the command is blocked or the user declined.
+///
+/// `placeholder_cmd` is the command WITH secret placeholders still in
+/// place — screening this form keeps real secret values out of any
+/// InputGuard display message.
+fn screen_injected_command(
+    interceptor: &crate::SessionInterceptor,
+    stdin_fd: libc::c_int,
+    placeholder_cmd: &str,
+) -> bool {
+    use aish_security::input_guard::InputVerdict;
+    let verdict = interceptor.screen_command(placeholder_cmd);
+    match &verdict {
+        InputVerdict::Allow => true,
+        InputVerdict::Block { .. } => {
+            let msg = format!("\r\n\x1b[31m{}\x1b[0m\r\n", verdict.format_display());
+            unsafe {
+                libc::write(
+                    libc::STDOUT_FILENO,
+                    msg.as_ptr() as *const libc::c_void,
+                    msg.len(),
+                );
+            }
+            false
+        }
+        InputVerdict::Confirm { .. } | InputVerdict::Unknown { .. } => {
+            read_confirm_raw(stdin_fd, &verdict.format_display())
+        }
+    }
+}
 
 /// Read one raw byte from stdin with EINTR retry.
 /// Returns the byte on success, or None on EOF/error.
@@ -3146,6 +3562,7 @@ fn handle_ask_user_interaction(
     stdin_fd: libc::c_int,
     master_fd: libc::c_int,
     pending_response: &mut Option<crate::AiResponse>,
+    interceptor: &crate::SessionInterceptor,
 ) -> bool {
     debug!(
         "handle_ask_user: kind={}, prompt={}",
@@ -3295,6 +3712,29 @@ fn handle_ask_user_interaction(
                         _ => false,
                     };
                 if approved {
+                    // InputGuard: BashExec commands must clear the same
+                    // safety gate as user-typed ones. If blocked or the
+                    // user declines the InputGuard confirmation, return
+                    // an aborted result so the AI sees a clean response
+                    // and the caller stops further tool chaining.
+                    if !screen_injected_command(interceptor, stdin_fd, &command) {
+                        let cancel_msg = format!(
+                            "\x1b[33m{}\x1b[0m\r\n",
+                            aish_i18n::t("shell.command_cancelled")
+                        );
+                        unsafe {
+                            libc::write(
+                                libc::STDOUT_FILENO,
+                                cancel_msg.as_ptr() as *const libc::c_void,
+                                cancel_msg.len(),
+                            );
+                        }
+                        let _ = output_sender.send(crate::session_interceptor::BashExecResult {
+                            output: format!("(cancelled: {})", command),
+                            offload_path: None,
+                        });
+                        return true;
+                    }
                     // Show "Running..." feedback
                     let running_msg = format!(
                         "\x1b[90m{}\x1b[0m\r\n",

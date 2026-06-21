@@ -68,16 +68,18 @@ impl SlashInputSession {
         // Drain any stale keyboard events before ratatui issues DSR queries.
         // Leftover bytes can corrupt the cursor position response parsing.
         drain_pending_events()?;
-        let backend = CrosstermBackend::new(io::stdout());
-        let height = self.panel_height();
-        let mut terminal = Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(height),
-            },
-        )?;
+        let mut viewport_height = self.panel_height();
+        let mut terminal = open_inline_terminal(viewport_height)?;
 
         let outcome = loop {
+            let desired_height = self.panel_height();
+            if desired_height != viewport_height {
+                let _ = terminal.clear();
+                drop(terminal);
+                viewport_height = desired_height;
+                terminal = open_inline_terminal(viewport_height)?;
+            }
+            let _ = terminal.autoresize();
             terminal.draw(|frame| self.render(frame, frame.area()))?;
 
             let event = event::read()?;
@@ -97,23 +99,75 @@ impl SlashInputSession {
         Ok(outcome)
     }
 
+    /// Override input after construction (for integration tests).
+    #[doc(hidden)]
+    pub fn with_input(mut self, input: impl Into<String>) -> Self {
+        self.input = input.into();
+        self.cursor = self.input.len();
+        self.update_filtered();
+        self
+    }
+
+    /// Dispatch a keyboard event without raw-mode TUI (for integration tests).
+    #[doc(hidden)]
+    pub fn dispatch_event(&mut self, event: Event) -> Option<SlashInputOutcome> {
+        self.handle_event(event)
+    }
+
     fn panel_height(&self) -> u16 {
-        let items = self.commands.len().clamp(1, MAX_VISIBLE_COMMANDS) as u16;
-        (1 + items).min(MAX_PANEL_HEIGHT)
+        if self.filtered.is_empty() {
+            return 1;
+        }
+        // Keep a stable height while the list is visible so typing does not resize
+        // the inline viewport on every filter change (which causes flicker).
+        (1 + MAX_VISIBLE_COMMANDS as u16).min(MAX_PANEL_HEIGHT)
+    }
+
+    /// Slash command token before the first space (e.g. `/help` from `/help foo`).
+    fn command_query(&self) -> &str {
+        match self.input.find(' ') {
+            Some(i) => &self.input[..i],
+            None => &self.input,
+        }
     }
 
     fn update_filtered(&mut self) {
-        let query = self.input.to_lowercase();
+        if self.should_hide_command_list() {
+            self.filtered.clear();
+            return;
+        }
+        let query = self.command_query().to_lowercase();
+        if query.is_empty() || !query.starts_with('/') {
+            self.filtered.clear();
+            self.selected = 0;
+            return;
+        }
         self.filtered = self
             .commands
             .iter()
             .enumerate()
-            .filter(|(_, (name, desc))| {
-                name.to_lowercase().starts_with(&query) || desc.to_lowercase().contains(&query)
-            })
+            .filter(|(_, (name, _))| name.to_lowercase().starts_with(&query))
             .map(|(i, _)| i)
             .collect();
+        self.selected = 0;
         self.clamp_selected();
+    }
+
+    fn matching_name_count(&self) -> usize {
+        let query = self.command_query().to_lowercase();
+        self.commands
+            .iter()
+            .filter(|(name, _)| name.to_lowercase().starts_with(&query))
+            .count()
+    }
+
+    fn replace_command_token(&mut self, new_command: &str) {
+        if let Some(space_idx) = self.input.find(' ') {
+            self.input = format!("{new_command}{}", &self.input[space_idx..]);
+        } else {
+            self.input = new_command.to_string();
+        }
+        self.cursor = self.input.len();
     }
 
     fn clamp_selected(&mut self) {
@@ -126,19 +180,97 @@ impl SlashInputSession {
 
     /// Whether the current input is still a prefix of any command name.
     fn has_command_prefix(&self) -> bool {
-        let query = self.input.to_lowercase();
+        let query = self.command_query().to_lowercase();
+        if query.is_empty() || !query.starts_with('/') {
+            return false;
+        }
         self.commands
             .iter()
             .any(|(name, _)| name.to_lowercase().starts_with(&query))
     }
 
-    /// Set input text and cursor to the currently selected command name.
-    fn sync_input_to_selected(&mut self) {
-        if let Some(&cmd_idx) = self.filtered.get(self.selected) {
-            let (name, _) = &self.commands[cmd_idx];
-            self.input = name.clone();
-            self.cursor = self.input.len();
+    /// True when input is an exact command followed by a space (Tab completion or typed).
+    /// Hide the suggestion list so Enter does not pick a different row.
+    fn should_hide_command_list(&self) -> bool {
+        let Some(space_idx) = self.input.find(' ') else {
+            return false;
+        };
+        let command_name = &self.input[..space_idx];
+        self.commands.iter().any(|(name, _)| name == command_name)
+    }
+
+    /// True when the user has started typing arguments (not just a trailing space).
+    fn has_real_command_args(input: &str) -> bool {
+        if !input.contains(' ') {
+            return false;
         }
+        !input.ends_with(' ')
+    }
+
+    fn format_command_with_trailing_space(command_name: &str) -> String {
+        format!("{command_name} ")
+    }
+
+    /// Name of the currently highlighted command in the filtered list.
+    fn selected_command_name(&self) -> Option<&str> {
+        self.filtered
+            .get(self.selected)
+            .map(|&idx| self.commands[idx].0.as_str())
+    }
+
+    /// Enter: exact command match executes; otherwise accept the highlighted item.
+    fn handle_submit(&mut self) -> Option<SlashInputOutcome> {
+        let trimmed = self.input.trim();
+        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+        let exact_match = self
+            .commands
+            .iter()
+            .any(|(name, _)| first_word == name || trimmed == name);
+        if exact_match {
+            return Some(SlashInputOutcome::Command(trimmed.to_string()));
+        }
+        if !self.filtered.is_empty() {
+            let query = self.command_query();
+            let match_count = self.matching_name_count();
+            // Ambiguous prefix (e.g. /r): return to readline instead of guessing.
+            if match_count > 1 && query != "/" {
+                return Some(SlashInputOutcome::Dismissed(self.input.clone()));
+            }
+            let Some(command) = self.selected_command_name().map(str::to_string) else {
+                return Some(SlashInputOutcome::Dismissed(self.input.clone()));
+            };
+            return Some(SlashInputOutcome::Command(command));
+        }
+        Some(SlashInputOutcome::Dismissed(self.input.clone()))
+    }
+
+    /// Tab: extend shared prefix, or complete the highlighted command and dismiss.
+    fn handle_tab_complete(&mut self) -> Option<SlashInputOutcome> {
+        if self.filtered.is_empty() {
+            return None;
+        }
+        if self.filtered.len() == 1 {
+            let command = self.selected_command_name()?.to_string();
+            let completed = Self::format_command_with_trailing_space(&command);
+            return Some(SlashInputOutcome::Dismissed(completed));
+        }
+
+        let names: Vec<&str> = self
+            .filtered
+            .iter()
+            .map(|&idx| self.commands[idx].0.as_str())
+            .collect();
+        let lcp = longest_common_prefix(&names);
+        let query = self.command_query();
+        if lcp.len() > query.len() {
+            self.replace_command_token(&lcp);
+            self.update_filtered();
+            return None;
+        }
+
+        let command = self.selected_command_name()?.to_string();
+        let completed = Self::format_command_with_trailing_space(&command);
+        Some(SlashInputOutcome::Dismissed(completed))
     }
 
     /// Handle an event. Returns `Some(outcome)` when the session should end.
@@ -161,6 +293,9 @@ impl SlashInputSession {
                 self.input.insert(self.cursor, ch);
                 self.cursor += ch.len_utf8();
                 self.update_filtered();
+                if Self::has_real_command_args(&self.input) {
+                    return Some(SlashInputOutcome::Dismissed(self.input.clone()));
+                }
                 // No longer a slash command prefix (e.g. /bin) → back to readline
                 if !self.has_command_prefix() {
                     return Some(SlashInputOutcome::Dismissed(self.input.clone()));
@@ -189,38 +324,17 @@ impl SlashInputSession {
             KeyCode::Up => {
                 if !self.filtered.is_empty() && self.selected > 0 {
                     self.selected -= 1;
-                    self.sync_input_to_selected();
                 }
                 None
             }
             KeyCode::Down => {
                 if !self.filtered.is_empty() {
                     self.selected = (self.selected + 1).min(self.filtered.len() - 1);
-                    self.sync_input_to_selected();
                 }
                 None
             }
-            KeyCode::Enter => {
-                let trimmed = self.input.trim();
-                let first_word = trimmed.split_whitespace().next().unwrap_or("");
-                let is_command = self
-                    .commands
-                    .iter()
-                    .any(|(name, _)| first_word == name || trimmed == name);
-                if is_command {
-                    return Some(SlashInputOutcome::Command(trimmed.to_string()));
-                }
-                // No match — dismiss to normal readline
-                Some(SlashInputOutcome::Dismissed(self.input.clone()))
-            }
-            KeyCode::Tab => {
-                // Complete to selected item and submit immediately
-                if let Some(&cmd_idx) = self.filtered.get(self.selected) {
-                    let (name, _) = &self.commands[cmd_idx];
-                    return Some(SlashInputOutcome::Command(name.clone()));
-                }
-                None
-            }
+            KeyCode::Enter => self.handle_submit(),
+            KeyCode::Tab => self.handle_tab_complete(),
             KeyCode::Home => {
                 self.cursor = 0;
                 None
@@ -371,6 +485,33 @@ fn drain_pending_events() -> io::Result<()> {
     Ok(())
 }
 
+fn open_inline_terminal(height: u16) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    Terminal::with_options(
+        CrosstermBackend::new(io::stdout()),
+        TerminalOptions {
+            viewport: Viewport::Inline(height),
+        },
+    )
+}
+
+fn longest_common_prefix(names: &[&str]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut prefix = String::new();
+    for (idx, ch) in names[0].chars().enumerate() {
+        if names[1..]
+            .iter()
+            .all(|name| name.chars().nth(idx) == Some(ch))
+        {
+            prefix.push(ch);
+        } else {
+            break;
+        }
+    }
+    prefix
+}
+
 /// Strip ANSI CSI/OSC escape sequences from a string.
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -408,4 +549,257 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> Event {
+        Event::Key(KeyEvent::new(code, mods))
+    }
+
+    fn sample_commands() -> Vec<(String, String)> {
+        vec![
+            ("/help".into(), "Show help".into()),
+            ("/model".into(), "Switch model".into()),
+            ("/quit".into(), "Exit".into()),
+        ]
+    }
+
+    fn all_slash_commands() -> Vec<(String, String)> {
+        vec![
+            ("/help".into(), "Show help information".into()),
+            ("/model".into(), "Show or switch AI model".into()),
+            ("/setup".into(), "Open setup wizard".into()),
+            ("/plan".into(), "Plan mode control".into()),
+            ("/token".into(), "Show token usage".into()),
+            ("/resume".into(), "Resume previous session".into()),
+            ("/feedback".into(), "Submit feedback".into()),
+            (
+                "/record".into(),
+                "Record terminal session (start/stop)".into(),
+            ),
+            ("/quit".into(), "Exit AI Shell".into()),
+            ("/doctor".into(), "Run system diagnostics".into()),
+            ("/status".into(), "Show system environment status".into()),
+        ]
+    }
+
+    fn session_with_commands(input: &str, commands: &[(String, String)]) -> SlashInputSession {
+        let mut session = SlashInputSession::new(commands.to_vec(), "aish> ".into());
+        session.input = input.to_string();
+        session.cursor = input.len();
+        session.update_filtered();
+        session
+    }
+
+    fn session_with_input(input: &str) -> SlashInputSession {
+        session_with_commands(input, &sample_commands())
+    }
+
+    #[test]
+    fn enter_on_slash_alone_executes_highlighted_command() {
+        let mut session = session_with_input("/");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Command("/help".into()))
+        );
+    }
+
+    #[test]
+    fn enter_on_partial_prefix_executes_highlighted_command() {
+        let mut session = session_with_input("/hel");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Command("/help".into()))
+        );
+    }
+
+    #[test]
+    fn enter_on_exact_command_executes_as_typed() {
+        let mut session = session_with_input("/quit");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Command("/quit".into()))
+        );
+    }
+
+    #[test]
+    fn tab_completes_and_dismisses_popup() {
+        let mut session = session_with_input("/mod");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/model ".into()))
+        );
+    }
+
+    #[test]
+    fn tab_on_slash_completes_highlighted_and_dismisses() {
+        let mut session = session_with_input("/");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/help ".into()))
+        );
+    }
+
+    #[test]
+    fn tab_at_shared_prefix_completes_highlighted() {
+        let commands = all_slash_commands();
+        let mut session = session_with_commands("/re", &commands);
+        // /resume precedes /record in SLASH_COMMANDS; selected defaults to 0.
+        assert_eq!(
+            session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/resume ".into()))
+        );
+    }
+
+    #[test]
+    fn trailing_space_after_exact_command_hides_suggestion_list() {
+        let session = session_with_input("/help ");
+        assert!(session.filtered.is_empty());
+    }
+
+    #[test]
+    fn enter_on_command_with_trailing_space_executes() {
+        let mut session = session_with_input("/help ");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Command("/help".into()))
+        );
+    }
+
+    #[test]
+    fn typing_args_after_command_dismisses_to_readline() {
+        let mut session = session_with_input("/help ");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/help x".into()))
+        );
+    }
+
+    #[test]
+    fn tab_completes_unambiguous_prefixes() {
+        let commands = all_slash_commands();
+        let cases = [
+            ("/hel", "/help "),
+            ("/mod", "/model "),
+            ("/tok", "/token "),
+            ("/doc", "/doctor "),
+            ("/stat", "/status "),
+            ("/rec", "/record "),
+            ("/qui", "/quit "),
+        ];
+        for (prefix, expected) in cases {
+            let mut session = session_with_commands(prefix, &commands);
+            assert_eq!(
+                session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+                Some(SlashInputOutcome::Dismissed(expected.into())),
+                "Tab on {prefix}",
+            );
+        }
+    }
+
+    #[test]
+    fn enter_executes_each_exact_command() {
+        let commands = all_slash_commands();
+        for (name, _) in &commands {
+            let mut session = session_with_commands(name, &commands);
+            assert_eq!(
+                session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+                Some(SlashInputOutcome::Command(name.clone())),
+                "Enter on {name}",
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_space_hides_list_for_each_command() {
+        let commands = all_slash_commands();
+        for (name, _) in &commands {
+            let input = format!("{name} ");
+            let session = session_with_commands(&input, &commands);
+            assert!(
+                session.filtered.is_empty(),
+                "list should hide for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_prefix_enter_dismisses_to_readline() {
+        let commands = all_slash_commands();
+        let mut session = session_with_commands("/r", &commands);
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/r".into()))
+        );
+    }
+
+    #[test]
+    fn tab_ambiguous_prefix_extends_common_prefix() {
+        let commands = all_slash_commands();
+        let mut session = session_with_commands("/r", &commands);
+        assert!(session
+            .handle_event(key(KeyCode::Tab, KeyModifiers::NONE))
+            .is_none());
+        assert_eq!(session.input, "/re");
+    }
+
+    #[test]
+    fn longest_common_prefix_shared_by_record_and_resume() {
+        assert_eq!(longest_common_prefix(&["/record", "/resume"]), "/re");
+    }
+
+    #[test]
+    fn backspace_to_empty_cancels_to_readline() {
+        let mut session = session_with_input("/");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Backspace, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Cancelled)
+        );
+    }
+
+    #[test]
+    fn arrow_keys_move_highlight_without_changing_input() {
+        let mut session = session_with_input("/");
+        session.handle_event(key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(session.input, "/");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/model ".into()))
+        );
+    }
+
+    #[test]
+    fn tab_completes_highlighted_after_down_arrow() {
+        let mut session = session_with_input("/");
+        session.handle_event(key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/model ".into()))
+        );
+    }
+
+    #[test]
+    fn double_tab_extends_then_completes_highlighted() {
+        let commands = all_slash_commands();
+        let mut session = session_with_commands("/r", &commands);
+        assert!(session
+            .handle_event(key(KeyCode::Tab, KeyModifiers::NONE))
+            .is_none());
+        assert_eq!(session.input, "/re");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Dismissed("/resume ".into()))
+        );
+    }
+
+    #[test]
+    fn description_only_query_does_not_match() {
+        let commands = all_slash_commands();
+        let session = session_with_commands("/show", &commands);
+        assert!(session.filtered.is_empty());
+    }
 }

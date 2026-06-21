@@ -68,6 +68,8 @@ pub struct SecurityPolicy {
     pub validation_issues: Vec<ValidationIssue>,
     #[serde(default)]
     pub secret_patterns: Vec<crate::secret::CustomPattern>,
+    #[serde(default)]
+    pub input_guard: crate::input_guard::config::InputGuardConfig,
 }
 
 impl Default for SecurityPolicy {
@@ -83,17 +85,43 @@ impl Default for SecurityPolicy {
             invalid_fallback_rules: Vec::new(),
             validation_issues: Vec::new(),
             secret_patterns: Vec::new(),
+            input_guard: crate::input_guard::config::InputGuardConfig::default(),
         }
     }
 }
 
 const EMPTY_POLICY_TEMPLATE: &str = "# AI-Shell Security Policy\n\
 \n\
+# Lines below ship aish defaults. Edit to tighten or relax; removing a\n\
+# key restores its default value. System location: /etc/aish/security_policy.yaml.\n\
+# User fallback (~/.config/aish/security_policy.yaml) is auto-seeded from this\n\
+# template on first launch.\n\
+\n\
 global:\n\
-  default_risk_level: LOW\n\
+  default_risk_level: LOW        # LOW | MEDIUM | HIGH\n\
   enable_sandbox: false\n\
-  sandbox_off_action: ALLOW\n\
+  sandbox_off_action: ALLOW      # ALLOW | CONFIRM | BLOCK\n\
   sandbox_timeout_seconds: 10\n\
+\n\
+audit:\n\
+  enabled: false\n\
+  # log_path: /var/log/aish/audit.log\n\
+\n\
+# InputGuard pre-screens shell commands and AI prompts before execution.\n\
+# Built-in rules: crates/aish-security/src/input_guard/patterns.rs.\n\
+# Custom rules below are merged on top of built-ins; a custom rule with\n\
+# the same `name` as a built-in overrides it.\n\
+input_guard:\n\
+  enabled: true\n\
+  # max_analyzable_bytes: 4096    # inputs longer than this force-confirm\n\
+  # custom_block_rules:\n\
+  #   - name: no_rm_data\n\
+  #     pattern: \"rm\\s+-rf\\s+/data\"\n\
+  #     message: deleting /data is forbidden\n\
+  # custom_confirm_rules:\n\
+  #   - name: confirm_docker_push\n\
+  #     pattern: \"docker\\s+push\"\n\
+  #     message: pushing image — confirm tag\n\
 \n\
 rules: []\n";
 
@@ -476,6 +504,11 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         })
         .unwrap_or_default();
 
+    let input_guard: crate::input_guard::config::InputGuardConfig = root
+        .and_then(|m| mapping_get(m, "input_guard"))
+        .and_then(|v| serde_yaml::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
     SecurityPolicy {
         enable_sandbox,
         sandbox_off_action,
@@ -487,6 +520,7 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         invalid_fallback_rules,
         validation_issues,
         secret_patterns,
+        input_guard,
     }
 }
 
@@ -599,5 +633,120 @@ mod tests {
         );
         assert_eq!(policy.invalid_fallback_rules.len(), 1);
         assert_eq!(policy.invalid_fallback_rules[0].rule_id, "H-001");
+    }
+
+    #[test]
+    fn load_policy_parses_input_guard_config() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            r#"
+global:
+  enable_sandbox: false
+
+input_guard:
+  enabled: true
+  custom_block_rules:
+    - name: block_dangerous
+      pattern: "dangerous_cmd"
+      message: "This is dangerous!"
+  custom_confirm_rules:
+    - name: confirm_risky
+      pattern: "risky_tool"
+      message: "Please confirm this risky operation"
+
+rules: []
+"#,
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        assert!(policy.input_guard.enabled);
+        assert_eq!(policy.input_guard.custom_block_rules.len(), 1);
+        assert_eq!(policy.input_guard.custom_confirm_rules.len(), 1);
+
+        assert_eq!(
+            policy.input_guard.custom_block_rules[0].name,
+            "block_dangerous"
+        );
+        assert_eq!(
+            policy.input_guard.custom_block_rules[0].pattern,
+            "dangerous_cmd"
+        );
+        assert_eq!(
+            policy.input_guard.custom_block_rules[0].message,
+            "This is dangerous!"
+        );
+
+        assert_eq!(
+            policy.input_guard.custom_confirm_rules[0].name,
+            "confirm_risky"
+        );
+        assert_eq!(
+            policy.input_guard.custom_confirm_rules[0].pattern,
+            "risky_tool"
+        );
+        assert_eq!(
+            policy.input_guard.custom_confirm_rules[0].message,
+            "Please confirm this risky operation"
+        );
+    }
+
+    #[test]
+    fn load_policy_parses_max_analyzable_bytes() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            r#"
+input_guard:
+  enabled: true
+  max_analyzable_bytes: 8192
+
+rules: []
+"#,
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        assert_eq!(policy.input_guard.max_analyzable_bytes, Some(8192));
+    }
+
+    #[test]
+    fn load_policy_defaults_max_analyzable_bytes_to_none() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            r#"
+rules: []
+"#,
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        assert_eq!(policy.input_guard.max_analyzable_bytes, None);
+    }
+
+    #[test]
+    fn load_policy_uses_default_input_guard_when_missing() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\nrules: []\n",
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+
+        // Should use default values
+        assert!(policy.input_guard.enabled);
+        assert!(policy.input_guard.custom_block_rules.is_empty());
+        assert!(policy.input_guard.custom_confirm_rules.is_empty());
     }
 }

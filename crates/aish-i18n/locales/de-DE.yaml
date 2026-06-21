@@ -152,6 +152,9 @@ shell:
     resume: "Vorherige Sitzung fortsetzen"
     feedback: "Feedback geben"
     quit: "AI Shell beenden"
+    record: "Terminalsitzung aufzeichnen (start/stop)"
+    doctor: "Systemdiagnose ausführen"
+    status: "Systemumgebungsstatus anzeigen"
 
   feedback:
     select_type: "Feedback-Typ auswählen"

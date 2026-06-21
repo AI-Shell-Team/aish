@@ -333,7 +333,8 @@ shell:
     feedback: "Submit feedback"
     quit: "Exit AI Shell"
     record: "Record terminal session (start/stop)"
-    doctor: "Basic config diagnostics"
+    doctor: "Run system diagnostics"
+    status: "Show system environment status"
 
   record:
     started: "⏺ Recording started: {path}"

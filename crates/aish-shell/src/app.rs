@@ -33,6 +33,11 @@ use crate::resume_selector::{select_resume_session, ResumeSessionItem};
 use crate::statusbar::{self, StatusBarState};
 use crate::types::ShellState;
 
+/// Format prompt + command as displayed after Enter (without trailing newline).
+fn format_user_submitted_line(prompt: &str, command: &str) -> String {
+    format!("{prompt}{command}")
+}
+
 // ---------------------------------------------------------------------------
 // SIGINT handler for AI operation cancellation
 // ---------------------------------------------------------------------------
@@ -69,6 +74,41 @@ async fn poll_cancelled(token: *const CancellationToken) {
 /// Braille spinner frames used in the reasoning overlay.
 const DOTS_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
 const RESUME_LIST_LIMIT: usize = 20;
+
+const SSH_CONTEXT_CAP: usize = 40;
+const SSH_CONTEXT_CHAR_BUDGET: usize = 200_000;
+
+fn msg_text_len(m: &ChatMessage) -> usize {
+    m.content
+        .as_ref()
+        .and_then(|c| c.to_text())
+        .map(|t| t.len())
+        .unwrap_or(0)
+}
+
+fn truncate_ssh_history(h: &mut Vec<ChatMessage>) {
+    let excess = h.len().saturating_sub(SSH_CONTEXT_CAP);
+    if excess > 0 {
+        h.drain(..excess);
+    }
+    let lengths: Vec<usize> = h.iter().map(|m| msg_text_len(m)).collect();
+    let total_chars: usize = lengths.iter().sum();
+    if total_chars > SSH_CONTEXT_CHAR_BUDGET {
+        let min_keep = 6;
+        let mut to_remove = 0;
+        let mut running = total_chars;
+        for &len in &lengths {
+            if running <= SSH_CONTEXT_CHAR_BUDGET || h.len() - to_remove <= min_keep {
+                break;
+            }
+            running -= len;
+            to_remove += 1;
+        }
+        if to_remove > 0 {
+            h.drain(..to_remove);
+        }
+    }
+}
 
 fn context_compaction_notice(event: &LlmEvent) -> Option<String> {
     let changed = event
@@ -239,6 +279,7 @@ pub struct AishShell {
     pub config: ConfigModel,
     pub ai_handler: AiHandler,
     pub security_manager: SecurityManager,
+    input_guard: aish_security::input_guard::InputGuard,
     secret_check_closure:
         std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync>,
     secret_vault: std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>,
@@ -346,6 +387,120 @@ impl AishShell {
     /// Returns `true` to continue, `false` if the user aborted (caller should skip).
     /// When secrets are detected and the user chooses "Redact", `question` is
     /// updated in-place with the redacted version.
+    /// Display a yellow InputGuard warning and ask y/N confirmation.
+    /// Returns `true` if the user explicitly confirms (y/yes).
+    fn confirm_action(reason: &str, prompt_label: &str) -> bool {
+        eprintln!("\x1b[33m{}\x1b[0m", reason);
+        print!("{} [y/N] ", prompt_label);
+        let _ = std::io::stdout().flush();
+
+        // The shell prompt is in canonical mode with ISIG enabled, so a
+        // bare std::io::stdin().read_line() would let Ctrl+C raise SIGINT
+        // and kill aish.  Switch to raw mode for a single keystroke so we
+        // can interpret Ctrl+C (0x03) as "cancel" instead of dying.
+        let stdin_fd = libc::STDIN_FILENO;
+        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(stdin_fd) };
+        let saved = nix::sys::termios::tcgetattr(borrowed).ok();
+        if let Some(ref saved) = saved {
+            let mut raw = saved.clone();
+            nix::sys::termios::cfmakeraw(&mut raw);
+            raw.output_flags |=
+                nix::sys::termios::OutputFlags::OPOST | nix::sys::termios::OutputFlags::ONLCR;
+            let _ =
+                nix::sys::termios::tcsetattr(borrowed, nix::sys::termios::SetArg::TCSANOW, &raw);
+        }
+
+        let response = read_confirm_keystroke(stdin_fd);
+
+        // Drain any trailing typeahead (Enter after `y`, full `yes<Enter>`,
+        // etc.) before restoring the terminal. Leftover bytes would
+        // otherwise be consumed by the next prompt as a fresh command.
+        drain_stdin_trailing(stdin_fd);
+
+        if let Some(ref saved) = saved {
+            let _ =
+                nix::sys::termios::tcsetattr(borrowed, nix::sys::termios::SetArg::TCSADRAIN, saved);
+        }
+
+        match response {
+            ConfirmResponse::Yes => {
+                println!("y");
+                true
+            }
+            ConfirmResponse::Cancel => {
+                println!("^C");
+                false
+            }
+            ConfirmResponse::No => {
+                println!("n");
+                false
+            }
+        }
+    }
+
+    /// Run InputGuard on `input` and handle the verdict uniformly:
+    /// - Allow → proceed (return true)
+    /// - Confirm / Unknown → ask user via confirm_action; return whether they confirmed
+    /// - Block → reject (return false)
+    ///
+    /// On Block or user-decline: prints the verdict in red and, when
+    /// `record_on_block` is true, records the input to history with
+    /// exit code 1 (matching prior inline behavior at command sites).
+    /// Returns false in both cases so the caller can `continue`.
+    fn screen_input(
+        &self,
+        input: &str,
+        context: aish_security::input_guard::InputContext,
+        prompt_label: &str,
+        record_on_block: bool,
+    ) -> bool {
+        let verdict = self.input_guard.check(input, context);
+        match &verdict {
+            aish_security::input_guard::InputVerdict::Block { .. } => {
+                eprintln!("\x1b[31m{}\x1b[0m", verdict.format_display());
+                if record_on_block {
+                    self.record_history(input, 1);
+                }
+                false
+            }
+            aish_security::input_guard::InputVerdict::Confirm { .. }
+            | aish_security::input_guard::InputVerdict::Unknown { .. } => {
+                let display = verdict.format_display();
+                if !Self::confirm_action(&display, prompt_label) {
+                    if record_on_block {
+                        self.record_history(input, 1);
+                    }
+                    false
+                } else {
+                    true
+                }
+            }
+            aish_security::input_guard::InputVerdict::Allow => true,
+        }
+    }
+
+    /// Pre-screen an AI-bound prompt. Does not record history on Block
+    /// (AI prompts aren't shell commands).
+    fn screen_ai_prompt(&self, input: &str) -> bool {
+        self.screen_input(
+            input,
+            aish_security::input_guard::InputContext::AiPrompt,
+            "Send to AI anyway?",
+            false,
+        )
+    }
+
+    /// Pre-screen a shell command. Records history with exit code 1 when
+    /// the user declines so the failed attempt shows up in `history`.
+    fn screen_shell_command(&self, input: &str) -> bool {
+        self.screen_input(
+            input,
+            aish_security::input_guard::InputContext::ShellCommand,
+            "Execute anyway?",
+            true,
+        )
+    }
+
     fn check_security_gate(&self, question: &mut String) -> bool {
         let decision = self.security_manager.check_ai_input(question);
         if !decision.require_confirmation {
@@ -434,7 +589,14 @@ impl AishShell {
         }
 
         // Initialize security manager (before tool registration)
-        let security_manager = SecurityManager::new(load_policy(None));
+        let mut policy = load_policy(None);
+        // config.yaml's input_guard_enabled mirrors security_policy.yaml's
+        // input_guard.enabled and takes precedence — lets users toggle
+        // InputGuard from the more familiar config file.
+        policy.input_guard.enabled = config.input_guard_enabled;
+        let security_manager = SecurityManager::new(policy);
+        let input_guard =
+            aish_security::input_guard::InputGuard::from_policy(security_manager.policy());
 
         // Register tools
         let mut tool_registry = ToolRegistry::new();
@@ -1284,6 +1446,7 @@ impl AishShell {
             config,
             ai_handler,
             security_manager,
+            input_guard,
             secret_check_closure,
             secret_vault,
             session_store,
@@ -1594,124 +1757,11 @@ impl AishShell {
                     {
                         match self.run_slash_input_session(&prompt_str) {
                             aish_ui::SlashInputOutcome::Command(cmd) => {
-                                // Record user input if recording is active
-                                crate::recorder::shared_record_input(
-                                    &self.shared_recorder,
-                                    &format!("{}\n", cmd.trim()),
-                                );
-                                // Execute the selected command directly (avoids raw mode
-                                // conflict between crossterm and rustyline).
-                                let input = cmd.trim();
-                                if !input.is_empty() {
-                                    self.state.history.push(input.to_string());
-                                    if self.handle_special_command(input) {
-                                        self.record_history(input, 0);
-                                    }
-                                }
+                                self.apply_slash_popup_command(&mut rl, &prompt_str, &cmd);
                             }
                             aish_ui::SlashInputOutcome::Dismissed(text) => {
-                                // No match — pre-fill readline so user can continue
-                                // typing (e.g. /bin/ls).
-                                match rl.read_line_with_initial(&prompt_str, (&text, "")) {
-                                    Ok(Some(line)) => {
-                                        let input = line.trim();
-                                        if !input.is_empty() {
-                                            self.state.history.push(input.to_string());
-                                            match input::classify_input(input) {
-                                                crate::types::InputIntent::SpecialCommand => {
-                                                    if self.handle_special_command(input) {
-                                                        self.record_history(input, 0);
-                                                    }
-                                                }
-                                                crate::types::InputIntent::Command
-                                                | crate::types::InputIntent::OperatorCommand => {
-                                                    self.set_phase(ShellPhase::Running);
-                                                    let exit_code =
-                                                        self.execute_external_command(input);
-                                                    self.set_phase(ShellPhase::Editing);
-                                                    self.record_history(input, exit_code);
-                                                    self.reset_interruption();
-                                                }
-                                                crate::types::InputIntent::BuiltinCommand => {
-                                                    let parts: Vec<&str> =
-                                                        input.split_whitespace().collect();
-                                                    if let Some(cmd) = parts.first() {
-                                                        let result = self
-                                                            .state
-                                                            .handle_builtin(cmd, &parts[1..]);
-                                                        if let Some(ref output) = result.output {
-                                                            println!("{}", output);
-                                                        }
-                                                        if result.should_exit {
-                                                            self.record_history(input, 0);
-                                                            break;
-                                                        }
-                                                    }
-                                                    self.record_history(input, 0);
-                                                }
-                                                crate::types::InputIntent::Help => {
-                                                    let result =
-                                                        self.state.handle_builtin("help", &[]);
-                                                    if let Some(output) = result.output {
-                                                        println!("{}", output);
-                                                    }
-                                                    self.record_history(input, 0);
-                                                }
-                                                crate::types::InputIntent::ScriptCall => {
-                                                    let exit_code = self.execute_script(input);
-                                                    self.record_history(input, exit_code);
-                                                }
-                                                _ => {
-                                                    eprintln!("Unknown: {}", input);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(ref e)
-                                        if matches!(
-                                            e,
-                                            rustyline::error::ReadlineError::Interrupted
-                                        ) =>
-                                    {
-                                        if rl.was_slash_requested() {
-                                            // User pressed `/` inside the
-                                            // pre-filled readline — re-trigger
-                                            // the slash popup.
-                                            match self.run_slash_input_session(&prompt_str) {
-                                                aish_ui::SlashInputOutcome::Command(cmd) => {
-                                                    // Record user input if recording is active
-                                                    crate::recorder::shared_record_input(
-                                                        &self.shared_recorder,
-                                                        &format!("{}\n", cmd.trim()),
-                                                    );
-                                                    let input = cmd.trim();
-                                                    if !input.is_empty() {
-                                                        self.state.history.push(input.to_string());
-                                                        if self.handle_special_command(input) {
-                                                            self.record_history(input, 0);
-                                                        }
-                                                    }
-                                                }
-                                                aish_ui::SlashInputOutcome::Dismissed(text) => {
-                                                    let _ = rl.read_line_with_initial(
-                                                        &prompt_str,
-                                                        (&text, ""),
-                                                    );
-                                                }
-                                                aish_ui::SlashInputOutcome::Cancelled => {}
-                                            }
-                                        } else {
-                                            crate::recorder::shared_record_output(
-                                                &self.shared_recorder,
-                                                "\r\n",
-                                            );
-                                            if self.handle_ctrl_c() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {}
+                                if self.read_line_after_slash_dismiss(&mut rl, &prompt_str, &text) {
+                                    break;
                                 }
                             }
                             aish_ui::SlashInputOutcome::Cancelled => {}
@@ -1758,6 +1808,7 @@ impl AishShell {
                     // If just ";" with no question and there's a pending error,
                     // trigger error correction instead of a normal AI query.
                     if question.is_empty() && self.state.can_correct_error {
+                        crate::recorder::shared_record_input(&self.shared_recorder, ";\n");
                         if let Some(ref cmd) = self.state.last_command.clone() {
                             let old_sigint = self.install_ai_sigint_handler();
                             let mut esc_watcher = CrosstermEscWatcher::start(
@@ -1785,14 +1836,23 @@ impl AishShell {
                                     match &correction.command {
                                         Some(corrected) => {
                                             // Display corrected command and description
-                                            println!(
+                                            let corrected_line = format!(
                                                 "{} \x1b[1;36m{}\x1b[0m",
                                                 t("shell.error_correction.corrected_command_title"),
                                                 corrected
                                             );
+                                            println!("{}", corrected_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", corrected_line),
+                                            );
                                             if let Some(ref desc) = correction.description {
                                                 if !desc.is_empty() {
                                                     println!("   {}", desc);
+                                                    crate::recorder::shared_record_output(
+                                                        &self.shared_recorder,
+                                                        &format!("   {}\r\n", desc),
+                                                    );
                                                 }
                                             }
                                             // Ask user confirmation: Y/n
@@ -1803,25 +1863,43 @@ impl AishShell {
                                                 t("shell.error_correction.confirm_execute_suffix")
                                             );
                                             print!("{}", prompt);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &prompt,
+                                            );
                                             let _ = std::io::stdout().flush();
                                             let mut answer = String::new();
                                             if std::io::stdin().read_line(&mut answer).is_err() {
                                                 continue;
                                             }
+                                            crate::recorder::shared_record_input(
+                                                &self.shared_recorder,
+                                                &answer,
+                                            );
                                             let answer = answer.trim().to_lowercase();
                                             if answer == "y" || answer == "yes" || answer.is_empty()
                                             {
-                                                let exit_code =
-                                                    self.execute_external_command(corrected);
-                                                self.record_history(corrected, exit_code);
+                                                // InputGuard: AI-corrected commands must
+                                                // clear the same gate as user-typed ones,
+                                                // even after the Y/n approval above.
+                                                if self.screen_shell_command(corrected) {
+                                                    let exit_code =
+                                                        self.execute_external_command(corrected);
+                                                    self.record_history(corrected, exit_code);
+                                                }
                                             }
                                             self.state.can_correct_error = false;
                                         }
                                         None => {
                                             // No valid command, show description if available
-                                            println!(
+                                            let warn_line = format!(
                                                 "\x1b[33m\u{26a0} {}\x1b[0m",
                                                 t("shell.error_correction.no_valid_command")
+                                            );
+                                            println!("{}", warn_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", warn_line),
                                             );
                                             if let Some(ref desc) = correction.description {
                                                 let clean = desc
@@ -1831,17 +1909,30 @@ impl AishShell {
                                                     .trim();
                                                 if !clean.is_empty() {
                                                     println!("   {}", clean);
+                                                    crate::recorder::shared_record_output(
+                                                        &self.shared_recorder,
+                                                        &format!("   {}\r\n", clean),
+                                                    );
                                                 }
                                             }
-                                            println!(
+                                            let hint_line = format!(
                                                 "   \x1b[36m{}\x1b[0m",
                                                 t("shell.error_correction.retry_hint")
+                                            );
+                                            println!("{}", hint_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", hint_line),
                                             );
                                         }
                                     }
                                 }
                                 Err(aish_core::AishError::Cancelled) => {
                                     self.animation.stop();
+                                    crate::recorder::shared_record_output(
+                                        &self.shared_recorder,
+                                        "\x1b[33mInterrupted\x1b[0m\r\n",
+                                    );
                                     println!("\x1b[33mInterrupted\x1b[0m");
                                 }
                                 Err(e) => {
@@ -1860,15 +1951,27 @@ impl AishShell {
                         }
                     }
 
+                    // InputGuard pre-check for AI prompts
+                    if !self.screen_ai_prompt(&question) {
+                        continue;
+                    }
+
                     // Security gate: detect secrets in AI input
                     if !self.check_security_gate(&mut question) {
                         continue;
                     }
 
-                    // Record sanitized user input after security check passes
+                    // Record sanitized user input after security check passes.
+                    // Use the original prefix (; or ；) so the cast replay shows
+                    // the AI trigger character.
+                    let ai_prefix = if input.starts_with('\u{ff1b}') {
+                        "\u{ff1b}"
+                    } else {
+                        ";"
+                    };
                     crate::recorder::shared_record_input(
                         &self.shared_recorder,
-                        &format!("{}\n", question),
+                        &format!("{}{}\n", ai_prefix, question),
                     );
 
                     let old_sigint = self.install_ai_sigint_handler();
@@ -2078,8 +2181,12 @@ impl AishShell {
                             self.record_history(input, 0);
                             break;
                         }
-                        // PTY-required commands (su, sudo) — route directly to PTY
+                        // PTY-required commands (su, sudo) — InputGuard
+                        // check first, then route directly to PTY.
                         if result.route_to_pty {
+                            if !self.screen_shell_command(input) {
+                                continue;
+                            }
                             if let Some(ref pty_cmd) = result.pty_command {
                                 self.set_phase(ShellPhase::Running);
                                 let exit_code = self.execute_external_command(pty_cmd);
@@ -2095,9 +2202,23 @@ impl AishShell {
                         // Otherwise bash's CWD/env diverges from the Rust
                         // shell's tracking, causing the next external command
                         // to run in the wrong directory/environment.
+                        // InputGuard MUST screen here too: bash will execute
+                        // any command-substitution payloads embedded in the
+                        // arguments (e.g. `export FOO=$(rm -rf /etc)`), so
+                        // bypassing this check would let destructive code
+                        // slip through unfiltered.
                         if crate::commands::is_state_modifying(cmd)
                             && !crate::commands::is_rejected(cmd)
                         {
+                            if !self.screen_shell_command(input) {
+                                // Destructive payload blocked — skip the sync
+                                // so bash never sees it. State in Rust is
+                                // already updated by handle_builtin above,
+                                // but the destructive payload in the value
+                                // never reaches bash.
+                                self.record_history(input, 0);
+                                continue;
+                            }
                             self.sync_command_to_pty(input);
                         }
 
@@ -2122,8 +2243,11 @@ impl AishShell {
                     }
                 }
                 crate::types::InputIntent::OperatorCommand | crate::types::InputIntent::Command => {
-                    // NL detection: check if input looks like natural language
-                    // and offer to route to AI instead of executing as a command.
+                    // NL detection runs BEFORE shell screening. Otherwise
+                    // NL-looking input like "how do I kill a process?" would
+                    // hit shell Confirm rules (kill) before the user gets a
+                    // chance to route it to AI, where Confirm rules are
+                    // intentionally skipped.
                     let nl_verdict = crate::nl_detect::detect(input);
                     if nl_verdict.is_natural_language {
                         let prompt_msg = t("shell.nl_detection.confirm_ask_ai");
@@ -2143,6 +2267,11 @@ impl AishShell {
                                     &self.shared_recorder,
                                     &format!("{}\n", question),
                                 );
+
+                                // InputGuard pre-check for NL-routed AI input
+                                if !self.screen_ai_prompt(input) {
+                                    continue;
+                                }
 
                                 // Security gate: same secret check as the normal AI path
                                 if !self.check_security_gate(&mut question) {
@@ -2216,6 +2345,14 @@ impl AishShell {
                         }
                     }
 
+                    // InputGuard pre-check for the (now confirmed) shell
+                    // execution path. NL routing above already ran the AI
+                    // variant; we only get here when the input will really
+                    // execute as a shell command.
+                    if !self.screen_shell_command(input) {
+                        continue;
+                    }
+
                     self.set_phase(ShellPhase::Running);
                     let exit_code = self.execute_external_command(input);
                     self.set_phase(ShellPhase::Editing);
@@ -2285,6 +2422,141 @@ impl AishShell {
         self.shutdown();
 
         Ok(())
+    }
+
+    /// Echo prompt + submitted command the way rustyline would after Enter.
+    fn echo_user_submitted_line(&self, prompt: &str, command: &str) {
+        use std::io::Write;
+        print!("{}", format_user_submitted_line(prompt, command));
+        println!();
+        let _ = std::io::stdout().flush();
+        crate::recorder::shared_record_input(&self.shared_recorder, &format!("{command}\n"));
+    }
+
+    /// Execute a slash command selected from the popup (echo, history, handler).
+    fn apply_slash_popup_command(&mut self, rl: &mut ShellReadline, prompt: &str, cmd: &str) {
+        let input = cmd.trim();
+        if input.is_empty() {
+            return;
+        }
+        self.echo_user_submitted_line(prompt, input);
+        rl.add_history_entry(input);
+        self.state.history.push(input.to_string());
+        if self.handle_special_command(input) {
+            self.record_history(input, 0);
+        }
+    }
+
+    /// Record Tab-dismissed popup text for cast replay (e.g. `/model ` after completion).
+    fn record_slash_popup_dismissed(&self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        crate::recorder::shared_record_input(&self.shared_recorder, &format!("{text}\n"));
+    }
+
+    /// After slash popup dismisses into readline, read/edit/submit (supports nested `/`).
+    /// Returns `true` when the main shell loop should exit.
+    fn read_line_after_slash_dismiss(
+        &mut self,
+        rl: &mut ShellReadline,
+        prompt: &str,
+        initial: &str,
+    ) -> bool {
+        self.record_slash_popup_dismissed(initial);
+        let mut prefill = initial.to_string();
+        loop {
+            match rl.read_line_with_initial(prompt, (&prefill, "")) {
+                Ok(Some(line)) => return self.process_readline_submission(&line),
+                Ok(None) => return false,
+                Err(ref e) if matches!(e, rustyline::error::ReadlineError::Interrupted) => {
+                    if rl.was_slash_requested() {
+                        match self.run_slash_input_session(prompt) {
+                            aish_ui::SlashInputOutcome::Command(cmd) => {
+                                self.apply_slash_popup_command(rl, prompt, &cmd);
+                                return false;
+                            }
+                            aish_ui::SlashInputOutcome::Dismissed(text) => {
+                                self.record_slash_popup_dismissed(&text);
+                                prefill = text;
+                            }
+                            aish_ui::SlashInputOutcome::Cancelled => return false,
+                        }
+                    } else {
+                        crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");
+                        return self.handle_ctrl_c();
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
+    /// Classify and run a readline submission. Returns `true` to break the main loop.
+    fn process_readline_submission(&mut self, line: &str) -> bool {
+        let input = line.trim();
+        if input.is_empty() {
+            return false;
+        }
+        self.state.history.push(input.to_string());
+        match input::classify_input(input) {
+            crate::types::InputIntent::SpecialCommand => {
+                if self.handle_special_command(input) {
+                    self.record_history(input, 0);
+                }
+                false
+            }
+            crate::types::InputIntent::Command | crate::types::InputIntent::OperatorCommand => {
+                // InputGuard: slash-popup-dismissed submissions must
+                // clear the same gate as main-loop submissions.
+                if !self.screen_shell_command(input) {
+                    return false;
+                }
+                self.set_phase(ShellPhase::Running);
+                let exit_code = self.execute_external_command(input);
+                self.set_phase(ShellPhase::Editing);
+                self.record_history(input, exit_code);
+                self.reset_interruption();
+                false
+            }
+            crate::types::InputIntent::BuiltinCommand => {
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                if let Some(cmd) = parts.first() {
+                    let result = self.state.handle_builtin(cmd, &parts[1..]);
+                    if let Some(ref output) = result.output {
+                        println!("{}", output);
+                    }
+                    if result.should_exit {
+                        self.record_history(input, 0);
+                        return true;
+                    }
+                }
+                self.record_history(input, 0);
+                false
+            }
+            crate::types::InputIntent::Help => {
+                let result = self.state.handle_builtin("help", &[]);
+                if let Some(output) = result.output {
+                    println!("{}", output);
+                }
+                self.record_history(input, 0);
+                false
+            }
+            crate::types::InputIntent::ScriptCall => {
+                // InputGuard: scripts run shell commands internally; gate
+                // the call the same way as a direct shell command.
+                if !self.screen_shell_command(input) {
+                    return false;
+                }
+                let exit_code = self.execute_script(input);
+                self.record_history(input, exit_code);
+                false
+            }
+            _ => {
+                eprintln!("Unknown: {}", input);
+                false
+            }
+        }
     }
 
     /// Record a command to the session store.
@@ -2383,6 +2655,7 @@ impl AishShell {
             }
             Some("/record") => self.handle_record_command(&parts),
             Some("/doctor") => self.handle_doctor_command(&parts),
+            Some("/status") => self.handle_status_command(),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -2409,6 +2682,15 @@ impl AishShell {
         rt.block_on(async {
             doctor.run(fix).await;
         });
+    }
+
+    fn handle_status_command(&mut self) {
+        crate::status::run_status(
+            &self.pty,
+            &self.version,
+            &self.session_uuid,
+            &self.config.model,
+        );
     }
 
     fn select_recent_session(&mut self) {
@@ -2893,6 +3175,14 @@ impl AishShell {
 
         // Send command via PTY (release the lock inside the block so the
         // MutexGuard is dropped before any potential restart_pty() call).
+        //
+        // For session commands (ssh, telnet) the PTY output must be recorded
+        // in real-time so that the cast file reflects the correct timing and
+        // order.  For normal (short-lived) commands, real-time recording would
+        // suppress output during the AI processing window inside
+        // send_command_interactive, so we fall back to post-return recording
+        // instead.
+        let is_session = aish_pty::is_interactive_command(command);
         let result = {
             let mut pty = self.lock_pty();
             let remote_host = extract_remote_host(command);
@@ -2903,12 +3193,38 @@ impl AishShell {
                 shared_host.clone(),
                 self.shared_recorder.clone(),
             );
+            let on_output: Option<Box<dyn Fn(&str) + Send>> = if is_session {
+                let recorder = self.shared_recorder.clone();
+                Some(Box::new(move |data: &str| {
+                    crate::recorder::shared_record_output(&recorder, data);
+                }))
+            } else {
+                None
+            };
+            let version_for_status = self.version.clone();
+            let session_for_status = self.session_uuid.clone();
+            let model_for_status = self.config.model.clone();
+            let status_cb: Option<Box<aish_pty::StatusCallback>> = if is_session {
+                Some(Box::new(move |exec: &mut aish_pty::RemoteExecFn| {
+                    crate::status::run_status_remote(
+                        exec,
+                        &version_for_status,
+                        &session_for_status,
+                        &model_for_status,
+                    )
+                }))
+            } else {
+                None
+            };
             pty.send_command_interactive(
                 command,
                 ai_cb,
+                status_cb,
                 Some(shared_host),
                 Some(self.secret_check_closure.clone()),
                 Some(self.secret_vault.clone()),
+                on_output,
+                self.config.input_guard_enabled,
             )
         };
         let (exit_code, cwd, output) = match result {
@@ -2928,8 +3244,9 @@ impl AishShell {
         // Store captured output for error correction and LLM context
         self.state.last_output = output.clone();
 
-        // Record command output if recording is active
-        if !output.is_empty() {
+        // For normal (non-session) commands, record output after the PTY call
+        // returns.  Session commands are recorded in real-time via on_output.
+        if !is_session && !output.is_empty() {
             crate::recorder::shared_record_output(&self.shared_recorder, &output);
         }
 
@@ -3160,14 +3477,44 @@ impl AishShell {
                 }
             };
 
+        // InputGuard: pre-screen every non-comment, non-AI line in the
+        // script before any of it reaches the bash executor. Scripts can
+        // be downloaded (git clone) or shared, so their contents are NOT
+        // trusted user input. Without this gate, an `evil.aish` containing
+        // `rm -rf /etc` would execute unfiltered.
+        //
+        // N2: AI-prompt detection uses `is_ai_call_line` (strict quoted
+        // form only). A loose `starts_with("ai ")` would let `ai $(rm -rf /)`
+        // skip pre-screen AND fall through to bash, executing the
+        // destructive payload.
+        for line in script.content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // Only quoted `ai "..."` lines are AI prompts — they're passed
+            // to the LLM, not bash, so InputGuard skips them. Anything else
+            // starting with `ai` (e.g. `ai $(rm -rf /)`) is treated as a
+            // shell command and screened.
+            if is_ai_call_line(trimmed) {
+                continue;
+            }
+            if !self.screen_shell_command(trimmed) {
+                // Destructive content — abort the whole script. The user
+                // gets one Block message naming the offending line.
+                return 1;
+            }
+        }
+
         // Collect arguments
         let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
 
-        // Check if the script contains any AI calls
-        let has_ai_calls = script.content.lines().any(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("ai ") || trimmed.starts_with("ai\t")
-        });
+        // Check if the script contains any AI calls (uses the same
+        // strict quoted-form predicate as the pre-screen — see N2 fix).
+        let has_ai_calls = script
+            .content
+            .lines()
+            .any(|line| is_ai_call_line(line.trim()));
 
         if !has_ai_calls {
             // No AI calls — use ScriptExecutor directly (faster, no async needed)
@@ -3185,8 +3532,10 @@ impl AishShell {
             return if result.success { 0 } else { result.returncode };
         }
 
-        // Script has AI calls — execute line by line, handling AI calls inline
-        let ai_call_re = regex::Regex::new(r#"^\s*ai\s+["']([^"']+)["']\s*$"#).unwrap();
+        // Script has AI calls — execute line by line, handling AI calls inline.
+        // `ai_call_re()` (module-level helper) is shared with the pre-screen
+        // loop above so the skip decision and inline-execution dispatch
+        // cannot drift apart (N2 defense).
         let mut returncode = 0;
 
         // Build runtime env for variable substitution
@@ -3208,8 +3557,9 @@ impl AishShell {
                 continue;
             }
 
-            // Check for AI call
-            if let Some(caps) = ai_call_re.captures(trimmed) {
+            // Check for AI call (uses the same strict quoted-form regex
+            // as the pre-screen above — N2 defense).
+            if let Some(caps) = ai_call_re().captures(trimmed) {
                 // Flush any accumulated bash commands first
                 if !bash_segment.is_empty() {
                     returncode = self.flush_bash_segment(&bash_segment, returncode);
@@ -3255,7 +3605,16 @@ impl AishShell {
             .pty
             .lock()
             .unwrap()
-            .send_command_interactive(segment, None, None, None, None)
+            .send_command_interactive(
+                segment,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                self.config.input_guard_enabled,
+            )
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
         if !output.is_empty() {
@@ -3697,10 +4056,7 @@ impl AishShell {
                                 h.push(ChatMessage::assistant(&pr.text));
                             }
                         }
-                        let excess = h.len().saturating_sub(50);
-                        if excess > 0 {
-                            h.drain(..excess);
-                        }
+                        truncate_ssh_history(&mut h);
                     }
 
                     // Render analysis
@@ -4234,6 +4590,8 @@ impl AishShell {
                      \n- **Available skills:**\n{ssh_skills_description} \
                      \n- **For reading/writing/searching files on the REMOTE host:** use `bash` tool with \
                      `cat`, `head`, `tail`, `echo`, `tee`, `grep`, `find`, `awk`, etc. \
+                     \n- **For editing remote files:** use `bash` with `sed -i` for replacements, \
+                     or `bash` with heredoc (`cat > file << 'EOF'`) for creating/overwriting files. \
                      \n- **IMPORTANT about offload:** when bash output is offloaded (status=offloaded), \
                      the file path is on the LOCAL machine. You MUST use `read_file` tool to read it. \
                      NEVER use `bash` to cat/wc/tail an offload path — that file does NOT exist on the remote host. \
@@ -4266,22 +4624,27 @@ impl AishShell {
                 ec_vars.insert("os_info".to_string(), ec_os_info.clone());
                 ec_vars.insert("basic_env_info".to_string(), ec_basic_env_info.clone());
                 ec_vars.insert("output_language".to_string(), ec_output_language.clone());
-                let mut sys = pm.render("cmd_error", &ec_vars);
+                ec_vars.insert("exit_code".to_string(), query.exit_code.to_string());
 
-                // Append SSH host context (use current dynamic host)
-                if let Some(ref host) = current_host {
-                    sys.push_str(&format!(
-                        "\n\n**Important:** The command was executed on remote host **{}** via SSH.",
+                // Add remote host environment info for SSH sessions
+                let remote_env_info = if let Some(ref host) = current_host {
+                    format!(
+                        "\n- **远程主机:** {} (命令在远程主机上执行，请基于远程环境进行分析和修正)",
                         host
-                    ));
-                }
+                    )
+                } else {
+                    String::new()
+                };
+                ec_vars.insert("remote_env_info".to_string(), remote_env_info);
 
-                // Same XML format as local aish's handle_error_correction
+                let sys = pm.render("cmd_error", &ec_vars);
+
+                // Include recent_output in the user message so LLM has the actual error
                 let ctx = format!(
-                    "<command_result>\nCommand: {}\nExit code: 1\n</command_result>\n\n\
-                     Please analyze the error and suggest a fix. \
-                     Check the recent terminal output above for the actual error output.",
-                    failed_cmd
+                    "<command_result>\nCommand: {}\nExit code: {}\n</command_result>\n\n\
+                     Recent terminal output:\n{}\n\n\
+                     Please analyze the error and suggest a fix.",
+                    failed_cmd, query.exit_code, query.recent_output
                 );
                 (ctx, sys)
             } else if query.recent_output.is_empty() {
@@ -4644,10 +5007,7 @@ impl AishShell {
                             h.push(ChatMessage::assistant(&pr.text));
                         }
                     }
-                    let excess = h.len().saturating_sub(50);
-                    if excess > 0 {
-                        h.drain(..excess);
-                    }
+                    truncate_ssh_history(&mut h);
                 }
 
                 // Build AiResponse from text
@@ -5288,6 +5648,158 @@ static TOOL_XML_TRAILING_METADATA_RE: std::sync::OnceLock<regex::Regex> =
 /// Cached regex for removing incomplete tags from truncation.
 static TOOL_XML_INCOMPLETE_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
+/// Cached regex identifying an AI-prompt line in `.aish` scripts. Only
+/// strict quoted form (`ai "..."` / `ai '...'`) qualifies; anything else
+/// starting with `ai` (e.g. `ai $(rm -rf /)`) is treated as a shell
+/// command and routed through InputGuard. Hoisted to module scope + cached
+/// so it can be unit-tested directly and isn't recompiled per script run.
+static AI_CALL_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+
+/// Returns the shared `AI_CALL_RE`, compiling it on first use.
+fn ai_call_re() -> &'static regex::Regex {
+    AI_CALL_RE.get_or_init(|| {
+        regex::Regex::new(r#"^\s*ai\s+["']([^"']+)["']\s*$"#).expect("AI_CALL_RE pattern is valid")
+    })
+}
+
+/// Returns true iff `line` is a strict AI-prompt line (`ai "..."`/`ai '...'`).
+/// Used by `execute_script`'s pre-screen skip and inline-execution dispatch
+/// so the two decisions cannot drift apart (N2 defense).
+fn is_ai_call_line(line: &str) -> bool {
+    ai_call_re().is_match(line)
+}
+
+#[cfg(test)]
+mod ai_call_line_tests {
+    use super::is_ai_call_line;
+
+    // --- N2 regression: malformed `ai ...` lines must NOT be flagged as
+    //     AI prompts. If they were, they'd skip InputGuard pre-screening
+    //     AND fall through to bash, executing the destructive payload. ---
+
+    #[test]
+    fn rejects_command_substitution_form() {
+        // The headline N2 bypass: `ai $(rm -rf /)` looks like an AI call
+        // under a loose `starts_with("ai ")` check, but is a destructive
+        // shell command. Must be rejected so InputGuard screens it.
+        assert!(!is_ai_call_line("ai $(rm -rf /)"));
+    }
+
+    #[test]
+    fn rejects_unquoted_payload() {
+        // No quotes → not a strict AI prompt → must screen.
+        assert!(!is_ai_call_line("ai rm -rf /"));
+    }
+
+    #[test]
+    fn rejects_trailing_content_after_close_quote() {
+        // `ai "x" ; rm -rf /` would be a two-statement attack if accepted
+        // as an AI line. Must reject so the second statement is screened.
+        assert!(!is_ai_call_line("ai \"x\" ; rm -rf /"));
+    }
+
+    #[test]
+    fn rejects_lookalike_commands() {
+        // `aid` and `aim` are real shell commands, not AI prompts.
+        assert!(!is_ai_call_line("aid --help"));
+        assert!(!is_ai_call_line("aim commit"));
+    }
+
+    // --- Positive cases: legitimate strict-quoted AI prompts MUST be
+    //     recognized so they reach the LLM, not bash. ---
+
+    #[test]
+    fn accepts_double_quoted_prompt() {
+        assert!(is_ai_call_line("ai \"summarize this\""));
+    }
+
+    #[test]
+    fn accepts_single_quoted_prompt() {
+        assert!(is_ai_call_line("ai 'summarize this'"));
+    }
+
+    #[test]
+    fn accepts_leading_whitespace() {
+        assert!(is_ai_call_line("   ai \"hi\""));
+        assert!(is_ai_call_line("\tai \"hi\""));
+    }
+}
+
+/// User's response to a single-key `[y/N]` confirmation prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmResponse {
+    /// User pressed `y` / `Y`.
+    Yes,
+    /// User pressed `n`, Enter, or any non-confirming key.
+    No,
+    /// User pressed Ctrl+C or ESC — cancel and stay in the shell.
+    Cancel,
+}
+
+/// Map a raw keystroke byte from a `[y/N]` prompt to a [`ConfirmResponse`].
+/// Kept as a pure function so it can be unit-tested without touching termios.
+pub(crate) fn interpret_confirm_byte(byte: u8) -> ConfirmResponse {
+    match byte {
+        b'y' | b'Y' => ConfirmResponse::Yes,
+        0x03 | 0x1b => ConfirmResponse::Cancel,
+        _ => ConfirmResponse::No,
+    }
+}
+
+/// Read one raw byte from `stdin_fd` with EINTR retry, then classify it.
+fn read_confirm_keystroke(stdin_fd: libc::c_int) -> ConfirmResponse {
+    loop {
+        let mut byte = [0u8; 1];
+        let n = unsafe { libc::read(stdin_fd, byte.as_mut_ptr() as *mut libc::c_void, 1) };
+        match n {
+            1 => return interpret_confirm_byte(byte[0]),
+            -1 => {
+                // Portable errno access (mirrors persistent.rs:61). Avoids
+                // glibc/musl-specific `__errno_location`.
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return ConfirmResponse::No;
+            }
+            _ => return ConfirmResponse::No,
+        }
+    }
+}
+
+/// Drain any trailing typeahead from stdin (e.g. user typed `yes<Enter>`
+/// but we only consumed the `y`). Without this, the leftover bytes are
+/// consumed by the next prompt as a fresh command.
+fn drain_stdin_trailing(stdin_fd: libc::c_int) {
+    let mut buf = [0u8; 64];
+    loop {
+        let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut fds);
+            libc::FD_SET(stdin_fd, &mut fds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 10_000,
+        };
+        let ready = unsafe {
+            libc::select(
+                stdin_fd + 1,
+                &mut fds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if ready <= 0 {
+            break;
+        }
+        let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            break;
+        }
+    }
+}
+
 /// Strip XML tags from tool output to extract plain text content for terminal display.
 /// Handles multi-line <offload>JSON</offload> blocks, <return_code>, <stdout>,
 /// <stderr>, and any incomplete tags from truncation.
@@ -5366,6 +5878,17 @@ pub fn collapse_output(
     result.push_str(&last.join("\n"));
 
     result
+}
+
+#[cfg(test)]
+mod submitted_line_tests {
+    use super::format_user_submitted_line;
+
+    #[test]
+    fn submitted_line_includes_prompt_and_command() {
+        let line = format_user_submitted_line("<aish> ", "/help");
+        assert_eq!(line, "<aish> /help");
+    }
 }
 
 #[cfg(test)]
@@ -5762,25 +6285,28 @@ fn extract_remote_host(command: &str) -> Option<String> {
     None
 }
 
+/// Shell error prefixes used by various shells (e.g. "bash: command: not found").
+/// Each variant appears with and without the leading login-shell dash.
+const SHELL_ERROR_PREFIXES: &[&str] = &[
+    "-bash: ", "bash: ", "-ksh: ", "ksh: ", "-zsh: ", "zsh: ", "-ash: ", "ash: ", "-dash: ",
+    "dash: ", "-fish: ", "fish: ", "-csh: ", "csh: ", "-tcsh: ", "tcsh: ", "-sh: ", "sh: ",
+];
+
 /// Extract the failed command from PTY output after a command error.
 /// Strategy 1: Find the full command from the prompt line just before the
-/// bash error (preserves pipes, args, etc.).
-/// Strategy 2: Extract the command name from the bash error message.
+/// shell error (preserves pipes, args, etc.).
+/// Strategy 2: Extract the command name from the shell error message.
 fn extract_failed_command(output: &str) -> String {
     static ANSI_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap());
     let clean = re.replace_all(output, "").to_string();
     let lines: Vec<&str> = clean.lines().collect();
 
-    // Find the shell error line
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let is_shell_error = trimmed.starts_with("-bash: ")
-            || trimmed.starts_with("bash: ")
-            || trimmed.starts_with("-ksh: ")
-            || trimmed.starts_with("ksh: ")
-            || trimmed.starts_with("-zsh: ")
-            || trimmed.starts_with("zsh: ");
+        let is_shell_error = SHELL_ERROR_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix));
 
         if is_shell_error && i > 0 {
             // Look at the line before the error — it should be the prompt + command
@@ -5804,16 +6330,14 @@ fn extract_failed_command(output: &str) -> String {
     // Fallback: extract command name from the error message itself
     for line in lines.iter().rev() {
         let trimmed = line.trim();
-        let rest = trimmed
-            .strip_prefix("-bash: ")
-            .or_else(|| trimmed.strip_prefix("bash: "))
-            .or_else(|| trimmed.strip_prefix("-ksh: "))
-            .or_else(|| trimmed.strip_prefix("ksh: "))
-            .or_else(|| trimmed.strip_prefix("-zsh: "))
-            .or_else(|| trimmed.strip_prefix("zsh: "));
+        let rest = SHELL_ERROR_PREFIXES
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix));
         if let Some(rest) = rest {
-            if let Some(colon_pos) = rest.find(": ") {
-                let cmd = rest[..colon_pos].trim();
+            // Use rfind to get the LAST ": " — fish errors like
+            // "Unknown command: foo" have multiple colons.
+            if let Some(colon_pos) = rest.rfind(": ") {
+                let cmd = rest[colon_pos + 2..].trim();
                 if !cmd.is_empty() {
                     return cmd.to_string();
                 }
@@ -5859,5 +6383,48 @@ mod phase_tests {
     fn test_phase_equality() {
         assert_eq!(ShellPhase::Booting, ShellPhase::Booting);
         assert_ne!(ShellPhase::Booting, ShellPhase::Editing);
+    }
+}
+
+#[cfg(test)]
+mod confirm_action_tests {
+    use super::*;
+
+    #[test]
+    fn yes_lower_confirms() {
+        assert_eq!(interpret_confirm_byte(b'y'), ConfirmResponse::Yes);
+    }
+
+    #[test]
+    fn yes_upper_confirms() {
+        assert_eq!(interpret_confirm_byte(b'Y'), ConfirmResponse::Yes);
+    }
+
+    #[test]
+    fn no_rejects() {
+        assert_eq!(interpret_confirm_byte(b'n'), ConfirmResponse::No);
+    }
+
+    #[test]
+    fn ctrl_c_cancels() {
+        assert_eq!(interpret_confirm_byte(0x03), ConfirmResponse::Cancel);
+    }
+
+    #[test]
+    fn esc_cancels() {
+        assert_eq!(interpret_confirm_byte(0x1b), ConfirmResponse::Cancel);
+    }
+
+    #[test]
+    fn enter_rejects() {
+        // Default action is No: bare Enter must not confirm.
+        assert_eq!(interpret_confirm_byte(b'\r'), ConfirmResponse::No);
+        assert_eq!(interpret_confirm_byte(b'\n'), ConfirmResponse::No);
+    }
+
+    #[test]
+    fn arbitrary_byte_rejects() {
+        assert_eq!(interpret_confirm_byte(b'x'), ConfirmResponse::No);
+        assert_eq!(interpret_confirm_byte(b' '), ConfirmResponse::No);
     }
 }
