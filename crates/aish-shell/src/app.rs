@@ -1808,6 +1808,12 @@ impl AishShell {
                     if question.is_empty() && self.state.can_correct_error {
                         crate::recorder::shared_record_input(&self.shared_recorder, ";\n");
                         if let Some(ref cmd) = self.state.last_command.clone() {
+                            // Set AI active for status bar
+                            self.ai_active = true;
+                            if self.statusbar_visible {
+                                self.render_statusbar_fixed();
+                            }
+                            let api_start = std::time::Instant::now();
                             let old_sigint = self.install_ai_sigint_handler();
                             let mut esc_watcher = CrosstermEscWatcher::start(
                                 self.ai_handler.cancellation_token_arc(),
@@ -1828,6 +1834,11 @@ impl AishShell {
                             });
                             esc_watcher.stop();
                             Self::restore_ai_sigint_handler(old_sigint);
+                            self.last_api_latency_ms = Some(api_start.elapsed().as_millis() as u64);
+                            self.ai_active = false;
+                            if self.statusbar_visible {
+                                self.render_statusbar_fixed();
+                            }
 
                             match result {
                                 Ok(correction) => {
@@ -2377,6 +2388,7 @@ impl AishShell {
         }
 
         // Exit fixed-bottom status bar mode (reset scroll region)
+        self.statusbar_visible_atomic.store(false, Ordering::SeqCst);
         if self.statusbar_visible {
             statusbar::exit_fixed_mode();
         }
@@ -2479,6 +2491,21 @@ impl AishShell {
                             }
                             aish_ui::SlashInputOutcome::Cancelled => return false,
                         }
+                    } else if rl.was_status_toggle_requested() {
+                        if self.statusbar_visible {
+                            statusbar::exit_fixed_mode();
+                            self.statusbar_visible = false;
+                            self.statusbar_visible_atomic.store(false, Ordering::SeqCst);
+                            print!("{}", statusbar::render_hidden_notice());
+                            let _ = io::stdout().flush();
+                        } else {
+                            self.statusbar_visible = true;
+                            self.statusbar_visible_atomic.store(true, Ordering::SeqCst);
+                            let lines = statusbar::statusbar_height(&self.config);
+                            statusbar::enter_fixed_mode(lines);
+                            self.render_statusbar_fixed();
+                        }
+                        continue;
                     } else {
                         crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");
                         return self.handle_ctrl_c();
@@ -2622,16 +2649,19 @@ impl AishShell {
                     match parts[1] {
                         "hide" => {
                             if self.statusbar_visible {
-                                statusbar::exit_fixed_mode();
                                 self.statusbar_visible = false;
+                                self.statusbar_visible_atomic.store(false, Ordering::SeqCst);
+                                statusbar::exit_fixed_mode();
                             }
                             println!("{}", t("shell.statusbar.hidden_msg"));
                         }
                         "show" => {
                             if !self.statusbar_visible {
                                 self.statusbar_visible = true;
+                                self.statusbar_visible_atomic.store(true, Ordering::SeqCst);
                                 let lines = statusbar::statusbar_height(&self.config);
                                 statusbar::enter_fixed_mode(lines);
+                                self.render_statusbar_fixed();
                             }
                             println!("{}", t("shell.statusbar.shown_msg"));
                         }
@@ -3076,7 +3106,11 @@ impl AishShell {
             token_stats: stats,
             context_tokens: budget_state.estimated_tokens,
             context_window: budget_state.effective_context_window,
-            budget_policy: "sliding".to_string(),
+            budget_policy: if self.config.context_auto_compact.enabled {
+                "auto-compact".to_string()
+            } else {
+                "sliding".to_string()
+            },
             ai_active: false,
             tool_call: None,
             compacting: budget_state.is_above_auto_compact_threshold,
@@ -3095,7 +3129,11 @@ impl AishShell {
             token_stats: stats,
             context_tokens: budget_state.estimated_tokens,
             context_window: budget_state.effective_context_window,
-            budget_policy: "sliding".to_string(),
+            budget_policy: if self.config.context_auto_compact.enabled {
+                "auto-compact".to_string()
+            } else {
+                "sliding".to_string()
+            },
             ai_active: self.ai_active,
             tool_call: None,
             compacting: budget_state.is_above_auto_compact_threshold,

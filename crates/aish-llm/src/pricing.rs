@@ -54,11 +54,21 @@ pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
         }
     }
 
-    // 4. Substring match for model families
-    for (key, pricing) in table.iter() {
-        if lower.contains(key) || key.contains(&lower) {
-            return Some(*pricing);
-        }
+    // 4. Deterministic substring fallback:
+    //    choose the most specific key (longest), then lexicographically.
+    let mut candidates: Vec<(&str, ModelPricing)> = table
+        .iter()
+        .filter_map(|(key, pricing)| {
+            if lower.contains(key) || key.contains(&lower) {
+                Some((*key, *pricing))
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_by(|(ka, _), (kb, _)| kb.len().cmp(&ka.len()).then_with(|| ka.cmp(kb)));
+    if let Some((_, pricing)) = candidates.first() {
+        return Some(*pricing);
     }
 
     None
