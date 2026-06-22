@@ -348,7 +348,7 @@ pub fn render_content(state: &StatusBarState, config: &ConfigModel) -> String {
                     format!("{} {}", req_seg, latency_seg)
                 };
                 format!(
-                    "{}{}{}{}{}{}{}{}{}{} {} {}",
+                    "{}{}{}{}{}{}{}{}{}{} {}{}{} {}",
                     ansi::ACCENT,
                     model.trim(),
                     ansi::RESET,
@@ -359,7 +359,9 @@ pub fn render_content(state: &StatusBarState, config: &ConfigModel) -> String {
                     sep,
                     inout_seg,
                     cost_str,
-                    format!("{}{}{}", sep, req_lat, sep),
+                    sep,
+                    req_lat,
+                    sep,
                     state_seg,
                 )
             } else if width >= 70 {

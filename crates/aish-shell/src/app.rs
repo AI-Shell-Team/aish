@@ -6174,19 +6174,6 @@ fn parse_category_str(s: &str) -> MemoryCategory {
     }
 }
 
-/// Format a number with thousand separators.
-fn format_number(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
 /// Read a single-byte confirmation from stdin in raw mode.
 ///
 /// Acquires the interactive input guard (pauses esc_watcher), reads one
