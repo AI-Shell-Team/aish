@@ -912,13 +912,17 @@ mod tests {
         let cwd = short_cwd();
         // Must be non-empty
         assert!(!cwd.is_empty(), "short_cwd returned empty string");
-        // Should contain ~ if under home dir
+        // Should contain ~ if under home dir (unless path is truncated with … prefix)
         if let Some(home) = dirs::home_dir() {
             if std::env::current_dir()
                 .map(|d| d.starts_with(&home))
                 .unwrap_or(false)
             {
-                assert!(cwd.starts_with('~'), "expected ~ in cwd, got: {}", cwd);
+                assert!(
+                    cwd.starts_with('~') || cwd.starts_with('\u{2026}'),
+                    "expected ~ or … in cwd, got: {}",
+                    cwd
+                );
             }
         }
     }

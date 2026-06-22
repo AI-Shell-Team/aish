@@ -468,6 +468,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 11);
+        assert_eq!(SLASH_COMMANDS.len(), 13);
     }
 }
