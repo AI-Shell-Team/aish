@@ -1736,15 +1736,13 @@ impl AishShell {
                             // Hiding: expand scroll region to full screen
                             statusbar::exit_fixed_mode();
                             self.statusbar_visible = false;
-                            self.statusbar_visible_atomic
-                                .store(false, Ordering::SeqCst);
+                            self.statusbar_visible_atomic.store(false, Ordering::SeqCst);
                             print!("{}", statusbar::render_hidden_notice());
                             let _ = io::stdout().flush();
                         } else {
                             // Showing: shrink scroll region, render bar
                             self.statusbar_visible = true;
-                            self.statusbar_visible_atomic
-                                .store(true, Ordering::SeqCst);
+                            self.statusbar_visible_atomic.store(true, Ordering::SeqCst);
                             let lines = statusbar::statusbar_height(&self.config);
                             statusbar::enter_fixed_mode(lines);
                             self.render_statusbar_fixed();
@@ -1998,8 +1996,7 @@ impl AishShell {
                     esc_watcher.stop();
                     Self::restore_ai_sigint_handler(old_sigint);
 
-                    self.last_api_latency_ms =
-                        Some(api_start.elapsed().as_millis() as u64);
+                    self.last_api_latency_ms = Some(api_start.elapsed().as_millis() as u64);
 
                     // Restore status bar to "idle" state
                     self.ai_active = false;

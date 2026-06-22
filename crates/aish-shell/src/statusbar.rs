@@ -242,10 +242,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 fn render_state_seg(state: &StatusBarState) -> String {
     if let Some(ref tool) = state.tool_call {
         let t = truncate_str(tool, 25);
-        format!(
-            "{}⚡ ▸ {}{}",
-            ansi::YELLOW, t, ansi::RESET
-        )
+        format!("{}⚡ ▸ {}{}", ansi::YELLOW, t, ansi::RESET)
     } else if state.compacting {
         format!("{}⚠ compacting{}", ansi::YELLOW, ansi::RESET)
     } else if state.ai_active {
@@ -264,8 +261,7 @@ pub fn render_content(state: &StatusBarState, config: &ConfigModel) -> String {
 
     let model = short_model(&state.model);
     let bar_width = std::cmp::min(10, width / 8).max(5);
-    let (bar, pct, bar_color) =
-        progress_bar(state.context_tokens, state.context_window, bar_width);
+    let (bar, pct, bar_color) = progress_bar(state.context_tokens, state.context_window, bar_width);
     let total = state.token_stats.total_input + state.token_stats.total_output;
     let cost = compute_cost(config, &state.model, &state.token_stats);
     let state_seg = render_state_seg(state);
@@ -495,10 +491,7 @@ pub fn exit_fixed_mode() {
     if h >= 2 {
         esc.push_str(&format!("\x1b[{};1H\x1b[2K", h - 1));
         esc.push_str(&format!("\x1b[{};1H\x1b[2K", h));
-        esc.push_str(&format!(
-            "\x1b[{};1H",
-            h.saturating_sub(2).max(1)
-        ));
+        esc.push_str(&format!("\x1b[{};1H", h.saturating_sub(2).max(1)));
     }
 
     let mut stdout = std::io::stdout();
@@ -555,7 +548,9 @@ pub fn render_fixed(state: &StatusBarState, config: &ConfigModel) {
         let content_fg_only = content.replace(ansi::RESET, ansi::RESET_FG);
         esc.push_str(&format!(
             "{} {} {}",
-            ansi::BG_DARK, content_fg_only, ansi::RESET
+            ansi::BG_DARK,
+            content_fg_only,
+            ansi::RESET
         ));
     }
 
@@ -608,8 +603,7 @@ pub fn render_token_panel(state: &StatusBarState, config: &ConfigModel) -> Strin
     let total = stats.total_input + stats.total_output;
 
     let bar_width = 40;
-    let (bar, pct, bar_color) =
-        progress_bar(state.context_tokens, state.context_window, bar_width);
+    let (bar, pct, bar_color) = progress_bar(state.context_tokens, state.context_window, bar_width);
 
     let cost_7d = compute_cost(config, &state.model, stats);
     let today_in = format_tokens(stats.total_input);
@@ -918,7 +912,10 @@ mod tests {
         assert!(!cwd.is_empty(), "short_cwd returned empty string");
         // Should contain ~ if under home dir
         if let Some(home) = dirs::home_dir() {
-            if std::env::current_dir().map(|d| d.starts_with(&home)).unwrap_or(false) {
+            if std::env::current_dir()
+                .map(|d| d.starts_with(&home))
+                .unwrap_or(false)
+            {
                 assert!(cwd.starts_with('~'), "expected ~ in cwd, got: {}", cwd);
             }
         }
@@ -951,7 +948,11 @@ mod tests {
         let config = ConfigModel::default();
         let output = render_content(&state, &config);
         let clean = strip_ansi(&output);
-        assert!(clean.contains("generating"), "missing generating state: {}", clean);
+        assert!(
+            clean.contains("generating"),
+            "missing generating state: {}",
+            clean
+        );
     }
 
     #[test]
@@ -962,7 +963,11 @@ mod tests {
         config.statusbar.style = "minimal".to_string();
         let output = render_content(&state, &config);
         let clean = strip_ansi(&output);
-        assert!(!clean.contains("~/aish"), "minimal should not have cwd: {}", clean);
+        assert!(
+            !clean.contains("~/aish"),
+            "minimal should not have cwd: {}",
+            clean
+        );
     }
 
     #[test]
@@ -978,7 +983,10 @@ mod tests {
     fn test_default_has_empty_cwd_and_no_latency() {
         let state = StatusBarState::default();
         assert!(state.cwd.is_empty(), "default cwd should be empty");
-        assert!(state.last_api_latency_ms.is_none(), "default latency should be None");
+        assert!(
+            state.last_api_latency_ms.is_none(),
+            "default latency should be None"
+        );
     }
 
     // --- Helpers for tests ---
@@ -1012,7 +1020,7 @@ mod tests {
                 if let Some(&next) = chars.peek() {
                     if next == '[' {
                         chars.next(); // consume '['
-                        // Skip until letter (end of CSI sequence)
+                                      // Skip until letter (end of CSI sequence)
                         for c2 in chars.by_ref() {
                             if c2.is_ascii_alphabetic() {
                                 break;

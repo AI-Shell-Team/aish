@@ -2,7 +2,6 @@
 ///
 /// Prices are per 1K tokens in USD. Data sourced from official provider
 /// pricing pages. When a model is not found, cost estimation is skipped.
-
 use std::collections::HashMap;
 
 /// Pricing for a single model variant.
