@@ -143,3 +143,35 @@ fn query_completions_ls_usr_bin_directory() {
         assert!(resp2.candidates.len() >= 2);
     });
 }
+
+/// Regression: subcommand completion must not run forward_readline_tab first.
+/// That probe injects the full line into interactive readline; slow systemctl
+/// completion leaves bash busy and query_completions times out (~1.4s, no candidates).
+#[test]
+fn query_completions_systemctl_rest_subcommand() {
+    if !std::path::Path::new("/usr/bin/systemctl").exists()
+        && !std::path::Path::new("/bin/systemctl").exists()
+    {
+        return;
+    }
+    with_pty(|pty| {
+        let line = "systemctl rest";
+        let pos = line.len();
+        let start = std::time::Instant::now();
+        let resp = pty
+            .query_completions(line, pos, Duration::from_millis(1200))
+            .expect("query");
+        assert!(
+            start.elapsed() < Duration::from_millis(800),
+            "subcommand completion took {:?}",
+            start.elapsed()
+        );
+        assert!(
+            resp.candidates
+                .iter()
+                .any(|c| c.replacement.starts_with("restart")),
+            "expected restart, got {:?}",
+            resp.candidates
+        );
+    });
+}

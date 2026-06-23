@@ -151,12 +151,19 @@ impl ShellHelper {
             return None;
         }
 
-        if !is_path_like_token(line.get(word_start_at(line, pos)..pos).unwrap_or("")) {
+        let word_start = word_start_at(line, pos);
+        let current_word = line.get(word_start..pos).unwrap_or("");
+
+        // Readline Tab probe only when completing the command name (cword == 0).
+        // Subcommands and arguments use __aish_complete directly: injecting the
+        // full line into interactive readline can leave bash busy on slow native
+        // completions (e.g. systemctl), causing query_completions to time out.
+        if word_start == 0 && !is_path_like_token(current_word) {
             if let Some(tab) = pty.forward_readline_tab(line, pos, TAB_PROBE_TIMEOUT) {
-                let (word_start, raw_pairs) = to_replacement_pairs(&tab, line, pos);
+                let (ws, raw_pairs) = to_replacement_pairs(&tab, line, pos);
                 if !raw_pairs.is_empty() {
                     return Some((
-                        word_start,
+                        ws,
                         raw_pairs
                             .into_iter()
                             .map(|(display, replacement)| Pair {
