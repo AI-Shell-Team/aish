@@ -1,0 +1,15 @@
+# DejaGnu tool configuration for ssh_git_prompt tests
+
+proc ssh_git_prompt_version { } {
+    verbose "ssh_git_prompt test suite for aish" 2
+}
+
+proc ssh_git_prompt_exit {} {
+    verbose "ssh_git_prompt test suite exiting" 2
+}
+
+proc ssh_git_prompt_start { } {
+    global spawn_id
+    verbose "ssh_git_prompt test starting" 2
+    return $spawn_id
+}

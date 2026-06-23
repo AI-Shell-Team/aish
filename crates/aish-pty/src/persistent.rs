@@ -30,26 +30,32 @@ const INTERACTIVE_COMMANDS: &[&str] = &[
     "more", "most", "man", "screen", "tmux", "mc", "ranger",
 ];
 
-fn write_all_with_retry<F>(buf: &[u8], mut write_once: F)
+fn write_all_with_retry<F>(buf: &[u8], mut write_once: F) -> bool
 where
     F: FnMut(&[u8]) -> Result<usize, i32>,
 {
+    // Returns true iff every byte of `buf` was handed to `write_once`
+    // successfully. EINTR is retried; Ok(0) and other errnos give up early
+    // and return false so the caller can decide whether to retry at a
+    // higher level (e.g. re-injecting a PS1 marker on the next prompt).
     let mut remaining = buf;
     while !remaining.is_empty() {
         match write_once(remaining) {
-            Ok(0) => break,
+            Ok(0) => return false,
             Ok(written) => remaining = &remaining[written.min(remaining.len())..],
             Err(errno) if errno == libc::EINTR => continue,
             Err(errno) => {
                 debug!(errno, "failed to forward PTY output to stdout");
-                break;
+                return false;
             }
         }
     }
+    true
 }
 
 fn write_stdout_all(buf: &[u8]) {
-    write_all_with_retry(buf, |remaining| {
+    // Return value intentionally ignored: callers fire-and-forget stdout writes.
+    let _ = write_all_with_retry(buf, |remaining| {
         let rc = unsafe {
             libc::write(
                 libc::STDOUT_FILENO,
@@ -65,6 +71,450 @@ fn write_stdout_all(buf: &[u8]) {
             Ok(rc as usize)
         }
     });
+}
+
+/// Strip ANSI escape sequences from a byte slice, returning the visible
+/// text. Used by prompt detection so colorized prompts are recognized.
+///
+/// Handles the three common escape forms:
+/// * CSI: `\x1b[...<letter>` (colours, cursor moves)
+/// * OSC: `\x1b]...<BEL>` or `\x1b]...\x1b\\` (terminal title — emitted by
+///   bash's default PS1 on most distros)
+/// * Other: `\x1b<single char>` (e.g. `\x1b7` save cursor)
+fn strip_ansi(data: &[u8]) -> String {
+    let s = String::from_utf8_lossy(data);
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' {
+                        if chars.peek().copied() == Some('\\') {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// Heuristic: does this byte slice (assumed to be one terminal line) look
+/// like a remote shell prompt?
+///
+/// Matches bash `[user@host dir]# `, Ubuntu `user@host:dir$ `, zsh `host% `,
+/// and similar — including ANSI-coloured variants. Rejects long lines or
+/// lines that lack typical prompt punctuation to avoid misclassifying
+/// command output that happens to end in `# ` or `$ `.
+fn looks_like_remote_prompt(line: &[u8]) -> bool {
+    if line.is_empty() || line.len() > 200 {
+        return false;
+    }
+    let stripped = strip_ansi(line);
+    if stripped.is_empty() || stripped.len() > 80 {
+        return false;
+    }
+    let ends_ok = stripped.ends_with("# ")
+        || stripped.ends_with("$ ")
+        || stripped.ends_with("% ")
+        || stripped.ends_with("> ");
+    if !ends_ok {
+        return false;
+    }
+    // Require at least one typical prompt character so command output that
+    // coincidentally ends in `# ` is rejected.
+    if stripped.contains('@') || stripped.contains('[') || stripped.contains(']') {
+        return true;
+    }
+    // zsh's default prompt is often just `host% ` — no `@`/`[`/`]`. Accept it
+    // only when the stem looks like a bare hostname (alphanumeric, `.`, `_`,
+    // `-`, no whitespace, at least one letter) so command output trailing in
+    // `% ` (e.g. `50% ` progress lines) is not matched.
+    if stripped.ends_with("% ") {
+        let stem = stripped.trim_end().trim_end_matches('%').trim();
+        return !stem.is_empty()
+            && !stem.chars().any(char::is_whitespace)
+            && stem.chars().any(|c| c.is_ascii_alphabetic())
+            && stem
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    }
+    false
+}
+
+/// Detect whether the last terminal line in `data` looks like a remote
+/// shell prompt. Returns true when the chunk ends with a prompt-shaped
+/// line (e.g. `[root@host ~]# `, `user@host:~$ `, ANSI-coloured variants).
+///
+/// Used to find a safe moment to inject the `PS1=...` command that bakes
+/// the `[ssh:host]` marker into the remote prompt. We only inject at a
+/// clean prompt boundary; injecting mid-line would interrupt the user.
+fn last_line_is_remote_prompt(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    let last_sep = data.iter().rposition(|&b| b == b'\n' || b == b'\r');
+    let last_line_start = last_sep.map(|p| p + 1).unwrap_or(0);
+    looks_like_remote_prompt(&data[last_line_start..])
+}
+
+/// Return the ANSI-stripped last line of `data` if non-empty.
+///
+/// Mirrors the line-splitting logic in `last_line_is_remote_prompt` so
+/// callers can inspect the candidate prompt's content (e.g. to detect
+/// zsh `% `-style prompts vs bash `$ `/`# `-style). Returns `None` when
+/// the last line is empty (no prompt candidate to inspect).
+fn stripped_last_line(data: &[u8]) -> Option<Vec<u8>> {
+    if data.is_empty() {
+        return None;
+    }
+    let last_sep = data.iter().rposition(|&b| b == b'\n' || b == b'\r');
+    let last_line = match last_sep {
+        Some(p) => &data[p + 1..],
+        None => data,
+    };
+    if last_line.is_empty() {
+        return None;
+    }
+    Some(strip_ansi(last_line).into_bytes())
+}
+
+/// Build the bash command that prepends a yellow `[ssh:host]` marker to
+/// the remote PS1. Uses `\[\]` readline zero-width markers so bash's own
+/// cursor-column tracking accounts for the colour escapes correctly —
+/// arrow keys, Ctrl-R and Tab completion all keep working.
+///
+/// `\e` is bash's PS1 escape for ASCII ESC (shorter than `\033`). The
+/// trailing `printf '\33[A\33[J'` moves the cursor up one line (where bash
+/// echoed this very `PS1=...` command) and erases from there to end of
+/// screen — this reliably clears the echo even when it wraps across
+/// multiple visual lines on narrow terminals.
+///
+/// The leading space keeps the command out of bash's history list on
+/// any system with `HISTCONTROL=ignorespace` or `ignoreboth` (the
+/// default on most Linux distros, including UOS). Without it, the user
+/// would see this injection every time they press Up arrow.
+///
+/// The host string is shell-quoted before splicing into the single-quoted
+/// PS1 literal. `extract_remote_host_from_cmd` is regex-based and could in
+/// principle produce a value containing `'`, which would otherwise break
+/// out of the PS1 assignment and let arbitrary bytes run on the remote
+/// shell. Quoting collapses that risk to a benignly-mangled PS1.
+fn build_ps1_marker_command(host: &str, enable_git: bool) -> Vec<u8> {
+    let prefix = format!("\\[\\e[33m\\][ssh:{}] \\[\\e[0m\\]", host);
+
+    if !enable_git {
+        // Legacy path: original behavior, no git awareness.
+        let cmd = format!(
+            " PS1={}\"$PS1\"; printf '\\33[A\\33[J'\r",
+            shell_quote_escape(&prefix)
+        );
+        return cmd.into_bytes();
+    }
+
+    // Git-aware injection. Five parts concatenated with semicolons:
+    //   1. Define __aish_git_branch: runs `git symbolic-ref`, stashes
+    //      ANSI-coloured `|branch` string into __aish_git_info.
+    //   2. Save any existing PROMPT_COMMAND (string OR array form).
+    //   3. Define __aish_git_hook: clears info, calls __aish_git_branch,
+    //      then replays the saved PROMPT_COMMAND if any.
+    //   4. Install __aish_git_hook as the new PROMPT_COMMAND.
+    //   5. Prepend marker + variable reference to PS1.
+    // The trailing printf + \r matches the legacy path: it moves the
+    // cursor up and erases the line so the user never sees the echo
+    // of this multi-line command.
+    //
+    // bash quoting notes:
+    //   * Leading space → HISTCONTROL=ignorespace keeps this out of history.
+    //   * $'\x1b[35m' is bash ANSI-C quoting → ESC[35m bytes at runtime.
+    //   * ${PROMPT_COMMAND[*]} collapses array form (bash 5.1+) to string.
+    //   * __aish_git_info is intentionally NOT wrapped in \[ \]: readline
+    //     can't know the runtime length of variable-expanded bytes, so
+    //     wrapping would not help; column tracking has minor error.
+    let body = concat!(
+        " __aish_git_branch() {",
+        " local b;",
+        " b=$(git symbolic-ref --short HEAD 2>/dev/null) || return;",
+        " __aish_git_info=$'\\x1b[35m|'$b$'\\x1b[0m';",
+        " };",
+        " __aish_orig_pc=\"${PROMPT_COMMAND[*]}\";",
+        " __aish_git_hook() {",
+        " __aish_git_info=\"\";",
+        " __aish_git_branch;",
+        " [ -n \"$__aish_orig_pc\" ] && eval \"$__aish_orig_pc\";",
+        " };",
+        " PROMPT_COMMAND=__aish_git_hook;",
+    );
+    // Rust format! escapes: `{{` → literal `{`, `}}` → literal `}`.
+    // So `${{__aish_git_info}}` produces the bash variable `${__aish_git_info}`.
+    let ps1_prefix = format!("{}${{__aish_git_info}}", prefix);
+    let cmd = format!(
+        "{} PS1={}\"$PS1\"; printf '\\33[A\\33[J'\r",
+        body,
+        shell_quote_escape(&ps1_prefix)
+    );
+    cmd.into_bytes()
+}
+
+/// Active PS1-echo suppression state. Installed whenever we write a PS1
+/// marker command to `master_fd`, used to strip the resulting PTY echo
+/// before it reaches the user's terminal.
+///
+/// `remaining` decrements per stripped echo. After it hits 0 (or after the
+/// 10-second safety timeout) the suppressor becomes inert.
+pub(crate) struct Ps1EchoSuppressor {
+    /// The literal command bytes we wrote to master_fd (host-substituted,
+    /// including the trailing `\r`).
+    pub(crate) pattern: Vec<u8>,
+    /// How many echoes we still expect to strip.
+    pub(crate) remaining: u8,
+    /// When the suppressor was installed — used for the safety timeout.
+    pub(crate) started: std::time::Instant,
+    /// Bytes from the trailing edge of the previous chunk that could be the
+    /// start of a pattern match but couldn't be confirmed because the match
+    /// would extend past the chunk boundary. Prepended to the next chunk so a
+    /// pattern split across two PTY reads is still stripped. Used by the
+    /// byte-exact path only.
+    pub(crate) pending: Vec<u8>,
+}
+
+impl Ps1EchoSuppressor {
+    /// Maximum lifetime of a suppressor. If echoes haven't arrived by this
+    /// point, give up so we don't accidentally strip legitimate output
+    /// containing `PS1=...` text the user might type later.
+    pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+}
+
+/// Construct a suppressor for a freshly-injected PS1 marker. The `pattern`
+/// matches what `build_ps1_marker_command(host, enable_git)` produced.
+pub(crate) fn build_ps1_echo_suppressor(host: &str, enable_git: bool) -> Ps1EchoSuppressor {
+    Ps1EchoSuppressor {
+        pattern: build_ps1_marker_command(host, enable_git),
+        remaining: 2,
+        started: std::time::Instant::now(),
+        pending: Vec::new(),
+    }
+}
+
+/// Strip the injected PS1 marker echo from `data`.
+///
+/// Two strategies, selected by `pattern` shape:
+///
+/// - **Byte-exact** (`strip_ps1_echo_exact`): for the short legacy injection
+///   (~70 bytes). Pattern matches the echo byte-for-byte and tolerates
+///   chunk-boundary splits via `pending`.
+///
+/// - **Anchor-based** (`strip_ps1_echo_anchor`): for the long git-aware
+///   injection (~410 bytes). Bash readline inserts wrap artifacts (bare
+///   `\r`, extra spaces) at terminal-width boundaries that break byte-exact
+///   matching, so we anchor on ` __aish_git_branch()` plus the next `\n`
+///   and strip everything in between.
+pub(crate) fn strip_ps1_echo(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
+    if sup.remaining == 0 || sup.pattern.is_empty() {
+        return data.to_vec();
+    }
+    let uses_anchor_strategy = find_subslice(&sup.pattern, b"__aish_git_branch()").is_some();
+    if uses_anchor_strategy {
+        strip_ps1_echo_anchor(data, sup)
+    } else {
+        strip_ps1_echo_exact(data, sup)
+    }
+}
+
+/// Byte-exact strip for the legacy short injection. See `strip_ps1_echo`.
+fn strip_ps1_echo_exact(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
+    let combined: Vec<u8> = if sup.pending.is_empty() {
+        data.to_vec()
+    } else {
+        let mut v = std::mem::take(&mut sup.pending);
+        v.extend_from_slice(data);
+        v
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(combined.len());
+    let mut cursor: usize = 0;
+    while sup.remaining > 0 && cursor < combined.len() {
+        let region = &combined[cursor..];
+        let pos = match find_subslice(region, &sup.pattern) {
+            Some(p) => p,
+            None => {
+                let split = (0..region.len())
+                    .find(|&i| {
+                        let suffix = &region[i..];
+                        suffix.len() <= sup.pattern.len() && sup.pattern.starts_with(suffix)
+                    })
+                    .unwrap_or(region.len());
+                out.extend_from_slice(&region[..split]);
+                if split < region.len() {
+                    sup.pending.extend_from_slice(&region[split..]);
+                }
+                cursor = combined.len();
+                break;
+            }
+        };
+        out.extend_from_slice(&region[..pos]);
+        cursor += pos + sup.pattern.len();
+        sup.remaining -= 1;
+    }
+    if cursor < combined.len() {
+        out.extend_from_slice(&combined[cursor..]);
+    }
+    out
+}
+
+/// Anchor-based strip for the long git-aware injection.
+///
+/// Find the start anchor ` __aish_git_branch()` (leading space makes it
+/// specific to our injection — bash function definitions in user input
+/// never start with a space), then the next `\n` (bash command terminator),
+/// then optionally `\x1b[A\x1b[J` (the trailing printf's cursor-up + erase).
+/// Strip everything from the previous `\n` boundary (or the anchor if none)
+/// through the end of the printf erase sequence. Single-shot: the full
+/// echo must be visible in the current `data` slice; if any piece is
+/// missing the suppressor is dropped and `data` passes through unchanged.
+/// After strip, `remaining = 0` so the caller discards the suppressor.
+///
+/// `ERASE_LINE` is emitted in the output so the terminal wipes the line
+/// where the initial remote prompt sat (it was displayed to the user in
+/// a prior chunk before we could strip it); the new prompt then arrives
+/// in the next chunk on a clean line.
+fn strip_ps1_echo_anchor(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
+    const START_ANCHOR: &[u8] = b" __aish_git_branch()";
+    const PRINTF_ERASE: &[u8] = b"\x1b[A\x1b[J";
+    const ERASE_LINE: &[u8] = b"\r\x1b[2K";
+    // Upper bound on bytes buffered while waiting for the rest of a split
+    // echo. The git-aware injection is ~410 bytes; 1 KiB covers that plus
+    // readline wrap artifacts. Beyond this the suppressor gives up and
+    // flushes pending so a stray anchor fragment can't swallow an unbounded
+    // amount of real output.
+    const PENDING_LIMIT: usize = 1024;
+
+    // Prepend any bytes held back from the previous chunk so an echo split
+    // across PTY reads is reassembled before scanning.
+    let combined: Vec<u8> = if sup.pending.is_empty() {
+        data.to_vec()
+    } else {
+        let mut v = std::mem::take(&mut sup.pending);
+        v.extend_from_slice(data);
+        v
+    };
+
+    // Loop over echoes: build_ps1_echo_suppressor arms `remaining = 2`
+    // because the injected command can be echoed twice (local PTY echo +
+    // remote bash echo). Strip each occurrence independently so neither
+    // leaks to the terminal.
+    let mut out: Vec<u8> = Vec::with_capacity(combined.len());
+    let mut cursor: usize = 0;
+    while sup.remaining > 0 && cursor < combined.len() {
+        let region = &combined[cursor..];
+        let anchor_rel = match find_subslice(region, START_ANCHOR) {
+            Some(s) => s,
+            None => {
+                // Anchor hasn't arrived yet in the remaining data. Hold
+                // back the trailing suffix that could be a prefix of
+                // START_ANCHOR; emit the rest unchanged.
+                let split = (0..region.len())
+                    .find(|&i| {
+                        let suffix = &region[i..];
+                        suffix.len() <= START_ANCHOR.len() && START_ANCHOR.starts_with(suffix)
+                    })
+                    .unwrap_or(region.len());
+                out.extend_from_slice(&region[..split]);
+                if split < region.len() {
+                    sup.pending.extend_from_slice(&region[split..]);
+                }
+                if sup.pending.len() > PENDING_LIMIT {
+                    out.append(&mut sup.pending);
+                    sup.remaining = 0;
+                }
+                return out;
+            }
+        };
+
+        let abs_anchor = cursor + anchor_rel;
+        let after_anchor = abs_anchor + START_ANCHOR.len();
+        let newline_rel = match combined[after_anchor..].iter().position(|&b| b == b'\n') {
+            Some(p) => p,
+            None => {
+                // Anchor found but the command echo hasn't terminated yet.
+                // Hold back the line containing the anchor; emit everything
+                // before it.
+                let strip_start = match combined[cursor..abs_anchor]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                {
+                    Some(p) => cursor + p + 1,
+                    None => cursor,
+                };
+                out.extend_from_slice(&combined[cursor..strip_start]);
+                sup.pending.extend_from_slice(&combined[strip_start..]);
+                if sup.pending.len() > PENDING_LIMIT {
+                    out.append(&mut sup.pending);
+                    sup.remaining = 0;
+                }
+                return out;
+            }
+        };
+        let after_newline = after_anchor + newline_rel + 1;
+
+        let end = if combined.len() >= after_newline + PRINTF_ERASE.len()
+            && &combined[after_newline..after_newline + PRINTF_ERASE.len()] == PRINTF_ERASE
+        {
+            after_newline + PRINTF_ERASE.len()
+        } else {
+            after_newline
+        };
+
+        let strip_start = match combined[cursor..abs_anchor]
+            .iter()
+            .rposition(|&b| b == b'\n')
+        {
+            Some(p) => cursor + p + 1,
+            None => abs_anchor,
+        };
+
+        out.extend_from_slice(&combined[cursor..strip_start]);
+        out.extend_from_slice(ERASE_LINE);
+        cursor = end;
+        sup.remaining -= 1;
+    }
+
+    if cursor < combined.len() {
+        out.extend_from_slice(&combined[cursor..]);
+    }
+    out
+}
+
+/// Find the first occurrence of `needle` in `haystack`. Equivalent to
+/// `haystack.windows(needle.len()).position(|w| w == needle)` but
+/// handles `needle.len() > haystack.len()` gracefully (returns None).
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Persistent PTY session managing a single long-lived bash process.
@@ -447,8 +897,10 @@ impl PersistentPty {
         secret_vault: Option<std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>>,
         on_output: Option<Box<dyn Fn(&str) + Send>>,
         input_guard_enabled: bool,
+        enable_remote_git_prompt: bool,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
+        let master_fd = self.master_fd;
         let mut interceptor = if is_session {
             crate::SessionInterceptor::new(ai_callback, status_callback, input_guard_enabled)
         } else {
@@ -580,6 +1032,28 @@ impl PersistentPty {
         // should not be injected during search - it would corrupt the search
         // input. Clear when we see a shell prompt indicating search ended.
         let mut in_search_mode = false;
+        // Tracks the remote host for which we have already baked the
+        // `[ssh:host]` marker into PS1. Reset (to None) implicitly by
+        // comparing against `remote_host_for_probe` — when the user enters
+        // a nested SSH, the new host triggers a fresh injection.
+        let mut ps1_marker_done_for: Option<String> = None;
+        // Saved ps1_marker_done_for values for outer SSH sessions, parallel
+        // to nested_host_stack. When the user enters a nested SSH we push
+        // the current value (and clear ps1_marker_done_for so the new bash
+        // gets its own injection); when they exit the nested session we
+        // pop and restore. Without this, returning to the outer session
+        // would look like a host change and trigger a second PS1 injection,
+        // stacking two `[ssh:...]` markers in front of the prompt.
+        let mut ps1_marker_done_stack: Vec<Option<String>> = Vec::new();
+        // Active PS1-echo suppressor. Installed when we inject a PS1 marker
+        // command, used to strip the local PTY echo + remote bash echo of the
+        // command bytes before they reach the user's terminal. See Task docs
+        // in `strip_ps1_echo` for the full rationale.
+        let mut ps1_echo_suppressor: Option<Ps1EchoSuppressor> = None;
+        // Bytes pulled out of a timed-out PS1 echo suppressor's `pending`
+        // buffer. Prepended to the next PTY read so held-back output is
+        // displayed instead of disappearing with the suppressor.
+        let mut ps1_pending_flush: Vec<u8> = Vec::new();
         // When a probe is triggered on-demand by the AI trigger (`;`),
         // the AI question is saved here and invoked after the probe completes.
         let mut pending_ai_question: Option<String> = None;
@@ -740,6 +1214,25 @@ impl PersistentPty {
                         idle_poll_count = idle_threshold;
                     }
                 }
+                // Drop stale PS1 echo suppressor. If both echoes haven't
+                // arrived within TIMEOUT, assume the SSH connection died
+                // mid-handshake (or the remote shell never echoed) and
+                // release the suppressor so it doesn't accidentally match
+                // a future user-typed PS1=... line.
+                if let Some(ref sup) = ps1_echo_suppressor {
+                    let elapsed = sup.started.elapsed();
+                    if elapsed >= Ps1EchoSuppressor::TIMEOUT {
+                        debug!(
+                            "ps1 echo suppressor timed out after {:?}, dropping",
+                            elapsed
+                        );
+                        if !sup.pending.is_empty() {
+                            ps1_pending_flush.extend_from_slice(&sup.pending);
+                        }
+                        ps1_echo_suppressor = None;
+                    }
+                }
+
                 if idle_poll_count >= idle_threshold {
                     // No data for N * 50ms — the remote shell is idle and
                     // sitting at a prompt waiting for input.
@@ -900,7 +1393,7 @@ impl PersistentPty {
                                 // Ctrl+C: hard abort — skip followup entirely
                                 if ans[0] == 0x03 {
                                     show("^C\r\n");
-                                    drain_stdin_trailing(stdin_fd);
+                                    drain_stdin_trailing(stdin_fd, master_fd);
                                     ai_cancelled = true;
                                     false
                                 } else {
@@ -916,7 +1409,7 @@ impl PersistentPty {
                                     show(std::str::from_utf8(echo).unwrap_or("y\r\n"));
                                     // Drain trailing newline/CR so it doesn't leak
                                     // into the next read cycle.
-                                    drain_stdin_trailing(stdin_fd);
+                                    drain_stdin_trailing(stdin_fd, master_fd);
                                     ans[0] == b'y'
                                         || ans[0] == b'Y'
                                         || ans[0] == b'\r'
@@ -932,7 +1425,8 @@ impl PersistentPty {
                             // the placeholder form (still contains <SECRET>
                             // tokens) so any InputGuard display message
                             // never leaks real secret values.
-                            if !screen_injected_command(&interceptor, stdin_fd, cmd) {
+                            if !screen_injected_command(&interceptor, stdin_fd, self.master_fd, cmd)
+                            {
                                 if let Some(followup) = response.followup {
                                     std::thread::spawn(move || {
                                         let _ = followup("Command cancelled by user", None);
@@ -1169,7 +1663,7 @@ impl PersistentPty {
                                             );
                                         }
                                     }
-                                    let confirmed = read_confirm_raw(stdin_fd, &reason);
+                                    let confirmed = read_confirm_raw(stdin_fd, master_fd, &reason);
                                     if confirmed {
                                         // Mirror Forward-branch nested
                                         // session detection so a confirmed
@@ -1185,6 +1679,14 @@ impl PersistentPty {
                                                     if let Some(cur) = remote_host_for_probe.take()
                                                     {
                                                         nested_host_stack.push(cur);
+                                                        // Keep ps1_marker_done_stack in sync with
+                                                        // nested_host_stack so disconnect can restore
+                                                        // the outer marker state. Without this push
+                                                        // the pop on disconnect returns None and the
+                                                        // outer session's PS1 gets re-injected,
+                                                        // stacking duplicate [ssh:...] markers.
+                                                        ps1_marker_done_stack
+                                                            .push(ps1_marker_done_for.take());
                                                     }
                                                     remote_host_for_probe = Some(host.clone());
                                                     if let Some(ref sh) = shared_host {
@@ -1341,6 +1843,9 @@ impl PersistentPty {
                                                                 remote_host_for_probe.take()
                                                             {
                                                                 nested_host_stack.push(cur);
+                                                                ps1_marker_done_stack.push(
+                                                                    ps1_marker_done_for.take(),
+                                                                );
                                                             }
                                                             remote_host_for_probe =
                                                                 Some(host.clone());
@@ -1779,6 +2284,51 @@ impl PersistentPty {
                             }
                             skip_echo_cmd = None;
                         }
+                        // Drop stale PS1 echo suppressor on the read path so a
+                        // long-running suppressor can't strip legitimate output
+                        // containing `PS1=...` text the user types >10s after
+                        // the injection. Idle-poll enforcement alone is not
+                        // enough: under continuous PTY output the idle branch
+                        // never runs.
+                        if let Some(ref sup) = ps1_echo_suppressor {
+                            if sup.started.elapsed() >= Ps1EchoSuppressor::TIMEOUT {
+                                debug!(
+                                    "ps1 echo suppressor timed out after {:?} (read path), dropping",
+                                    sup.started.elapsed()
+                                );
+                                if !sup.pending.is_empty() {
+                                    ps1_pending_flush.extend_from_slice(&sup.pending);
+                                }
+                                ps1_echo_suppressor = None;
+                            }
+                        }
+                        // Strip PS1 marker echo into an owned buffer so the
+                        // cleaned bytes flow through the rest of the pipeline
+                        // (output_buf, followup_captured, ssh_scan, display)
+                        // instead of leaking the raw `PS1=...` command into
+                        // recorded output or LLM followup context. Prepend any
+                        // bytes flushed from a suppressor that timed out
+                        // mid-echo so they still reach the user.
+                        let cleaned_data: Vec<u8> = if !ps1_pending_flush.is_empty() {
+                            let mut v = std::mem::take(&mut ps1_pending_flush);
+                            if let Some(ref mut sup) = ps1_echo_suppressor {
+                                v.extend_from_slice(&strip_ps1_echo(data, sup));
+                            } else {
+                                v.extend_from_slice(data);
+                            }
+                            v
+                        } else if let Some(ref mut sup) = ps1_echo_suppressor {
+                            strip_ps1_echo(data, sup)
+                        } else {
+                            data.to_vec()
+                        };
+                        // Drop the suppressor once it has nothing left to strip.
+                        if let Some(ref sup) = ps1_echo_suppressor {
+                            if sup.remaining == 0 {
+                                ps1_echo_suppressor = None;
+                            }
+                        }
+                        let data: &[u8] = &cleaned_data;
                         if !data.is_empty() {
                             output_buf.extend_from_slice(data);
                             // Clear session command grace period once we receive output.
@@ -1984,10 +2534,11 @@ impl PersistentPty {
                                     } else {
                                         if let Some(cur) = remote_host_for_probe.take() {
                                             nested_host_stack.push(cur);
+                                            ps1_marker_done_stack.push(ps1_marker_done_for.take());
                                         }
                                         remote_host_for_probe = Some(host.clone());
                                         if let Some(ref sh) = shared_host {
-                                            *sh.lock().unwrap() = Some(host);
+                                            *sh.lock().unwrap() = Some(host.clone());
                                         }
                                         probe_injected = false;
                                         probe_active = false;
@@ -2000,6 +2551,22 @@ impl PersistentPty {
                                         output_ssh_scan.clear();
                                         at_password_prompt = false;
                                         in_search_mode = false;
+                                        // Do NOT inject the PS1 marker here.
+                                        // Bash always shows its first prompt
+                                        // BEFORE reading stdin, so the bytes
+                                        // could only affect the second prompt
+                                        // onwards — same as the late-injection
+                                        // path below. Worse, writing here would
+                                        // send the bytes across every SSH hop
+                                        // in the chain (high loss probability
+                                        // for nested SSH), and setting
+                                        // `ps1_marker_done_for = Some(host)`
+                                        // would permanently disable the
+                                        // late-injection retry. Let the
+                                        // late-injection block handle it: it
+                                        // fires the moment the first remote
+                                        // prompt arrives, and re-fires if the
+                                        // first attempt's bytes are lost.
                                     }
                                 } else if !output_ssh_scan.contains('\n') {
                                     // No complete line yet — skip scan
@@ -2044,6 +2611,13 @@ impl PersistentPty {
                                         if is_current {
                                             if let Some(prev) = nested_host_stack.pop() {
                                                 remote_host_for_probe = Some(prev.clone());
+                                                // Restore the outer session's
+                                                // ps1_marker_done_for so we do not
+                                                // re-inject (the outer bash's PS1
+                                                // still has the marker from the
+                                                // initial injection).
+                                                ps1_marker_done_for =
+                                                    ps1_marker_done_stack.pop().flatten();
                                                 if let Some(ref sh) = shared_host {
                                                     *sh.lock().unwrap() = Some(prev);
                                                 }
@@ -2052,16 +2626,114 @@ impl PersistentPty {
                                                 nested_probe_pending = false;
                                                 probe_sections.clear();
                                                 probe_current_section.clear();
+                                                // Drop any pending echo suppressor:
+                                                // we've returned to the outer
+                                                // session whose PS1 marker was
+                                                // already baked in, so no more
+                                                // echoes are expected.
+                                                ps1_echo_suppressor = None;
                                             }
                                         }
                                         output_ssh_scan.clear();
                                     }
                                 }
                             }
+                            // When inside an SSH/telnet/... session, bake a
+                            // `[ssh:host]` marker into the remote PS1 so it
+                            // appears in front of every prompt on the same
+                            // line. We do this by sending a `PS1=...` command
+                            // to the remote shell once per host: bash's
+                            // readline then renders the marker itself, so
+                            // cursor-column tracking stays correct and
+                            // arrow-key / Ctrl-R / Tab redraws don't garble
+                            // the display.
+                            //
+                            // This block is intentionally OUTSIDE the
+                            // `!probe_active && !was_probe_active` display
+                            // gate below: the probe-completes chunk is exactly
+                            // when the first remote prompt arrives, and we
+                            // must inject on that chunk even though display
+                            // of probe internals is suppressed.
+                            //
+                            // Conditions: only fire on a clean prompt-looking
+                            // chunk (so we don't interrupt the user mid-type),
+                            // skip during password entry and reverse-i-search,
+                            // and only once per host so nested SSH gets its
+                            // own marker.
+                            if is_session
+                                && !at_password_prompt
+                                && !in_search_mode
+                                && !interceptor.is_ai_processing()
+                                && ps1_marker_done_for != remote_host_for_probe
+                                && last_line_is_remote_prompt(data)
+                            {
+                                if let Some(host) = remote_host_for_probe.as_deref() {
+                                    // zsh '% '-style prompts would not honor PROMPT_COMMAND; only
+                                    // inject the git-aware path on bash-shaped prompts.
+                                    let is_bash_like = match stripped_last_line(data) {
+                                        Some(s) => !s.ends_with(b"% "),
+                                        None => false,
+                                    };
+                                    let enable_git = enable_remote_git_prompt && is_bash_like;
+
+                                    let cmd = build_ps1_marker_command(host, enable_git);
+                                    debug!(
+                                        "PS1 inject: host={}, enable_git={}, cmd_len={}, nesting={}, done_for={:?}, last_line={:?}",
+                                        host,
+                                        enable_git,
+                                        cmd.len(),
+                                        nested_host_stack.len(),
+                                        ps1_marker_done_for,
+                                        stripped_last_line(data).as_deref().unwrap_or(&[][..]),
+                                    );
+                                    let master_fd = self.master_fd;
+                                    let written_all = write_all_with_retry(&cmd, |remaining| {
+                                        let rc = unsafe {
+                                            libc::write(
+                                                master_fd,
+                                                remaining.as_ptr() as *const libc::c_void,
+                                                remaining.len(),
+                                            )
+                                        };
+                                        if rc < 0 {
+                                            Err(std::io::Error::last_os_error()
+                                                .raw_os_error()
+                                                .unwrap_or(libc::EIO))
+                                        } else {
+                                            Ok(rc as usize)
+                                        }
+                                    });
+                                    // Only arm the suppressor + mark done when
+                                    // the full command made it into the PTY.
+                                    // On partial write / EINTR-exhaustion / EPIPE
+                                    // we leave ps1_marker_done_for untouched so
+                                    // the next prompt-looking chunk retries the
+                                    // injection instead of silently dropping it.
+                                    if written_all {
+                                        debug!(
+                                            "PS1 inject OK: host={}, armed suppressor, remaining=2",
+                                            host
+                                        );
+                                        ps1_echo_suppressor =
+                                            Some(build_ps1_echo_suppressor(host, enable_git));
+                                        ps1_marker_done_for = Some(host.to_string());
+                                    } else {
+                                        debug!(
+                                            "PS1 marker write failed for host {}, will retry on next prompt",
+                                            host
+                                        );
+                                    }
+                                }
+                            }
                             // Display unless AI is processing or capturing probe output.
                             // Use was_probe_active to prevent leaking the chunk where
                             // probe completes (probe_active changes to false mid-parse).
-                            if !interceptor.is_ai_processing() && !probe_active && !was_probe_active
+                            // PS1 echo stripping already happened above (before output_buf
+                            // was extended), so `data` here is the cleaned slice.
+                            if !interceptor.is_ai_processing()
+                                && !probe_active
+                                && !was_probe_active
+                                && !data.is_empty()
                             {
                                 write_stdout_all(data);
                                 if let Some(ref cb) = on_output {
@@ -2155,7 +2827,7 @@ impl PersistentPty {
                             // Ctrl+C: hard abort — skip followup entirely
                             if ans[0] == 0x03 {
                                 show("^C\r\n");
-                                drain_stdin_trailing(stdin_fd);
+                                drain_stdin_trailing(stdin_fd, master_fd);
                                 ai_cancelled = true;
                                 false
                             } else {
@@ -2169,7 +2841,7 @@ impl PersistentPty {
                                     "n\r\n"
                                 };
                                 show(echo);
-                                drain_stdin_trailing(stdin_fd);
+                                drain_stdin_trailing(stdin_fd, master_fd);
                                 ans[0] == b'y'
                                     || ans[0] == b'Y'
                                     || ans[0] == b'\r'
@@ -2184,7 +2856,7 @@ impl PersistentPty {
                         // same safety gate as user-typed ones, even after
                         // the generic Y/n approval. Screen the placeholder
                         // form so any display message keeps secret tokens.
-                        if !screen_injected_command(&interceptor, stdin_fd, cmd) {
+                        if !screen_injected_command(&interceptor, stdin_fd, self.master_fd, cmd) {
                             if let Some(followup) = response.followup {
                                 std::thread::spawn(move || {
                                     let _ = followup("Command cancelled by user", None);
@@ -2969,38 +3641,63 @@ fn show_secret_dialog(warning: &str, stdin_fd: libc::c_int) -> SshSecretChoice {
 
 /// Drain trailing bytes (e.g. `\n` or `\r`) from stdin after a single-byte
 /// confirmation read so they don't leak into the next input cycle.
-fn drain_stdin_trailing(stdin_fd: libc::c_int) {
+fn drain_stdin_trailing(stdin_fd: libc::c_int, master_fd: libc::c_int) {
     // Drain up to 256 bytes with a 100ms timeout to handle cases where
-    // the user typed ahead (e.g., started typing the next command while
+    // the user typed ahead (e.g. started typing the next command while
     // the confirmation was being processed).
+    //
+    // Control characters (Ctrl+C, Ctrl+Z, Ctrl+\, Ctrl+D) are NOT drained:
+    // they are written straight to `master_fd` so the remote PTY sees them
+    // immediately. Otherwise a user who confirms a destructive command and
+    // immediately hits Ctrl+C to abort would have the cancel silently
+    // swallowed by this drain — the command runs anyway and the user has
+    // to press Ctrl+C repeatedly while the remote ssh keeps retrying.
     let mut discard = [0u8; 256];
-    let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::FD_ZERO(&mut rfds);
-        libc::FD_SET(stdin_fd, &mut rfds);
-    }
-    let mut tv = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 100_000, // 100ms
-    };
-    let sel = unsafe {
-        libc::select(
-            stdin_fd + 1,
-            &mut rfds,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut tv,
-        )
-    };
-    if sel > 0 {
-        // Drain all available bytes, not just one
-        let _ = unsafe {
+    loop {
+        let mut rfds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut rfds);
+            libc::FD_SET(stdin_fd, &mut rfds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 100_000, // 100ms
+        };
+        let sel = unsafe {
+            libc::select(
+                stdin_fd + 1,
+                &mut rfds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel <= 0 {
+            break;
+        }
+        let n = unsafe {
             libc::read(
                 stdin_fd,
                 discard.as_mut_ptr() as *mut libc::c_void,
                 discard.len(),
             )
         };
+        if n <= 0 {
+            break;
+        }
+        let n = n as usize;
+        for &b in &discard[..n] {
+            if matches!(b, 0x03 | 0x1a | 0x1c | 0x04) {
+                // Forward control characters straight to the PTY so the
+                // remote has a chance to react before the queued command.
+                unsafe {
+                    libc::write(master_fd, &b as *const u8 as *const libc::c_void, 1);
+                }
+            }
+        }
+        if n < discard.len() {
+            break;
+        }
     }
 }
 
@@ -3144,7 +3841,7 @@ fn display_ask_user(request: &crate::AskUserRequest) {
 }
 /// Display a yellow warning and prompt `[y/N]`, then read one raw key.
 /// Returns `true` only when the user presses `y` or `Y`.
-fn read_confirm_raw(stdin_fd: libc::c_int, reason: &str) -> bool {
+fn read_confirm_raw(stdin_fd: libc::c_int, master_fd: libc::c_int, reason: &str) -> bool {
     let msg = format!("\r\n\x1b[33m{}\x1b[0m\r\nExecute anyway? [y/N] ", reason);
     unsafe {
         libc::write(libc::STDOUT_FILENO, msg.as_ptr() as *const _, msg.len());
@@ -3187,8 +3884,9 @@ fn read_confirm_raw(stdin_fd: libc::c_int, reason: &str) -> bool {
     };
     // Drain any trailing typeahead (e.g. user typed `y<Enter>` — the
     // Enter would otherwise be forwarded to the remote PTY as the
-    // start of a new command).
-    drain_stdin_trailing(stdin_fd);
+    // start of a new command). Control characters are forwarded to
+    // the PTY by the helper instead of being drained.
+    drain_stdin_trailing(stdin_fd, master_fd);
     result
 }
 
@@ -3203,6 +3901,7 @@ fn read_confirm_raw(stdin_fd: libc::c_int, reason: &str) -> bool {
 fn screen_injected_command(
     interceptor: &crate::SessionInterceptor,
     stdin_fd: libc::c_int,
+    master_fd: libc::c_int,
     placeholder_cmd: &str,
 ) -> bool {
     use aish_security::input_guard::InputVerdict;
@@ -3221,7 +3920,7 @@ fn screen_injected_command(
             false
         }
         InputVerdict::Confirm { .. } | InputVerdict::Unknown { .. } => {
-            read_confirm_raw(stdin_fd, &verdict.format_display())
+            read_confirm_raw(stdin_fd, master_fd, &verdict.format_display())
         }
     }
 }
@@ -3682,7 +4381,7 @@ fn handle_ask_user_interaction(
                                         4,
                                     );
                                 }
-                                drain_stdin_trailing(stdin_fd);
+                                drain_stdin_trailing(stdin_fd, master_fd);
                                 hard_abort = true;
                                 false
                             } else {
@@ -3702,7 +4401,7 @@ fn handle_ask_user_interaction(
                                         echo.len(),
                                     );
                                 }
-                                drain_stdin_trailing(stdin_fd);
+                                drain_stdin_trailing(stdin_fd, master_fd);
                                 ans[0] == b'y'
                                     || ans[0] == b'Y'
                                     || ans[0] == b'\r'
@@ -3717,7 +4416,7 @@ fn handle_ask_user_interaction(
                     // user declines the InputGuard confirmation, return
                     // an aborted result so the AI sees a clean response
                     // and the caller stops further tool chaining.
-                    if !screen_injected_command(interceptor, stdin_fd, &command) {
+                    if !screen_injected_command(interceptor, stdin_fd, master_fd, &command) {
                         let cancel_msg = format!(
                             "\x1b[33m{}\x1b[0m\r\n",
                             aish_i18n::t("shell.command_cancelled")
@@ -4546,6 +5245,23 @@ fn looks_like_continuation_prompt(output: &[u8]) -> bool {
 /// Scan PTY output for an SSH command and extract the target host.
 /// Only checks complete lines (terminated by \r\n) so that partial
 /// typing echoes don't trigger false positives.
+///
+/// Accepts one shape:
+/// * Line has ` ssh ` in the middle, with the **prefix ending in a shell
+///   prompt terminator** (`#`, `$`, `%`, `>`). This is the shape produced
+///   when the user runs ssh from inside an already-connected remote bash
+///   — bash redraws the line as `<prompt> ssh ...`, then echoes it on
+///   Enter. The terminator check rejects command output that happens to
+///   mention ssh (e.g. `w | grep ssh` prints `root pts/1 ... 0.05s ssh
+///   -l root 10.10.17.243` — the prefix ends with `s`, not a prompt
+///   terminator).
+///
+/// Bare `ssh ` at the start of a line is intentionally NOT accepted: the
+/// outer session's initial ssh command is echoed verbatim at the top of
+/// the PTY (no prompt prefix), and treating it as a nested session would
+/// push a fake stack frame and re-enable PS1 injection against the local
+/// prompt after disconnect. Callers that need to detect a freshly submitted
+/// outer ssh command should use stdin shadowing, not this scan.
 fn scan_output_for_ssh_host(output: &str) -> Option<String> {
     // Only scan up to the last newline — anything after it is an
     // incomplete line (user still typing, reverse-i-search, etc.).
@@ -4566,28 +5282,105 @@ fn scan_output_for_ssh_host(output: &str) -> Option<String> {
         if is_isearch {
             continue;
         }
-        // Skip lines that are clearly not shell command invocations:
-        // echo/grep/cat output, log lines, etc.
-        let lower = line.to_lowercase();
-        let prefix_blocked = ["echo ", "grep ", "cat ", "sed ", "awk ", "tail "];
-        let line_starts_blocked = prefix_blocked.iter().any(|p| lower.starts_with(p));
-        if line_starts_blocked {
+        // Locate where the `ssh ...` part starts in the line. Only accept
+        // the `<prompt> ssh ...` shape (ssh appears after a space, preceded
+        // by a prompt terminator). A bare `ssh ...` at the start of a line
+        // is the outer session's own command echo and must NOT be treated
+        // as a nested session — see the function doc comment.
+        //
+        // `before` is everything in the line up to (but excluding) the
+        // leading space of ` ssh ` — so for `[root@host ~]# ssh ...` it is
+        // `[root@host ~]#`, ending in `#`.
+        //
+        // We match against `line` directly (not `line.to_lowercase()`)
+        // because the ssh command is itself lowercase — `SSH user@host` is
+        // not a valid command and bash would reject it. Skipping the
+        // lowercase conversion avoids a UTF-8 panic: `str::to_lowercase`
+        // can change byte length for some Unicode chars (e.g. `İ` → `i̇`),
+        // so an offset found in the lowercased string might not land on a
+        // char boundary when used to slice the original `line`.
+        let idx = match line.find(" ssh ") {
+            Some(idx) => idx,
+            None => continue,
+        };
+        let before = &line[..idx];
+        let after = &line[idx + 1..];
+        // Prefix must end with a shell prompt terminator — otherwise this
+        // is command output that merely mentions ssh.
+        let prompt_terminated = before.ends_with('#')
+            || before.ends_with('$')
+            || before.ends_with('%')
+            || before.ends_with('>');
+        if !prompt_terminated {
             continue;
         }
-        // Find "ssh " as a standalone word (not "ssh:" which is error output)
-        if let Some(idx) = lower.find(" ssh ") {
-            let after = &line[idx + 1..]; // skip leading space
-            if let Some(host) = extract_remote_host_from_cmd(after.trim()) {
-                return Some(host);
-            }
-        }
-        if lower.starts_with("ssh ") {
-            if let Some(host) = extract_remote_host_from_cmd(line.trim()) {
+        if let Some(host) = extract_remote_host_from_cmd(after.trim()) {
+            if is_plausible_ssh_host(&host) {
                 return Some(host);
             }
         }
     }
     None
+}
+
+/// Decide whether `host` looks like a real SSH destination (IPv4, hostname,
+/// or `user@...`). Used to filter out garbage produced when
+/// `output_ssh_scan` concatenates partial typing across chunks (e.g. the
+/// user typed `ssh 10.10.17.243` and then `ssh` while poking around in
+/// reverse-i-search — the accumulated buffer becomes `ssh 10.10.17.243ssh`,
+/// which the extractor would otherwise happily return as a host).
+fn is_plausible_ssh_host(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    let host_part = host.rsplit('@').next().unwrap_or(host);
+    if host_part.is_empty() {
+        return false;
+    }
+    let labels: Vec<&str> = host_part.split('.').collect();
+    // Strict IPv4: 4 octets, each 0-255.
+    let is_strict_ipv4 = labels.len() == 4
+        && labels.iter().all(|o| {
+            !o.is_empty()
+                && o.len() <= 3
+                && o.chars().all(|c| c.is_ascii_digit())
+                && o.parse::<u32>().map(|n| n <= 255).unwrap_or(false)
+        });
+    if is_strict_ipv4 {
+        return true;
+    }
+    // 4-label all-numeric that is NOT strict IPv4 (e.g. `999.999.999.999`)
+    // is never a valid hostname either — fall-through to the general
+    // hostname check would accept it because each label is alphanumeric.
+    // Reject explicitly so we don't poison remote_host_for_probe with an
+    // impossible address.
+    let is_ipv4_like = labels.len() == 4
+        && labels
+            .iter()
+            .all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit()));
+    if is_ipv4_like {
+        return false;
+    }
+    // Corruption pattern: three leading octets look like IPv4 but the last
+    // label glues digits together with trailing letters (e.g. "243ssh").
+    // Real hostnames don't normally look like that.
+    if labels.len() == 4
+        && labels[..3]
+            .iter()
+            .all(|o| !o.is_empty() && o.chars().all(|c| c.is_ascii_digit()))
+        && labels[3].chars().any(|c| c.is_ascii_digit())
+        && labels[3].chars().any(|c| c.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    // General hostname: each label alphanumeric + hyphens, not at edges.
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_alphanumeric() || c == '-')
+    })
 }
 
 /// Scan PTY output for SSH disconnection messages like
@@ -4626,6 +5419,164 @@ mod tests {
     }
 
     #[test]
+    fn test_looks_like_remote_prompt_bash_bracket_root() {
+        assert!(looks_like_remote_prompt(b"[root@host ~]# "));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_bash_bracket_user() {
+        assert!(looks_like_remote_prompt(b"[user@host dir]$ "));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_with_ansi_color() {
+        assert!(looks_like_remote_prompt(
+            b"\x1b[01;31mroot@host\x1b[00m:\x1b[01;34m~\x1b[00m# "
+        ));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_with_osc_title_prefix() {
+        // Bash's default PS1 on RHEL/Fedora emits an OSC title-setting
+        // sequence before the visible prompt. Detection must see through it.
+        assert!(looks_like_remote_prompt(
+            b"\x1b]0;root@xzxserver:~\x07\x1b[?1034h[root@xzxserver ~]# "
+        ));
+    }
+
+    #[test]
+    fn test_strip_ansi_handles_csi_osc_and_single_char() {
+        assert_eq!(strip_ansi(b"abc"), "abc");
+        assert_eq!(strip_ansi(b"\x1b[31mred\x1b[0m"), "red");
+        // OSC with BEL terminator
+        assert_eq!(strip_ansi(b"\x1b]0;title\x07rest"), "rest");
+        // OSC with ST (\x1b\\) terminator
+        assert_eq!(strip_ansi(b"\x1b]0;title\x1b\\rest"), "rest");
+        // Single-char escape (save cursor)
+        assert_eq!(strip_ansi(b"\x1b7X"), "X");
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_rejects_long_output() {
+        // A 200-char line ending in `# ` should be rejected as it is almost
+        // certainly command output, not a prompt.
+        let long_line = format!("{}# ", "x".repeat(200));
+        assert!(!looks_like_remote_prompt(long_line.as_bytes()));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_rejects_plain_text() {
+        // No prompt structure punctuation -> reject.
+        assert!(!looks_like_remote_prompt(b"hello world# "));
+        assert!(!looks_like_remote_prompt(b"done$ "));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_rejects_no_terminator() {
+        assert!(!looks_like_remote_prompt(b"[root@host ~]"));
+        assert!(!looks_like_remote_prompt(b"[root@host ~]#"));
+        assert!(!looks_like_remote_prompt(b"[root@host ~] #"));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_accepts_zsh_bare_percent() {
+        // zsh's default prompt is often just `host% ` with no `@`/`[`/`]`.
+        // Without explicit support these would be rejected and PS1
+        // injection never fired on plain zsh prompts.
+        assert!(looks_like_remote_prompt(b"host% "));
+        assert!(looks_like_remote_prompt(b"build-01% "));
+    }
+
+    #[test]
+    fn test_looks_like_remote_prompt_rejects_percent_with_garbage_stem() {
+        // Trailing `% ` only counts as a zsh prompt when the stem looks
+        // like a bare hostname — free-form text ending in `% ` is still
+        // command output, not a prompt.
+        assert!(!looks_like_remote_prompt(b"some output text% "));
+        assert!(!looks_like_remote_prompt(b"50% "));
+        assert!(!looks_like_remote_prompt(b"foo bar% "));
+    }
+
+    #[test]
+    fn test_last_line_is_remote_prompt_plain_prompt() {
+        assert!(last_line_is_remote_prompt(b"[root@host ~]# "));
+    }
+
+    #[test]
+    fn test_last_line_is_remote_prompt_after_output() {
+        assert!(last_line_is_remote_prompt(b"file1\nfile2\n[root@host ~]# "));
+    }
+
+    #[test]
+    fn test_last_line_is_remote_prompt_rejects_command_echo() {
+        // Prompt followed by partial user input must not trigger — we'd be
+        // interrupting the user mid-type.
+        assert!(!last_line_is_remote_prompt(b"[root@host ~]# pwd"));
+        assert!(!last_line_is_remote_prompt(b"[root@host ~]# ls"));
+    }
+
+    #[test]
+    fn test_last_line_is_remote_prompt_rejects_plain_output() {
+        assert!(!last_line_is_remote_prompt(b"file1\nfile2\nfile3\n"));
+        assert!(!last_line_is_remote_prompt(b"hello world"));
+    }
+
+    #[test]
+    fn test_build_ps1_marker_command_contains_zero_width_markers() {
+        let cmd = build_ps1_marker_command("10.10.17.130", false);
+        let s = String::from_utf8(cmd).expect("valid UTF-8");
+        // Leading space so bash's HISTCONTROL=ignorespace (default on most
+        // distros) keeps the injection out of the user's history.
+        assert!(s.starts_with(' '), "must start with space for HISTCONTROL");
+        // PS1 must wrap colour escapes in \[ \] so bash's readline counts
+        // them as zero-width. Otherwise arrow keys / Ctrl-R misalign.
+        assert!(s.contains("\\[\\e[33m\\]"), "missing \\[ before colour");
+        assert!(s.contains("\\[\\e[0m\\]"), "missing \\[ before reset");
+        assert!(s.contains("[ssh:10.10.17.130]"), "missing marker text");
+        // Trailing CR to submit the command.
+        assert!(s.ends_with('\r'), "must end with CR");
+        // Must preserve the user's original PS1.
+        assert!(s.contains("\"$PS1\""));
+        // Must include a printf that deletes the command echo line above
+        // the new prompt. \33[A = cursor up, \33[J = erase to end of screen.
+        assert!(
+            s.contains("printf '\\33[A\\33[J'"),
+            "missing echo-clearing printf: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_build_ps1_marker_command_disabled_matches_legacy() {
+        // The exact byte sequence the original (pre-git-aware) function
+        // produced for host "10.10.17.130". If the disabled path drifts,
+        // existing PS1 echo-suppressor tests that hardcode this pattern
+        // will silently fail to strip echoes.
+        let new = build_ps1_marker_command("10.10.17.130", false);
+        let legacy: Vec<u8> =
+            b" PS1='\\[\\e[33m\\][ssh:10.10.17.130] \\[\\e[0m\\]'\"$PS1\"; printf '\\33[A\\33[J'\r"
+                .to_vec();
+        assert_eq!(
+            new, legacy,
+            "enable_git=false must be byte-identical to legacy output"
+        );
+    }
+
+    #[test]
+    fn test_build_ps1_marker_command_disabled_no_git_symbols() {
+        let cmd = build_ps1_marker_command("v25", false);
+        let s = String::from_utf8_lossy(&cmd);
+        assert!(
+            !s.contains("__aish_git_branch"),
+            "disabled path must not mention git function"
+        );
+        assert!(
+            !s.contains("PROMPT_COMMAND"),
+            "disabled path must not touch PROMPT_COMMAND"
+        );
+    }
+
+    #[test]
     fn test_is_session_command() {
         assert!(is_session_command("ssh user@host"));
         assert!(is_session_command("telnet example.com"));
@@ -4642,6 +5593,87 @@ mod tests {
     }
 
     #[test]
+    fn test_is_plausible_ssh_host_accepts_ipv4() {
+        assert!(is_plausible_ssh_host("10.10.17.243"));
+        assert!(is_plausible_ssh_host("192.168.1.1"));
+        assert!(is_plausible_ssh_host("root@10.10.17.243"));
+    }
+
+    #[test]
+    fn test_is_plausible_ssh_host_accepts_hostname() {
+        assert!(is_plausible_ssh_host("example.com"));
+        assert!(is_plausible_ssh_host("build-ssh-01.prod.example.com"));
+        assert!(is_plausible_ssh_host("localhost"));
+        assert!(is_plausible_ssh_host("user@build-ssh-01"));
+    }
+
+    #[test]
+    fn test_is_plausible_ssh_host_rejects_glued_digit_letter() {
+        // The corruption pattern: output_ssh_scan concatenates partial
+        // typing across chunks (e.g. `ssh 10.10.17.243` followed by `ssh`
+        // while reverse-i-search is in flight), producing a line like
+        // `ssh 10.10.17.243ssh`. extract_remote_host_from_cmd returns the
+        // trailing token verbatim; the validator must reject it.
+        assert!(!is_plausible_ssh_host("10.10.17.243ssh"));
+        assert!(!is_plausible_ssh_host("10.10.17.243abc"));
+        assert!(!is_plausible_ssh_host("192.168.1.1xyz"));
+    }
+
+    #[test]
+    fn test_is_plausible_ssh_host_rejects_empty_and_garbage() {
+        assert!(!is_plausible_ssh_host(""));
+        assert!(!is_plausible_ssh_host("@"));
+        assert!(!is_plausible_ssh_host("user@"));
+        assert!(!is_plausible_ssh_host("-bad.example.com"));
+        assert!(!is_plausible_ssh_host("bad-.example.com"));
+    }
+
+    #[test]
+    fn test_is_plausible_ssh_host_rejects_invalid_ipv4() {
+        // 4 all-numeric labels that fail strict IPv4 validation must NOT
+        // fall through to the general hostname check (each label is
+        // alphanumeric). Without this rejection they would be accepted
+        // and poison remote_host_for_probe with an impossible address.
+        assert!(!is_plausible_ssh_host("999.999.999.999"));
+        assert!(!is_plausible_ssh_host("256.256.256.256"));
+        assert!(!is_plausible_ssh_host("1.2.3.256"));
+    }
+
+    #[test]
+    fn test_scan_output_rejects_glued_corruption() {
+        // Simulates the buffer state when output_ssh_scan has accumulated
+        // partial typing from the user. The line `ssh 10.10.17.243ssh`
+        // would be extracted by extract_remote_host_from_cmd but must be
+        // rejected by the plausibility check so the host in
+        // remote_host_for_probe does not get poisoned.
+        let output = "ssh 10.10.17.243ssh\r\n";
+        let host = scan_output_for_ssh_host(output);
+        assert_eq!(host, None);
+    }
+
+    #[test]
+    fn test_scan_output_rejects_ssh_in_command_output() {
+        // `w | grep ssh` prints lines describing active SSH sessions —
+        // the `ssh` token appears in the middle of the line as data, not
+        // as a command being executed. Picking it up would update
+        // remote_host_for_probe and re-trigger PS1 injection, stacking
+        // multiple `[ssh:...]` markers in the prompt.
+        let output =
+            "root     pts/1    10.10.73.60      086月26 14days  0.06s  0.05s ssh -l root 10.10.17.243\r\n";
+        let host = scan_output_for_ssh_host(output);
+        assert_eq!(host, None);
+    }
+
+    #[test]
+    fn test_scan_output_rejects_log_line_with_ssh() {
+        // System log lines that mention ssh are not user-typed commands.
+        let output =
+            "Jun 23 02:00:00 host sshd[1234]: Accepted publickey for root from 10.0.0.5\r\n";
+        let host = scan_output_for_ssh_host(output);
+        assert_eq!(host, None);
+    }
+
+    #[test]
     fn test_scan_output_ignores_ssh_in_forward_isearch() {
         let output = "(i-search)`ssh': ssh user@192.168.1.1\r\n";
         let host = scan_output_for_ssh_host(output);
@@ -4649,10 +5681,35 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_output_normal_echo_still_works() {
+    fn test_scan_output_rejects_bare_ssh_at_line_start() {
+        // A bare `ssh ...` at the start of a line is the outer session's
+        // own command echo (no prompt prefix). Treating it as a nested
+        // session would push a fake stack frame and re-enable PS1
+        // injection after the outer session disconnects. Only the
+        // `<prompt> ssh ...` shape is accepted.
         let output = "ssh -l root 10.10.17.243\r\n";
         let host = scan_output_for_ssh_host(output);
+        assert_eq!(host, None);
+    }
+
+    #[test]
+    fn test_scan_output_detects_ssh_after_remote_prompt() {
+        // User pressed Up-arrow to recall an ssh command from inside an
+        // already-connected remote bash. Bash redraws the line with the
+        // prompt prefix, then echoes it on Enter. The scan must see the
+        // prompt-terminated shape and detect the nested SSH target.
+        let output = "[ssh:10.10.17.130] [root@xzxserver ~]# ssh -l root 10.10.17.243\r\n";
+        let host = scan_output_for_ssh_host(output);
         assert_eq!(host, Some("10.10.17.243".to_string()));
+    }
+
+    #[test]
+    fn test_scan_output_detects_ssh_after_bare_prompt() {
+        // Same shape without our own marker prefix (e.g. right after SSH,
+        // before PS1 injection completed).
+        let output = "[root@host ~]# ssh user@10.0.0.5\r\n";
+        let host = scan_output_for_ssh_host(output);
+        assert_eq!(host, Some("user@10.0.0.5".to_string()));
     }
 
     #[test]
@@ -4681,12 +5738,28 @@ mod tests {
         let mut calls = Vec::new();
         let mut results = vec![Err(libc::EINTR), Ok(2usize), Ok(1usize), Ok(2usize)].into_iter();
 
-        write_all_with_retry(b"hello", |chunk| {
+        let fully_written = write_all_with_retry(b"hello", |chunk| {
             calls.push(String::from_utf8(chunk.to_vec()).unwrap());
             results.next().expect("expected another write result")
         });
 
+        assert!(fully_written, "should report full write on success");
         assert_eq!(calls, vec!["hello", "hello", "llo", "lo"]);
+    }
+
+    #[test]
+    fn test_write_all_with_retry_returns_false_on_zero_write() {
+        // Ok(0) signals EOF / closed fd — helper must give up and report false
+        // so callers (e.g. PS1 injection) can retry on the next opportunity.
+        let fully_written = write_all_with_retry(b"hello", |_| Ok(0));
+        assert!(!fully_written);
+    }
+
+    #[test]
+    fn test_write_all_with_retry_returns_false_on_non_eintr_error() {
+        // Non-EINTR errors abort immediately; caller sees false.
+        let fully_written = write_all_with_retry(b"hello", |_| Err(libc::EIO));
+        assert!(!fully_written);
     }
 
     #[test]
@@ -4836,5 +5909,520 @@ mod tests {
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&tempdir);
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_no_suppressor_returns_input_untouched() {
+        // When remaining == 0, the suppressor is inert and returns data as-is.
+        let mut sup = Ps1EchoSuppressor {
+            pattern: build_ps1_marker_command("10.10.17.243", false),
+            remaining: 0,
+            started: std::time::Instant::now(),
+            pending: Vec::new(),
+        };
+        let data = b"hello world\n";
+        assert_eq!(strip_ps1_echo(data, &mut sup), data.to_vec());
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_strips_local_echo_with_cr() {
+        // Local PTY ECHO returns the exact bytes written (including trailing \r).
+        let pattern = build_ps1_marker_command("10.10.17.243", false);
+        let mut sup = Ps1EchoSuppressor {
+            pattern: pattern.clone(),
+            remaining: 2,
+            started: std::time::Instant::now(),
+            pending: Vec::new(),
+        };
+        // Construct an echoed chunk: leading banner + the echoed command (pattern
+        // already ends with \r) + trailing prompt fragment.
+        let mut data = b"banner line\r\n".to_vec();
+        data.extend_from_slice(&pattern);
+        data.extend_from_slice(b"[root@host ~]# ");
+        let stripped = strip_ps1_echo(&data, &mut sup);
+        assert_eq!(sup.remaining, 1, "should have consumed one echo");
+        let s = String::from_utf8_lossy(&stripped);
+        assert!(!s.contains("PS1="), "PS1= still in output: {}", s);
+        assert!(s.contains("banner line"), "banner dropped: {}", s);
+        assert!(s.contains("[root@host ~]#"), "prompt dropped: {}", s);
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_strips_remote_echo_with_escape_sequence() {
+        // Remote bash ECHO + printf output: the literal command (with the trailing
+        // \r turning into \r\n through OPOST) followed by the actual escape bytes
+        // \x1b[A\x1b[J emitted by printf.
+        let pattern = build_ps1_marker_command("10.10.17.243", false);
+        let escape = vec![0x1b, b'[', b'A', 0x1b, b'[', b'J'];
+        let mut sup = Ps1EchoSuppressor {
+            pattern: pattern.clone(),
+            remaining: 1, // simulating local echo already consumed
+            started: std::time::Instant::now(),
+            pending: Vec::new(),
+        };
+        // Strip the trailing \r from pattern, simulate \r\n line ending, then escape.
+        let mut data = pattern.clone();
+        let cr_idx = data.len() - 1; // last byte is \r
+        data[cr_idx] = b'\n';
+        data.insert(cr_idx, b'\r'); // now ends with \r\n
+        data.extend_from_slice(&escape);
+        data.extend_from_slice(b"[ssh:10.10.17.243] [root@v25 ~]# ");
+        let stripped = strip_ps1_echo(&data, &mut sup);
+        assert_eq!(sup.remaining, 0, "should have consumed the remote echo");
+        let s = String::from_utf8_lossy(&stripped);
+        assert!(!s.contains("PS1="), "PS1= still in output: {}", s);
+        // The escape bytes should now be preserved (not stripped).
+        assert!(
+            s.contains('\x1b'),
+            "escape bytes should be present: {:?}",
+            s
+        );
+        assert!(s.contains("[root@v25 ~]#"), "prompt dropped: {}", s);
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_strips_both_echoes_in_one_chunk() {
+        // Pathological case: both echoes arrive in a single read() (e.g. very
+        // fast local SSH). The function must loop and strip both.
+        let pattern = build_ps1_marker_command("10.10.17.243", false);
+        let escape = vec![0x1b, b'[', b'A', 0x1b, b'[', b'J'];
+        let mut sup = Ps1EchoSuppressor {
+            pattern: pattern.clone(),
+            remaining: 2,
+            started: std::time::Instant::now(),
+            pending: Vec::new(),
+        };
+        let mut data = pattern.clone(); // local echo (ends with \r)
+                                        // Remote echo: pattern without trailing \r, then \r\n, then escape bytes.
+        let mut remote = pattern[..pattern.len() - 1].to_vec();
+        remote.push(b'\r');
+        remote.push(b'\n');
+        remote.extend_from_slice(&escape);
+        data.extend_from_slice(&remote);
+        data.extend_from_slice(b"prompt# ");
+        let stripped = strip_ps1_echo(&data, &mut sup);
+        assert_eq!(sup.remaining, 0, "should have consumed both echoes");
+        let s = String::from_utf8_lossy(&stripped);
+        assert!(!s.contains("PS1="), "PS1= leaked: {}", s);
+        // The escape bytes should now be preserved (not stripped).
+        assert!(s.contains('\x1b'), "escape should be present: {:?}", s);
+        assert!(s.contains("prompt#"), "prompt dropped: {}", s);
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_no_match_returns_input_unchanged() {
+        // No pattern match → data unchanged.
+        let mut sup = Ps1EchoSuppressor {
+            pattern: build_ps1_marker_command("10.10.17.243", false),
+            remaining: 2,
+            started: std::time::Instant::now(),
+            pending: Vec::new(),
+        };
+        let data = b"totally unrelated output\n";
+        assert_eq!(strip_ps1_echo(data, &mut sup), data.to_vec());
+        assert_eq!(sup.remaining, 2, "should not have consumed anything");
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_buffers_split_match_across_chunks() {
+        // PTY reads are not message-framed: a slow SSH link can split the
+        // echoed PS1 command across two reads. The suppressor must retain
+        // the trailing partial match from chunk 1 and strip the full
+        // pattern once chunk 2 arrives, instead of leaking the first
+        // fragment.
+        let pattern = build_ps1_marker_command("10.10.17.243", false);
+        let mut sup = Ps1EchoSuppressor {
+            pattern: pattern.clone(),
+            remaining: 1,
+            started: std::time::Instant::now(),
+            pending: Vec::new(),
+        };
+        let split_at = pattern.len() / 2;
+        let chunk1 = &pattern[..split_at];
+        let chunk2 = &pattern[split_at..];
+
+        let stripped1 = strip_ps1_echo(chunk1, &mut sup);
+        assert_eq!(
+            sup.remaining, 1,
+            "should not consume on partial match — waiting for more bytes"
+        );
+        // chunk1 is entirely a prefix of the pattern, so nothing is emitted.
+        assert!(
+            stripped1.is_empty(),
+            "partial trailing suffix should be buffered, not emitted: {:?}",
+            stripped1
+        );
+        assert_eq!(sup.pending, chunk1, "pending should hold chunk1 bytes");
+
+        let mut chunk2_data = chunk2.to_vec();
+        chunk2_data.extend_from_slice(b"\x1b[A\x1b[J[ssh:10.10.17.243] [root@v25 ~]# ");
+        let stripped2 = strip_ps1_echo(&chunk2_data, &mut sup);
+        assert_eq!(sup.remaining, 0, "should consume the full match on chunk2");
+        let s = String::from_utf8_lossy(&stripped2);
+        assert!(!s.contains("PS1="), "PS1= leaked: {}", s);
+        assert!(
+            s.contains('\x1b'),
+            "escape bytes should be present: {:?}",
+            s
+        );
+        assert!(s.contains("[root@v25 ~]#"), "prompt dropped: {}", s);
+    }
+
+    #[test]
+    fn test_build_ps1_echo_suppressor_constructor() {
+        let sup = build_ps1_echo_suppressor("10.10.17.243", false);
+        assert_eq!(sup.remaining, 2);
+        assert!(
+            sup.pattern.starts_with(b" PS1='"),
+            "pattern: {:?}",
+            sup.pattern
+        );
+        assert!(sup.pattern.ends_with(b"\r"), "pattern must end with CR");
+    }
+
+    #[test]
+    fn test_build_ps1_marker_command_enabled_contains_git_function() {
+        let cmd = build_ps1_marker_command("v25", true);
+        let s = String::from_utf8_lossy(&cmd);
+
+        // Must define the git-branch computation function.
+        assert!(
+            s.contains("__aish_git_branch()"),
+            "missing function definition"
+        );
+        assert!(
+            s.contains("git symbolic-ref --short HEAD"),
+            "missing git invocation"
+        );
+
+        // Must wrap PROMPT_COMMAND (preserving any user-existing one).
+        assert!(
+            s.contains("__aish_orig_pc"),
+            "missing PROMPT_COMMAND preservation"
+        );
+        assert!(
+            s.contains("PROMPT_COMMAND=__aish_git_hook"),
+            "missing PROMPT_COMMAND assignment"
+        );
+
+        // Must reference the variable in PS1 prefix.
+        assert!(
+            s.contains("${__aish_git_info}"),
+            "missing variable reference in PS1"
+        );
+
+        // Must still contain the host marker.
+        assert!(s.contains("[ssh:v25]"), "missing host marker");
+
+        // Must still end with the echo-suppression printf + CR.
+        assert!(cmd.ends_with(b"\r"), "must end with CR");
+        assert!(
+            s.contains("printf '\\33[A\\33[J'"),
+            "missing echo-erase printf"
+        );
+
+        // Hostile host name with single quote must NOT break out of quoting.
+        let evil = build_ps1_marker_command("a'b", true);
+        let es = String::from_utf8_lossy(&evil);
+        // The single quote must be escaped via the standard '\'\\'' pattern.
+        assert!(es.contains("'\\''"), "single quote in host must be escaped");
+    }
+
+    #[test]
+    fn test_build_ps1_marker_command_enabled_path_is_longer_than_disabled() {
+        let off = build_ps1_marker_command("v25", false);
+        let on = build_ps1_marker_command("v25", true);
+        assert!(
+            on.len() > off.len() + 100,
+            "git-aware command must be substantially longer"
+        );
+    }
+
+    #[test]
+    fn test_build_ps1_echo_suppressor_git_aware_pattern_matches() {
+        let sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+        assert_eq!(
+            sup.pattern, cmd,
+            "suppressor pattern must match the injected command byte-for-byte"
+        );
+        assert_eq!(
+            sup.remaining, 2,
+            "must expect 2 echoes (local PTY + remote bash)"
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_split_across_chunks() {
+        // The git-aware injection is ~410 bytes; under nested SSH the PTY
+        // frequently splits the bash echo of that injection across reads.
+        // The anchor strategy must buffer the partial echo and strip the
+        // full pattern once the second half arrives, instead of leaking the
+        // first fragment (regression observed on aish → ssh → ssh chains).
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Land the split inside the start anchor: chunk1 ends with the
+        // partial prefix ` __aish_git_bra`, chunk2 starts with `nch()...`.
+        // Pending must bridge the gap so the full anchor is seen on chunk2.
+        let anchor = b" __aish_git_branch()";
+        let anchor_pos = cmd.windows(anchor.len()).position(|w| w == anchor).unwrap();
+        let kept_prefix = b" __aish_git_bra"; // 15 bytes — a true prefix of the anchor
+        let split = anchor_pos + kept_prefix.len();
+        let chunk1 = cmd[..split].to_vec();
+        let chunk2 = cmd[split..].to_vec();
+
+        let out1 = strip_ps1_echo(&chunk1, &mut sup);
+        assert_eq!(sup.remaining, 2, "suppressor must stay armed while waiting");
+        assert_eq!(
+            sup.pending, *kept_prefix,
+            "pending must hold the partial anchor"
+        );
+        // Bytes before the held-back prefix pass through unchanged.
+        assert_eq!(
+            out1,
+            cmd[..anchor_pos],
+            "prefix before partial anchor must pass through"
+        );
+
+        // chunk2 finishes the echo and adds the bash trailing bytes.
+        let mut chunk2_data = chunk2;
+        chunk2_data.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+        let out2 = strip_ps1_echo(&chunk2_data, &mut sup);
+        // `remaining` decrements per stripped echo; the suppressor is built
+        // expecting 2 echoes (local PTY + remote bash), so one strip leaves
+        // it armed for the second.
+        assert_eq!(
+            sup.remaining, 1,
+            "suppressor decrements per echo, not consumed"
+        );
+        let s = String::from_utf8_lossy(&out2);
+        assert!(!s.contains("__aish_git_branch"), "echo body leaked: {}", s);
+        assert!(
+            !s.contains("PROMPT_COMMAND"),
+            "PROMPT_COMMAND leaked: {}",
+            s
+        );
+        assert!(
+            s.contains('\x1b'),
+            "erase sequence should be present: {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_strips_both_echoes() {
+        // build_ps1_echo_suppressor arms remaining = 2 because the injected
+        // command can be echoed twice: once by the local PTY (ECHO termios
+        // on the aish-owned pty), once by the remote bash readline. Both
+        // echoes carry the same bytes and must be stripped, otherwise the
+        // user sees a literal `__aish_git_branch()...` line on screen.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Simulate local PTY echo: command bytes + bash trailing sequence.
+        let mut echo1 = cmd.clone();
+        echo1.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+        // Simulate remote bash echo: same shape, possibly separated in time.
+        let mut echo2 = cmd.clone();
+        echo2.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+
+        let out1 = strip_ps1_echo(&echo1, &mut sup);
+        assert_eq!(sup.remaining, 1, "first echo decrements remaining to 1");
+        let s1 = String::from_utf8_lossy(&out1);
+        assert!(
+            !s1.contains("__aish_git_branch"),
+            "echo1 body leaked: {}",
+            s1
+        );
+
+        let out2 = strip_ps1_echo(&echo2, &mut sup);
+        assert_eq!(sup.remaining, 0, "second echo decrements remaining to 0");
+        let s2 = String::from_utf8_lossy(&out2);
+        assert!(
+            !s2.contains("__aish_git_branch"),
+            "echo2 body leaked: {}",
+            s2
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_strips_both_echoes_one_chunk() {
+        // Both echoes can land in the same PTY read. The strip loop must
+        // consume them in a single call rather than stopping after the first.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        let mut both = Vec::with_capacity(cmd.len() * 2 + 16);
+        both.extend_from_slice(&cmd);
+        both.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+        both.extend_from_slice(&cmd);
+        both.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+
+        let out = strip_ps1_echo(&both, &mut sup);
+        assert_eq!(sup.remaining, 0, "both echoes must be consumed");
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            !s.contains("__aish_git_branch"),
+            "echo body leaked in combined chunk: {}",
+            s
+        );
+        assert!(
+            !s.contains("PROMPT_COMMAND"),
+            "PROMPT_COMMAND leaked in combined chunk: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_pending_limit() {
+        // If pending grows past PENDING_LIMIT without resolving, the
+        // suppressor must give up and flush — otherwise a stray anchor
+        // fragment could swallow an unbounded amount of real output.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        sup.pending.clear();
+
+        // Feed a 2 KiB chunk that contains the anchor but no \n: pending
+        // grows until it exceeds PENDING_LIMIT, then flushes.
+        let mut chunk = b" __aish_git_branch() xyz".to_vec();
+        chunk.resize(2048, b'x');
+
+        let out = strip_ps1_echo(&chunk, &mut sup);
+        assert_eq!(sup.remaining, 0, "suppressor must give up past limit");
+        assert_eq!(out.len(), 2048, "all bytes flushed when giving up");
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_handles_terminal_wrap_cr() {
+        // Regression: bash readline inserts bare \r (no \n) at terminal
+        // width boundaries when echoing a long command. The strip must
+        // tolerate these wrap artifacts.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Simulate 80-col wrap: insert a standalone \r every 80 bytes.
+        let mut wrapped = Vec::with_capacity(cmd.len() + cmd.len() / 80);
+        for (i, &b) in cmd.iter().enumerate() {
+            wrapped.push(b);
+            if (i + 1) % 80 == 0 && i + 1 < cmd.len() {
+                wrapped.push(b'\r');
+            }
+        }
+        // Append the bytes bash emits after the command: \n then printf output.
+        wrapped.extend_from_slice(b"\n\x1b[A\x1b[J");
+
+        let stripped = strip_ps1_echo(&wrapped, &mut sup);
+        let stripped_str = String::from_utf8_lossy(&stripped);
+
+        assert!(
+            !stripped_str.contains("__aish_git_branch"),
+            "command bytes leaked through strip: {:?}",
+            stripped_str
+        );
+        assert!(
+            !stripped_str.contains("PROMPT_COMMAND"),
+            "PROMPT_COMMAND text leaked through strip: {:?}",
+            stripped_str
+        );
+        assert!(
+            sup.remaining < 2,
+            "suppressor did not match the wrapped echo"
+        );
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_handles_terminal_wrap_with_spaces() {
+        // Real-world regression observed in production: bash readline on
+        // 119-col terminals inserts not just \r but also SPACE bytes at
+        // wrap boundaries when echoing the 410-byte git-aware injection.
+        // Byte-exact pattern matching breaks because the wrap spaces are
+        // indistinguishable from legitimate spaces in the command. The
+        // anchor-based strip path must tolerate them.
+        let mut sup = build_ps1_echo_suppressor("10.10.17.130", true);
+
+        // Real echo captured from a live ssh session: the full injected
+        // command but with extra spaces inserted at wrap boundaries.
+        // Constructed to mirror what bash readline actually produces.
+        let cmd = build_ps1_marker_command("10.10.17.130", true);
+        let mut echo = Vec::with_capacity(cmd.len() + 16);
+        // Insert a space every ~80 bytes (simulating wrap).
+        for (i, &b) in cmd.iter().enumerate() {
+            echo.push(b);
+            if (i + 1) % 80 == 0 && i + 1 < cmd.len() {
+                echo.push(b' ');
+            }
+        }
+        // Trailing bytes: \r\n + printf output.
+        echo.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+
+        let stripped = strip_ps1_echo(&echo, &mut sup);
+        let stripped_str = String::from_utf8_lossy(&stripped);
+
+        assert!(
+            !stripped_str.contains("__aish_git_branch"),
+            "command bytes leaked through anchor strip: {:?}",
+            stripped_str
+        );
+        assert!(
+            !stripped_str.contains("PROMPT_COMMAND"),
+            "PROMPT_COMMAND leaked through anchor strip: {:?}",
+            stripped_str
+        );
+        assert!(sup.remaining < 2, "anchor strip did not consume the echo");
+    }
+
+    #[test]
+    fn test_strip_ps1_echo_preserves_crlf_pairs() {
+        // Sanity: \r\n pairs (normal line terminators) must NOT be stripped.
+        let mut sup = build_ps1_echo_suppressor("v25", false);
+        let cmd = build_ps1_marker_command("v25", false);
+
+        // Trailing bytes after echo: \r\n + escape sequence (real-world shape).
+        let mut data = cmd.clone();
+        data.extend_from_slice(b"\r\n\x1b[A\x1b[J");
+
+        let stripped = strip_ps1_echo(&data, &mut sup);
+        // The command itself stripped, but \r\n + escapes preserved.
+        let s = String::from_utf8_lossy(&stripped);
+        assert!(
+            s.contains("\r\n"),
+            "CRLF pair must be preserved, got: {:?}",
+            s
+        );
+        assert!(
+            s.contains("\x1b[J"),
+            "escape sequence must be preserved, got: {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn test_stripped_last_line_basic_bash_prompt() {
+        let data = b"some output\r\n[root@host ~]# ";
+        let last = stripped_last_line(data).expect("should find last line");
+        assert_eq!(last, b"[root@host ~]# ");
+    }
+
+    #[test]
+    fn test_stripped_last_line_strips_ansi() {
+        let data = b"\x1b[32muser@host\x1b[0m:~$ ";
+        let last = stripped_last_line(data).expect("should find last line");
+        assert_eq!(last, b"user@host:~$ ");
+    }
+
+    #[test]
+    fn test_stripped_last_line_zsh_percent_prompt() {
+        let data = b"output\nhost% ";
+        let last = stripped_last_line(data).expect("should find last line");
+        assert_eq!(last, b"host% ");
+    }
+
+    #[test]
+    fn test_stripped_last_line_empty_returns_none() {
+        assert!(stripped_last_line(b"").is_none());
+        assert!(
+            stripped_last_line(b"abc\n").is_none(),
+            "trailing newline → empty last line"
+        );
     }
 }
