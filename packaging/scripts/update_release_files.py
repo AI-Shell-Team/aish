@@ -133,11 +133,9 @@ def _update_changelog(version: str, release_date: str) -> None:
     unreleased_bounds = _find_section_bounds(original, UNRELEASED_HEADING_RE)
     if unreleased_bounds is not None:
         unreleased_start, _, unreleased_end = unreleased_bounds
-        unreleased_section = f"## [Unreleased]\n\n{UNRELEASED_PLACEHOLDER}\n"
         updated = (
             f"{original[:unreleased_start]}"
             f"{new_section}"
-            f"{unreleased_section}"
             f"{original[unreleased_end:]}"
         )
     else:

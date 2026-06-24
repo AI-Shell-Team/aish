@@ -33,12 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Removed deprecated dead code from the Rust runtime (LiteLLMClient, legacy diagnose agent, state_capture).
 
-## [Unreleased]
-
-### Added
-
-- No unreleased changes yet.
-
 ## [0.3.4] - 2026-06-08
 
 ### Added
