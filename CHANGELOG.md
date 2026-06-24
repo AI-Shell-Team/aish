@@ -7,6 +7,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] - 2026-06-24
+
+### Added
+
+- Added `/record start|stop` for asciinema v2 session recording, including real-time PTY output and error-correction flow capture.
+- Added native bash Tab completion via control-pipe JSON, with readline forwarding and Bash 4.2 compatibility.
+- Added InputGuard pre-execution screening for shell commands and AI prompts (Allow / Confirm / Block), including SSH/PTY sessions.
+- Added `/status` to display system environment (hostname, OS, CPU, memory, network, services, errors) in local and remote SSH modes.
+- Added `/doctor` for parallel environment diagnostics (config, API key, dirs, session, tools, skills, memory, connectivity).
+
+### Changed
+
+- Improved slash-command popup Enter/Tab UX, viewport stability, and arrow navigation.
+- Improved SSH error correction with exit codes, remote host context, and broader shell error-prefix support.
+- Added release profile size optimizations (LTO, strip).
+
+### Fixed
+
+- Fixed cast replay by preserving standalone `\r` and recording Ctrl+C events.
+- Fixed Tab completion timeout for slow native completions (e.g. systemctl).
+- Fixed Tab completion on Bash 4.2 (CentOS 7).
+
+### Removed
+
+- Removed deprecated dead code from the Rust runtime (LiteLLMClient, legacy diagnose agent, state_capture).
+
+## [Unreleased]
+
+### Added
+
+- No unreleased changes yet.
+
 ## [0.3.4] - 2026-06-08
 
 ### Added
@@ -26,12 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fixed confirmation panel rendering so the right border draws correctly in the terminal UI.
 - Fixed feedback log attachment so oversized bodies keep as many recent log lines as possible instead of dropping logs entirely when the GitHub issue URL would exceed the length limit.
-
-## [Unreleased]
-
-### Added
-
-- No unreleased changes yet.
 
 ## [0.3.3] - 2026-06-03
 
