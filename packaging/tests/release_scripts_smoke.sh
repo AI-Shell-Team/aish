@@ -88,8 +88,10 @@ EOF
 
 grep -Fq '## [1.0.0] - 2026-05-10' "$SANDBOX/CHANGELOG.md"
 grep -Fq 'Beta release note' "$SANDBOX/CHANGELOG.md"
-grep -Fq '## [Unreleased]' "$SANDBOX/CHANGELOG.md"
-grep -Fq -- '- No unreleased changes yet.' "$SANDBOX/CHANGELOG.md"
+if grep -Fq '## [Unreleased]' "$SANDBOX/CHANGELOG.md"; then
+  echo "Expected stable release to drop the [Unreleased] section" >&2
+  exit 1
+fi
 
 cat > "$SANDBOX/Cargo.toml" <<'EOF'
 [workspace.package]
