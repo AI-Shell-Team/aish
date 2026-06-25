@@ -3161,9 +3161,30 @@ impl AishShell {
         // send_command_interactive, so we fall back to post-return recording
         // instead.
         let is_session = aish_pty::is_interactive_command(command);
+        let remote_host = extract_remote_host(command);
+
+        // Session entry banner: when the user runs ssh/telnet/mosh/etc, the
+        // remote shell's own prompt (e.g. bash's `[root@host ~]#`) gives no
+        // hint that the terminal has crossed into a remote session. Print a
+        // yellow marker just before handing control to the PTY so the user
+        // can see which host they are about to enter.
+        if is_session {
+            if let Some(host) = remote_host.as_deref() {
+                let marker = format!("\x1b[33m[ssh:{}]\x1b[0m", host);
+                eprintln!("{}", marker);
+                // Mirror to the session recorder so cast replay shows the
+                // same banner as the live terminal — without this, replay
+                // silently drops the marker and diverges from what the user
+                // actually saw when entering the session.
+                crate::recorder::shared_record_output(
+                    &self.shared_recorder,
+                    &format!("{}\r\n", marker),
+                );
+            }
+        }
+
         let result = {
             let mut pty = self.lock_pty();
-            let remote_host = extract_remote_host(command);
             let shared_host = Arc::new(Mutex::new(remote_host.clone()));
             let ai_cb = Self::build_session_ai_callback(
                 &self.config,
@@ -3203,6 +3224,7 @@ impl AishShell {
                 Some(self.secret_vault.clone()),
                 on_output,
                 self.config.input_guard_enabled,
+                self.config.enable_remote_git_prompt,
             )
         };
         let (exit_code, cwd, output) = match result {
@@ -3595,6 +3617,7 @@ impl AishShell {
                 None,
                 None,
                 self.config.input_guard_enabled,
+                false, // not an SSH session, no git prompt injection
             )
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 
@@ -6246,7 +6269,6 @@ fn extract_remote_host(command: &str) -> Option<String> {
     }
     let opts_with_arg: &[&str] = &[
         "-p", "-l", "-i", "-o", "-L", "-R", "-S", "-W", "-J", "-b", "-c", "-F", "-I", "-K", "-m",
-        "-Q", "-q",
     ];
     let mut iter = parts.iter().skip(1).peekable();
     while let Some(part) = iter.next() {
@@ -6264,6 +6286,34 @@ fn extract_remote_host(command: &str) -> Option<String> {
         return Some(part.to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod extract_remote_host_tests {
+    use super::extract_remote_host;
+
+    // Regression: ssh -q is the quiet flag (no argument). Treating -q as an
+    // option-with-arg caused `ssh -q host` to skip `host` and return None,
+    // disabling the [ssh:host] banner and remote PS1 marker.
+    #[test]
+    fn ssh_quiet_flag_does_not_consume_host() {
+        assert_eq!(
+            extract_remote_host("ssh -q 10.10.17.243"),
+            Some("10.10.17.243".to_string())
+        );
+        assert_eq!(
+            extract_remote_host("ssh -q user@host"),
+            Some("user@host".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_port_option_still_consumes_argument() {
+        assert_eq!(
+            extract_remote_host("ssh -p 2222 user@host"),
+            Some("user@host".to_string())
+        );
+    }
 }
 
 /// Shell error prefixes used by various shells (e.g. "bash: command: not found").

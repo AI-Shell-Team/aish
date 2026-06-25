@@ -192,6 +192,15 @@ pub struct ConfigModel {
     pub memory: Option<MemoryConfig>,
     pub session_db_path: Option<String>,
     pub enable_sandbox: bool,
+
+    /// Inject git branch awareness into remote bash prompts during SSH/telnet
+    /// sessions. When true, aish prepends a `|branch` marker (magenta, matching
+    /// local prompt style) to the remote PS1 by installing a PROMPT_COMMAND
+    /// hook. Default: true. Set false if you use starship/oh-my-posh on remote
+    /// machines and want to avoid duplicate branch display.
+    #[serde(default = "default_true")]
+    pub enable_remote_git_prompt: bool,
+
     pub sandbox_off_action: String,
     pub sandbox_timeout_seconds: f64,
     pub default_risk_level: String,
@@ -290,6 +299,7 @@ impl Default for ConfigModel {
             memory: None,
             session_db_path: None,
             enable_sandbox: false,
+            enable_remote_git_prompt: true,
             sandbox_off_action: "allow".to_string(),
             sandbox_timeout_seconds: 10.0,
             default_risk_level: "low".to_string(),
@@ -526,5 +536,21 @@ api_key: sk-test
         assert_eq!(compact.shell_keep_recent_commands, 8);
         assert_eq!(compact.max_consecutive_failures, 3);
         assert_eq!(compact.summary_max_tokens, 4000);
+    }
+
+    #[test]
+    fn test_enable_remote_git_prompt_defaults_to_true() {
+        let cfg: ConfigModel = serde_yaml::from_str("model: test\n").unwrap();
+        assert!(
+            cfg.enable_remote_git_prompt,
+            "enable_remote_git_prompt must default to true"
+        );
+    }
+
+    #[test]
+    fn test_enable_remote_git_prompt_can_be_disabled() {
+        let yaml = "model: test\nenable_remote_git_prompt: false\n";
+        let cfg: ConfigModel = serde_yaml::from_str(yaml).unwrap();
+        assert!(!cfg.enable_remote_git_prompt);
     }
 }
