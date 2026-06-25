@@ -24,6 +24,7 @@ pub mod providers;
 pub mod session;
 pub mod streaming;
 pub mod subsession;
+pub mod tool_context;
 pub mod types;
 pub mod usage;
 
@@ -48,5 +49,6 @@ pub use providers::{
 pub use session::LlmSession;
 pub use streaming::{SseEvent, StreamParser};
 pub use subsession::{SubSession, SubSessionConfig};
+pub use tool_context::{ToolContext, ToolExecutionPolicy};
 pub use types::*;
 pub use usage::{TokenStats, TokenUsage};

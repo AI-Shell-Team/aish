@@ -49,6 +49,8 @@ pub struct LlmSession {
     plan_state: Arc<Mutex<PlanModeState>>,
     /// Cumulative token usage statistics for this session.
     token_stats: std::sync::Mutex<crate::usage::TokenStats>,
+    /// Per-session tool execution policy (read-only bash enforcement, etc.).
+    tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
 }
 
 impl LlmSession {
@@ -77,7 +79,16 @@ impl LlmSession {
             compact_consecutive_failures: std::sync::Mutex::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
+            tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
         }
+    }
+
+    pub fn tool_execution_policy(&self) -> crate::tool_context::ToolExecutionPolicy {
+        self.tool_execution_policy
+    }
+
+    pub fn set_tool_execution_policy(&mut self, policy: crate::tool_context::ToolExecutionPolicy) {
+        self.tool_execution_policy = policy;
     }
 
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
@@ -1040,8 +1051,9 @@ impl LlmSession {
             serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::Value::Null);
 
         if let Some(tool) = self.tools.get(&tool_call.name) {
+            let ctx = crate::tool_context::ToolContext::for_session(self);
             // Run preflight check before execution
-            match tool.preflight(&args) {
+            match tool.preflight_with_context(&args, &ctx) {
                 PreflightResult::Allow => {}
                 PreflightResult::Confirm { message, security } => {
                     let security = security.unwrap_or_else(|| {
@@ -1250,6 +1262,7 @@ impl LlmSession {
             compact_consecutive_failures: std::sync::Mutex::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
+            tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
         }
     }
 

@@ -130,6 +130,7 @@ fn test_diagnose_agent_construction() {
         max_iterations: 20,
         max_context_messages: 100,
         system_prompt: Some("Custom prompt".to_string()),
+        enforce_read_only_bash: false,
     };
     let _agent2 = DiagnoseAgent::with_config(config);
 }
@@ -165,6 +166,7 @@ fn test_subsession_custom_config() {
         max_context_messages: 100,
         max_iterations: 20,
         system_prompt: Some("Custom system prompt".to_string()),
+        enforce_read_only_bash: false,
     };
     assert_eq!(config.max_context_messages, 100);
     assert_eq!(config.max_iterations, 20);

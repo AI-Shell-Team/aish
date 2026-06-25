@@ -169,6 +169,7 @@ impl Tool for SystemDiagnoseTool {
                 max_context_messages: 30,
                 max_iterations: 10,
                 system_prompt: Some(prompt),
+                enforce_read_only_bash: false,
             };
 
             let agent = DiagnoseAgent::with_config(config);

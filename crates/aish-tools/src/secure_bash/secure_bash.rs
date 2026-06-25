@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use aish_llm::{CancellationToken, Tool, ToolResult};
+use aish_llm::{CancellationToken, Tool, ToolContext, ToolResult};
 use aish_security::SecurityDecision;
 
-use crate::bash::PtySlot;
+use crate::bash::{preflight_enforce, PtySlot};
 
 /// Type of the security check callback.
 type SecurityCheckFn = Box<dyn Fn(&str) -> SecurityDecision + Send + Sync>;
@@ -115,47 +115,66 @@ impl Tool for SecureBashTool {
     }
 
     fn preflight(&self, args: &serde_json::Value) -> aish_llm::PreflightResult {
-        let command = match args.get("command").and_then(|c| c.as_str()) {
-            Some(cmd) => cmd,
-            None => return aish_llm::PreflightResult::Allow,
-        };
+        secure_bash_preflight(self, args, false)
+    }
 
-        // Strip sudo prefix before security check
-        let effective_command = strip_sudo(command);
-
-        if let Some(ref check) = self.security_check {
-            let decision = check(effective_command);
-            if !decision.allow {
-                let reason = decision
-                    .analysis
-                    .confirm_message
-                    .clone()
-                    .unwrap_or_else(|| decision.analysis.impact_description.clone());
-                aish_llm::PreflightResult::Block {
-                    message: reason,
-                    security: None,
-                }
-            } else if decision.require_confirmation {
-                let reason = decision
-                    .analysis
-                    .confirm_message
-                    .clone()
-                    .unwrap_or_else(|| decision.analysis.impact_description.clone());
-                aish_llm::PreflightResult::Confirm {
-                    message: reason,
-                    security: None,
-                }
-            } else {
-                aish_llm::PreflightResult::Allow
-            }
-        } else {
-            aish_llm::PreflightResult::Allow
-        }
+    fn preflight_with_context(
+        &self,
+        args: &serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> aish_llm::PreflightResult {
+        secure_bash_preflight(self, args, ctx.policy.enforce_read_only_bash)
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
         // Security check is now handled by preflight()
         self.inner.execute(args)
+    }
+}
+
+fn secure_bash_preflight(
+    tool: &SecureBashTool,
+    args: &serde_json::Value,
+    enforce_read_only_bash: bool,
+) -> aish_llm::PreflightResult {
+    let command = match args.get("command").and_then(|c| c.as_str()) {
+        Some(cmd) => cmd,
+        None => return aish_llm::PreflightResult::Allow,
+    };
+
+    let effective_command = strip_sudo(command);
+
+    if let Some(result) = preflight_enforce(effective_command, enforce_read_only_bash) {
+        return result;
+    }
+
+    if let Some(ref check) = tool.security_check {
+        let decision = check(effective_command);
+        if !decision.allow {
+            let reason = decision
+                .analysis
+                .confirm_message
+                .clone()
+                .unwrap_or_else(|| decision.analysis.impact_description.clone());
+            aish_llm::PreflightResult::Block {
+                message: reason,
+                security: None,
+            }
+        } else if decision.require_confirmation {
+            let reason = decision
+                .analysis
+                .confirm_message
+                .clone()
+                .unwrap_or_else(|| decision.analysis.impact_description.clone());
+            aish_llm::PreflightResult::Confirm {
+                message: reason,
+                security: None,
+            }
+        } else {
+            aish_llm::PreflightResult::Allow
+        }
+    } else {
+        aish_llm::PreflightResult::Allow
     }
 }
 

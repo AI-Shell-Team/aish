@@ -6,7 +6,7 @@ use std::time::Duration;
 use aish_i18n;
 use aish_llm::{
     CancellationToken, PreflightResult, PreflightSecurityContext, SecurityPanelMode, Tool,
-    ToolResult,
+    ToolContext, ToolResult,
 };
 use aish_pty::{BashOffloadSettings, BashOutputOffload, CancelToken, PtyExecutor};
 use aish_security::{
@@ -14,6 +14,7 @@ use aish_security::{
 };
 
 use super::prompt;
+use super::read_only::{self, preflight_enforce, ReadOnlyVerdict};
 
 /// Large keep_bytes for the silent PTY executor to capture full command output.
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
@@ -174,6 +175,26 @@ fn security_preflight_with_socket(
     PreflightResult::Allow
 }
 
+fn bash_preflight(
+    tool: &BashTool,
+    args: &serde_json::Value,
+    enforce_read_only_bash: bool,
+) -> PreflightResult {
+    let Some(command) = args.get("command").and_then(|c| c.as_str()) else {
+        return PreflightResult::Allow;
+    };
+
+    // Restore secret placeholders so security checks run on the actual command.
+    let (command, _) = tool.restore_secrets(command);
+
+    if let Some(result) = preflight_enforce(&command, enforce_read_only_bash) {
+        return result;
+    }
+
+    let cwd = std::env::current_dir().ok();
+    security_preflight(&command, cwd.as_deref(), None)
+}
+
 fn format_security_message(decision: &SecurityDecision) -> String {
     if let Some(confirm_message) = decision.analysis.confirm_message.as_deref() {
         let trimmed = confirm_message.trim();
@@ -245,6 +266,16 @@ impl BashTool {
             pty_slot: Arc::new(Mutex::new(None)),
             secret_vault: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Whether a command is read-only in the literal shell sense.
+    pub fn is_read_only(command: &str) -> bool {
+        read_only::is_read_only(command)
+    }
+
+    /// Classify a command for read-only semantics.
+    pub fn classify_read_only(command: &str) -> ReadOnlyVerdict {
+        read_only::classify(command)
     }
 
     /// Set the shared cancellation token from the AI handler.
@@ -490,15 +521,15 @@ impl Tool for BashTool {
     }
 
     fn preflight(&self, args: &serde_json::Value) -> PreflightResult {
-        let Some(command) = args.get("command").and_then(|c| c.as_str()) else {
-            return PreflightResult::Allow;
-        };
+        bash_preflight(self, args, false)
+    }
 
-        // Restore secret placeholders so security checks run on the actual command.
-        let (command, _) = self.restore_secrets(command);
-
-        let cwd = std::env::current_dir().ok();
-        security_preflight(&command, cwd.as_deref(), None)
+    fn preflight_with_context(
+        &self,
+        args: &serde_json::Value,
+        ctx: &ToolContext<'_>,
+    ) -> PreflightResult {
+        bash_preflight(self, args, ctx.policy.enforce_read_only_bash)
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -752,6 +783,20 @@ mod tests {
             }
             other => panic!("unexpected preflight result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_blocks_non_readonly_when_enforced() {
+        let tool = BashTool::new();
+        let session = aish_llm::LlmSession::new("http://localhost", "key", "model", None, None);
+        let ctx = aish_llm::ToolContext::with_policy(
+            &session,
+            aish_llm::ToolExecutionPolicy {
+                enforce_read_only_bash: true,
+            },
+        );
+        let result = tool.preflight_with_context(&serde_json::json!({"command": "rm -rf /"}), &ctx);
+        assert!(matches!(result, PreflightResult::Block { .. }));
     }
 
     #[test]
