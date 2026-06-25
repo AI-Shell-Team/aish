@@ -92,6 +92,54 @@ fn strip_ansi_len(s: &str) -> usize {
     len
 }
 
+/// Localized changelog title for the current version (e.g. "v0.3.4 更新内容").
+/// Shared between the welcome panel header and the Ctrl+O record title so
+/// they never drift apart.
+pub fn changelog_title(version: &str) -> String {
+    let mut args = HashMap::new();
+    args.insert("version".to_string(), format!("v{}", version));
+    t_with_args("shell.welcome2.changelog_title", &args)
+}
+
+/// Truncate a string with ANSI codes to a maximum visible length.
+///
+/// Only handles SGR sequences (`\x1b[...m`) — changelog lines use color codes
+/// only, so cursor-movement escapes are not expected here. If broader ANSI
+/// coverage is needed later, switch to a proper parser.
+fn truncate_ansi(s: &str, max_visible: usize) -> String {
+    let mut result = String::new();
+    let mut visible = 0;
+    let mut i = 0;
+    let bytes = s.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'\x1b' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Find the end of the ANSI escape sequence
+            let end = bytes[i + 2..]
+                .iter()
+                .position(|&b| b == b'm')
+                .map(|p| i + 2 + p + 1);
+            if let Some(end_pos) = end {
+                result.push_str(&s[i..end_pos]);
+                i = end_pos;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        let ch_len = ch.len_utf8();
+        // Use display width (CJK = 2 columns) so the result matches what
+        // strip_ansi_len measured — otherwise wide glyphs would still push
+        // the line past inner_width after truncation.
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if visible + ch_width > max_visible {
+            break;
+        }
+        result.push(ch);
+        visible += ch_width;
+        i += ch_len;
+    }
+    result
+}
+
 /// Render the shell prompt in compact.aish theme style.
 ///
 /// Format: `<mode> ~/n/x/g/aish|branch●➜ `
@@ -152,7 +200,13 @@ pub fn render_prompt(
 /// - Rounded box info panel
 /// - Quick start tips
 /// - Risk warning
-pub fn render_welcome(version: &str, model: &str, skill_count: usize) -> String {
+/// - Changelog entries (up to 2 shown; Ctrl+O expands to full list)
+pub fn render_welcome(
+    version: &str,
+    model: &str,
+    skill_count: usize,
+    changelog: Vec<aish_i18n::changelog::ChangelogEntry>,
+) -> String {
     let mut out = String::new();
     out.push('\n');
 
@@ -187,7 +241,7 @@ pub fn render_welcome(version: &str, model: &str, skill_count: usize) -> String 
     let model_hint = t("shell.welcome2.model_hint");
     let skills_suffix = t("shell.welcome2.skills_loaded_suffix");
 
-    let content_lines = vec![
+    let mut content_lines = vec![
         String::new(),
         format!(
             "  \x1b[1m{}:\x1b[0m {} \x1b[2m{}\x1b[0m",
@@ -200,6 +254,54 @@ pub fn render_welcome(version: &str, model: &str, skill_count: usize) -> String 
         ),
         String::new(),
     ];
+
+    // Changelog section (inside the panel)
+    if !changelog.is_empty() {
+        let title = changelog_title(version);
+
+        let max_entries = 2usize;
+        let entries_to_show = changelog.len().min(max_entries);
+        let has_more = changelog.len() > max_entries;
+
+        // Title line. When the panel already shows every entry, omit the
+        // "Ctrl+O 查看全部" hint — there's nothing more to expand, and the
+        // hint would mislead users into opening Ctrl+O expecting hidden
+        // entries.
+        let header = if has_more {
+            let mut hint_args = HashMap::new();
+            hint_args.insert("version".to_string(), format!("v{}", version));
+            hint_args.insert("count".to_string(), changelog.len().to_string());
+            let hint_prefix = t_with_args("shell.welcome2.changelog_hint_prefix", &hint_args);
+            let hint_suffix = t("shell.welcome2.changelog_hint_suffix");
+            format!(
+                "  \x1b[1;36m{}\x1b[0m \x1b[2m·\x1b[0m \x1b[2m{} \x1b[1;36mCtrl+O\x1b[0m\x1b[2m {}\x1b[0m",
+                title, hint_prefix, hint_suffix,
+            )
+        } else {
+            format!("  \x1b[1;36m{}\x1b[0m", title)
+        };
+        content_lines.push(header);
+
+        for entry in &changelog[..entries_to_show] {
+            let cat = entry.category.as_str();
+            let (badge, color) = match cat {
+                "Added" => ("[+]", "\x1b[32m"),
+                "Changed" => ("[*]", "\x1b[33m"),
+                "Fixed" => ("[!]", "\x1b[31m"),
+                _ => ("[-]", "\x1b[37m"),
+            };
+            let mut line = format!("  {}{} {}{}", color, badge, entry.text, "\x1b[0m");
+            let visible = strip_ansi_len(&line);
+            if visible > inner_width {
+                let truncated = truncate_ansi(&line, inner_width - 3);
+                // Re-append reset: truncate_ansi may have stopped before the
+                // trailing \x1b[0m, leaving the active color to leak into the
+                // panel padding that follows on the same rendered line.
+                line = format!("{}...\x1b[0m", truncated);
+            }
+            content_lines.push(line);
+        }
+    }
 
     // Render rounded box top with the same title as the Python panel.
     let title = format!(" {} ", header);
@@ -305,6 +407,90 @@ pub fn render_welcome(version: &str, model: &str, skill_count: usize) -> String 
     out.push_str(&format!("\x1b[2m{}\x1b[0m\n", risk));
 
     out
+}
+
+/// Format all changelog entries as plain text for Ctrl+O ExpandPanel view.
+/// No ANSI codes — ratatui renders raw escape sequences as visible text.
+/// Lines are wrapped at 76 chars to fit the panel.
+///
+/// Returns an empty `String` when `entries` is empty so the caller can skip
+/// without leaving a header-only stub in the ExpandPanel.
+pub fn format_changelog_full(
+    version: &str,
+    entries: &[aish_i18n::changelog::ChangelogEntry],
+) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+
+    let title = changelog_title(version);
+    out.push_str(&title);
+    out.push_str("\n\n");
+
+    for entry in entries {
+        let badge = match entry.category.as_str() {
+            "Added" => "[+]",
+            "Changed" => "[*]",
+            "Fixed" => "[!]",
+            _ => "[-]",
+        };
+        // Wrap long descriptions to fit panel width (~76 visible chars)
+        let prefix = format!("{} ", badge);
+        let prefix_len = prefix.chars().count();
+        let max_line = 76usize.saturating_sub(prefix_len);
+        let text = &entry.text;
+        let mut first = true;
+        for chunk in wrap_text(text, max_line) {
+            if first {
+                out.push_str(&prefix);
+                out.push_str(&chunk);
+                out.push('\n');
+                first = false;
+            } else {
+                // Continuation line indented to align with badge text
+                let indent = " ".repeat(prefix_len);
+                out.push_str(&indent);
+                out.push_str(&chunk);
+                out.push('\n');
+            }
+        }
+    }
+
+    out
+}
+
+/// Wrap text at `max` characters per line, breaking at word boundaries.
+fn wrap_text(text: &str, max: usize) -> Vec<String> {
+    if text.is_empty() || max == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if current_len == 0 {
+            current.push_str(word);
+            current_len = word_len;
+        } else if current_len + 1 + word_len <= max {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+        } else {
+            lines.push(current);
+            current = word.to_string();
+            current_len = word_len;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(text.to_string());
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -445,6 +631,67 @@ mod tests {
     }
 
     #[test]
+    fn test_truncate_ansi_counts_display_width_for_cjk() {
+        // CJK glyphs occupy 2 terminal columns each. truncate_ansi must
+        // measure display width (matching strip_ansi_len), not char count —
+        // otherwise a "5-column" budget would let 5 CJK chars through (10
+        // visible columns), blowing past the panel boundary.
+        let s = "\x1b[32m中文字符串\x1b[0m"; // 5 CJK chars, display width 10
+        assert_eq!(strip_ansi_len(s), 10);
+        let truncated = truncate_ansi(s, 4);
+        assert_eq!(
+            strip_ansi_len(&truncated),
+            4,
+            "truncated display width must match budget, got {:?}",
+            truncated,
+        );
+        // Two CJK chars (4 columns) kept; the third would push to 6.
+        assert!(truncated.contains("中文"));
+        assert!(!truncated.contains("字"));
+    }
+
+    #[test]
+    fn test_truncate_ansi_preserves_inner_color_codes() {
+        // Color codes inside the kept prefix must be preserved verbatim so
+        // the truncated string keeps its styling up to the cut point.
+        let s = "\x1b[32mgreen\x1b[0m text overflow";
+        let truncated = truncate_ansi(s, 6);
+        assert!(
+            truncated.starts_with("\x1b[32m"),
+            "leading SGR code must be preserved: {:?}",
+            truncated,
+        );
+        assert!(
+            truncated.contains("green"),
+            "leading visible text must be preserved: {:?}",
+            truncated,
+        );
+    }
+
+    #[test]
+    fn test_render_welcome_changelog_truncated_appends_reset() {
+        // Long changelog lines get truncated to inner_width-3 chars plus
+        // "...". Without an explicit reset, the panel padding after the
+        // line would inherit the changelog entry's color. Verify the
+        // truncated line ends with \x1b[0m so the padding stays neutral.
+        let entry = aish_i18n::changelog::ChangelogEntry {
+            category: "Added".to_string(),
+            text: "X".repeat(120),
+        };
+        let result = render_welcome("0.3.5", "gpt-4", 0, vec![entry]);
+        let lines: Vec<&str> = result.lines().collect();
+        let truncated_line = lines
+            .iter()
+            .find(|line| line.contains("..."))
+            .expect("expected a truncated changelog line in the output");
+        assert!(
+            truncated_line.ends_with("\x1b[0m"),
+            "truncated line must end with reset so padding stays neutral: {:?}",
+            truncated_line,
+        );
+    }
+
+    #[test]
     fn test_render_prompt_recording_indicator() {
         let result = render_prompt("/tmp", "test-model", 0, "aish", true);
         assert!(
@@ -497,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_contains_logo() {
-        let result = render_welcome("0.1.0", "gpt-4", 3);
+        let result = render_welcome("0.1.0", "gpt-4", 3, vec![]);
         assert!(result.contains("█████"), "should contain ASCII art logo");
         assert!(result.contains("╭"), "should contain rounded box top-left");
         assert!(result.contains("╮"), "should contain rounded box top-right");
@@ -519,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_contains_quick_start() {
-        let result = render_welcome("0.1.0", "gpt-4", 0);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
         assert!(result.contains("•"), "should contain bullet points");
         assert!(result.contains("ls"), "should contain ls example command");
         assert!(result.contains("top"), "should contain top example command");
@@ -529,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_uses_default_logo_color() {
-        let result = render_welcome("0.1.0", "gpt-4", 0);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
         assert!(
             !result.contains("\x1b[38;5;250m"),
             "logo should not use grayscale gradient colors"
@@ -538,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_starts_with_blank_line() {
-        let result = render_welcome("0.1.0", "gpt-4", 0);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
         assert!(
             result.starts_with('\n'),
             "welcome banner should leave a blank line above the logo"
@@ -547,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_aligns_quick_start_content() {
-        let result = render_welcome("0.1.0", "gpt-4", 0);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
         let item1_prefix = t("shell.welcome2.quick_start.item1_prefix");
         let item2_prefix = t("shell.welcome2.quick_start.item2_prefix");
         let item3_prefix = t("shell.welcome2.quick_start.item3_prefix");

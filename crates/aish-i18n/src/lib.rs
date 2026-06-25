@@ -13,6 +13,7 @@
     clippy::too_many_arguments
 )]
 
+pub mod changelog;
 pub mod manager;
 
 pub use manager::I18nManager;

@@ -1385,12 +1385,24 @@ impl AishShell {
 
         let version = env!("CARGO_PKG_VERSION").to_string();
 
-        // Print welcome banner
+        // Print welcome banner with changelog
+        let changelog = aish_i18n::changelog::parse_current_changelog(&version);
         print!(
             "{}",
-            prompt::render_welcome(&version, &config.model, skill_count)
+            prompt::render_welcome(&version, &config.model, skill_count, changelog.clone())
         );
         let _ = io::stdout().flush();
+
+        // Store full changelog in expand_history so Ctrl+O can show all entries
+        // when the welcome panel truncates them with "and N more".
+        if changelog.len() > 2 {
+            let full_text = prompt::format_changelog_full(&version, &changelog);
+            let cl_title = prompt::changelog_title(&version);
+            expand_history
+                .lock()
+                .unwrap()
+                .add(format!("[changelog] {}", cl_title), full_text);
+        }
 
         // Initialize persistent PTY session
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));

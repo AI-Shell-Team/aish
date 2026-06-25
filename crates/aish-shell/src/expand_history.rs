@@ -35,7 +35,15 @@ impl ExpandHistory {
 
     /// Add a new record. Returns the record index.
     /// Evicts oldest records if over the limit.
+    ///
+    /// Changelog records (command starts with `[changelog]`) are ephemeral:
+    /// they exist only to surface "what's new" before the user starts real
+    /// work. Once any real command arrives, drop them so they don't clutter
+    /// Ctrl+O history for the rest of the session.
     pub fn add(&mut self, command: String, mut output: String) -> usize {
+        if !command.starts_with("[changelog]") {
+            self.remove_changelog_records();
+        }
         if output.len() > MAX_OUTPUT_BYTES {
             let mut end = MAX_OUTPUT_BYTES;
             while end > 0 && !output.is_char_boundary(end) {
@@ -68,6 +76,12 @@ impl ExpandHistory {
     /// Whether history is empty.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Remove all changelog records (command starts with `[changelog]`).
+    pub fn remove_changelog_records(&mut self) {
+        self.records
+            .retain(|r| !r.command.starts_with("[changelog]"));
     }
 
     /// Clone all records (for use without holding the mutex).
@@ -117,5 +131,35 @@ mod tests {
         assert_eq!(h.len(), 3);
         let records = h.clone_records();
         assert_eq!(records[1].command, "cmd2");
+    }
+
+    #[test]
+    fn changelog_records_auto_evict_on_real_command() {
+        // Welcome banner stores a `[changelog] ...` record so Ctrl+O can
+        // expand "what's new". The first real command must evict it —
+        // otherwise the changelog entry lingers in history all session
+        // for users who never run AI commands.
+        let mut h = ExpandHistory::new();
+        h.add(
+            "[changelog] v0.3.4 更新内容".into(),
+            "entry1\nentry2".into(),
+        );
+        assert_eq!(h.len(), 1);
+
+        h.add("ls -la".into(), "file.txt".into());
+        let records = h.clone_records();
+        assert_eq!(records.len(), 1, "changelog record must be evicted");
+        assert_eq!(records[0].command, "ls -la");
+    }
+
+    #[test]
+    fn changelog_records_persist_when_only_changelog_added() {
+        // Adding another changelog record must NOT evict existing ones —
+        // the eviction trigger is "real command arrived", not "any add".
+        let mut h = ExpandHistory::new();
+        h.add("[changelog] v0.3.4".into(), "first".into());
+        h.add("[changelog] v0.3.5".into(), "second".into());
+        let records = h.clone_records();
+        assert_eq!(records.len(), 2, "multiple changelog records coexist");
     }
 }
