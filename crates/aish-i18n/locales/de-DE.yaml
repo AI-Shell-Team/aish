@@ -226,9 +226,7 @@ shell:
   exit_goodbye: "Shell wird beendet. Auf Wiedersehen!"
   command_cancelled: "Befehl abgebrochen"
   error_correction:
-    failure_hint_title: "Die Befehlsausführung ist fehlgeschlagen."
-    quick_fix_hint: "  ; — Schnellreparatur (KI schlägt korrigierten Befehl vor)"
-    diagnose_hint: "  /diagnose — schreibgeschützte Fehlerdiagnose"
+    press_semicolon_hint: "Die Befehlsausführung ist fehlgeschlagen. ; für Schnellreparatur oder /diagnose für schreibgeschützte Diagnose."
     corrected_command_label: "Vorgeschlagene Korrektur:"
     corrected_command_title: "💡 Korrigierter Befehl:"
     confirm_execute_prefix: "Ausführen: "

@@ -226,9 +226,7 @@ shell:
   exit_goodbye: "Saliendo del shell. ¡Adiós!"
   command_cancelled: "Comando cancelado"
   error_correction:
-    failure_hint_title: "La ejecución del comando falló."
-    quick_fix_hint: "  ; — corrección rápida (la IA sugiere un comando corregido)"
-    diagnose_hint: "  /diagnose — diagnóstico de fallo de solo lectura"
+    press_semicolon_hint: "La ejecución del comando falló. ; para corrección rápida o /diagnose para diagnóstico de solo lectura."
     corrected_command_label: "Corrección sugerida:"
     corrected_command_title: "💡 Comando corregido:"
     confirm_execute_prefix: "Ejecutar: "

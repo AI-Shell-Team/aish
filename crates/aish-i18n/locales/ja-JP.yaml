@@ -226,9 +226,7 @@ shell:
   exit_goodbye: "シェルを終了します。さようなら！"
   command_cancelled: "コマンドをキャンセルしました"
   error_correction:
-    failure_hint_title: "コマンド実行に失敗しました。"
-    quick_fix_hint: "  ; — クイック修正（AI が修正コマンドを提案）"
-    diagnose_hint: "  /diagnose — 読み取り専用の失敗診断"
+    press_semicolon_hint: "コマンド実行に失敗しました。; でクイック修正、または /diagnose で読み取り専用診断。"
     corrected_command_label: "修正候補:"
     corrected_command_title: "💡 修正されたコマンド:"
     confirm_execute_prefix: "実行: "

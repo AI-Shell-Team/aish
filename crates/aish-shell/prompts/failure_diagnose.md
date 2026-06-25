@@ -21,7 +21,7 @@ You should be concise, direct, and to the point. Response with $output_language.
 - 退出码: $exit_code
 - 工作目录: $cwd
 - 命令输出:
-```
+```text
 $command_output
 ```
 
