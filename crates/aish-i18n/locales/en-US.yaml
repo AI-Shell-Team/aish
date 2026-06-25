@@ -515,9 +515,7 @@ shell:
     history_footer: " ↑↓ Select · Enter View · Ctrl+O/Esc Close "
 
   error_correction:
-    failure_hint_title: "Command execution failed."
-    quick_fix_hint: "  ; — quick fix (AI suggests a corrected command)"
-    diagnose_hint: "  /diagnose — read-only failure diagnosis"
+    press_semicolon_hint: "Command execution failed. Type ; for quick fix, or /diagnose for read-only diagnosis."
     corrected_command_label: "Suggested fix:"
     corrected_command_title: "💡 Corrected command:"
     confirm_execute_prefix: "Execute: "

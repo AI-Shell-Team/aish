@@ -2321,17 +2321,10 @@ impl AishShell {
         self.state.last_exit_code = exit_code;
         self.state.can_correct_error = exit_code != 0 && exit_code != 130;
         if exit_code != 0 && exit_code != 130 {
-            let title = t("shell.error_correction.failure_hint_title");
-            let quick_fix = t("shell.error_correction.quick_fix_hint");
-            let diagnose = t("shell.error_correction.diagnose_hint");
-            let hint_str = format!(
-                "\x1b[2m\x1b[37m<{}>\x1b[0m\n\x1b[2m\x1b[37m<{}>\x1b[0m\n\x1b[2m\x1b[37m<{}>\x1b[0m\n",
-                title, quick_fix, diagnose
-            );
+            let hint = t("shell.error_correction.press_semicolon_hint");
+            let hint_str = format!("\x1b[2m\x1b[37m<{}>\x1b[0m\n", hint);
             crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
-            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", title);
-            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", quick_fix);
-            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", diagnose);
+            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", hint);
         }
     }
 
