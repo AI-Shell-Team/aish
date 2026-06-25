@@ -32,6 +32,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/record", "Record terminal session (start/stop)"),
     ("/quit", "Exit AI Shell"),
     ("/doctor", "Run system diagnostics"),
+    ("/diagnose", "Read-only diagnosis for last failed command"),
     ("/status", "Show system environment status"),
 ];
 
@@ -441,6 +442,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 11);
+        assert_eq!(SLASH_COMMANDS.len(), 12);
     }
 }

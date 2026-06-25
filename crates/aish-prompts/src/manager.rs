@@ -117,6 +117,7 @@ fn default_templates() -> &'static [(&'static str, &'static str)] {
         ("role", ROLE_PROMPT),
         ("oracle", ORACLE_PROMPT),
         ("cmd_error", CMD_ERROR_PROMPT),
+        ("failure_diagnose", FAILURE_DIAGNOSE_PROMPT),
         ("error_detect", ERROR_DETECT_PROMPT),
         ("system_diagnose", SYSTEM_DIAGNOSE_PROMPT),
         ("guess_command", GUESS_COMMAND_PROMPT),
@@ -269,6 +270,52 @@ You should be concise, direct, and to the point.  Response with {{output_languag
   "description": "简短说明修正原因和命令作用,或者说明为什么没有合适的解决方案"
 }
 ```"#;
+
+const FAILURE_DIAGNOSE_PROMPT: &str = r#"{{role_prompt}}
+
+## 系统基本信息
+- 运行环境信息: {{uname_info}}
+- 用户的昵称: {{user_nickname}}
+- 发行版信息：{{os_info}}
+- 基本环境信息：
+{{basic_env_info}}
+
+## Tone and Style
+You should be concise, direct, and to the point. Response with {{output_language}}.
+
+## 任务
+上一条 shell 命令执行失败。你在 **只读诊断模式** 下调查失败原因：
+- 可使用 bash、read_file 收集证据（如 which、journalctl、systemctl status、cat 等只读命令）
+- **禁止** 写文件、改配置、安装软件、启停服务等会改变系统状态的操作
+- 调查完成后 **必须** 调用 `final_answer` 工具提交诊断报告
+
+## 失败上下文
+- 失败命令: {{failed_command}}
+- 退出码: {{exit_code}}
+- 工作目录: {{cwd}}
+- 命令输出:
+```
+{{command_output}}
+```
+
+## 输出格式
+调用 `final_answer` 时，`answer` 参数必须是 **唯一** 的 JSON 字符串，结构如下：
+
+```json
+{
+  "type": "diagnose_report",
+  "root_cause": "简要失败原因",
+  "evidence": ["依据1", "依据2"],
+  "suggested_fix": "建议修复命令或 null",
+  "verify_commands": ["只读验证命令1"],
+  "risk_notes": "风险提示或 null",
+  "confidence": "high"
+}
+```
+
+- `root_cause` 和 `evidence`（非空数组）必填
+- `verify_commands` 中的命令必须是只读检查
+- `confidence` 为 high / medium / low 之一"#;
 
 const ERROR_DETECT_PROMPT: &str = r#"{{role_prompt}}
 

@@ -254,6 +254,9 @@ impl<'a> ReActAgent<'a> {
         let cancel = self.session.cancellation_token();
         cancel.reset();
 
+        self.emit_op_start(query);
+        let _op_end = EmitOpEnd(self.session);
+
         let mut messages: Vec<ChatMessage> = Vec::new();
         let system_prompt = self.session.system_prompt_with_tool_prompts(system_prompt);
         messages.push(ChatMessage::system(&system_prompt));
@@ -269,6 +272,8 @@ impl<'a> ReActAgent<'a> {
 
             info!(iteration, "ReAct loop iteration");
 
+            self.emit_generation_start();
+
             // Call the LLM (non-streaming for easier parsing of the ReAct text).
             let response = self
                 .session
@@ -279,7 +284,11 @@ impl<'a> ReActAgent<'a> {
                     self.config.temperature,
                     self.config.max_tokens,
                 )
-                .await?;
+                .await;
+
+            self.emit_generation_end();
+
+            let response = response?;
 
             // Extract text content, reasoning content, and tool calls from the response.
             let (content, reasoning_content, tool_calls) = match response {
@@ -443,6 +452,47 @@ impl<'a> ReActAgent<'a> {
         self.session.emit_event(LlmEvent {
             event_type,
             data,
+            timestamp: now_timestamp(),
+            metadata: Some(serde_json::json!({ "source": "react_agent" })),
+        });
+    }
+
+    fn emit_op_start(&self, query: &str) {
+        self.session.emit_event(LlmEvent {
+            event_type: LlmEventType::OpStart,
+            data: serde_json::json!({ "prompt_length": query.len() }),
+            timestamp: now_timestamp(),
+            metadata: Some(serde_json::json!({ "source": "react_agent" })),
+        });
+    }
+
+    fn emit_generation_start(&self) {
+        self.session.emit_event(LlmEvent {
+            event_type: LlmEventType::GenerationStart,
+            data: serde_json::json!({}),
+            timestamp: now_timestamp(),
+            metadata: Some(serde_json::json!({ "source": "react_agent" })),
+        });
+    }
+
+    fn emit_generation_end(&self) {
+        self.session.emit_event(LlmEvent {
+            event_type: LlmEventType::GenerationEnd,
+            data: serde_json::json!({}),
+            timestamp: now_timestamp(),
+            metadata: Some(serde_json::json!({ "source": "react_agent" })),
+        });
+    }
+}
+
+/// Emit `OpEnd` when a ReAct run finishes (success, error, or cancel).
+struct EmitOpEnd<'a>(&'a LlmSession);
+
+impl Drop for EmitOpEnd<'_> {
+    fn drop(&mut self) {
+        self.0.emit_event(LlmEvent {
+            event_type: LlmEventType::OpEnd,
+            data: serde_json::json!({}),
             timestamp: now_timestamp(),
             metadata: Some(serde_json::json!({ "source": "react_agent" })),
         });

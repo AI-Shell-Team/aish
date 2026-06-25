@@ -17,6 +17,7 @@ pub mod command_state;
 pub mod control;
 pub mod ctrl_o;
 pub mod executor;
+pub mod exit_code;
 pub mod nl_detect;
 pub mod offload;
 pub mod output_buffer;
