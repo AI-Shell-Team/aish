@@ -109,6 +109,17 @@ fn truncate_ssh_history(h: &mut Vec<ChatMessage>) {
     }
 }
 
+/// ReAct sub-sessions (`/diagnose`, `system_diagnose_agent`) tag events with this source.
+/// Their UI should keep one thinking spinner for the whole `OpStart`..`OpEnd` window.
+fn react_agent_llm_event(event: &LlmEvent) -> bool {
+    event
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get("source"))
+        .and_then(|value| value.as_str())
+        == Some("react_agent")
+}
+
 fn context_compaction_notice(event: &LlmEvent) -> Option<String> {
     let changed = event
         .data
@@ -974,6 +985,7 @@ impl AishShell {
                             }
                         }
                     }
+                    LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
                     LlmEventType::GenerationStart => {
                         compaction_active_ref.store(false, Ordering::SeqCst);
                         animation_ref.stop();
@@ -990,6 +1002,7 @@ impl AishShell {
                         renderer_ref.lock().unwrap().reset();
                         animation_ref.start(&t("shell.status.thinking"));
                     }
+                    LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
                     LlmEventType::GenerationEnd => {
                         animation_ref.stop();
                         clear_reasoning();
@@ -1132,8 +1145,10 @@ impl AishShell {
                     }
                     LlmEventType::ToolExecutionStart => {
                         if let Some(name) = event.data.get("tool_name").and_then(|n| n.as_str()) {
-                            animation_ref.stop();
-                            clear_reasoning();
+                            if !react_agent_llm_event(&event) {
+                                animation_ref.stop();
+                                clear_reasoning();
+                            }
                             let args_preview = event
                                 .data
                                 .get("tool_args")
@@ -2513,11 +2528,12 @@ impl AishShell {
     fn handle_failure_diagnose_command(&mut self) {
         use crate::ai_handler::{
             effective_verify_exit_code, format_failure_diagnose_error,
-            print_failure_diagnose_report, readonly_command_verdict,
-            summarize_verification_conclusion, verify_outcome_from_execution, DiagnoseParseOutcome,
-            FailureDiagnoseConclusion, VerifyOutcome, VerifyStepResult,
+            print_failure_diagnose_report, summarize_verification_conclusion,
+            verify_outcome_from_execution, DiagnoseParseOutcome, FailureDiagnoseConclusion,
+            VerifyOutcome, VerifyStepResult,
         };
         use aish_i18n::{t, t_with_args};
+        use aish_tools::bash::{BashTool, ReadOnlyVerdict};
         use std::collections::HashMap;
 
         if !self.state.can_correct_error {
@@ -2616,9 +2632,13 @@ impl AishShell {
             println!("{}", t("shell.failure_diagnose.verifying"));
             let mut steps = Vec::new();
             for verify_cmd in &report.verify_commands {
-                let verdict = readonly_command_verdict(verify_cmd);
-                if !verdict.allowed {
-                    let reason = verdict.reason.unwrap_or_else(|| "non-readonly".to_string());
+                let verdict = BashTool::classify_read_only(verify_cmd);
+                if !matches!(verdict, ReadOnlyVerdict::ReadOnly) {
+                    let reason = match verdict {
+                        ReadOnlyVerdict::NotReadOnly { reason } => reason,
+                        ReadOnlyVerdict::Unparseable => "unparseable command".to_string(),
+                        ReadOnlyVerdict::ReadOnly => unreachable!(),
+                    };
                     println!(
                         "{}",
                         t_with_args(
@@ -3897,6 +3917,7 @@ impl AishShell {
                                     }
                                 }
                             }
+                            LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
                             LlmEventType::GenerationStart => {
                                 compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
@@ -3907,6 +3928,7 @@ impl AishShell {
                                 reasoning_buf.lock().unwrap().clear();
                                 anim.start(&t("shell.status.thinking"));
                             }
+                            LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
                             LlmEventType::GenerationEnd => {
                                 anim.stop();
                                 clear_reasoning();
@@ -4797,6 +4819,7 @@ impl AishShell {
                                     }
                                 }
                             }
+                            LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
                             LlmEventType::GenerationStart => {
                                 compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
@@ -4807,6 +4830,7 @@ impl AishShell {
                                 reasoning_buf.lock().unwrap().clear();
                                 anim.start(&t("shell.status.thinking"));
                             }
+                            LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
                             LlmEventType::GenerationEnd => {
                                 anim.stop();
                                 clear_reasoning();

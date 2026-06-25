@@ -693,6 +693,9 @@ tools:
     execute_failed: "执行失败: {error}"
     output_truncated: "[...截断了 {bytes} 字节...]\n{tail}"
     truncated_notice: "[...截断了 {bytes} 字节...]"
+    read_only:
+      blocked: "已拦截：命令不是只读操作（{reason}）"
+      unparseable: "已拦截：无法将该命令判定为只读"
 
   fs:
     read_file:

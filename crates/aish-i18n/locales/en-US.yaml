@@ -694,6 +694,9 @@ tools:
     execute_failed: "Failed to execute: {error}"
     output_truncated: "[...{bytes} bytes truncated...]\n{tail}"
     truncated_notice: "[...{bytes} bytes truncated...]"
+    read_only:
+      blocked: "Blocked: command is not read-only ({reason})"
+      unparseable: "Blocked: command could not be analyzed as read-only"
 
   fs:
     read_file:

@@ -53,6 +53,13 @@ impl DiagnoseAgent {
         // Set custom system prompt for diagnosis
         sub.config.system_prompt = Some(self.system_prompt.clone());
 
+        if self.config.enforce_read_only_bash {
+            sub.inner
+                .set_tool_execution_policy(crate::ToolExecutionPolicy {
+                    enforce_read_only_bash: true,
+                });
+        }
+
         // Register tools to the underlying session
         for tool in tools {
             sub.inner.register_tool(tool);

@@ -26,8 +26,10 @@ pub mod ask_user {
 pub mod bash {
     mod bash;
     mod prompt;
+    mod read_only;
 
     pub use self::bash::*;
+    pub use self::read_only::{classify, is_read_only, preflight_enforce, ReadOnlyVerdict};
 }
 
 pub mod channel_ask_user {

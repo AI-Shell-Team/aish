@@ -374,6 +374,7 @@ impl AiHandler {
             max_context_messages: 30,
             max_iterations: 10,
             system_prompt: Some(system_prompt),
+            enforce_read_only_bash: true,
         };
 
         let agent = DiagnoseAgent::with_config(config);
@@ -1089,91 +1090,6 @@ fn parse_diagnose_confidence(s: &str) -> DiagnoseConfidence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReadonlyVerdict {
-    pub allowed: bool,
-    pub reason: Option<String>,
-}
-
-pub(crate) fn readonly_command_verdict(command: &str) -> ReadonlyVerdict {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return ReadonlyVerdict {
-            allowed: false,
-            reason: Some("empty command".into()),
-        };
-    }
-
-    for segment in split_command_segments(trimmed) {
-        let seg = segment.trim();
-        if seg.is_empty() {
-            continue;
-        }
-        if let Some(reason) = non_readonly_segment_reason(seg) {
-            return ReadonlyVerdict {
-                allowed: false,
-                reason: Some(reason),
-            };
-        }
-    }
-
-    ReadonlyVerdict {
-        allowed: true,
-        reason: None,
-    }
-}
-
-fn split_command_segments(command: &str) -> Vec<String> {
-    let mut segments = vec![command.to_string()];
-    for sep in [";", "&&", "||", "|"] {
-        segments = segments
-            .into_iter()
-            .flat_map(|s| s.split(sep).map(|p| p.to_string()).collect::<Vec<_>>())
-            .collect();
-    }
-    segments
-}
-
-fn non_readonly_segment_reason(segment: &str) -> Option<String> {
-    let lower = segment.to_lowercase();
-    if lower.contains('>') && !lower.contains("/dev/null") {
-        return Some("write redirect".into());
-    }
-    if lower.contains("<<") && !lower.contains("/dev/null") {
-        return Some("heredoc write".into());
-    }
-
-    let first = segment.split_whitespace().next().unwrap_or("");
-    let base = first.rsplit('/').next().unwrap_or(first).to_lowercase();
-
-    const BLOCKED: &[&str] = &[
-        "rm", "mv", "cp", "chmod", "chown", "mkdir", "touch", "tee", "truncate", "install", "apt",
-        "yum", "dnf", "pip", "npm", "cargo", "sed", "vim", "vi", "nano", "reboot", "shutdown",
-        "kill", "pkill", "killall",
-    ];
-    if BLOCKED.iter().any(|b| base == *b) {
-        return Some(format!("blocked command: {base}"));
-    }
-
-    if base == "systemctl" || base == "service" {
-        for token in segment.split_whitespace().skip(1) {
-            let t = token.to_lowercase();
-            if matches!(
-                t.as_str(),
-                "start" | "stop" | "restart" | "reload" | "enable" | "disable"
-            ) {
-                return Some(format!("service control: {t}"));
-            }
-        }
-    }
-
-    if base == "sed" && lower.contains("-i") {
-        return Some("in-place edit".into());
-    }
-
-    None
-}
-
 /// Map a verification command's exit code and output to pass/fail.
 pub(crate) fn verify_outcome_from_execution(exit_code: i32, output: &str) -> VerifyOutcome {
     let effective = aish_pty::exit_code::infer_exit_code_from_output(exit_code, output);
@@ -1722,10 +1638,22 @@ mod tests {
 
     #[test]
     fn test_readonly_command_guard() {
-        assert!(readonly_command_verdict("systemctl status nginx").allowed);
-        assert!(readonly_command_verdict("which foo").allowed);
-        assert!(!readonly_command_verdict("systemctl restart nginx").allowed);
-        assert!(!readonly_command_verdict("rm -rf /").allowed);
+        use aish_tools::bash::{BashTool, ReadOnlyVerdict};
+
+        assert!(BashTool::is_read_only("systemctl status nginx"));
+        assert_eq!(
+            BashTool::classify_read_only("systemctl status nginx"),
+            ReadOnlyVerdict::ReadOnly
+        );
+        assert!(BashTool::is_read_only("which foo"));
+        assert!(matches!(
+            BashTool::classify_read_only("systemctl restart nginx"),
+            ReadOnlyVerdict::NotReadOnly { .. }
+        ));
+        assert!(matches!(
+            BashTool::classify_read_only("rm -rf /"),
+            ReadOnlyVerdict::NotReadOnly { .. }
+        ));
     }
 
     #[test]

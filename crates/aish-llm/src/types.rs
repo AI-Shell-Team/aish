@@ -526,6 +526,16 @@ pub trait Tool: Send + Sync {
         PreflightResult::Allow
     }
 
+    /// Context-aware preflight. Default delegates to [`Self::preflight`].
+    fn preflight_with_context(
+        &self,
+        args: &serde_json::Value,
+        ctx: &crate::tool_context::ToolContext<'_>,
+    ) -> PreflightResult {
+        let _ = ctx;
+        self.preflight(args)
+    }
+
     fn execute(&self, args: serde_json::Value) -> ToolResult;
 
     /// Async variant of `execute`. The default implementation delegates to the

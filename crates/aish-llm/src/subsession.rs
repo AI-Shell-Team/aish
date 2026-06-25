@@ -16,6 +16,8 @@ pub struct SubSessionConfig {
     pub max_iterations: usize,
     /// Optional custom system prompt.
     pub system_prompt: Option<String>,
+    /// When true, bash tool preflight blocks non-read-only commands.
+    pub enforce_read_only_bash: bool,
 }
 
 impl Default for SubSessionConfig {
@@ -24,6 +26,7 @@ impl Default for SubSessionConfig {
             max_context_messages: 50,
             max_iterations: 10,
             system_prompt: None,
+            enforce_read_only_bash: false,
         }
     }
 }
@@ -136,10 +139,12 @@ mod tests {
             max_context_messages: 100,
             max_iterations: 20,
             system_prompt: Some("Custom prompt".to_string()),
+            enforce_read_only_bash: true,
         };
         assert_eq!(config.max_context_messages, 100);
         assert_eq!(config.max_iterations, 20);
         assert_eq!(config.system_prompt, Some("Custom prompt".to_string()));
+        assert!(config.enforce_read_only_bash);
     }
 
     #[test]
