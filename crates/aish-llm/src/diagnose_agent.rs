@@ -75,8 +75,27 @@ impl DiagnoseAgent {
             .map(|s| s.as_str())
             .unwrap_or(crate::agent::REACT_SYSTEM_PROMPT_TEMPLATE);
 
-        agent.run_with_system_prompt(query, system_prompt).await
+        let parent_cancel = parent_session.cancellation_token_arc();
+        let sub_cancel = sub.inner.cancellation_token_arc();
+        let run = agent.run_with_system_prompt(query, system_prompt);
+
+        tokio::select! {
+            result = run => result,
+            () = forward_cancellation(parent_cancel, sub_cancel) => {
+                Err(AishError::Cancelled)
+            }
+        }
     }
+}
+
+async fn forward_cancellation(
+    parent: std::sync::Arc<crate::types::CancellationToken>,
+    sub: std::sync::Arc<crate::types::CancellationToken>,
+) {
+    while !parent.is_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    sub.cancel();
 }
 
 impl Default for DiagnoseAgent {

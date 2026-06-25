@@ -345,36 +345,71 @@ impl AiHandler {
         );
     }
 
-    /// Run a diagnostic agent to investigate a command failure.
-    /// Returns a diagnostic summary string if successful.
-    pub async fn diagnose_failure(
-        &self,
+    /// Run read-only failure diagnosis via an isolated DiagnoseAgent sub-session.
+    pub async fn handle_failure_diagnose(
+        &mut self,
         command: &str,
         exit_code: i32,
         output: &str,
-    ) -> aish_core::Result<String> {
+        cwd: &str,
+    ) -> aish_core::Result<FailureDiagnoseParseResult> {
         use aish_llm::diagnose_agent::DiagnoseAgent;
+        use aish_llm::{SubSessionConfig, Tool};
+
+        let output_trunc = if output.len() > 4096 {
+            &output[..floor_char_boundary(output, 4096)]
+        } else {
+            output
+        };
 
         let query = format!(
-            "Command failed: '{}'\nExit code: {}\nOutput:\n{}\n\n\
-             Please investigate and diagnose why this command failed.",
-            command,
-            exit_code,
-            if output.len() > 4096 {
-                &output[..output.floor_char_boundary(4096)]
-            } else {
-                output
-            }
+            "Investigate why this command failed and submit a diagnose_report JSON via final_answer.\n\
+             Command: {command}\nExit code: {exit_code}\nCWD: {cwd}"
         );
 
-        let agent = DiagnoseAgent::new();
-        // Create minimal tool set for diagnosis
-        let tools: Vec<Box<dyn aish_llm::Tool>> = vec![
+        let system_prompt =
+            self.failure_diagnose_system_prompt(command, exit_code, output_trunc, cwd);
+
+        let config = SubSessionConfig {
+            max_context_messages: 30,
+            max_iterations: 10,
+            system_prompt: Some(system_prompt),
+        };
+
+        let agent = DiagnoseAgent::with_config(config);
+        let tools: Vec<Box<dyn Tool>> = vec![
             Box::new(aish_tools::bash::BashTool::new()),
             Box::new(aish_tools::fs::ReadFileTool::new()),
+            Box::new(aish_tools::FinalAnswerTool::new()),
         ];
 
-        agent.diagnose(&self.llm_session, &query, tools).await
+        let raw = agent.diagnose(&self.llm_session, &query, tools).await?;
+
+        self.persist_token_usage();
+
+        Ok(parse_diagnose_report_response(&raw))
+    }
+
+    fn failure_diagnose_system_prompt(
+        &mut self,
+        command: &str,
+        exit_code: i32,
+        output: &str,
+        cwd: &str,
+    ) -> String {
+        let role_prompt = self.prompt_manager.get("role").to_string();
+        let mut vars = HashMap::new();
+        vars.insert("role_prompt".to_string(), role_prompt);
+        vars.insert("uname_info".to_string(), uname_info());
+        vars.insert("user_nickname".to_string(), whoami());
+        vars.insert("os_info".to_string(), os_info());
+        vars.insert("basic_env_info".to_string(), basic_env_info());
+        vars.insert("output_language".to_string(), output_language());
+        vars.insert("failed_command".to_string(), command.to_string());
+        vars.insert("exit_code".to_string(), exit_code.to_string());
+        vars.insert("cwd".to_string(), cwd.to_string());
+        vars.insert("command_output".to_string(), output.to_string());
+        self.prompt_manager.render("failure_diagnose", &vars)
     }
 
     /// Handle an AI question: send to LLM and return the response text.
@@ -807,6 +842,444 @@ impl AiHandler {
     }
 }
 
+/// Confidence level in a failure diagnosis report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnoseConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+/// Structured failure diagnosis report from the LLM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureDiagnoseReport {
+    pub root_cause: String,
+    pub evidence: Vec<String>,
+    pub suggested_fix: Option<String>,
+    pub verify_commands: Vec<String>,
+    pub risk_notes: Option<String>,
+    pub confidence: DiagnoseConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Passed,
+    Failed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyStepResult {
+    pub command: String,
+    pub output: String,
+    pub exit_code: i32,
+    pub outcome: VerifyOutcome,
+    pub block_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureDiagnoseConclusion {
+    Fixed,
+    PartialFailure,
+    CannotDetermine,
+}
+
+/// How the LLM diagnose output was parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnoseParseOutcome {
+    /// Structured JSON report.
+    Structured,
+    /// Plain-text fallback when the model did not return JSON.
+    ProseFallback,
+    /// JSON-like output that could not be parsed into a report.
+    FormatError,
+}
+
+/// Parsed failure diagnosis report and parse metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureDiagnoseParseResult {
+    pub report: FailureDiagnoseReport,
+    pub outcome: DiagnoseParseOutcome,
+}
+
+/// Parse LLM output into a failure diagnosis report.
+pub(crate) fn parse_diagnose_report_response(response: &str) -> FailureDiagnoseParseResult {
+    if let Some(json) = extract_diagnose_report_json(response) {
+        if let Some(report) = parse_diagnose_report_json(&json) {
+            return FailureDiagnoseParseResult {
+                report,
+                outcome: DiagnoseParseOutcome::Structured,
+            };
+        }
+    }
+
+    let trimmed = response.trim();
+    if looks_like_malformed_diagnose_report(trimmed) {
+        return FailureDiagnoseParseResult {
+            report: empty_diagnose_report(),
+            outcome: DiagnoseParseOutcome::FormatError,
+        };
+    }
+
+    FailureDiagnoseParseResult {
+        report: FailureDiagnoseReport {
+            root_cause: trimmed.to_string(),
+            evidence: vec![],
+            suggested_fix: None,
+            verify_commands: vec![],
+            risk_notes: None,
+            confidence: DiagnoseConfidence::Low,
+        },
+        outcome: DiagnoseParseOutcome::ProseFallback,
+    }
+}
+
+fn empty_diagnose_report() -> FailureDiagnoseReport {
+    FailureDiagnoseReport {
+        root_cause: String::new(),
+        evidence: vec![],
+        suggested_fix: None,
+        verify_commands: vec![],
+        risk_notes: None,
+        confidence: DiagnoseConfidence::Low,
+    }
+}
+
+fn looks_like_malformed_diagnose_report(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with('{')
+        || t.starts_with("```")
+        || t.contains("\"root_cause\"")
+        || t.contains("\"type\"")
+        || t.contains("\"diagnose_report\"")
+}
+
+fn extract_diagnose_report_json(response: &str) -> Option<serde_json::Value> {
+    let code_block_re = regex::Regex::new(r"(?s)```(?:json)?\s*\n?(.*?)```").unwrap();
+    for caps in code_block_re.captures_iter(response) {
+        let content = caps.get(1)?.as_str().trim();
+        if let Some(json) = diagnose_report_from_parsed_json(content) {
+            return Some(json);
+        }
+    }
+
+    if let Some(json) = extract_json_object_from_text(response) {
+        if let Some(report) = diagnose_report_from_value(&json) {
+            return Some(report);
+        }
+    }
+
+    diagnose_report_from_parsed_json(response.trim())
+}
+
+fn diagnose_report_from_parsed_json(text: &str) -> Option<serde_json::Value> {
+    let json = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    diagnose_report_from_value(&json)
+}
+
+fn diagnose_report_from_value(json: &serde_json::Value) -> Option<serde_json::Value> {
+    if is_diagnose_report_candidate(json) {
+        return Some(json.clone());
+    }
+    if let Some(answer) = json.get("answer").and_then(|v| v.as_str()) {
+        return diagnose_report_from_parsed_json(answer.trim());
+    }
+    None
+}
+
+fn is_diagnose_report_candidate(json: &serde_json::Value) -> bool {
+    let Some(obj) = json.as_object() else {
+        return false;
+    };
+    match obj.get("type").and_then(|v| v.as_str()) {
+        Some("diagnose_report") | None => {}
+        Some(_) => return false,
+    }
+    obj.get("root_cause")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn extract_json_object_from_text(text: &str) -> Option<serde_json::Value> {
+    for (start, _) in text.match_indices('{') {
+        let slice = &text[start..];
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(slice) {
+            return Some(value);
+        }
+        for (end, _) in slice.match_indices('}') {
+            let candidate = &slice[..=end];
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn parse_diagnose_report_json(json: &serde_json::Value) -> Option<FailureDiagnoseReport> {
+    if !is_diagnose_report_candidate(json) {
+        return None;
+    }
+    let root_cause = json.get("root_cause")?.as_str()?.trim().to_string();
+    if root_cause.is_empty() {
+        return None;
+    }
+    let evidence: Vec<String> = json
+        .get("evidence")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let suggested_fix = json
+        .get("suggested_fix")
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.trim().to_string())
+            }
+        })
+        .filter(|s| !s.is_empty());
+    let verify_commands: Vec<String> = json
+        .get("verify_commands")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let risk_notes = json
+        .get("risk_notes")
+        .and_then(|v| {
+            if v.is_null() {
+                None
+            } else {
+                v.as_str().map(|s| s.trim().to_string())
+            }
+        })
+        .filter(|s| !s.is_empty());
+    let confidence = json
+        .get("confidence")
+        .and_then(|v| v.as_str())
+        .map(parse_diagnose_confidence)
+        .unwrap_or(DiagnoseConfidence::Medium);
+    Some(FailureDiagnoseReport {
+        root_cause,
+        evidence,
+        suggested_fix,
+        verify_commands,
+        risk_notes,
+        confidence,
+    })
+}
+
+fn parse_diagnose_confidence(s: &str) -> DiagnoseConfidence {
+    match s.to_ascii_lowercase().as_str() {
+        "high" => DiagnoseConfidence::High,
+        "low" => DiagnoseConfidence::Low,
+        _ => DiagnoseConfidence::Medium,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadonlyVerdict {
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
+pub(crate) fn readonly_command_verdict(command: &str) -> ReadonlyVerdict {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return ReadonlyVerdict {
+            allowed: false,
+            reason: Some("empty command".into()),
+        };
+    }
+
+    for segment in split_command_segments(trimmed) {
+        let seg = segment.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        if let Some(reason) = non_readonly_segment_reason(seg) {
+            return ReadonlyVerdict {
+                allowed: false,
+                reason: Some(reason),
+            };
+        }
+    }
+
+    ReadonlyVerdict {
+        allowed: true,
+        reason: None,
+    }
+}
+
+fn split_command_segments(command: &str) -> Vec<String> {
+    let mut segments = vec![command.to_string()];
+    for sep in [";", "&&", "||", "|"] {
+        segments = segments
+            .into_iter()
+            .flat_map(|s| s.split(sep).map(|p| p.to_string()).collect::<Vec<_>>())
+            .collect();
+    }
+    segments
+}
+
+fn non_readonly_segment_reason(segment: &str) -> Option<String> {
+    let lower = segment.to_lowercase();
+    if lower.contains('>') && !lower.contains("/dev/null") {
+        return Some("write redirect".into());
+    }
+    if lower.contains("<<") && !lower.contains("/dev/null") {
+        return Some("heredoc write".into());
+    }
+
+    let first = segment.split_whitespace().next().unwrap_or("");
+    let base = first.rsplit('/').next().unwrap_or(first).to_lowercase();
+
+    const BLOCKED: &[&str] = &[
+        "rm", "mv", "cp", "chmod", "chown", "mkdir", "touch", "tee", "truncate", "install", "apt",
+        "yum", "dnf", "pip", "npm", "cargo", "sed", "vim", "vi", "nano", "reboot", "shutdown",
+        "kill", "pkill", "killall",
+    ];
+    if BLOCKED.iter().any(|b| base == *b) {
+        return Some(format!("blocked command: {base}"));
+    }
+
+    if base == "systemctl" || base == "service" {
+        for token in segment.split_whitespace().skip(1) {
+            let t = token.to_lowercase();
+            if matches!(
+                t.as_str(),
+                "start" | "stop" | "restart" | "reload" | "enable" | "disable"
+            ) {
+                return Some(format!("service control: {t}"));
+            }
+        }
+    }
+
+    if base == "sed" && lower.contains("-i") {
+        return Some("in-place edit".into());
+    }
+
+    None
+}
+
+/// Map a verification command's exit code and output to pass/fail.
+pub(crate) fn verify_outcome_from_execution(exit_code: i32, output: &str) -> VerifyOutcome {
+    let effective = aish_pty::exit_code::infer_exit_code_from_output(exit_code, output);
+    if effective == 0 {
+        VerifyOutcome::Passed
+    } else {
+        VerifyOutcome::Failed
+    }
+}
+
+pub(crate) fn effective_verify_exit_code(exit_code: i32, output: &str) -> i32 {
+    aish_pty::exit_code::infer_exit_code_from_output(exit_code, output)
+}
+
+pub(crate) fn summarize_verification_conclusion(
+    steps: &[VerifyStepResult],
+) -> FailureDiagnoseConclusion {
+    if steps.is_empty() {
+        return FailureDiagnoseConclusion::CannotDetermine;
+    }
+    let mut any_ran = false;
+    let mut any_failed = false;
+    for step in steps {
+        match step.outcome {
+            VerifyOutcome::Passed => any_ran = true,
+            VerifyOutcome::Failed => {
+                any_ran = true;
+                any_failed = true;
+            }
+            VerifyOutcome::Blocked => {}
+        }
+    }
+    if !any_ran {
+        FailureDiagnoseConclusion::CannotDetermine
+    } else if any_failed {
+        FailureDiagnoseConclusion::PartialFailure
+    } else {
+        FailureDiagnoseConclusion::Fixed
+    }
+}
+
+/// Print a failure diagnosis report to stdout.
+pub(crate) fn print_failure_diagnose_report(result: &FailureDiagnoseParseResult) {
+    use aish_i18n::t;
+    if result.outcome == DiagnoseParseOutcome::FormatError {
+        println!(
+            "\x1b[33m{}\x1b[0m",
+            t("shell.failure_diagnose.parse_format_error")
+        );
+        return;
+    }
+    let report = &result.report;
+    println!("{}", t("shell.failure_diagnose.report_title"));
+    if result.outcome == DiagnoseParseOutcome::ProseFallback {
+        println!(
+            "\x1b[33m{}\x1b[0m",
+            t("shell.failure_diagnose.parse_prose_fallback")
+        );
+    }
+    println!(
+        "{} {}",
+        t("shell.failure_diagnose.root_cause"),
+        report.root_cause
+    );
+    println!(
+        "{} {}",
+        t("shell.failure_diagnose.confidence"),
+        match report.confidence {
+            DiagnoseConfidence::High => t("shell.failure_diagnose.confidence_high"),
+            DiagnoseConfidence::Medium => t("shell.failure_diagnose.confidence_medium"),
+            DiagnoseConfidence::Low => t("shell.failure_diagnose.confidence_low"),
+        }
+    );
+    println!("{}", t("shell.failure_diagnose.evidence"));
+    if report.evidence.is_empty() {
+        println!("  {}", t("shell.failure_diagnose.no_evidence"));
+    } else {
+        for (i, item) in report.evidence.iter().enumerate() {
+            println!("  {}. {}", i + 1, item);
+        }
+    }
+    if let Some(ref fix) = report.suggested_fix {
+        println!("{} {}", t("shell.failure_diagnose.suggested_fix"), fix);
+    } else {
+        println!("{}", t("shell.failure_diagnose.no_suggested_fix"));
+    }
+    if !report.verify_commands.is_empty() {
+        println!("{}", t("shell.failure_diagnose.verify_commands"));
+        for cmd in &report.verify_commands {
+            println!("  · {}", cmd);
+        }
+    }
+    if let Some(ref notes) = report.risk_notes {
+        println!("{} {}", t("shell.failure_diagnose.risk_notes"), notes);
+    }
+    println!("{}", t("shell.failure_diagnose.readonly_footer"));
+}
+
+/// Format a model/API error from failure diagnosis for display.
+pub(crate) fn format_failure_diagnose_error(error: &aish_core::AishError) -> String {
+    use aish_i18n::t_with_args;
+    let mut args = std::collections::HashMap::new();
+    args.insert("error".to_string(), error.to_string());
+    t_with_args("shell.failure_diagnose.error", &args)
+}
+
 /// Format a memory category for display.
 fn format_category(cat: &MemoryCategory) -> &'static str {
     match cat {
@@ -1181,5 +1654,119 @@ mod tests {
     fn test_extract_retainable_facts_environment() {
         let facts = extract_retainable_facts("the database port is 5432");
         assert!(!facts.is_empty());
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_json() {
+        let response = r#"```json
+{
+  "type": "diagnose_report",
+  "root_cause": "command not found",
+  "evidence": ["which foo returned empty"],
+  "suggested_fix": "sudo apt install foo",
+  "verify_commands": ["which foo"],
+  "confidence": "high"
+}
+```"#;
+        let parsed = parse_diagnose_report_response(response);
+        assert_eq!(parsed.outcome, DiagnoseParseOutcome::Structured);
+        assert_eq!(parsed.report.root_cause, "command not found");
+        assert_eq!(parsed.report.evidence.len(), 1);
+        assert_eq!(
+            parsed.report.suggested_fix.as_deref(),
+            Some("sudo apt install foo")
+        );
+        assert_eq!(parsed.report.confidence, DiagnoseConfidence::High);
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_empty_evidence_accepted() {
+        let response = r#"{"type":"diagnose_report","root_cause":"x","evidence":[]}"#;
+        let parsed = parse_diagnose_report_response(response);
+        assert_eq!(parsed.outcome, DiagnoseParseOutcome::Structured);
+        assert_eq!(parsed.report.root_cause, "x");
+        assert!(parsed.report.evidence.is_empty());
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_without_type_field() {
+        let response = r#"{"root_cause":"service inactive","evidence":["systemctl status"]}"#;
+        let parsed = parse_diagnose_report_response(response);
+        assert_eq!(parsed.outcome, DiagnoseParseOutcome::Structured);
+        assert_eq!(parsed.report.root_cause, "service inactive");
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_from_answer_wrapper() {
+        let response =
+            r#"{"answer":"{\"root_cause\":\"missing binary\",\"evidence\":[\"which missing\"]}"}"#;
+        let parsed = parse_diagnose_report_response(response);
+        assert_eq!(parsed.outcome, DiagnoseParseOutcome::Structured);
+        assert_eq!(parsed.report.root_cause, "missing binary");
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_malformed_json_is_format_error() {
+        let response = r#"{"type":"diagnose_report","root_cause":"","evidence":["x"]}"#;
+        let parsed = parse_diagnose_report_response(response);
+        assert_eq!(parsed.outcome, DiagnoseParseOutcome::FormatError);
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_prose_fallback() {
+        let response = "The command failed because foo is not installed.";
+        let parsed = parse_diagnose_report_response(response);
+        assert_eq!(parsed.outcome, DiagnoseParseOutcome::ProseFallback);
+        assert_eq!(parsed.report.root_cause, response);
+    }
+
+    #[test]
+    fn test_readonly_command_guard() {
+        assert!(readonly_command_verdict("systemctl status nginx").allowed);
+        assert!(readonly_command_verdict("which foo").allowed);
+        assert!(!readonly_command_verdict("systemctl restart nginx").allowed);
+        assert!(!readonly_command_verdict("rm -rf /").allowed);
+    }
+
+    #[test]
+    fn test_verify_outcome_infers_failure_from_output() {
+        let out = "Failed to restart foo.service: Unit foo.service not found.\n";
+        assert_eq!(verify_outcome_from_execution(0, out), VerifyOutcome::Failed);
+        assert_eq!(effective_verify_exit_code(0, out), 1);
+        assert_eq!(
+            verify_outcome_from_execution(0, "active (running)\n"),
+            VerifyOutcome::Passed
+        );
+    }
+
+    #[test]
+    fn test_summarize_verification_conclusion() {
+        use VerifyOutcome::*;
+        let fixed = summarize_verification_conclusion(&[VerifyStepResult {
+            command: "true".into(),
+            output: String::new(),
+            exit_code: 0,
+            outcome: Passed,
+            block_reason: None,
+        }]);
+        assert_eq!(fixed, FailureDiagnoseConclusion::Fixed);
+
+        let partial = summarize_verification_conclusion(&[VerifyStepResult {
+            command: "false".into(),
+            output: String::new(),
+            exit_code: 1,
+            outcome: Failed,
+            block_reason: None,
+        }]);
+        assert_eq!(partial, FailureDiagnoseConclusion::PartialFailure);
+
+        let unknown = summarize_verification_conclusion(&[VerifyStepResult {
+            command: "rm x".into(),
+            output: String::new(),
+            exit_code: -1,
+            outcome: Blocked,
+            block_reason: Some("blocked".into()),
+        }]);
+        assert_eq!(unknown, FailureDiagnoseConclusion::CannotDetermine);
     }
 }

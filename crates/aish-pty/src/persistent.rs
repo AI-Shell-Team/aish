@@ -505,6 +505,7 @@ impl PersistentPty {
         // to master_fd, causing intermittent missing output for fast
         // commands.
         let mut draining = false;
+        let mut deferred_control_events: Vec<crate::control::BackendControlEvent> = Vec::new();
         // The PTY may emit a bare leading newline from stale prompt
         // rendering.  Only skip a leading CR-LF or LF at the very start
         // of the first chunk -- never consume actual command output.
@@ -2320,8 +2321,19 @@ impl PersistentPty {
                                 // command.
                                 self.running.store(false, Ordering::SeqCst);
                             }
+                            if let BackendControlEvent::PromptReady { .. } = event {
+                                let output_so_far =
+                                    strip_ansi_escapes(&String::from_utf8_lossy(&output_buf));
+                                if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
+                                    deferred_control_events.push(event.clone());
+                                    continue;
+                                }
+                            }
                             if let Some(r) = self.command_state.handle_event(event) {
-                                result_exit_code = r.exit_code;
+                                result_exit_code = crate::exit_code::infer_exit_code_from_output(
+                                    r.exit_code,
+                                    &strip_ansi_escapes(&String::from_utf8_lossy(&output_buf)),
+                                );
                                 // Discard any stdin bytes captured in the same
                                 // poll cycle.  Without this, a buffered newline
                                 // could execute a stale line before the next
@@ -2345,6 +2357,31 @@ impl PersistentPty {
                     _ => {}
                 }
             }
+
+            if !deferred_control_events.is_empty() {
+                let output_so_far = strip_ansi_escapes(&String::from_utf8_lossy(&output_buf));
+                let mut still_deferred = Vec::new();
+                for event in deferred_control_events.drain(..) {
+                    if let BackendControlEvent::PromptReady { .. } = &event {
+                        if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
+                            still_deferred.push(event);
+                            continue;
+                        }
+                    }
+                    if let Some(r) = self.command_state.handle_event(&event) {
+                        result_exit_code = crate::exit_code::infer_exit_code_from_output(
+                            r.exit_code,
+                            &output_so_far,
+                        );
+                        write_buf.clear();
+                        draining = true;
+                    }
+                    if let BackendControlEvent::PromptReady { cwd, .. } = &event {
+                        result_cwd = cwd.clone();
+                    }
+                }
+                deferred_control_events = still_deferred;
+            }
         }
 
         // Restore terminal.
@@ -2356,6 +2393,7 @@ impl PersistentPty {
         // text representation suitable for LLM context.
         let raw_output = String::from_utf8_lossy(&output_buf).to_string();
         let output = strip_ansi_escapes(&raw_output);
+        result_exit_code = crate::exit_code::infer_exit_code_from_output(result_exit_code, &output);
 
         Ok((result_exit_code, result_cwd, output))
     }

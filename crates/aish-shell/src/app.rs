@@ -2196,22 +2196,12 @@ impl AishShell {
                     self.record_history(input, exit_code);
                     self.reset_interruption();
 
-                    // Track for error correction
-                    self.state.last_command = Some(input.to_string());
-                    self.state.last_exit_code = exit_code;
-                    self.state.can_correct_error = exit_code != 0 && exit_code != 130;
-
-                    // Show error correction hint
-                    if exit_code != 0 && exit_code != 130 {
-                        let hint = t("shell.error_correction.press_semicolon_hint");
-                        let hint_str = format!("\x1b[2m\x1b[37m<{}>\x1b[0m\n", hint);
-                        crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
-                        eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", hint);
-                    }
+                    self.track_command_failure_state(input, exit_code);
                 }
                 crate::types::InputIntent::ScriptCall => {
                     let exit_code = self.execute_script(input);
                     self.record_history(input, exit_code);
+                    self.track_command_failure_state(input, exit_code);
                 }
             }
         }
@@ -2324,6 +2314,27 @@ impl AishShell {
         }
     }
 
+    /// Record last command outcome for `;` quick-fix and `/diagnose`.
+    fn track_command_failure_state(&mut self, command: &str, exit_code: i32) {
+        use aish_i18n::t;
+        self.state.last_command = Some(command.to_string());
+        self.state.last_exit_code = exit_code;
+        self.state.can_correct_error = exit_code != 0 && exit_code != 130;
+        if exit_code != 0 && exit_code != 130 {
+            let title = t("shell.error_correction.failure_hint_title");
+            let quick_fix = t("shell.error_correction.quick_fix_hint");
+            let diagnose = t("shell.error_correction.diagnose_hint");
+            let hint_str = format!(
+                "\x1b[2m\x1b[37m<{}>\x1b[0m\n\x1b[2m\x1b[37m<{}>\x1b[0m\n\x1b[2m\x1b[37m<{}>\x1b[0m\n",
+                title, quick_fix, diagnose
+            );
+            crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
+            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", title);
+            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", quick_fix);
+            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", diagnose);
+        }
+    }
+
     /// Classify and run a readline submission. Returns `true` to break the main loop.
     fn process_readline_submission(&mut self, line: &str) -> bool {
         let input = line.trim();
@@ -2349,6 +2360,7 @@ impl AishShell {
                 self.set_phase(ShellPhase::Editing);
                 self.record_history(input, exit_code);
                 self.reset_interruption();
+                self.track_command_failure_state(input, exit_code);
                 false
             }
             crate::types::InputIntent::BuiltinCommand => {
@@ -2382,6 +2394,7 @@ impl AishShell {
                 }
                 let exit_code = self.execute_script(input);
                 self.record_history(input, exit_code);
+                self.track_command_failure_state(input, exit_code);
                 false
             }
             _ => {
@@ -2462,6 +2475,7 @@ impl AishShell {
             }
             Some("/record") => self.handle_record_command(&parts),
             Some("/doctor") => self.handle_doctor_command(&parts),
+            Some("/diagnose") => self.handle_failure_diagnose_command(),
             Some("/status") => self.handle_status_command(),
             _ => {
                 eprintln!("{}", {
@@ -2489,6 +2503,194 @@ impl AishShell {
         rt.block_on(async {
             doctor.run(fix).await;
         });
+    }
+
+    fn handle_failure_diagnose_command(&mut self) {
+        use crate::ai_handler::{
+            effective_verify_exit_code, format_failure_diagnose_error,
+            print_failure_diagnose_report, readonly_command_verdict,
+            summarize_verification_conclusion, verify_outcome_from_execution, DiagnoseParseOutcome,
+            FailureDiagnoseConclusion, VerifyOutcome, VerifyStepResult,
+        };
+        use aish_i18n::{t, t_with_args};
+        use std::collections::HashMap;
+
+        if !self.state.can_correct_error {
+            println!("{}", t("shell.failure_diagnose.no_failure"));
+            return;
+        }
+
+        let Some(ref command) = self.state.last_command.clone() else {
+            println!("{}", t("shell.failure_diagnose.no_failure"));
+            return;
+        };
+
+        let command = command.clone();
+        let exit_code = self.state.last_exit_code;
+        let output = self.state.last_output.clone();
+        let cwd = self.state.cwd.clone();
+        let (safe_command, _) = self.secret_vault.lock().unwrap().redact_output(&command);
+        let (safe_output, _) = self.secret_vault.lock().unwrap().redact_output(&output);
+
+        let old_sigint = self.install_ai_sigint_handler();
+        let mut esc_watcher = CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
+        let token_ptr = self.ai_handler.cancellation_token() as *const aish_llm::CancellationToken;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let diagnose_result = rt.block_on(async {
+            tokio::select! {
+                r = self.ai_handler.handle_failure_diagnose(
+                    &safe_command,
+                    exit_code,
+                    &safe_output,
+                    &cwd,
+                ) => r,
+                _ = poll_cancelled(token_ptr) => {
+                    Err(aish_core::AishError::Cancelled)
+                }
+            }
+        });
+
+        esc_watcher.stop();
+        Self::restore_ai_sigint_handler(old_sigint);
+        self.animation.stop();
+
+        let report = match diagnose_result {
+            Ok(parsed) => parsed,
+            Err(aish_core::AishError::Cancelled) => {
+                println!("\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                return;
+            }
+            Err(e) => {
+                eprintln!("\x1b[31m{}\x1b[0m", format_failure_diagnose_error(&e));
+                return;
+            }
+        };
+
+        print_failure_diagnose_report(&report);
+
+        if report.outcome == DiagnoseParseOutcome::FormatError {
+            self.state.can_correct_error = false;
+            return;
+        }
+
+        let report = report.report;
+
+        if let Some(ref fix_cmd) = report.suggested_fix {
+            let prompt = format!(
+                "{}\x1b[1;36m{}\x1b[0m{}",
+                t("shell.failure_diagnose.confirm_fix_prefix"),
+                fix_cmd,
+                t("shell.failure_diagnose.confirm_fix_suffix")
+            );
+            if !Self::confirm_action(&prompt, "") {
+                let mut args = HashMap::new();
+                args.insert("command".to_string(), fix_cmd.clone());
+                println!(
+                    "{}",
+                    t_with_args("shell.failure_diagnose.fix_cancelled", &args)
+                );
+                self.state.can_correct_error = false;
+                return;
+            }
+
+            if !self.screen_shell_command(fix_cmd) {
+                self.state.can_correct_error = false;
+                return;
+            }
+
+            let fix_exit = self.execute_external_command(fix_cmd);
+            self.record_history(fix_cmd, fix_exit);
+
+            if report.verify_commands.is_empty() {
+                println!("{}", t("shell.failure_diagnose.no_verify_commands"));
+                self.state.can_correct_error = false;
+                return;
+            }
+
+            println!("{}", t("shell.failure_diagnose.verifying"));
+            let mut steps = Vec::new();
+            for verify_cmd in &report.verify_commands {
+                let verdict = readonly_command_verdict(verify_cmd);
+                if !verdict.allowed {
+                    let reason = verdict.reason.unwrap_or_else(|| "non-readonly".to_string());
+                    println!(
+                        "{}",
+                        t_with_args(
+                            "shell.failure_diagnose.verify_blocked",
+                            &HashMap::from([
+                                ("command".to_string(), verify_cmd.clone()),
+                                ("reason".to_string(), reason.clone()),
+                            ])
+                        )
+                    );
+                    steps.push(VerifyStepResult {
+                        command: verify_cmd.clone(),
+                        output: String::new(),
+                        exit_code: -1,
+                        outcome: VerifyOutcome::Blocked,
+                        block_reason: Some(reason),
+                    });
+                    continue;
+                }
+
+                if !self.screen_shell_command(verify_cmd) {
+                    steps.push(VerifyStepResult {
+                        command: verify_cmd.clone(),
+                        output: String::new(),
+                        exit_code: -1,
+                        outcome: VerifyOutcome::Blocked,
+                        block_reason: Some("input guard declined".to_string()),
+                    });
+                    continue;
+                }
+
+                let code = self.execute_external_command(verify_cmd);
+                let step_output = self.state.last_output.clone();
+                let effective_code = effective_verify_exit_code(code, &step_output);
+                let outcome = verify_outcome_from_execution(code, &step_output);
+                let status_key = match outcome {
+                    VerifyOutcome::Passed => "shell.failure_diagnose.verify_passed",
+                    VerifyOutcome::Failed => "shell.failure_diagnose.verify_failed",
+                    VerifyOutcome::Blocked => "shell.failure_diagnose.verify_blocked",
+                };
+                println!(
+                    "{}",
+                    t_with_args(
+                        status_key,
+                        &HashMap::from([
+                            ("command".to_string(), verify_cmd.clone()),
+                            ("exit_code".to_string(), effective_code.to_string()),
+                        ])
+                    )
+                );
+                if !step_output.is_empty() {
+                    let preview: String = step_output.chars().take(500).collect();
+                    println!("   {}", preview.trim());
+                }
+                steps.push(VerifyStepResult {
+                    command: verify_cmd.clone(),
+                    output: step_output,
+                    exit_code: effective_code,
+                    outcome,
+                    block_reason: None,
+                });
+            }
+
+            let conclusion = summarize_verification_conclusion(&steps);
+            let conclusion_msg = match conclusion {
+                FailureDiagnoseConclusion::Fixed => t("shell.failure_diagnose.conclusion_fixed"),
+                FailureDiagnoseConclusion::PartialFailure => {
+                    t("shell.failure_diagnose.conclusion_partial")
+                }
+                FailureDiagnoseConclusion::CannotDetermine => {
+                    t("shell.failure_diagnose.conclusion_unknown")
+                }
+            };
+            println!("{}", conclusion_msg);
+        }
+
+        self.state.can_correct_error = false;
     }
 
     fn handle_status_command(&mut self) {
@@ -3013,11 +3215,13 @@ impl AishShell {
         let (exit_code, cwd, output) = match result {
             Ok(result) => result,
             Err(e) => {
-                eprintln!("{}", {
+                let message = {
                     let mut args = std::collections::HashMap::new();
                     args.insert("error".to_string(), e.to_string());
                     aish_i18n::t_with_args("shell.error.pty_error", &args)
-                });
+                };
+                eprintln!("{}", message);
+                self.state.last_output = message;
                 // PTY may have died, try restart
                 self.restart_pty();
                 return 1;
@@ -3311,6 +3515,7 @@ impl AishShell {
                 eprint!("{}", result.error);
             }
 
+            self.state.last_output = format!("{}{}", result.output, result.error);
             self.apply_script_result(&result);
             return if result.success { 0 } else { result.returncode };
         }
