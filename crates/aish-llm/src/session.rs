@@ -289,10 +289,14 @@ impl LlmSession {
         name: &str,
         args: serde_json::Value,
     ) -> Result<ToolResult, String> {
-        match self.tools.get(name) {
-            Some(tool) => Ok(tool.as_ref().execute_async(args).await),
-            None => Err(format!("Unknown tool: {}", name)),
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| format!("Unknown tool: {}", name))?;
+        if let Some(result) = self.run_tool_preflight(name, tool.as_ref(), &args) {
+            return Ok(result);
         }
+        Ok(tool.as_ref().execute_async(args).await)
     }
 
     /// Emit an event through the callback (public for agent use).
@@ -1051,49 +1055,8 @@ impl LlmSession {
             serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::Value::Null);
 
         if let Some(tool) = self.tools.get(&tool_call.name) {
-            let ctx = crate::tool_context::ToolContext::for_session(self);
-            // Run preflight check before execution
-            match tool.preflight_with_context(&args, &ctx) {
-                PreflightResult::Allow => {}
-                PreflightResult::Confirm { message, security } => {
-                    let security = security.unwrap_or_else(|| {
-                        PreflightSecurityContext::fallback(
-                            tool_call.name.clone(),
-                            None,
-                            message.clone(),
-                            SecurityPanelMode::Confirm,
-                        )
-                    });
-                    let approved = if let Some(ref cb) = self.confirmation_callback {
-                        cb(&security)
-                    } else {
-                        true // No callback = allow (backward compatible)
-                    };
-                    if !approved {
-                        return ToolResult::error(format!("Tool execution denied: {}", message));
-                    }
-                }
-                PreflightResult::Block { message, security } => {
-                    let security = security.unwrap_or_else(|| {
-                        PreflightSecurityContext::fallback(
-                            tool_call.name.clone(),
-                            None,
-                            message.clone(),
-                            SecurityPanelMode::Blocked,
-                        )
-                    });
-                    if let Some(ref cb) = self.security_notice_callback {
-                        cb(&security);
-                    }
-                    return ToolResult {
-                        ok: false,
-                        output: format!("Blocked by security policy: {}", message),
-                        meta: Some(serde_json::json!({
-                            "dispatch_status": "short_circuit",
-                            "reason": "security_blocked"
-                        })),
-                    };
-                }
+            if let Some(result) = self.run_tool_preflight(&tool_call.name, tool.as_ref(), &args) {
+                return result;
             }
 
             self.emit_event(LlmEvent {
@@ -1262,7 +1225,63 @@ impl LlmSession {
             compact_consecutive_failures: std::sync::Mutex::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
-            tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
+            tool_execution_policy: self.tool_execution_policy,
+        }
+    }
+
+    fn run_tool_preflight(
+        &self,
+        tool_name: &str,
+        tool: &dyn Tool,
+        args: &serde_json::Value,
+    ) -> Option<ToolResult> {
+        let ctx = crate::tool_context::ToolContext::for_session(self);
+        match tool.preflight_with_context(args, &ctx) {
+            PreflightResult::Allow => None,
+            PreflightResult::Confirm { message, security } => {
+                let security = security.unwrap_or_else(|| {
+                    PreflightSecurityContext::fallback(
+                        tool_name.to_string(),
+                        None,
+                        message.clone(),
+                        SecurityPanelMode::Confirm,
+                    )
+                });
+                let approved = if let Some(ref cb) = self.confirmation_callback {
+                    cb(&security)
+                } else {
+                    true
+                };
+                if approved {
+                    None
+                } else {
+                    Some(ToolResult::error(format!(
+                        "Tool execution denied: {}",
+                        message
+                    )))
+                }
+            }
+            PreflightResult::Block { message, security } => {
+                let security = security.unwrap_or_else(|| {
+                    PreflightSecurityContext::fallback(
+                        tool_name.to_string(),
+                        None,
+                        message.clone(),
+                        SecurityPanelMode::Blocked,
+                    )
+                });
+                if let Some(ref cb) = self.security_notice_callback {
+                    cb(&security);
+                }
+                Some(ToolResult {
+                    ok: false,
+                    output: format!("Blocked by security policy: {}", message),
+                    meta: Some(serde_json::json!({
+                        "dispatch_status": "short_circuit",
+                        "reason": "security_blocked"
+                    })),
+                })
+            }
         }
     }
 
@@ -2436,6 +2455,16 @@ mod tests {
         assert!(sub.tool_specs().is_empty());
         // Subsession has independent cancellation (not cancelled)
         assert!(!sub.cancellation_token().is_cancelled());
+    }
+
+    #[test]
+    fn test_create_subsession_inherits_tool_execution_policy() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_tool_execution_policy(crate::ToolExecutionPolicy {
+            enforce_read_only_bash: true,
+        });
+        let sub = session.create_subsession();
+        assert!(sub.tool_execution_policy().enforce_read_only_bash);
     }
 
     #[test]

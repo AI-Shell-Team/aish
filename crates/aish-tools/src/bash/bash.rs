@@ -799,6 +799,21 @@ mod tests {
         assert!(matches!(result, PreflightResult::Block { .. }));
     }
 
+    #[tokio::test]
+    async fn test_execute_tool_by_name_blocks_non_readonly_when_enforced() {
+        let mut session = aish_llm::LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_tool_execution_policy(aish_llm::ToolExecutionPolicy {
+            enforce_read_only_bash: true,
+        });
+        session.register_tool(Box::new(BashTool::new()));
+        let result = session
+            .execute_tool_by_name("bash", serde_json::json!({"command": "rm -rf /"}))
+            .await
+            .expect("bash tool should be registered");
+        assert!(!result.ok);
+        assert!(result.output.contains("Blocked by security policy"));
+    }
+
     #[test]
     fn test_bash_tool_preflight_allows_low_risk_commands() {
         let dir = tempdir().unwrap();

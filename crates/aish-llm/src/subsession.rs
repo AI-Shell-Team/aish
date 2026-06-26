@@ -131,6 +131,7 @@ mod tests {
         assert_eq!(config.max_context_messages, 50);
         assert_eq!(config.max_iterations, 10);
         assert!(config.system_prompt.is_none());
+        assert!(!config.enforce_read_only_bash);
     }
 
     #[test]
