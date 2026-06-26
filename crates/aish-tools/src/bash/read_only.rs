@@ -24,19 +24,18 @@ pub fn classify(command: &str) -> ReadOnlyVerdict {
         return ReadOnlyVerdict::Unparseable;
     }
 
-    let (stripped, _sudo_detected, sudo_ok) = strip_sudo_prefix(trimmed);
-    if !sudo_ok {
-        return ReadOnlyVerdict::Unparseable;
-    }
-    let effective = stripped.trim();
-    if effective.is_empty() {
-        return ReadOnlyVerdict::Unparseable;
-    }
-
-    for segment in split_compound_segments(effective) {
+    for segment in split_compound_segments(trimmed) {
         let seg = segment.trim();
         if seg.is_empty() {
             continue;
+        }
+        let (stripped, _sudo_detected, sudo_ok) = strip_sudo_prefix(seg);
+        if !sudo_ok {
+            return ReadOnlyVerdict::Unparseable;
+        }
+        let seg = stripped.trim();
+        if seg.is_empty() {
+            return ReadOnlyVerdict::Unparseable;
         }
         if let Some(reason) = non_readonly_segment_reason(seg) {
             return ReadOnlyVerdict::NotReadOnly { reason };
@@ -94,7 +93,7 @@ fn split_compound_segments(command: &str) -> Vec<String> {
             current.push(ch);
             continue;
         }
-        if ch == '\\' && !in_single_quote && in_double_quote {
+        if ch == '\\' && !in_single_quote {
             current.push(ch);
             if let Some(next) = chars.next() {
                 current.push(next);
@@ -218,6 +217,14 @@ fn scan_outside_quotes(segment: &str, mut predicate: impl FnMut(&str) -> bool) -
 
     while index < segment.len() {
         let ch = segment[index..].chars().next().expect("valid utf8");
+        if ch == '\\' && !in_single_quote {
+            index += ch.len_utf8();
+            if index < segment.len() {
+                let next = segment[index..].chars().next().expect("valid utf8");
+                index += next.len_utf8();
+            }
+            continue;
+        }
         if ch == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
             index += ch.len_utf8();
@@ -336,6 +343,18 @@ mod tests {
     fn sudo_stripped_before_analysis() {
         assert_read_only("sudo systemctl status nginx");
         assert_not_read_only("sudo rm -rf /");
+    }
+
+    #[test]
+    fn sudo_in_later_compound_segment_is_stripped() {
+        assert_not_read_only("ls && sudo rm -rf /tmp/x");
+        assert_not_read_only("true; sudo touch /tmp/x");
+    }
+
+    #[test]
+    fn escaped_quotes_do_not_hide_writes_or_separators() {
+        assert_not_read_only(r"echo \' > /tmp/a");
+        assert_not_read_only(r"echo \' ; rm -rf /tmp/a");
     }
 
     #[test]
