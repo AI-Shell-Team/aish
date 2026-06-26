@@ -80,7 +80,7 @@ base64 = "0.22"
 rand = "0.9"
 
 # Readline
-rustyline = { version = "18", features = ["derive"] }
+rustyline = { version = "18", features = ["derive", "with-dirs"] }
 
 # UUID
 uuid = { version = "1", features = ["v4"] }
