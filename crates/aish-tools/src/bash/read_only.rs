@@ -23,6 +23,11 @@ pub fn classify(command: &str) -> ReadOnlyVerdict {
     if trimmed.is_empty() {
         return ReadOnlyVerdict::Unparseable;
     }
+    if has_background_operator(trimmed) {
+        return ReadOnlyVerdict::NotReadOnly {
+            reason: "background job".into(),
+        };
+    }
 
     for segment in split_compound_segments(trimmed) {
         let seg = segment.trim();
@@ -144,11 +149,44 @@ fn split_compound_segments(command: &str) -> Vec<String> {
     segments
 }
 
+fn has_background_operator(command: &str) -> bool {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+        if ch == '\\' && !in_single_quote {
+            chars.next();
+            continue;
+        }
+        if !in_single_quote && !in_double_quote && ch == '&' {
+            if chars.peek() == Some(&'&') {
+                chars.next();
+                continue;
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
 fn non_readonly_segment_reason(segment: &str) -> Option<String> {
     if scan_outside_quotes(segment, |window| {
-        window.starts_with("$(") || window.starts_with('`')
+        window.starts_with("$(")
+            || window.starts_with('`')
+            || window.starts_with("<(")
+            || window.starts_with(">(")
     }) {
-        return Some("command substitution".into());
+        return Some("command or process substitution".into());
     }
     if scan_outside_quotes(segment, |window| window.starts_with('*')) {
         return Some("unquoted glob".into());
@@ -172,8 +210,16 @@ fn non_readonly_segment_reason(segment: &str) -> Option<String> {
         return Some("heredoc write".into());
     }
 
-    let first = segment.split_whitespace().next().unwrap_or("");
-    let base = first.rsplit('/').next().unwrap_or(first).to_lowercase();
+    let tokens = tokenize_shell_words(segment);
+    let first = tokens
+        .first()
+        .map(|token| normalize_shell_word(token))
+        .unwrap_or_default();
+    let base = first
+        .rsplit('/')
+        .next()
+        .unwrap_or(&first)
+        .to_ascii_lowercase();
 
     const BLOCKED: &[&str] = &[
         "rm", "mv", "cp", "chmod", "chown", "mkdir", "touch", "tee", "truncate", "install", "ln",
@@ -196,8 +242,15 @@ fn non_readonly_segment_reason(segment: &str) -> Option<String> {
         }
     }
 
-    if base == "find" && segment.to_lowercase().contains("-delete") {
-        return Some("find delete".into());
+    if base == "find"
+        && tokens.iter().any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
+            )
+        })
+    {
+        return Some("find mutating or command execution".into());
     }
 
     if base == "curl" && curl_writes_or_mutates(segment) {
@@ -464,6 +517,33 @@ fn unquote_shell_word(word: &str) -> String {
     }
 }
 
+fn normalize_shell_word(word: &str) -> String {
+    let mut out = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut chars = word.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+        if ch == '\\' && !in_single_quote {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+
+    out
+}
+
 fn scan_outside_quotes(segment: &str, mut predicate: impl FnMut(&str) -> bool) -> bool {
     let mut in_single_quote = false;
     let mut in_double_quote = false;
@@ -641,6 +721,28 @@ mod tests {
     #[test]
     fn blocks_background_job_segments() {
         assert_not_read_only("sleep 1 & rm -rf /tmp/x");
+    }
+
+    #[test]
+    fn blocks_trailing_background_operator() {
+        assert_not_read_only("sleep 9999 &");
+    }
+
+    #[test]
+    fn blocks_find_exec_and_ok() {
+        assert_not_read_only("find . -exec rm {} \\;");
+        assert_not_read_only("find . -ok rm {} \\;");
+    }
+
+    #[test]
+    fn blocks_escaped_command_names() {
+        assert_not_read_only(r"r\m -rf /tmp/x");
+        assert_not_read_only(r"'r'm -rf /tmp/x");
+    }
+
+    #[test]
+    fn blocks_process_substitution() {
+        assert_not_read_only("cat <(rm -rf /tmp/x)");
     }
 
     #[test]
