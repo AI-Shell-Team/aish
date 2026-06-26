@@ -46,7 +46,7 @@ pub use offload::{
 };
 pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
-pub use readline_tab::ReadlineTabResult;
+pub use readline_tab::{should_complete_path_locally, ReadlineTabResult};
 pub use session_interceptor::{
     pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,
     AskUserOption, AskUserRequest, BashExecResult, FollowupCallback, InterceptorState,

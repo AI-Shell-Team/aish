@@ -1,7 +1,8 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::Instant;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::config::Configurer;
@@ -14,11 +15,10 @@ use rustyline::{
     EventContext, EventHandler, KeyCode, KeyEvent, Modifiers, RepeatCount,
 };
 
-use aish_pty::readline_tab::{
-    clamp_pos, is_path_like_token, to_replacement_pairs, word_start_at, TAB_PROBE_TIMEOUT,
-};
+use aish_pty::readline_tab::clamp_pos;
 
 use crate::autosuggest::AutoSuggest;
+use crate::completion::CompletionEngine;
 
 /// Slash commands with descriptions for popup completion.
 pub const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -36,9 +36,6 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/status", "Show system environment status"),
 ];
 
-/// Timeout for PTY completion queries.
-const COMPLETION_TIMEOUT: Duration = Duration::from_millis(1200);
-
 // ---------------------------------------------------------------------------
 // Mode toggle key binding handler
 // ---------------------------------------------------------------------------
@@ -51,6 +48,105 @@ static CTRL_O_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Flag set by `SlashHandler` when `/` is pressed on an empty line.
 static SLASH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Max gap between Tab presses to count as "double Tab" (bash second-tab list).
+const DOUBLE_TAB_MS: u128 = 800;
+
+struct TabCompletionState {
+    last_tab_at: Option<Instant>,
+    pending_list: bool,
+}
+
+static TAB_STATE: Mutex<TabCompletionState> = Mutex::new(TabCompletionState {
+    last_tab_at: None,
+    pending_list: false,
+});
+
+thread_local! {
+    static CURRENT_TERMINAL_SIZE: Cell<(u16, u16)> = const { Cell::new((80, 24)) };
+}
+
+/// Terminal size last seen by rustyline (cols, rows).
+pub fn current_terminal_size() -> (u16, u16) {
+    CURRENT_TERMINAL_SIZE.with(|s| s.get())
+}
+
+fn refresh_terminal_size<H: Helper>(editor: &mut Editor<H, rustyline::history::DefaultHistory>) {
+    if let Some((cols, rows)) = editor.dimensions() {
+        CURRENT_TERMINAL_SIZE.with(|s| s.set((cols, rows)));
+    }
+}
+
+/// Reset double-Tab tracking so a new prompt line starts clean.
+pub fn clear_tab_completion_state() {
+    if let Ok(mut state) = TAB_STATE.lock() {
+        state.last_tab_at = None;
+        state.pending_list = false;
+    }
+}
+
+/// Intercept the second Tab to print a bash-style column list ourselves.
+struct TabCompletionHandler {
+    engine: Arc<CompletionEngine>,
+}
+
+impl ConditionalEventHandler for TabCompletionHandler {
+    fn handle(
+        &self,
+        evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        let Event::KeySeq(keys) = evt else {
+            return None;
+        };
+        let key = keys.first()?;
+        if key.0 != KeyCode::Tab || key.1 != Modifiers::NONE {
+            return None;
+        }
+
+        let line = ctx.line();
+        let pos = clamp_pos(line, ctx.pos());
+        let Some((_word_start, pairs)) = self.engine.complete(line, pos) else {
+            if let Ok(mut state) = TAB_STATE.lock() {
+                state.pending_list = false;
+            }
+            return None;
+        };
+
+        let now = Instant::now();
+        let Ok(mut state) = TAB_STATE.lock() else {
+            return None;
+        };
+
+        let consecutive = state
+            .last_tab_at
+            .is_some_and(|t| now.duration_since(t).as_millis() < DOUBLE_TAB_MS);
+        if !consecutive {
+            state.pending_list = false;
+        }
+        state.last_tab_at = Some(now);
+
+        if pairs.len() <= 1 {
+            state.pending_list = false;
+            return None;
+        }
+
+        let show_list = consecutive && state.pending_list;
+        if show_list {
+            state.pending_list = false;
+            drop(state);
+            let _ = crate::completion_list::print_completion_list(&pairs);
+            // Repaint: rustyline must redraw prompt+line; manual stdout redraw
+            // overwrites the buffer when the aish prompt uses ANSI/control chars.
+            return Some(Cmd::Repaint);
+        }
+
+        state.pending_list = true;
+        None
+    }
+}
 
 /// Event handler that sets a flag when Shift+Tab or F2 is pressed,
 /// then returns `Cmd::Interrupt` to break out of `read_line`.
@@ -113,79 +209,18 @@ impl ConditionalEventHandler for SlashHandler {
     }
 }
 
-/// Shell readline helper: tab completion delegates to PTY bash.
+/// Shell readline helper: tab completion via CompletionEngine.
 struct ShellHelper {
-    /// Shared reference to the persistent PTY session.
-    pty: Arc<Mutex<aish_pty::PersistentPty>>,
-    /// Shared autosuggest engine.
+    engine: Arc<CompletionEngine>,
     autosuggest: Arc<Mutex<AutoSuggest>>,
 }
 
 impl ShellHelper {
-    fn new(pty: Arc<Mutex<aish_pty::PersistentPty>>, autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
-        Self { pty, autosuggest }
-    }
-
-    /// Drop candidates that would not change the current word (rustyline re-applies
-    /// single-candidate replacements even when the word is already complete).
-    fn filter_extending_candidates(
-        line: &str,
-        pos: usize,
-        word_start: usize,
-        candidates: Vec<aish_pty::CompletionCandidate>,
-    ) -> Vec<Pair> {
-        let current = line.get(word_start..pos).unwrap_or("");
-        candidates
-            .into_iter()
-            .filter(|c| c.replacement != current)
-            .map(|c| Pair {
-                display: c.display,
-                replacement: c.replacement,
-            })
-            .collect()
-    }
-
-    fn complete_via_pty(&self, line: &str, pos: usize) -> Option<(usize, Vec<Pair>)> {
-        let pos = clamp_pos(line, pos);
-        let mut pty = self.pty.lock().ok()?;
-        if !pty.is_running() {
-            return None;
+    fn new(engine: Arc<CompletionEngine>, autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
+        Self {
+            engine,
+            autosuggest,
         }
-
-        let word_start = word_start_at(line, pos);
-        let current_word = line.get(word_start..pos).unwrap_or("");
-
-        // Readline Tab probe only when completing the command name (cword == 0).
-        // Subcommands and arguments use __aish_complete directly: injecting the
-        // full line into interactive readline can leave bash busy on slow native
-        // completions (e.g. systemctl), causing query_completions to time out.
-        if word_start == 0 && !is_path_like_token(current_word) {
-            if let Some(tab) = pty.forward_readline_tab(line, pos, TAB_PROBE_TIMEOUT) {
-                let (ws, raw_pairs) = to_replacement_pairs(&tab, line, pos);
-                if !raw_pairs.is_empty() {
-                    return Some((
-                        ws,
-                        raw_pairs
-                            .into_iter()
-                            .map(|(display, replacement)| Pair {
-                                display,
-                                replacement,
-                            })
-                            .collect(),
-                    ));
-                }
-            }
-        }
-
-        pty.query_completions(line, pos, COMPLETION_TIMEOUT)
-            .ok()
-            .filter(|resp| !resp.candidates.is_empty())
-            .map(|resp| {
-                (
-                    resp.word_start,
-                    Self::filter_extending_candidates(line, pos, resp.word_start, resp.candidates),
-                )
-            })
     }
 }
 
@@ -230,24 +265,26 @@ impl Completer for ShellHelper {
         _ctx: &Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let pos = clamp_pos(line, pos);
-        let before = &line[..pos];
-
-        // Skip completion for AI queries
-        if before.starts_with(';') || before.starts_with('\u{ff1b}') {
+        let Some((start, pairs)) = self.engine.complete(line, pos) else {
             return Ok((0, Vec::new()));
+        };
+
+        // If our Tab handler already armed a list, block rustyline's own column listing
+        // on the matching second Tab (handler normally Interrupts before we get here).
+        if pairs.len() > 1 {
+            if let Ok(state) = TAB_STATE.lock() {
+                if state.pending_list {
+                    if let Some(last) = state.last_tab_at {
+                        let elapsed = last.elapsed().as_millis();
+                        if (100..DOUBLE_TAB_MS).contains(&elapsed) {
+                            return Ok((start, Vec::new()));
+                        }
+                    }
+                }
+            }
         }
 
-        // Empty input: no completion (bash semantics)
-        if before.trim().is_empty() {
-            return Ok((0, Vec::new()));
-        }
-
-        if let Some((word_start, pairs)) = self.complete_via_pty(line, pos) {
-            return Ok((word_start, pairs));
-        }
-
-        // PTY unavailable — no fallback (bash is the single source of truth).
-        Ok((0, Vec::new()))
+        Ok((start, pairs))
     }
 }
 
@@ -262,6 +299,7 @@ pub struct ShellReadline {
 impl ShellReadline {
     pub fn new(pty: Arc<Mutex<aish_pty::PersistentPty>>) -> rustyline::Result<Self> {
         let autosuggest = Arc::new(Mutex::new(AutoSuggest::new(5000)));
+        let engine = Arc::new(CompletionEngine::new(pty));
 
         let builder = Config::builder()
             .completion_type(CompletionType::List)
@@ -270,8 +308,15 @@ impl ShellReadline {
         let config = builder.history_ignore_dups(true)?.build();
 
         let mut editor = Editor::with_config(config)?;
-        editor.set_helper(Some(ShellHelper::new(pty, autosuggest.clone())));
+        editor.set_helper(Some(ShellHelper::new(engine.clone(), autosuggest.clone())));
         editor.set_max_history_size(500)?;
+
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Tab, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(TabCompletionHandler {
+                engine: engine.clone(),
+            })),
+        );
 
         // Bind Shift+Tab (BackTab) and F2 for mode toggle
         editor.bind_sequence(
@@ -326,6 +371,8 @@ impl ShellReadline {
         prompt: &str,
         initial: (&str, &str),
     ) -> rustyline::Result<Option<String>> {
+        clear_tab_completion_state();
+        refresh_terminal_size(&mut self.editor);
         match self.editor.readline_with_initial(prompt, initial) {
             Ok(line) => Ok(Some(line)),
             Err(rustyline::error::ReadlineError::Eof) => Ok(None),
@@ -338,6 +385,8 @@ impl ShellReadline {
     /// Supports backslash continuation: lines ending with `\` read
     /// additional lines with a `> ` prompt.
     pub fn read_line(&mut self, prompt: &str) -> rustyline::Result<Option<String>> {
+        clear_tab_completion_state();
+        refresh_terminal_size(&mut self.editor);
         let line = match self.editor.readline(prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => return Ok(None),
@@ -417,16 +466,6 @@ impl ShellReadline {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_filter_extending_candidates_drops_unchanged() {
-        let candidates = vec![aish_pty::CompletionCandidate {
-            display: "usr/".into(),
-            replacement: "/usr/".into(),
-        }];
-        let pairs = ShellHelper::filter_extending_candidates("/usr/", 5, 0, candidates);
-        assert!(pairs.is_empty(), "unchanged replacement should be filtered");
-    }
 
     #[test]
     fn test_slash_commands_format() {

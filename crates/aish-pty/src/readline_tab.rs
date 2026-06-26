@@ -45,13 +45,26 @@ pub fn word_start_at(line: &str, pos: usize) -> usize {
         .unwrap_or(0)
 }
 
-pub fn is_path_like_token(token: &str) -> bool {
+fn is_path_like_token(token: &str) -> bool {
     !token.is_empty()
         && (token.starts_with('/')
             || token.starts_with("./")
             || token.starts_with("../")
             || token.starts_with('~')
             || token.contains('/'))
+}
+
+fn is_quoted_token(token: &str) -> bool {
+    token.starts_with('"') || token.starts_with('\'')
+}
+
+fn looks_like_remote_path(token: &str) -> bool {
+    token.contains("://") || (token.contains('@') && token.contains(':'))
+}
+
+/// True when Rust `FilenameCompleter` should handle the token (not PTY/bash path logic).
+pub fn should_complete_path_locally(token: &str) -> bool {
+    is_path_like_token(token) && !is_quoted_token(token) && !looks_like_remote_path(token)
 }
 
 /// Build keystrokes for PTY readline: optional Ctrl-U, line text, cursor, Tab×n.
@@ -217,6 +230,13 @@ fn parse_inline_line(text: &str, input_line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_complete_path_locally_excludes_quoted_and_remote() {
+        assert!(should_complete_path_locally("~/.config/"));
+        assert!(!should_complete_path_locally("\"~/.config\""));
+        assert!(!should_complete_path_locally("user@host:/path"));
+    }
 
     #[test]
     fn parse_gi_list_and_inline_extend() {
