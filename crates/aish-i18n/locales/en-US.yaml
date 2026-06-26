@@ -314,6 +314,9 @@ shell:
       item3_suffix_2: " to see built-in help and usage."
     risk: "AI-generated content may be risky, please verify carefully."
     skills_loaded_suffix: " loaded"
+    changelog_title: "What's New in {version}"
+    changelog_hint_prefix: "{count} updates —"
+    changelog_hint_suffix: "to view all"
 
   # General error messages
   general_error: "error: {error}"

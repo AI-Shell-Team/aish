@@ -299,6 +299,14 @@ pub(crate) struct Ps1EchoSuppressor {
     /// pattern split across two PTY reads is still stripped. Used by the
     /// byte-exact path only.
     pub(crate) pending: Vec<u8>,
+    /// When Some, an echo's `\r\n` has been stripped (ERASE_LINE emitted) but
+    /// the trailing `printf '\33[A\33[J'` sequence — which bash sends as the
+    /// last step of the injected command — has only partially arrived. Holds
+    /// the bytes after the echo's `\n` that could still be a prefix of
+    /// PRINTF_ERASE. Without this, a chunk boundary between `\n` and
+    /// `\x1b[A\x1b[J` would let the cursor-positioning escapes leak to the
+    /// user's terminal and corrupt cursor tracking.
+    pub(crate) pending_printf_erase: Option<Vec<u8>>,
 }
 
 impl Ps1EchoSuppressor {
@@ -316,6 +324,7 @@ pub(crate) fn build_ps1_echo_suppressor(host: &str, enable_git: bool) -> Ps1Echo
         remaining: 2,
         started: std::time::Instant::now(),
         pending: Vec::new(),
+        pending_printf_erase: None,
     }
 }
 
@@ -376,7 +385,7 @@ fn strip_ps1_echo_exact(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
         };
         out.extend_from_slice(&region[..pos]);
         cursor += pos + sup.pattern.len();
-        sup.remaining -= 1;
+        sup.remaining = sup.remaining.saturating_sub(1);
     }
     if cursor < combined.len() {
         out.extend_from_slice(&combined[cursor..]);
@@ -411,9 +420,47 @@ fn strip_ps1_echo_anchor(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
     // amount of real output.
     const PENDING_LIMIT: usize = 1024;
 
-    // Prepend any bytes held back from the previous chunk so an echo split
-    // across PTY reads is reassembled before scanning.
-    let combined: Vec<u8> = if sup.pending.is_empty() {
+    let mut out: Vec<u8> = Vec::with_capacity(data.len() + 16);
+
+    // If the previous chunk left us with bytes that could still be a prefix
+    // of PRINTF_ERASE (i.e. we committed an echo strip but the trailing
+    // `\x1b[A\x1b[J` hadn't fully arrived), resolve that state first.
+    // Without this branch, those bytes would leak to the user's terminal
+    // and corrupt cursor tracking — bash/readline would think the cursor
+    // is one line below where it visually is, causing symptoms like
+    // "cursor position abnormal" and "space needs multiple presses".
+    let combined: Vec<u8> = if let Some(pending) = sup.pending_printf_erase.take() {
+        let mut v = pending;
+        v.extend_from_slice(data);
+        // We have at least 1 byte after the echo's \n. Decide whether the
+        // combined buffer confirms or refutes PRINTF_ERASE.
+        if v.len() >= PRINTF_ERASE.len() {
+            if v.starts_with(PRINTF_ERASE) {
+                // PRINTF_ERASE confirmed — strip it. This finalises the
+                // echo we partially stripped last chunk.
+                sup.remaining = sup.remaining.saturating_sub(1);
+                v[PRINTF_ERASE.len()..].to_vec()
+            } else {
+                // Enough bytes and they don't match — no PRINTF_ERASE was
+                // sent. Emit the held bytes (they're real output) and
+                // finalise the echo.
+                out.extend_from_slice(&v);
+                sup.remaining = sup.remaining.saturating_sub(1);
+                Vec::new()
+            }
+        } else if PRINTF_ERASE.starts_with(&v) {
+            // Still a strict prefix of PRINTF_ERASE — keep buffering until
+            // we can confirm or refute.
+            sup.pending_printf_erase = Some(v);
+            return out;
+        } else {
+            // Shorter than PRINTF_ERASE and not a prefix — definitely not
+            // PRINTF_ERASE. Emit and finalise.
+            out.extend_from_slice(&v);
+            sup.remaining = sup.remaining.saturating_sub(1);
+            Vec::new()
+        }
+    } else if sup.pending.is_empty() {
         data.to_vec()
     } else {
         let mut v = std::mem::take(&mut sup.pending);
@@ -425,7 +472,6 @@ fn strip_ps1_echo_anchor(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
     // because the injected command can be echoed twice (local PTY echo +
     // remote bash echo). Strip each occurrence independently so neither
     // leaks to the terminal.
-    let mut out: Vec<u8> = Vec::with_capacity(combined.len());
     let mut cursor: usize = 0;
     while sup.remaining > 0 && cursor < combined.len() {
         let region = &combined[cursor..];
@@ -479,14 +525,6 @@ fn strip_ps1_echo_anchor(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
         };
         let after_newline = after_anchor + newline_rel + 1;
 
-        let end = if combined.len() >= after_newline + PRINTF_ERASE.len()
-            && &combined[after_newline..after_newline + PRINTF_ERASE.len()] == PRINTF_ERASE
-        {
-            after_newline + PRINTF_ERASE.len()
-        } else {
-            after_newline
-        };
-
         let strip_start = match combined[cursor..abs_anchor]
             .iter()
             .rposition(|&b| b == b'\n')
@@ -495,10 +533,36 @@ fn strip_ps1_echo_anchor(data: &[u8], sup: &mut Ps1EchoSuppressor) -> Vec<u8> {
             None => abs_anchor,
         };
 
+        // Decide where this strip ends. Three cases:
+        //   1. PRINTF_ERASE fully present → strip through it.
+        //   2. PRINTF_ERASE refuted (enough bytes, no match) → strip
+        //      through the echo's \n only.
+        //   3. PRINTF_ERASE could still be arriving (chunk ended at or
+        //      inside a prefix of PRINTF_ERASE) → emit ERASE_LINE now,
+        //      buffer the bytes after \n, and DON'T decrement remaining.
+        //      The next chunk resolves case 1 vs 2 via the preamble above.
+        let end = if combined.len() >= after_newline + PRINTF_ERASE.len() {
+            if &combined[after_newline..after_newline + PRINTF_ERASE.len()] == PRINTF_ERASE {
+                after_newline + PRINTF_ERASE.len()
+            } else {
+                after_newline
+            }
+        } else {
+            let tail = &combined[after_newline..];
+            if PRINTF_ERASE.starts_with(tail) {
+                // Case 3: emit ERASE_LINE and buffer the pending prefix.
+                out.extend_from_slice(&combined[cursor..strip_start]);
+                out.extend_from_slice(ERASE_LINE);
+                sup.pending_printf_erase = Some(tail.to_vec());
+                return out;
+            }
+            after_newline
+        };
+
         out.extend_from_slice(&combined[cursor..strip_start]);
         out.extend_from_slice(ERASE_LINE);
         cursor = end;
-        sup.remaining -= 1;
+        sup.remaining = sup.remaining.saturating_sub(1);
     }
 
     if cursor < combined.len() {
@@ -5957,6 +6021,7 @@ mod tests {
             remaining: 0,
             started: std::time::Instant::now(),
             pending: Vec::new(),
+            pending_printf_erase: None,
         };
         let data = b"hello world\n";
         assert_eq!(strip_ps1_echo(data, &mut sup), data.to_vec());
@@ -5971,6 +6036,7 @@ mod tests {
             remaining: 2,
             started: std::time::Instant::now(),
             pending: Vec::new(),
+            pending_printf_erase: None,
         };
         // Construct an echoed chunk: leading banner + the echoed command (pattern
         // already ends with \r) + trailing prompt fragment.
@@ -5997,6 +6063,7 @@ mod tests {
             remaining: 1, // simulating local echo already consumed
             started: std::time::Instant::now(),
             pending: Vec::new(),
+            pending_printf_erase: None,
         };
         // Strip the trailing \r from pattern, simulate \r\n line ending, then escape.
         let mut data = pattern.clone();
@@ -6029,6 +6096,7 @@ mod tests {
             remaining: 2,
             started: std::time::Instant::now(),
             pending: Vec::new(),
+            pending_printf_erase: None,
         };
         let mut data = pattern.clone(); // local echo (ends with \r)
                                         // Remote echo: pattern without trailing \r, then \r\n, then escape bytes.
@@ -6055,6 +6123,7 @@ mod tests {
             remaining: 2,
             started: std::time::Instant::now(),
             pending: Vec::new(),
+            pending_printf_erase: None,
         };
         let data = b"totally unrelated output\n";
         assert_eq!(strip_ps1_echo(data, &mut sup), data.to_vec());
@@ -6074,6 +6143,7 @@ mod tests {
             remaining: 1,
             started: std::time::Instant::now(),
             pending: Vec::new(),
+            pending_printf_erase: None,
         };
         let split_at = pattern.len() / 2;
         let chunk1 = &pattern[..split_at];
@@ -6309,6 +6379,171 @@ mod tests {
             !s.contains("PROMPT_COMMAND"),
             "PROMPT_COMMAND leaked in combined chunk: {}",
             s
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_printf_erase_split_across_chunks() {
+        // Regression: when the bash echo's terminating \r\n arrives in one
+        // PTY read but the printf escape sequence (\x1b[A\x1b[J) arrives in
+        // the next, the suppressor must NOT commit the strip on the first
+        // chunk. Committing decrements `remaining` and lets the unanchored
+        // PRINTF_ERASE leak through in the next chunk — those bytes move the
+        // user's cursor up one line and erase to end of screen, producing
+        // wrong cursor position and "swallowed" keystrokes after SSH login.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Chunk 1: full echo + trailing CRLF, but NO printf erase yet.
+        let mut chunk1 = cmd.clone();
+        chunk1.extend_from_slice(b"\r\n");
+        // Chunk 2: PRINTF_ERASE arrives, followed by the new prompt.
+        let mut chunk2 = b"\x1b[A\x1b[J".to_vec();
+        chunk2.extend_from_slice(b"[ssh:v25] [root@host ~]# ");
+
+        let out1 = strip_ps1_echo(&chunk1, &mut sup);
+        assert!(
+            sup.remaining >= 1,
+            "suppressor must stay armed (still expecting PRINTF_ERASE): out1={:?}, remaining={}",
+            String::from_utf8_lossy(&out1),
+            sup.remaining,
+        );
+
+        let out2 = strip_ps1_echo(&chunk2, &mut sup);
+        let s = String::from_utf8_lossy(&out2);
+        assert!(
+            !s.contains("\x1b[A\x1b[J"),
+            "PRINTF_ERASE must be stripped from chunk 2, got {:?}",
+            s,
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_printf_erase_partial_prefix_split() {
+        // Edge case for the PRINTF_ERASE split fix: chunk 1 ends with a
+        // partial prefix of PRINTF_ERASE (e.g. `\x1b[A` — the first 3 of 6
+        // bytes). Pending must bridge the partial prefix so chunk 2 can
+        // either complete PRINTF_ERASE (strip it) or refute it (emit it).
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Chunk 1: echo + CRLF + first 3 bytes of PRINTF_ERASE.
+        let mut chunk1 = cmd.clone();
+        chunk1.extend_from_slice(b"\r\n\x1b[A");
+        // Chunk 2: last 3 bytes of PRINTF_ERASE + new prompt.
+        let mut chunk2 = b"\x1b[J".to_vec();
+        chunk2.extend_from_slice(b"[ssh:v25] [root@host ~]# ");
+
+        let out1 = strip_ps1_echo(&chunk1, &mut sup);
+        let s1 = String::from_utf8_lossy(&out1);
+        assert!(
+            !s1.contains("\x1b[A"),
+            "partial PRINTF_ERASE prefix must not leak via chunk 1: {:?}",
+            s1,
+        );
+
+        let out2 = strip_ps1_echo(&chunk2, &mut sup);
+        let s2 = String::from_utf8_lossy(&out2);
+        assert!(
+            !s2.contains("\x1b[A\x1b[J"),
+            "PRINTF_ERASE must be stripped once completed in chunk 2: {:?}",
+            s2,
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_printf_erase_three_way_split() {
+        // Stress the pending_printf_erase re-buffer logic: chunk 1 ends with
+        // a strict prefix of PRINTF_ERASE, chunk 2 *also* ends with a strict
+        // prefix (extending what chunk 1 started), and only chunk 3 completes
+        // the sequence. The suppressor must keep re-buffering until it can
+        // confirm or refute — without this, an intermediate chunk would
+        // either leak bytes or decrement `remaining` at the wrong time.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Chunk 1: echo + CRLF + byte 1 of PRINTF_ERASE (\x1b).
+        let mut chunk1 = cmd.clone();
+        chunk1.extend_from_slice(b"\r\n\x1b");
+        // Chunk 2: bytes 2-3 of PRINTF_ERASE ([A) — still a strict prefix.
+        let chunk2 = b"[A".to_vec();
+        // Chunk 3: bytes 4-6 of PRINTF_ERASE (\x1b[J) + new prompt.
+        let mut chunk3 = b"\x1b[J".to_vec();
+        chunk3.extend_from_slice(b"[ssh:v25] [root@host ~]# ");
+
+        let out1 = strip_ps1_echo(&chunk1, &mut sup);
+        assert!(
+            sup.remaining >= 1,
+            "after chunk 1 suppressor must stay armed: remaining={}, out={:?}",
+            sup.remaining,
+            String::from_utf8_lossy(&out1),
+        );
+
+        let out2 = strip_ps1_echo(&chunk2, &mut sup);
+        assert!(
+            sup.remaining >= 1,
+            "after chunk 2 (still partial prefix) suppressor must stay armed: remaining={}, out={:?}",
+            sup.remaining,
+            String::from_utf8_lossy(&out2),
+        );
+
+        let out3 = strip_ps1_echo(&chunk3, &mut sup);
+        let s3 = String::from_utf8_lossy(&out3);
+        assert!(
+            !s3.contains("\x1b[A\x1b[J"),
+            "PRINTF_ERASE must be stripped once completed in chunk 3: {:?}",
+            s3,
+        );
+    }
+
+    #[test]
+    fn test_ps1_echo_suppressor_git_aware_printf_erase_prefix_then_refute() {
+        // When chunk 1 ends with a strict prefix of PRINTF_ERASE but chunk 2
+        // arrives with bytes that DON'T extend PRINTF_ERASE, the suppressor
+        // must emit the buffered prefix verbatim (it's real output, not the
+        // escape sequence) and decrement `remaining` exactly once for the
+        // echo that was already stripped in chunk 1.
+        let mut sup = build_ps1_echo_suppressor("v25", true);
+        let cmd = build_ps1_marker_command("v25", true);
+
+        // Chunk 1: echo + CRLF + first 3 bytes of PRINTF_ERASE (\x1b[A).
+        let mut chunk1 = cmd.clone();
+        chunk1.extend_from_slice(b"\r\n\x1b[A");
+        // Chunk 2: NOT the rest of PRINTF_ERASE — starts with 'X' which
+        // refutes the match. Followed by real prompt output.
+        let mut chunk2 = b"Xreal output\n".to_vec();
+        chunk2.extend_from_slice(b"[ssh:v25] [root@host ~]# ");
+
+        let out1 = strip_ps1_echo(&chunk1, &mut sup);
+        let s1 = String::from_utf8_lossy(&out1);
+        assert!(
+            !s1.contains("\x1b[A"),
+            "partial PRINTF_ERASE prefix must not leak via chunk 1: {:?}",
+            s1,
+        );
+
+        let remaining_after_1 = sup.remaining;
+
+        let out2 = strip_ps1_echo(&chunk2, &mut sup);
+        let s2 = String::from_utf8_lossy(&out2);
+
+        // The buffered `\x1b[A` (3 bytes) must be emitted as real output
+        // because the refute proves it wasn't a PRINTF_ERASE sequence.
+        assert!(
+            s2.contains("\x1b[A"),
+            "refuted prefix bytes must be emitted as real output: {:?}",
+            s2,
+        );
+        assert!(
+            s2.contains("Xreal output"),
+            "bytes after the refuted prefix must pass through: {:?}",
+            s2,
+        );
+        // Exactly one decrement for the echo stripped in chunk 1.
+        assert_eq!(
+            sup.remaining,
+            remaining_after_1.saturating_sub(1),
+            "remaining must decrement exactly once across the refute path",
         );
     }
 
