@@ -7242,6 +7242,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_probe_output_skips_echo_to_pick_last_start_marker() {
+        // On a real PTY with ECHO on, bash echoes the typed probe command
+        // (which contains the markers as literal text) BEFORE executing it.
+        // The parser MUST skip the echo and parse the real marker body —
+        // i.e. use `rfind` for the start marker (last occurrence wins).
+        // Pure-function replacement for the old PTY-based
+        // `test_probe_remote_command_parses_with_echo_enabled` which was
+        // racy: line-discipline echo ordering vs the test's slave-side
+        // writes was nondeterministic, flipping rfind's choice under load.
+        let raw = " echo @@aish_ctx_start@@; id -u 2>/dev/null; echo @@aish_ctx_end@@\r\
+                   @@aish_ctx_start@@\r\n\
+                   1000\r\n\
+                   docker\r\n\
+                   prod-cluster\r\n\
+                   @@aish_ctx_end@@\r\n";
+        let snap = parse_probe_output(raw).expect("must skip echo and parse real body");
+        assert_eq!(snap.container.as_deref(), Some("docker"));
+        assert_eq!(snap.kube_context.as_deref(), Some("prod-cluster"));
+        assert!(snap.is_kube_prod);
+    }
+
+    #[test]
     fn test_parse_probe_output_no_markers() {
         assert!(parse_probe_output("just some output\n").is_none());
     }
@@ -8731,101 +8753,6 @@ mod tests {
         let snap = snap_opt.expect("probe must parse marker body");
         assert_eq!(snap.container.as_deref(), Some("docker"));
         assert_eq!(snap.kube_context.as_deref(), Some("prod-cluster"));
-    }
-
-    /// Open a non-blocking pty pair with ECHO ENABLED on the slave, matching
-    /// the default termios of a real ssh session. Writes to master get echoed
-    /// back by the line discipline before the slave process emits its own
-    /// output, so the reader sees both the echoed command and the marker
-    /// output interleaved.
-    fn open_test_pty_pair_with_echo() -> (std::fs::File, std::fs::File) {
-        use std::os::unix::io::FromRawFd;
-        let mut master_fd: libc::c_int = -1;
-        let mut slave_fd: libc::c_int = -1;
-        let rc = unsafe {
-            libc::openpty(
-                &mut master_fd,
-                &mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        assert_eq!(rc, 0, "openpty failed: {}", std::io::Error::last_os_error());
-
-        // Leave ECHO enabled (default) and disable OPOST/ONLCR so slave-written
-        // "\r\n" reaches master unchanged.
-        unsafe {
-            let mut tio: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(slave_fd, &mut tio) == 0 {
-                tio.c_oflag &= !libc::OPOST;
-                libc::tcsetattr(slave_fd, libc::TCSANOW, &tio);
-            }
-            let flags = libc::fcntl(master_fd, libc::F_GETFL);
-            libc::fcntl(master_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-
-        let master = unsafe { std::fs::File::from_raw_fd(master_fd) };
-        let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
-        (master, slave)
-    }
-
-    #[test]
-    fn test_probe_remote_command_parses_with_echo_enabled() {
-        use std::os::unix::io::AsRawFd;
-        let (master, slave) = open_test_pty_pair_with_echo();
-        let slave_fd = slave.as_raw_fd();
-
-        // Simulate the byte sequence a real ssh+bash session produces: the
-        // line discipline echoes the typed probe command (including its
-        // embedded markers) BEFORE the slave process runs and emits the real
-        // marker-delimited body. With ECHO on, the buffer contains TWO
-        // `@@aish_ctx_start@@` tokens — the parser must pick the last one.
-        let echo_cmd = concat!(
-            " echo @@aish_ctx_start@@;",
-            " id -u 2>/dev/null;",
-            " [ -f /.dockerenv ] && echo docker;",
-            " [ -f /run/.containerenv ] && echo podman;",
-            " command -v kubectl >/dev/null 2>&1 && kubectl config current-context 2>/dev/null;",
-            " echo @@aish_ctx_end@@\r",
-        )
-        .as_bytes()
-        .to_vec();
-        let marker_output = concat!(
-            "@@aish_ctx_start@@\r\n",
-            "1000\r\n",
-            "docker\r\n",
-            "prod-cluster\r\n",
-            "@@aish_ctx_end@@\r\n",
-        )
-        .as_bytes()
-        .to_vec();
-        let _writer = std::thread::spawn(move || {
-            // Write both the echoed command and the real marker output up
-            // front (no sleep): with ECHO on, the slave line discipline also
-            // reflects the probe's own master write, so the buffer will end up
-            // with multiple `@@aish_ctx_start@@` occurrences. The parser must
-            // pick the last one regardless of how many echoes are present.
-            unsafe {
-                libc::write(
-                    slave_fd,
-                    echo_cmd.as_ptr() as *const libc::c_void,
-                    echo_cmd.len(),
-                );
-                libc::write(
-                    slave_fd,
-                    marker_output.as_ptr() as *const libc::c_void,
-                    marker_output.len(),
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        });
-
-        let (snap_opt, _residual) = probe_remote_command(master.as_raw_fd());
-        let snap = snap_opt.expect("probe must skip echo and parse real marker body");
-        assert_eq!(snap.container.as_deref(), Some("docker"));
-        assert_eq!(snap.kube_context.as_deref(), Some("prod-cluster"));
-        assert!(snap.is_kube_prod);
     }
 
     #[test]
