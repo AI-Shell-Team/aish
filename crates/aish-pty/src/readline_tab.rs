@@ -59,7 +59,21 @@ fn is_quoted_token(token: &str) -> bool {
 }
 
 fn looks_like_remote_path(token: &str) -> bool {
-    token.contains("://") || (token.contains('@') && token.contains(':'))
+    if token.contains("://") {
+        return true;
+    }
+
+    if token.starts_with('/')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('~')
+    {
+        return false;
+    }
+
+    token.split_once(':').is_some_and(|(host, path)| {
+        !host.is_empty() && !host.contains('/') && path.starts_with('/')
+    })
 }
 
 /// True when Rust `FilenameCompleter` should handle the token (not PTY/bash path logic).
@@ -236,6 +250,7 @@ mod tests {
         assert!(should_complete_path_locally("~/.config/"));
         assert!(!should_complete_path_locally("\"~/.config\""));
         assert!(!should_complete_path_locally("user@host:/path"));
+        assert!(!should_complete_path_locally("host:/path"));
     }
 
     #[test]

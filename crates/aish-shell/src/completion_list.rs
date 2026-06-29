@@ -228,9 +228,9 @@ fn page_rows(rows: &[String], terminal_rows: u16) -> io::Result<()> {
 
     for row in rows {
         while lines_on_page >= page_size {
+            drain_stdin_typeahead();
             write!(stdout, "\n{MORE_PROMPT}")?;
             stdout.flush()?;
-            drain_stdin_typeahead();
             match read_more_action()? {
                 MoreAction::NextPage => lines_on_page = 0,
                 MoreAction::NextLine => lines_on_page = page_size.saturating_sub(1),
