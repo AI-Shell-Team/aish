@@ -1956,16 +1956,16 @@ impl PersistentPty {
                                         // `connect()`). `inject_*` is a no-op
                                         // for non-ssh lines and when the user
                                         // already specified ConnectTimeout.
-                                        let injected_line = if let Ok(s) = std::str::from_utf8(&line)
-                                        {
-                                            inject_ssh_connect_timeout(
-                                                s,
-                                                DEFAULT_SSH_CONNECT_TIMEOUT,
-                                            )
-                                            .into_bytes()
-                                        } else {
-                                            line.clone()
-                                        };
+                                        let injected_line =
+                                            if let Ok(s) = std::str::from_utf8(&line) {
+                                                inject_ssh_connect_timeout(
+                                                    s,
+                                                    DEFAULT_SSH_CONNECT_TIMEOUT,
+                                                )
+                                                .into_bytes()
+                                            } else {
+                                                line.clone()
+                                            };
                                         write_buf.extend_from_slice(&injected_line);
                                         write_buf.push(b'\r');
                                     } else {
@@ -2804,14 +2804,15 @@ impl PersistentPty {
                                         // parse populated it), fall back to a
                                         // synthesized minimal info so the stack
                                         // depth still matches ps1_marker_done_stack.
-                                        let outer = remote_info_for_probe.take().unwrap_or_else(|| {
-                                            SshCommandInfo {
-                                                user: None,
-                                                host: host.clone(),
-                                                jump_chain: Vec::new(),
-                                                dest_raw: host.clone(),
-                                            }
-                                        });
+                                        let outer =
+                                            remote_info_for_probe.take().unwrap_or_else(|| {
+                                                SshCommandInfo {
+                                                    user: None,
+                                                    host: host.clone(),
+                                                    jump_chain: Vec::new(),
+                                                    dest_raw: host.clone(),
+                                                }
+                                            });
                                         nested_host_stack.push(outer);
                                         ps1_marker_done_stack.push(ps1_marker_done_for.take());
                                         // Output-scan path only knows the host
@@ -3014,10 +3015,7 @@ impl PersistentPty {
                             // stack; the recognized-failure patterns are
                             // specific enough that normal session output will
                             // not trip them.
-                            if !probe_active
-                                && is_session
-                                && !nested_host_stack.is_empty()
-                            {
+                            if !probe_active && is_session && !nested_host_stack.is_empty() {
                                 let text = String::from_utf8_lossy(data);
                                 if scan_output_for_ssh_failure(&text).is_some() {
                                     debug!(
@@ -3029,8 +3027,7 @@ impl PersistentPty {
                                         let prev_host = prev_info.dest_raw.clone();
                                         remote_info_for_probe = Some(prev_info);
                                         remote_host_for_probe = Some(prev_host.clone());
-                                        ps1_marker_done_for =
-                                            ps1_marker_done_stack.pop().flatten();
+                                        ps1_marker_done_for = ps1_marker_done_stack.pop().flatten();
                                         if let Some(ref sh) = shared_host {
                                             *sh.lock().unwrap() = Some(prev_host);
                                         }
@@ -3094,8 +3091,7 @@ impl PersistentPty {
                                 if nested_confirm_buf.len() > 8 * 1024 {
                                     let keep = 8 * 1024;
                                     let start = nested_confirm_buf.len() - keep;
-                                    let mut truncated =
-                                        nested_confirm_buf.split_off(start);
+                                    let mut truncated = nested_confirm_buf.split_off(start);
                                     std::mem::swap(&mut truncated, &mut nested_confirm_buf);
                                 }
                             }
@@ -5649,8 +5645,7 @@ pub(crate) fn probe_remote_command(master_fd: i32) -> (Option<RemoteContextSnaps
         let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         debug!(
             master_fd,
-            err,
-            "probe_remote_command: write failed, aborting probe"
+            err, "probe_remote_command: write failed, aborting probe"
         );
         return (None, Vec::new());
     }
@@ -6709,8 +6704,7 @@ mod tests {
         // stay visible as plain text (`|main`, `[ROOT]`, `|venv-name`).
         let info = make_simple_info("v25");
         let snap = make_minimal_snapshot();
-        let cmd =
-            build_ps1_marker_command(&info, &snap, DangerLevel::None, true, true, true, true);
+        let cmd = build_ps1_marker_command(&info, &snap, DangerLevel::None, true, true, true, true);
         let s = String::from_utf8(cmd).expect("valid UTF-8");
         // venv segment: plain concatenation, no $'\x1b...' ANSI-C quote.
         assert!(
@@ -6729,7 +6723,11 @@ mod tests {
             s
         );
         // The text labels must still appear (so the feature works).
-        assert!(s.contains("[ROOT]"), "ROOT badge text must be present; cmd={}", s);
+        assert!(
+            s.contains("[ROOT]"),
+            "ROOT badge text must be present; cmd={}",
+            s
+        );
         // No literal \[\] leaking.
         assert!(
             !s.contains(r"\[\]"),
@@ -7147,8 +7145,7 @@ mod tests {
 
     #[test]
     fn test_parse_probe_output_complete() {
-        let raw =
-            "@@aish_ctx_start@@\n1000\ndocker\nprod-cluster\n@@aish_ctx_end@@\n";
+        let raw = "@@aish_ctx_start@@\n1000\ndocker\nprod-cluster\n@@aish_ctx_end@@\n";
         let snap = parse_probe_output(raw).expect("complete probe must parse");
         assert_eq!(snap.container.as_deref(), Some("docker"));
         assert!(matches!(snap.shell_type, ShellKind::Bash));
@@ -7168,8 +7165,7 @@ mod tests {
 
     #[test]
     fn test_parse_probe_output_flags_prod_kube_context() {
-        let raw =
-            "@@aish_ctx_start@@\n1000\ndocker\nprod-cluster\n@@aish_ctx_end@@\n";
+        let raw = "@@aish_ctx_start@@\n1000\ndocker\nprod-cluster\n@@aish_ctx_end@@\n";
         let snap = parse_probe_output(raw).expect("must parse");
         assert!(
             snap.is_kube_prod,
@@ -7240,8 +7236,7 @@ mod tests {
     #[test]
     fn test_parse_probe_output_echo_leak_with_cr() {
         // PTY OPOST turns \n into \r\n. Parser must tolerate trailing \r.
-        let raw =
-            "@@aish_ctx_start@@\r\n1000\r\ndocker\r\nprod\r\n@@aish_ctx_end@@\r\n";
+        let raw = "@@aish_ctx_start@@\r\n1000\r\ndocker\r\nprod\r\n@@aish_ctx_end@@\r\n";
         let snap = parse_probe_output(raw).unwrap();
         assert_eq!(snap.container.as_deref(), Some("docker"));
     }
@@ -8934,14 +8929,23 @@ mod tests {
         // No markers at all -> empty: the raw buffer holds the echoed command
         // at most, and re-injecting it would leak the probe literal.
         let r = compute_probe_residual("echo @@aish_ctx_start@@; id -u\r\n");
-        assert!(r.is_empty(), "no-marker input must return empty; got {:?}", r);
+        assert!(
+            r.is_empty(),
+            "no-marker input must return empty; got {:?}",
+            r
+        );
 
         // Start only -> empty: probe timed out, body never completed.
         let r = compute_probe_residual("noise\r\n@@aish_ctx_start@@\r\n1000");
-        assert!(r.is_empty(), "start-only input must return empty; got {:?}", r);
+        assert!(
+            r.is_empty(),
+            "start-only input must return empty; got {:?}",
+            r
+        );
 
         // Full markers -> only trailing bytes (POST), pre-bytes (PRE) dropped.
-        let raw = "PRE\r\n@@aish_ctx_start@@\r\n1000\r\ndocker\r\nprod\r\n@@aish_ctx_end@@\r\nPOST\r\n";
+        let raw =
+            "PRE\r\n@@aish_ctx_start@@\r\n1000\r\ndocker\r\nprod\r\n@@aish_ctx_end@@\r\nPOST\r\n";
         let r = compute_probe_residual(raw);
         let s = String::from_utf8_lossy(&r);
         assert!(
@@ -8954,7 +8958,11 @@ mod tests {
             "trailing bytes must survive; got {:?}",
             s
         );
-        assert!(!s.contains("Linux"), "body must not be duplicated; got {:?}", s);
+        assert!(
+            !s.contains("Linux"),
+            "body must not be duplicated; got {:?}",
+            s
+        );
     }
 
     /// Regression: after the first echo is stripped, the suppressor stays

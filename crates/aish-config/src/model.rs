@@ -695,13 +695,17 @@ api_key: sk-test
         // Valid patterns compile; invalid ones are skipped without panic.
         let patterns = vec![
             "^prod-".to_string(),
-            "".to_string(), // empty skipped silently
+            "".to_string(),  // empty skipped silently
             "[".to_string(), // invalid regex skipped with warn
             "-prod\\.".to_string(),
         ];
         let compiled = compile_remote_danger_patterns(&patterns);
         // 2 valid + 1 empty-skipped + 1 invalid-skipped => 2 compiled.
-        assert_eq!(compiled.len(), 2, "invalid and empty patterns must be skipped");
+        assert_eq!(
+            compiled.len(),
+            2,
+            "invalid and empty patterns must be skipped"
+        );
         assert!(compiled[0].is_match("prod-web-03"));
     }
 
