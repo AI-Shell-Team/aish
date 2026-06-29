@@ -3654,12 +3654,12 @@ impl AishShell {
                 None,
                 None,
                 self.config.input_guard_enabled,
-                false,      // not an SSH session, no git prompt injection
-                false,      // remote_rich_prompt: irrelevant for non-session
-                Vec::new(), // remote_danger_patterns: unused
-                false,      // remote_show_venv
-                false,      // remote_show_container
-                false,      // remote_show_kube
+                false, // not an SSH session, no git prompt injection
+                self.config.remote_rich_prompt,
+                self.config.remote_danger_patterns.clone(),
+                self.config.remote_show_venv,
+                self.config.remote_show_container,
+                self.config.remote_show_kube,
             )
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 

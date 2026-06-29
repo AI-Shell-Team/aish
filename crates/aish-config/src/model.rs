@@ -66,7 +66,9 @@ fn default_summary_max_tokens() -> usize {
 fn default_remote_danger_patterns() -> Vec<String> {
     vec![
         "^prod-".into(),
+        "^prod\\.".into(),
         "^prd-".into(),
+        "^prd\\.".into(),
         "-prod\\.".into(),
         "^production".into(),
         "^release-".into(),
@@ -227,7 +229,8 @@ pub struct ConfigModel {
     ///   non-danger color (explicit disable, no fallback to defaults).
     /// - Non-empty list: replaces defaults entirely.
     ///
-    /// Built-in defaults: `^prod-`, `^prd-`, `-prod\.`, `^production`,
+    /// Built-in defaults: `^prod-`, `^prod\.`, `^prd-`, `^prd\.`, `-prod\.`,
+    /// `^production`,
     /// `^release-`, `^live-`.
     #[serde(default = "default_remote_danger_patterns")]
     pub remote_danger_patterns: Vec<String>,
