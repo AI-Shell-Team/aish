@@ -3257,6 +3257,11 @@ impl AishShell {
                 on_output,
                 self.config.input_guard_enabled,
                 self.config.enable_remote_git_prompt,
+                self.config.remote_rich_prompt,
+                self.config.remote_danger_patterns.clone(),
+                self.config.remote_show_venv,
+                self.config.remote_show_container,
+                self.config.remote_show_kube,
             )
         };
         let (exit_code, cwd, output) = match result {
@@ -3650,6 +3655,11 @@ impl AishShell {
                 None,
                 self.config.input_guard_enabled,
                 false, // not an SSH session, no git prompt injection
+                self.config.remote_rich_prompt,
+                self.config.remote_danger_patterns.clone(),
+                self.config.remote_show_venv,
+                self.config.remote_show_container,
+                self.config.remote_show_kube,
             )
             .unwrap_or((-1, self.state.cwd.clone(), String::new()));
 

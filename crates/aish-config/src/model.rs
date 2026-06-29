@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,19 @@ fn default_max_consecutive_compact_failures() -> usize {
 
 fn default_summary_max_tokens() -> usize {
     4000
+}
+
+fn default_remote_danger_patterns() -> Vec<String> {
+    vec![
+        "^prod-".into(),
+        "^prod\\.".into(),
+        "^prd-".into(),
+        "^prd\\.".into(),
+        "-prod\\.".into(),
+        "^production".into(),
+        "^release-".into(),
+        "^live-".into(),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +215,38 @@ pub struct ConfigModel {
     #[serde(default = "default_true")]
     pub enable_remote_git_prompt: bool,
 
+    /// Master switch for environment-aware PS1 injection. When false, the
+    /// legacy `[ssh:host]` literal is used with no probe, no jump chain,
+    /// no container/kube segments. Default: true.
+    #[serde(default = "default_true")]
+    pub remote_rich_prompt: bool,
+
+    /// Hostname regex patterns that escalate the PS1 marker to Danger
+    /// color.
+    ///
+    /// - Missing key in YAML: built-in defaults are applied.
+    /// - Empty list `[]`: NO danger patterns — every host renders with
+    ///   non-danger color (explicit disable, no fallback to defaults).
+    /// - Non-empty list: replaces defaults entirely.
+    ///
+    /// Built-in defaults: `^prod-`, `^prod\.`, `^prd-`, `^prd\.`, `-prod\.`,
+    /// `^production`,
+    /// `^release-`, `^live-`.
+    #[serde(default = "default_remote_danger_patterns")]
+    pub remote_danger_patterns: Vec<String>,
+
+    /// Show venv/conda name segment in remote PS1. Default: true.
+    #[serde(default = "default_true")]
+    pub remote_show_venv: bool,
+
+    /// Show container segment (`docker`/`podman`/etc) in remote PS1. Default: true.
+    #[serde(default = "default_true")]
+    pub remote_show_container: bool,
+
+    /// Show kube context segment in remote PS1. Default: true.
+    #[serde(default = "default_true")]
+    pub remote_show_kube: bool,
+
     pub sandbox_off_action: String,
     pub sandbox_timeout_seconds: f64,
     pub default_risk_level: String,
@@ -300,6 +346,11 @@ impl Default for ConfigModel {
             session_db_path: None,
             enable_sandbox: false,
             enable_remote_git_prompt: true,
+            remote_rich_prompt: default_true(),
+            remote_danger_patterns: default_remote_danger_patterns(),
+            remote_show_venv: default_true(),
+            remote_show_container: default_true(),
+            remote_show_kube: default_true(),
             sandbox_off_action: "allow".to_string(),
             sandbox_timeout_seconds: 10.0,
             default_risk_level: "low".to_string(),
@@ -329,8 +380,35 @@ impl Default for ConfigModel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
+/// Compile the `remote_danger_patterns` into `Regex` objects, logging each
+/// invalid pattern at warn level and skipping it. Patterns come from config
+/// and don't change during a session, so callers should compile once and
+/// cache the result rather than recompiling on every prompt injection.
+///
+/// `tracing::warn!` makes typo'd patterns visible to users (previously they
+/// were silently ignored by `Regex::new(...).ok()`).
+pub fn compile_remote_danger_patterns(patterns: &[String]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|p| {
+            if p.is_empty() {
+                return None;
+            }
+            match Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = p.as_str(),
+                        error = %e,
+                        "skipping invalid remote_danger_patterns regex"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -552,5 +630,91 @@ api_key: sk-test
         let yaml = "model: test\nenable_remote_git_prompt: false\n";
         let cfg: ConfigModel = serde_yaml::from_str(yaml).unwrap();
         assert!(!cfg.enable_remote_git_prompt);
+    }
+
+    #[test]
+    fn test_remote_danger_patterns_defaults_nonempty() {
+        let cfg = ConfigModel::default();
+        assert!(
+            !cfg.remote_danger_patterns.is_empty(),
+            "must ship sensible defaults"
+        );
+        // Must catch common prod naming.
+        let any_matches = cfg
+            .remote_danger_patterns
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .any(|re| re.is_match("prod-web-03"));
+        assert!(any_matches, "defaults must match prod-web-03");
+    }
+
+    #[test]
+    fn test_remote_rich_prompt_defaults_true() {
+        assert!(ConfigModel::default().remote_rich_prompt);
+    }
+
+    #[test]
+    fn test_remote_show_flags_default_true() {
+        let cfg = ConfigModel::default();
+        assert!(cfg.remote_show_venv);
+        assert!(cfg.remote_show_container);
+        assert!(cfg.remote_show_kube);
+    }
+
+    #[test]
+    fn test_remote_danger_patterns_empty_stays_empty() {
+        // Explicit empty list must NOT fall back to defaults — it means
+        // "disable danger escalation entirely". Locks the serde semantic
+        // so future "fixes" don't silently reintroduce fallback behavior.
+        let yaml = "model: test\nremote_danger_patterns: []\n";
+        let cfg: ConfigModel = serde_yaml::from_str(yaml).expect("parse");
+        assert!(
+            cfg.remote_danger_patterns.is_empty(),
+            "explicit empty must stay empty, no fallback"
+        );
+    }
+
+    #[test]
+    fn test_remote_config_overrides_apply() {
+        let yaml = "model: test\nremote_rich_prompt: false\nremote_danger_patterns: ['^my-prod-']\nremote_show_venv: false\nremote_show_container: false\nremote_show_kube: false\n";
+        let cfg: ConfigModel = serde_yaml::from_str(yaml).expect("parse");
+        assert!(!cfg.remote_rich_prompt);
+        assert!(!cfg.remote_show_venv);
+        assert!(!cfg.remote_show_container);
+        assert!(!cfg.remote_show_kube);
+        assert_eq!(cfg.remote_danger_patterns, vec!["^my-prod-".to_string()]);
+    }
+
+    #[test]
+    fn test_legacy_yaml_without_remote_config_loads() {
+        let yaml = "model: test\napi_base: https://x\napi_key: k\n";
+        let cfg: ConfigModel = serde_yaml::from_str(yaml).expect("parse");
+        assert!(cfg.remote_rich_prompt);
+        assert!(!cfg.remote_danger_patterns.is_empty());
+    }
+
+    #[test]
+    fn test_compile_remote_danger_patterns_skips_invalid() {
+        // Valid patterns compile; invalid ones are skipped without panic.
+        let patterns = vec![
+            "^prod-".to_string(),
+            "".to_string(),  // empty skipped silently
+            "[".to_string(), // invalid regex skipped with warn
+            "-prod\\.".to_string(),
+        ];
+        let compiled = compile_remote_danger_patterns(&patterns);
+        // 2 valid + 1 empty-skipped + 1 invalid-skipped => 2 compiled.
+        assert_eq!(
+            compiled.len(),
+            2,
+            "invalid and empty patterns must be skipped"
+        );
+        assert!(compiled[0].is_match("prod-web-03"));
+    }
+
+    #[test]
+    fn test_compile_remote_danger_patterns_empty_input() {
+        let compiled = compile_remote_danger_patterns(&[]);
+        assert!(compiled.is_empty());
     }
 }

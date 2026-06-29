@@ -57,6 +57,7 @@ version = "0.3.5"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -164,6 +165,7 @@ dependencies = [
 name = "aish-pty"
 version = "0.3.5"
 dependencies = [
+ "aish-config",
  "aish-core",
  "aish-hosts",
  "aish-i18n",

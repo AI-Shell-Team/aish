@@ -17,4 +17,7 @@ pub mod loader;
 pub mod model;
 
 pub use loader::ConfigLoader;
-pub use model::{ConfigModel, MemoryConfig, OutputOffloadConfig, ToolArgPreviewConfig};
+pub use model::{
+    compile_remote_danger_patterns, ConfigModel, MemoryConfig, OutputOffloadConfig,
+    ToolArgPreviewConfig,
+};
