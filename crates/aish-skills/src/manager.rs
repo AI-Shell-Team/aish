@@ -134,16 +134,24 @@ impl SkillManager {
         let metadata: SkillMetadata = serde_yaml::from_str(frontmatter_yaml)
             .map_err(|e| aish_core::AishError::Skill(format!("Invalid YAML frontmatter: {}", e)))?;
 
+        let base_dir = skill_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_string_lossy()
+            .to_string();
+
+        // Skills imported from the Claude ecosystem often hardcode `~/.claude/skills/<name>`;
+        // aish seeds them to `~/.config/aish/skills/<name>` instead. Rewrite both forms to
+        // the actual base_dir so script paths resolve correctly regardless of where the
+        // skill was loaded from.
+        let skill_content = rewrite_skill_paths(skill_content, &metadata.name, &base_dir);
+
         Ok(Skill {
             metadata,
-            content: skill_content.to_string(),
+            content: skill_content,
             source,
             file_path: skill_path.to_string_lossy().to_string(),
-            base_dir: skill_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_string_lossy()
-                .to_string(),
+            base_dir,
         })
     }
 
@@ -278,4 +286,104 @@ fn walk_dir(dir: &Path) -> Vec<PathBuf> {
     walk(dir, &mut files, &mut visited);
     files.sort();
     files
+}
+
+/// Rewrite hardcoded skill paths in SKILL.md content to the actual base_dir.
+///
+/// Many skills imported from the Claude ecosystem reference their own scripts as
+/// `~/.claude/skills/<name>/scripts/...`. aish loads the same skill from a different
+/// location (`~/.config/aish/skills/<name>` or `/usr/local/share/aish/skills/<name>`),
+/// so without rewriting, LLM-driven `bash` calls would hit non-existent paths. Both
+/// `~/.claude/skills/<name>` and `~/.config/aish/skills/<name>` forms are replaced
+/// with the absolute base_dir, preserving any sub-path that follows.
+///
+/// Replacement is boundary-aware: a pattern only matches when followed by `/`,
+/// end-of-string, or a non-identifier character (i.e. not `[A-Za-z0-9_-]`). This
+/// prevents `~/.claude/skills/deploy` from corrupting `~/.claude/skills/deploy-helper`.
+fn rewrite_skill_paths(content: &str, skill_name: &str, base_dir: &str) -> String {
+    let patterns = [
+        format!("~/.claude/skills/{}", skill_name),
+        format!("~/.config/aish/skills/{}", skill_name),
+        format!("$HOME/.claude/skills/{}", skill_name),
+        format!("$HOME/.config/aish/skills/{}", skill_name),
+    ];
+    let mut result = content.to_string();
+    for p in patterns {
+        result = replace_path_prefix(&result, &p, base_dir);
+    }
+    result
+}
+
+/// Replace `needle` with `replacement` in `haystack`, but only when the match is
+/// followed by a path boundary (`/`, end-of-string, or any char that is not
+/// alphanumeric, `_`, or `-`). Without this guard, `String::replace` would treat
+/// `~/.claude/skills/deploy` as a prefix of `~/.claude/skills/deploy-helper`.
+fn replace_path_prefix(haystack: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(idx) = rest.find(needle) {
+        let after = &rest[idx + needle.len()..];
+        let is_boundary = after
+            .chars()
+            .next()
+            .map(|c| !c.is_alphanumeric() && c != '_' && c != '-')
+            .unwrap_or(true);
+        out.push_str(&rest[..idx]);
+        if is_boundary {
+            out.push_str(replacement);
+        } else {
+            out.push_str(needle);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_replaces_claude_path() {
+        let content = "Run `bash ~/.claude/skills/my-skill/scripts/x.sh`";
+        let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
+        assert_eq!(rewritten, "Run `bash /abs/path/scripts/x.sh`");
+    }
+
+    #[test]
+    fn rewrite_replaces_aish_path() {
+        let content = "See ~/.config/aish/skills/my-skill/README.md";
+        let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
+        assert_eq!(rewritten, "See /abs/path/README.md");
+    }
+
+    #[test]
+    fn rewrite_does_not_touch_other_skills() {
+        let content = "Refers to ~/.claude/skills/other-skill/x.sh";
+        let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
+        assert_eq!(rewritten, content, "other-skill path must be left alone");
+    }
+
+    #[test]
+    fn rewrite_handles_home_env_form() {
+        let content = "bash $HOME/.claude/skills/my-skill/scripts/y.sh";
+        let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
+        assert_eq!(rewritten, "bash /abs/path/scripts/y.sh");
+    }
+
+    #[test]
+    fn rewrite_does_not_match_prefixed_skill_names() {
+        // `deploy` must not be treated as a prefix of `deploy-helper`.
+        let content = "bash ~/.claude/skills/deploy-helper/scripts/x.sh";
+        let rewritten = rewrite_skill_paths(content, "deploy", "/abs/path");
+        assert_eq!(rewritten, content, "deploy-helper must not be touched");
+    }
+
+    #[test]
+    fn rewrite_matches_bare_skill_at_end_of_string() {
+        let content = "Installed at ~/.claude/skills/my-skill";
+        let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
+        assert_eq!(rewritten, "Installed at /abs/path");
+    }
 }

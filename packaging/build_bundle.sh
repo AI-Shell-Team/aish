@@ -38,6 +38,7 @@ make install NO_BUILD=1 DESTDIR="$ROOTFS_DIR" TARGET="$TARGET"
 
 install -m 0755 packaging/scripts/install-bundle.sh "${STAGE_DIR}/install.sh"
 install -m 0755 packaging/scripts/uninstall-bundle.sh "${STAGE_DIR}/uninstall.sh"
+install -m 0755 packaging/scripts/seed-skills.sh "${STAGE_DIR}/seed-skills.sh"
 mkdir -p "${STAGE_DIR}/systemd"
 install -m 0644 packaging/systemd/aish-sandbox.service.in "${STAGE_DIR}/systemd/aish-sandbox.service.in"
 install -m 0644 packaging/systemd/aish-sandbox.socket "${STAGE_DIR}/systemd/aish-sandbox.socket"
