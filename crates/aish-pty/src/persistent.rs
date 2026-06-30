@@ -1159,6 +1159,17 @@ impl PersistentPty {
         // commands.
         let mut draining = false;
         let mut deferred_control_events: Vec<crate::control::BackendControlEvent> = Vec::new();
+        // Iteration budget for the deferred-event replay loop. Each main-loop
+        // tick that ends with `deferred_control_events` still non-empty counts
+        // as one iteration (~50 ms poll interval). If the polkit heuristic
+        // keeps returning true longer than this budget — e.g. a translated
+        // polkit banner that no longer matches the hard-coded English strings,
+        // or some future regression in `polkit_auth_in_progress` — we abandon
+        // the deferral and flush the events through `handle_event`. This
+        // converts the failure mode from "shell hangs forever" (the bug this
+        // path once caused) to "shell pauses for ~10 s, then proceeds".
+        const DEFERRED_MAX_ITERS: u32 = 200;
+        let mut deferred_iters: u32 = 0;
         // The PTY may emit a bare leading newline from stale prompt
         // rendering.  Only skip a leading CR-LF or LF at the very start
         // of the first chunk -- never consume actual command output.
@@ -3527,7 +3538,10 @@ impl PersistentPty {
                             if let BackendControlEvent::PromptReady { .. } = event {
                                 let output_so_far =
                                     strip_ansi_escapes(&String::from_utf8_lossy(&output_buf));
-                                if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
+                                let over_budget = deferred_iters >= DEFERRED_MAX_ITERS;
+                                if !over_budget
+                                    && crate::exit_code::polkit_auth_in_progress(&output_so_far)
+                                {
                                     deferred_control_events.push(event.clone());
                                     continue;
                                 }
@@ -3563,13 +3577,24 @@ impl PersistentPty {
             }
 
             if !deferred_control_events.is_empty() {
+                deferred_iters = deferred_iters.saturating_add(1);
+                let budget_exhausted = deferred_iters >= DEFERRED_MAX_ITERS;
+                if budget_exhausted {
+                    debug!(
+                        "deferred events exceeded {} iters (~{}s); flushing regardless of polkit heuristic",
+                        DEFERRED_MAX_ITERS,
+                        DEFERRED_MAX_ITERS / 20
+                    );
+                }
                 let output_so_far = strip_ansi_escapes(&String::from_utf8_lossy(&output_buf));
                 let mut still_deferred = Vec::new();
                 for event in deferred_control_events.drain(..) {
-                    if let BackendControlEvent::PromptReady { .. } = &event {
-                        if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
-                            still_deferred.push(event);
-                            continue;
+                    if !budget_exhausted {
+                        if let BackendControlEvent::PromptReady { .. } = &event {
+                            if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
+                                still_deferred.push(event);
+                                continue;
+                            }
                         }
                     }
                     if let Some(r) = self.command_state.handle_event(&event) {
