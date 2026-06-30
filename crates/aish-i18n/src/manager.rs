@@ -286,12 +286,12 @@ shell:
         // zh-CN is embedded at compile time, should work without filesystem access.
         let mgr = I18nManager::new_with_locale("zh-CN");
         // Should return Chinese text, not the key itself
-        let step_provider = mgr.t("cli.setup.step_provider");
-        assert_ne!(step_provider, "cli.setup.step_provider");
+        let provider_header = mgr.t("cli.setup.provider_header");
+        assert_ne!(provider_header, "cli.setup.provider_header");
         assert!(
-            step_provider.contains("步骤"),
+            provider_header.contains("Provider"),
             "Expected Chinese text, got: {}",
-            step_provider
+            provider_header
         );
     }
 

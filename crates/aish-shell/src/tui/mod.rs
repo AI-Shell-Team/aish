@@ -3,7 +3,9 @@
 
 // Re-export public API from inline prompts
 pub use crate::tui::ask_user::run_ask_user_request;
-pub use crate::tui::inline_prompts::{show_selection_dialog, DialogOption, DialogResult};
+pub use crate::tui::inline_prompts::{
+    show_selection_dialog, DialogOption, DialogResult, CUSTOM_DIALOG_VALUE,
+};
 
 mod ask_user;
 mod inline_prompts;
