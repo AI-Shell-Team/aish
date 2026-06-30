@@ -24,8 +24,8 @@
 /// (see `DEFERRED_MAX_ITERS` in persistent.rs): if this heuristic stays
 /// `true` longer than the budget, the deferred events are flushed regardless.
 pub fn polkit_auth_in_progress(output: &str) -> bool {
-    let polkit_prompted = output.contains("AUTHENTICATING FOR")
-        || output.contains("Authenticating as:");
+    let polkit_prompted =
+        output.contains("AUTHENTICATING FOR") || output.contains("Authenticating as:");
     if !polkit_prompted {
         return false;
     }
