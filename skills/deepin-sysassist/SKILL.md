@@ -611,6 +611,8 @@ bash ~/.claude/skills/deepin-sysassist/scripts/baselineconfig.sh
 
 创建监控服务：
 ```bash
+# NOTE: systemd does not expand `~` or `$HOME` in ExecStart. Use an absolute path
+# to the monitor script (aish seeds skills to ~/.config/aish/skills/deepin-sysassist/).
 sudo tee /etc/systemd/system/deepin-sysassist-monitor.service <<EOF
 [Unit]
 Description=Deepin System Assistant Monitor Service
@@ -619,7 +621,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/bin/bash ~/.claude/skills/deepin-sysassist/scripts/monitor.sh --daemon
+ExecStart=/bin/bash /home/root/.config/aish/skills/deepin-sysassist/scripts/monitor.sh --daemon
 Restart=always
 RestartSec=10
 

@@ -29,7 +29,7 @@ spec:
             dbInstanceClass: db.t3.micro
             engine: postgres
             engineVersion: "15"
-            masterUsername: admin
+            masterUsername: <change-me>  # Replace with a strong, unique username
             allocatedStorage: 20
 ```
 
@@ -163,7 +163,7 @@ echo "✓ Service created! Merge to main to deploy."
 
 ## GitOps Repository Structure
 
-```
+```text
 gitops/
 ├── apps/
 │   ├── production/

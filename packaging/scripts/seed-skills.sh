@@ -53,8 +53,8 @@ for skill_path in "$SYSTEM_SKILLS_DIR"/*/; do
 
     cp -r "$skill_path" "$target"
     # cp -r does not preserve ownership, so the copy is owned by root (the sudo caller);
-    # restore ownership to the target user so they can edit their seeded skills.
-    chown -R "$TARGET_USER" "$target" 2>/dev/null || true
+    # restore ownership (user and group) so the target user can edit their seeded skills.
+    chown -R "$TARGET_USER:" "$target" 2>/dev/null || true
     seeded=$((seeded + 1))
 done
 

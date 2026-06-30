@@ -149,7 +149,7 @@ cat /tmp/sosreport-*/memory/ps-cpu.txt
 sudo crontab -e
 
 # 添加:
-0 8 * * 1 /bin/bash /home/weilei/.claude/skills/sosreport-analyzer/scripts/collect_all.sh > /var/log/sosreport-weekly.log 2>&1
+0 8 * * 1 /bin/bash "$HOME/.config/aish/skills/sosreport-analyzer/scripts/collect_all.sh" > /var/log/sosreport-weekly.log 2>&1
 ```
 
 ### 示例3: 故障工单附件

@@ -44,7 +44,9 @@ You are a Docker expert with deep experience in:
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production && npm cache clean --force
+# Install full deps (including devDependencies) — `npm run build` needs them.
+# Production-only prune happens in the runner stage below.
+RUN npm ci && npm cache clean --force
 COPY . .
 RUN npm run build
 

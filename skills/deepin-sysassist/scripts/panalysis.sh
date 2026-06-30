@@ -8,7 +8,10 @@ echo ""
 
 # OOM Killer 事件
 echo "[分析] OOM Killer 事件"
-oom_count=$(journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Out of memory" || echo 0)
+# `grep -c` already prints "0" on no match; use `|| true` only to swallow its
+# non-zero exit under `set -e` — never `|| echo 0`, which would append a second 0.
+oom_count=$(journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Out of memory" || true)
+oom_count=${oom_count:-0}
 if [ "$oom_count" -gt 0 ]; then
     echo "  发现 $oom_count 个 OOM 事件"
     journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "Out of memory" | tail -3
@@ -19,7 +22,8 @@ echo ""
 
 # 进程崩溃
 echo "[分析] 进程崩溃事件"
-segfault_count=$(journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep -c "segfault" || echo 0)
+segfault_count=$(journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep -c "segfault" || true)
+segfault_count=${segfault_count:-0}
 if [ "$segfault_count" -gt 0 ]; then
     echo "  发现 $segfault_count 个 Segmentation Fault"
     journalctl --since "24 hours ago" --no-pager 2>/dev/null | grep "segfault" | tail -3

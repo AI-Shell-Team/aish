@@ -123,7 +123,7 @@ spec:
 
 ## GitOps Repository Structure
 
-```
+```text
 gitops/
 ├── apps/
 │   ├── production/

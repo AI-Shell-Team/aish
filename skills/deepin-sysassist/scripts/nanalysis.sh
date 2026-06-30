@@ -31,10 +31,14 @@ echo ""
 # SSH 登录尝试（如果有日志）
 echo "[分析] SSH 登录尝试"
 if [ -f /var/log/auth.log ]; then
-    failed_ssh=$(grep "Failed password" /var/log/auth.log 2>/dev/null | wc -l || echo 0)
+    # `wc -l` always emits a number, so no fallback needed.
+    failed_ssh=$(grep "Failed password" /var/log/auth.log 2>/dev/null | wc -l)
     echo "  失败登录尝试: $failed_ssh 次"
 elif command -v journalctl &>/dev/null; then
-    failed_ssh=$(journalctl -u sshd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" || echo 0)
+    # `grep -c` already prints "0" on no match; use `|| true` only to swallow its
+    # non-zero exit under `set -e` — never `|| echo 0`, which would append a second 0.
+    failed_ssh=$(journalctl -u sshd --since "24 hours ago" --no-pager 2>/dev/null | grep -c "Failed password" || true)
+    failed_ssh=${failed_ssh:-0}
     echo "  失败登录尝试（24h）: $failed_ssh 次"
 else
     echo "  无法获取 SSH 日志"

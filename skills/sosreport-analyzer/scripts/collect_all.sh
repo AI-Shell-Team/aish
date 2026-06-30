@@ -344,8 +344,10 @@ collect_memory_performance() {
     fi
 
     # 进程信息
-    safe_exec "${REPORT_DIR}/memory/ps-mem.txt" ps aux --sort=-%mem | head -30
-    safe_exec "${REPORT_DIR}/memory/ps-cpu.txt" ps aux --sort=-%cpu | head -30
+    # Pass the pipeline as a single quoted string so safe_exec's eval sees the `|`
+    # instead of the outer shell applying it to safe_exec's own stdout.
+    safe_exec "${REPORT_DIR}/memory/ps-mem.txt" "ps aux --sort=-%mem | head -30"
+    safe_exec "${REPORT_DIR}/memory/ps-cpu.txt" "ps aux --sort=-%cpu | head -30"
     safe_exec "${REPORT_DIR}/memory/pstree.txt" pstree -p
 
     # Swap
@@ -414,7 +416,7 @@ collect_security() {
 
     # SSH 配置（敏感信息需脱敏）
     if [ -f /etc/ssh/sshd_config ]; then
-        safe_exec "${REPORT_DIR}/security/sshd_config" grep -v "^#" /etc/ssh/sshd_config | grep -v "^$"
+        safe_exec "${REPORT_DIR}/security/sshd_config" "grep -v '^#' /etc/ssh/sshd_config | grep -v '^$'"
     fi
 
     # 用户与组
@@ -461,10 +463,10 @@ collect_packages() {
     # 内核包
     case "$DISTRO" in
         rhel|centos|fedora|rocky|alma)
-            safe_exec "${REPORT_DIR}/packages/kernels.txt" rpm -qa | grep kernel
+            safe_exec "${REPORT_DIR}/packages/kernels.txt" "rpm -qa | grep kernel"
             ;;
         debian|ubuntu)
-            safe_exec "${REPORT_DIR}/packages/kernels.txt" dpkg -l | grep linux-image
+            safe_exec "${REPORT_DIR}/packages/kernels.txt" "dpkg -l | grep linux-image"
             ;;
     esac
 }

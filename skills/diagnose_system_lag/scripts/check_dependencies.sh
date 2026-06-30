@@ -67,7 +67,10 @@ if [ $MISSING_REQUIRED -eq 0 ]; then
     echo -e "${GREEN}✅ 所有必需工具已安装，可以正常运行诊断${NC}"
     echo ""
     echo "运行诊断："
-    echo "  bash ~/.claude/skills/diagnose_system_lag/scripts/diagnose.sh"
+    # Resolve this script's location so the hint works regardless of where the
+    # skill was seeded (~/.config/aish/skills/, /usr/local/share/aish/skills/, etc.).
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    echo "  bash ${SCRIPT_DIR}/diagnose.sh"
     exit 0
 else
     echo -e "${RED}✗ 缺少 $MISSING_REQUIRED 个必需工具${NC}"

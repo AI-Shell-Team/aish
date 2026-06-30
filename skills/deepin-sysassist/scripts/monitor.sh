@@ -58,7 +58,15 @@ clear_screen() {
 
 # CPU 监控
 monitor_cpu() {
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
+    # Compute busy time as `100 - id` to capture user+sys+nice+iowait, not just `us`.
+    # `top` output looks like: "%Cpu(s):  5.6 us,  3.1 sy,  0.0 ni, 91.3 id,  0.0 wa, ..."
+    # Field $4 (comma-separated) holds "91.3 id".
+    # Fallback to idle=100 (usage=0) if parsing fails, so `set -euo pipefail` doesn't abort.
+    local cpu_idle
+    cpu_idle=$(top -bn1 2>/dev/null | awk -F',' '/Cpu\(s\)/{gsub(/[^0-9.]/,"",$4); print $4}' || true)
+    cpu_idle=${cpu_idle:-100}
+    local cpu_usage
+    cpu_usage=$(awk "BEGIN {printf \"%.1f\", 100 - ${cpu_idle}}")
     local load_avg=$(uptime | awk -F'load average:' '{print $2}' | xargs)
 
     echo -e "${CYAN}━━━ CPU 状态 ━━━${NC}"

@@ -296,6 +296,10 @@ fn walk_dir(dir: &Path) -> Vec<PathBuf> {
 /// so without rewriting, LLM-driven `bash` calls would hit non-existent paths. Both
 /// `~/.claude/skills/<name>` and `~/.config/aish/skills/<name>` forms are replaced
 /// with the absolute base_dir, preserving any sub-path that follows.
+///
+/// Replacement is boundary-aware: a pattern only matches when followed by `/`,
+/// end-of-string, or a non-identifier character (i.e. not `[A-Za-z0-9_-]`). This
+/// prevents `~/.claude/skills/deploy` from corrupting `~/.claude/skills/deploy-helper`.
 fn rewrite_skill_paths(content: &str, skill_name: &str, base_dir: &str) -> String {
     let patterns = [
         format!("~/.claude/skills/{}", skill_name),
@@ -305,9 +309,35 @@ fn rewrite_skill_paths(content: &str, skill_name: &str, base_dir: &str) -> Strin
     ];
     let mut result = content.to_string();
     for p in patterns {
-        result = result.replace(&p, base_dir);
+        result = replace_path_prefix(&result, &p, base_dir);
     }
     result
+}
+
+/// Replace `needle` with `replacement` in `haystack`, but only when the match is
+/// followed by a path boundary (`/`, end-of-string, or any char that is not
+/// alphanumeric, `_`, or `-`). Without this guard, `String::replace` would treat
+/// `~/.claude/skills/deploy` as a prefix of `~/.claude/skills/deploy-helper`.
+fn replace_path_prefix(haystack: &str, needle: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(haystack.len());
+    let mut rest = haystack;
+    while let Some(idx) = rest.find(needle) {
+        let after = &rest[idx + needle.len()..];
+        let is_boundary = after
+            .chars()
+            .next()
+            .map(|c| !c.is_alphanumeric() && c != '_' && c != '-')
+            .unwrap_or(true);
+        out.push_str(&rest[..idx]);
+        if is_boundary {
+            out.push_str(replacement);
+        } else {
+            out.push_str(needle);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -340,5 +370,20 @@ mod tests {
         let content = "bash $HOME/.claude/skills/my-skill/scripts/y.sh";
         let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
         assert_eq!(rewritten, "bash /abs/path/scripts/y.sh");
+    }
+
+    #[test]
+    fn rewrite_does_not_match_prefixed_skill_names() {
+        // `deploy` must not be treated as a prefix of `deploy-helper`.
+        let content = "bash ~/.claude/skills/deploy-helper/scripts/x.sh";
+        let rewritten = rewrite_skill_paths(content, "deploy", "/abs/path");
+        assert_eq!(rewritten, content, "deploy-helper must not be touched");
+    }
+
+    #[test]
+    fn rewrite_matches_bare_skill_at_end_of_string() {
+        let content = "Installed at ~/.claude/skills/my-skill";
+        let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
+        assert_eq!(rewritten, "Installed at /abs/path");
     }
 }

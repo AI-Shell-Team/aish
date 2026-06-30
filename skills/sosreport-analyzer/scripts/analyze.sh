@@ -36,10 +36,12 @@ add_issue() {
     ISSUES+=("${severity}|${category}|${message}|${recommendation}")
 
     case "$severity" in
-        CRITICAL) ((CRITICAL++)) ;;
-        HIGH) ((HIGH++)) ;;
-        MEDIUM) ((MEDIUM++)) ;;
-        LOW) ((LOW++)) ;;
+        # Use assignment form, not post-increment: `((x++))` returns non-zero when x is 0,
+        # which would abort the script under `set -e`.
+        CRITICAL) CRITICAL=$((CRITICAL + 1)) ;;
+        HIGH) HIGH=$((HIGH + 1)) ;;
+        MEDIUM) MEDIUM=$((MEDIUM + 1)) ;;
+        LOW) LOW=$((LOW + 1)) ;;
     esac
 }
 
@@ -142,7 +144,11 @@ analyze_failed_services() {
     local failed="${REPORT_DIR}/services/systemctl-failed.txt"
     [ ! -f "$failed" ] && return
 
-    local failed_count=$(grep -c "●" "$failed" 2>/dev/null || echo 0)
+    # `grep -c` already prints "0" on no match; use `|| true` to swallow its non-zero
+    # exit under `set -e` — never `|| echo 0`, which would append a second 0.
+    local failed_count
+    failed_count=$(grep -c "●" "$failed" 2>/dev/null || true)
+    failed_count=${failed_count:-0}
 
     if [ "$failed_count" -gt 0 ]; then
         local failed_list=$(grep "●" "$failed" | awk '{print $2}' | tr '\n' ', ' | sed 's/,$//')

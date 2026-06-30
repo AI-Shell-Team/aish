@@ -266,7 +266,11 @@ check_performance() {
 
 # 生成摘要报告
 generate_summary() {
-    local health_score=$((PASSED_CHECKS * 100 / TOTAL_CHECKS))
+    # Guard against division by zero when no checks fired (e.g. dry-run paths).
+    local health_score=0
+    if [[ "$TOTAL_CHECKS" -gt 0 ]]; then
+        health_score=$((PASSED_CHECKS * 100 / TOTAL_CHECKS))
+    fi
 
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
