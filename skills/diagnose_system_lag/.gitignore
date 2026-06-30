@@ -1,0 +1,22 @@
+# 运行时生成的文件
+logs/*.log
+reports/*.txt
+reports/*.md
+reports/*.html
+reports/*.json
+
+# 临时文件
+*.tmp
+*.bak
+*~
+.DS_Store
+
+# 编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 用户配置（如果有覆盖默认配置）
+config/user.conf
+config/local.conf

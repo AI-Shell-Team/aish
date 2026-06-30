@@ -80,6 +80,9 @@ install:
 		install -d "$(DESTDIR)$(DATADIR)"; \
 		cp -a skills "$(DESTDIR)$(DATADIR)/"; \
 	fi
+	@if [ -z "$(DESTDIR)" ]; then \
+		packaging/scripts/seed-skills.sh "$(DATADIR)/skills"; \
+	fi
 
 clean:
 	cargo clean
