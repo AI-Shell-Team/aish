@@ -1159,6 +1159,23 @@ impl PersistentPty {
         // commands.
         let mut draining = false;
         let mut deferred_control_events: Vec<crate::control::BackendControlEvent> = Vec::new();
+        // Wall-clock budget for the deferred-event replay loop. If the polkit
+        // heuristic keeps returning true longer than this budget — e.g. a
+        // translated polkit banner that no longer matches the hard-coded
+        // English strings, or some future regression in
+        // `polkit_auth_in_progress` — we abandon the deferral and flush the
+        // events through `handle_event`. This converts the failure mode from
+        // "shell hangs forever" (the bug this path once caused) to "shell
+        // pauses for ~10 s, then proceeds".
+        //
+        // A wall-clock deadline (rather than an iteration count) is required
+        // because `select` returns immediately when PTY/control/stdin has
+        // data ready — under password entry with keystroke echoes or chatty
+        // PTY output, the loop can blow through an iteration budget in a
+        // fraction of the intended window and flush `PromptReady` while
+        // polkit auth is genuinely still in progress.
+        const DEFERRED_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+        let mut deferred_since: Option<std::time::Instant> = None;
         // The PTY may emit a bare leading newline from stale prompt
         // rendering.  Only skip a leading CR-LF or LF at the very start
         // of the first chunk -- never consume actual command output.
@@ -3527,7 +3544,12 @@ impl PersistentPty {
                             if let BackendControlEvent::PromptReady { .. } = event {
                                 let output_so_far =
                                     strip_ansi_escapes(&String::from_utf8_lossy(&output_buf));
-                                if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
+                                let over_budget = deferred_since
+                                    .is_some_and(|since| since.elapsed() >= DEFERRED_MAX_DELAY);
+                                if !over_budget
+                                    && crate::exit_code::polkit_auth_in_progress(&output_so_far)
+                                {
+                                    deferred_since.get_or_insert_with(std::time::Instant::now);
                                     deferred_control_events.push(event.clone());
                                     continue;
                                 }
@@ -3563,13 +3585,23 @@ impl PersistentPty {
             }
 
             if !deferred_control_events.is_empty() {
+                let budget_exhausted =
+                    deferred_since.is_some_and(|since| since.elapsed() >= DEFERRED_MAX_DELAY);
+                if budget_exhausted {
+                    debug!(
+                        "deferred events exceeded {:?}; flushing regardless of polkit heuristic",
+                        DEFERRED_MAX_DELAY
+                    );
+                }
                 let output_so_far = strip_ansi_escapes(&String::from_utf8_lossy(&output_buf));
                 let mut still_deferred = Vec::new();
                 for event in deferred_control_events.drain(..) {
-                    if let BackendControlEvent::PromptReady { .. } = &event {
-                        if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
-                            still_deferred.push(event);
-                            continue;
+                    if !budget_exhausted {
+                        if let BackendControlEvent::PromptReady { .. } = &event {
+                            if crate::exit_code::polkit_auth_in_progress(&output_so_far) {
+                                still_deferred.push(event);
+                                continue;
+                            }
                         }
                     }
                     if let Some(r) = self.command_state.handle_event(&event) {
@@ -3585,6 +3617,9 @@ impl PersistentPty {
                     }
                 }
                 deferred_control_events = still_deferred;
+                if deferred_control_events.is_empty() {
+                    deferred_since = None;
+                }
             }
         }
 
