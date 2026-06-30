@@ -202,7 +202,11 @@ fn main() {
         Commands::Run => run_shell(config),
         Commands::Resume { session_id } => run_shell_resume(config, &session_id),
         Commands::Info => show_info(&config),
-        Commands::Setup => run_setup(&mut config),
+        Commands::Setup => {
+            if !run_setup(&mut config) {
+                std::process::exit(1);
+            }
+        }
         Commands::ModelsUsage => show_models_usage(&config),
         Commands::CheckToolSupport {
             model,
@@ -264,7 +268,13 @@ fn run_shell(mut config: aish_config::ConfigModel) {
     // Auto-trigger setup wizard on first run if config is incomplete
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
-        run_setup(&mut config);
+        if !run_setup(&mut config) {
+            eprintln!(
+                "\n\x1b[33m{}\x1b[0m",
+                aish_i18n::t("cli.setup.required_cancelled")
+            );
+            std::process::exit(1);
+        }
         // Reload config with the saved values
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
@@ -291,7 +301,13 @@ fn run_shell_resume(mut config: aish_config::ConfigModel, session_id: &str) {
     // Auto-trigger setup wizard on first run if config is incomplete
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
-        run_setup(&mut config);
+        if !run_setup(&mut config) {
+            eprintln!(
+                "\n\x1b[33m{}\x1b[0m",
+                aish_i18n::t("cli.setup.required_cancelled")
+            );
+            std::process::exit(1);
+        }
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
             config = loaded;
@@ -341,7 +357,7 @@ fn show_info(config: &aish_config::ConfigModel) {
     );
 }
 
-fn run_setup(config: &mut aish_config::ConfigModel) {
+fn run_setup(config: &mut aish_config::ConfigModel) -> bool {
     let config_dir = aish_config::ConfigLoader::default_config_path()
         .parent()
         .map(|p| p.to_path_buf())
@@ -354,16 +370,17 @@ fn run_setup(config: &mut aish_config::ConfigModel) {
     let mut wizard = aish_shell::wizard::SetupWizard::new(config_dir);
     match wizard.run() {
         Ok(new_config) => {
-            *config = new_config;
-            println!("\n{}", aish_i18n::t("cli.setup.setup_complete_hint"));
+            *config = aish_shell::wizard::apply_setup_result(config, new_config);
+            aish_shell::wizard::print_setup_complete_hint();
+            true
+        }
+        Err(aish_core::AishError::Cancelled) => {
+            eprintln!("\x1b[33m{}\x1b[0m", aish_i18n::t("cli.setup.cancelled"));
+            false
         }
         Err(e) => {
-            eprintln!(
-                "\n\x1b[33m{}: {}\x1b[0m",
-                aish_i18n::t("cli.setup.cancelled"),
-                e
-            );
-            eprintln!("~/.config/aish/config.yaml");
+            eprintln!("\x1b[31m{}\x1b[0m", e);
+            false
         }
     }
 }

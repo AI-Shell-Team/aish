@@ -3,20 +3,63 @@
 //! Guides users through selecting a provider, entering credentials, choosing a model,
 //! and verifying connectivity and tool support.
 
+mod clack_filter;
+pub mod clack_log;
+pub mod clack_theme;
 pub mod endpoints;
 pub mod free_key;
 pub mod model_fetch;
 pub mod plan_approval;
 pub mod plan_display;
+pub mod prompts;
+pub mod ui;
 pub mod verification;
 
 use std::path::PathBuf;
 
 use aish_config::ConfigModel;
 use aish_core::AishError;
-use aish_i18n::t;
+use aish_i18n::{t, t_with_args};
 
-use crate::tui::{DialogOption, DialogResult};
+use crate::tui::{DialogOption, DialogResult, CUSTOM_DIALOG_VALUE};
+use ui::{show_searchable_selection, show_selection};
+
+enum SaveNotice {
+    Normal,
+    WithWarning,
+}
+
+fn format_config_path(path: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return format!("~/{}", relative.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// Merge wizard-produced setup fields into an existing config, preserving unrelated settings.
+pub fn apply_setup_result(existing: &ConfigModel, setup: ConfigModel) -> ConfigModel {
+    let mut merged = existing.clone();
+    merged.model = setup.model;
+    merged.api_base = setup.api_base;
+    merged.api_key = setup.api_key;
+    merged.is_free_key = setup.is_free_key;
+    merged
+}
+
+/// Default OpenAI-compatible API base for providers without a preset URL.
+fn default_api_base_for_provider(provider_key: &str) -> Option<String> {
+    match provider_key {
+        "openai" => Some("https://api.openai.com/v1".to_string()),
+        "anthropic" => Some("https://api.anthropic.com/v1".to_string()),
+        "deepseek" => Some("https://api.deepseek.com/v1".to_string()),
+        "gemini" | "google" => {
+            Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string())
+        }
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Provider definitions
@@ -270,6 +313,7 @@ pub struct SetupWizard {
     api_base: Option<String>,
     api_key: Option<String>,
     selected_model: Option<String>,
+    is_free_key: bool,
 }
 
 /// Mask a secret string, showing only first 4 and last 4 characters.
@@ -289,6 +333,7 @@ impl SetupWizard {
             api_base: None,
             api_key: None,
             selected_model: None,
+            is_free_key: false,
         }
     }
 
@@ -312,17 +357,15 @@ impl SetupWizard {
             );
         }
 
-        let result = crate::tui::show_selection_dialog(
+        let result = show_selection(
             &t("cli.setup.entry_title"),
             &t("cli.setup.entry_header"),
             &options,
-            false,
-            true,
-        );
+        )?;
 
         match result {
             DialogResult::Selected(key) => Ok(key),
-            DialogResult::Cancelled => Err(AishError::Config(t("cli.setup.cancelled"))),
+            DialogResult::Cancelled => Err(AishError::Cancelled),
             _ => Ok("manual".to_string()),
         }
     }
@@ -332,7 +375,7 @@ impl SetupWizard {
         let entry_mode = self.select_entry_mode()?;
 
         if entry_mode == "exit" {
-            return Err(AishError::Config(t("cli.setup.cancelled")));
+            return Err(AishError::Cancelled);
         }
 
         // Free key flow: register, then jump straight to verification.
@@ -368,13 +411,8 @@ impl SetupWizard {
                 DialogOption::new("agree", t("cli.setup.action_agree")),
                 DialogOption::new("disagree", t("cli.setup.action_disagree")),
             ];
-            let consent = crate::tui::show_selection_dialog(
-                &t("cli.setup.free_key_privacy_title"),
-                "",
-                &consent_options,
-                false,
-                true,
-            );
+            let consent =
+                show_selection(&t("cli.setup.free_key_privacy_title"), "", &consent_options)?;
 
             match consent {
                 DialogResult::Selected(key) if key == "agree" => {}
@@ -422,6 +460,7 @@ impl SetupWizard {
                         "free_key",
                         t("cli.setup.free_key_provider_label"),
                     ));
+                    self.is_free_key = true;
 
                     // If all fields are present, verify and save.
                     if self.api_key.is_some()
@@ -477,21 +516,19 @@ impl SetupWizard {
             DialogOption::new("exit", t("cli.setup.action_exit")),
         ];
 
-        let result = crate::tui::show_selection_dialog(
+        let result = show_selection(
             &t("cli.setup.verify_title"),
             &t("cli.setup.action_header"),
             &options,
-            false,
-            true,
-        );
+        )?;
 
         match result {
             DialogResult::Selected(key) => match key.as_str() {
                 "retry" => Ok(true),
                 "manual" => Ok(false),
-                _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+                _ => Err(AishError::Cancelled),
             },
-            _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+            _ => Err(AishError::Cancelled),
         }
     }
 
@@ -541,8 +578,7 @@ impl SetupWizard {
 
     /// Step 1: Provider selection.
     fn select_provider(&mut self) -> Result<(), AishError> {
-        let title = t("cli.setup.step_provider");
-        let question = t("cli.setup.provider_header");
+        let title = t("cli.setup.provider_header");
 
         let providers = get_all_providers();
         let options: Vec<DialogOption> = providers
@@ -555,19 +591,22 @@ impl SetupWizard {
                 } else {
                     String::new()
                 };
-                let label = if note.is_empty() {
-                    p.label.clone()
-                } else {
-                    format!("{}  [{}]", p.label, note)
-                };
-                DialogOption::new(&p.key, label)
+                let mut opt = DialogOption::new(&p.key, p.label.clone());
+                if !note.is_empty() {
+                    opt = opt.with_description(note);
+                }
+                opt
             })
             .collect();
 
-        let result = crate::tui::show_selection_dialog(
-            &title, &question, &options, true, // allow custom provider (custom API base)
-            true, // allow cancel
-        );
+        let result = show_searchable_selection(
+            &title,
+            &t("cli.setup.provider_filter_prompt"),
+            &t("cli.setup.provider_filter_hint"),
+            &options,
+            None,
+            false,
+        )?;
 
         match result {
             DialogResult::Selected(key) => {
@@ -580,27 +619,21 @@ impl SetupWizard {
                 // Check for alternative endpoints
                 let eps = endpoints::get_provider_endpoints(&key);
                 if !eps.is_empty() {
-                    self.api_base = Some(self.select_endpoint(&eps));
+                    self.api_base = Some(self.select_endpoint(&eps)?);
                 } else if provider.requires_api_base {
                     self.api_base = Some(self.prompt_api_base(&key)?);
                 } else {
-                    self.api_base = provider.api_base.clone();
+                    self.api_base = provider
+                        .api_base
+                        .clone()
+                        .or_else(|| default_api_base_for_provider(&key));
                 }
             }
-            DialogResult::CustomInput(input) => {
-                // Custom provider: treat API base as provider key.
-                self.api_base = Some(input.clone());
-                self.selected_provider = Some(ProviderInfo {
-                    key: input.clone(),
-                    label: format!("Custom ({})", input),
-                    api_base: Some(input),
-                    requires_api_base: false,
-                    allow_custom_model: true,
-                    env_key: None,
-                });
-            }
             DialogResult::Cancelled => {
-                return Err(AishError::Config(t("cli.setup.cancelled")));
+                return Err(AishError::Cancelled);
+            }
+            _ => {
+                return Err(AishError::Cancelled);
             }
         }
 
@@ -609,54 +642,40 @@ impl SetupWizard {
 
     /// Prompt for custom API base URL.
     fn prompt_api_base(&self, _provider_key: &str) -> Result<String, AishError> {
-        println!("\n{}", t("cli.setup.custom_api_base_title"));
-        println!("  {}", t("cli.setup.custom_api_base_header"));
-
-        let prompt_label = t("cli.setup.provider_custom_api_base");
-        let required_msg = t("cli.setup.provider_custom_api_base_required");
-        let invalid_msg = t("cli.setup.provider_custom_api_base_invalid");
-
-        loop {
-            let result = inquire::Text::new(&format!("{}:", prompt_label))
-                .prompt()
-                .map_err(|_| AishError::Config(t("cli.setup.cancelled")))?;
-
-            let trimmed = result.trim().to_string();
-            if trimmed.is_empty() {
-                println!("  {}", required_msg);
-                continue;
-            }
-
-            if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-                println!("  {}", invalid_msg);
-                continue;
-            }
-
-            return Ok(trimmed);
-        }
+        prompts::prompt_api_base_url()
     }
 
     /// Let the user select an endpoint from a list of alternatives.
-    fn select_endpoint(&self, eps: &[endpoints::EndpointInfo]) -> String {
-        let provider_label = self
+    fn select_endpoint(&self, eps: &[endpoints::EndpointInfo]) -> Result<String, AishError> {
+        let provider = self
             .selected_provider
             .as_ref()
-            .map(|p| p.label.as_str())
-            .unwrap_or("Provider");
-        let title = t("cli.setup.step_provider_endpoint");
-        let question =
-            t("cli.setup.provider_endpoint_header").replace("{provider}", provider_label);
+            .ok_or(AishError::Cancelled)?;
+        let mut args = std::collections::HashMap::new();
+        args.insert("provider".to_string(), provider.label.clone());
+        let title = t_with_args("cli.setup.provider_endpoint_header", &args);
 
         let options: Vec<DialogOption> = eps
             .iter()
-            .map(|e| DialogOption::new(&e.api_base, format!("{}  [{}]", e.label, e.hint)))
+            .map(|e| {
+                DialogOption::new(&e.api_base, e.label.clone())
+                    .with_description(format!("{} — {}", e.hint, e.api_base))
+            })
             .collect();
 
-        let result = crate::tui::show_selection_dialog(&title, &question, &options, false, true);
+        let result = show_searchable_selection(
+            &title,
+            &t("cli.setup.provider_filter_prompt"),
+            &t("cli.setup.provider_filter_hint"),
+            &options,
+            None,
+            false,
+        )?;
 
         match result {
-            DialogResult::Selected(key) => key,
-            _ => eps.first().map(|e| e.api_base.clone()).unwrap_or_default(),
+            DialogResult::Selected(key) => Ok(key),
+            DialogResult::Cancelled => Err(AishError::Cancelled),
+            _ => Err(AishError::Cancelled),
         }
     }
 
@@ -665,10 +684,7 @@ impl SetupWizard {
         let provider = self
             .selected_provider
             .as_ref()
-            .ok_or_else(|| AishError::Config(t("cli.setup.cancelled")))?;
-
-        // Show step header
-        println!("\n{}", t("cli.setup.step_key"));
+            .ok_or(AishError::Cancelled)?;
 
         // Check environment variable
         let env_value = provider.env_key.as_ref().and_then(|k| {
@@ -687,32 +703,12 @@ impl SetupWizard {
                     .replace("{env_key}", provider.env_key.as_deref().unwrap_or(""))
                     .replace("{masked}", &masked)
             );
-            println!("  {}", t("cli.setup.api_key_hint"));
+            println!("  {}", t("cli.setup.api_key_env_hint"));
         }
 
-        // Loop until we get a valid key
-        let prompt_label = t("cli.setup.api_key_prompt");
-        let required_msg = t("cli.setup.api_key_required");
-        loop {
-            let result = inquire::Text::new(&format!("{}:", prompt_label))
-                .prompt()
-                .map_err(|_| AishError::Config(t("cli.setup.cancelled")))?;
-
-            let trimmed = result.trim().to_string();
-
-            if trimmed.is_empty() {
-                // If env value exists, use it
-                if let Some(ref value) = env_value {
-                    self.api_key = Some(value.clone());
-                    return Ok(());
-                }
-                println!("  {}", required_msg);
-                continue;
-            }
-
-            self.api_key = Some(trimmed);
-            return Ok(());
-        }
+        let api_key = prompts::prompt_api_key_value(env_value.as_deref())?;
+        self.api_key = Some(api_key);
+        Ok(())
     }
 
     /// Step 3: Model selection (with dynamic fetch from provider API).
@@ -720,10 +716,11 @@ impl SetupWizard {
         let provider = self
             .selected_provider
             .as_ref()
-            .ok_or_else(|| AishError::Config(t("cli.setup.cancelled")))?;
+            .ok_or(AishError::Cancelled)?;
 
-        let title = t("cli.setup.step_model");
-        let question = t("cli.setup.model_header").replace("{provider}", &provider.label);
+        let mut args = std::collections::HashMap::new();
+        args.insert("provider".to_string(), provider.label.clone());
+        let title = t_with_args("cli.setup.model_header", &args);
 
         let api_base = self.api_base.as_deref().unwrap_or("");
 
@@ -748,52 +745,43 @@ impl SetupWizard {
                 .map(|m| DialogOption::new(m, m.clone()))
                 .collect();
 
-            let result = crate::tui::show_selection_dialog(
-                &title, &question, &options, true, // allow custom model
-                true, // allow cancel
-            );
+            let result = show_searchable_selection(
+                &title,
+                &t("cli.setup.model_filter_prompt"),
+                &t("cli.setup.model_filter_hint"),
+                &options,
+                Some(&t("cli.setup.model_custom_option")),
+                true,
+            )?;
 
             match result {
+                DialogResult::Selected(model) if model == CUSTOM_DIALOG_VALUE => {
+                    return self.prompt_custom_model();
+                }
                 DialogResult::Selected(model) => {
                     self.selected_model = Some(model_fetch::normalize_model_name(&model));
                     return Ok(());
                 }
-                DialogResult::CustomInput(model) => {
-                    let model = model.trim().to_string();
-                    if model.is_empty() {
-                        println!("  {}", t("cli.setup.model_custom_required"));
-                        // Fall through to manual input
-                    } else {
-                        self.selected_model = Some(model_fetch::normalize_model_name(&model));
-                        return Ok(());
-                    }
-                }
                 DialogResult::Cancelled => {
-                    return Err(AishError::Config(t("cli.setup.cancelled")));
+                    return Err(AishError::Cancelled);
+                }
+                _ => {
+                    return Err(AishError::Cancelled);
                 }
             }
         }
 
-        // Manual model input (no models found or custom input was empty)
-        let model_prompt = t("cli.setup.model_prompt");
-        let model_required_msg = t("cli.setup.model_custom_required");
-        loop {
-            let result = inquire::Text::new(&format!("{}: {}", title, model_prompt))
-                .prompt()
-                .map_err(|_| AishError::Config(t("cli.setup.cancelled")))?;
+        self.prompt_custom_model()
+    }
 
-            let model = result.trim().to_string();
-            if model.is_empty() {
-                println!("  {}", model_required_msg);
-                continue;
-            }
-            if model.eq_ignore_ascii_case("back") || model.eq_ignore_ascii_case("b") {
-                self.state = WizardState::ProviderSelection;
-                return Ok(());
-            }
-            self.selected_model = Some(model_fetch::normalize_model_name(&model));
+    fn prompt_custom_model(&mut self) -> Result<(), AishError> {
+        let model = prompts::prompt_custom_model_name()?;
+        if model.eq_ignore_ascii_case("back") || model.eq_ignore_ascii_case("b") {
+            self.state = WizardState::ProviderSelection;
             return Ok(());
         }
+        self.selected_model = Some(model_fetch::normalize_model_name(&model));
+        Ok(())
     }
 
     /// Step 4: Verify and save configuration.
@@ -801,11 +789,11 @@ impl SetupWizard {
         let _provider = self
             .selected_provider
             .as_ref()
-            .ok_or_else(|| AishError::Config(t("cli.setup.cancelled")))?;
+            .ok_or(AishError::Cancelled)?;
         let model = self
             .selected_model
             .as_ref()
-            .ok_or_else(|| AishError::Config(t("cli.setup.cancelled")))?
+            .ok_or(AishError::Cancelled)?
             .clone();
         let api_base = self
             .api_base
@@ -818,47 +806,42 @@ impl SetupWizard {
             .ok_or_else(|| AishError::Config("No API key configured".to_string()))?
             .clone();
 
-        println!("\n{}", t("cli.setup.verify_header"));
-
-        // --- Layer 1: Connectivity check ---
-        println!("  {}", t("cli.setup.verify_connectivity_in_progress"));
-
-        let conn = verification::check_connectivity(
-            &api_base,
-            &api_key,
-            &model,
-            verification::DEFAULT_CONNECTIVITY_TIMEOUT_S,
-        );
+        let connectivity_msg = t("cli.setup.verify_connectivity_in_progress");
+        clack_log::step(&connectivity_msg);
+        let conn = clack_log::with_spinner("...", || {
+            verification::check_connectivity(
+                &api_base,
+                &api_key,
+                &model,
+                verification::DEFAULT_CONNECTIVITY_TIMEOUT_S,
+            )
+        });
 
         if !conn.ok {
             let err_msg = conn.error.as_deref().unwrap_or("Unknown error");
             let reason =
                 t("cli.setup.verify_simple_failed_with_reason").replace("{reason}", err_msg);
-            println!("\n  {}", reason);
-
+            clack_log::error(&reason);
             return self.handle_connectivity_failure();
         }
 
         let latency = conn.latency_ms.unwrap_or(0);
-        println!(
-            "  {}",
-            t("cli.setup.connectivity_ok").replace("{}", &latency.to_string())
-        );
+        clack_log::success(&t("cli.setup.connectivity_ok").replace("{}", &latency.to_string()));
 
-        // --- Layer 2: Tool support check ---
-        println!("  {}", t("cli.setup.verify_tool_in_progress"));
-
-        let tool_result = verification::check_tool_support(
-            &api_base,
-            &api_key,
-            &model,
-            verification::DEFAULT_TOOL_SUPPORT_TIMEOUT_S,
-        );
+        let tool_msg = t("cli.setup.verify_tool_in_progress");
+        clack_log::step(&tool_msg);
+        let tool_result = clack_log::with_spinner("...", || {
+            verification::check_tool_support(
+                &api_base,
+                &api_key,
+                &model,
+                verification::DEFAULT_TOOL_SUPPORT_TIMEOUT_S,
+            )
+        });
 
         if tool_result.supports {
-            println!("  {}", t("cli.setup.verify_simple_success"));
-            self.save_config()?;
-            println!("\n  {}", t("cli.setup.saved"));
+            clack_log::success(&t("cli.setup.verify_simple_success"));
+            self.save_config(SaveNotice::Normal)?;
             self.state = WizardState::Complete;
             return Ok(());
         }
@@ -867,7 +850,7 @@ impl SetupWizard {
         let reason = tool_result.error.as_deref().unwrap_or("not detected");
         let full_reason =
             t("cli.setup.verify_simple_failed_with_reason").replace("{reason}", reason);
-        println!("\n  {}", full_reason);
+        clack_log::error(&full_reason);
 
         if tool_result.error.is_none() {
             // Inconclusive result - offer "Continue anyway"
@@ -888,13 +871,11 @@ impl SetupWizard {
             DialogOption::new("exit", t("cli.setup.action_exit")),
         ];
 
-        let result = crate::tui::show_selection_dialog(
+        let result = show_selection(
             &t("cli.setup.verify_title"),
             &t("cli.setup.action_header"),
             &options,
-            false,
-            true,
-        );
+        )?;
 
         match result {
             DialogResult::Selected(key) => match key.as_str() {
@@ -924,10 +905,10 @@ impl SetupWizard {
                     self.state = WizardState::ProviderSelection;
                     Ok(())
                 }
-                _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+                _ => Err(AishError::Cancelled),
             },
-            DialogResult::Cancelled => Err(AishError::Config(t("cli.setup.cancelled"))),
-            _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+            DialogResult::Cancelled => Err(AishError::Cancelled),
+            _ => Err(AishError::Cancelled),
         }
     }
 
@@ -939,13 +920,11 @@ impl SetupWizard {
             DialogOption::new("exit", t("cli.setup.action_exit")),
         ];
 
-        let result = crate::tui::show_selection_dialog(
+        let result = show_selection(
             &t("cli.setup.verify_title"),
             &t("cli.setup.action_header"),
             &options,
-            false,
-            true,
-        );
+        )?;
 
         match result {
             DialogResult::Selected(key) => match key.as_str() {
@@ -957,10 +936,10 @@ impl SetupWizard {
                     self.state = WizardState::ProviderSelection;
                     Ok(())
                 }
-                _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+                _ => Err(AishError::Cancelled),
             },
-            DialogResult::Cancelled => Err(AishError::Config(t("cli.setup.cancelled"))),
-            _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+            DialogResult::Cancelled => Err(AishError::Cancelled),
+            _ => Err(AishError::Cancelled),
         }
     }
 
@@ -973,13 +952,11 @@ impl SetupWizard {
             DialogOption::new("exit", t("cli.setup.action_exit")),
         ];
 
-        let result = crate::tui::show_selection_dialog(
+        let result = show_selection(
             &t("cli.setup.verify_title"),
             &t("cli.setup.action_header"),
             &options,
-            false,
-            true,
-        );
+        )?;
 
         match result {
             DialogResult::Selected(key) => match key.as_str() {
@@ -992,20 +969,25 @@ impl SetupWizard {
                     Ok(())
                 }
                 "continue" => {
-                    self.save_config()?;
-                    println!("\n  {}", t("cli.setup.saved_with_warning"));
+                    self.save_config(SaveNotice::WithWarning)?;
                     self.state = WizardState::Complete;
                     Ok(())
                 }
-                _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+                _ => Err(AishError::Cancelled),
             },
-            DialogResult::Cancelled => Err(AishError::Config(t("cli.setup.cancelled"))),
-            _ => Err(AishError::Config(t("cli.setup.cancelled"))),
+            DialogResult::Cancelled => Err(AishError::Cancelled),
+            _ => Err(AishError::Cancelled),
         }
     }
 
+    /// Load existing config from disk, or defaults when missing.
+    fn load_existing_config(&self) -> ConfigModel {
+        let config_path = self.config_dir.join("config.yaml");
+        aish_config::ConfigLoader::load(Some(&config_path)).unwrap_or_default()
+    }
+
     /// Save configuration to disk.
-    fn save_config(&self) -> Result<(), AishError> {
+    fn save_config(&self, notice: SaveNotice) -> Result<(), AishError> {
         let _provider = self
             .selected_provider
             .as_ref()
@@ -1023,13 +1005,11 @@ impl SetupWizard {
             .as_ref()
             .ok_or_else(|| AishError::Config("No API key configured".to_string()))?;
 
-        // Build ConfigModel: start from defaults, override wizard-collected values.
-        let mut config = ConfigModel::default();
+        let mut config = self.load_existing_config();
         config.model = model.clone();
         config.api_base = api_base.clone();
         config.api_key = api_key.clone();
-        config.temperature = 0.7;
-        config.max_tokens = Some(4096);
+        config.is_free_key = self.is_free_key;
 
         // Save to config file.
         let config_path = self.config_dir.join("config.yaml");
@@ -1039,18 +1019,21 @@ impl SetupWizard {
         std::fs::write(&config_path, yaml_content)
             .map_err(|e| AishError::Config(format!("Failed to write config: {}", e)))?;
 
-        println!("\n  {}", t("cli.setup.saved"));
-        println!(
-            "  {}",
-            t("cli.setup.config_path").replace("{}", &config_path.display().to_string())
-        );
+        let path = format_config_path(&config_path);
+        let mut args = std::collections::HashMap::new();
+        args.insert("path".to_string(), path);
+        let message_key = match notice {
+            SaveNotice::Normal => "cli.setup.saved_to",
+            SaveNotice::WithWarning => "cli.setup.saved_with_warning_to",
+        };
+        clack_log::success(&t_with_args(message_key, &args));
 
         Ok(())
     }
 
     /// Build the final ConfigModel.
     fn build_config(&self) -> Result<ConfigModel, AishError> {
-        let mut config = ConfigModel::default();
+        let mut config = self.load_existing_config();
         config.model = self
             .selected_model
             .as_ref()
@@ -1066,10 +1049,14 @@ impl SetupWizard {
             .as_ref()
             .ok_or_else(|| AishError::Config("No API key configured".to_string()))?
             .clone();
-        config.temperature = 0.7;
-        config.max_tokens = Some(4096);
+        config.is_free_key = self.is_free_key;
         Ok(config)
     }
+}
+
+/// Print the post-setup outro (for CLI `aish setup`).
+pub fn print_setup_complete_hint() {
+    clack_log::outro(&t("cli.setup.setup_complete_hint"));
 }
 
 // ---------------------------------------------------------------------------

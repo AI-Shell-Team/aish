@@ -120,3 +120,6 @@ aish-tools = { path = "crates/aish-tools" }
 aish-shell = { path = "crates/aish-shell" }
 aish-scripts = { path = "crates/aish-scripts" }
 aish-prompts = { path = "crates/aish-prompts" }
+
+[patch.crates-io]
+cliclack = { git = "https://github.com/AI-Shell-Team/cliclack", rev = "1636d63" }

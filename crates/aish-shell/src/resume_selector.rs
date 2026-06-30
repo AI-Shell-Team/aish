@@ -9,8 +9,6 @@ use aish_ui::{
 use chrono::{DateTime, Utc};
 use unicode_width::UnicodeWidthStr;
 
-const MAX_VISIBLE_ITEMS: usize = 8;
-
 #[derive(Debug, Clone)]
 pub struct ResumeSessionItem {
     pub session_id: String,
@@ -70,8 +68,7 @@ pub fn select_resume_session(items: &[ResumeSessionItem]) -> io::Result<Option<S
         panel_items,
     )
     .with_empty_message(t("shell.resume.no_matches"))
-    .with_footer(t("shell.resume.selector_footer"))
-    .with_max_visible_items(MAX_VISIBLE_ITEMS);
+    .with_footer(t("shell.resume.selector_footer"));
 
     match PanelRuntime::new().run(panel).map_err(io::Error::other)? {
         PanelOutcome::Submitted(SearchSelectOutcome::Selected(session_id)) => Ok(Some(session_id)),

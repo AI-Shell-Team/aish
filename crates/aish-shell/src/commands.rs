@@ -1,5 +1,4 @@
 use crate::types::ShellState;
-use crate::wizard::SetupWizard;
 use aish_i18n::{t, t_with_args};
 
 /// Result of handling a built-in command.
@@ -535,36 +534,8 @@ impl ShellState {
     // -- setup ----------------------------------------------------------------
 
     fn handle_setup(&mut self, _args: &[&str]) -> BuiltinResult {
-        // Get config directory
-        let config_dir = dirs::config_dir()
-            .map(|d| d.join("aish"))
-            .unwrap_or_else(|| {
-                let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-                home.join(".config").join("aish")
-            });
-
-        // Ensure config directory exists
-        if let Err(e) = std::fs::create_dir_all(&config_dir) {
-            return BuiltinResult::handled(format!(
-                "setup: failed to create config directory: {}",
-                e
-            ));
-        }
-
-        // Run the wizard
-        let mut wizard = SetupWizard::new(config_dir);
-        match wizard.run() {
-            Ok(config) => {
-                let msg = format!(
-                    "Setup complete!\n  Provider: {}\n  Model: {}\n  Config saved to: {}/config.yaml",
-                    config.model,
-                    config.model,
-                    wizard.config_dir().display()
-                );
-                BuiltinResult::handled(msg)
-            }
-            Err(e) => BuiltinResult::handled(format!("setup cancelled or failed: {}", e)),
-        }
+        // Routed through `AishShell::run_setup_wizard` in app.rs.
+        BuiltinResult::not_handled()
     }
 }
 

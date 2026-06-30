@@ -13,6 +13,9 @@ use super::SecretDialogChoice;
 // Data types
 // ---------------------------------------------------------------------------
 
+/// Sentinel value for the explicit "custom input" row in searchable lists.
+pub const CUSTOM_DIALOG_VALUE: &str = "__custom__";
+
 /// A single selectable option presented in a dialog.
 #[derive(Debug, Clone)]
 pub struct DialogOption {
@@ -113,12 +116,15 @@ fn run_panel_selection(
     allow_custom: bool,
     allow_cancel: bool,
 ) -> Result<DialogResult, aish_ui::PanelError> {
+    let _input_guard = aish_tools::bash::acquire_interactive_input_guard();
     let items: Vec<SearchSelectItem> = options
         .iter()
         .map(|opt| {
             let mut item = SearchSelectItem::new(opt.value.clone(), opt.label.clone());
             if let Some(description) = &opt.description {
-                item = item.with_detail(description.clone());
+                if !description.trim().is_empty() {
+                    item = item.with_detail(description.clone());
+                }
             }
             item.with_search_text(opt.display_label())
         })

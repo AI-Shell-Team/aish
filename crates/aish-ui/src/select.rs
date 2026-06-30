@@ -1,4 +1,5 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -9,9 +10,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{PanelComponent, PanelEvent};
 
-const DEFAULT_VISIBLE_ITEMS: usize = 8;
-const MIN_PANEL_HEIGHT: u16 = 7;
-const SEARCH_RESERVED_LINES: u16 = 4;
+const DEFAULT_VISIBLE_ITEMS: usize = 32;
+const MIN_LIST_ROWS: usize = 5;
+const MIN_PANEL_HEIGHT: u16 = 6;
 const PANEL_PADDING_X: u16 = 2;
 const DESCRIPTION_INDENT: &str = "    ";
 
@@ -57,6 +58,17 @@ impl SearchSelectItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchSelectOutcome {
     Selected(String),
+}
+
+/// Match when every whitespace-separated token in `query` is a substring of `search_text`.
+fn matches_tokenized_query(search_text: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    query
+        .split_whitespace()
+        .all(|token| search_text.contains(token))
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +145,7 @@ impl SearchSelectPanel {
     }
 
     pub fn filtered_entries(&self) -> Vec<SelectEntry> {
-        let query = self.query.trim().to_lowercase();
+        let query = self.query.trim();
         if query.is_empty() {
             (0..self.items.len()).map(SelectEntry::Item).collect()
         } else {
@@ -141,8 +153,7 @@ impl SearchSelectPanel {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, item)| {
-                    item.search_text
-                        .contains(&query)
+                    matches_tokenized_query(&item.search_text, query)
                         .then_some(SelectEntry::Item(index))
                 })
                 .collect()
@@ -171,11 +182,21 @@ impl SearchSelectPanel {
         }
     }
 
+    fn chrome_lines(&self) -> u16 {
+        // divider + title + search + footer (+ optional subtitle)
+        4 + u16::from(self.subtitle.is_some())
+    }
+
+    fn effective_max_visible_items(&self, terminal_height: u16) -> usize {
+        let row_height = self.estimated_entry_height().max(1) as usize;
+        let budget =
+            (terminal_height as usize).saturating_sub(self.chrome_lines() as usize) / row_height;
+        budget.max(MIN_LIST_ROWS).min(self.max_visible_items)
+    }
+
     fn visible_limit(&self, list_height: usize) -> usize {
         let row_height = self.estimated_entry_height() as usize;
-        (list_height / row_height)
-            .max(1)
-            .clamp(1, self.max_visible_items)
+        (list_height / row_height).max(1)
     }
 
     pub fn scroll_offset(&self, list_height: usize) -> usize {
@@ -197,11 +218,30 @@ impl SearchSelectPanel {
     }
 
     fn estimated_entry_height(&self) -> u16 {
-        if self.items.iter().any(|item| item.detail.is_some()) {
+        if self
+            .items
+            .iter()
+            .any(|item| item.detail.as_ref().is_some_and(|d| !d.trim().is_empty()))
+        {
             2
         } else {
             1
         }
+    }
+
+    fn entry_detail_lines<'a>(&self, item: &'a SearchSelectItem) -> Vec<Line<'a>> {
+        let detail_style = Style::default().fg(Color::DarkGray);
+        let Some(detail) = &item.detail else {
+            return Vec::new();
+        };
+        if detail.trim().is_empty() {
+            return Vec::new();
+        }
+
+        vec![Line::from(vec![
+            Span::raw(DESCRIPTION_INDENT),
+            Span::styled(detail.as_str(), detail_style),
+        ])]
     }
 }
 
@@ -214,11 +254,10 @@ impl PanelComponent for SearchSelectPanel {
     type Output = SearchSelectOutcome;
 
     fn desired_height(&self, _terminal_width: u16, terminal_height: u16) -> u16 {
-        let item_count = self.items.len();
-        let visible_rows =
-            item_count.min(self.max_visible_items).max(1) as u16 * self.estimated_entry_height();
-        let reserved_lines = SEARCH_RESERVED_LINES + u16::from(self.subtitle.is_some());
-        (visible_rows + reserved_lines).clamp(MIN_PANEL_HEIGHT, terminal_height.max(1))
+        let max_visible = self.effective_max_visible_items(terminal_height);
+        let visible_count = self.items.len().min(max_visible).max(1);
+        let list_height = visible_count as u16 * self.estimated_entry_height();
+        (list_height + self.chrome_lines()).clamp(MIN_PANEL_HEIGHT, terminal_height.max(1))
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
@@ -278,11 +317,17 @@ impl PanelComponent for SearchSelectPanel {
                 PanelEvent::Continue
             }
             KeyCode::PageUp => {
-                self.move_up(self.max_visible_items);
+                let page = terminal::size()
+                    .map(|(_, rows)| self.effective_max_visible_items(rows))
+                    .unwrap_or(self.max_visible_items);
+                self.move_up(page);
                 PanelEvent::Continue
             }
             KeyCode::PageDown => {
-                self.move_down(self.max_visible_items);
+                let page = terminal::size()
+                    .map(|(_, rows)| self.effective_max_visible_items(rows))
+                    .unwrap_or(self.max_visible_items);
+                self.move_down(page);
                 PanelEvent::Continue
             }
             KeyCode::Home => {
@@ -362,13 +407,10 @@ impl SearchSelectPanel {
             Style::default().fg(Color::White)
         };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Search: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    truncate_display(search_text, area.width.saturating_sub(8) as usize),
-                    search_style,
-                ),
-            ])),
+            Paragraph::new(Line::from(vec![Span::styled(
+                truncate_display(search_text, area.width as usize),
+                search_style,
+            )])),
             area,
         );
     }
@@ -463,7 +505,6 @@ impl SearchSelectPanel {
         } else {
             Style::default()
         };
-        let detail_style = Style::default().fg(Color::DarkGray);
 
         match entry {
             SelectEntry::Item(index) => {
@@ -477,12 +518,7 @@ impl SearchSelectPanel {
                     ));
                 }
                 let mut lines = vec![Line::from(spans)];
-                if let Some(detail) = &item.detail {
-                    lines.push(Line::from(vec![
-                        Span::raw(DESCRIPTION_INDENT),
-                        Span::styled(detail.as_str(), detail_style),
-                    ]));
-                }
+                lines.extend(self.entry_detail_lines(item));
                 lines
             }
         }
@@ -547,6 +583,32 @@ mod tests {
         panel.handle_event(key(KeyCode::Char('a')));
 
         assert_eq!(panel.filtered_entries(), vec![SelectEntry::Item(1)]);
+    }
+
+    #[test]
+    fn filters_with_tokenized_and_query() {
+        let mut panel = SearchSelectPanel::new(
+            "Providers",
+            "Search",
+            vec![
+                item("openrouter", "OpenRouter", "openrouter open router"),
+                item("openai", "OpenAI", "openai open ai"),
+            ],
+        );
+
+        panel.handle_event(key(KeyCode::Char('o')));
+        panel.handle_event(key(KeyCode::Char('p')));
+        panel.handle_event(key(KeyCode::Char('e')));
+        panel.handle_event(key(KeyCode::Char('n')));
+        panel.handle_event(key(KeyCode::Char(' ')));
+        panel.handle_event(key(KeyCode::Char('r')));
+        panel.handle_event(key(KeyCode::Char('o')));
+        panel.handle_event(key(KeyCode::Char('u')));
+        panel.handle_event(key(KeyCode::Char('t')));
+        panel.handle_event(key(KeyCode::Char('e')));
+        panel.handle_event(key(KeyCode::Char('r')));
+
+        assert_eq!(panel.filtered_entries(), vec![SelectEntry::Item(0)]);
     }
 
     #[test]

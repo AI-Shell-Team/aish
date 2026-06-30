@@ -2046,6 +2046,11 @@ impl AishShell {
                 crate::types::InputIntent::BuiltinCommand => {
                     let parts: Vec<&str> = input.split_whitespace().collect();
                     if let Some(cmd) = parts.first() {
+                        if *cmd == "setup" {
+                            self.run_setup_wizard();
+                            self.record_history(input, 0);
+                            continue;
+                        }
                         let result = self.state.handle_builtin(cmd, &parts[1..]);
                         if let Some(ref output) = result.output {
                             println!("{}", output);
@@ -2386,6 +2391,11 @@ impl AishShell {
             crate::types::InputIntent::BuiltinCommand => {
                 let parts: Vec<&str> = input.split_whitespace().collect();
                 if let Some(cmd) = parts.first() {
+                    if *cmd == "setup" {
+                        self.run_setup_wizard();
+                        self.record_history(input, 0);
+                        return false;
+                    }
                     let result = self.state.handle_builtin(cmd, &parts[1..]);
                     if let Some(ref output) = result.output {
                         println!("{}", output);
@@ -3147,7 +3157,7 @@ impl AishShell {
         let mut wizard = crate::wizard::SetupWizard::new(config_dir);
         match wizard.run() {
             Ok(new_config) => {
-                self.config = new_config;
+                self.config = crate::wizard::apply_setup_result(&self.config, new_config);
                 // Update LLM session with new config
                 self.ai_handler.update_model(
                     &self.config.model,
@@ -3162,8 +3172,11 @@ impl AishShell {
                     t_with_args("shell.setup.applied", &args)
                 );
             }
+            Err(aish_core::AishError::Cancelled) => {
+                eprintln!("\x1b[33m{}\x1b[0m", t("shell.setup.cancelled"));
+            }
             Err(e) => {
-                eprintln!("\x1b[33mSetup cancelled: {}\x1b[0m", e);
+                eprintln!("\x1b[31m{}\x1b[0m", e);
             }
         }
     }
