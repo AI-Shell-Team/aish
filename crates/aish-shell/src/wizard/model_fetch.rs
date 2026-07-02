@@ -5,6 +5,8 @@
 
 use tracing::debug;
 
+use aish_llm::trim_model_name;
+
 use super::get_provider_models;
 
 // ---------------------------------------------------------------------------
@@ -85,7 +87,7 @@ pub fn fetch_models_from_api(
         if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
             for entry in data {
                 if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
-                    all_models.push(normalize_model_name(id));
+                    all_models.push(trim_model_name(id));
                 }
             }
         } else {
@@ -150,7 +152,7 @@ pub fn fetch_ollama_models(timeout_s: u64) -> Result<Vec<String>, String> {
     if let Some(arr) = body.get("models").and_then(|v| v.as_array()) {
         for entry in arr {
             if let Some(name) = entry.get("name").and_then(|v| v.as_str()) {
-                models.push(normalize_model_name(name));
+                models.push(trim_model_name(name));
             }
         }
     }
@@ -226,27 +228,6 @@ pub fn get_models_for_provider(
     Vec::new()
 }
 
-/// Normalize a model name by trimming whitespace and removing common prefixes.
-pub fn normalize_model_name(model: &str) -> String {
-    let trimmed = model.trim();
-
-    // Common prefixes users might accidentally include.
-    let prefixes_to_strip = [
-        "openai/",    // e.g. "openai/gpt-4o" from some aggregators
-        "anthropic/", // e.g. "anthropic/claude-3-opus"
-    ];
-
-    let mut result = trimmed;
-    for prefix in &prefixes_to_strip {
-        if let Some(stripped) = result.strip_prefix(prefix) {
-            result = stripped;
-            break; // Only strip one prefix
-        }
-    }
-
-    result.to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -275,30 +256,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_model_name_basic() {
-        assert_eq!(normalize_model_name("  gpt-4o  "), "gpt-4o");
-        assert_eq!(normalize_model_name("gpt-4o"), "gpt-4o");
-    }
-
-    #[test]
-    fn test_normalize_model_name_strip_prefix() {
-        assert_eq!(normalize_model_name("openai/gpt-4o"), "gpt-4o");
+    fn test_trim_model_name_in_fetch() {
+        assert_eq!(trim_model_name("  gpt-4o  "), "gpt-4o");
+        assert_eq!(trim_model_name("openai/gpt-4o"), "openai/gpt-4o");
         assert_eq!(
-            normalize_model_name("anthropic/claude-3-opus"),
-            "claude-3-opus"
+            trim_model_name("anthropic/claude-3-opus"),
+            "anthropic/claude-3-opus"
         );
     }
 
     #[test]
-    fn test_normalize_model_name_no_strip() {
-        // Should NOT strip unknown prefixes.
-        assert_eq!(normalize_model_name("my-custom-model"), "my-custom-model");
-    }
-
-    #[test]
-    fn test_normalize_model_name_empty() {
-        assert_eq!(normalize_model_name(""), "");
-        assert_eq!(normalize_model_name("   "), "");
+    fn test_trim_model_name_empty() {
+        assert_eq!(trim_model_name(""), "");
+        assert_eq!(trim_model_name("   "), "");
     }
 
     #[test]

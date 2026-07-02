@@ -1,7 +1,11 @@
 use aish_core::AishError;
 use reqwest::Client;
 
+use crate::model_id::resolve_model_for_api;
 use crate::types::{ChatMessage, ToolSpec};
+
+/// Default max_tokens when config does not specify a value.
+pub const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// HTTP client for OpenAI-compatible chat completion APIs.
 pub struct LlmClient {
@@ -13,7 +17,7 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(api_base: &str, api_key: &str, model: &str) -> Self {
-        let model = strip_provider_prefix_if_openai(model, api_base);
+        let model = resolve_model_for_api(model, api_base);
         Self {
             http: Client::new(),
             api_base: api_base.trim_end_matches('/').into(),
@@ -39,7 +43,7 @@ impl LlmClient {
 
     /// Update the model name (used for runtime model switching).
     pub fn update_model(&mut self, model: &str) {
-        self.model = strip_provider_prefix_if_openai(model, &self.api_base);
+        self.model = resolve_model_for_api(model, &self.api_base);
     }
 
     /// Update the API key.
@@ -141,9 +145,7 @@ impl LlmClient {
         if let Some(temp) = temperature {
             body["temperature"] = serde_json::json!(temp);
         }
-        if let Some(tokens) = max_tokens {
-            body["max_tokens"] = serde_json::json!(tokens);
-        }
+        body["max_tokens"] = serde_json::json!(effective_max_tokens(max_tokens));
         if let Some(tools) = tools {
             body["tools"] = serde_json::json!(tools);
             body["tool_choice"] = serde_json::json!("auto");
@@ -181,17 +183,10 @@ impl LlmClient {
     }
 }
 
-/// Strip LiteLLM-style provider prefix only when targeting OpenAI's official API.
-/// Unified gateways (e.g. ai.uniontech.com) require the full prefixed model name.
-fn strip_provider_prefix_if_openai(model: &str, api_base: &str) -> String {
-    let is_openai = api_base.contains("api.openai.com");
-    if is_openai {
-        match model.split_once('/') {
-            Some((_provider, name)) => name.to_string(),
-            None => model.to_string(),
-        }
-    } else {
-        model.to_string()
+fn effective_max_tokens(max_tokens: Option<u32>) -> u32 {
+    match max_tokens {
+        None | Some(0) => DEFAULT_MAX_TOKENS,
+        Some(n) => n,
     }
 }
 
@@ -252,6 +247,22 @@ mod tests {
             "provider/model-name",
         );
         assert_eq!(client.model_name(), "provider/model-name");
+    }
+
+    #[test]
+    fn test_new_client_strips_openai_prefix_for_custom_gateway() {
+        let client = LlmClient::new(
+            "http://www.aishell.ai:8080/aitest/v1",
+            "sk-test",
+            "openai/gpt-5.1",
+        );
+        assert_eq!(client.model_name(), "gpt-5.1");
+    }
+
+    #[test]
+    fn test_new_client_preserves_prefix_for_openrouter() {
+        let client = LlmClient::new("https://openrouter.ai/api/v1", "sk-test", "openai/gpt-4o");
+        assert_eq!(client.model_name(), "openai/gpt-4o");
     }
 
     #[test]
@@ -326,6 +337,13 @@ mod tests {
         let msg = format_http_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
         assert!(msg.contains("500"));
         assert!(msg.contains("Server error"));
+    }
+
+    #[test]
+    fn test_effective_max_tokens() {
+        assert_eq!(effective_max_tokens(None), DEFAULT_MAX_TOKENS);
+        assert_eq!(effective_max_tokens(Some(0)), DEFAULT_MAX_TOKENS);
+        assert_eq!(effective_max_tokens(Some(1000)), 1000);
     }
 
     #[test]
