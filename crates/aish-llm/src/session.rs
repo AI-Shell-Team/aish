@@ -239,13 +239,13 @@ impl LlmSession {
 
     /// Update the model, optionally also updating API base and key.
     pub fn update_model(&mut self, model: &str, api_base: Option<&str>, api_key: Option<&str>) {
-        self.client.update_model(model);
         if let Some(base) = api_base {
             self.client.update_api_base(base);
         }
         if let Some(key) = api_key {
             self.client.update_api_key(key);
         }
+        self.client.update_model(model);
     }
 
     /// Return the current model name.
@@ -2529,7 +2529,22 @@ mod tests {
             Some(1000),
         );
         session.update_model("gpt-4o", None, None);
-        // compile-time check that method exists
+        assert_eq!(session.model_name(), "gpt-4o");
+    }
+
+    #[test]
+    fn test_session_update_model_resolves_after_api_base_change() {
+        let mut session = LlmSession::new(
+            "https://openrouter.ai/api/v1",
+            "sk-test",
+            "openai/gpt-4o",
+            None,
+            None,
+        );
+        assert_eq!(session.model_name(), "openai/gpt-4o");
+
+        session.update_model("openai/gpt-4o", Some("https://api.openai.com/v1"), None);
+        assert_eq!(session.model_name(), "gpt-4o");
     }
 
     #[test]

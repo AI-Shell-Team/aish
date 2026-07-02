@@ -17,6 +17,7 @@ pub mod agent;
 pub mod client;
 pub mod diagnose_agent;
 pub mod langfuse;
+pub mod model_id;
 pub mod models;
 pub mod oauth;
 pub mod provider;
@@ -29,9 +30,10 @@ pub mod types;
 pub mod usage;
 
 pub use agent::{AgentConfig, AgentStep, ReActAgent};
-pub use client::{LlmClient, LlmResponse};
+pub use client::{LlmClient, LlmResponse, DEFAULT_MAX_TOKENS};
 pub use diagnose_agent::DiagnoseAgent;
 pub use langfuse::{LangfuseClient, LangfuseConfig};
+pub use model_id::{normalize_model_for_provider, resolve_model_for_api, trim_model_name};
 pub use models::{
     fetch_models_from_api, fetch_ollama_models, filter_by_tool_support, get_predefined_models,
     model_supports_tools, ModelInfo,

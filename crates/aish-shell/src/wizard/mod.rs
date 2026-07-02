@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use aish_config::ConfigModel;
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
+use aish_llm::{normalize_model_for_provider, resolve_model_for_api};
 
 use crate::tui::{DialogOption, DialogResult, CUSTOM_DIALOG_VALUE};
 use ui::{show_searchable_selection, show_selection};
@@ -342,6 +343,24 @@ impl SetupWizard {
         &self.config_dir
     }
 
+    fn set_normalized_model(&mut self, raw: &str) {
+        let provider_key = self
+            .selected_provider
+            .as_ref()
+            .map(|p| p.key.as_str())
+            .unwrap_or("custom");
+        let normalized = normalize_model_for_provider(provider_key, raw);
+        if normalized != raw.trim() {
+            let mut args = std::collections::HashMap::new();
+            args.insert("model".to_string(), normalized.clone());
+            println!(
+                "  \x1b[2m{}\x1b[0m",
+                t_with_args("cli.setup.model_custom_saved_as", &args)
+            );
+        }
+        self.selected_model = Some(normalized);
+    }
+
     /// Prompt the user to choose setup entry mode.
     fn select_entry_mode(&self) -> Result<String, AishError> {
         let mut options = vec![
@@ -451,15 +470,15 @@ impl SetupWizard {
                     } else {
                         Some(result.api_base)
                     };
-                    self.selected_model = if result.model.is_empty() {
-                        None
-                    } else {
-                        Some(model_fetch::normalize_model_name(&result.model))
-                    };
                     self.selected_provider = Some(ProviderInfo::new(
                         "free_key",
                         t("cli.setup.free_key_provider_label"),
                     ));
+                    if result.model.is_empty() {
+                        self.selected_model = None;
+                    } else {
+                        self.set_normalized_model(&result.model);
+                    }
                     self.is_free_key = true;
 
                     // If all fields are present, verify and save.
@@ -759,7 +778,7 @@ impl SetupWizard {
                     return self.prompt_custom_model();
                 }
                 DialogResult::Selected(model) => {
-                    self.selected_model = Some(model_fetch::normalize_model_name(&model));
+                    self.set_normalized_model(&model);
                     return Ok(());
                 }
                 DialogResult::Cancelled => {
@@ -780,7 +799,7 @@ impl SetupWizard {
             self.state = WizardState::ProviderSelection;
             return Ok(());
         }
-        self.selected_model = Some(model_fetch::normalize_model_name(&model));
+        self.set_normalized_model(&model);
         Ok(())
     }
 
@@ -805,6 +824,7 @@ impl SetupWizard {
             .as_ref()
             .ok_or_else(|| AishError::Config("No API key configured".to_string()))?
             .clone();
+        let api_model = resolve_model_for_api(&model, &api_base);
 
         let connectivity_msg = t("cli.setup.verify_connectivity_in_progress");
         clack_log::step(&connectivity_msg);
@@ -812,7 +832,7 @@ impl SetupWizard {
             verification::check_connectivity(
                 &api_base,
                 &api_key,
-                &model,
+                &api_model,
                 verification::DEFAULT_CONNECTIVITY_TIMEOUT_S,
             )
         });
@@ -834,7 +854,7 @@ impl SetupWizard {
             verification::check_tool_support(
                 &api_base,
                 &api_key,
-                &model,
+                &api_model,
                 verification::DEFAULT_TOOL_SUPPORT_TIMEOUT_S,
             )
         });

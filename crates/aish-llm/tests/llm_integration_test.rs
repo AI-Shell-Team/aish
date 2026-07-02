@@ -8,8 +8,9 @@
 // 5. SubSessionConfig defaults
 
 use aish_llm::{
-    detect_provider, detect_provider_from_model, refine_provider_from_api_base, ChatMessage,
-    DiagnoseAgent, LlmClient, SubSessionConfig,
+    detect_provider, detect_provider_from_model, normalize_model_for_provider,
+    refine_provider_from_api_base, resolve_model_for_api, ChatMessage, DiagnoseAgent, LlmClient,
+    SubSessionConfig, DEFAULT_MAX_TOKENS,
 };
 
 #[test]
@@ -41,6 +42,76 @@ fn test_provider_prefix_stripping() {
         "deepseek/deepseek-coder",
     );
     assert_eq!(client4.model_name(), "deepseek-coder");
+}
+
+#[test]
+fn test_model_id_setup_normalize_matrix() {
+    assert_eq!(
+        normalize_model_for_provider("openrouter", "gpt-5.1"),
+        "openai/gpt-5.1"
+    );
+    assert_eq!(
+        normalize_model_for_provider("openrouter", "openai/gpt-5.1"),
+        "openai/gpt-5.1"
+    );
+    assert_eq!(normalize_model_for_provider("custom", "gpt-5.1"), "gpt-5.1");
+    assert_eq!(
+        normalize_model_for_provider("custom", "openai/gpt-5.1"),
+        "openai/gpt-5.1"
+    );
+    assert_eq!(
+        normalize_model_for_provider("openai", "openai/gpt-4o"),
+        "gpt-4o"
+    );
+}
+
+#[test]
+fn test_model_id_runtime_resolve_matrix() {
+    assert_eq!(
+        resolve_model_for_api("openai/gpt-4o", "https://api.openai.com/v1"),
+        "gpt-4o"
+    );
+    assert_eq!(
+        resolve_model_for_api("openai/gpt-4o", "https://openrouter.ai/api/v1"),
+        "openai/gpt-4o"
+    );
+    let custom_base = "http://www.aishell.ai:8080/aitest/v1";
+    assert_eq!(
+        resolve_model_for_api("openai/gpt-5.1", custom_base),
+        "gpt-5.1"
+    );
+    assert_eq!(resolve_model_for_api("gpt-5.1", custom_base), "gpt-5.1");
+}
+
+#[test]
+fn test_llm_client_custom_gateway_model_resolution() {
+    let client = LlmClient::new(
+        "http://www.aishell.ai:8080/aitest/v1",
+        "sk-test",
+        "openai/gpt-5.1",
+    );
+    assert_eq!(client.model_name(), "gpt-5.1");
+
+    let client2 = LlmClient::new("https://openrouter.ai/api/v1", "sk-test", "openai/gpt-4o");
+    assert_eq!(client2.model_name(), "openai/gpt-4o");
+}
+
+#[test]
+fn test_setup_verification_uses_runtime_model_resolution() {
+    let config_model = "openai/gpt-4o";
+    assert_eq!(
+        resolve_model_for_api(config_model, "https://api.openai.com/v1"),
+        "gpt-4o"
+    );
+    assert_eq!(
+        resolve_model_for_api(config_model, "https://openrouter.ai/api/v1"),
+        "openai/gpt-4o"
+    );
+}
+
+#[test]
+fn test_default_max_tokens_constant() {
+    assert_eq!(DEFAULT_MAX_TOKENS, 4096);
 }
 
 #[test]
