@@ -3,8 +3,18 @@
 //! Layer 1: Basic connectivity check (sends a minimal chat completion request).
 //! Layer 2: Tool support check (sends a chat completion request with tool definitions).
 
+use aish_i18n::t_with_args;
 use serde_json::json;
+use std::collections::HashMap;
 use tracing::debug;
+
+fn verify_msg(key: &str, args: &[(&str, &str)]) -> String {
+    let map: HashMap<String, String> = args
+        .iter()
+        .map(|(k, v)| (k.to_string(), (*v).to_string()))
+        .collect();
+    t_with_args(key, &map)
+}
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -65,7 +75,10 @@ pub fn check_connectivity(
         Err(e) => {
             return ConnectivityResult {
                 ok: false,
-                error: Some(format!("Failed to build HTTP client: {}", e)),
+                error: Some(verify_msg(
+                    "cli.setup.verify_http_client_build_failed",
+                    &[("detail", &e.to_string())],
+                )),
                 latency_ms: None,
             }
         }
@@ -113,7 +126,14 @@ pub fn check_connectivity(
                 };
                 ConnectivityResult {
                     ok: false,
-                    error: Some(format!("HTTP {} from {}: {}", status_code, url, detail)),
+                    error: Some(verify_msg(
+                        "cli.setup.verify_http_error",
+                        &[
+                            ("status", &status_code.to_string()),
+                            ("url", &url),
+                            ("detail", &detail),
+                        ],
+                    )),
                     latency_ms: Some(elapsed),
                 }
             }
@@ -121,14 +141,17 @@ pub fn check_connectivity(
         Err(e) => {
             debug!("Connectivity error ({}ms): {}", elapsed, e);
             let msg = if e.is_timeout() {
-                format!(
-                    "Request timed out after {}s connecting to {}",
-                    timeout_s, url
+                verify_msg(
+                    "cli.setup.verify_connect_timeout",
+                    &[("timeout", &timeout_s.to_string()), ("url", &url)],
                 )
             } else if e.is_connect() {
-                format!("Connection refused or unreachable: {}", url)
+                verify_msg("cli.setup.verify_connect_refused", &[("url", &url)])
             } else {
-                format!("Request failed: {}", e)
+                verify_msg(
+                    "cli.setup.verify_request_failed",
+                    &[("detail", &e.to_string())],
+                )
             };
             ConnectivityResult {
                 ok: false,
@@ -162,7 +185,10 @@ pub fn check_tool_support(
         Err(e) => {
             return ToolSupportResult {
                 supports: false,
-                error: Some(format!("Failed to build HTTP client: {}", e)),
+                error: Some(verify_msg(
+                    "cli.setup.verify_http_client_build_failed",
+                    &[("detail", &e.to_string())],
+                )),
             }
         }
     };
@@ -221,9 +247,9 @@ pub fn check_tool_support(
                 let supports = false;
                 ToolSupportResult {
                     supports,
-                    error: Some(format!(
-                        "HTTP {} — tool support not detected: {}",
-                        status_code, detail
+                    error: Some(verify_msg(
+                        "cli.setup.verify_tool_http_error",
+                        &[("status", &status_code.to_string()), ("detail", &detail)],
                     )),
                 }
             }
@@ -231,12 +257,15 @@ pub fn check_tool_support(
         Err(e) => {
             debug!("Tool-support check error: {}", e);
             let msg = if e.is_timeout() {
-                format!(
-                    "Request timed out after {}s during tool-support check",
-                    timeout_s
+                verify_msg(
+                    "cli.setup.verify_tool_timeout",
+                    &[("timeout", &timeout_s.to_string())],
                 )
             } else {
-                format!("Request failed during tool-support check: {}", e)
+                verify_msg(
+                    "cli.setup.verify_tool_request_failed",
+                    &[("detail", &e.to_string())],
+                )
             };
             ToolSupportResult {
                 supports: false,
@@ -278,6 +307,7 @@ mod tests {
 
     #[test]
     fn test_check_connectivity_bad_url() {
+        aish_i18n::set_locale("en-US");
         // Use a URL that should not be reachable.
         let result = check_connectivity("http://127.0.0.1:1", "test-key", "test-model", 2);
         assert!(!result.ok);
