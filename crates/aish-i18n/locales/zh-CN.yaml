@@ -8,6 +8,8 @@ cli:
   check_tool_support_command_help: "调试 tool-call 在线验证"
 
   models_auth_title: "模型认证: {provider}"
+  models_auth_relogin_hint: "用于重新登录或轮换凭证。首次配置请在 `aish setup` 向导内完成认证。"
+  models_auth_existing_kept: "已保留现有 {provider} 认证（使用 --force 可重新登录）"
   checking_existing_auth: "检查现有认证状态..."
   oauth_not_implemented: "OAuth 流程尚未在 Rust 版本中实现。"
   oauth_hint: "请手动输入您的认证令牌。"
@@ -130,10 +132,10 @@ cli:
     api_key_hint: "请设置 {env_var}，或在配置文件中填写 api_key。"
 
   openai_codex:
-    auth_not_found: "未找到 OpenAI Codex 认证信息。请先运行 `aish models auth --provider openai-codex`。"
+    auth_not_found: "未找到 OpenAI Codex 认证信息。首次使用请运行 `aish setup`；重新登录请运行 `aish models auth --provider openai-codex`。"
     auth_read_failed: "读取 Codex 认证文件失败：{path}"
-    auth_missing_tokens: "Codex 认证文件中缺少 ChatGPT OAuth tokens。请重新运行 `aish models auth --provider openai-codex`。"
-    auth_incomplete: "Codex 认证信息不完整。请重新运行 `aish models auth --provider openai-codex`。"
+    auth_missing_tokens: "Codex 认证文件中缺少 ChatGPT OAuth tokens。请运行 `aish setup`，或 `aish models auth --provider openai-codex --force`。"
+    auth_incomplete: "Codex 认证信息不完整。请运行 `aish setup`，或 `aish models auth --provider openai-codex --force`。"
 
   option:
     model: "要使用的模型(也可通过 AISH_MODEL 或配置文件设置)。"
@@ -219,7 +221,9 @@ cli:
     api_key_required: "API Key 不能为空"
     codex_auth_header: "选择 Codex 认证方式"
     codex_auth_oauth: "ChatGPT OAuth"
-    codex_auth_oauth_hint: "使用 ChatGPT/Codex 订阅；在向导内登录（或复用 ~/.codex/auth.json）"
+    codex_auth_oauth_hint: "浏览器登录；若回调失败可粘贴 redirect URL（或复用 ~/.codex/auth.json）"
+    codex_auth_device_code: "设备码"
+    codex_auth_device_code_hint: "适用于 SSH/无图形环境：访问页面并输入此处显示的设备码"
     codex_auth_api_key: "OpenAI API Key"
     codex_auth_api_key_hint: "通过 OpenAI Platform 按量计费（api.openai.com）"
     codex_oauth_login_in_progress: "正在登录 ChatGPT/Codex..."
@@ -227,6 +231,7 @@ cli:
     codex_oauth_existing_auth: "已使用现有 Codex 登录：{account}"
     codex_oauth_login_failed: "Codex 登录失败：{error}"
     codex_oauth_setup_hint: "若已有 ~/.codex/auth.json 将直接复用，否则会打开浏览器 OAuth。"
+    codex_device_code_in_progress: "正在启动 Codex 设备码登录..."
     model_header: "当前 Provider：{provider}"
     model_filter_prompt: "搜索:"
     model_filter_hint: "↑/↓ 选择 · Enter 确认 · 输入以搜索 · Esc 取消"
@@ -1308,6 +1313,9 @@ llm:
   oauth:
     browser_login_opening: "正在打开浏览器进行 {display_name} 登录。如果未自动打开，请访问：\n{url}"
     browser_login_manual: "请在浏览器中打开以下链接以完成 {display_name} 认证：\n{url}"
+    browser_login_paste_hint: "若浏览器无法回调到本机，请在下方粘贴完整 redirect URL 或 code#state。"
+    browser_login_paste_prompt: "粘贴授权码或完整 redirect URL："
+    callback_timeout: "等待 OAuth 回调超时"
     device_code_visit: "\n要完成认证，请访问：\n  {verification_uri}"
     device_code_enter: "并输入代码：{user_code}\n"
     failed_bind_port: "绑定端口 {port} 失败：{error}"

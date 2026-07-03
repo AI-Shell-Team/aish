@@ -10,12 +10,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aish_i18n::{t, t_with_args};
 
@@ -130,16 +131,91 @@ pub fn generate_state() -> String {
 // Browser-based authorization code flow
 // ---------------------------------------------------------------------------
 
+const BROWSER_LOGIN_TIMEOUT_SECS: u64 = 300;
+
+/// Options for the browser OAuth flow.
+#[derive(Debug, Clone, Copy)]
+pub struct BrowserLoginOptions {
+    pub open_browser: bool,
+    /// When true, also accept a pasted redirect URL or authorization code from stdin.
+    pub allow_manual_redirect: bool,
+}
+
+impl BrowserLoginOptions {
+    pub fn with_browser(open_browser: bool) -> Self {
+        Self {
+            open_browser,
+            allow_manual_redirect: true,
+        }
+    }
+}
+
+/// Parse callback URLs, raw query strings, `code#state`, or plain pasted codes.
+pub fn parse_oauth_authorization_input(input: &str) -> (Option<String>, Option<String>) {
+    let value = input.trim();
+    if value.is_empty() {
+        return (None, None);
+    }
+
+    if value.starts_with("http://") || value.starts_with("https://") {
+        if let Some(query) = value.split('?').nth(1) {
+            let query = query.split('#').next().unwrap_or(query);
+            let code = parse_query_param(query, "code");
+            let state = parse_query_param(query, "state");
+            if code.is_some() || state.is_some() {
+                return (code, state);
+            }
+        }
+    }
+
+    if let Some((code, state)) = value.split_once('#') {
+        let code = code.trim();
+        let state = state.trim();
+        if !code.is_empty() {
+            return (
+                Some(code.to_string()),
+                if state.is_empty() {
+                    None
+                } else {
+                    Some(state.to_string())
+                },
+            );
+        }
+    }
+
+    if value.contains("code=") {
+        return (
+            parse_query_param(value, "code"),
+            parse_query_param(value, "state"),
+        );
+    }
+
+    (Some(value.to_string()), None)
+}
+
 /// Run the browser-based OAuth flow.
 ///
 /// 1. Bind a TCP listener on `127.0.0.1:{callback_port}`.
 /// 2. Open the user's browser at the authorization URL.
-/// 3. Wait for the callback with the authorization `code`.
+/// 3. Wait for the callback with the authorization `code`, or a pasted redirect URL.
 /// 4. Exchange the code for tokens.
 pub fn login_with_browser(
     provider: &OAuthProviderSpec,
     callback_port: u16,
     open_browser: bool,
+) -> Result<OAuthTokens, String> {
+    login_with_browser_opts(
+        provider,
+        callback_port,
+        BrowserLoginOptions::with_browser(open_browser),
+    )
+}
+
+/// Browser OAuth with configurable manual redirect fallback.
+pub fn login_with_browser_opts(
+    provider: &OAuthProviderSpec,
+    callback_port: u16,
+    options: BrowserLoginOptions,
 ) -> Result<OAuthTokens, String> {
     let redirect_uri = format!("http://127.0.0.1:{}", callback_port);
     let pkce = generate_pkce();
@@ -167,7 +243,23 @@ pub fn login_with_browser(
         t_with_args("llm.oauth.failed_bind_port", &args)
     })?;
 
-    if open_browser {
+    let (tx, rx) = mpsc::channel::<Result<String, String>>();
+    let expected_state = state.clone();
+    let callback_tx = tx.clone();
+    thread::spawn(move || {
+        let result = wait_for_oauth_callback(listener, &expected_state);
+        let _ = callback_tx.send(result);
+    });
+
+    if options.allow_manual_redirect {
+        let manual_state = state.clone();
+        thread::spawn(move || {
+            let result = read_manual_oauth_input(&manual_state);
+            let _ = tx.send(result);
+        });
+    }
+
+    if options.open_browser {
         open_url(&auth_url);
         let mut args = HashMap::new();
         args.insert("display_name".to_string(), provider.display_name.clone());
@@ -180,58 +272,113 @@ pub fn login_with_browser(
         println!("{}", t_with_args("llm.oauth.browser_login_manual", &args));
     }
 
-    // Wait for a single callback.
-    listener.set_nonblocking(false).ok();
-    let (mut stream, _addr) = listener.accept().map_err(|e| {
-        let mut args = HashMap::new();
-        args.insert("error".to_string(), e.to_string());
-        t_with_args("llm.oauth.failed_accept_callback", &args)
-    })?;
-
-    // Read HTTP request.
-    let mut buf = [0u8; 4096];
-    let n = stream.read(&mut buf).map_err(|e| {
-        let mut args = HashMap::new();
-        args.insert("error".to_string(), e.to_string());
-        t_with_args("llm.oauth.failed_read_callback", &args)
-    })?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-
-    // Send a simple HTML response so the user sees a success page.
-    let html = format!(
-        "\
-        HTTP/1.1 200 OK\r\n\
-        Content-Type: text/html; charset=utf-8\r\n\
-        Connection: close\r\n\
-        \r\n\
-        <html><body><h2>{}</h2>\
-        <p>{}</p>\
-        </body></html>",
-        t("llm.oauth.auth_successful"),
-        t("llm.oauth.auth_successful_close")
-    );
-    stream.write_all(html.as_bytes()).ok();
-    let _ = stream.flush();
-
-    // Parse query params from the GET path.
-    let code = parse_callback_query_param(&request, "code").ok_or_else(|| {
-        let error = parse_callback_query_param(&request, "error");
-        match error {
-            Some(e) => {
-                let mut args = HashMap::new();
-                args.insert("error".to_string(), e);
-                t_with_args("llm.oauth.oauth_error", &args)
-            }
-            None => t("llm.oauth.no_auth_code"),
-        }
-    })?;
-
-    let returned_state = parse_callback_query_param(&request, "state");
-    if returned_state.as_deref() != Some(&state) {
-        return Err(t("llm.oauth.state_mismatch"));
+    if options.allow_manual_redirect {
+        println!("{}", t("llm.oauth.browser_login_paste_hint"));
     }
 
+    let mut errors = Vec::new();
+    let mut code = None;
+    let expected_results = if options.allow_manual_redirect { 2 } else { 1 };
+    for _ in 0..expected_results {
+        match rx.recv() {
+            Ok(Ok(received_code)) => {
+                code = Some(received_code);
+                break;
+            }
+            Ok(Err(error)) => errors.push(error),
+            Err(_) => break,
+        }
+    }
+
+    let code = code.ok_or_else(|| errors.join("; "))?;
+
     exchange_code_for_tokens(provider, &code, &redirect_uri, &pkce.code_verifier)
+}
+
+fn wait_for_oauth_callback(listener: TcpListener, expected_state: &str) -> Result<String, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("Failed to configure callback listener: {e}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(BROWSER_LOGIN_TIMEOUT_SECS);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(t("llm.oauth.callback_timeout"));
+        }
+
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).map_err(|e| {
+                    let mut args = HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    t_with_args("llm.oauth.failed_read_callback", &args)
+                })?;
+                let request = String::from_utf8_lossy(&buf[..n]);
+
+                let html = format!(
+                    "\
+                    HTTP/1.1 200 OK\r\n\
+                    Content-Type: text/html; charset=utf-8\r\n\
+                    Connection: close\r\n\
+                    \r\n\
+                    <html><body><h2>{}</h2>\
+                    <p>{}</p>\
+                    </body></html>",
+                    t("llm.oauth.auth_successful"),
+                    t("llm.oauth.auth_successful_close")
+                );
+                stream.write_all(html.as_bytes()).ok();
+                let _ = stream.flush();
+
+                let code = parse_callback_query_param(&request, "code").ok_or_else(|| {
+                    let error = parse_callback_query_param(&request, "error");
+                    match error {
+                        Some(e) => {
+                            let mut args = HashMap::new();
+                            args.insert("error".to_string(), e);
+                            t_with_args("llm.oauth.oauth_error", &args)
+                        }
+                        None => t("llm.oauth.no_auth_code"),
+                    }
+                })?;
+
+                let returned_state = parse_callback_query_param(&request, "state");
+                if returned_state.as_deref() != Some(expected_state) {
+                    return Err(t("llm.oauth.state_mismatch"));
+                }
+
+                return Ok(code);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let mut args = HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                return Err(t_with_args("llm.oauth.failed_accept_callback", &args));
+            }
+        }
+    }
+}
+
+fn read_manual_oauth_input(expected_state: &str) -> Result<String, String> {
+    println!("{}", t("llm.oauth.browser_login_paste_prompt"));
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read redirect URL: {e}"))?;
+
+    let (code, pasted_state) = parse_oauth_authorization_input(&line);
+    let code = code.ok_or_else(|| t("llm.oauth.no_auth_code"))?;
+    if let Some(state) = pasted_state {
+        if state != expected_state {
+            return Err(t("llm.oauth.state_mismatch"));
+        }
+    }
+    Ok(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +605,10 @@ fn parse_callback_query_param(request: &str, key: &str) -> Option<String> {
     let first_line = request.lines().next()?;
     let path_part = first_line.split(' ').nth(1)?;
     let query_string = path_part.split('?').nth(1)?;
+    parse_query_param(query_string, key)
+}
+
+fn parse_query_param(query_string: &str, key: &str) -> Option<String> {
     for pair in query_string.split('&') {
         let mut kv = pair.splitn(2, '=');
         let k = kv.next()?;
@@ -578,6 +729,38 @@ mod tests {
         assert_eq!(loaded.token_type, "Bearer");
         assert_eq!(loaded.scope, Some("openid email".to_string()));
         assert_eq!(loaded.expires_in, Some(3600));
+    }
+
+    #[test]
+    fn test_parse_oauth_authorization_input() {
+        assert_eq!(
+            parse_oauth_authorization_input(
+                "http://localhost:1455/auth/callback?code=oauth-code&state=oauth-state"
+            ),
+            (
+                Some("oauth-code".to_string()),
+                Some("oauth-state".to_string())
+            )
+        );
+        assert_eq!(
+            parse_oauth_authorization_input("code=oauth-code&state=oauth-state"),
+            (
+                Some("oauth-code".to_string()),
+                Some("oauth-state".to_string())
+            )
+        );
+        assert_eq!(
+            parse_oauth_authorization_input("oauth-code#oauth-state"),
+            (
+                Some("oauth-code".to_string()),
+                Some("oauth-state".to_string())
+            )
+        );
+        assert_eq!(
+            parse_oauth_authorization_input(" oauth-code "),
+            (Some("oauth-code".to_string()), None)
+        );
+        assert_eq!(parse_oauth_authorization_input("   "), (None, None));
     }
 
     #[test]

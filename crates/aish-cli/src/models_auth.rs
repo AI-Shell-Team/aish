@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use aish_config::ConfigModel;
 use aish_i18n::{t, t_with_args};
 use aish_llm::providers::codex::{
-    ensure_codex_auth, login_codex_device_code, resolve_codex_auth_path, CODEX_DEFAULT_BASE_URL,
-    CODEX_PROVIDER,
+    ensure_codex_auth_with_options, load_codex_auth, login_codex_browser, login_codex_device_code,
+    resolve_codex_auth_path, CODEX_DEFAULT_BASE_URL, CODEX_PROVIDER,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -75,10 +75,7 @@ pub fn run_models_auth(
         args.insert("provider".to_string(), provider_id.to_string());
         t_with_args("cli.models_auth_title", &args)
     });
-
-    if !force {
-        println!("\x1b[2m{}\x1b[0m", t("cli.checking_existing_auth"));
-    }
+    println!("\x1b[2m{}\x1b[0m", t("cli.models_auth_relogin_hint"));
 
     let auth_path = config
         .codex_auth_path
@@ -88,9 +85,22 @@ pub fn run_models_auth(
 
     let auth_path_ref = auth_path.as_deref();
 
-    let auth_result = match auth_flow {
-        AuthFlow::Browser => ensure_codex_auth(auth_path_ref, open_browser),
-        AuthFlow::DeviceCode | AuthFlow::CodexCli => login_codex_device_code(auth_path_ref),
+    let had_existing = !force
+        && matches!(auth_flow, AuthFlow::Browser)
+        && load_codex_auth(auth_path_ref)
+            .map(|auth| !auth.access_token.is_empty())
+            .unwrap_or(false);
+
+    if !force && !had_existing {
+        println!("\x1b[2m{}\x1b[0m", t("cli.checking_existing_auth"));
+    }
+
+    let auth_result = match (&auth_flow, force) {
+        (AuthFlow::Browser, true) => login_codex_browser(auth_path_ref, open_browser, true),
+        (AuthFlow::Browser, false) => {
+            ensure_codex_auth_with_options(auth_path_ref, open_browser, true)
+        }
+        (AuthFlow::DeviceCode | AuthFlow::CodexCli, _) => login_codex_device_code(auth_path_ref),
     };
 
     match auth_result {
@@ -120,7 +130,11 @@ pub fn run_models_auth(
             println!("\n\x1b[32m{}\x1b[0m", {
                 let mut args = std::collections::HashMap::new();
                 args.insert("provider".to_string(), provider_id.to_string());
-                t_with_args("cli.auth_configured", &args)
+                if had_existing && !force && matches!(auth_flow, AuthFlow::Browser) {
+                    t_with_args("cli.models_auth_existing_kept", &args)
+                } else {
+                    t_with_args("cli.auth_configured", &args)
+                }
             });
             if set_default {
                 println!("\x1b[32m{}\x1b[0m", {
