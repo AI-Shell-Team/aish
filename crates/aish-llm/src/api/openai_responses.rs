@@ -18,7 +18,7 @@ pub async fn stream(
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
     stream: bool,
-    _temperature: Option<f32>,
+    temperature: Option<f32>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
     let message_values = chat_messages_to_values(messages)?;
@@ -35,6 +35,7 @@ pub async fn stream(
             tool_refs,
             "auto",
             max_output,
+            temperature,
             120,
         )
         .await
@@ -52,6 +53,7 @@ pub async fn stream(
         tool_refs,
         "auto",
         max_output,
+        temperature,
         120,
     )
     .await
@@ -73,6 +75,7 @@ pub async fn test_connection(ctx: &StreamContext) -> Result<(), String> {
         None,
         "auto",
         Some(16),
+        None,
         30,
     )
     .await
