@@ -122,6 +122,7 @@ dependencies = [
  "aish-i18n",
  "aish-security",
  "base64 0.22.1",
+ "bytes",
  "futures",
  "langfuse-ergonomic",
  "rand 0.9.4",

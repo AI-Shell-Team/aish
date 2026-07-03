@@ -840,7 +840,7 @@ pub fn collect_codex_stream(events: &[(String, Value)]) -> Result<Value, CodexEr
     Ok(result)
 }
 
-fn extract_stream_failure(payload: &Value) -> String {
+pub(crate) fn extract_stream_failure(payload: &Value) -> String {
     payload
         .get("response")
         .and_then(|v| v.get("error"))
@@ -939,6 +939,31 @@ pub async fn create_openai_responses_with_api_key(
     max_output_tokens: Option<u32>,
     timeout_secs: u64,
 ) -> Result<Value, CodexError> {
+    let resp = create_openai_responses_http_response(
+        api_base,
+        api_key,
+        model,
+        messages,
+        tools,
+        tool_choice,
+        max_output_tokens,
+        timeout_secs,
+    )
+    .await?;
+    read_responses_http_payload(resp).await
+}
+
+/// Send a Platform Responses request and return the raw HTTP response (for SSE translation).
+pub async fn create_openai_responses_http_response(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&[Value]>,
+    tool_choice: &str,
+    max_output_tokens: Option<u32>,
+    timeout_secs: u64,
+) -> Result<reqwest::Response, CodexError> {
     let base = api_base.trim().trim_end_matches('/');
     let url = format!("{base}/responses");
     let request_body = build_codex_request(model, messages, tools, tool_choice, max_output_tokens);
@@ -958,7 +983,14 @@ pub async fn create_openai_responses_with_api_key(
             .await;
 
         match result {
-            Ok(resp) => return read_responses_http_payload(resp).await,
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                let text = resp.text().await.unwrap_or_default();
+                return Err(CodexError::Http(format!("{status} {text}")));
+            }
             Err(e) if e.is_connect() || e.is_timeout() => {
                 warn!(attempt, "Transport error: {e}");
                 if attempt + 1 >= CODEX_MAX_REQUEST_ATTEMPTS {
@@ -990,6 +1022,29 @@ pub async fn create_codex_chat_completion(
     auth_path: Option<&Path>,
     timeout_secs: u64,
 ) -> Result<Value, CodexError> {
+    let resp = create_codex_http_response(
+        model,
+        messages,
+        tools,
+        tool_choice,
+        api_base,
+        auth_path,
+        timeout_secs,
+    )
+    .await?;
+    read_responses_http_payload(resp).await
+}
+
+/// Send a Codex Responses request and return the raw HTTP response (for SSE translation).
+pub async fn create_codex_http_response(
+    model: &str,
+    messages: &[Value],
+    tools: Option<&[Value]>,
+    tool_choice: &str,
+    api_base: Option<&str>,
+    auth_path: Option<&Path>,
+    timeout_secs: u64,
+) -> Result<reqwest::Response, CodexError> {
     let base_url = resolve_codex_base_url(api_base);
     let url = format!("{}/responses", base_url);
 
@@ -1039,7 +1094,7 @@ pub async fn create_codex_chat_completion(
                     return Err(CodexError::Http(format!("{status} {text}")));
                 }
 
-                return read_responses_http_payload(resp).await;
+                return Ok(resp);
             }
             Err(e) if e.is_connect() || e.is_timeout() => {
                 warn!(attempt, "Transport error: {e}");
@@ -1062,7 +1117,7 @@ pub async fn create_codex_chat_completion(
 }
 
 /// Parse SSE text into a list of (event_type, payload) tuples.
-fn parse_sse_text(text: &str) -> Vec<(String, Value)> {
+pub(crate) fn parse_sse_text(text: &str) -> Vec<(String, Value)> {
     let mut events = Vec::new();
     let mut event_type: Option<String> = None;
     let mut data_lines: Vec<String> = Vec::new();
