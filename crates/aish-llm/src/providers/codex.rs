@@ -373,7 +373,7 @@ pub async fn refresh_codex_auth(auth: &CodexAuthState) -> Result<CodexAuthState,
 pub fn codex_oauth_provider() -> OAuthProviderSpec {
     OAuthProviderSpec {
         provider_id: CODEX_PROVIDER.to_string(),
-        display_name: "OpenAI Codex".to_string(),
+        display_name: "Codex".to_string(),
         client_id: CODEX_CLIENT_ID.to_string(),
         scope: CODEX_OAUTH_SCOPE.to_string(),
         authorize_url: CODEX_AUTHORIZE_URL.to_string(),
@@ -476,6 +476,7 @@ pub fn build_codex_request(
     messages: &[Value],
     tools: Option<&[Value]>,
     tool_choice: &str,
+    max_output_tokens: Option<u32>,
 ) -> Value {
     let mut instructions: Vec<String> = Vec::new();
     let mut input_items: Vec<Value> = Vec::new();
@@ -558,7 +559,7 @@ pub fn build_codex_request(
 
     let converted_tools = convert_tools_for_codex(tools.unwrap_or(&[]));
 
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": strip_codex_prefix(model),
         "instructions": instructions_str,
         "input": input_items,
@@ -568,7 +569,11 @@ pub fn build_codex_request(
         "store": false,
         "stream": true,
         "include": [],
-    })
+    });
+    if let Some(max_tokens) = max_output_tokens.filter(|n| *n > 0) {
+        body["max_output_tokens"] = Value::from(max_tokens);
+    }
+    body
 }
 
 fn coerce_message_text(val: Option<&Value>) -> Option<String> {
@@ -702,12 +707,31 @@ pub fn convert_codex_response(payload: &Value) -> Value {
         message["tool_calls"] = Value::Array(tool_calls);
     }
 
-    serde_json::json!({
+    let mut result = serde_json::json!({
         "choices": [{
             "message": message,
             "finish_reason": finish_reason,
         }]
-    })
+    });
+
+    if let Some(usage) = payload.get("usage") {
+        let prompt_tokens = usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let completion_tokens = usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        result["usage"] = serde_json::json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        });
+    }
+
+    result
 }
 
 fn extract_response_text(content: Option<&Value>) -> Option<String> {
@@ -841,6 +865,12 @@ fn build_headers(auth: &CodexAuthState) -> reqwest::header::HeaderMap {
     if let Ok(val) = "application/json".parse() {
         headers.insert(reqwest::header::CONTENT_TYPE, val);
     }
+    if let Ok(val) = "text/event-stream".parse() {
+        headers.insert(reqwest::header::ACCEPT, val);
+    }
+    if let Ok(val) = "responses=experimental".parse() {
+        headers.insert("OpenAI-Beta", val);
+    }
     let ua = format!(
         "{}/0.0.0 (aish; Rust; {} {})",
         CODEX_ORIGINATOR,
@@ -854,6 +884,96 @@ fn build_headers(auth: &CodexAuthState) -> reqwest::header::HeaderMap {
         headers.insert("originator", val);
     }
     headers
+}
+
+fn build_platform_responses_headers(api_key: &str) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(val) = format!("Bearer {api_key}").parse() {
+        headers.insert(reqwest::header::AUTHORIZATION, val);
+    }
+    if let Ok(val) = "application/json".parse() {
+        headers.insert(reqwest::header::CONTENT_TYPE, val);
+    }
+    if let Ok(val) = "text/event-stream".parse() {
+        headers.insert(reqwest::header::ACCEPT, val);
+    }
+    headers
+}
+
+async fn read_responses_http_payload(resp: reqwest::Response) -> Result<Value, CodexError> {
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(CodexError::Http(format!("{status} {text}")));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if content_type.contains("text/event-stream") || content_type.is_empty() {
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| CodexError::Stream(format!("Failed to read stream: {e}")))?;
+        let events = parse_sse_text(&text);
+        collect_codex_stream(&events)
+    } else {
+        resp.json()
+            .await
+            .map_err(|e| CodexError::Request(format!("Invalid JSON response: {e}")))
+    }
+}
+
+/// Create a chat completion using the OpenAI Platform Responses API and an API key.
+pub async fn create_openai_responses_with_api_key(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[Value],
+    tools: Option<&[Value]>,
+    tool_choice: &str,
+    max_output_tokens: Option<u32>,
+    timeout_secs: u64,
+) -> Result<Value, CodexError> {
+    let base = api_base.trim().trim_end_matches('/');
+    let url = format!("{base}/responses");
+    let request_body = build_codex_request(model, messages, tools, tool_choice, max_output_tokens);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| CodexError::Request(format!("Failed to build HTTP client: {e}")))?;
+
+    for attempt in 0..CODEX_MAX_REQUEST_ATTEMPTS {
+        debug!(attempt, "Sending OpenAI Platform Responses request");
+        let result = client
+            .post(&url)
+            .headers(build_platform_responses_headers(api_key))
+            .json(&request_body)
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) => return read_responses_http_payload(resp).await,
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                warn!(attempt, "Transport error: {e}");
+                if attempt + 1 >= CODEX_MAX_REQUEST_ATTEMPTS {
+                    return Err(CodexError::Request(format!(
+                        "Failed after {CODEX_MAX_REQUEST_ATTEMPTS} attempts: {e}"
+                    )));
+                }
+            }
+            Err(e) => return Err(CodexError::Request(format!("Request failed: {e}"))),
+        }
+    }
+
+    Err(CodexError::Request(
+        "Failed after all retry attempts".to_string(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -873,7 +993,7 @@ pub async fn create_codex_chat_completion(
     let base_url = resolve_codex_base_url(api_base);
     let url = format!("{}/responses", base_url);
 
-    let request_body = build_codex_request(model, messages, tools, tool_choice);
+    let request_body = build_codex_request(model, messages, tools, tool_choice, None);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -919,31 +1039,7 @@ pub async fn create_codex_chat_completion(
                     return Err(CodexError::Http(format!("{status} {text}")));
                 }
 
-                // Parse response.
-                let content_type = resp
-                    .headers()
-                    .get(reqwest::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                if content_type.contains("text/event-stream") || content_type.is_empty() {
-                    // SSE streaming response — collect all chunks.
-                    let text = resp
-                        .text()
-                        .await
-                        .map_err(|e| CodexError::Stream(format!("Failed to read stream: {e}")))?;
-                    let events = parse_sse_text(&text);
-                    let payload = collect_codex_stream(&events)?;
-                    return Ok(convert_codex_response(&payload));
-                } else {
-                    // JSON response.
-                    let body: Value = resp
-                        .json()
-                        .await
-                        .map_err(|e| CodexError::Request(format!("Invalid JSON response: {e}")))?;
-                    return Ok(convert_codex_response(&body));
-                }
+                return read_responses_http_payload(resp).await;
             }
             Err(e) if e.is_connect() || e.is_timeout() => {
                 warn!(attempt, "Transport error: {e}");
@@ -1083,15 +1179,15 @@ impl ProviderAdapter for CodexProviderAdapter {
     }
 
     fn display_name(&self) -> &str {
-        "OpenAI Codex"
+        "Codex"
     }
 
     fn metadata(&self) -> ProviderMetadata {
         ProviderMetadata {
             provider_id: CODEX_PROVIDER.to_string(),
-            display_name: "OpenAI Codex".to_string(),
+            display_name: "Codex".to_string(),
             dashboard_url: Some("https://codex.ai/settings".to_string()),
-            api_key_env_var: "AISH_CODEX_AUTH_PATH".to_string(),
+            api_key_env_var: "OPENAI_API_KEY".to_string(),
             supports_streaming: true,
             supports_tools: true,
             uses_custom_client: true,
@@ -1225,12 +1321,18 @@ mod tests {
     }
 
     #[test]
+    fn test_build_codex_request_max_output_tokens() {
+        let req = build_codex_request("gpt-5.4", &[], None, "auto", Some(128));
+        assert_eq!(req["max_output_tokens"], 128);
+    }
+
+    #[test]
     fn test_build_codex_request_system() {
         let messages = vec![serde_json::json!({
             "role": "system",
             "content": "You are helpful."
         })];
-        let req = build_codex_request("gpt-5.4", &messages, None, "auto");
+        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None);
         assert_eq!(req["instructions"], "You are helpful.");
         assert_eq!(req["model"], "gpt-5.4");
     }
@@ -1241,7 +1343,7 @@ mod tests {
             serde_json::json!({"role": "user", "content": "Hello"}),
             serde_json::json!({"role": "assistant", "content": "Hi there"}),
         ];
-        let req = build_codex_request("gpt-5.4", &messages, None, "auto");
+        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None);
         let input = req["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "message");
@@ -1271,7 +1373,7 @@ mod tests {
                 "content": "file1.txt\nfile2.txt"
             }),
         ];
-        let req = build_codex_request("gpt-5.4", &messages, None, "auto");
+        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None);
         let input = req["input"].as_array().unwrap();
         // user message + function_call + function_call_output
         assert_eq!(input.len(), 3);
@@ -1289,7 +1391,7 @@ mod tests {
                 "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
             }
         })];
-        let req = build_codex_request("gpt-5.4", &[], Some(&tools), "auto");
+        let req = build_codex_request("gpt-5.4", &[], Some(&tools), "auto", None);
         let converted = req["tools"].as_array().unwrap();
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["name"], "bash");
@@ -1310,6 +1412,33 @@ mod tests {
         assert_eq!(msg["content"], "Hello!");
         assert_eq!(msg["role"], "assistant");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn test_convert_codex_response_usage() {
+        let payload = serde_json::json!({
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hi"}]
+            }],
+            "usage": {"input_tokens": 42, "output_tokens": 7}
+        });
+        let result = convert_codex_response(&payload);
+        assert_eq!(result["usage"]["prompt_tokens"], 42);
+        assert_eq!(result["usage"]["completion_tokens"], 7);
+    }
+
+    #[test]
+    fn test_double_convert_codex_response_is_empty() {
+        let payload = serde_json::json!({
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello!"}]
+            }]
+        });
+        let once = convert_codex_response(&payload);
+        let twice = convert_codex_response(&once);
+        assert_eq!(twice["choices"][0]["message"]["content"], "");
     }
 
     #[test]
@@ -1423,13 +1552,14 @@ mod tests {
     fn test_codex_provider_adapter() {
         let adapter = CodexProviderAdapter;
         assert_eq!(adapter.provider_id(), "openai-codex");
-        assert_eq!(adapter.display_name(), "OpenAI Codex");
+        assert_eq!(adapter.display_name(), "Codex");
         assert!(adapter.matches_model("openai-codex/gpt-5.4"));
         assert!(!adapter.matches_model("gpt-4o"));
         assert!(adapter.matches_api_base("https://chatgpt.com"));
         assert!(!adapter.matches_api_base("https://api.openai.com"));
 
         let meta = adapter.metadata();
+        assert_eq!(meta.api_key_env_var, "OPENAI_API_KEY");
         assert!(meta.uses_custom_client);
         assert!(meta.dashboard_url.is_some());
 

@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use aish_context::{ContextBudgetPolicy, ContextMessage, ContextPressureLevel, MicrocompactReport};
 use aish_core::{AishError, LlmEvent, LlmEventType, MemoryType, PlanModeState, PlanPhase};
 
-use crate::client::{LlmClient, LlmResponse};
+use crate::api::{resolve_api_dialect, stream_simple, ApiDialect, StreamContext};
+use crate::client::LlmResponse;
 use crate::langfuse::LangfuseClient;
 use crate::streaming::{extract_message_text, SseEvent, StreamParser};
 use crate::types::*;
@@ -25,7 +26,8 @@ const COMPACT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize old AI Shell context 
 
 /// Main LLM session that orchestrates the chat loop with tool calling.
 pub struct LlmSession {
-    client: LlmClient,
+    stream_ctx: StreamContext,
+    api_dialect: ApiDialect,
     tools: HashMap<String, Box<dyn Tool>>,
     cancellation_token: Arc<CancellationToken>,
     event_callback: Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>>,
@@ -61,8 +63,26 @@ impl LlmSession {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Self {
+        Self::with_context(
+            StreamContext::new(api_base, api_key, model, None),
+            temperature,
+            max_tokens,
+        )
+    }
+
+    pub fn with_context(
+        stream_ctx: StreamContext,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+    ) -> Self {
+        let api_dialect = resolve_api_dialect(
+            &stream_ctx.config_model,
+            &stream_ctx.api_base,
+            &stream_ctx.api_key,
+        );
         Self {
-            client: LlmClient::new(api_base, api_key, model),
+            stream_ctx,
+            api_dialect,
             tools: HashMap::with_capacity(16),
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: None,
@@ -239,18 +259,46 @@ impl LlmSession {
 
     /// Update the model, optionally also updating API base and key.
     pub fn update_model(&mut self, model: &str, api_base: Option<&str>, api_key: Option<&str>) {
-        if let Some(base) = api_base {
-            self.client.update_api_base(base);
-        }
-        if let Some(key) = api_key {
-            self.client.update_api_key(key);
-        }
-        self.client.update_model(model);
+        self.stream_ctx.refresh_dialect(model, api_base, api_key);
+        self.api_dialect = resolve_api_dialect(
+            &self.stream_ctx.config_model,
+            &self.stream_ctx.api_base,
+            &self.stream_ctx.api_key,
+        );
     }
 
     /// Return the current model name.
     pub fn model_name(&self) -> &str {
-        self.client.model_name()
+        &self.stream_ctx.model
+    }
+
+    /// Resolved model name sent to the API (prefixes stripped when applicable).
+    pub fn resolved_model_name(&self) -> String {
+        self.stream_ctx.resolved_model()
+    }
+
+    pub fn api_dialect(&self) -> ApiDialect {
+        self.api_dialect
+    }
+
+    async fn chat_completion(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        stream: bool,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+    ) -> Result<LlmResponse, AishError> {
+        stream_simple(
+            self.api_dialect,
+            &self.stream_ctx,
+            messages,
+            tools,
+            stream,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     /// Low-level chat completion returning the raw API response.
@@ -262,8 +310,7 @@ impl LlmSession {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
-        self.client
-            .chat_completion(messages, tools, stream, temperature, max_tokens)
+        self.chat_completion(messages, tools, stream, temperature, max_tokens)
             .await
     }
 
@@ -357,10 +404,10 @@ impl LlmSession {
 
         messages = self.prepare_messages_for_send(messages).await;
 
-        // Set cache breakpoint on system message for Anthropic models only.
-        // Non-Anthropic providers may reject unknown fields in the request body.
-        let is_anthropic = self.client.model_name().contains("claude");
-        if is_anthropic {
+        // OpenAI-compat prompt cache hint for Claude models on proxy endpoints only.
+        let is_openai_compat_claude = self.api_dialect == ApiDialect::OpenAiCompletions
+            && self.stream_ctx.model.to_lowercase().contains("claude");
+        if is_openai_compat_claude {
             if let Some(msg) = messages.first_mut() {
                 if msg.role == "system" {
                     msg.cache_control = Some(CacheControl::ephemeral());
@@ -442,7 +489,6 @@ impl LlmSession {
             });
 
             let response = match self
-                .client
                 .chat_completion(
                     &messages,
                     if has_tools { Some(&tool_specs) } else { None },
@@ -490,11 +536,12 @@ impl LlmSession {
                                 .load(std::sync::atomic::Ordering::Relaxed),
                             iterations
                         );
+                        let resolved_model = self.stream_ctx.resolved_model();
                         langfuse
                             .span_generation(
                                 tid,
                                 &span_name,
-                                self.client.model_name(),
+                                &resolved_model,
                                 serde_json::json!(messages),
                                 content.as_deref().unwrap_or(""),
                                 pt,
@@ -798,11 +845,12 @@ impl LlmSession {
                                 .load(std::sync::atomic::Ordering::Relaxed),
                             iterations
                         );
+                        let resolved_model = self.stream_ctx.resolved_model();
                         langfuse
                             .span_generation(
                                 tid,
                                 &span_name,
-                                self.client.model_name(),
+                                &resolved_model,
                                 serde_json::json!(messages),
                                 &accumulated,
                                 stream_prompt_tokens,
@@ -1021,7 +1069,6 @@ impl LlmSession {
         messages.push(ChatMessage::user(prompt));
 
         let response = self
-            .client
             .chat_completion(&messages, None, stream, self.temperature, self.max_tokens)
             .await?;
 
@@ -1202,11 +1249,8 @@ impl LlmSession {
     /// The caller is responsible for registering tools in the subsession.
     pub fn create_subsession(&self) -> Self {
         Self {
-            client: LlmClient::new(
-                self.client.api_base(),
-                self.client.api_key(),
-                self.client.model_name(),
-            ),
+            stream_ctx: self.stream_ctx.clone(),
+            api_dialect: self.api_dialect,
             tools: HashMap::with_capacity(16),
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: self.event_callback.clone(),
@@ -1466,7 +1510,6 @@ impl LlmSession {
         ];
         let max_tokens = summary_max_tokens.min(u32::MAX as usize) as u32;
         let response = self
-            .client
             .chat_completion(&messages, None, false, Some(0.1), Some(max_tokens))
             .await?;
         match response {
@@ -2479,12 +2522,42 @@ mod tests {
     }
 
     #[test]
-    fn test_client_getters() {
-        use crate::client::LlmClient;
-        let client = LlmClient::new("https://api.example.com/v1", "sk-key123", "gpt-4o");
-        assert_eq!(client.api_base(), "https://api.example.com/v1");
-        assert_eq!(client.api_key(), "sk-key123");
-        assert_eq!(client.model_name(), "gpt-4o");
+    fn test_session_codex_api_key_uses_openai_responses() {
+        let session = LlmSession::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            "openai-codex/gpt-5.4",
+            None,
+            None,
+        );
+        assert_eq!(session.api_dialect(), ApiDialect::OpenAiResponses);
+        assert_eq!(session.resolved_model_name(), "gpt-5.4");
+    }
+
+    #[test]
+    fn test_session_codex_oauth_uses_chatgpt_responses() {
+        let session = LlmSession::new(
+            "https://chatgpt.com/backend-api/codex",
+            "",
+            "openai-codex/gpt-5.4",
+            None,
+            None,
+        );
+        assert_eq!(session.api_dialect(), ApiDialect::OpenAiChatgptResponses);
+    }
+
+    #[test]
+    fn test_stream_context_getters() {
+        let session = LlmSession::new(
+            "https://api.example.com/v1",
+            "sk-key123",
+            "gpt-4o",
+            None,
+            None,
+        );
+        assert_eq!(session.model_name(), "gpt-4o");
+        assert_eq!(session.resolved_model_name(), "gpt-4o");
+        assert_eq!(session.api_dialect(), ApiDialect::OpenAiCompletions);
     }
 
     #[test]

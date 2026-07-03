@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use super::anthropic::AnthropicProviderAdapter;
 use super::codex::CodexProviderAdapter;
 use super::openai_compat::OpenAiCompatProvider;
 use super::types::ProviderAdapter;
@@ -21,6 +22,7 @@ impl ProviderRegistry {
         Self {
             providers: vec![
                 Arc::new(CodexProviderAdapter),
+                Arc::new(AnthropicProviderAdapter),
                 Arc::new(OpenAiCompatProvider),
             ],
         }
@@ -176,7 +178,7 @@ mod tests {
     fn test_registry_default() {
         let registry = ProviderRegistry::new();
         let ids = registry.list_provider_ids();
-        assert_eq!(ids, vec!["openai-codex", "openai-compat"]);
+        assert_eq!(ids, vec!["openai-codex", "anthropic", "openai-compat"]);
     }
 
     #[test]
@@ -237,6 +239,14 @@ mod tests {
         registry.register(Arc::new(TestProvider));
         let ids = registry.list_provider_ids();
         // TestProvider should appear before the fallbacks.
-        assert_eq!(ids, vec!["openai-codex", "test-provider", "openai-compat"]);
+        assert_eq!(
+            ids,
+            vec![
+                "openai-codex",
+                "anthropic",
+                "test-provider",
+                "openai-compat"
+            ]
+        );
     }
 }

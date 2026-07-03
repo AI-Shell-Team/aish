@@ -1,9 +1,13 @@
 //! Provider authentication flows (OAuth, device-code, etc.).
 
-use std::io::{self, Write};
+use std::path::PathBuf;
 
 use aish_config::ConfigModel;
 use aish_i18n::{t, t_with_args};
+use aish_llm::providers::codex::{
+    login_codex_browser, login_codex_device_code, resolve_codex_auth_path, CODEX_DEFAULT_BASE_URL,
+    CODEX_PROVIDER,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum AuthFlow {
@@ -20,9 +24,9 @@ struct AuthProviderInfo {
 
 fn get_auth_capable_providers() -> Vec<AuthProviderInfo> {
     vec![AuthProviderInfo {
-        id: "openai-codex".to_string(),
-        _display_name: "OpenAI Codex".to_string(),
-        default_model: "codex-mini".to_string(),
+        id: CODEX_PROVIDER.to_string(),
+        _display_name: "Codex".to_string(),
+        default_model: "gpt-5.4".to_string(),
     }]
 }
 
@@ -37,7 +41,7 @@ pub fn run_models_auth(
     provider: Option<&str>,
     model: &str,
     set_default: bool,
-    _auth_flow: AuthFlow,
+    auth_flow: AuthFlow,
     force: bool,
     open_browser: bool,
     _callback_port: u16,
@@ -76,46 +80,43 @@ pub fn run_models_auth(
         println!("\x1b[2m{}\x1b[0m", t("cli.checking_existing_auth"));
     }
 
-    println!("\x1b[33m{}\x1b[0m", t("cli.oauth_not_implemented"));
-    println!("{}\n", t("cli.oauth_hint"));
+    let auth_path = config
+        .codex_auth_path
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| Some(resolve_codex_auth_path(None)));
 
-    if !open_browser {
-        println!("{}\x1b[0m", t("cli.skipping_browser"));
-    }
+    let auth_path_ref = auth_path.as_deref();
 
-    print!("Auth token: ");
-    io::stdout().flush().unwrap();
-    let mut token = String::new();
-    if io::stdin().read_line(&mut token).is_err() {
-        eprintln!("\x1b[31m{}\x1b[0m", t("cli.token_read_failed"));
-        return;
-    }
-    let token = token.trim();
-
-    if token.is_empty() {
-        eprintln!("\x1b[31m{}\x1b[0m", t("cli.token_empty"));
-        return;
-    }
-
-    let resolved_model = if model.is_empty() {
-        get_auth_capable_providers()
-            .iter()
-            .find(|p| p.id == provider_id)
-            .map(|p| p.default_model.clone())
-            .unwrap_or_else(|| "default".to_string())
-    } else {
-        model.to_string()
+    let auth_result = match auth_flow {
+        AuthFlow::Browser => login_codex_browser(auth_path_ref, open_browser),
+        AuthFlow::DeviceCode | AuthFlow::CodexCli => login_codex_device_code(auth_path_ref),
     };
 
-    config.api_key = token.to_string();
+    match auth_result {
+        Ok(auth) => {
+            if let Some(path) = auth_path {
+                config.codex_auth_path = Some(path.display().to_string());
+            }
+            config.api_key.clear();
 
-    if set_default {
-        config.model = format!("{}/{}", provider_id, resolved_model);
-    }
+            let resolved_model = if model.is_empty() {
+                get_auth_capable_providers()
+                    .iter()
+                    .find(|p| p.id == provider_id)
+                    .map(|p| format!("{}/{}", p.id, p.default_model))
+                    .unwrap_or_else(|| format!("{}/gpt-5.4", CODEX_PROVIDER))
+            } else if model.contains('/') {
+                model.to_string()
+            } else {
+                format!("{}/{}", provider_id, model)
+            };
 
-    let config_path = aish_config::ConfigLoader::default_config_path();
-    match aish_config::ConfigLoader::save(config, &config_path) {
-        Ok(()) => {
+            if set_default {
+                config.model = resolved_model;
+                config.api_base = CODEX_DEFAULT_BASE_URL.to_string();
+            }
+
             println!("\n\x1b[32m{}\x1b[0m", {
                 let mut args = std::collections::HashMap::new();
                 args.insert("provider".to_string(), provider_id.to_string());
@@ -128,7 +129,21 @@ pub fn run_models_auth(
                     t_with_args("cli.default_model_set_success", &args)
                 });
             }
+            println!(
+                "\x1b[2mAccount: {} | auth: {}\x1b[0m",
+                auth.account_id,
+                auth.auth_path.display()
+            );
         }
+        Err(e) => {
+            eprintln!("\x1b[31m{}\x1b[0m", e);
+            std::process::exit(1);
+        }
+    }
+
+    let config_path = aish_config::ConfigLoader::default_config_path();
+    match aish_config::ConfigLoader::save(config, &config_path) {
+        Ok(()) => {}
         Err(e) => {
             eprintln!("\x1b[31m{}\x1b[0m", {
                 let mut args = std::collections::HashMap::new();

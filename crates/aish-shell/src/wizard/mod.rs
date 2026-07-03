@@ -53,6 +53,8 @@ pub fn apply_setup_result(existing: &ConfigModel, setup: ConfigModel) -> ConfigM
 fn default_api_base_for_provider(provider_key: &str) -> Option<String> {
     match provider_key {
         "openai" => Some("https://api.openai.com/v1".to_string()),
+        "anthropic" => Some("https://api.anthropic.com".to_string()),
+        "openai-codex" => Some("https://chatgpt.com/backend-api/codex".to_string()),
         "deepseek" => Some("https://api.deepseek.com/v1".to_string()),
         "gemini" | "google" => {
             Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string())
@@ -116,8 +118,12 @@ pub fn get_all_providers() -> Vec<ProviderInfo> {
         ProviderInfo::new("openai", "OpenAI").with_env_key("OPENAI_API_KEY"),
         // 3. Anthropic
         ProviderInfo::new("anthropic", "Anthropic")
-            .with_custom_api_base()
+            .with_api_base("https://api.anthropic.com")
             .with_env_key("ANTHROPIC_API_KEY"),
+        // 3b. Codex (ChatGPT OAuth or OpenAI API key)
+        ProviderInfo::new("openai-codex", "Codex")
+            .with_api_base("https://chatgpt.com/backend-api/codex")
+            .with_env_key("OPENAI_API_KEY"),
         // 4. DeepSeek
         ProviderInfo::new("deepseek", "DeepSeek").with_env_key("DEEPSEEK_API_KEY"),
         // 5. Gemini
@@ -197,10 +203,10 @@ pub fn get_provider_models(provider_key: &str) -> Vec<String> {
             "gpt-3.5-turbo".into(),
         ],
         "anthropic" => vec![
+            "claude-sonnet-4-20250514".into(),
             "claude-3-5-sonnet-20241022".into(),
             "claude-3-5-haiku-20241022".into(),
             "claude-3-opus-20240229".into(),
-            "claude-3-sonnet-20240229".into(),
         ],
         "gemini" | "google" => vec![
             "gemini-2.5-flash-preview".into(),
@@ -210,7 +216,7 @@ pub fn get_provider_models(provider_key: &str) -> Vec<String> {
         ],
         "deepseek" => vec!["deepseek-chat".into(), "deepseek-coder".into()],
         "xai" => vec!["grok-4".into()],
-        "openai-codex" => vec!["gpt-5.4".into()],
+        "openai-codex" => vec!["openai-codex/gpt-5.4".into()],
         "ollama" => vec![
             "llama3.2".into(),
             "llama3.1".into(),
@@ -703,12 +709,16 @@ impl SetupWizard {
         }
     }
 
-    /// Step 2: API key input.
+    /// Step 2: API key input (or Codex auth method selection).
     fn prompt_api_key(&mut self) -> Result<(), AishError> {
         let provider = self
             .selected_provider
             .as_ref()
             .ok_or(AishError::Cancelled)?;
+
+        if provider.key == "openai-codex" {
+            return self.prompt_codex_auth();
+        }
 
         // Check environment variable
         let env_value = provider.env_key.as_ref().and_then(|k| {
@@ -733,6 +743,56 @@ impl SetupWizard {
         let api_key = prompts::prompt_api_key_value(env_value.as_deref())?;
         self.api_key = Some(api_key);
         Ok(())
+    }
+
+    /// Codex auth: ChatGPT OAuth (subscription) or OpenAI Platform API key.
+    fn prompt_codex_auth(&mut self) -> Result<(), AishError> {
+        let options = vec![
+            DialogOption::new("oauth", t("cli.setup.codex_auth_oauth"))
+                .with_description(t("cli.setup.codex_auth_oauth_hint")),
+            DialogOption::new("api-key", t("cli.setup.codex_auth_api_key"))
+                .with_description(t("cli.setup.codex_auth_api_key_hint")),
+        ];
+
+        let result = show_selection(
+            &t("cli.setup.codex_auth_header"),
+            &t("cli.setup.select_hint"),
+            &options,
+        )?;
+
+        match result {
+            DialogResult::Selected(key) if key == "oauth" => {
+                println!("  {}", t("cli.setup.codex_oauth_setup_hint"));
+                self.api_key = Some(String::new());
+                self.api_base = Some(
+                    default_api_base_for_provider("openai-codex")
+                        .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
+                );
+                Ok(())
+            }
+            DialogResult::Selected(key) if key == "api-key" => {
+                self.api_base = Some(
+                    default_api_base_for_provider("openai")
+                        .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
+                );
+                let env_value = std::env::var("OPENAI_API_KEY").ok();
+                if let Some(ref value) = env_value {
+                    let masked = mask_secret(value);
+                    println!(
+                        "  {}",
+                        t("cli.setup.api_key_env_found")
+                            .replace("{env_key}", "OPENAI_API_KEY")
+                            .replace("{masked}", &masked)
+                    );
+                    println!("  {}", t("cli.setup.api_key_env_hint"));
+                }
+                let api_key = prompts::prompt_api_key_value(env_value.as_deref())?;
+                self.api_key = Some(api_key);
+                Ok(())
+            }
+            DialogResult::Cancelled => Err(AishError::Cancelled),
+            _ => Err(AishError::Cancelled),
+        }
     }
 
     /// Step 3: Model selection (with dynamic fetch from provider API).
@@ -814,6 +874,7 @@ impl SetupWizard {
             .selected_provider
             .as_ref()
             .ok_or(AishError::Cancelled)?;
+        let provider_key = _provider.key.clone();
         let model = self
             .selected_model
             .as_ref()
@@ -824,17 +885,18 @@ impl SetupWizard {
             .as_ref()
             .ok_or_else(|| AishError::Config("No API base configured".to_string()))?
             .clone();
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| AishError::Config("No API key configured".to_string()))?
-            .clone();
+        let api_key = self.api_key.clone().unwrap_or_default();
+        let uses_codex_oauth = provider_key == "openai-codex" && api_key.is_empty();
+        if !uses_codex_oauth && api_key.is_empty() {
+            return Err(AishError::Config("No API key configured".to_string()));
+        }
         let api_model = resolve_model_for_api(&model, &api_base);
 
         let connectivity_msg = t("cli.setup.verify_connectivity_in_progress");
         clack_log::step(&connectivity_msg);
         let conn = clack_log::with_spinner("...", || {
-            verification::check_connectivity(
+            verification::check_connectivity_for_provider(
+                &provider_key,
                 &api_base,
                 &api_key,
                 &api_model,
@@ -857,7 +919,8 @@ impl SetupWizard {
         let tool_msg = t("cli.setup.verify_tool_in_progress");
         clack_log::step(&tool_msg);
         let tool_result = clack_log::with_spinner("...", || {
-            verification::check_tool_support(
+            verification::check_tool_support_for_provider(
+                &provider_key,
                 &api_base,
                 &api_key,
                 &api_model,
@@ -1118,6 +1181,7 @@ mod tests {
         assert!(providers.iter().any(|p| p.key == "openrouter"));
         assert!(providers.iter().any(|p| p.key == "openai"));
         assert!(providers.iter().any(|p| p.key == "anthropic"));
+        assert!(providers.iter().any(|p| p.key == "openai-codex"));
         assert!(providers.iter().any(|p| p.key == "qianfan"));
         assert!(providers.iter().any(|p| p.key == "mistral"));
         assert!(providers.iter().any(|p| p.key == "ollama"));
