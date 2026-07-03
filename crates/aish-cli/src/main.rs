@@ -457,37 +457,19 @@ fn check_tool_support(
     println!("Checking tool calling support for: {}", model);
     println!("API Base: {}", api_base);
 
-    // Send a simple request with a tool definition to test support
+    // Mirror interactive shell: dialect-aware streaming request with normal token budget.
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        let client = aish_llm::LlmClient::new(&api_base, &api_key, &model);
-        let messages = vec![aish_llm::ChatMessage::user(
-            "Reply with just 'ok'. Do not use any tools.",
-        )];
-        let tool = aish_llm::ToolSpec {
-            r#type: "function".to_string(),
-            function: aish_llm::FunctionSpec {
-                name: "test_tool".to_string(),
-                description: "A test tool".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "input": {"type": "string"}
-                    }
-                }),
-            },
-        };
-        client
-            .chat_completion(&messages, Some(&[tool]), false, Some(0.0), Some(10))
-            .await
-    });
+    let result = rt.block_on(aish_llm::probe_live_tool_support(
+        &api_base, &api_key, &model,
+    ));
 
     match result {
-        Ok(_) => {
+        Ok(()) => {
             println!("\x1b[32mTool calling is supported.\x1b[0m");
         }
         Err(e) => {
-            println!("\x1b[31mTool calling may not be supported: {}\x1b[0m", e);
+            eprintln!("\x1b[31mTool calling may not be supported: {}\x1b[0m", e);
+            std::process::exit(1);
         }
     }
 }
