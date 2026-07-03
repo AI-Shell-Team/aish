@@ -20,6 +20,8 @@ use std::path::PathBuf;
 use aish_config::ConfigModel;
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
+use aish_llm::providers::codex::ensure_codex_auth;
+use aish_llm::providers::codex::load_codex_auth;
 use aish_llm::{normalize_model_for_provider, resolve_model_for_api};
 
 use crate::tui::{DialogOption, DialogResult, CUSTOM_DIALOG_VALUE};
@@ -46,6 +48,7 @@ pub fn apply_setup_result(existing: &ConfigModel, setup: ConfigModel) -> ConfigM
     merged.api_base = setup.api_base;
     merged.api_key = setup.api_key;
     merged.is_free_key = setup.is_free_key;
+    merged.codex_auth_path = setup.codex_auth_path;
     merged
 }
 
@@ -320,6 +323,7 @@ pub struct SetupWizard {
     selected_provider: Option<ProviderInfo>,
     api_base: Option<String>,
     api_key: Option<String>,
+    codex_auth_path: Option<PathBuf>,
     selected_model: Option<String>,
     is_free_key: bool,
 }
@@ -340,6 +344,7 @@ impl SetupWizard {
             selected_provider: None,
             api_base: None,
             api_key: None,
+            codex_auth_path: None,
             selected_model: None,
             is_free_key: false,
         }
@@ -745,6 +750,33 @@ impl SetupWizard {
         Ok(())
     }
 
+    fn uses_codex_oauth(&self) -> bool {
+        self.selected_provider
+            .as_ref()
+            .is_some_and(|p| p.key == "openai-codex")
+            && self.api_key.as_deref().unwrap_or("").is_empty()
+    }
+
+    fn run_codex_oauth_login(&mut self) -> Result<(), AishError> {
+        let had_auth = load_codex_auth(self.codex_auth_path.as_deref()).is_ok();
+        clack_log::step(&t("cli.setup.codex_oauth_login_in_progress"));
+        let auth = ensure_codex_auth(self.codex_auth_path.as_deref(), true).map_err(|e| {
+            let mut args = std::collections::HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            AishError::Config(t_with_args("cli.setup.codex_oauth_login_failed", &args))
+        })?;
+        self.codex_auth_path = Some(auth.auth_path);
+        let message_key = if had_auth {
+            "cli.setup.codex_oauth_existing_auth"
+        } else {
+            "cli.setup.codex_oauth_login_success"
+        };
+        let mut args = std::collections::HashMap::new();
+        args.insert("account".to_string(), auth.account_id);
+        clack_log::success(&t_with_args(message_key, &args));
+        Ok(())
+    }
+
     /// Codex auth: ChatGPT OAuth (subscription) or OpenAI Platform API key.
     fn prompt_codex_auth(&mut self) -> Result<(), AishError> {
         let options = vec![
@@ -762,15 +794,15 @@ impl SetupWizard {
 
         match result {
             DialogResult::Selected(key) if key == "oauth" => {
-                println!("  {}", t("cli.setup.codex_oauth_setup_hint"));
                 self.api_key = Some(String::new());
                 self.api_base = Some(
                     default_api_base_for_provider("openai-codex")
                         .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
                 );
-                Ok(())
+                self.run_codex_oauth_login()
             }
             DialogResult::Selected(key) if key == "api-key" => {
+                self.codex_auth_path = None;
                 self.api_base = Some(
                     default_api_base_for_provider("openai")
                         .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
@@ -886,11 +918,12 @@ impl SetupWizard {
             .ok_or_else(|| AishError::Config("No API base configured".to_string()))?
             .clone();
         let api_key = self.api_key.clone().unwrap_or_default();
-        let uses_codex_oauth = provider_key == "openai-codex" && api_key.is_empty();
+        let uses_codex_oauth = self.uses_codex_oauth();
         if !uses_codex_oauth && api_key.is_empty() {
             return Err(AishError::Config("No API key configured".to_string()));
         }
         let api_model = resolve_model_for_api(&model, &api_base);
+        let codex_auth_path = self.codex_auth_path.as_deref();
 
         let connectivity_msg = t("cli.setup.verify_connectivity_in_progress");
         clack_log::step(&connectivity_msg);
@@ -901,6 +934,7 @@ impl SetupWizard {
                 &api_key,
                 &api_model,
                 verification::DEFAULT_CONNECTIVITY_TIMEOUT_S,
+                codex_auth_path,
             )
         });
 
@@ -925,6 +959,7 @@ impl SetupWizard {
                 &api_key,
                 &api_model,
                 verification::DEFAULT_TOOL_SUPPORT_TIMEOUT_S,
+                codex_auth_path,
             )
         });
 
@@ -953,13 +988,26 @@ impl SetupWizard {
 
     /// Handle a connectivity failure (Layer 1): offer specific retry options.
     fn handle_connectivity_failure(&mut self) -> Result<(), AishError> {
-        let options = vec![
+        let mut options = vec![
             DialogOption::new("retry_api_base", t("cli.setup.action_retry_api_base")),
             DialogOption::new("retry_model", t("cli.setup.action_retry_model")),
-            DialogOption::new("retry_api_key", t("cli.setup.action_retry_api_key")),
-            DialogOption::new("change_provider", t("cli.setup.action_change_provider")),
-            DialogOption::new("exit", t("cli.setup.action_exit")),
         ];
+        if self.uses_codex_oauth() {
+            options.push(DialogOption::new(
+                "retry_codex_auth",
+                t("cli.setup.action_retry_codex_auth"),
+            ));
+        } else {
+            options.push(DialogOption::new(
+                "retry_api_key",
+                t("cli.setup.action_retry_api_key"),
+            ));
+        }
+        options.push(DialogOption::new(
+            "change_provider",
+            t("cli.setup.action_change_provider"),
+        ));
+        options.push(DialogOption::new("exit", t("cli.setup.action_exit")));
 
         let result = show_selection(
             &t("cli.setup.verify_title"),
@@ -991,6 +1039,9 @@ impl SetupWizard {
                     self.state = WizardState::ApiKeyInput;
                     Ok(())
                 }
+                "retry_codex_auth" => self
+                    .run_codex_oauth_login()
+                    .and_then(|_| self.verify_and_save()),
                 "change_provider" => {
                     self.state = WizardState::ProviderSelection;
                     Ok(())
@@ -1090,16 +1141,17 @@ impl SetupWizard {
             .api_base
             .as_ref()
             .ok_or_else(|| AishError::Config("No API base configured".to_string()))?;
-        let api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| AishError::Config("No API key configured".to_string()))?;
+        let api_key = self.api_key.clone().unwrap_or_default();
 
         let mut config = self.load_existing_config();
         config.model = model.clone();
         config.api_base = api_base.clone();
-        config.api_key = api_key.clone();
+        config.api_key = api_key;
         config.is_free_key = self.is_free_key;
+        config.codex_auth_path = self
+            .codex_auth_path
+            .as_ref()
+            .map(|path| path.display().to_string());
 
         // Save to config file.
         let config_path = self.config_dir.join("config.yaml");
@@ -1134,12 +1186,12 @@ impl SetupWizard {
             .as_ref()
             .ok_or_else(|| AishError::Config("No API base configured".to_string()))?
             .clone();
-        config.api_key = self
-            .api_key
-            .as_ref()
-            .ok_or_else(|| AishError::Config("No API key configured".to_string()))?
-            .clone();
+        config.api_key = self.api_key.clone().unwrap_or_default();
         config.is_free_key = self.is_free_key;
+        config.codex_auth_path = self
+            .codex_auth_path
+            .as_ref()
+            .map(|path| path.display().to_string());
         Ok(config)
     }
 }
@@ -1213,6 +1265,23 @@ mod tests {
 
         let empty_models = get_provider_models("nonexistent");
         assert!(empty_models.is_empty());
+    }
+
+    #[test]
+    fn test_apply_setup_result_preserves_codex_auth_path() {
+        let existing = ConfigModel::default();
+        let mut setup = ConfigModel::default();
+        setup.model = "openai-codex/gpt-5.4".into();
+        setup.api_base = "https://chatgpt.com/backend-api/codex".into();
+        setup.api_key.clear();
+        setup.codex_auth_path = Some("/home/user/.codex/auth.json".into());
+
+        let merged = apply_setup_result(&existing, setup);
+        assert_eq!(
+            merged.codex_auth_path.as_deref(),
+            Some("/home/user/.codex/auth.json")
+        );
+        assert!(merged.api_key.is_empty());
     }
 
     #[test]

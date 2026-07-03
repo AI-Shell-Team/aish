@@ -427,6 +427,19 @@ pub fn login_codex_browser(
     })
 }
 
+/// Return existing Codex auth when present, otherwise run browser OAuth login.
+pub fn ensure_codex_auth(
+    auth_path: Option<&Path>,
+    open_browser: bool,
+) -> Result<CodexAuthState, CodexError> {
+    if let Ok(auth) = load_codex_auth(auth_path) {
+        if !auth.access_token.is_empty() {
+            return Ok(auth);
+        }
+    }
+    login_codex_browser(auth_path, open_browser)
+}
+
 /// Login via device code flow.
 pub fn login_codex_device_code(auth_path: Option<&Path>) -> Result<CodexAuthState, CodexError> {
     let path = resolve_codex_auth_path(auth_path);
