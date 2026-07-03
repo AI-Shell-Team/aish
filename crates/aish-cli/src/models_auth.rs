@@ -127,6 +127,16 @@ pub fn run_models_auth(
                 config.api_base = CODEX_DEFAULT_BASE_URL.to_string();
             }
 
+            let config_path = aish_config::ConfigLoader::default_config_path();
+            if let Err(e) = aish_config::ConfigLoader::save(config, &config_path) {
+                eprintln!("\x1b[31m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    t_with_args("cli.save_config_failed", &args)
+                });
+                std::process::exit(1);
+            }
+
             println!("\n\x1b[32m{}\x1b[0m", {
                 let mut args = std::collections::HashMap::new();
                 args.insert("provider".to_string(), provider_id.to_string());
@@ -152,18 +162,6 @@ pub fn run_models_auth(
         Err(e) => {
             eprintln!("\x1b[31m{}\x1b[0m", e);
             std::process::exit(1);
-        }
-    }
-
-    let config_path = aish_config::ConfigLoader::default_config_path();
-    match aish_config::ConfigLoader::save(config, &config_path) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("\x1b[31m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::new();
-                args.insert("error".to_string(), e.to_string());
-                t_with_args("cli.save_config_failed", &args)
-            });
         }
     }
 }

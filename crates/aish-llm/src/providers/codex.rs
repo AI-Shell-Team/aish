@@ -446,16 +446,45 @@ pub fn ensure_codex_auth(
     ensure_codex_auth_with_options(auth_path, open_browser, false)
 }
 
+/// Reuse cached auth when still valid; refresh when near expiry; otherwise return `None`.
+fn try_reuse_cached_codex_auth(
+    auth_path: Option<&Path>,
+) -> Result<Option<CodexAuthState>, CodexError> {
+    let auth = match load_codex_auth(auth_path) {
+        Ok(auth) => auth,
+        Err(_) => return Ok(None),
+    };
+    if auth.access_token.is_empty() {
+        return Ok(None);
+    }
+    if !auth.needs_refresh() {
+        return Ok(Some(auth));
+    }
+    if auth.refresh_token.is_none() {
+        return Ok(None);
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CodexError::Auth(format!("Failed to start runtime for token refresh: {e}")))?;
+    match rt.block_on(refresh_codex_auth(&auth)) {
+        Ok(refreshed) => Ok(Some(refreshed)),
+        Err(e) => {
+            warn!("Codex token refresh failed, will re-login: {e}");
+            Ok(None)
+        }
+    }
+}
+
 /// Like [`ensure_codex_auth`] but allows pasted redirect URLs (CLI use).
 pub fn ensure_codex_auth_with_options(
     auth_path: Option<&Path>,
     open_browser: bool,
     allow_manual_redirect: bool,
 ) -> Result<CodexAuthState, CodexError> {
-    if let Ok(auth) = load_codex_auth(auth_path) {
-        if !auth.access_token.is_empty() {
-            return Ok(auth);
-        }
+    if let Some(auth) = try_reuse_cached_codex_auth(auth_path)? {
+        return Ok(auth);
     }
     login_codex_browser(auth_path, open_browser, allow_manual_redirect)
 }

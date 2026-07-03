@@ -70,6 +70,27 @@ fn openai_finish_chunk(finish_reason: &str, usage: Option<(u64, u64)>) -> String
 
 const OPENAI_SSE_DONE: &str = "data: [DONE]\n\n";
 
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_sse_block_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
+    find_subsequence(buf, b"\r\n\r\n")
+        .map(|pos| (pos, 4))
+        .or_else(|| find_subsequence(buf, b"\n\n").map(|pos| (pos, 2)))
+}
+
+fn decode_sse_block(bytes: &[u8]) -> Result<String, AishError> {
+    std::str::from_utf8(bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| AishError::Llm(format!("Invalid UTF-8 in SSE block: {e}")))
+}
+
 struct AnthropicSseTranslator {
     tool_calls: HashMap<usize, (String, String)>,
     stop_reason: Option<String>,
@@ -331,14 +352,23 @@ where
     let (tx, rx) = futures::channel::mpsc::unbounded();
 
     tokio::spawn(async move {
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
         loop {
             match resp.chunk().await {
                 Ok(Some(chunk)) => {
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
-                    while let Some(pos) = buffer.find("\n\n") {
-                        let block = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
+                    buffer.extend_from_slice(&chunk);
+                    while let Some((pos, delim_len)) = find_sse_block_delimiter(&buffer) {
+                        let block = match decode_sse_block(&buffer[..pos]) {
+                            Ok(block) => block,
+                            Err(err) => {
+                                let _ = tx.unbounded_send(Err(err));
+                                return;
+                            }
+                        };
+                        buffer.drain(..pos + delim_len);
+                        if block.trim().is_empty() {
+                            continue;
+                        }
                         match translate_block(&block) {
                             Ok(lines) => {
                                 for line in lines {
@@ -355,15 +385,24 @@ where
                     }
                 }
                 Ok(None) => {
-                    if !buffer.trim().is_empty() {
-                        match translate_block(&buffer) {
-                            Ok(lines) => {
-                                for line in lines {
-                                    if tx.unbounded_send(Ok(Bytes::from(line))).is_err() {
+                    if !buffer.is_empty() {
+                        match decode_sse_block(&buffer) {
+                            Ok(block) if !block.trim().is_empty() => {
+                                match translate_block(&block) {
+                                    Ok(lines) => {
+                                        for line in lines {
+                                            if tx.unbounded_send(Ok(Bytes::from(line))).is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        let _ = tx.unbounded_send(Err(err));
                                         return;
                                     }
                                 }
                             }
+                            Ok(_) => {}
                             Err(err) => {
                                 let _ = tx.unbounded_send(Err(err));
                                 return;
@@ -477,5 +516,19 @@ mod tests {
         assert_eq!(out.len(), 1);
         let (events, _) = StreamParser::parse_sse_chunk(out[0].trim());
         assert!(matches!(events.first(), Some(SseEvent::ContentDelta(text)) if text == "Hello"));
+    }
+
+    #[test]
+    fn sse_block_delimiter_handles_lf_and_crlf() {
+        assert_eq!(
+            find_sse_block_delimiter(b"event: x\r\n\r\nrest"),
+            Some((8, 4))
+        );
+        assert_eq!(find_sse_block_delimiter(b"event: x\n\nrest"), Some((8, 2)));
+    }
+
+    #[test]
+    fn decode_sse_block_rejects_invalid_utf8() {
+        assert!(decode_sse_block(&[0xff, 0xfe]).is_err());
     }
 }
