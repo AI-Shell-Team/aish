@@ -606,9 +606,18 @@ impl SetupWizard {
             .map(|p| {
                 let hint_key = format!("cli.setup.provider_hints.{}", p.key);
                 let hint = t(&hint_key);
+                let description = if hint != hint_key {
+                    hint
+                } else if p.requires_api_base {
+                    t("cli.setup.provider_custom_note")
+                } else if p.api_base.is_some() {
+                    t("cli.setup.provider_preset_base")
+                } else {
+                    String::new()
+                };
                 let mut opt = DialogOption::new(&p.key, p.label.clone());
-                if hint != hint_key {
-                    opt = opt.with_description(hint);
+                if !description.is_empty() {
+                    opt = opt.with_description(description);
                 }
                 opt
             })
@@ -834,7 +843,8 @@ impl SetupWizard {
         });
 
         if !conn.ok {
-            let err_msg = conn.error.as_deref().unwrap_or("Unknown error");
+            let unknown = t("cli.setup.verify_failed_unknown");
+            let err_msg = conn.error.as_deref().unwrap_or(&unknown);
             let reason =
                 t("cli.setup.verify_simple_failed_with_reason").replace("{reason}", err_msg);
             clack_log::error(&reason);
@@ -863,7 +873,8 @@ impl SetupWizard {
         }
 
         // Tool support not detected - check if it's a definitive failure or inconclusive
-        let reason = tool_result.error.as_deref().unwrap_or("not detected");
+        let not_detected = t("cli.setup.verify_tool_not_detected");
+        let reason = tool_result.error.as_deref().unwrap_or(&not_detected);
         let full_reason =
             t("cli.setup.verify_simple_failed_with_reason").replace("{reason}", reason);
         clack_log::error(&full_reason);
