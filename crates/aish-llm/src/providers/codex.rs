@@ -477,6 +477,7 @@ pub fn build_codex_request(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
+    temperature: Option<f32>,
 ) -> Value {
     let mut instructions: Vec<String> = Vec::new();
     let mut input_items: Vec<Value> = Vec::new();
@@ -572,6 +573,9 @@ pub fn build_codex_request(
     });
     if let Some(max_tokens) = max_output_tokens.filter(|n| *n > 0) {
         body["max_output_tokens"] = Value::from(max_tokens);
+    }
+    if let Some(temp) = temperature {
+        body["temperature"] = Value::from(temp);
     }
     body
 }
@@ -937,6 +941,7 @@ pub async fn create_openai_responses_with_api_key(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
+    temperature: Option<f32>,
     timeout_secs: u64,
 ) -> Result<Value, CodexError> {
     let resp = create_openai_responses_http_response(
@@ -947,6 +952,7 @@ pub async fn create_openai_responses_with_api_key(
         tools,
         tool_choice,
         max_output_tokens,
+        temperature,
         timeout_secs,
     )
     .await?;
@@ -962,11 +968,19 @@ pub async fn create_openai_responses_http_response(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
+    temperature: Option<f32>,
     timeout_secs: u64,
 ) -> Result<reqwest::Response, CodexError> {
     let base = api_base.trim().trim_end_matches('/');
     let url = format!("{base}/responses");
-    let request_body = build_codex_request(model, messages, tools, tool_choice, max_output_tokens);
+    let request_body = build_codex_request(
+        model,
+        messages,
+        tools,
+        tool_choice,
+        max_output_tokens,
+        temperature,
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -1018,6 +1032,8 @@ pub async fn create_codex_chat_completion(
     messages: &[Value],
     tools: Option<&[Value]>,
     tool_choice: &str,
+    max_output_tokens: Option<u32>,
+    temperature: Option<f32>,
     api_base: Option<&str>,
     auth_path: Option<&Path>,
     timeout_secs: u64,
@@ -1027,6 +1043,8 @@ pub async fn create_codex_chat_completion(
         messages,
         tools,
         tool_choice,
+        max_output_tokens,
+        temperature,
         api_base,
         auth_path,
         timeout_secs,
@@ -1041,6 +1059,8 @@ pub async fn create_codex_http_response(
     messages: &[Value],
     tools: Option<&[Value]>,
     tool_choice: &str,
+    max_output_tokens: Option<u32>,
+    temperature: Option<f32>,
     api_base: Option<&str>,
     auth_path: Option<&Path>,
     timeout_secs: u64,
@@ -1048,7 +1068,14 @@ pub async fn create_codex_http_response(
     let base_url = resolve_codex_base_url(api_base);
     let url = format!("{}/responses", base_url);
 
-    let request_body = build_codex_request(model, messages, tools, tool_choice, None);
+    let request_body = build_codex_request(
+        model,
+        messages,
+        tools,
+        tool_choice,
+        max_output_tokens,
+        temperature,
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -1377,8 +1404,15 @@ mod tests {
 
     #[test]
     fn test_build_codex_request_max_output_tokens() {
-        let req = build_codex_request("gpt-5.4", &[], None, "auto", Some(128));
+        let req = build_codex_request("gpt-5.4", &[], None, "auto", Some(128), None);
         assert_eq!(req["max_output_tokens"], 128);
+    }
+
+    #[test]
+    fn test_build_codex_request_temperature() {
+        let req = build_codex_request("gpt-5.4", &[], None, "auto", None, Some(0.7));
+        let temp = req["temperature"].as_f64().unwrap();
+        assert!((temp - 0.7).abs() < 1e-6);
     }
 
     #[test]
@@ -1387,7 +1421,7 @@ mod tests {
             "role": "system",
             "content": "You are helpful."
         })];
-        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None);
+        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None, None);
         assert_eq!(req["instructions"], "You are helpful.");
         assert_eq!(req["model"], "gpt-5.4");
     }
@@ -1398,7 +1432,7 @@ mod tests {
             serde_json::json!({"role": "user", "content": "Hello"}),
             serde_json::json!({"role": "assistant", "content": "Hi there"}),
         ];
-        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None);
+        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None, None);
         let input = req["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["type"], "message");
@@ -1428,7 +1462,7 @@ mod tests {
                 "content": "file1.txt\nfile2.txt"
             }),
         ];
-        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None);
+        let req = build_codex_request("gpt-5.4", &messages, None, "auto", None, None);
         let input = req["input"].as_array().unwrap();
         // user message + function_call + function_call_output
         assert_eq!(input.len(), 3);
@@ -1446,7 +1480,7 @@ mod tests {
                 "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
             }
         })];
-        let req = build_codex_request("gpt-5.4", &[], Some(&tools), "auto", None);
+        let req = build_codex_request("gpt-5.4", &[], Some(&tools), "auto", None, None);
         let converted = req["tools"].as_array().unwrap();
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["name"], "bash");

@@ -11,19 +11,20 @@ use crate::providers::codex::{
 use crate::types::{ChatMessage, ToolSpec};
 
 use super::convert::{chat_messages_to_values, codex_error_to_aish, tools_to_values};
-use super::StreamContext;
+use super::{effective_max_tokens, StreamContext};
 
 pub async fn stream(
     ctx: &StreamContext,
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
     stream: bool,
-    _temperature: Option<f32>,
-    _max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
     let message_values = chat_messages_to_values(messages)?;
     let tool_values = tools.map(tools_to_values).transpose()?;
     let tool_refs = tool_values.as_deref();
+    let max_output = Some(effective_max_tokens(max_tokens));
 
     let auth_path = ctx.codex_auth_path.as_deref();
     let api_base = if ctx.api_base.is_empty() {
@@ -38,6 +39,8 @@ pub async fn stream(
             &message_values,
             tool_refs,
             "auto",
+            max_output,
+            temperature,
             api_base,
             auth_path,
             120,
@@ -54,6 +57,8 @@ pub async fn stream(
         &message_values,
         tool_refs,
         "auto",
+        max_output,
+        temperature,
         api_base,
         auth_path,
         120,
@@ -81,7 +86,7 @@ mod tests {
     fn test_build_codex_request_from_chat_messages() {
         let messages = vec![ChatMessage::system("sys"), ChatMessage::user("hi")];
         let values = chat_messages_to_values(&messages).unwrap();
-        let body = build_codex_request("openai-codex/gpt-5.4", &values, None, "auto", None);
+        let body = build_codex_request("openai-codex/gpt-5.4", &values, None, "auto", None, None);
         assert_eq!(body["model"], "gpt-5.4");
         assert!(body["instructions"].as_str().unwrap().contains("sys"));
     }

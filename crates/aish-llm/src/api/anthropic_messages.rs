@@ -110,7 +110,7 @@ pub async fn test_connection(ctx: &StreamContext) -> Result<(), String> {
         .map_err(|e| format!("Connection failed: {e}"))?;
 
     let status = resp.status();
-    if status.is_success() || status.as_u16() == 401 || status.as_u16() == 403 {
+    if status.is_success() {
         Ok(())
     } else {
         let text = resp.text().await.unwrap_or_default();
