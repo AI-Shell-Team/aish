@@ -73,6 +73,28 @@ pub async fn stream(
 pub async fn test_connection(ctx: &StreamContext) -> Result<(), String> {
     let auth_path = ctx.codex_auth_path.as_deref();
     load_codex_auth(auth_path).map_err(|e| e.to_string())?;
+
+    let api_base = if ctx.api_base.is_empty() {
+        None
+    } else {
+        Some(ctx.api_base.as_str())
+    };
+    let messages = [serde_json::json!({"role": "user", "content": "Hi"})];
+
+    create_codex_chat_completion(
+        &ctx.resolved_model(),
+        &messages,
+        None,
+        "none",
+        Some(16),
+        None,
+        api_base,
+        auth_path,
+        30,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
