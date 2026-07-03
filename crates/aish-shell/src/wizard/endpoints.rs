@@ -46,14 +46,14 @@ pub fn get_provider_endpoints(provider_key: &str) -> Vec<EndpointInfo> {
         "minimax" => vec![
             EndpointInfo {
                 label: "MiniMax Global".to_string(),
-                api_base: "https://api.minimax.io/anthropic".to_string(),
+                api_base: "https://api.minimax.io/v1".to_string(),
                 region: "minimax-global".to_string(),
                 hint: "api.minimax.io (M2.5 recommended)".to_string(),
                 default_model: "MiniMax-M2.5".to_string(),
             },
             EndpointInfo {
                 label: "MiniMax CN".to_string(),
-                api_base: "https://api.minimaxi.com/anthropic".to_string(),
+                api_base: "https://api.minimaxi.com/v1".to_string(),
                 region: "minimax-cn".to_string(),
                 hint: "api.minimaxi.com (M2.5 recommended)".to_string(),
                 default_model: "MiniMax-M2.5".to_string(),
@@ -75,22 +75,13 @@ pub fn get_provider_endpoints(provider_key: &str) -> Vec<EndpointInfo> {
                 default_model: "kimi-k2.5".to_string(),
             },
         ],
-        "deepseek" => vec![
-            EndpointInfo {
-                label: "DeepSeek (Global)".to_string(),
-                api_base: "https://api.deepseek.com/v1".to_string(),
-                region: "global".to_string(),
-                hint: "api.deepseek.com".to_string(),
-                default_model: "deepseek-chat".to_string(),
-            },
-            EndpointInfo {
-                label: "DeepSeek (China)".to_string(),
-                api_base: "https://api.deepseek.com/v1".to_string(),
-                region: "cn".to_string(),
-                hint: "api.deepseek.com".to_string(),
-                default_model: "deepseek-chat".to_string(),
-            },
-        ],
+        "deepseek" => vec![EndpointInfo {
+            label: "DeepSeek".to_string(),
+            api_base: "https://api.deepseek.com/v1".to_string(),
+            region: "global".to_string(),
+            hint: "api.deepseek.com".to_string(),
+            default_model: "deepseek-chat".to_string(),
+        }],
         "openrouter" => vec![EndpointInfo {
             label: "OpenRouter (Global)".to_string(),
             api_base: "https://openrouter.ai/api/v1".to_string(),
@@ -131,6 +122,9 @@ mod tests {
         let endpoints = get_provider_endpoints("minimax");
         assert_eq!(endpoints.len(), 2);
         assert!(endpoints.iter().any(|e| e.region == "minimax-global"));
+        assert!(endpoints
+            .iter()
+            .all(|e| e.api_base.ends_with("/v1") && !e.api_base.contains("/anthropic")));
     }
 
     #[test]
