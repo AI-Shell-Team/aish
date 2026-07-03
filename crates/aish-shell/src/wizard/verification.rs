@@ -4,6 +4,8 @@
 //! Layer 2: Tool support check (sends a chat completion request with tool definitions).
 
 use aish_i18n::t_with_args;
+use aish_llm::api::resolve_anthropic_messages_url;
+use aish_llm::providers::codex::load_codex_auth;
 use serde_json::json;
 use std::collections::HashMap;
 use tracing::debug;
@@ -48,6 +50,388 @@ pub struct ToolSupportResult {
 pub const DEFAULT_CONNECTIVITY_TIMEOUT_S: u64 = 15;
 /// Default timeout for tool-support checks (seconds).
 pub const DEFAULT_TOOL_SUPPORT_TIMEOUT_S: u64 = 30;
+
+// ---------------------------------------------------------------------------
+// Provider-aware verification
+// ---------------------------------------------------------------------------
+
+/// Route connectivity checks to the correct API dialect.
+pub fn check_connectivity_for_provider(
+    provider_key: &str,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ConnectivityResult {
+    match provider_key {
+        "anthropic" => check_anthropic_connectivity(api_base, api_key, model, timeout_s),
+        "openai-codex" if api_key.trim().is_empty() => check_codex_connectivity(None),
+        "openai-codex" => check_openai_responses_connectivity(api_base, api_key, model, timeout_s),
+        _ => check_connectivity(api_base, api_key, model, timeout_s),
+    }
+}
+
+/// Route tool-support checks to the correct API dialect.
+pub fn check_tool_support_for_provider(
+    provider_key: &str,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ToolSupportResult {
+    match provider_key {
+        "anthropic" => check_anthropic_tool_support(api_base, api_key, model, timeout_s),
+        "openai-codex" if api_key.trim().is_empty() => check_codex_tool_support(None),
+        "openai-codex" => check_openai_responses_tool_support(api_base, api_key, model, timeout_s),
+        _ => check_tool_support(api_base, api_key, model, timeout_s),
+    }
+}
+
+pub fn check_anthropic_connectivity(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ConnectivityResult {
+    let url = resolve_anthropic_messages_url(api_base);
+    debug!("Anthropic connectivity check: POST {}", url);
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_s))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ConnectivityResult {
+                ok: false,
+                error: Some(verify_msg(
+                    "cli.setup.verify_http_client_build_failed",
+                    &[("detail", &e.to_string())],
+                )),
+                latency_ms: None,
+            };
+        }
+    };
+
+    let body = json!({
+        "model": model,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
+    });
+
+    let start = std::time::Instant::now();
+    let response = client
+        .post(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send();
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                ConnectivityResult {
+                    ok: true,
+                    error: None,
+                    latency_ms: Some(elapsed),
+                }
+            } else {
+                let body_text = resp.text().unwrap_or_default();
+                ConnectivityResult {
+                    ok: false,
+                    error: Some(verify_msg(
+                        "cli.setup.verify_http_error",
+                        &[
+                            ("status", &status.as_u16().to_string()),
+                            ("url", &url),
+                            ("detail", &body_text),
+                        ],
+                    )),
+                    latency_ms: Some(elapsed),
+                }
+            }
+        }
+        Err(e) => ConnectivityResult {
+            ok: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_request_failed",
+                &[("detail", &e.to_string())],
+            )),
+            latency_ms: Some(elapsed),
+        },
+    }
+}
+
+pub fn check_anthropic_tool_support(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ToolSupportResult {
+    let url = resolve_anthropic_messages_url(api_base);
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_s))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ToolSupportResult {
+                supports: false,
+                error: Some(verify_msg(
+                    "cli.setup.verify_http_client_build_failed",
+                    &[("detail", &e.to_string())],
+                )),
+            };
+        }
+    };
+
+    let body = json!({
+        "model": model,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "Hi"}]}],
+        "tools": [{
+            "name": "ping",
+            "description": "ping",
+            "input_schema": {"type": "object", "properties": {}},
+        }],
+        "tool_choice": {"type": "auto"},
+    });
+
+    match client
+        .post(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+    {
+        Ok(resp) => ToolSupportResult {
+            supports: resp.status().is_success(),
+            error: if resp.status().is_success() {
+                None
+            } else {
+                Some(verify_msg(
+                    "cli.setup.verify_tool_http_error",
+                    &[
+                        ("status", &resp.status().as_u16().to_string()),
+                        ("detail", &resp.text().unwrap_or_default()),
+                    ],
+                ))
+            },
+        },
+        Err(e) => ToolSupportResult {
+            supports: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_tool_request_failed",
+                &[("detail", &e.to_string())],
+            )),
+        },
+    }
+}
+
+pub fn check_codex_connectivity(codex_auth_path: Option<&std::path::Path>) -> ConnectivityResult {
+    match load_codex_auth(codex_auth_path) {
+        Ok(auth) if !auth.access_token.is_empty() => ConnectivityResult {
+            ok: true,
+            error: None,
+            latency_ms: Some(0),
+        },
+        Ok(_) => ConnectivityResult {
+            ok: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_request_failed",
+                &[("detail", "Codex auth token is empty")],
+            )),
+            latency_ms: None,
+        },
+        Err(e) => ConnectivityResult {
+            ok: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_request_failed",
+                &[("detail", &e.to_string())],
+            )),
+            latency_ms: None,
+        },
+    }
+}
+
+pub fn check_openai_responses_connectivity(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ConnectivityResult {
+    let url = format!("{}/responses", api_base.trim_end_matches('/'));
+    debug!("OpenAI Responses connectivity check: POST {}", url);
+
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_s))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ConnectivityResult {
+                ok: false,
+                error: Some(verify_msg(
+                    "cli.setup.verify_http_client_build_failed",
+                    &[("detail", &e.to_string())],
+                )),
+                latency_ms: None,
+            };
+        }
+    };
+
+    let body = json!({
+        "model": model,
+        "instructions": "",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hi"}],
+        }],
+        "max_output_tokens": 16,
+        "store": false,
+        "stream": false,
+    });
+
+    let start = std::time::Instant::now();
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send();
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    match response {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                ConnectivityResult {
+                    ok: true,
+                    error: None,
+                    latency_ms: Some(elapsed),
+                }
+            } else {
+                let body_text = resp.text().unwrap_or_default();
+                ConnectivityResult {
+                    ok: false,
+                    error: Some(verify_msg(
+                        "cli.setup.verify_http_error",
+                        &[
+                            ("status", &status.as_u16().to_string()),
+                            ("url", &url),
+                            ("detail", &body_text),
+                        ],
+                    )),
+                    latency_ms: Some(elapsed),
+                }
+            }
+        }
+        Err(e) => ConnectivityResult {
+            ok: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_request_failed",
+                &[("detail", &e.to_string())],
+            )),
+            latency_ms: Some(elapsed),
+        },
+    }
+}
+
+pub fn check_openai_responses_tool_support(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ToolSupportResult {
+    let url = format!("{}/responses", api_base.trim_end_matches('/'));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_s))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ToolSupportResult {
+                supports: false,
+                error: Some(verify_msg(
+                    "cli.setup.verify_http_client_build_failed",
+                    &[("detail", &e.to_string())],
+                )),
+            };
+        }
+    };
+
+    let body = json!({
+        "model": model,
+        "instructions": "",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Hi"}],
+        }],
+        "tools": [{
+            "type": "function",
+            "name": "ping",
+            "description": "ping",
+            "parameters": {"type": "object", "properties": {}},
+        }],
+        "tool_choice": "auto",
+        "max_output_tokens": 16,
+        "store": false,
+        "stream": false,
+    });
+
+    match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+    {
+        Ok(resp) => ToolSupportResult {
+            supports: resp.status().is_success(),
+            error: if resp.status().is_success() {
+                None
+            } else {
+                Some(verify_msg(
+                    "cli.setup.verify_tool_http_error",
+                    &[
+                        ("status", &resp.status().as_u16().to_string()),
+                        ("detail", &resp.text().unwrap_or_default()),
+                    ],
+                ))
+            },
+        },
+        Err(e) => ToolSupportResult {
+            supports: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_tool_request_failed",
+                &[("detail", &e.to_string())],
+            )),
+        },
+    }
+}
+
+pub fn check_codex_tool_support(codex_auth_path: Option<&std::path::Path>) -> ToolSupportResult {
+    match load_codex_auth(codex_auth_path) {
+        Ok(auth) if !auth.access_token.is_empty() => ToolSupportResult {
+            supports: true,
+            error: None,
+        },
+        Ok(_) => ToolSupportResult {
+            supports: false,
+            error: Some("Codex auth token is empty".to_string()),
+        },
+        Err(e) => ToolSupportResult {
+            supports: false,
+            error: Some(e.to_string()),
+        },
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Verification functions

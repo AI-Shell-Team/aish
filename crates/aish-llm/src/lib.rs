@@ -14,6 +14,7 @@
 )]
 
 pub mod agent;
+pub mod api;
 pub mod client;
 pub mod diagnose_agent;
 pub mod langfuse;
@@ -30,6 +31,10 @@ pub mod types;
 pub mod usage;
 
 pub use agent::{AgentConfig, AgentStep, ReActAgent};
+pub use api::{
+    resolve_anthropic_messages_url, resolve_api_dialect, stream_simple,
+    test_connection as test_api_connection, ApiDialect, StreamContext,
+};
 pub use client::{LlmClient, LlmResponse, DEFAULT_MAX_TOKENS};
 pub use diagnose_agent::DiagnoseAgent;
 pub use langfuse::{LangfuseClient, LangfuseConfig};

@@ -23,6 +23,21 @@ impl TokenUsage {
                 .unwrap_or(0),
         }
     }
+
+    /// Extract token usage from an Anthropic Messages API response JSON.
+    pub fn from_anthropic_json(json: &serde_json::Value) -> Self {
+        let usage = json.get("usage");
+        Self {
+            prompt_tokens: usage
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            completion_tokens: usage
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        }
+    }
 }
 
 /// Cumulative token statistics for an LLM session.
@@ -50,6 +65,19 @@ impl TokenStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_token_usage_from_anthropic_json() {
+        let json = serde_json::json!({
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 40
+            }
+        });
+        let usage = TokenUsage::from_anthropic_json(&json);
+        assert_eq!(usage.prompt_tokens, 120);
+        assert_eq!(usage.completion_tokens, 40);
+    }
 
     #[test]
     fn test_token_usage_from_response_json() {

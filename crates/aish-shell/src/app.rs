@@ -12,7 +12,7 @@ use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
 use aish_llm::{
     langfuse::{LangfuseClient, LangfuseConfig},
-    CancellationToken, ChatMessage, LlmCallbackResult, LlmSession,
+    CancellationToken, ChatMessage, LlmCallbackResult, LlmSession, StreamContext,
 };
 use aish_memory::MemoryManager;
 use aish_security::{load_policy, SecurityManager};
@@ -20,6 +20,7 @@ use aish_session::{SessionContextMessage, SessionRecord, SessionStateSnapshot, S
 use aish_skills::hotreload::SkillHotReloader;
 use aish_skills::SkillManager;
 use aish_tools::ToolRegistry;
+use std::path::PathBuf;
 
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
 use crate::animation::SharedAnimation;
@@ -131,6 +132,32 @@ fn context_compaction_notice(event: &LlmEvent) -> Option<String> {
     }
 
     Some(t("shell.compaction.completed"))
+}
+
+fn stream_context_from_config(config: &ConfigModel) -> StreamContext {
+    StreamContext::new(
+        &config.api_base,
+        &config.api_key,
+        &config.model,
+        config.codex_auth_path.as_ref().map(PathBuf::from),
+    )
+}
+
+fn llm_session_from_config(config: &ConfigModel) -> LlmSession {
+    LlmSession::with_context(
+        stream_context_from_config(config),
+        Some(config.temperature),
+        config.max_tokens,
+    )
+}
+
+fn stream_context_from_parts(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    codex_auth_path: Option<&str>,
+) -> StreamContext {
+    StreamContext::new(api_base, api_key, model, codex_auth_path.map(PathBuf::from))
 }
 
 fn context_budget_policy_from_config(config: &ConfigModel) -> ContextBudgetPolicy {
@@ -566,13 +593,7 @@ impl AishShell {
         }
 
         // Initialize LLM session
-        let mut llm_session = LlmSession::new(
-            &config.api_base,
-            &config.api_key,
-            &config.model,
-            Some(config.temperature),
-            config.max_tokens,
-        );
+        let mut llm_session = llm_session_from_config(&config);
         let context_budget_policy = context_budget_policy_from_config(&config);
         llm_session.set_context_budget_policy(context_budget_policy.clone());
 
@@ -3789,6 +3810,7 @@ impl AishShell {
         api_base: &str,
         api_key: &str,
         model: &str,
+        codex_auth_path: Option<&str>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
         system_msg: &str,
@@ -3801,6 +3823,7 @@ impl AishShell {
         let api_base_f = api_base.to_string();
         let api_key_f = api_key.to_string();
         let model_f = model.to_string();
+        let codex_auth_path_f = codex_auth_path.map(str::to_string);
         let system_msg_f = system_msg.to_string();
         let question_f = original_question.to_string();
         let anim_f = animation.clone();
@@ -3849,6 +3872,7 @@ impl AishShell {
 
                 // Spawn LLM thread with ChannelAskUserTool
                 let api_base_th = api_base_f.clone();
+                let codex_auth_path_th = codex_auth_path_f.clone();
                 let api_key_th = api_key_f.clone();
                 let model_th = model_f.clone();
                 let system_msg_th = system_msg_f.clone();
@@ -3875,10 +3899,13 @@ impl AishShell {
                             return;
                         }
                     };
-                    let mut session = LlmSession::new(
-                        &api_base_th,
-                        &api_key_th,
-                        &model_th,
+                    let mut session = LlmSession::with_context(
+                        stream_context_from_parts(
+                            &api_base_th,
+                            &api_key_th,
+                            &model_th,
+                            codex_auth_path_th.as_deref(),
+                        ),
                         temperature,
                         max_tokens,
                     );
@@ -4139,6 +4166,7 @@ impl AishShell {
                             &api_base_th,
                             &api_key_th,
                             &model_th,
+                            codex_auth_path_th.as_deref(),
                             temperature,
                             max_tokens,
                             &system_msg_th,
@@ -4538,6 +4566,7 @@ impl AishShell {
         let api_base = config.api_base.clone();
         let api_key = config.api_key.clone();
         let model = config.model.clone();
+        let codex_auth_path = config.codex_auth_path.clone();
         let temperature = config.temperature;
         let max_tokens = config.max_tokens;
         let animation = animation.clone();
@@ -4751,6 +4780,7 @@ impl AishShell {
             let reasoning_lines_cb = reasoning_lines_main.clone();
 
             let api_base_t = api_base.clone();
+            let codex_auth_path_t = codex_auth_path.clone();
             let api_key_f = api_key.clone();
             let model_f = model.clone();
             let animation_t = animation.clone();
@@ -4760,6 +4790,7 @@ impl AishShell {
             let conversation_history_t = conversation_history.clone();
             let system_msg_t = effective_system_msg.clone();
             let query_question_t = query.question.clone();
+            let codex_auth_path_th = codex_auth_path.clone();
             let api_base_th = api_base.clone();
             let api_key_th = api_key.clone();
             let model_th = model.clone();
@@ -4774,10 +4805,13 @@ impl AishShell {
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 let result = rt.block_on(async {
-                    let mut session = LlmSession::new(
-                        &api_base_t,
-                        &api_key_f,
-                        &model_f,
+                    let mut session = LlmSession::with_context(
+                        stream_context_from_parts(
+                            &api_base_t,
+                            &api_key_f,
+                            &model_f,
+                            codex_auth_path_t.as_deref(),
+                        ),
                         Some(temperature),
                         max_tokens,
                     );
@@ -5125,6 +5159,7 @@ impl AishShell {
                                 &api_base_th,
                                 &api_key_th,
                                 &model_th,
+                                codex_auth_path_th.as_deref(),
                                 Some(temperature),
                                 max_tokens,
                                 &system_msg_th,
