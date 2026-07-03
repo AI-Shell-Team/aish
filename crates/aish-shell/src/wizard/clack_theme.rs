@@ -104,8 +104,9 @@ impl Theme for AishSetupTheme {
         let query = cursor.to_string();
         let suffix = Self::match_suffix(&query, &haystacks);
         let cursor_display = base.cursor_with_style(cursor, &input_style);
+        // Gap after label (e.g. "搜索:") before typed text — matches OpenClaw @clack autocomplete.
         let line = format!(
-            "{}{}{}",
+            "{} {}{}",
             dim.apply_to(prefix),
             cursor_display,
             dim.apply_to(suffix)
@@ -173,6 +174,7 @@ mod tests {
         let rendered = Theme::format_input(&AishSetupTheme, &ThemeState::Active, &cursor);
         assert!(rendered.contains('o'));
         assert!(rendered.contains("搜索:"));
+        assert!(rendered.contains("搜索: o"));
         assert!(!rendered.is_empty());
     }
 }

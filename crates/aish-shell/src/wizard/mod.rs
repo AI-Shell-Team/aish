@@ -53,7 +53,6 @@ pub fn apply_setup_result(existing: &ConfigModel, setup: ConfigModel) -> ConfigM
 fn default_api_base_for_provider(provider_key: &str) -> Option<String> {
     match provider_key {
         "openai" => Some("https://api.openai.com/v1".to_string()),
-        "anthropic" => Some("https://api.anthropic.com/v1".to_string()),
         "deepseek" => Some("https://api.deepseek.com/v1".to_string()),
         "gemini" | "google" => {
             Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string())
@@ -112,11 +111,13 @@ pub fn get_all_providers() -> Vec<ProviderInfo> {
         // 1. OpenRouter
         ProviderInfo::new("openrouter", "OpenRouter")
             .with_api_base("https://openrouter.ai/api/v1")
-            .with_env_key("OPENAI_API_KEY"),
+            .with_env_key("OPENROUTER_API_KEY"),
         // 2. OpenAI
         ProviderInfo::new("openai", "OpenAI").with_env_key("OPENAI_API_KEY"),
         // 3. Anthropic
-        ProviderInfo::new("anthropic", "Anthropic").with_env_key("ANTHROPIC_API_KEY"),
+        ProviderInfo::new("anthropic", "Anthropic")
+            .with_custom_api_base()
+            .with_env_key("ANTHROPIC_API_KEY"),
         // 4. DeepSeek
         ProviderInfo::new("deepseek", "DeepSeek").with_env_key("DEEPSEEK_API_KEY"),
         // 5. Gemini
@@ -603,16 +604,11 @@ impl SetupWizard {
         let options: Vec<DialogOption> = providers
             .iter()
             .map(|p| {
-                let note = if p.requires_api_base {
-                    t("cli.setup.provider_custom_note")
-                } else if p.api_base.is_some() {
-                    t("cli.setup.provider_preset_base")
-                } else {
-                    String::new()
-                };
+                let hint_key = format!("cli.setup.provider_hints.{}", p.key);
+                let hint = t(&hint_key);
                 let mut opt = DialogOption::new(&p.key, p.label.clone());
-                if !note.is_empty() {
-                    opt = opt.with_description(note);
+                if hint != hint_key {
+                    opt = opt.with_description(hint);
                 }
                 opt
             })

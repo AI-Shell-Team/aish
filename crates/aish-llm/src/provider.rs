@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(p.id, "minimax");
         assert_eq!(p.display_name, "MiniMax");
 
-        let p2 = detect_provider("model", "https://api.minimaxi.com/anthropic");
+        let p2 = detect_provider("model", "https://api.minimaxi.com/v1");
         assert_eq!(p2.id, "minimax");
     }
 
