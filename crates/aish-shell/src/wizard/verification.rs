@@ -62,10 +62,11 @@ pub fn check_connectivity_for_provider(
     api_key: &str,
     model: &str,
     timeout_s: u64,
+    codex_auth_path: Option<&std::path::Path>,
 ) -> ConnectivityResult {
     match provider_key {
         "anthropic" => check_anthropic_connectivity(api_base, api_key, model, timeout_s),
-        "openai-codex" if api_key.trim().is_empty() => check_codex_connectivity(None),
+        "openai-codex" if api_key.trim().is_empty() => check_codex_connectivity(codex_auth_path),
         "openai-codex" => check_openai_responses_connectivity(api_base, api_key, model, timeout_s),
         _ => check_connectivity(api_base, api_key, model, timeout_s),
     }
@@ -78,10 +79,11 @@ pub fn check_tool_support_for_provider(
     api_key: &str,
     model: &str,
     timeout_s: u64,
+    codex_auth_path: Option<&std::path::Path>,
 ) -> ToolSupportResult {
     match provider_key {
         "anthropic" => check_anthropic_tool_support(api_base, api_key, model, timeout_s),
-        "openai-codex" if api_key.trim().is_empty() => check_codex_tool_support(None),
+        "openai-codex" if api_key.trim().is_empty() => check_codex_tool_support(codex_auth_path),
         "openai-codex" => check_openai_responses_tool_support(api_base, api_key, model, timeout_s),
         _ => check_tool_support(api_base, api_key, model, timeout_s),
     }

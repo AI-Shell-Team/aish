@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use aish_config::ConfigModel;
 use aish_i18n::{t, t_with_args};
 use aish_llm::providers::codex::{
-    login_codex_browser, login_codex_device_code, resolve_codex_auth_path, CODEX_DEFAULT_BASE_URL,
+    ensure_codex_auth, login_codex_device_code, resolve_codex_auth_path, CODEX_DEFAULT_BASE_URL,
     CODEX_PROVIDER,
 };
 
@@ -89,7 +89,7 @@ pub fn run_models_auth(
     let auth_path_ref = auth_path.as_deref();
 
     let auth_result = match auth_flow {
-        AuthFlow::Browser => login_codex_browser(auth_path_ref, open_browser),
+        AuthFlow::Browser => ensure_codex_auth(auth_path_ref, open_browser),
         AuthFlow::DeviceCode | AuthFlow::CodexCli => login_codex_device_code(auth_path_ref),
     };
 
