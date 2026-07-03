@@ -8,6 +8,8 @@ cli:
   check_tool_support_command_help: "Debug live tool-call support check"
 
   models_auth_title: "Models Auth: {provider}"
+  models_auth_relogin_hint: "Re-sign in or rotate credentials. First-time setup runs auth inside `aish setup`."
+  models_auth_existing_kept: "Kept existing {provider} auth (use --force to sign in again)"
   checking_existing_auth: "Checking for existing auth state..."
   oauth_not_implemented: "OAuth flows are not yet implemented in the Rust version."
   oauth_hint: "Please enter your auth token manually."
@@ -130,10 +132,10 @@ cli:
     api_key_hint: "Set {env_var} or configure api_key in your config file."
 
   openai_codex:
-    auth_not_found: "OpenAI Codex auth not found. Run `aish models auth --provider openai-codex` first."
+    auth_not_found: "OpenAI Codex auth not found. Run `aish setup` for first-time sign-in, or `aish models auth --provider openai-codex` to sign in again."
     auth_read_failed: "Failed to read Codex auth file: {path}"
-    auth_missing_tokens: "Codex auth file does not contain ChatGPT OAuth tokens. Re-run `aish models auth --provider openai-codex`."
-    auth_incomplete: "Codex auth is incomplete. Re-run `aish models auth --provider openai-codex`."
+    auth_missing_tokens: "Codex auth file does not contain ChatGPT OAuth tokens. Run `aish setup` or `aish models auth --provider openai-codex --force`."
+    auth_incomplete: "Codex auth is incomplete. Run `aish setup` or `aish models auth --provider openai-codex --force`."
 
   option:
     model: "LLM model to use (can also be set via AISH_MODEL or config file)."
@@ -219,7 +221,9 @@ cli:
     api_key_required: "API key is required"
     codex_auth_header: "Choose Codex authentication"
     codex_auth_oauth: "ChatGPT OAuth"
-    codex_auth_oauth_hint: "Use ChatGPT/Codex subscription; sign in in the wizard (or reuse ~/.codex/auth.json)"
+    codex_auth_oauth_hint: "Browser sign-in; paste redirect URL if callback fails (or reuse ~/.codex/auth.json)"
+    codex_auth_device_code: "Device code"
+    codex_auth_device_code_hint: "For SSH/headless hosts: visit the URL and enter the code shown here"
     codex_auth_api_key: "OpenAI API key"
     codex_auth_api_key_hint: "Bill via OpenAI Platform (api.openai.com)"
     codex_oauth_login_in_progress: "Signing in to ChatGPT/Codex..."
@@ -227,6 +231,7 @@ cli:
     codex_oauth_existing_auth: "Using existing Codex auth for {account}"
     codex_oauth_login_failed: "Codex sign-in failed: {error}"
     codex_oauth_setup_hint: "Reuses ~/.codex/auth.json when present; otherwise opens browser OAuth."
+    codex_device_code_in_progress: "Starting Codex device-code sign-in..."
     model_header: "Provider: {provider}"
     model_filter_prompt: "Search:"
     model_filter_hint: "↑/↓ to select · Enter: confirm · Type: to search · Esc to cancel"
@@ -1310,6 +1315,9 @@ llm:
   oauth:
     browser_login_opening: "Opening browser for {display_name} login. If it does not open, visit:\n{url}"
     browser_login_manual: "Please open the following URL in your browser to authenticate with {display_name}:\n{url}"
+    browser_login_paste_hint: "If the browser cannot return to this machine, paste the full redirect URL or code#state below."
+    browser_login_paste_prompt: "Paste authorization code or full redirect URL:"
+    callback_timeout: "Timed out waiting for OAuth callback"
     device_code_visit: "\nTo authenticate, visit:\n  {verification_uri}"
     device_code_enter: "And enter code: {user_code}\n"
     failed_bind_port: "Failed to bind port {port}: {error}"

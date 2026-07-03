@@ -20,8 +20,9 @@ use std::path::PathBuf;
 use aish_config::ConfigModel;
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
-use aish_llm::providers::codex::ensure_codex_auth;
-use aish_llm::providers::codex::load_codex_auth;
+use aish_llm::providers::codex::{
+    ensure_codex_auth, load_codex_auth, login_codex_browser, login_codex_device_code,
+};
 use aish_llm::{normalize_model_for_provider, resolve_model_for_api};
 
 use crate::tui::{DialogOption, DialogResult, CUSTOM_DIALOG_VALUE};
@@ -324,6 +325,8 @@ pub struct SetupWizard {
     api_base: Option<String>,
     api_key: Option<String>,
     codex_auth_path: Option<PathBuf>,
+    /// Codex OAuth method chosen in setup: `oauth` (browser) or `device-code`.
+    codex_auth_method: Option<String>,
     selected_model: Option<String>,
     is_free_key: bool,
 }
@@ -336,6 +339,12 @@ fn mask_secret(s: &str) -> String {
     format!("{}...{}", &s[..4], &s[s.len() - 4..])
 }
 
+fn map_codex_login_err(e: aish_llm::providers::codex::CodexError) -> AishError {
+    let mut args = std::collections::HashMap::new();
+    args.insert("error".to_string(), e.to_string());
+    AishError::Config(t_with_args("cli.setup.codex_oauth_login_failed", &args))
+}
+
 impl SetupWizard {
     pub fn new(config_dir: PathBuf) -> Self {
         Self {
@@ -345,6 +354,7 @@ impl SetupWizard {
             api_base: None,
             api_key: None,
             codex_auth_path: None,
+            codex_auth_method: None,
             selected_model: None,
             is_free_key: false,
         }
@@ -757,14 +767,15 @@ impl SetupWizard {
             && self.api_key.as_deref().unwrap_or("").is_empty()
     }
 
-    fn run_codex_oauth_login(&mut self) -> Result<(), AishError> {
-        let had_auth = load_codex_auth(self.codex_auth_path.as_deref()).is_ok();
+    fn run_codex_oauth_login(&mut self, force: bool) -> Result<(), AishError> {
+        let had_auth = !force && load_codex_auth(self.codex_auth_path.as_deref()).is_ok();
         clack_log::step(&t("cli.setup.codex_oauth_login_in_progress"));
-        let auth = ensure_codex_auth(self.codex_auth_path.as_deref(), true).map_err(|e| {
-            let mut args = std::collections::HashMap::new();
-            args.insert("error".to_string(), e.to_string());
-            AishError::Config(t_with_args("cli.setup.codex_oauth_login_failed", &args))
-        })?;
+        let auth = if force {
+            login_codex_browser(self.codex_auth_path.as_deref(), true, false)
+                .map_err(map_codex_login_err)?
+        } else {
+            ensure_codex_auth(self.codex_auth_path.as_deref(), true).map_err(map_codex_login_err)?
+        };
         self.codex_auth_path = Some(auth.auth_path);
         let message_key = if had_auth {
             "cli.setup.codex_oauth_existing_auth"
@@ -777,11 +788,32 @@ impl SetupWizard {
         Ok(())
     }
 
+    fn run_codex_device_code_login(&mut self) -> Result<(), AishError> {
+        clack_log::step(&t("cli.setup.codex_device_code_in_progress"));
+        let auth = login_codex_device_code(self.codex_auth_path.as_deref())
+            .map_err(map_codex_login_err)?;
+        self.codex_auth_path = Some(auth.auth_path);
+        let mut args = std::collections::HashMap::new();
+        args.insert("account".to_string(), auth.account_id);
+        clack_log::success(&t_with_args("cli.setup.codex_oauth_login_success", &args));
+        Ok(())
+    }
+
+    fn run_codex_auth_login(&mut self, force: bool) -> Result<(), AishError> {
+        if self.codex_auth_method.as_deref() == Some("device-code") {
+            self.run_codex_device_code_login()
+        } else {
+            self.run_codex_oauth_login(force)
+        }
+    }
+
     /// Codex auth: ChatGPT OAuth (subscription) or OpenAI Platform API key.
     fn prompt_codex_auth(&mut self) -> Result<(), AishError> {
         let options = vec![
             DialogOption::new("oauth", t("cli.setup.codex_auth_oauth"))
                 .with_description(t("cli.setup.codex_auth_oauth_hint")),
+            DialogOption::new("device-code", t("cli.setup.codex_auth_device_code"))
+                .with_description(t("cli.setup.codex_auth_device_code_hint")),
             DialogOption::new("api-key", t("cli.setup.codex_auth_api_key"))
                 .with_description(t("cli.setup.codex_auth_api_key_hint")),
         ];
@@ -795,14 +827,25 @@ impl SetupWizard {
         match result {
             DialogResult::Selected(key) if key == "oauth" => {
                 self.api_key = Some(String::new());
+                self.codex_auth_method = Some("oauth".to_string());
                 self.api_base = Some(
                     default_api_base_for_provider("openai-codex")
                         .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
                 );
-                self.run_codex_oauth_login()
+                self.run_codex_oauth_login(false)
+            }
+            DialogResult::Selected(key) if key == "device-code" => {
+                self.api_key = Some(String::new());
+                self.codex_auth_method = Some("device-code".to_string());
+                self.api_base = Some(
+                    default_api_base_for_provider("openai-codex")
+                        .unwrap_or_else(|| "https://chatgpt.com/backend-api/codex".to_string()),
+                );
+                self.run_codex_device_code_login()
             }
             DialogResult::Selected(key) if key == "api-key" => {
                 self.codex_auth_path = None;
+                self.codex_auth_method = None;
                 self.api_base = Some(
                     default_api_base_for_provider("openai")
                         .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
@@ -1040,7 +1083,7 @@ impl SetupWizard {
                     Ok(())
                 }
                 "retry_codex_auth" => self
-                    .run_codex_oauth_login()
+                    .run_codex_auth_login(true)
                     .and_then(|_| self.verify_and_save()),
                 "change_provider" => {
                     self.state = WizardState::ProviderSelection;

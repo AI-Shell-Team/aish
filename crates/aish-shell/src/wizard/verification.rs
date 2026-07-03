@@ -5,7 +5,7 @@
 
 use aish_i18n::t_with_args;
 use aish_llm::api::resolve_anthropic_messages_url;
-use aish_llm::providers::codex::load_codex_auth;
+use aish_llm::providers::codex::{load_codex_auth, probe_codex_oauth_connectivity};
 use serde_json::json;
 use std::collections::HashMap;
 use tracing::debug;
@@ -66,7 +66,9 @@ pub fn check_connectivity_for_provider(
 ) -> ConnectivityResult {
     match provider_key {
         "anthropic" => check_anthropic_connectivity(api_base, api_key, model, timeout_s),
-        "openai-codex" if api_key.trim().is_empty() => check_codex_connectivity(codex_auth_path),
+        "openai-codex" if api_key.trim().is_empty() => {
+            check_codex_connectivity(codex_auth_path, api_base, model, timeout_s)
+        }
         "openai-codex" => check_openai_responses_connectivity(api_base, api_key, model, timeout_s),
         _ => check_connectivity(api_base, api_key, model, timeout_s),
     }
@@ -83,7 +85,9 @@ pub fn check_tool_support_for_provider(
 ) -> ToolSupportResult {
     match provider_key {
         "anthropic" => check_anthropic_tool_support(api_base, api_key, model, timeout_s),
-        "openai-codex" if api_key.trim().is_empty() => check_codex_tool_support(codex_auth_path),
+        "openai-codex" if api_key.trim().is_empty() => {
+            check_codex_tool_support(codex_auth_path, api_base, model, timeout_s)
+        }
         "openai-codex" => check_openai_responses_tool_support(api_base, api_key, model, timeout_s),
         _ => check_tool_support(api_base, api_key, model, timeout_s),
     }
@@ -234,20 +238,41 @@ pub fn check_anthropic_tool_support(
     }
 }
 
-pub fn check_codex_connectivity(codex_auth_path: Option<&std::path::Path>) -> ConnectivityResult {
+pub fn check_codex_connectivity(
+    codex_auth_path: Option<&std::path::Path>,
+    api_base: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ConnectivityResult {
     match load_codex_auth(codex_auth_path) {
-        Ok(auth) if !auth.access_token.is_empty() => ConnectivityResult {
-            ok: true,
-            error: None,
-            latency_ms: Some(0),
-        },
-        Ok(_) => ConnectivityResult {
+        Ok(auth) if auth.access_token.is_empty() => ConnectivityResult {
             ok: false,
             error: Some(verify_msg(
                 "cli.setup.verify_request_failed",
                 &[("detail", "Codex auth token is empty")],
             )),
             latency_ms: None,
+        },
+        Ok(_) => match probe_codex_oauth_connectivity(
+            codex_auth_path,
+            Some(api_base),
+            model,
+            timeout_s,
+            false,
+        ) {
+            Ok(latency_ms) => ConnectivityResult {
+                ok: true,
+                error: None,
+                latency_ms: Some(latency_ms),
+            },
+            Err(detail) => ConnectivityResult {
+                ok: false,
+                error: Some(verify_msg(
+                    "cli.setup.verify_request_failed",
+                    &[("detail", &detail)],
+                )),
+                latency_ms: None,
+            },
         },
         Err(e) => ConnectivityResult {
             ok: false,
@@ -418,15 +443,32 @@ pub fn check_openai_responses_tool_support(
     }
 }
 
-pub fn check_codex_tool_support(codex_auth_path: Option<&std::path::Path>) -> ToolSupportResult {
+pub fn check_codex_tool_support(
+    codex_auth_path: Option<&std::path::Path>,
+    api_base: &str,
+    model: &str,
+    timeout_s: u64,
+) -> ToolSupportResult {
     match load_codex_auth(codex_auth_path) {
-        Ok(auth) if !auth.access_token.is_empty() => ToolSupportResult {
-            supports: true,
-            error: None,
-        },
-        Ok(_) => ToolSupportResult {
+        Ok(auth) if auth.access_token.is_empty() => ToolSupportResult {
             supports: false,
             error: Some("Codex auth token is empty".to_string()),
+        },
+        Ok(_) => match probe_codex_oauth_connectivity(
+            codex_auth_path,
+            Some(api_base),
+            model,
+            timeout_s,
+            true,
+        ) {
+            Ok(_) => ToolSupportResult {
+                supports: true,
+                error: None,
+            },
+            Err(detail) => ToolSupportResult {
+                supports: false,
+                error: Some(detail),
+            },
         },
         Err(e) => ToolSupportResult {
             supports: false,

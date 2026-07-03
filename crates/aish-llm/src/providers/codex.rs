@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 use super::types::{ProviderAdapter, ProviderAuthConfig, ProviderCapabilities, ProviderMetadata};
-use crate::oauth::{login_with_browser, login_with_device_code, OAuthProviderSpec, OAuthTokens};
+use crate::oauth::{
+    login_with_browser_opts, login_with_device_code, BrowserLoginOptions, OAuthProviderSpec,
+    OAuthTokens,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -400,11 +403,19 @@ pub fn codex_oauth_provider() -> OAuthProviderSpec {
 pub fn login_codex_browser(
     auth_path: Option<&Path>,
     open_browser: bool,
+    allow_manual_redirect: bool,
 ) -> Result<CodexAuthState, CodexError> {
     let path = resolve_codex_auth_path(auth_path);
     let provider = codex_oauth_provider();
-    let tokens = login_with_browser(&provider, CODEX_DEFAULT_CALLBACK_PORT, open_browser)
-        .map_err(|e| CodexError::Auth(e))?;
+    let tokens = login_with_browser_opts(
+        &provider,
+        CODEX_DEFAULT_CALLBACK_PORT,
+        BrowserLoginOptions {
+            open_browser,
+            allow_manual_redirect,
+        },
+    )
+    .map_err(CodexError::Auth)?;
 
     let account_id = extract_account_id_from_tokens(&tokens)?;
     persist_codex_tokens(
@@ -432,12 +443,21 @@ pub fn ensure_codex_auth(
     auth_path: Option<&Path>,
     open_browser: bool,
 ) -> Result<CodexAuthState, CodexError> {
+    ensure_codex_auth_with_options(auth_path, open_browser, false)
+}
+
+/// Like [`ensure_codex_auth`] but allows pasted redirect URLs (CLI use).
+pub fn ensure_codex_auth_with_options(
+    auth_path: Option<&Path>,
+    open_browser: bool,
+    allow_manual_redirect: bool,
+) -> Result<CodexAuthState, CodexError> {
     if let Ok(auth) = load_codex_auth(auth_path) {
         if !auth.access_token.is_empty() {
             return Ok(auth);
         }
     }
-    login_codex_browser(auth_path, open_browser)
+    login_codex_browser(auth_path, open_browser, allow_manual_redirect)
 }
 
 /// Login via device code flow.
@@ -1259,6 +1279,106 @@ pub fn resolve_codex_base_url(api_base: Option<&str>) -> String {
         return format!("{scheme}://{host}/backend-api/codex");
     }
     CODEX_DEFAULT_BASE_URL.to_string()
+}
+
+/// Blocking connectivity probe for Codex OAuth (ChatGPT subscription `/responses` API).
+pub fn probe_codex_oauth_connectivity(
+    auth_path: Option<&Path>,
+    api_base: Option<&str>,
+    model: &str,
+    timeout_secs: u64,
+    with_tools: bool,
+) -> Result<u64, String> {
+    let mut auth = load_codex_auth(auth_path).map_err(|e| e.to_string())?;
+    if auth.access_token.is_empty() {
+        return Err("Codex auth token is empty".to_string());
+    }
+
+    if auth.needs_refresh() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to start runtime for token refresh: {e}"))?;
+        auth = rt
+            .block_on(refresh_codex_auth(&auth))
+            .map_err(|e| e.to_string())?;
+    }
+
+    let base_url = resolve_codex_base_url(api_base);
+    let url = format!("{}/responses", base_url.trim_end_matches('/'));
+
+    let messages = [serde_json::json!({"role": "user", "content": "Hi"})];
+    let tools = if with_tools {
+        Some(vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "ping",
+                "description": "ping",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })])
+    } else {
+        None
+    };
+    let tool_refs = tools.as_deref();
+    let mut request_body = build_codex_request(
+        model,
+        &messages,
+        tool_refs,
+        if with_tools { "auto" } else { "none" },
+        Some(16),
+        None,
+    );
+    request_body["stream"] = Value::Bool(false);
+    if !with_tools {
+        if let Some(obj) = request_body.as_object_mut() {
+            obj.remove("tools");
+            obj.remove("tool_choice");
+            obj.remove("parallel_tool_calls");
+        }
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let start = std::time::Instant::now();
+    let response = client
+        .post(&url)
+        .headers(blocking_codex_headers(&auth))
+        .json(&request_body)
+        .send()
+        .map_err(|e| e.to_string())?;
+    let elapsed = start.elapsed().as_millis() as u64;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(elapsed)
+    } else {
+        Err(format!(
+            "{} {}",
+            status,
+            response.text().unwrap_or_default()
+        ))
+    }
+}
+
+fn blocking_codex_headers(auth: &CodexAuthState) -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Ok(val) = format!("Bearer {}", auth.access_token).parse() {
+        headers.insert(reqwest::header::AUTHORIZATION, val);
+    }
+    if let Ok(val) = auth.account_id.parse() {
+        headers.insert("ChatGPT-Account-ID", val);
+    }
+    if let Ok(val) = "application/json".parse() {
+        headers.insert(reqwest::header::CONTENT_TYPE, val);
+    }
+    if let Ok(val) = "responses=experimental".parse() {
+        headers.insert("OpenAI-Beta", val);
+    }
+    headers
 }
 
 // ---------------------------------------------------------------------------
