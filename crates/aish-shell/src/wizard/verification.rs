@@ -6,6 +6,7 @@
 use aish_i18n::t_with_args;
 use aish_llm::api::resolve_anthropic_messages_url;
 use aish_llm::providers::codex::{load_codex_auth, probe_codex_oauth_connectivity};
+use aish_llm::DEFAULT_MAX_TOKENS;
 use serde_json::json;
 use std::collections::HashMap;
 use tracing::debug;
@@ -484,8 +485,8 @@ pub fn check_codex_tool_support(
 /// Check basic connectivity to the chat completions endpoint.
 ///
 /// Sends a minimal `POST {api_base}/chat/completions` with a single "Hi"
-/// user message and `max_tokens: 5`.  Returns latency on success or an
-/// explanatory error on failure.
+/// user message. Uses the normal runtime token budget so proxy backends with
+/// reasoning models do not return empty responses on tiny probes.
 pub fn check_connectivity(
     api_base: &str,
     api_key: &str,
@@ -515,7 +516,7 @@ pub fn check_connectivity(
     let body = json!({
         "model": model,
         "messages": [{"role": "user", "content": "Hi"}],
-        "max_tokens": 5,
+        "max_tokens": DEFAULT_MAX_TOKENS,
     });
 
     let start = std::time::Instant::now();
@@ -592,24 +593,15 @@ pub fn check_connectivity(
 
 /// Check whether the model supports tool/function calling.
 ///
-/// Sends a chat completion request that includes a trivial `ping` tool
-/// definition with `tool_choice: "auto"`.  If the response is successful
-/// we consider tool support to be present.  A 400-level error or an
-/// error message mentioning "tools" is interpreted as lack of support.
+/// Uses the same dialect-aware streaming probe as `aish check-tool-support`.
 pub fn check_tool_support(
     api_base: &str,
     api_key: &str,
     model: &str,
     timeout_s: u64,
 ) -> ToolSupportResult {
-    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    debug!("Tool-support check: POST {}", url);
-
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_s))
-        .build()
-    {
-        Ok(c) => c,
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
         Err(e) => {
             return ToolSupportResult {
                 supports: false,
@@ -617,89 +609,34 @@ pub fn check_tool_support(
                     "cli.setup.verify_http_client_build_failed",
                     &[("detail", &e.to_string())],
                 )),
-            }
+            };
         }
     };
 
-    let tool_def = json!({
-        "type": "function",
-        "function": {
-            "name": "ping",
-            "description": "ping",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
+    let result = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_s),
+            aish_llm::probe_live_tool_support(api_base, api_key, model),
+        )
+        .await
     });
 
-    let body = json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "Hi"}],
-        "max_tokens": 5,
-        "tools": [tool_def],
-        "tool_choice": "auto",
-    });
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send();
-
-    match response {
-        Ok(resp) => {
-            let status = resp.status();
-            debug!("Tool-support response status: {}", status);
-
-            if status.is_success() {
-                ToolSupportResult {
-                    supports: true,
-                    error: None,
-                }
-            } else {
-                let status_code = status.as_u16();
-                let body_text = resp.text().unwrap_or_default();
-                let detail = if body_text.len() > 300 {
-                    let mut end = 300;
-                    while end > 0 && !body_text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    format!("{}...", &body_text[..end])
-                } else {
-                    body_text
-                };
-                // A client error (4xx) likely means the endpoint rejected
-                // the tools parameter.
-                let supports = false;
-                ToolSupportResult {
-                    supports,
-                    error: Some(verify_msg(
-                        "cli.setup.verify_tool_http_error",
-                        &[("status", &status_code.to_string()), ("detail", &detail)],
-                    )),
-                }
-            }
-        }
-        Err(e) => {
-            debug!("Tool-support check error: {}", e);
-            let msg = if e.is_timeout() {
-                verify_msg(
-                    "cli.setup.verify_tool_timeout",
-                    &[("timeout", &timeout_s.to_string())],
-                )
-            } else {
-                verify_msg(
-                    "cli.setup.verify_tool_request_failed",
-                    &[("detail", &e.to_string())],
-                )
-            };
-            ToolSupportResult {
-                supports: false,
-                error: Some(msg),
-            }
-        }
+    match result {
+        Ok(Ok(())) => ToolSupportResult {
+            supports: true,
+            error: None,
+        },
+        Ok(Err(err)) => ToolSupportResult {
+            supports: false,
+            error: Some(err.to_string()),
+        },
+        Err(_) => ToolSupportResult {
+            supports: false,
+            error: Some(verify_msg(
+                "cli.setup.verify_tool_timeout",
+                &[("timeout", &timeout_s.to_string())],
+            )),
+        },
     }
 }
 
