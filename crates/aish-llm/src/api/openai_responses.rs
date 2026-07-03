@@ -3,8 +3,10 @@
 use aish_core::AishError;
 
 use crate::client::LlmResponse;
+use crate::openai_sse_bridge::translate_codex_responses_sse_stream;
 use crate::providers::codex::{
-    convert_codex_response, create_openai_responses_with_api_key, CodexError,
+    convert_codex_response, create_openai_responses_http_response,
+    create_openai_responses_with_api_key, CodexError,
 };
 use crate::types::{ChatMessage, ToolSpec};
 
@@ -15,13 +17,32 @@ pub async fn stream(
     ctx: &StreamContext,
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
-    _stream: bool,
+    stream: bool,
     _temperature: Option<f32>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
     let message_values = chat_messages_to_values(messages)?;
     let tool_values = tools.map(tools_to_values).transpose()?;
     let tool_refs = tool_values.as_deref();
+    let max_output = Some(effective_max_tokens(max_tokens));
+
+    if stream {
+        let resp = create_openai_responses_http_response(
+            &ctx.api_base,
+            &ctx.api_key,
+            &ctx.model,
+            &message_values,
+            tool_refs,
+            "auto",
+            max_output,
+            120,
+        )
+        .await
+        .map_err(codex_error_to_aish)?;
+        return Ok(LlmResponse::Stream(translate_codex_responses_sse_stream(
+            resp,
+        )));
+    }
 
     let payload = create_openai_responses_with_api_key(
         &ctx.api_base,
@@ -30,7 +51,7 @@ pub async fn stream(
         &message_values,
         tool_refs,
         "auto",
-        Some(effective_max_tokens(max_tokens)),
+        max_output,
         120,
     )
     .await

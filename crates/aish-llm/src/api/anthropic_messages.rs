@@ -5,6 +5,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::client::LlmResponse;
+use crate::openai_sse_bridge::translate_anthropic_sse_stream;
 use crate::types::{ChatMessage, ToolSpec};
 use crate::usage::TokenUsage;
 
@@ -77,12 +78,7 @@ pub async fn stream(
     }
 
     if stream {
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| AishError::Llm(e.to_string()))?;
-        let openai_json = anthropic_sse_to_openai_json(&text)?;
-        Ok(LlmResponse::Json(openai_json))
+        Ok(LlmResponse::Stream(translate_anthropic_sse_stream(resp)))
     } else {
         let json_body: Value = resp
             .json()
@@ -315,155 +311,6 @@ fn anthropic_response_to_openai_json(response: &Value) -> Value {
         }
     })
 }
-
-fn anthropic_sse_to_openai_json(sse_text: &str) -> Result<Value, AishError> {
-    let mut text_parts: Vec<String> = Vec::new();
-    let mut tool_calls: HashMap<usize, ToolCallBuilder> = HashMap::new();
-    let mut stop_reason = "end_turn".to_string();
-    let mut usage_json: Option<Value> = None;
-
-    for line in sse_text.lines() {
-        let line = line.trim();
-        if !line.starts_with("data: ") {
-            continue;
-        }
-        let data = &line[6..];
-        if data == "[DONE]" {
-            break;
-        }
-        let Ok(event) = serde_json::from_str::<Value>(data) else {
-            continue;
-        };
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        match event_type {
-            "content_block_start" => {
-                if let Some(block) = event.get("content_block") {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                        let index =
-                            event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        tool_calls.insert(
-                            index,
-                            ToolCallBuilder {
-                                id,
-                                name,
-                                arguments: String::new(),
-                            },
-                        );
-                    }
-                }
-            }
-            "content_block_delta" => {
-                if let Some(delta) = event.get("delta") {
-                    match delta.get("type").and_then(|t| t.as_str()) {
-                        Some("text_delta") => {
-                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                text_parts.push(text.to_string());
-                            }
-                        }
-                        Some("input_json_delta") => {
-                            let index =
-                                event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                            if let Some(partial) =
-                                delta.get("partial_json").and_then(|v| v.as_str())
-                            {
-                                if let Some(entry) = tool_calls.get_mut(&index) {
-                                    entry.arguments.push_str(partial);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            "message_delta" => {
-                if let Some(delta) = event.get("delta") {
-                    if let Some(reason) = delta.get("stop_reason").and_then(|v| v.as_str()) {
-                        stop_reason = reason.to_string();
-                    }
-                }
-                if let Some(usage) = event.get("usage") {
-                    usage_json = Some(json!({
-                        "input_tokens": usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        "output_tokens": usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                    }));
-                }
-            }
-            "message_start" => {
-                if let Some(message) = event.get("message") {
-                    if let Some(usage) = message.get("usage") {
-                        usage_json = Some(json!({
-                            "input_tokens": usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                            "output_tokens": usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-                        }));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut openai_tool_calls: Vec<Value> = Vec::new();
-    let mut indices: Vec<_> = tool_calls.keys().copied().collect();
-    indices.sort_unstable();
-    for index in indices {
-        if let Some(builder) = tool_calls.remove(&index) {
-            openai_tool_calls.push(json!({
-                "id": builder.id,
-                "type": "function",
-                "function": {
-                    "name": builder.name,
-                    "arguments": if builder.arguments.is_empty() { "{}".to_string() } else { builder.arguments },
-                }
-            }));
-        }
-    }
-
-    let finish_reason = if stop_reason == "tool_use" || !openai_tool_calls.is_empty() {
-        "tool_calls"
-    } else {
-        "stop"
-    };
-
-    let mut message = json!({
-        "role": "assistant",
-        "content": text_parts.join(""),
-    });
-    if !openai_tool_calls.is_empty() {
-        message["tool_calls"] = json!(openai_tool_calls);
-    }
-
-    let usage = usage_json.unwrap_or(json!({"input_tokens": 0, "output_tokens": 0}));
-
-    Ok(json!({
-        "choices": [{
-            "message": message,
-            "finish_reason": finish_reason,
-        }],
-        "usage": {
-            "prompt_tokens": usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-            "completion_tokens": usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
-        }
-    }))
-}
-
-struct ToolCallBuilder {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-use std::collections::HashMap;
 
 #[cfg(test)]
 mod tests {

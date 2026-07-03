@@ -3,8 +3,10 @@
 use aish_core::AishError;
 
 use crate::client::LlmResponse;
+use crate::openai_sse_bridge::translate_codex_responses_sse_stream;
 use crate::providers::codex::{
-    convert_codex_response, create_codex_chat_completion, load_codex_auth,
+    convert_codex_response, create_codex_chat_completion, create_codex_http_response,
+    load_codex_auth,
 };
 use crate::types::{ChatMessage, ToolSpec};
 
@@ -15,7 +17,7 @@ pub async fn stream(
     ctx: &StreamContext,
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
-    _stream: bool,
+    stream: bool,
     _temperature: Option<f32>,
     _max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
@@ -29,6 +31,23 @@ pub async fn stream(
     } else {
         Some(ctx.api_base.as_str())
     };
+
+    if stream {
+        let resp = create_codex_http_response(
+            &ctx.model,
+            &message_values,
+            tool_refs,
+            "auto",
+            api_base,
+            auth_path,
+            120,
+        )
+        .await
+        .map_err(codex_error_to_aish)?;
+        return Ok(LlmResponse::Stream(translate_codex_responses_sse_stream(
+            resp,
+        )));
+    }
 
     let payload = create_codex_chat_completion(
         &ctx.model,

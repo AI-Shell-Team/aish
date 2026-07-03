@@ -1,6 +1,7 @@
 use aish_core::AishError;
 use reqwest::Client;
 
+use crate::llm_stream::LlmStream;
 use crate::model_id::resolve_model_for_api;
 use crate::types::{ChatMessage, ToolSpec};
 
@@ -170,7 +171,7 @@ impl LlmClient {
         }
 
         if stream {
-            Ok(LlmResponse::Stream(resp))
+            Ok(LlmResponse::Stream(LlmStream::from_http(resp)))
         } else {
             let text = resp
                 .text()
@@ -210,7 +211,7 @@ fn format_http_error(status: reqwest::StatusCode, body: &str) -> String {
 /// Response from the LLM API, either a complete JSON body or a streaming response.
 pub enum LlmResponse {
     Json(serde_json::Value),
-    Stream(reqwest::Response),
+    Stream(LlmStream),
 }
 
 #[cfg(test)]
