@@ -7,6 +7,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6] - 2026-07-03
+
+### Added
+
+- Added `/diagnose` for read-only failure diagnosis when shell commands are blocked.
+- Added read-only mode support for the bash tool, with hardened parsing for sudo segments and escapes.
+- Added bash-style multi-column tab completion with a custom pager.
+- Added environment-aware remote PS1 with danger escalation, including SSH host and git branch display.
+- Added a welcome changelog panel on startup.
+- Added a cliclack-based setup wizard with Codex OAuth login and OpenClaw-aligned auth flows.
+- Added bundled ops skills that seed to the user directory on install.
+- Added a multi API dialect registry for Anthropic and Codex, with streaming via an OpenAI SSE bridge.
+
+### Changed
+
+- Improved setup wizard UX, provider copy, and localized verification error messages.
+- Normalized model IDs for setup/runtime and adjusted default `max_tokens`.
+
+### Fixed
+
+- Fixed read-only bash enforcement gaps in the parser and session.
+- Fixed remote path detection for `host:/path` syntax and stdin draining before `--More--` prompts.
+- Fixed `send_command_interactive` blocking after sudo/PAM authentication.
+- Fixed PTY `PRINTF_ERASE` chunk-boundary leak.
+- Fixed Codex auth, SSE streaming, and Responses adapter `temperature` / `max_tokens` passthrough.
+
 ## [0.3.5] - 2026-06-24
 
 ### Added
