@@ -5447,13 +5447,19 @@ fn reap_child(pid: Pid) {
 /// temp dir). No subdirectory is created: a shared `aish-rc` dir breaks when the
 /// first creator (often root via `sudo aish`) owns it and later users cannot write.
 fn write_rcfile_temp_in(base: &std::path::Path) -> aish_core::Result<std::path::PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
 
     let path = base.join(format!("aish-rc-{}-{}.sh", getuid(), uuid::Uuid::new_v4()));
-    std::fs::write(&path, BASH_RC_WRAPPER)
+    // Create with 0600 atomically so the file is never briefly world-readable.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
         .map_err(|e| AishError::Pty(format!("failed to write rcfile temp: {e}")))?;
-    // Best-effort: owner-only read/write; ignore failure on exotic FS.
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    f.write_all(BASH_RC_WRAPPER.as_bytes())
+        .map_err(|e| AishError::Pty(format!("failed to write rcfile temp: {e}")))?;
     Ok(path)
 }
 
