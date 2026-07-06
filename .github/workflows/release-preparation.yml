@@ -3,26 +3,41 @@ name: Release Preparation
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Target release version, for example 0.3.0 or 1.0.0-beta.1"
+      pr_number:
+        description: "Upstream release PR number (manual trigger only)"
         required: true
-        type: string
-      ref:
-        description: "Git ref to validate, for example release/v0.3.0-prep or a commit SHA"
-        required: false
-        default: main
         type: string
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: release-preparation-${{ github.event.inputs.version }}
+  group: release-preparation-pr-${{ github.event.inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Validate release PR context
+    runs-on: ubuntu-latest
+    outputs:
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      head_ref: ${{ steps.resolve.outputs.head_ref }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Resolve release PR context
+        id: resolve
+        uses: ./.github/actions/resolve-release-pr
+        with:
+          pr_number: ${{ github.event.inputs.pr_number }}
+
   release-meta:
     name: Compute release metadata
+    needs: preflight
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}
@@ -30,22 +45,38 @@ jobs:
       previous_stable_tag: ${{ steps.metadata.outputs.previous_stable_tag }}
       release_notes: ${{ steps.metadata.outputs.release_notes }}
     steps:
-      - name: Checkout repository
+      - name: Checkout release merge ref
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+
+      - name: Resolve target version
+        id: target_version
+        shell: bash
+        env:
+          PREFLIGHT_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PREFLIGHT_VERSION}" ]; then
+            echo "value=${PREFLIGHT_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            version="$(python3 packaging/scripts/release_metadata.py --print-json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            echo "value=${version}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Compute release metadata
         id: metadata
         uses: ./.github/actions/release-metadata
         with:
-          version: ${{ github.event.inputs.version }}
+          version: ${{ steps.target_version.outputs.value }}
           artifact_prefix: release-preparation
 
   prepare-release:
     name: Summarize release preparation output
-    needs: release-meta
+    needs:
+      - preflight
+      - release-meta
     runs-on: ubuntu-latest
     outputs:
       version: ${{ needs.release-meta.outputs.version }}
@@ -53,23 +84,35 @@ jobs:
       previous_stable_tag: ${{ needs.release-meta.outputs.previous_stable_tag }}
     steps:
       - name: Write job summary
+        env:
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+          RELEASE_TAG: ${{ needs.release-meta.outputs.tag }}
+          PREFLIGHT_PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          PREFLIGHT_HEAD_REF: ${{ needs.preflight.outputs.head_ref }}
+          PREFLIGHT_CHECKOUT_REF: ${{ needs.preflight.outputs.checkout_ref }}
+          RELEASE_PREVIOUS_STABLE_TAG: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
+          RELEASE_NOTES: ${{ needs.release-meta.outputs.release_notes }}
         run: |
-          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          # Release Preparation Ready
-
-          - Version: ${{ needs.release-meta.outputs.version }}
-          - Tag: ${{ needs.release-meta.outputs.tag }}
-          - Ref: ${{ github.event.inputs.ref }}
-          - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
-
-          ## Release Notes
-
-          ${{ needs.release-meta.outputs.release_notes }}
-          EOF
+          {
+            echo "# Release Preparation Ready"
+            echo ""
+            echo "- Version: ${RELEASE_VERSION}"
+            echo "- Tag: ${RELEASE_TAG}"
+            echo "- PR: #${PREFLIGHT_PR_NUMBER}"
+            echo "- Head branch: ${PREFLIGHT_HEAD_REF}"
+            echo "- Checkout ref: ${PREFLIGHT_CHECKOUT_REF}"
+            echo "- Previous stable tag: ${RELEASE_PREVIOUS_STABLE_TAG}"
+            echo ""
+            echo "## Release Notes"
+            echo ""
+            printf '%s\n' "${RELEASE_NOTES}";
+          } >> "$GITHUB_STEP_SUMMARY"
 
   dry-run-package-validation:
     name: Dry-run package validation (${{ matrix.arch }})
-    needs: release-meta
+    needs:
+      - preflight
+      - release-meta
     strategy:
       fail-fast: false
       matrix:
@@ -83,10 +126,10 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout release merge ref
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
 
       - name: Set up build environment
         env:
@@ -128,7 +171,9 @@ jobs:
 
   dry-run-pypi-validation:
     name: Dry-run PyPI validation (${{ matrix.arch }})
-    needs: release-meta
+    needs:
+      - preflight
+      - release-meta
     strategy:
       fail-fast: false
       matrix:
@@ -147,11 +192,11 @@ jobs:
         run: |
           echo "Skipping PyPI wheel validation for prerelease version ${{ needs.release-meta.outputs.version }}."
 
-      - name: Checkout repository
+      - name: Checkout release merge ref
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
 
       - name: Set up build environment
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
@@ -204,16 +249,18 @@ jobs:
   live-smoke-validation:
     name: Live smoke validation
     needs:
+      - preflight
       - release-meta
       - dry-run-package-validation
     uses: ./.github/workflows/live-smoke.yml
     with:
-      ref: ${{ github.event.inputs.ref }}
+      ref: ${{ needs.preflight.outputs.checkout_ref }}
     secrets: inherit
 
   release-preparation-summary:
-    name: Summarize release preparation validation
+    name: Release preparation summary
     needs:
+      - preflight
       - release-meta
       - prepare-release
       - dry-run-package-validation
@@ -222,14 +269,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Write final summary
+        env:
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+          RELEASE_TAG: ${{ needs.release-meta.outputs.tag }}
+          PREFLIGHT_PR_NUMBER: ${{ needs.preflight.outputs.pr_number }}
+          PREFLIGHT_HEAD_REF: ${{ needs.preflight.outputs.head_ref }}
+          PREFLIGHT_CHECKOUT_REF: ${{ needs.preflight.outputs.checkout_ref }}
+          RELEASE_PREVIOUS_STABLE_TAG: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
         run: |
-          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          # Release Preparation Complete
-
-          - Version: ${{ needs.release-meta.outputs.version }}
-          - Tag: ${{ needs.release-meta.outputs.tag }}
-          - Ref: ${{ github.event.inputs.ref }}
-          - Previous stable tag: ${{ needs.release-meta.outputs.previous_stable_tag || 'none' }}
-
-          Release metadata artifacts, dry-run bundle validation, stable-only PyPI wheel validation, and live smoke validation have completed successfully.
-          EOF
+          {
+            echo "# Release Preparation Complete"
+            echo ""
+            echo "- Version: ${RELEASE_VERSION}"
+            echo "- Tag: ${RELEASE_TAG}"
+            echo "- PR: #${PREFLIGHT_PR_NUMBER}"
+            echo "- Head branch: ${PREFLIGHT_HEAD_REF}"
+            echo "- Checkout ref: ${PREFLIGHT_CHECKOUT_REF}"
+            echo "- Previous stable tag: ${RELEASE_PREVIOUS_STABLE_TAG}"
+            echo ""
+            echo "Release metadata artifacts, dry-run bundle validation, stable-only PyPI wheel validation, and live smoke validation have completed successfully."
+          } >> "$GITHUB_STEP_SUMMARY"
