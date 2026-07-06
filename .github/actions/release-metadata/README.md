@@ -31,5 +31,5 @@ It performs four tasks:
 
 Used from release-oriented workflows such as:
 
-- `.github/workflows/release-preparation.yml`
+- `.github/workflows/release-preparation.yml` (after `resolve-release-pr` validates the upstream release PR)
 - `.github/workflows/release.yml`
