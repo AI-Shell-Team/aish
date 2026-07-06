@@ -9,7 +9,7 @@ use nix::pty::openpty;
 use nix::sys::signal::{kill, Signal};
 use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, OutputFlags, SetArg};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{close, dup2, execvp, fork, pipe, ForkResult, Pid};
+use nix::unistd::{close, dup2, execvp, fork, getuid, pipe, ForkResult, Pid};
 
 use aish_core::AishError;
 use tracing::debug;
@@ -5443,14 +5443,23 @@ fn reap_child(pid: Pid) {
     }
 }
 
-/// Write the rc wrapper script to a temp file and return the path.
-fn write_rcfile_temp() -> aish_core::Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir().join("aish-rc");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("rc-{}", uuid::Uuid::new_v4()));
+/// Write the rc wrapper as a unique file under `base` (normally the system
+/// temp dir). No subdirectory is created: a shared `aish-rc` dir breaks when the
+/// first creator (often root via `sudo aish`) owns it and later users cannot write.
+fn write_rcfile_temp_in(base: &std::path::Path) -> aish_core::Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = base.join(format!("aish-rc-{}-{}.sh", getuid(), uuid::Uuid::new_v4()));
     std::fs::write(&path, BASH_RC_WRAPPER)
         .map_err(|e| AishError::Pty(format!("failed to write rcfile temp: {e}")))?;
+    // Best-effort: owner-only read/write; ignore failure on exotic FS.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     Ok(path)
+}
+
+/// Write the rc wrapper script to a temp file and return the path.
+fn write_rcfile_temp() -> aish_core::Result<std::path::PathBuf> {
+    write_rcfile_temp_in(&std::env::temp_dir())
 }
 
 /// Simple shell quoting for embedding a command in a bash assignment.
@@ -6564,6 +6573,54 @@ mod tests {
             DangerLevel::Danger.max(DangerLevel::Danger),
             DangerLevel::Danger
         ));
+    }
+
+    #[test]
+    fn test_write_rcfile_temp_in_creates_unique_private_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("aish-rc-base-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("create base");
+
+        let path = write_rcfile_temp_in(&base).expect("write should succeed");
+        assert_eq!(path.parent(), Some(base.as_path()));
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            name.starts_with(&format!("aish-rc-{}-", getuid())) && name.ends_with(".sh"),
+            "unexpected rc path: {}",
+            path.display()
+        );
+        assert!(path.exists());
+        let mode = std::fs::metadata(&path)
+            .expect("file meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(
+            !base.join(format!("aish-rc-{}", getuid())).exists(),
+            "should not create a per-user directory"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_write_rcfile_temp_in_ignores_legacy_shared_dir() {
+        let base =
+            std::env::temp_dir().join(format!("aish-rc-legacy-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).expect("create base");
+        let legacy = base.join("aish-rc");
+        std::fs::create_dir_all(&legacy).expect("create legacy dir");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod legacy dir");
+
+        let path = write_rcfile_temp_in(&base).expect("should not use legacy aish-rc dir");
+        assert_eq!(path.parent(), Some(base.as_path()));
+        assert!(!path.starts_with(&legacy));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
