@@ -5,7 +5,7 @@ Spawn a synchronous sub-agent to handle an isolated sub-task. Only the final con
 is returned to the parent session; intermediate tool output stays in the sub-session.\n\n\
 Available subagent types:";
 
-pub fn parameters() -> serde_json::Value {
+pub fn parameters(subagent_types: &[String]) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -19,7 +19,7 @@ pub fn parameters() -> serde_json::Value {
             },
             "subagent_type": {
                 "type": "string",
-                "enum": ["explore"],
+                "enum": subagent_types,
                 "description": "Built-in sub-agent type to spawn"
             }
         },

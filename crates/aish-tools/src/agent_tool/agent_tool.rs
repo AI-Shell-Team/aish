@@ -5,7 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use aish_llm::{
-    spawn_builtin, AgentRegistry, LlmSession, LoopStatus, SpawnResult, Tool, ToolResult, ToolSpec,
+    spawn_builtin, AgentDefinition, AgentRegistry, LlmSession, LoopStatus, SpawnResult, Tool,
+    ToolResult, ToolSpec,
 };
 
 use super::prompt;
@@ -22,15 +23,26 @@ pub type SpawnFn = Arc<
         + Sync,
 >;
 
-/// Tool that spawns built-in sub-agents (Phase 1: `explore` only).
+/// Optional skill callbacks for `general-purpose` sub-agents.
+pub type SkillLookupFn = Arc<dyn Fn(&str) -> Option<crate::SkillInfo> + Send + Sync>;
+pub type SkillListFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+pub type SkillCallbacks = (SkillLookupFn, SkillListFn);
+
+/// Tool that spawns built-in sub-agents (`explore`, `plan`, `general-purpose`).
 pub struct AgentTool {
     registry: AgentRegistry,
     description: String,
     spawn_fn: Option<SpawnFn>,
+    skill_callbacks: Option<SkillCallbacks>,
 }
 
 impl AgentTool {
     pub fn new() -> Self {
+        Self::with_skill_callbacks(None)
+    }
+
+    /// Create an `AgentTool` that can register inherited `skill` tools for general-purpose spawns.
+    pub fn with_skill_callbacks(skill_callbacks: Option<SkillCallbacks>) -> Self {
         let registry = AgentRegistry::builtin();
         let description = format!(
             "{}\n{}",
@@ -41,6 +53,7 @@ impl AgentTool {
             registry,
             description,
             spawn_fn: None,
+            skill_callbacks,
         }
     }
 
@@ -91,7 +104,7 @@ impl AgentTool {
         }
     }
 
-    fn register_explore_tools(sub: &mut LlmSession, specs: &[ToolSpec]) {
+    fn register_read_only_tools(sub: &mut LlmSession, specs: &[ToolSpec]) {
         for spec in specs {
             match spec.function.name.as_str() {
                 "grep" => sub.register_tool(Box::new(crate::GrepTool::new())),
@@ -104,6 +117,56 @@ impl AgentTool {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn register_general_purpose_tools(
+        sub: &mut LlmSession,
+        specs: &[ToolSpec],
+        skill_callbacks: &Option<SkillCallbacks>,
+    ) {
+        for spec in specs {
+            match spec.function.name.as_str() {
+                "grep" => sub.register_tool(Box::new(crate::GrepTool::new())),
+                "glob" => sub.register_tool(Box::new(crate::GlobTool::new())),
+                "read_file" => sub.register_tool(Box::new(crate::ReadFileTool::new())),
+                "write_file" => sub.register_tool(Box::new(crate::WriteFileTool::new())),
+                "edit_file" => sub.register_tool(Box::new(crate::EditFileTool::new())),
+                "bash" => {
+                    let mut bash = crate::bash::BashTool::new();
+                    bash.set_cancellation_token(sub.cancellation_token_arc());
+                    sub.register_tool(Box::new(bash));
+                }
+                "skill" => {
+                    if let Some((lookup, list)) = skill_callbacks {
+                        sub.register_tool(Box::new(crate::SkillTool::new(
+                            Box::new({
+                                let lookup = Arc::clone(lookup);
+                                move |name| lookup(name)
+                            }),
+                            Box::new({
+                                let list = Arc::clone(list);
+                                move || list()
+                            }),
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn register_tools_for_definition(
+        &self,
+        sub: &mut LlmSession,
+        def: &AgentDefinition,
+        specs: &[ToolSpec],
+    ) {
+        match def.subagent_type.as_str() {
+            "general-purpose" => {
+                Self::register_general_purpose_tools(sub, specs, &self.skill_callbacks)
+            }
+            _ => Self::register_read_only_tools(sub, specs),
         }
     }
 }
@@ -124,7 +187,7 @@ impl Tool for AgentTool {
     }
 
     fn parameters(&self) -> serde_json::Value {
-        prompt::parameters()
+        prompt::parameters(&self.registry.subagent_types())
     }
 
     fn execute(&self, _args: serde_json::Value) -> ToolResult {
@@ -142,9 +205,10 @@ impl Tool for AgentTool {
                 Err(err) => return err,
             };
 
-            if self.registry.resolve(subagent_type).is_err() {
-                return ToolResult::error(format!("Unknown subagent_type: {subagent_type}"));
-            }
+            let def = match self.registry.resolve(subagent_type) {
+                Ok(def) => def.clone(),
+                Err(err) => return ToolResult::error(err),
+            };
 
             if let Some(spawn_fn) = &self.spawn_fn {
                 let result = match spawn_fn(session, subagent_type, prompt).await {
@@ -157,7 +221,7 @@ impl Tool for AgentTool {
             let registry = self.registry.clone();
             let result =
                 match spawn_builtin(session, &registry, subagent_type, prompt, |sub, specs| {
-                    Self::register_explore_tools(sub, specs)
+                    self.register_tools_for_definition(sub, &def, specs);
                 })
                 .await
                 {
@@ -181,9 +245,24 @@ mod tests {
     }
 
     #[test]
-    fn description_includes_explore_builtin() {
+    fn description_includes_all_builtins() {
         let tool = AgentTool::new();
         assert!(tool.description().contains("explore"));
+        assert!(tool.description().contains("plan"));
+        assert!(tool.description().contains("general-purpose"));
         assert!(tool.description().contains("read-only"));
+    }
+
+    #[test]
+    fn parameters_enum_lists_all_builtins() {
+        let tool = AgentTool::new();
+        let params = tool.parameters();
+        let enum_values = params["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("subagent_type enum");
+        let names: Vec<_> = enum_values.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"explore"));
+        assert!(names.contains(&"plan"));
+        assert!(names.contains(&"general-purpose"));
     }
 }

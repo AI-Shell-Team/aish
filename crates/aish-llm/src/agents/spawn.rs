@@ -9,9 +9,9 @@ use crate::session::LlmSession;
 use crate::tool_context::ToolExecutionPolicy;
 use crate::types::{ChatMessage, LlmCallbackResult, ToolSpec};
 
-use super::registry::AgentRegistry;
+use super::registry::{AgentRegistry, ToolStrategy};
 use super::tool_loop::{run_tool_loop_until_done, LoopStatus, ToolLoopConfig};
-use super::tools::resolve_tools_for_agent;
+use super::tools::{parent_has_skill_tool, resolve_tools_for_agent};
 
 /// Global ceiling on sub-agent turns (applied via `min(def.max_turns, GLOBAL_MAX_TURNS)`).
 pub const GLOBAL_MAX_TURNS: u32 = 30;
@@ -77,7 +77,7 @@ where
     }
 }
 
-/// Spawn a built-in sub-agent (`explore` in Phase 1 slice) from `parent`.
+/// Spawn a built-in sub-agent from `parent`.
 ///
 /// `register_tools` receives the sub-session and filtered parent tool specs; it must
 /// register concrete tool implementations on the sub-session.
@@ -92,7 +92,10 @@ where
     F: FnOnce(&mut LlmSession, &[ToolSpec]),
 {
     let def = registry.resolve(subagent_type)?;
-    let allowed_specs = resolve_tools_for_agent(def, &parent.tool_specs());
+    let parent_tools = parent.tool_specs();
+    let parent_has_skill = parent_has_skill_tool(&parent_tools);
+    let allowed_specs = resolve_tools_for_agent(def, &parent_tools, parent_has_skill);
+    let enforce_read_only_bash = matches!(def.tool_strategy, ToolStrategy::Allowlist(_));
     let max_turns = def.max_turns.min(GLOBAL_MAX_TURNS);
     let spawn_id = Uuid::new_v4().to_string();
     let agent_type = def.subagent_type.clone();
@@ -107,7 +110,7 @@ where
         },
         |sub| {
             sub.set_tool_execution_policy(ToolExecutionPolicy {
-                enforce_read_only_bash: true,
+                enforce_read_only_bash,
             });
             install_sub_agent_event_proxy(sub, &agent_type, &spawn_id);
             register_tools(sub, &allowed_specs);
@@ -272,12 +275,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_spawn_builtin_plan_mock_sequence() {
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.register_tool(Box::new(MockTool::new("write_file")));
+        parent.register_tool(Box::new(MockTool::new("enter_plan_mode")));
+
+        let registry = AgentRegistry::builtin();
+        let result = spawn_builtin(
+            &parent,
+            &registry,
+            "plan",
+            "design rollout",
+            |sub, specs| {
+                sub.set_test_chat_responses(vec![Ok(mock_text_response("rollout plan"))]);
+                let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
+                assert!(names.contains(&"grep"));
+                assert!(!names.contains(&"write_file"));
+                assert!(!names.contains(&"enter_plan_mode"));
+                register_mock_from_specs(sub, specs);
+            },
+        )
+        .await
+        .expect("spawn_builtin plan should succeed");
+
+        assert_eq!(result.status, LoopStatus::Complete);
+        assert_eq!(result.text, "rollout plan");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_general_purpose_excludes_agent() {
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("bash")));
+        parent.register_tool(Box::new(MockTool::new("read_file")));
+        parent.register_tool(Box::new(MockTool::new("Agent")));
+
+        let registry = AgentRegistry::builtin();
+        let result = spawn_builtin(
+            &parent,
+            &registry,
+            "general-purpose",
+            "run sub task",
+            |sub, specs| {
+                sub.set_test_chat_responses(vec![Ok(mock_text_response("sub task done"))]);
+                let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
+                assert!(names.contains(&"bash"));
+                assert!(names.contains(&"read_file"));
+                assert!(!names.contains(&"Agent"));
+                register_mock_from_specs(sub, specs);
+            },
+        )
+        .await
+        .expect("spawn_builtin general-purpose should succeed");
+
+        assert_eq!(result.status, LoopStatus::Complete);
+        assert_eq!(result.text, "sub task done");
+    }
+
+    #[tokio::test]
     async fn test_spawn_builtin_unknown_type_errors() {
         let parent = LlmSession::new("http://localhost", "key", "model", None, None);
         let registry = AgentRegistry::builtin();
-        let err = spawn_builtin(&parent, &registry, "plan", "task", |_sub, _specs| {})
-            .await
-            .unwrap_err();
+        let err = spawn_builtin(
+            &parent,
+            &registry,
+            "troubleshoot",
+            "task",
+            |_sub, _specs| {},
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("Unknown subagent_type"));
     }
 
