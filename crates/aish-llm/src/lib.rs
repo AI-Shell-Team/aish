@@ -14,6 +14,7 @@
 )]
 
 pub mod agent;
+pub mod agents;
 pub mod api;
 pub mod client;
 pub mod diagnose_agent;
@@ -34,6 +35,10 @@ pub mod types;
 pub mod usage;
 
 pub use agent::{AgentConfig, AgentStep, ReActAgent};
+pub use agents::{
+    run_tool_loop_until_done, spawn, LoopOutcome, LoopStatus, SpawnConfig, SpawnResult,
+    ToolLoopConfig,
+};
 pub use api::{
     resolve_anthropic_messages_url, resolve_api_dialect, stream_simple,
     test_connection as test_api_connection, ApiDialect, StreamContext,

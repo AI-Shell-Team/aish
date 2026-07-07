@@ -53,6 +53,9 @@ pub struct LlmSession {
     token_stats: std::sync::Mutex<crate::usage::TokenStats>,
     /// Per-session tool execution policy (read-only bash enforcement, etc.).
     tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
+    /// Scripted chat completion responses for unit/integration tests (pop in order).
+    #[cfg(test)]
+    test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
 }
 
 impl LlmSession {
@@ -100,6 +103,8 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
+            #[cfg(test)]
+            test_chat_responses: None,
         }
     }
 
@@ -154,6 +159,12 @@ impl LlmSession {
     /// and other components to monitor cancellation without borrowing self.
     pub fn cancellation_token_arc(&self) -> Arc<CancellationToken> {
         Arc::clone(&self.cancellation_token)
+    }
+
+    /// Install scripted LLM responses for tests (consumed in FIFO order).
+    #[cfg(test)]
+    pub fn set_test_chat_responses(&mut self, responses: Vec<Result<LlmResponse, AishError>>) {
+        self.test_chat_responses = Some(Arc::new(std::sync::Mutex::new(responses)));
     }
 
     /// Set the maximum context token budget for message trimming.
@@ -253,6 +264,18 @@ impl LlmSession {
     }
 
     /// Record token usage from an API response.
+    pub(crate) fn record_usage_public(&self, usage: crate::usage::TokenUsage) {
+        self.record_usage(usage);
+    }
+
+    pub(crate) fn loop_temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    pub(crate) fn loop_max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+    }
+
     fn record_usage(&self, usage: crate::usage::TokenUsage) {
         self.token_stats.lock().unwrap().record(usage);
     }
@@ -289,6 +312,14 @@ impl LlmSession {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
+        #[cfg(test)]
+        if let Some(ref queue) = self.test_chat_responses {
+            let mut q = queue.lock().expect("test chat response queue poisoned");
+            if !q.is_empty() {
+                return q.remove(0);
+            }
+        }
+
         stream_simple(
             self.api_dialect,
             &self.stream_ctx,
@@ -1270,6 +1301,8 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             tool_execution_policy: self.tool_execution_policy,
+            #[cfg(test)]
+            test_chat_responses: None,
         }
     }
 
@@ -1376,7 +1409,10 @@ impl LlmSession {
         });
     }
 
-    async fn prepare_messages_for_send(&self, mut messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    pub(crate) async fn prepare_messages_for_send(
+        &self,
+        mut messages: Vec<ChatMessage>,
+    ) -> Vec<ChatMessage> {
         let policy = &self.context_budget_policy;
         if !policy.enabled {
             return trim_messages(messages, self.max_context_tokens, 5);
