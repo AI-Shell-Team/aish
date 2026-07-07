@@ -650,6 +650,7 @@ impl AishShell {
         )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
+        tool_registry.register(Box::new(aish_tools::AgentTool::new()));
 
         // System diagnose tool — needs session credentials to spawn sub-sessions.
         // The shared event callback holder allows setting the callback after

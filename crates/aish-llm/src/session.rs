@@ -127,6 +127,13 @@ impl LlmSession {
         self.event_callback = Some(cb);
     }
 
+    /// Clone the current event callback, if any.
+    pub fn event_callback_arc(
+        &self,
+    ) -> Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>> {
+        self.event_callback.clone()
+    }
+
     /// Set the confirmation callback invoked when a tool's preflight returns Confirm.
     /// The callback receives raw security context and returns true to approve.
     pub fn set_confirmation_callback(
@@ -1151,7 +1158,10 @@ impl LlmSession {
             // Execute with retry: try once, retry once on failure.
             // Mirrors Python's normalize_tool_result + error recovery pattern.
             let result = {
-                let first = tool.as_ref().execute_async(args.clone()).await;
+                let first = tool
+                    .as_ref()
+                    .execute_async_in_session(args.clone(), self)
+                    .await;
                 if first.ok {
                     first
                 } else {
@@ -1161,7 +1171,10 @@ impl LlmSession {
                         tool_call.name,
                         first.output
                     );
-                    let second = tool.as_ref().execute_async(args.clone()).await;
+                    let second = tool
+                        .as_ref()
+                        .execute_async_in_session(args.clone(), self)
+                        .await;
                     if second.ok {
                         second
                     } else {

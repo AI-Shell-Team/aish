@@ -562,6 +562,19 @@ pub trait Tool: Send + Sync {
             }
         })
     }
+
+    /// Async execution with access to the hosting [`LlmSession`].
+    ///
+    /// Tools that spawn sub-sessions (e.g. `Agent`) override this to inherit parent
+    /// credentials and tool pools. Default delegates to [`Self::execute_async`].
+    fn execute_async_in_session<'a>(
+        &'a self,
+        args: serde_json::Value,
+        session: &'a crate::session::LlmSession,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let _ = session;
+        self.execute_async(args)
+    }
 }
 
 /// Token used to cancel an in-progress LLM request.
