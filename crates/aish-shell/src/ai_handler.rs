@@ -1001,7 +1001,10 @@ fn is_diagnose_report_candidate(json: &serde_json::Value) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
-fn extract_json_object_from_text(text: &str) -> Option<serde_json::Value> {
+/// Brute-force scan: iterate every `{` × `}` combination and return the first
+/// slice that parses as a valid JSON object. Used to recover JSON from prose-
+/// wrapped or non-fenced model output.
+pub(crate) fn extract_json_object_from_text(text: &str) -> Option<serde_json::Value> {
     for (start, _) in text.match_indices('{') {
         let slice = &text[start..];
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(slice) {

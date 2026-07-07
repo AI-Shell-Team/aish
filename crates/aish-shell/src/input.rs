@@ -1,12 +1,19 @@
 use crate::types::{CommandCategory, InputIntent};
 
+/// True if the line begins (after leading whitespace) with a `;` or
+/// full-width `；`, marking it as an AI prompt.
+pub fn is_ai_prompt_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with(';') || trimmed.starts_with('\u{ff1b}')
+}
+
 /// Classify user input into an intent category.
 pub fn classify_input(input: &str) -> InputIntent {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return InputIntent::Empty;
     }
-    if trimmed.starts_with(';') || trimmed.starts_with('\u{ff1b}') {
+    if is_ai_prompt_line(trimmed) {
         return InputIntent::Ai;
     }
     if trimmed == "help" {

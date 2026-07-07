@@ -13,7 +13,7 @@ pub struct LlmClient {
     http: Client,
     api_base: String,
     api_key: String,
-    model: String,
+    model: std::sync::Mutex<String>,
 }
 
 impl LlmClient {
@@ -23,7 +23,7 @@ impl LlmClient {
             http: Client::new(),
             api_base: api_base.trim_end_matches('/').into(),
             api_key: api_key.into(),
-            model,
+            model: std::sync::Mutex::new(model),
         }
     }
 
@@ -38,13 +38,13 @@ impl LlmClient {
     }
 
     /// Return the model name used for this client.
-    pub fn model_name(&self) -> &str {
-        &self.model
+    pub fn model_name(&self) -> String {
+        self.model.lock().unwrap().clone()
     }
 
     /// Update the model name (used for runtime model switching).
-    pub fn update_model(&mut self, model: &str) {
-        self.model = resolve_model_for_api(model, &self.api_base);
+    pub fn update_model(&self, model: &str) {
+        *self.model.lock().unwrap() = resolve_model_for_api(model, &self.api_base);
     }
 
     /// Update the API key.
@@ -137,8 +137,32 @@ impl LlmClient {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
+        self.chat_completion_with_extras(
+            messages,
+            tools,
+            stream,
+            temperature,
+            max_tokens,
+            serde_json::Map::new(),
+        )
+        .await
+    }
+
+    /// Like `chat_completion`, but merges provider-specific extra fields into
+    /// the JSON request body. Used for vendor extensions such as
+    /// `{"thinking": {"type": "disabled"}}` (Anthropic-style reasoning toggle)
+    /// or `{"enable_thinking": false}` (DeepSeek/Qwen-style).
+    pub async fn chat_completion_with_extras(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolSpec]>,
+        stream: bool,
+        temperature: Option<f32>,
+        max_tokens: Option<u32>,
+        extras: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<LlmResponse, AishError> {
         let mut body = serde_json::json!({
-            "model": self.model,
+            "model": self.model.lock().unwrap().clone(),
             "messages": messages,
             "stream": stream,
         });
@@ -150,6 +174,11 @@ impl LlmClient {
         if let Some(tools) = tools {
             body["tools"] = serde_json::json!(tools);
             body["tool_choice"] = serde_json::json!("auto");
+        }
+        if let serde_json::Value::Object(body_map) = &mut body {
+            for (k, v) in extras {
+                body_map.insert(k, v);
+            }
         }
 
         let url = format!("{}/chat/completions", self.api_base);
@@ -228,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_update_model() {
-        let mut client = LlmClient::new("https://api.example.com/v1", "sk-test", "gpt-4");
+        let client = LlmClient::new("https://api.example.com/v1", "sk-test", "gpt-4");
         assert_eq!(client.model_name(), "gpt-4");
         client.update_model("gpt-4o");
         assert_eq!(client.model_name(), "gpt-4o");
@@ -268,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_update_model_preserves_prefix_for_non_openai() {
-        let mut client = LlmClient::new("https://gateway.example.com/v1", "sk-test", "gpt-4");
+        let client = LlmClient::new("https://gateway.example.com/v1", "sk-test", "gpt-4");
         client.update_model("provider/model-name");
         assert_eq!(client.model_name(), "provider/model-name");
     }

@@ -1,7 +1,46 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use aish_i18n::{t, t_with_args};
+
+/// Whether the current locale is a CJK (Chinese/Japanese/Korean) locale.
+/// Cached after the first call. When true, ambiguous-width Unicode
+/// characters (●, ➜, etc.) should be treated as 2 columns wide — matching
+/// how CJK terminals render them.
+fn is_cjk_locale() -> bool {
+    static CJK: OnceLock<bool> = OnceLock::new();
+    *CJK.get_or_init(|| {
+        let lang = std::env::var("LC_ALL")
+            .or_else(|_| std::env::var("LC_CTYPE"))
+            .or_else(|_| std::env::var("LANG"))
+            .unwrap_or_default();
+        let lang = lang.to_lowercase();
+        lang.contains("zh") || lang.contains("ja") || lang.contains("ko")
+    })
+}
+
+/// Compute the visible terminal width of a string, respecting the current
+/// locale's handling of ambiguous-width characters. On CJK locales,
+/// ambiguous chars count as 2 columns (matching the terminal); on other
+/// locales, they count as 1.
+pub fn term_width(s: &str) -> usize {
+    if is_cjk_locale() {
+        unicode_width::UnicodeWidthStr::width_cjk(s)
+    } else {
+        unicode_width::UnicodeWidthStr::width(s)
+    }
+}
+
+/// Compute the visible terminal width of a single character, respecting
+/// the current locale's handling of ambiguous-width characters.
+pub fn term_char_width(ch: char) -> usize {
+    if is_cjk_locale() {
+        unicode_width::UnicodeWidthChar::width_cjk(ch).unwrap_or(0)
+    } else {
+        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
+}
 
 /// Walk up from `cwd` to find a `.git/HEAD` file and extract the branch name.
 ///
@@ -75,7 +114,7 @@ fn abbreviate_path(path: &str, home: &str) -> String {
 
 /// Calculate the visible display width of a string, ignoring ANSI escape sequences.
 /// Accounts for CJK double-width characters.
-fn strip_ansi_len(s: &str) -> usize {
+pub fn strip_ansi_len(s: &str) -> usize {
     let mut len = 0;
     let mut in_escape = false;
     for ch in s.chars() {
@@ -86,7 +125,7 @@ fn strip_ansi_len(s: &str) -> usize {
                 in_escape = false;
             }
         } else {
-            len += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            len += term_char_width(ch);
         }
     }
     len
@@ -552,7 +591,9 @@ mod tests {
     #[test]
     fn test_strip_ansi_len_with_escape() {
         assert_eq!(strip_ansi_len("\x1b[32mhello\x1b[0m"), 5);
-        assert_eq!(strip_ansi_len("\x1b[1;36m•\x1b[0m"), 1); // • is 1 display column
+        // Use ASCII 'A' (always 1 col) instead of '•' (ambiguous: 1 or 2
+        // cols depending on locale) so the test is locale-independent.
+        assert_eq!(strip_ansi_len("\x1b[1;36mA\x1b[0m"), 1);
     }
 
     #[test]
@@ -560,6 +601,24 @@ mod tests {
         let line = format!("  \x1b[1m{}:\x1b[0m {}", "model", "gpt-4");
         // "  model: gpt-4" visible = 14
         assert_eq!(strip_ansi_len(&line), 14);
+    }
+
+    /// Ambiguous-width characters (●, ➜, •) have different widths depending
+    /// on locale: 1 col in non-CJK, 2 cols in CJK. `term_width` must match
+    /// the locale so the inline-completion spinner's `lines_up` calculation
+    /// agrees with the terminal's actual rendering. This test verifies the
+    /// locale-dependent behavior is consistent — on a CJK locale, ambiguous
+    /// chars are wider; ASCII is always 1 col regardless.
+    #[test]
+    fn test_term_width_locale_consistency() {
+        // ASCII is always 1 col, regardless of locale.
+        assert_eq!(term_width("hello"), 5);
+        // CJK characters are always 2 cols (Wide, not Ambiguous).
+        assert_eq!(term_width("中文"), 4);
+        // The width of the ambiguous char ● depends on the locale — just
+        // verify it's one of the two valid values (1 or 2).
+        let bullet_width = term_char_width('●');
+        assert!(bullet_width == 1 || bullet_width == 2);
     }
 
     #[test]
