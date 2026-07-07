@@ -73,8 +73,21 @@ impl AgentTool {
     fn spawn_result_to_tool_result(result: SpawnResult) -> ToolResult {
         match result.status {
             LoopStatus::Complete | LoopStatus::Incomplete => ToolResult::success(result.text),
-            LoopStatus::Cancelled => ToolResult::error("Sub-agent cancelled"),
-            LoopStatus::Fatal => ToolResult::error("Sub-agent failed"),
+            LoopStatus::Cancelled => {
+                Self::short_circuit_error("Sub-agent cancelled", "sub_agent_cancelled")
+            }
+            LoopStatus::Fatal => Self::short_circuit_error("Sub-agent failed", "sub_agent_fatal"),
+        }
+    }
+
+    fn short_circuit_error(output: impl Into<String>, reason: &str) -> ToolResult {
+        ToolResult {
+            ok: false,
+            output: output.into(),
+            meta: Some(serde_json::json!({
+                "dispatch_status": "short_circuit",
+                "reason": reason,
+            })),
         }
     }
 

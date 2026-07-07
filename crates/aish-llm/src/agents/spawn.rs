@@ -218,6 +218,7 @@ mod tests {
     async fn test_spawn_builtin_explore_mock_sequence() {
         let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
         parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.register_tool(Box::new(MockTool::new("read_file")));
         parent.register_tool(Box::new(MockTool::new("write_file")));
 
         let registry = AgentRegistry::builtin();
@@ -227,8 +228,13 @@ mod tests {
                 Ok(mock_tool_call_response(&[("c2", "read_file", "{}")])),
                 Ok(mock_text_response("nginx at /etc/nginx")),
             ]);
+            assert!(specs
+                .iter()
+                .any(|spec| spec.function.name.as_str() == "read_file"));
+            assert!(!specs
+                .iter()
+                .any(|spec| spec.function.name.as_str() == "write_file"));
             register_mock_from_specs(sub, specs);
-            sub.register_tool(Box::new(MockTool::new("read_file")));
         })
         .await
         .expect("spawn_builtin should succeed");
