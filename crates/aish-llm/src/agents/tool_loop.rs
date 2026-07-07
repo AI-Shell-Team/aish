@@ -1,5 +1,7 @@
 //! Reusable native tool calling loop for sub-agent spawn paths.
 
+use aish_core::{LlmEvent, LlmEventType};
+
 use crate::client::LlmResponse;
 use crate::session::LlmSession;
 use crate::streaming::{extract_message_text, StreamParser};
@@ -122,6 +124,13 @@ pub async fn run_tool_loop_until_done(
 
         messages = session.prepare_messages_for_send(messages).await;
 
+        session.emit_event(LlmEvent {
+            event_type: LlmEventType::GenerationStart,
+            data: serde_json::json!({}),
+            timestamp: now_timestamp(),
+            metadata: None,
+        });
+
         let response = match session
             .chat_completion_raw(
                 &messages,
@@ -133,8 +142,23 @@ pub async fn run_tool_loop_until_done(
             .await
         {
             Ok(r) => r,
-            Err(e) => return LoopOutcome::fatal(e),
+            Err(e) => {
+                session.emit_event(LlmEvent {
+                    event_type: LlmEventType::GenerationEnd,
+                    data: serde_json::json!({}),
+                    timestamp: now_timestamp(),
+                    metadata: None,
+                });
+                return LoopOutcome::fatal(e);
+            }
         };
+
+        session.emit_event(LlmEvent {
+            event_type: LlmEventType::GenerationEnd,
+            data: serde_json::json!({}),
+            timestamp: now_timestamp(),
+            metadata: None,
+        });
 
         let LlmResponse::Json(json) = response else {
             return LoopOutcome::fatal(AishError::Llm(
@@ -182,6 +206,13 @@ pub async fn run_tool_loop_until_done(
             loop_messages.push(tool_msg);
         }
     }
+}
+
+fn now_timestamp() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 #[cfg(test)]

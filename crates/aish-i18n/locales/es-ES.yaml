@@ -349,6 +349,9 @@ shell:
     prefix_diagnose: "  └─ 🔧 Herramienta de diagnóstico"
     done_diagnose: "  └─ ✅ Diagnóstico completado"
 
+  sub_agent:
+    thinking: "Pensando"
+
 security:
   sandbox_off_action:
     allow: "Permitir directamente"
