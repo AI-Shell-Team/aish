@@ -16,6 +16,13 @@
 
 pub mod registry;
 
+pub mod agent_tool {
+    mod agent_tool;
+    mod prompt;
+
+    pub use self::agent_tool::{AgentTool, SpawnFn};
+}
+
 pub mod ask_user {
     mod ask_user;
     mod prompt;
@@ -155,6 +162,7 @@ pub mod write_file {
     pub use self::write_file::*;
 }
 
+pub use agent_tool::{AgentTool, SpawnFn};
 pub use ask_user::AskUserTool;
 pub use channel_ask_user::ChannelAskUserTool;
 pub use channel_bash::ChannelBashTool;
