@@ -6,6 +6,8 @@ use crate::streaming::{extract_message_text, StreamParser};
 use crate::types::{ChatMessage, MessageContent};
 use aish_core::AishError;
 
+use super::outcome::{extract_spawn_outcome, OutcomeConfig, TerminationKind, INCOMPLETE_PREFIX};
+
 /// Configuration for [`run_tool_loop_until_done`].
 #[derive(Debug, Clone)]
 pub struct ToolLoopConfig {
@@ -22,7 +24,15 @@ impl Default for ToolLoopConfig {
         Self {
             max_turns: 20,
             system_message: None,
-            incomplete_prefix: "[incomplete: max turns reached]\n".to_string(),
+            incomplete_prefix: INCOMPLETE_PREFIX.to_string(),
+        }
+    }
+}
+
+impl ToolLoopConfig {
+    fn outcome_config(&self) -> OutcomeConfig {
+        OutcomeConfig {
+            incomplete_prefix: self.incomplete_prefix.clone(),
         }
     }
 }
@@ -46,45 +56,27 @@ pub struct LoopOutcome {
 }
 
 impl LoopOutcome {
-    fn complete(text: String, new_messages: Vec<ChatMessage>) -> Self {
+    fn from_spawn_outcome(
+        outcome: super::outcome::SpawnOutcome,
+        new_messages: Vec<ChatMessage>,
+        error: Option<AishError>,
+    ) -> Self {
         Self {
-            status: LoopStatus::Complete,
-            text,
+            status: outcome.status,
+            text: outcome.text,
             new_messages,
-            error: None,
-        }
-    }
-
-    fn incomplete(prefix: &str, last_text: &str, new_messages: Vec<ChatMessage>) -> Self {
-        let text = if last_text.is_empty() {
-            prefix.to_string()
-        } else {
-            format!("{prefix}{last_text}")
-        };
-        Self {
-            status: LoopStatus::Incomplete,
-            text,
-            new_messages,
-            error: None,
+            error,
         }
     }
 
     pub fn cancelled() -> Self {
-        Self {
-            status: LoopStatus::Cancelled,
-            text: String::new(),
-            new_messages: Vec::new(),
-            error: Some(AishError::Cancelled),
-        }
+        let outcome = extract_spawn_outcome(TerminationKind::Cancelled, &OutcomeConfig::default());
+        Self::from_spawn_outcome(outcome, Vec::new(), Some(AishError::Cancelled))
     }
 
     fn fatal(error: AishError) -> Self {
-        Self {
-            status: LoopStatus::Fatal,
-            text: String::new(),
-            new_messages: Vec::new(),
-            error: Some(error),
-        }
+        let outcome = extract_spawn_outcome(TerminationKind::Fatal, &OutcomeConfig::default());
+        Self::from_spawn_outcome(outcome, Vec::new(), Some(error))
     }
 }
 
@@ -118,11 +110,13 @@ pub async fn run_tool_loop_until_done(
         }
 
         if iterations >= config.max_turns {
-            return LoopOutcome::incomplete(
-                &config.incomplete_prefix,
-                &last_assistant_text,
-                loop_messages,
+            let outcome = extract_spawn_outcome(
+                TerminationKind::MaxTurnsReached {
+                    last_assistant_text: last_assistant_text.clone(),
+                },
+                &config.outcome_config(),
             );
+            return LoopOutcome::from_spawn_outcome(outcome, loop_messages, None);
         }
         iterations += 1;
 
@@ -154,7 +148,13 @@ pub async fn run_tool_loop_until_done(
         }
 
         if tool_calls.is_empty() {
-            return LoopOutcome::complete(content.unwrap_or_default(), loop_messages);
+            let outcome = extract_spawn_outcome(
+                TerminationKind::NaturalStop {
+                    assistant_text: content.unwrap_or_default(),
+                },
+                &config.outcome_config(),
+            );
+            return LoopOutcome::from_spawn_outcome(outcome, loop_messages, None);
         }
 
         if let Some(text) = content {
@@ -310,6 +310,25 @@ mod tests {
 
         assert_eq!(outcome.status, LoopStatus::Incomplete);
         assert!(outcome.text.starts_with("[incomplete: max turns reached]"));
+    }
+
+    #[tokio::test]
+    async fn test_loop_fatal_on_llm_error() {
+        let mut session =
+            test_session_with_responses(vec![Err(AishError::Llm("rate limited".into()))]);
+        session.register_tool(Box::new(MockTool::new("grep", "out")));
+
+        let outcome = run_tool_loop_until_done(
+            &session,
+            &ChatMessage::user("task"),
+            &[],
+            &ToolLoopConfig::default(),
+        )
+        .await;
+
+        assert_eq!(outcome.status, LoopStatus::Fatal);
+        assert!(outcome.text.is_empty());
+        assert!(outcome.error.is_some());
     }
 
     #[tokio::test]
