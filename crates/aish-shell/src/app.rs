@@ -346,6 +346,9 @@ pub struct AishShell {
     expand_history: Arc<Mutex<crate::expand_history::ExpandHistory>>,
     /// Shared terminal session recorder for asciinema v2 recording.
     shared_recorder: crate::recorder::SharedRecorder,
+    /// Inline AI completer (None when disabled). Stored so `/model` can
+    /// update its model at runtime without restarting the shell.
+    inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
 }
 
 impl AishShell {
@@ -1499,6 +1502,7 @@ impl AishShell {
             animation,
             expand_history,
             shared_recorder,
+            inline_ai: None,
         })
     }
 
@@ -1566,8 +1570,42 @@ impl AishShell {
             sigterm_flag.store(true, Ordering::SeqCst);
         });
 
+        // Build the shared AutoSuggest engine up here, before ShellReadline::new.
+        let autosuggest = Arc::new(Mutex::new(crate::autosuggest::AutoSuggest::new(5000)));
+        let runtime_handle = runtime.handle().clone();
+
+        let inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>> = {
+            let cfg = &self.config.inline_completion;
+            if !cfg.enabled {
+                None
+            } else if self.config.api_key.is_empty() {
+                tracing::info!("inline_completion enabled but no api_key configured; skipping");
+                None
+            } else {
+                let llm_client = Arc::new(aish_llm::LlmClient::new(
+                    &self.config.api_base,
+                    &self.config.api_key,
+                    &self.config.model,
+                ));
+                let provider = crate::inline_completion::build_default_provider(
+                    llm_client,
+                    cfg.disable_thinking,
+                    cfg.enforce_json,
+                );
+                Some(crate::inline_completion::InlineCompleter::new(
+                    provider,
+                    autosuggest.clone(),
+                    cfg.clone(),
+                    runtime_handle,
+                ))
+            }
+        };
+
+        // Store inline_ai on self so `/model` can update its model at runtime.
+        self.inline_ai = inline_ai.clone();
+
         // Initialize readline with history, tab completion, and line editing
-        let mut rl = ShellReadline::new(self.pty.clone()).map_err(|e| {
+        let mut rl = ShellReadline::new(self.pty.clone(), autosuggest, inline_ai).map_err(|e| {
             let mut args = std::collections::HashMap::new();
             args.insert("error".to_string(), e.to_string());
             aish_core::AishError::Config(t_with_args("shell.readline_init_failed", &args))
@@ -3054,6 +3092,11 @@ impl AishShell {
             Some(&self.config.api_base),
             Some(&self.config.api_key),
         );
+
+        // Update inline completion model so it follows `/model` switches
+        if let Some(ai) = &self.inline_ai {
+            ai.update_model(&new_model);
+        }
 
         // Update config
         self.config.model = new_model.clone();

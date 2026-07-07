@@ -183,6 +183,82 @@ impl Default for ContextAutoCompactConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Inline AI completion sub-config
+// ---------------------------------------------------------------------------
+
+/// Configuration for inline AI completion (the gray ghost-text suggestions
+/// shown when the user types a `;`/`;`-prefixed AI prompt).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InlineCompletionConfig {
+    /// Master toggle. When false, no InlineCompleter is constructed.
+    pub enabled: bool,
+
+    /// How long after the user stops typing before we fire a request.
+    pub debounce_ms: u64,
+
+    /// Number of recent shell-history lines to include as context.
+    pub context_lines: usize,
+
+    /// Hard cap on tokens for the suggested suffix.
+    pub max_tokens: u32,
+
+    /// Minimum non-prefix character count required to trigger.
+    pub min_input_chars: usize,
+
+    /// When true, send a bundle of "skip reasoning" flags in the request
+    /// body: `thinking: {type: disabled}` (Anthropic), `enable_thinking:
+    /// false` (Qwen/DeepSeek custom), `chat_template_kwargs: {enable_thinking:
+    /// false}` (vLLM), `reasoning_effort: low` (OpenAI o1-style).
+    /// Default is **false**: many gateways either ignore these fields
+    /// (DeepSeek still generates reasoning) or process them slowly
+    /// (moonshot response time doubles). Enable only if your model is a
+    /// Qwen3/vLLM deployment that genuinely honors `enable_thinking`.
+    pub disable_thinking: bool,
+
+    /// When true, send `{"response_format": {"type": "json_object"}}` to
+    /// force OpenAI-compatible JSON-mode output. Some gateways reject this
+    /// field with HTTP 400, so default is false — the system prompt alone
+    /// asks the model for JSON. Enable if your provider supports JSON mode
+    /// and you want stricter output enforcement.
+    pub enforce_json: bool,
+
+    /// Hard cap (seconds) on a single inline-completion LLM call. If the
+    /// model doesn't respond within this window, the request is abandoned
+    /// silently. The underlying `LlmClient` has its own 120s timeout —
+    /// this overrides that for inline completion because waiting two
+    /// minutes for a hint is unacceptable. Bump this if your gateway is
+    /// consistently slow.
+    pub timeout_secs: u64,
+}
+
+impl Default for InlineCompletionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            debounce_ms: 400,
+            context_lines: 5,
+            // Reasoning models (DeepSeek-R1, Qwen3, GLM, etc.) spend a lot
+            // of tokens on chain-of-thought before emitting visible content.
+            // `enable_thinking: false` is sent but many gateways (notably
+            // DeepSeek) ignore it and still produce 1000-2000 chars of
+            // reasoning_content. We need a budget large enough for the
+            // full reasoning + the JSON answer: 512 covers the ~480-token
+            // reasoning we've observed in the wild. cap_suffix_width()
+            // keeps the ghost text short regardless of token consumption.
+            max_tokens: 512,
+            min_input_chars: 3,
+            // Default OFF: many gateways either ignore these flags (DeepSeek
+            // still generates reasoning) or process them slowly (moonshot
+            // response time doubles). See the field doc above for details.
+            disable_thinking: false,
+            enforce_json: false,
+            timeout_secs: 30,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level config model
 // ---------------------------------------------------------------------------
 
@@ -327,6 +403,10 @@ pub struct ConfigModel {
     /// Terminal resize handling mode: full, pty_only, or off
     #[serde(default = "default_terminal_resize_mode")]
     pub terminal_resize_mode: String,
+
+    /// Inline AI completion (ghost-text suggestions in AI mode).
+    #[serde(default)]
+    pub inline_completion: InlineCompletionConfig,
 }
 
 impl Default for ConfigModel {
@@ -376,6 +456,7 @@ impl Default for ConfigModel {
             enable_scripts: default_true(),
             history_size: default_history_size(),
             terminal_resize_mode: default_terminal_resize_mode(),
+            inline_completion: InlineCompletionConfig::default(),
         }
     }
 }
@@ -716,5 +797,64 @@ api_key: sk-test
     fn test_compile_remote_danger_patterns_empty_input() {
         let compiled = compile_remote_danger_patterns(&[]);
         assert!(compiled.is_empty());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Inline completion
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn inline_completion_defaults_are_off() {
+        let cfg = InlineCompletionConfig::default();
+        assert!(!cfg.enabled, "must be opt-in (off by default)");
+        assert_eq!(cfg.debounce_ms, 400);
+        assert_eq!(cfg.context_lines, 5);
+        assert_eq!(cfg.max_tokens, 512);
+        assert_eq!(cfg.min_input_chars, 3);
+        assert!(
+            !cfg.disable_thinking,
+            "should be OFF by default — extras hurt non-reasoning models"
+        );
+        assert!(
+            !cfg.enforce_json,
+            "JSON mode should be opt-in (off by default)"
+        );
+        assert_eq!(cfg.timeout_secs, 30);
+    }
+
+    #[test]
+    fn config_model_default_includes_inline_completion() {
+        let m = ConfigModel::default();
+        assert!(!m.inline_completion.enabled);
+    }
+
+    #[test]
+    fn inline_completion_deserializes_from_yaml() {
+        let yaml = r#"
+inline_completion:
+  enabled: true
+  debounce_ms: 250
+  context_lines: 8
+  max_tokens: 16
+  min_input_chars: 2
+"#;
+        let m: ConfigModel = serde_yaml::from_str(yaml).unwrap();
+        assert!(m.inline_completion.enabled);
+        assert_eq!(m.inline_completion.debounce_ms, 250);
+        assert_eq!(m.inline_completion.context_lines, 8);
+        assert_eq!(m.inline_completion.max_tokens, 16);
+        assert_eq!(m.inline_completion.min_input_chars, 2);
+    }
+
+    #[test]
+    fn inline_completion_partial_uses_defaults_for_missing_fields() {
+        let yaml = r#"
+inline_completion:
+  enabled: true
+"#;
+        let m: ConfigModel = serde_yaml::from_str(yaml).unwrap();
+        assert!(m.inline_completion.enabled);
+        assert_eq!(m.inline_completion.debounce_ms, 400);
+        assert_eq!(m.inline_completion.max_tokens, 512);
     }
 }

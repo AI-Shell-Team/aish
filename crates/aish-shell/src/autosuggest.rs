@@ -48,6 +48,11 @@ impl AutoSuggest {
             self.add(&cmd);
         }
     }
+
+    /// Return the `n` most-recently-added commands, most recent first.
+    pub fn recent_n(&self, n: usize) -> Vec<String> {
+        self.history.iter().take(n).cloned().collect()
+    }
 }
 
 #[cfg(test)]
@@ -118,5 +123,34 @@ mod tests {
         assert_eq!(sug.suggest("git"), Some("git push"));
         assert_eq!(sug.suggest("cargo"), Some("cargo test"));
         assert_eq!(sug.suggest("car"), Some("cargo test"));
+    }
+
+    #[test]
+    fn test_recent_n_returns_most_recent_first() {
+        let mut sug = AutoSuggest::new(100);
+        sug.add("git status");
+        sug.add("git push");
+        sug.add("cargo build");
+        let recent = sug.recent_n(2);
+        assert_eq!(
+            recent,
+            vec!["cargo build".to_string(), "git push".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_recent_n_returns_all_when_n_exceeds_size() {
+        let mut sug = AutoSuggest::new(100);
+        sug.add("a");
+        sug.add("b");
+        let recent = sug.recent_n(10);
+        assert_eq!(recent, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn test_recent_n_zero_returns_empty() {
+        let mut sug = AutoSuggest::new(100);
+        sug.add("a");
+        assert!(sug.recent_n(0).is_empty());
     }
 }

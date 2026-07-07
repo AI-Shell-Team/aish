@@ -26,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+async-trait.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 tracing.workspace = true

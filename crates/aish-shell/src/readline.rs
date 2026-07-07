@@ -64,11 +64,23 @@ static TAB_STATE: Mutex<TabCompletionState> = Mutex::new(TabCompletionState {
 
 thread_local! {
     static CURRENT_TERMINAL_SIZE: Cell<(u16, u16)> = const { Cell::new((80, 24)) };
+    static CURRENT_PROMPT_WIDTH: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Terminal size last seen by rustyline (cols, rows).
 pub fn current_terminal_size() -> (u16, u16) {
     CURRENT_TERMINAL_SIZE.with(|s| s.get())
+}
+
+/// Visible width (terminal columns) of the prompt for the current `read_line`
+/// call. Set just before each readline; read by `InlineCompleter` to detect
+/// input wrap.
+pub fn current_prompt_width() -> usize {
+    CURRENT_PROMPT_WIDTH.with(|c| c.get())
+}
+
+pub(crate) fn set_current_prompt_width(width: usize) {
+    CURRENT_PROMPT_WIDTH.with(|c| c.set(width));
 }
 
 fn refresh_terminal_size<H: Helper>(editor: &mut Editor<H, rustyline::history::DefaultHistory>) {
@@ -209,17 +221,111 @@ impl ConditionalEventHandler for SlashHandler {
     }
 }
 
+/// Accept the inline AI completion ghost text (if any) when the user presses
+/// Right Arrow or Ctrl+F while in AI mode with the cursor at end of line.
+/// Falls through to default behavior otherwise.
+struct AcceptInlineHintHandler {
+    inline_ai: Arc<crate::inline_completion::InlineCompleter>,
+}
+
+impl ConditionalEventHandler for AcceptInlineHintHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if ctx.pos() != ctx.line().len() {
+            return None;
+        }
+        if !crate::input::is_ai_prompt_line(ctx.line()) {
+            return None;
+        }
+        self.inline_ai
+            .take_hint()
+            .map(|suffix| Cmd::Insert(1, suffix))
+    }
+}
+
+/// On Enter (or any line-submit key): clear the visible ghost text before
+/// rustyline accepts the line. Our ghost is rendered directly via ANSI
+/// escapes, so rustyline doesn't know to clear it during its own repaint.
+/// Without this, the ghost would remain frozen on the submitted line.
+struct ClearGhostOnSubmitHandler {
+    inline_ai: Arc<crate::inline_completion::InlineCompleter>,
+}
+
+impl ConditionalEventHandler for ClearGhostOnSubmitHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        // Take the hint BEFORE cancel clears the slot, so we know whether
+        // a ghost was visible and needs `\x1b[K` to erase it.
+        let had_hint = self.inline_ai.take_hint().is_some();
+        // Cancel any in-flight prefetch (debounce / LLM call) and stop the
+        // spinner. Without this, a prefetch task dispatched before Enter
+        // would keep running — the spinner would re-appear mid-execution
+        // of the submitted line, and any late LLM result would render a
+        // stale ghost on the already-submitted line.
+        self.inline_ai.cancel();
+        if had_hint {
+            eprint!("\x1b[K");
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+        }
+        None
+    }
+}
+
+/// Which inline-AI handler to attach for a given key.
+enum HandlerKind {
+    AcceptInline,
+    ClearGhost,
+}
+
+/// Bind multiple (key, handler-kind) pairs to the same `InlineCompleter`.
+/// Exists because rustyline's `EventHandler` is not `Clone`, so each key
+/// needs its own handler instance — this helper hides the repetition.
+fn bind_conditional_handlers(
+    editor: &mut Editor<ShellHelper, rustyline::history::DefaultHistory>,
+    bindings: &[(KeyEvent, HandlerKind)],
+    ai: &Arc<crate::inline_completion::InlineCompleter>,
+) {
+    for (key, kind) in bindings {
+        let handler: Box<dyn ConditionalEventHandler> = match kind {
+            HandlerKind::AcceptInline => Box::new(AcceptInlineHintHandler {
+                inline_ai: Arc::clone(ai),
+            }),
+            HandlerKind::ClearGhost => Box::new(ClearGhostOnSubmitHandler {
+                inline_ai: Arc::clone(ai),
+            }),
+        };
+        editor.bind_sequence(*key, EventHandler::Conditional(handler));
+    }
+}
+
 /// Shell readline helper: tab completion via CompletionEngine.
 struct ShellHelper {
     engine: Arc<CompletionEngine>,
     autosuggest: Arc<Mutex<AutoSuggest>>,
+    inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
 }
 
 impl ShellHelper {
-    fn new(engine: Arc<CompletionEngine>, autosuggest: Arc<Mutex<AutoSuggest>>) -> Self {
+    fn new(
+        engine: Arc<CompletionEngine>,
+        autosuggest: Arc<Mutex<AutoSuggest>>,
+        inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
+    ) -> Self {
         Self {
             engine,
             autosuggest,
+            inline_ai,
         }
     }
 }
@@ -236,10 +342,23 @@ impl Hinter for ShellHelper {
     type Hint = String;
 
     fn hint(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        // Only hint at the end of the line
+        // Cursor not at end-of-line: just bail. Don't cancel the in-flight
+        // prefetch — a cursor move alone isn't an input change, and the
+        // Right-Arrow accept handler already guards against stale hints via
+        // its own `pos == line.len()` check, so no need to abort the request.
         if pos == 0 || pos < line.len() {
             return None;
         }
+
+        let is_ai = crate::input::is_ai_prompt_line(line);
+        if let Some(ai) = &self.inline_ai {
+            if is_ai {
+                ai.hint(line);
+                return None;
+            }
+            ai.cancel();
+        }
+
         let trimmed = line.trim_start();
         let guard = self.autosuggest.lock().unwrap();
         guard.suggest(trimmed).and_then(|s| {
@@ -294,11 +413,20 @@ pub struct ShellReadline {
     /// Shared autosuggest engine so both Hinter and external callers can add
     /// suggestions without needing Editor::helper_mut().
     autosuggest: Arc<Mutex<AutoSuggest>>,
+    /// Inline AI completer, kept here so we can cancel any in-flight
+    /// spinner / prefetch on every readline entry. The submit keys
+    /// (Enter/Ctrl+J/Ctrl+M/Ctrl+C) also clear it via bound handlers,
+    /// but this guard covers every return path (Interrupted, error, EOF)
+    /// so a spinner can never outlive its `read_line` call.
+    inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
 }
 
 impl ShellReadline {
-    pub fn new(pty: Arc<Mutex<aish_pty::PersistentPty>>) -> rustyline::Result<Self> {
-        let autosuggest = Arc::new(Mutex::new(AutoSuggest::new(5000)));
+    pub fn new(
+        pty: Arc<Mutex<aish_pty::PersistentPty>>,
+        autosuggest: Arc<Mutex<AutoSuggest>>,
+        inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
+    ) -> rustyline::Result<Self> {
         let engine = Arc::new(CompletionEngine::new(pty));
 
         let builder = Config::builder()
@@ -308,7 +436,11 @@ impl ShellReadline {
         let config = builder.history_ignore_dups(true)?.build();
 
         let mut editor = Editor::with_config(config)?;
-        editor.set_helper(Some(ShellHelper::new(engine.clone(), autosuggest.clone())));
+        editor.set_helper(Some(ShellHelper::new(
+            engine.clone(),
+            autosuggest.clone(),
+            inline_ai.clone(),
+        )));
         editor.set_max_history_size(500)?;
 
         editor.bind_sequence(
@@ -340,9 +472,55 @@ impl ShellReadline {
             EventHandler::Conditional(Box::new(SlashHandler)),
         );
 
+        // Bind Right Arrow and Ctrl+F to accept the inline AI ghost, and
+        // bind the line-submit keys to clear it before rustyline repaints.
+        // rustyline's `EventHandler` is not `Clone`, so each binding needs
+        // its own handler instance — the helpers below hide that.
+        if let Some(ref ai) = inline_ai {
+            bind_conditional_handlers(
+                &mut editor,
+                &[
+                    (
+                        KeyEvent(KeyCode::Right, Modifiers::NONE),
+                        HandlerKind::AcceptInline,
+                    ),
+                    (
+                        KeyEvent(KeyCode::Char('f'), Modifiers::CTRL),
+                        HandlerKind::AcceptInline,
+                    ),
+                    (
+                        KeyEvent(KeyCode::Enter, Modifiers::NONE),
+                        HandlerKind::ClearGhost,
+                    ),
+                    (
+                        KeyEvent(KeyCode::Enter, Modifiers::SHIFT),
+                        HandlerKind::ClearGhost,
+                    ),
+                    (
+                        KeyEvent(KeyCode::Char('j'), Modifiers::CTRL),
+                        HandlerKind::ClearGhost,
+                    ),
+                    (
+                        KeyEvent(KeyCode::Char('m'), Modifiers::CTRL),
+                        HandlerKind::ClearGhost,
+                    ),
+                    // Ctrl+C: cancel the spinner / clear the ghost BEFORE
+                    // rustyline raises `Interrupted`. Without this the
+                    // animation keeps running because nothing calls cancel()
+                    // on the Interrupted path.
+                    (
+                        KeyEvent(KeyCode::Char('c'), Modifiers::CTRL),
+                        HandlerKind::ClearGhost,
+                    ),
+                ],
+                ai,
+            );
+        }
+
         Ok(Self {
             editor,
             autosuggest,
+            inline_ai,
         })
     }
 
@@ -373,6 +551,12 @@ impl ShellReadline {
     ) -> rustyline::Result<Option<String>> {
         clear_tab_completion_state();
         refresh_terminal_size(&mut self.editor);
+        set_current_prompt_width(crate::prompt::strip_ansi_len(prompt));
+        // Cancel any spinner / prefetch left over from a previous readline
+        // (e.g. after Ctrl+C, an error, or a mode-toggle Interrupted).
+        if let Some(ai) = &self.inline_ai {
+            ai.cancel();
+        }
         match self.editor.readline_with_initial(prompt, initial) {
             Ok(line) => Ok(Some(line)),
             Err(rustyline::error::ReadlineError::Eof) => Ok(None),
@@ -387,6 +571,12 @@ impl ShellReadline {
     pub fn read_line(&mut self, prompt: &str) -> rustyline::Result<Option<String>> {
         clear_tab_completion_state();
         refresh_terminal_size(&mut self.editor);
+        set_current_prompt_width(crate::prompt::strip_ansi_len(prompt));
+        // Cancel any spinner / prefetch left over from a previous readline
+        // (e.g. after Ctrl+C, an error, or a mode-toggle Interrupted).
+        if let Some(ai) = &self.inline_ai {
+            ai.cancel();
+        }
         let line = match self.editor.readline(prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => return Ok(None),
@@ -443,6 +633,13 @@ impl ShellReadline {
     /// Useful for pre-loading history entries so they appear as hints.
     pub fn add_suggestion(&self, command: &str) {
         self.autosuggest.lock().unwrap().add(command);
+    }
+
+    /// Update the inline-completion model (called on `/model` switch).
+    pub fn update_inline_model(&self, model: &str) {
+        if let Some(ai) = &self.inline_ai {
+            ai.update_model(model);
+        }
     }
 
     /// Load history from a file (best-effort).

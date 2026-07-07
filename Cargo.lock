@@ -244,6 +244,7 @@ dependencies = [
  "aish-skills",
  "aish-tools",
  "aish-ui",
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "cliclack",

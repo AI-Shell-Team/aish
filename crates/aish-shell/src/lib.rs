@@ -27,6 +27,7 @@ pub mod esc_watcher;
 pub mod expand_history;
 pub mod feedback;
 pub mod image;
+pub mod inline_completion;
 pub mod input;
 pub mod keyboard;
 pub mod nl_detect;
