@@ -328,16 +328,42 @@ fn extract_suffix_from_json(content: &str) -> Option<String> {
         .get_or_init(|| Regex::new(r#""suffix"\s*:\s*"((?:[^"\\]|\\.)*)""#).expect("suffix regex"));
     let caps = re.captures(trimmed)?;
     let raw = caps.get(1)?.as_str();
-    let unescaped = raw
-        .replace(r#"\""#, "\"")
-        .replace(r"\\", r"\")
-        .replace(r"\n", "\n")
-        .replace(r"\t", "\t");
+    // Single-pass unescape: process \\, \", \n, \t left-to-right so that
+    // a literal "\\n" (backslash + n) is NOT mistaken for a newline.
+    // The previous chained-replace approach first collapsed "\\\\" → "\\"
+    // and then mis-read the result as "\n" → newline.
+    let unescaped = unescape_json_suffix(raw);
     if unescaped.is_empty() {
         None
     } else {
         Some(unescaped)
     }
+}
+
+/// Decode JSON string escapes in a single left-to-right pass. Handles
+/// `\\"`, `\\\\`, `\\n`, `\\t`; any unrecognized escape is passed through
+/// literally (backslash + char).
+fn unescape_json_suffix(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Pull the non-empty `suffix` field out of a parsed JSON value.
@@ -1032,6 +1058,24 @@ mod tests {
         assert_eq!(
             extract_suffix_from_json(r#"{"suffix": "hello \"world\""}"#),
             Some("hello \"world\"".to_string())
+        );
+    }
+
+    /// Regression: a literal backslash-n in the JSON (`\\n` — two chars)
+    /// must NOT be turned into an actual newline. The old chained-replace
+    /// approach first collapsed `\\` → `\`, then mis-read the result as
+    /// `\n` → newline. The single-pass scanner avoids this.
+    #[test]
+    fn extract_suffix_preserves_literal_backslash_n() {
+        // JSON: "foo\\nbar" → should decode to "foo\nbar" (literal \ + n)
+        assert_eq!(
+            extract_suffix_from_json(r#"{"suffix": "foo\\nbar"}"#),
+            Some("foo\\nbar".to_string())
+        );
+        // But a real JSON newline (\n) should still decode to a newline.
+        assert_eq!(
+            extract_suffix_from_json("{\"suffix\": \"a\\nb\"}"),
+            Some("a\nb".to_string())
         );
     }
 

@@ -248,9 +248,9 @@ impl Default for InlineCompletionConfig {
             // keeps the ghost text short regardless of token consumption.
             max_tokens: 512,
             min_input_chars: 3,
-            // Default ON: reasoning is pure waste for inline completion
-            // (a few-word suffix hint needs no chain-of-thought), and many
-            // models intermittently enable thinking, starving content.
+            // Default OFF: many gateways either ignore these flags (DeepSeek
+            // still generates reasoning) or process them slowly (moonshot
+            // response time doubles). See the field doc above for details.
             disable_thinking: false,
             enforce_json: false,
             timeout_secs: 30,
