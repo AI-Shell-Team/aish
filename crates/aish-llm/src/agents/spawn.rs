@@ -13,8 +13,13 @@ use super::registry::{AgentRegistry, ToolStrategy};
 use super::tool_loop::{run_tool_loop_until_done, LoopStatus, ToolLoopConfig};
 use super::tools::{parent_has_skill_tool, resolve_tools_for_agent};
 
-/// Global ceiling on sub-agent turns (applied via `min(def.max_turns, GLOBAL_MAX_TURNS)`).
+/// Global ceiling on sub-agent turns (applied via [`effective_max_turns`]).
 pub const GLOBAL_MAX_TURNS: u32 = 30;
+
+/// Apply the global turn ceiling to a built-in's configured limit.
+pub fn effective_max_turns(def_max_turns: u32) -> u32 {
+    def_max_turns.min(GLOBAL_MAX_TURNS)
+}
 
 /// Configuration for [`spawn`].
 #[derive(Debug, Clone)]
@@ -96,7 +101,7 @@ where
     let parent_has_skill = parent_has_skill_tool(&parent_tools);
     let allowed_specs = resolve_tools_for_agent(def, &parent_tools, parent_has_skill);
     let enforce_read_only_bash = matches!(def.tool_strategy, ToolStrategy::Allowlist(_));
-    let max_turns = def.max_turns.min(GLOBAL_MAX_TURNS);
+    let max_turns = effective_max_turns(def.max_turns);
     let spawn_id = Uuid::new_v4().to_string();
     let agent_type = def.subagent_type.clone();
     let system_prompt = def.system_prompt.clone();
@@ -170,6 +175,7 @@ async fn forward_cancellation(
 mod tests {
     use super::*;
     use crate::agents::{mock_text_response, mock_tool_call_response, AgentRegistry};
+    use crate::client::LlmResponse;
     use crate::types::Tool;
     use aish_context::ContextBudgetPolicy;
 
@@ -463,5 +469,190 @@ mod tests {
 
         let result = run.await;
         assert_eq!(result.status, LoopStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_max_turns_returns_incomplete_with_last_text() {
+        let parent = LlmSession::new("http://localhost", "key", "model", None, None);
+
+        let result = spawn(
+            &parent,
+            "keep searching",
+            SpawnConfig {
+                max_turns: 1,
+                ..Default::default()
+            },
+            |sub| {
+                disable_context_budget(sub);
+                sub.set_test_chat_responses(vec![
+                    Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                    Ok(mock_text_response("should not reach")),
+                ]);
+                sub.register_tool(Box::new(MockTool::new("grep")));
+            },
+        )
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Incomplete);
+        assert_eq!(result.text, "[incomplete: max turns reached]\n");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_max_turns_includes_last_assistant_text() {
+        let parent = LlmSession::new("http://localhost", "key", "model", None, None);
+
+        struct TextThenToolMockTool {
+            name: String,
+        }
+
+        impl Tool for TextThenToolMockTool {
+            fn name(&self) -> &str {
+                &self.name
+            }
+
+            fn description(&self) -> &str {
+                "mock"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+
+            fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+                crate::types::ToolResult::success("ok")
+            }
+        }
+
+        fn mock_tool_call_with_content(text: &str) -> LlmResponse {
+            LlmResponse::Json(serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": text,
+                        "tool_calls": [{
+                            "id": "c1",
+                            "type": "function",
+                            "function": {
+                                "name": "grep",
+                                "arguments": "{}",
+                            }
+                        }],
+                    }
+                }]
+            }))
+        }
+
+        let result = spawn(
+            &parent,
+            "investigate",
+            SpawnConfig {
+                max_turns: 1,
+                ..Default::default()
+            },
+            |sub| {
+                disable_context_budget(sub);
+                sub.set_test_chat_responses(vec![Ok(mock_tool_call_with_content(
+                    "partial findings",
+                ))]);
+                sub.register_tool(Box::new(TextThenToolMockTool {
+                    name: "grep".to_string(),
+                }));
+            },
+        )
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Incomplete);
+        assert_eq!(
+            result.text,
+            "[incomplete: max turns reached]\npartial findings"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_fatal_llm_error() {
+        use aish_core::AishError;
+
+        let parent = LlmSession::new("http://localhost", "key", "model", None, None);
+
+        let result = spawn(&parent, "task", SpawnConfig::default(), |sub| {
+            disable_context_budget(sub);
+            sub.set_test_chat_responses(vec![Err(AishError::Llm("upstream failure".into()))]);
+        })
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Fatal);
+        assert!(result.text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_plan_max_turns_is_twenty() {
+        let registry = AgentRegistry::builtin();
+        assert_eq!(registry.resolve("plan").expect("plan").max_turns, 20);
+    }
+
+    #[test]
+    fn test_effective_max_turns_applies_global_cap() {
+        use super::effective_max_turns;
+
+        assert_eq!(effective_max_turns(15), 15);
+        assert_eq!(effective_max_turns(20), 20);
+        assert_eq!(effective_max_turns(25), 25);
+        assert_eq!(effective_max_turns(35), GLOBAL_MAX_TURNS);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_respects_global_max_turns_at_runtime() {
+        let parent = LlmSession::new("http://localhost", "key", "model", None, None);
+
+        let responses: Vec<_> = (0..GLOBAL_MAX_TURNS + 3)
+            .map(|i| Ok(mock_tool_call_response(&[(&format!("c{i}"), "grep", "{}")])))
+            .collect();
+
+        let result = spawn(
+            &parent,
+            "deep task",
+            SpawnConfig {
+                max_turns: effective_max_turns(100),
+                ..Default::default()
+            },
+            |sub| {
+                disable_context_budget(sub);
+                sub.set_test_chat_responses(responses);
+                sub.register_tool(Box::new(MockTool::new("grep")));
+            },
+        )
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Incomplete);
+        assert!(result.text.starts_with("[incomplete: max turns reached]"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_max_turns_exhaustion() {
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+
+        let registry = AgentRegistry::builtin();
+        let explore_turns = registry.resolve("explore").expect("explore").max_turns;
+
+        let responses: Vec<_> = (0..explore_turns + 2)
+            .map(|i| Ok(mock_tool_call_response(&[(&format!("c{i}"), "grep", "{}")])))
+            .collect();
+
+        let result = spawn_builtin(
+            &parent,
+            &registry,
+            "explore",
+            "deep search",
+            |sub, specs| {
+                disable_context_budget(sub);
+                sub.set_test_chat_responses(responses);
+                register_mock_from_specs(sub, specs);
+            },
+        )
+        .await
+        .expect("spawn should succeed");
+
+        assert_eq!(result.status, LoopStatus::Incomplete);
+        assert!(result.text.starts_with("[incomplete: max turns reached]"));
     }
 }

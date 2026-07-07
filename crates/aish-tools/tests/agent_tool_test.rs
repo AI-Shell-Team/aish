@@ -31,6 +31,32 @@ fn mock_spawn_cancelled<'a>(
     })
 }
 
+fn mock_spawn_incomplete<'a>(
+    _session: &'a aish_llm::LlmSession,
+    _ty: &'a str,
+    _prompt: &'a str,
+) -> Pin<Box<dyn Future<Output = Result<SpawnResult, String>> + Send + 'a>> {
+    Box::pin(async {
+        Ok(SpawnResult {
+            text: "[incomplete: max turns reached]\npartial conclusion".to_string(),
+            status: LoopStatus::Incomplete,
+        })
+    })
+}
+
+fn mock_spawn_fatal<'a>(
+    _session: &'a aish_llm::LlmSession,
+    _ty: &'a str,
+    _prompt: &'a str,
+) -> Pin<Box<dyn Future<Output = Result<SpawnResult, String>> + Send + 'a>> {
+    Box::pin(async {
+        Ok(SpawnResult {
+            text: String::new(),
+            status: LoopStatus::Fatal,
+        })
+    })
+}
+
 #[tokio::test]
 async fn test_agent_tool_missing_prompt_errors() {
     let tool = AgentTool::new();
@@ -109,5 +135,52 @@ async fn test_agent_tool_mock_spawn_cancelled_errors() {
             .and_then(|m| m.get("dispatch_status"))
             .and_then(|v| v.as_str()),
         Some("short_circuit")
+    );
+}
+
+#[tokio::test]
+async fn test_agent_tool_mock_spawn_incomplete_success_with_prefix() {
+    let spawn_fn: SpawnFn = Arc::new(mock_spawn_incomplete);
+    let tool = AgentTool::with_spawn_fn(spawn_fn);
+    let session = aish_llm::LlmSession::new("http://localhost", "key", "model", None, None);
+    let result = tool
+        .execute_async_in_session(
+            serde_json::json!({
+                "description": "long search",
+                "prompt": "search everything",
+                "subagent_type": "explore"
+            }),
+            &session,
+        )
+        .await;
+    assert!(result.ok);
+    assert!(result.output.starts_with("[incomplete: max turns reached]"));
+    assert!(result.output.contains("partial conclusion"));
+}
+
+#[tokio::test]
+async fn test_agent_tool_mock_spawn_fatal_errors() {
+    let spawn_fn: SpawnFn = Arc::new(mock_spawn_fatal);
+    let tool = AgentTool::with_spawn_fn(spawn_fn);
+    let session = aish_llm::LlmSession::new("http://localhost", "key", "model", None, None);
+    let result = tool
+        .execute_async_in_session(
+            serde_json::json!({
+                "description": "run task",
+                "prompt": "do work",
+                "subagent_type": "explore"
+            }),
+            &session,
+        )
+        .await;
+    assert!(!result.ok);
+    assert!(result.output.contains("failed"));
+    assert_eq!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("reason"))
+            .and_then(|v| v.as_str()),
+        Some("sub_agent_fatal")
     );
 }
