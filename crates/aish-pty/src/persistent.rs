@@ -945,12 +945,19 @@ impl PersistentPty {
                     n if n > 0 => {
                         let data = &tmp[..n as usize];
                         if data.contains(&0x03) {
-                            // Ctrl+C: cancel and send SIGINT to bash.
-                            let _ = kill_pg(self.child_pid, Signal::SIGINT);
+                            // Ctrl+C: forward the byte to the PTY so the
+                            // terminal driver delivers SIGINT to the
+                            // *foreground* process group (the pager's group),
+                            // not bash's own group. Pagers like `less` swallow
+                            // SIGINT, so the SIGTERM/SIGKILL escalation for
+                            // them happens in the cleanup section below after
+                            // the loop breaks.
+                            let _ = self.write_master(b"\x03");
                             if let Some(ref ct) = cancel_token {
                                 ct.cancel();
                             }
                             cancelled = true;
+                            break 'select_loop;
                         } else if data.contains(&0x0f) {
                             // Ctrl+O: invoke the live output viewer (blocks until closed).
                             // Restore terminal from PTY raw mode so the panel can use it.
@@ -1040,6 +1047,24 @@ impl PersistentPty {
 
         // Drain remaining output.
         self.drain_master_to_exec_buffer();
+
+        // If cancelled, forcefully terminate any foreground job that survived
+        // the Ctrl+C byte. Interactive pagers (e.g. `less` invoked by
+        // `nmcli -p`) swallow SIGINT and keep owning the PTY foreground,
+        // which would leave bash stuck and pollute subsequent commands. We
+        // escalate to SIGTERM/SIGKILL against the *foreground* process group
+        // (the pager's group), never against bash's own group, so the
+        // long-lived session survives for the next command.
+        if cancelled {
+            force_cancel_pty_foreground(self.master_fd, self.child_pid);
+            // Give bash a moment to reclaim the foreground after the pager
+            // dies, then drain residual output (job-terminated notices, the
+            // restored prompt) into the exec buffer so it is captured rather
+            // than leaking into the next command.
+            std::thread::sleep(Duration::from_millis(50));
+            self.drain_master_to_exec_buffer();
+        }
+
         self.exec_mode.store(false, Ordering::SeqCst);
 
         // Flush stale input so escape sequences don't confuse the next prompt.
@@ -5400,6 +5425,42 @@ fn sync_window_size(src_fd: RawFd, dst_fd: RawFd) -> nix::Result<()> {
 
 fn kill_pg(pid: Pid, sig: Signal) -> nix::Result<()> {
     kill(Pid::from_raw(-pid.as_raw()), sig)
+}
+
+/// Get the foreground process group currently attached to the PTY.
+/// On the master fd this returns the foreground group of the PTY session
+/// (e.g. a pager like `less` invoked by `nmcli -p`). Returns None if the
+/// ioctl is unsupported or the PTY has no foreground group yet.
+fn pty_foreground_pgrp(master_fd: RawFd) -> Option<Pid> {
+    let mut pgrp: libc::pid_t = 0;
+    let rc = unsafe { libc::ioctl(master_fd, libc::TIOCGPGRP, &mut pgrp) };
+    if rc == 0 && pgrp > 0 {
+        Some(Pid::from_raw(pgrp))
+    } else {
+        None
+    }
+}
+
+/// Forcefully cancel the foreground job of the PTY. Interactive pagers
+/// (`less`/`more`/`man`) swallow SIGINT, so after the Ctrl+C byte is sent we
+/// escalate to SIGTERM/SIGKILL against the foreground process group. The
+/// bash process group (`child_pid`) is never killed directly: bash is the
+/// long-lived session leader and must survive so the next command can run.
+fn force_cancel_pty_foreground(master_fd: RawFd, child_pid: Pid) {
+    if let Some(fg) = pty_foreground_pgrp(master_fd) {
+        if fg != child_pid {
+            let _ = kill_pg(fg, Signal::SIGTERM);
+            std::thread::sleep(Duration::from_millis(100));
+            // Re-check the foreground group before escalating: SIGTERM usually
+            // terminates the pager, after which bash reclaims the foreground
+            // (group == child_pid) or starts a new job. Only send SIGKILL when
+            // the same foreground group is still active, so we never signal a
+            // recycled or unrelated PGID.
+            if pty_foreground_pgrp(master_fd) == Some(fg) {
+                let _ = kill_pg(fg, Signal::SIGKILL);
+            }
+        }
+    }
 }
 
 fn child_has_exited(pid: Pid) -> bool {
