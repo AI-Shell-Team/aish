@@ -20,7 +20,7 @@ pub mod agent_tool {
     mod agent_tool;
     mod prompt;
 
-    pub use self::agent_tool::{AgentTool, SpawnFn};
+    pub use self::agent_tool::{AgentTool, SkillCallbacks, SpawnFn};
 }
 
 pub mod ask_user {

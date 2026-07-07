@@ -57,7 +57,7 @@ async fn test_agent_tool_unknown_subagent_type_errors() {
             serde_json::json!({
                 "description": "plan task",
                 "prompt": "make a plan",
-                "subagent_type": "plan"
+                "subagent_type": "troubleshoot"
             }),
             &session,
         )

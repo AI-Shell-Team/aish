@@ -653,7 +653,8 @@ impl AishShell {
         )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
-        tool_registry.register(Box::new(aish_tools::AgentTool::new()));
+        // AgentTool registration is deferred until after skill loading so general-purpose
+        // sub-agents can inherit skill callbacks when the parent session has skills.
 
         // System diagnose tool — needs session credentials to spawn sub-sessions.
         // The shared event callback holder allows setting the callback after
@@ -782,6 +783,16 @@ impl AishShell {
                     })
                     .collect();
             let skill_names: Vec<String> = skills_snapshot.keys().cloned().collect();
+            let agent_skills = skills_snapshot.clone();
+            let agent_skill_names = skill_names.clone();
+            let agent_lookup =
+                std::sync::Arc::new(move |name: &str| agent_skills.get(name).cloned())
+                    as std::sync::Arc<dyn Fn(&str) -> Option<aish_tools::SkillInfo> + Send + Sync>;
+            let agent_list = std::sync::Arc::new(move || agent_skill_names.clone())
+                as std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+            tool_registry.register(Box::new(aish_tools::AgentTool::with_skill_callbacks(Some(
+                (agent_lookup, agent_list),
+            ))));
             let lookup = Box::new(move |name: &str| skills_snapshot.get(name).cloned());
             let list = Box::new(move || skill_names.clone());
             aish_tools::SkillTool::new(lookup, list)
