@@ -87,3 +87,81 @@ impl Drop for SharedAnimation {
         self.stop();
     }
 }
+
+/// Spinner for sub-agent thinking lines (`  └─ explore · ⠇ 思考中 ... 2.1s`).
+///
+/// Separate from [`SharedAnimation`] so the main-loop spinner can stay off while
+/// sub-agent progress remains visibly alive.
+pub struct SubAgentThinkingAnimation {
+    active: Arc<AtomicBool>,
+    handle: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl SubAgentThinkingAnimation {
+    pub fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(false)),
+            handle: Mutex::new(None),
+        }
+    }
+
+    /// Animate `prefix` + spinner + `label` on a single dimmed line.
+    pub fn start(&self, prefix: &str, label: &str) {
+        self.stop();
+
+        let active = self.active.clone();
+        active.store(true, Ordering::SeqCst);
+
+        let prefix = prefix.to_string();
+        let label = label.to_string();
+        let start_time = Instant::now();
+
+        let handle = thread::Builder::new()
+            .name("aish-subagent-animation".into())
+            .spawn(move || {
+                let mut spinner = Spinner::new("dots").expect("dots spinner should exist");
+                print!("\x1b[?25l");
+                let _ = io::stdout().flush();
+
+                while active.load(Ordering::SeqCst) {
+                    let frame = spinner.next_frame();
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    if elapsed > 0.1 {
+                        print!(
+                            "\r\x1b[K\x1b[2m{}{} {} ... {:.1}s\x1b[0m",
+                            prefix, frame, label, elapsed
+                        );
+                    } else {
+                        print!("\r\x1b[K\x1b[2m{}{} {}\x1b[0m", prefix, frame, label);
+                    }
+                    let _ = io::stdout().flush();
+                    thread::sleep(Duration::from_millis(150));
+                }
+
+                print!("\r\x1b[2K\x1b[?25h");
+                let _ = io::stdout().flush();
+            })
+            .ok();
+
+        *self.handle.lock().unwrap() = handle;
+    }
+
+    pub fn stop(&self) {
+        self.active.store(false, Ordering::SeqCst);
+        if let Some(h) = self.handle.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Default for SubAgentThinkingAnimation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for SubAgentThinkingAnimation {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}

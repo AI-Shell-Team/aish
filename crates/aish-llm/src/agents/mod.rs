@@ -4,6 +4,7 @@
 //! Issue #331: explore vertical slice — registry, tool filter, spawn_builtin.
 //! Issue #332: plan + general-purpose built-ins and tool filtering.
 
+mod event_metadata;
 mod mock_llm;
 mod outcome;
 mod registry;
