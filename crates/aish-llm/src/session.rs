@@ -381,7 +381,7 @@ impl LlmSession {
         if let Some(result) = self.run_tool_preflight(name, tool.as_ref(), &args) {
             return Ok(result);
         }
-        Ok(tool.as_ref().execute_async(args).await)
+        Ok(tool.as_ref().execute_async_in_session(args, self).await)
     }
 
     /// Emit an event through the callback (public for agent use).
@@ -1162,7 +1162,7 @@ impl LlmSession {
                     .as_ref()
                     .execute_async_in_session(args.clone(), self)
                     .await;
-                if first.ok {
+                if first.ok || is_short_circuit_result(&first) {
                     first
                 } else {
                     // Retry once — log the retry attempt

@@ -102,4 +102,12 @@ async fn test_agent_tool_mock_spawn_cancelled_errors() {
         .await;
     assert!(!result.ok);
     assert!(result.output.contains("cancelled"));
+    assert_eq!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("dispatch_status"))
+            .and_then(|v| v.as_str()),
+        Some("short_circuit")
+    );
 }
