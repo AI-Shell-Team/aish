@@ -1,6 +1,7 @@
 //! Reusable native tool calling loop for sub-agent spawn paths.
 
 use crate::client::LlmResponse;
+use crate::prompt::{PromptAssembly, PromptContext};
 use crate::session::LlmSession;
 use crate::streaming::{extract_message_text, StreamParser};
 use crate::types::{ChatMessage, MessageContent};
@@ -15,6 +16,8 @@ pub struct ToolLoopConfig {
     pub max_turns: u32,
     /// Optional system prompt prepended to the message list.
     pub system_message: Option<String>,
+    /// Prompt assembly context (MainChat vs SubAgent filtering).
+    pub prompt_context: PromptContext,
     /// Prefix prepended to the final text when max turns is reached.
     pub incomplete_prefix: String,
 }
@@ -24,6 +27,7 @@ impl Default for ToolLoopConfig {
         Self {
             max_turns: 20,
             system_message: None,
+            prompt_context: PromptContext::MainChat,
             incomplete_prefix: INCOMPLETE_PREFIX.to_string(),
         }
     }
@@ -88,16 +92,16 @@ pub async fn run_tool_loop_until_done(
     context_messages: &[ChatMessage],
     config: &ToolLoopConfig,
 ) -> LoopOutcome {
+    let base_system = config.system_message.as_deref().unwrap_or("");
+    let bundle = PromptAssembly::build(session, config.prompt_context.clone(), base_system);
     let mut messages: Vec<ChatMessage> = Vec::new();
-    if let Some(sys) = &config.system_message {
-        messages.push(ChatMessage::system(
-            session.system_prompt_with_tool_prompts(sys),
-        ));
+    if config.system_message.is_some() {
+        messages.push(ChatMessage::system(bundle.system_message));
     }
     messages.extend_from_slice(context_messages);
     messages.push(user_msg.clone());
 
-    let tool_specs = session.filtered_tool_specs();
+    let tool_specs = bundle.tool_specs;
     let has_tools = !tool_specs.is_empty();
 
     let mut iterations = 0u32;

@@ -25,6 +25,7 @@ pub mod models;
 pub mod oauth;
 pub mod openai_sse_bridge;
 pub mod probe;
+pub mod prompt;
 pub mod provider;
 pub mod providers;
 pub mod session;
@@ -58,6 +59,7 @@ pub use oauth::{
     login_with_device_code, open_url, save_tokens, OAuthProviderSpec, OAuthTokens, PkcePair,
 };
 pub use probe::probe_live_tool_support;
+pub use prompt::{PromptAssembly, PromptBundle, PromptContext, ToolVisibilityPolicy};
 pub use provider::{
     detect_provider, detect_provider_from_model, refine_provider_from_api_base, ProviderInfo,
 };

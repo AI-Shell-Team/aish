@@ -499,6 +499,16 @@ pub enum PreflightResult {
     },
 }
 
+/// Whether a tool's [`Tool::prompt`] is included in the system appendix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptVisibility {
+    /// Include in appendix when [`Tool::prompt`] is non-empty after trim.
+    #[default]
+    AppendixWhenNonEmpty,
+    /// Never append [`Tool::prompt`] to the system message.
+    NeverInAppendix,
+}
+
 /// Trait for tool implementations that the LLM can invoke.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -507,6 +517,11 @@ pub trait Tool: Send + Sync {
 
     fn prompt(&self) -> &str {
         ""
+    }
+
+    /// Controls whether [`Tool::prompt`] is appended to the system message appendix.
+    fn prompt_visibility(&self) -> PromptVisibility {
+        PromptVisibility::AppendixWhenNonEmpty
     }
 
     fn to_spec(&self) -> ToolSpec {

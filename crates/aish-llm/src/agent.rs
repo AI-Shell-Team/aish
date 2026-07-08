@@ -1,17 +1,14 @@
 //! ReAct-style agent system for iterative reasoning and tool use.
 //!
-//! The agent follows the Thought/Action/Observation/Final Answer pattern:
-//! 1. Send the query plus conversation history to the LLM.
-//! 2. Parse the LLM response for structured ReAct blocks.
-//! 3. If the response contains an **Action**, execute the named tool and feed
-//!    the result back as an **Observation**.
-//! 4. If the response contains a **Final Answer**, return it immediately.
-//! 5. Repeat until a final answer is produced or the iteration limit is hit.
+//! **Legacy path:** used only by [`crate::diagnose_agent::DiagnoseAgent`] and
+//! `system_diagnose` tooling. Main shell chat and sub-agent spawn use native
+//! tool calling via [`crate::prompt::PromptAssembly`].
 
 use aish_core::{AishError, LlmEvent, LlmEventType};
 use tracing::{debug, info, warn};
 
 use crate::client::LlmResponse;
+use crate::prompt::{PromptAssembly, PromptContext};
 use crate::streaming::StreamParser;
 use crate::types::*;
 use crate::LlmSession;
@@ -218,6 +215,8 @@ Available tools will be provided via the standard tool-calling interface.";
 
 /// A ReAct-style agent that drives an [`LlmSession`] through iterative
 /// Thought → Action → Observation cycles until a Final Answer is produced.
+///
+/// Legacy: prefer [`PromptAssembly`] + native tool calling for new code paths.
 pub struct ReActAgent<'a> {
     session: &'a LlmSession,
     config: AgentConfig,
@@ -258,11 +257,11 @@ impl<'a> ReActAgent<'a> {
         let _op_end = EmitOpEnd(self.session);
 
         let mut messages: Vec<ChatMessage> = Vec::new();
-        let system_prompt = self.session.system_prompt_with_tool_prompts(system_prompt);
-        messages.push(ChatMessage::system(&system_prompt));
+        let bundle = PromptAssembly::build(self.session, PromptContext::MainChat, system_prompt);
+        messages.push(ChatMessage::system(&bundle.system_message));
         messages.push(ChatMessage::user(query));
 
-        let tool_specs: Vec<ToolSpec> = self.session.tool_specs();
+        let tool_specs = bundle.tool_specs;
         let has_tools = !tool_specs.is_empty();
 
         for iteration in 0..self.config.max_iterations {

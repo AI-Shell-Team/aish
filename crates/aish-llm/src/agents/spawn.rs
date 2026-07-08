@@ -5,6 +5,7 @@ use std::sync::Arc;
 use aish_core::LlmEvent;
 use uuid::Uuid;
 
+use crate::prompt::PromptContext;
 use crate::session::LlmSession;
 use crate::tool_context::ToolExecutionPolicy;
 use crate::types::{ChatMessage, LlmCallbackResult, ToolSpec};
@@ -26,6 +27,7 @@ pub fn effective_max_turns(def_max_turns: u32) -> u32 {
 pub struct SpawnConfig {
     pub max_turns: u32,
     pub system_message: Option<String>,
+    pub prompt_context: PromptContext,
 }
 
 impl Default for SpawnConfig {
@@ -33,6 +35,7 @@ impl Default for SpawnConfig {
         Self {
             max_turns: 20,
             system_message: None,
+            prompt_context: PromptContext::MainChat,
         }
     }
 }
@@ -64,6 +67,7 @@ where
     let loop_config = ToolLoopConfig {
         max_turns: config.max_turns,
         system_message: config.system_message,
+        prompt_context: config.prompt_context,
         ..ToolLoopConfig::default()
     };
     let user_msg = ChatMessage::user(prompt);
@@ -112,6 +116,9 @@ where
         SpawnConfig {
             max_turns,
             system_message: Some(system_prompt),
+            prompt_context: PromptContext::SubAgent {
+                subagent_type: agent_type.clone(),
+            },
         },
         |sub| {
             sub.set_tool_execution_policy(ToolExecutionPolicy {
