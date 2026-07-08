@@ -1,12 +1,17 @@
-pub(crate) const DESCRIPTION: &str = "Execute a bash command and return the output.";
+pub(crate) const DESCRIPTION: &str = "\
+Execute a bash command and return the output. Prefer for direct shell commands and scripts; \
+use read_file, grep, or glob for file content; use Python for structured scripts; use Agent \
+(subagent_type=explore) for open-ended multi-round investigation; use Agent to delegate other \
+isolated sub-tasks.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to run shell commands.
 
 Usage:
 - Explain non-trivial commands before running them.
-- Prefer read_file, grep, or glob when those tools directly match the task.
 - Use timeout only when a bounded runtime is expected.
-- Do not retry commands the user rejected or cancelled."#;
+- Do not retry commands the user rejected or cancelled.
+- Prefer read_file, grep, or glob for file content; use bash for one-shot commands or read-only \
+discovery (find, ls, stat) when those tools are a better fit."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({

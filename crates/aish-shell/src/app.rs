@@ -4846,7 +4846,7 @@ impl AishShell {
                 // Add remote host environment info for SSH sessions
                 let remote_env_info = if let Some(ref host) = current_host {
                     format!(
-                        "\n- **远程主机:** {} (命令在远程主机上执行，请基于远程环境进行分析和修正)",
+                        "\n- **Remote host:** {} (commands run on the remote host; analyze and correct based on the remote environment)",
                         host
                     )
                 } else {

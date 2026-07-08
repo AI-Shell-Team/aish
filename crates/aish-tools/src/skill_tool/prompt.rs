@@ -1,11 +1,13 @@
-pub(crate) const DESCRIPTION: &str = "Invoke a skill within the main conversation.";
+pub(crate) const DESCRIPTION: &str = "\
+Invoke a skill within the main conversation. Use only skills listed in the current turn's \
+system-reminder; do not guess skill names from memory.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to invoke user-available skills.
 
 Usage:
 - Invoke a skill before answering when it directly matches the user's request.
 - Pass only concise arguments needed by the selected skill.
-- Do not invent skill names; use only skills that are available in the current session."#;
+- Write skill outputs only to dedicated subdirectories under the current working directory when files are needed."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({

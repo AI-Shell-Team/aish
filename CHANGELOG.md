@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Added `PromptAssembly` to unify MainChat and sub-agent system prompt and tool spec assembly; removed legacy `LlmSession` prompt filtering APIs.
+- Moved per-tool routing guidance into tool descriptions; tool usage remains in tool prompts. Oracle delegates tool choice to descriptions (no duplicated routing tables). If you customize `~/.config/aish/prompts/oracle.md`, remove duplicated tool-selection sections that mirror tool descriptions.
+- Added explicit routing between `Agent(subagent_type=plan)` and `enter_plan_mode`; `enter_plan_mode` keeps routing in its description and usage-only text in its prompt appendix.
+- Expanded built-in sub-agent system prompts (explore/plan/general-purpose) with read-only rules and efficient search strategy; Agent `prompt` schema now requires scope and thoroughness.
+- Converted embedded LLM prompt templates (`oracle`, `cmd_error`, `failure_diagnose`) to English-only; SSH error-correction context injection is English as well. Removed unused embedded templates (`error_detect`, `system_diagnose`, `guess_command`) and stale copies under `crates/aish-shell/prompts/` (runtime source: `aish-prompts/src/manager.rs`).
+
 ## [0.3.6] - 2026-07-03
 
 ### Added

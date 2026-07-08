@@ -45,9 +45,12 @@ impl AgentTool {
     pub fn with_skill_callbacks(skill_callbacks: Option<SkillCallbacks>) -> Self {
         let registry = AgentRegistry::builtin();
         let description = format!(
-            "{}\n{}",
+            "{}\n{}\n\nAvailable subagent types:\n{}\n\n{}\n\n{}",
             prompt::DESCRIPTION,
-            registry.list_for_tool_description()
+            prompt::ROUTING_SECTION,
+            registry.list_for_tool_description(),
+            prompt::WHEN_NOT_SECTION,
+            prompt::USAGE_SECTION,
         );
         Self {
             registry,
@@ -251,6 +254,18 @@ mod tests {
         assert!(tool.description().contains("plan"));
         assert!(tool.description().contains("general-purpose"));
         assert!(tool.description().contains("read-only"));
+    }
+
+    #[test]
+    fn description_includes_planning_routing_table() {
+        let tool = AgentTool::new();
+        assert!(tool
+            .description()
+            .contains("## Routing: planning vs plan mode vs sub-agents"));
+        assert!(tool.description().contains("Do NOT use enter_plan_mode"));
+        assert!(tool
+            .description()
+            .contains("## When NOT to use the Agent tool"));
     }
 
     #[test]

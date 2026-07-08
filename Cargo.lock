@@ -121,6 +121,7 @@ dependencies = [
  "aish-core",
  "aish-i18n",
  "aish-security",
+ "aish-tools",
  "base64 0.22.1",
  "bytes",
  "futures",

@@ -1,4 +1,5 @@
-pub(crate) const DESCRIPTION: &str = "Write text content to a file.";
+pub(crate) const DESCRIPTION: &str = "\
+Write text content to a file. Use when the user explicitly wants a file created or overwritten.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to create or overwrite a text file.
 

@@ -53,6 +53,8 @@ pub struct LlmSession {
     token_stats: std::sync::Mutex<crate::usage::TokenStats>,
     /// Per-session tool execution policy (read-only bash enforcement, etc.).
     tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
+    /// True for sessions created via [`Self::create_subsession`].
+    is_sub_agent: bool,
     /// Scripted chat completion responses for unit/integration tests (pop in order).
     #[cfg(test)]
     test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
@@ -103,6 +105,7 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
+            is_sub_agent: false,
             #[cfg(test)]
             test_chat_responses: None,
         }
@@ -114,6 +117,11 @@ impl LlmSession {
 
     pub fn set_tool_execution_policy(&mut self, policy: crate::tool_context::ToolExecutionPolicy) {
         self.tool_execution_policy = policy;
+    }
+
+    /// Whether this session is an isolated sub-agent loop (not the main shell chat).
+    pub fn is_sub_agent(&self) -> bool {
+        self.is_sub_agent
     }
 
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
@@ -194,70 +202,9 @@ impl LlmSession {
         self.tools.values().map(|t| t.to_spec()).collect()
     }
 
-    /// Return tool specs filtered based on the current plan phase.
-    ///
-    /// During planning, only tools in PLANNING_VISIBLE_TOOLS are available.
-    /// During normal mode, all tools are visible.
-    pub fn filtered_tool_specs(&self) -> Vec<ToolSpec> {
-        let all = self.tool_specs();
-        let phase = self.plan_state.lock().unwrap().phase.clone();
-
-        match phase {
-            PlanPhase::Normal => all,
-            PlanPhase::Planning => {
-                let visible = aish_core::PLANNING_VISIBLE_TOOLS;
-                all.into_iter()
-                    .filter(|t| visible.contains(&t.function.name.as_str()))
-                    .collect()
-            }
-        }
-    }
-
-    fn tool_visible_in_phase(tool_name: &str, phase: &PlanPhase) -> bool {
-        match phase {
-            PlanPhase::Normal => true,
-            PlanPhase::Planning => aish_core::PLANNING_VISIBLE_TOOLS.contains(&tool_name),
-        }
-    }
-
-    pub fn filtered_tool_prompt_section(&self) -> Option<String> {
-        let phase = self.plan_state.lock().unwrap().phase.clone();
-        let mut prompts: Vec<(&str, &str)> = self
-            .tools
-            .values()
-            .filter(|tool| Self::tool_visible_in_phase(tool.name(), &phase))
-            .filter_map(|tool| {
-                let prompt = tool.prompt().trim();
-                if prompt.is_empty() {
-                    None
-                } else {
-                    Some((tool.name(), prompt))
-                }
-            })
-            .collect();
-
-        if prompts.is_empty() {
-            return None;
-        }
-
-        prompts.sort_by(|a, b| a.0.cmp(b.0));
-
-        let mut section = String::from("## Tool Instructions\n");
-        for (name, prompt) in prompts {
-            section.push_str("\n### ");
-            section.push_str(name);
-            section.push('\n');
-            section.push_str(prompt);
-            section.push('\n');
-        }
-        Some(section)
-    }
-
-    pub fn system_prompt_with_tool_prompts(&self, system_prompt: &str) -> String {
-        match self.filtered_tool_prompt_section() {
-            Some(section) => format!("{}\n\n{}", system_prompt.trim_end(), section),
-            None => system_prompt.to_string(),
-        }
+    /// Iterate registered tools (for prompt assembly appendix).
+    pub(crate) fn registered_tools(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.tools.values().map(|tool| tool.as_ref())
     }
 
     /// Get a reference to the plan state (for external coordination).
@@ -432,10 +379,13 @@ impl LlmSession {
 
         // Build initial message list
         let mut messages: Vec<ChatMessage> = Vec::new();
-        if let Some(sys) = system_message {
-            messages.push(ChatMessage::system(
-                self.system_prompt_with_tool_prompts(sys),
-            ));
+        let prompt_bundle = crate::prompt::PromptAssembly::build(
+            self,
+            crate::prompt::PromptContext::MainChat,
+            system_message.unwrap_or(""),
+        );
+        if system_message.is_some() {
+            messages.push(ChatMessage::system(prompt_bundle.system_message));
         }
         messages.extend_from_slice(context_messages);
         messages.push(user_msg.clone());
@@ -455,7 +405,7 @@ impl LlmSession {
 
         let initial_len = messages.len();
 
-        let tool_specs = self.filtered_tool_specs();
+        let tool_specs = prompt_bundle.tool_specs;
         let has_tools = !tool_specs.is_empty();
 
         // Tool calling loop (max iterations to prevent infinite loops)
@@ -1314,6 +1264,7 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             tool_execution_policy: self.tool_execution_policy,
+            is_sub_agent: true,
             #[cfg(test)]
             test_chat_responses: None,
         }
@@ -1325,6 +1276,12 @@ impl LlmSession {
         tool: &dyn Tool,
         args: &serde_json::Value,
     ) -> Option<ToolResult> {
+        if self.is_sub_agent && crate::prompt::SUBAGENT_GLOBAL_DENY.contains(&tool_name) {
+            return Some(ToolResult::error(format!(
+                "Tool '{tool_name}' is not available in sub-agent sessions"
+            )));
+        }
+
         let ctx = crate::tool_context::ToolContext::for_session(self);
         match tool.preflight_with_context(args, &ctx) {
             PreflightResult::Allow => None,
@@ -2610,27 +2567,28 @@ mod tests {
     }
 
     #[test]
-    fn test_filtered_tool_specs_normal_mode() {
+    fn test_main_chat_tool_specs_normal_mode() {
+        use crate::prompt::{PromptAssembly, PromptContext};
+
         let session = LlmSession::new("http://localhost", "key", "model", None, None);
 
-        // In normal mode, filtered specs should return all registered tools
-        let specs = session.filtered_tool_specs();
-        assert_eq!(specs.len(), 0); // No tools registered yet
+        let specs = PromptAssembly::build(&session, PromptContext::MainChat, "").tool_specs;
+        assert_eq!(specs.len(), 0);
     }
 
     #[test]
-    fn test_filtered_tool_specs_planning_mode() {
+    fn test_main_chat_tool_specs_planning_mode() {
+        use crate::prompt::{PromptAssembly, PromptContext};
         use aish_core::PlanPhase;
+
         let session = LlmSession::new("http://localhost", "key", "model", None, None);
 
-        // Set planning mode
         {
             let mut state = session.plan_state.lock().unwrap();
             state.phase = PlanPhase::Planning;
         }
 
-        // In planning mode, should return empty (no tools registered)
-        let specs = session.filtered_tool_specs();
+        let specs = PromptAssembly::build(&session, PromptContext::MainChat, "").tool_specs;
         assert_eq!(specs.len(), 0);
     }
 
@@ -2740,6 +2698,8 @@ mod tests {
 
     #[test]
     fn test_tool_prompt_section_uses_only_non_empty_prompts() {
+        use crate::prompt::{PromptAssembly, PromptContext};
+
         let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
         session.register_tool(Box::new(MockTool::new("empty_tool")));
         session.register_tool(Box::new(MockTool::with_prompt(
@@ -2747,7 +2707,7 @@ mod tests {
             "Use carefully.",
         )));
 
-        let section = session.filtered_tool_prompt_section().unwrap();
+        let section = PromptAssembly::build(&session, PromptContext::MainChat, "").system_message;
 
         assert!(section.contains("## Tool Instructions"));
         assert!(section.contains("### prompt_tool"));
@@ -2757,6 +2717,8 @@ mod tests {
 
     #[test]
     fn test_tool_prompt_section_respects_planning_filter() {
+        use crate::prompt::{PromptAssembly, PromptContext};
+
         let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
         session.register_tool(Box::new(MockTool::with_prompt(
             "read_file",
@@ -2772,7 +2734,7 @@ mod tests {
             state.phase = aish_core::PlanPhase::Planning;
         }
 
-        let section = session.filtered_tool_prompt_section().unwrap();
+        let section = PromptAssembly::build(&session, PromptContext::MainChat, "").system_message;
 
         assert!(section.contains("### read_file"));
         assert!(section.contains("Read files during planning."));
@@ -2781,11 +2743,15 @@ mod tests {
     }
 
     #[test]
-    fn test_system_prompt_with_tool_prompts_appends_section() {
+    fn test_prompt_assembly_appends_tool_section_to_base_system() {
+        use crate::prompt::{PromptAssembly, PromptContext};
+
         let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
         session.register_tool(Box::new(MockTool::with_prompt("mock", "Mock guidance.")));
 
-        let system_prompt = session.system_prompt_with_tool_prompts("Base prompt.\n");
+        let system_prompt =
+            PromptAssembly::build(&session, PromptContext::MainChat, "Base prompt.\n")
+                .system_message;
 
         assert!(system_prompt.starts_with("Base prompt."));
         assert!(system_prompt.contains("## Tool Instructions"));
@@ -2795,26 +2761,24 @@ mod tests {
 
     #[test]
     fn test_tool_filtering_with_registered_tools() {
+        use crate::prompt::{PromptAssembly, PromptContext};
         use aish_core::PlanPhase;
+
         let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
 
-        // Register mock tools
         session.register_tool(Box::new(MockTool::new("read_file")));
         session.register_tool(Box::new(MockTool::new("bash_exec")));
         session.register_tool(Box::new(MockTool::new("grep")));
 
-        // In normal mode, all tools should be visible
-        let specs = session.filtered_tool_specs();
+        let specs = PromptAssembly::build(&session, PromptContext::MainChat, "").tool_specs;
         assert_eq!(specs.len(), 3);
 
-        // Set planning mode
         {
             let mut state = session.plan_state.lock().unwrap();
             state.phase = PlanPhase::Planning;
         }
 
-        // In planning mode, bash_exec should be filtered out
-        let specs = session.filtered_tool_specs();
+        let specs = PromptAssembly::build(&session, PromptContext::MainChat, "").tool_specs;
         assert_eq!(specs.len(), 2);
         let tool_names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
         assert!(tool_names.contains(&"read_file"));
