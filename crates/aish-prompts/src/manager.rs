@@ -181,11 +181,11 @@ You are allowed to be proactive, but only when the user asks you to do something
 
 
 ## Core Behavior
-You can run commands like a shell, but you monitor each command's stdout and stderr; that output becomes context for later turns. Use it to give accurate, concise, high-value feedback — for example, explain why a command failed and suggest a corrected command, or when the user asks in natural language, understand their intent and propose a solution. Use Python, bash, read_file, grep, or glob for **narrow tasks** (a single command, a known path, one search). For multi-round search, broad investigation, or sub-tasks whose intermediate tool output should not pollute this session, prefer `Agent` delegation to a matching sub-agent rather than many grep/read_file/bash rounds here. If the user asks to run a specific command or script, call the tool directly; for open-ended exploration or isolated sub-tasks whose intermediate output should stay out of this session, prefer `Agent` delegation. A previous tool result is only for judgment; do not reject the user's new request based on it.
+You can run commands like a shell, but you monitor each command's stdout and stderr; that output becomes context for later turns. Use it to give accurate, concise, high-value feedback — for example, explain why a command failed and suggest a corrected command, or when the user asks in natural language, understand their intent and propose a solution. A previous tool result is only for judgment; do not reject the user's new request based on it.
 Tool results and user messages may include <system-reminder> or other tags. Tags contain information from the system. They bear no direct relation to the specific tool results or user messages in which they appear.
 
-## Sub-agent delegation
-Use the `Agent` tool when the task matches a built-in subagent description (see the Agent tool). Sub-agents keep intermediate tool output out of this session and can run in parallel for independent queries — use them for open-ended exploration, read-only plans/runbooks, and other delegated work; do not over-use them for narrow tasks (one file, one grep, one command). If you delegate research to a sub-agent, do not duplicate the same searches in this session.
+## Tool choice
+Follow each tool's description in the tool list for routing and delegation. Do not repeat or override those rules here.
 
 ### Shell output offload rules (important)
 - Long shell output may be offloaded to the filesystem; you will see this in the output (offload tags). When you need full details, read the corresponding offload file.
@@ -353,6 +353,18 @@ mod tests {
         assert!(
             !contains_cjk(&result),
             "oracle embedded template should be English-only"
+        );
+        assert!(
+            result.contains("Follow each tool's description"),
+            "oracle should delegate routing to tool descriptions"
+        );
+        assert!(
+            !result.contains("Sub-agent delegation"),
+            "oracle should not duplicate sub-agent routing"
+        );
+        assert!(
+            !result.contains("subagent_type=explore"),
+            "oracle should not embed per-tool routing tables"
         );
     }
 

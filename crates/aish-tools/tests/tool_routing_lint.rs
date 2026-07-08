@@ -25,12 +25,18 @@ fn enter_plan_mode_description_emphasizes_artifact_and_points_to_agent_plan() {
 }
 
 #[test]
-fn enter_plan_mode_prompt_has_when_not_without_full_routing_table() {
+fn enter_plan_mode_prompt_is_usage_only_routing_in_description() {
     let tool = EnterPlanModeTool::new();
-    assert!(!tool.description().contains(ROUTING_TABLE_MARKER));
-    assert!(!tool.prompt().contains(ROUTING_TABLE_MARKER));
-    assert!(tool.prompt().contains("When NOT to Use"));
-    assert!(tool.prompt().contains("Agent(subagent_type=plan)"));
+    let description = tool.description();
+    let prompt = tool.prompt();
+    assert!(!description.contains(ROUTING_TABLE_MARKER));
+    assert!(!prompt.contains(ROUTING_TABLE_MARKER));
+    assert!(!prompt.contains("When NOT"));
+    assert!(!prompt.contains("Agent(subagent_type="));
+    assert!(description.contains("Agent(subagent_type=plan)"));
+    assert!(description.contains("Agent(subagent_type=explore)"));
+    assert!(prompt.contains("write_file/edit_file"));
+    assert!(prompt.contains("Exit plan mode"));
 }
 
 #[test]
