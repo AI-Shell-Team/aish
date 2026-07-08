@@ -1257,6 +1257,9 @@ impl AishShell {
                         }
                     }
                     LlmEventType::ToolExecutionEnd => {
+                        if crate::llm_event_ui::is_parent_agent_spawn_tool_event(&event) {
+                            sub_agent_ui_active_ref.store(false, Ordering::SeqCst);
+                        }
                         if let Some(preview) =
                             event.data.get("output_preview").and_then(|p| p.as_str())
                         {
