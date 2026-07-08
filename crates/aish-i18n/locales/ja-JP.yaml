@@ -349,6 +349,9 @@ shell:
     prefix_diagnose: "  └─ 🔧 診断ツール"
     done_diagnose: "  └─ ✅ 診断完了"
 
+  sub_agent:
+    thinking: "考え中"
+
 security:
   sandbox_off_action:
     allow: "そのまま許可"

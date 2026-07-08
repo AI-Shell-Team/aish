@@ -5,6 +5,7 @@
 //! Issue #332: plan + general-purpose built-ins and tool filtering.
 
 mod builtin_prompts;
+mod event_metadata;
 mod mock_llm;
 mod outcome;
 mod registry;

@@ -23,7 +23,7 @@ use aish_tools::ToolRegistry;
 use std::path::PathBuf;
 
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
-use crate::animation::SharedAnimation;
+use crate::animation::{SharedAnimation, SubAgentThinkingAnimation};
 use crate::environment;
 use crate::esc_watcher::CrosstermEscWatcher;
 use crate::input;
@@ -902,6 +902,10 @@ impl AishShell {
         let compaction_active_ref = compaction_active.clone();
         let compaction_notice_shown = Arc::new(AtomicBool::new(false));
         let compaction_notice_shown_ref = compaction_notice_shown.clone();
+        let sub_agent_ui_active = Arc::new(AtomicBool::new(false));
+        let sub_agent_ui_active_ref = sub_agent_ui_active.clone();
+        let sub_agent_animation = Arc::new(SubAgentThinkingAnimation::new());
+        let sub_agent_animation_ref = sub_agent_animation.clone();
 
         // Shared history of collapsed bash outputs for Ctrl+O browsing.
         let expand_history = Arc::new(Mutex::new(crate::expand_history::ExpandHistory::new()));
@@ -995,6 +999,8 @@ impl AishShell {
                     }
                     LlmEventType::OpEnd => {
                         // Operation ends — stop animation and show timing
+                        sub_agent_ui_active_ref.store(false, Ordering::SeqCst);
+                        sub_agent_animation_ref.stop();
                         animation_ref.stop();
                         let ttft = *ttft_value_ref.lock().unwrap();
                         if ttft >= 0.1 {
@@ -1022,6 +1028,17 @@ impl AishShell {
                         }
                     }
                     LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
+                    LlmEventType::GenerationStart
+                        if crate::llm_event_ui::sub_agent_llm_event(&event) =>
+                    {
+                        animation_ref.stop();
+                        clear_reasoning();
+                        if let Some(prefix) =
+                            crate::llm_event_ui::sub_agent_thinking_animation_prefix(&event)
+                        {
+                            sub_agent_animation_ref.start(&prefix, &t("shell.sub_agent.thinking"));
+                        }
+                    }
                     LlmEventType::GenerationStart => {
                         compaction_active_ref.store(false, Ordering::SeqCst);
                         animation_ref.stop();
@@ -1036,9 +1053,16 @@ impl AishShell {
                         reasoning_buf_ref.lock().unwrap().clear();
                         reasoning_frame_ref.store(0, Ordering::SeqCst);
                         renderer_ref.lock().unwrap().reset();
-                        animation_ref.start(&t("shell.status.thinking"));
+                        if !sub_agent_ui_active_ref.load(Ordering::SeqCst) {
+                            animation_ref.start(&t("shell.status.thinking"));
+                        }
                     }
                     LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
+                    LlmEventType::GenerationEnd
+                        if crate::llm_event_ui::sub_agent_llm_event(&event) =>
+                    {
+                        sub_agent_animation_ref.stop();
+                    }
                     LlmEventType::GenerationEnd => {
                         animation_ref.stop();
                         clear_reasoning();
@@ -1047,6 +1071,8 @@ impl AishShell {
                             renderer_ref.lock().unwrap().finalize_stream();
                         }
                     }
+                    LlmEventType::ContentDelta
+                        if crate::llm_event_ui::sub_agent_llm_event(&event) => {}
                     LlmEventType::ContentDelta => {
                         if let Some(delta) = event.data.get("delta").and_then(|d| d.as_str()) {
                             if !delta.is_empty() {
@@ -1180,8 +1206,21 @@ impl AishShell {
                         reasoning_buf_ref.lock().unwrap().clear();
                     }
                     LlmEventType::ToolExecutionStart => {
-                        if let Some(name) = event.data.get("tool_name").and_then(|n| n.as_str()) {
-                            if !react_agent_llm_event(&event) {
+                        if crate::llm_event_ui::is_parent_agent_spawn_tool_event(&event) {
+                            sub_agent_ui_active_ref.store(true, Ordering::SeqCst);
+                            animation_ref.stop();
+                            sub_agent_animation_ref.stop();
+                            clear_reasoning();
+                        } else if let Some(name) =
+                            event.data.get("tool_name").and_then(|n| n.as_str())
+                        {
+                            let is_sub_agent =
+                                crate::llm_event_ui::sub_agent_context(&event).is_some();
+                            if is_sub_agent {
+                                sub_agent_animation_ref.stop();
+                                animation_ref.stop();
+                                clear_reasoning();
+                            } else if !react_agent_llm_event(&event) {
                                 animation_ref.stop();
                                 clear_reasoning();
                             }
@@ -1194,12 +1233,21 @@ impl AishShell {
                             if content_started_flag.load(Ordering::SeqCst) {
                                 println!();
                             }
-                            let tool_line = format!(
-                                "\x1b[36m{}: {} ({})\x1b[0m",
-                                t("shell.tool.prefix"),
-                                name,
-                                args_preview
-                            );
+                            let tool_line =
+                                if let Some(ctx) = crate::llm_event_ui::sub_agent_context(&event) {
+                                    crate::llm_event_ui::format_sub_agent_tool_line(
+                                        &ctx,
+                                        name,
+                                        &args_preview,
+                                    )
+                                } else {
+                                    format!(
+                                        "\x1b[36m{}: {} ({})\x1b[0m",
+                                        t("shell.tool.prefix"),
+                                        name,
+                                        args_preview
+                                    )
+                                };
                             crate::recorder::shared_record_output(
                                 &shared_recorder_cb,
                                 &format!("{}\n", tool_line),
@@ -1209,6 +1257,9 @@ impl AishShell {
                         }
                     }
                     LlmEventType::ToolExecutionEnd => {
+                        if crate::llm_event_ui::is_parent_agent_spawn_tool_event(&event) {
+                            sub_agent_ui_active_ref.store(false, Ordering::SeqCst);
+                        }
                         if let Some(preview) =
                             event.data.get("output_preview").and_then(|p| p.as_str())
                         {
@@ -1248,6 +1299,16 @@ impl AishShell {
                                         ));
                                     }
                                     preview_ansi.push('\n');
+                                    if let Some(ctx) =
+                                        crate::llm_event_ui::sub_agent_context(&event)
+                                    {
+                                        preview_ansi =
+                                            crate::llm_event_ui::indent_sub_agent_output_block(
+                                                &ctx,
+                                                preview_ansi.trim_end(),
+                                            );
+                                        preview_ansi.push('\n');
+                                    }
                                     crate::recorder::shared_record_output(
                                         &shared_recorder_cb,
                                         &preview_ansi,
@@ -1280,6 +1341,7 @@ impl AishShell {
                         }
                     }
                     LlmEventType::Error => {
+                        sub_agent_animation_ref.stop();
                         animation_ref.stop();
                         clear_reasoning();
                         let error_msg = event
@@ -1296,6 +1358,7 @@ impl AishShell {
                         eprintln!("\x1b[31m{}\x1b[0m", msg);
                     }
                     LlmEventType::Cancelled => {
+                        sub_agent_animation_ref.stop();
                         animation_ref.stop();
                         clear_reasoning();
                         println!("\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
@@ -4023,6 +4086,11 @@ impl AishShell {
                                 }
                             }
                             LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
+                            LlmEventType::GenerationStart
+                                if crate::llm_event_ui::sub_agent_llm_event(&event) =>
+                            {
+                                crate::llm_event_ui::print_sub_agent_generation_start(&event);
+                            }
                             LlmEventType::GenerationStart => {
                                 compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
@@ -4034,10 +4102,14 @@ impl AishShell {
                                 anim.start(&t("shell.status.thinking"));
                             }
                             LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
+                            LlmEventType::GenerationEnd
+                                if crate::llm_event_ui::sub_agent_llm_event(&event) => {}
                             LlmEventType::GenerationEnd => {
                                 anim.stop();
                                 clear_reasoning();
                             }
+                            LlmEventType::ContentDelta
+                                if crate::llm_event_ui::sub_agent_llm_event(&event) => {}
                             LlmEventType::ContentDelta => {
                                 if let Some(delta) =
                                     event.data.get("delta").and_then(|d| d.as_str())
@@ -4932,6 +5004,11 @@ impl AishShell {
                                 }
                             }
                             LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
+                            LlmEventType::GenerationStart
+                                if crate::llm_event_ui::sub_agent_llm_event(&event) =>
+                            {
+                                crate::llm_event_ui::print_sub_agent_generation_start(&event);
+                            }
                             LlmEventType::GenerationStart => {
                                 compaction_active.store(false, std::sync::atomic::Ordering::SeqCst);
                                 anim.stop();
@@ -4943,10 +5020,14 @@ impl AishShell {
                                 anim.start(&t("shell.status.thinking"));
                             }
                             LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
+                            LlmEventType::GenerationEnd
+                                if crate::llm_event_ui::sub_agent_llm_event(&event) => {}
                             LlmEventType::GenerationEnd => {
                                 anim.stop();
                                 clear_reasoning();
                             }
+                            LlmEventType::ContentDelta
+                                if crate::llm_event_ui::sub_agent_llm_event(&event) => {}
                             LlmEventType::ContentDelta => {
                                 if let Some(delta) =
                                     event.data.get("delta").and_then(|d| d.as_str())

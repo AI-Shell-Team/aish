@@ -10,6 +10,7 @@ use crate::session::LlmSession;
 use crate::tool_context::ToolExecutionPolicy;
 use crate::types::{ChatMessage, LlmCallbackResult, ToolSpec};
 
+use super::event_metadata::forward_sub_agent_event;
 use super::registry::{AgentRegistry, ToolStrategy};
 use super::tool_loop::{run_tool_loop_until_done, LoopStatus, ToolLoopConfig};
 use super::tools::{parent_has_skill_tool, resolve_tools_for_agent};
@@ -142,28 +143,7 @@ fn install_sub_agent_event_proxy(sub: &mut LlmSession, agent_type: &str, spawn_i
 
     let proxy: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
         Arc::new(move |event: LlmEvent| {
-            let modified_data = if let Some(obj) = event.data.as_object() {
-                let mut new_obj = obj.clone();
-                new_obj.insert("source".to_string(), serde_json::json!("sub_agent"));
-                new_obj.insert("agent_type".to_string(), serde_json::json!(agent_type));
-                new_obj.insert("depth".to_string(), serde_json::json!(1));
-                new_obj.insert("spawn_id".to_string(), serde_json::json!(spawn_id));
-                serde_json::Value::Object(new_obj)
-            } else {
-                serde_json::json!({
-                    "source": "sub_agent",
-                    "agent_type": agent_type,
-                    "depth": 1,
-                    "spawn_id": spawn_id,
-                    "original_data": event.data,
-                })
-            };
-            parent_cb(LlmEvent {
-                event_type: event.event_type,
-                data: modified_data,
-                timestamp: event.timestamp,
-                metadata: event.metadata,
-            })
+            forward_sub_agent_event(parent_cb.as_ref(), event, &agent_type, &spawn_id)
         });
     sub.set_event_callback(proxy);
 }
@@ -661,5 +641,76 @@ mod tests {
 
         assert_eq!(result.status, LoopStatus::Incomplete);
         assert!(result.text.starts_with("[incomplete: max turns reached]"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_forwards_sub_agent_metadata_on_events() {
+        use aish_core::LlmEventType;
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        use uuid::Uuid;
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.set_event_callback(Arc::new(move |event| {
+            captured_cb.lock().unwrap().push(event);
+            None
+        }));
+
+        let registry = AgentRegistry::builtin();
+        let _ = spawn_builtin(&parent, &registry, "explore", "find nginx", |sub, specs| {
+            sub.set_test_chat_responses(vec![
+                Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                Ok(mock_text_response("done")),
+            ]);
+            register_mock_from_specs(sub, specs);
+        })
+        .await
+        .expect("spawn_builtin should succeed");
+
+        let events = captured.lock().unwrap();
+        let sub_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                event.data.get("source").and_then(|value| value.as_str()) == Some("sub_agent")
+            })
+            .collect();
+
+        assert!(!sub_events.is_empty());
+        for event in &sub_events {
+            assert_eq!(
+                event
+                    .data
+                    .get("agent_type")
+                    .and_then(|value| value.as_str()),
+                Some("explore")
+            );
+            assert_eq!(
+                event.data.get("depth").and_then(|value| value.as_u64()),
+                Some(super::super::event_metadata::SUB_AGENT_DEPTH as u64)
+            );
+            let spawn_id = event
+                .data
+                .get("spawn_id")
+                .and_then(|value| value.as_str())
+                .expect("spawn_id");
+            assert!(Uuid::parse_str(spawn_id).is_ok(), "spawn_id must be a UUID");
+        }
+
+        let spawn_ids: HashSet<_> = sub_events
+            .iter()
+            .filter_map(|event| event.data.get("spawn_id").and_then(|value| value.as_str()))
+            .collect();
+        assert_eq!(spawn_ids.len(), 1);
+
+        assert!(sub_events
+            .iter()
+            .any(|event| event.event_type == LlmEventType::GenerationStart));
+        assert!(sub_events
+            .iter()
+            .any(|event| event.event_type == LlmEventType::ToolExecutionStart));
     }
 }

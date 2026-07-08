@@ -654,6 +654,9 @@ shell:
     prefix_diagnose: "  └─ 🔧 诊断工具"
     done_diagnose: "  └─ ✅ 诊断完成"
 
+  sub_agent:
+    thinking: "思考中"
+
 security:
   sandbox_off_action:
     allow: "直接放行"
