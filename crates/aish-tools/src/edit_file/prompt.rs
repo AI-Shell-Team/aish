@@ -1,4 +1,5 @@
-pub(crate) const DESCRIPTION: &str = "Edit a file by replacing exact text.";
+pub(crate) const DESCRIPTION: &str = "\
+Edit a file by replacing exact text. Use after read_file when modifying existing files.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to make exact string replacements in text files.
 

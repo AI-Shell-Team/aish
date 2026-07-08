@@ -1,11 +1,15 @@
-pub(crate) const DESCRIPTION: &str = "Find files matching glob patterns.";
+pub(crate) const DESCRIPTION: &str = "\
+Find file paths by glob pattern. In the main session, prefer Agent(subagent_type=explore) for \
+open-ended multi-round path discovery instead of many globs here. Inside a sub-agent, prefer one \
+broad recursive pattern per root over many narrow globs on the same tree.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to enumerate file paths by glob pattern.
 
 Usage:
-- Prefer this tool when you need matching file names, not file contents.
-- Use recursive patterns such as **/*.rs when searching across a tree.
-- Use the root parameter to limit search scope when the user names a directory."#;
+- Prefer matching file names, not file contents (use grep for content search).
+- Use one broad recursive pattern (e.g. /etc/**/*ssh*) before trying many narrow patterns.
+- Set root to limit scope when the task names a directory.
+- Parallel globs are fine when roots or patterns are independent; do not repeat the same search."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({

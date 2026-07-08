@@ -186,6 +186,7 @@ mod tests {
     fn test_enter_plan_mode_description() {
         let tool = EnterPlanModeTool::new();
         assert!(tool.description().contains("plan mode"));
-        assert!(tool.description().contains("read-only"));
+        assert!(tool.description().contains(".aish/plans/"));
+        assert!(tool.description().contains("Agent(subagent_type=plan)"));
     }
 }

@@ -1,4 +1,5 @@
-pub(crate) const DESCRIPTION: &str = "Read text content from a file.";
+pub(crate) const DESCRIPTION: &str = "\
+Read text content from a file. Prefer over bash cat, head, tail, or similar commands for reading files.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to read text files.
 

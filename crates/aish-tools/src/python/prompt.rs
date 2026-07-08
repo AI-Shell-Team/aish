@@ -1,11 +1,12 @@
-pub(crate) const DESCRIPTION: &str = "Execute Python code and return the result.";
+pub(crate) const DESCRIPTION: &str = "\
+Execute Python code and return the result. Prefer for scripted data processing, formatting, \
+calculations, and multi-step logic instead of bash pipelines.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool for small Python snippets that are better expressed as code than shell pipelines.
 
 Usage:
 - Print values that should be returned to the conversation.
 - Keep snippets focused and self-contained.
-- Prefer this tool for structured data processing, calculations, and short scripts.
 - Do not use this tool for long-running or interactive programs."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
