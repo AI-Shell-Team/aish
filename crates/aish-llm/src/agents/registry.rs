@@ -2,6 +2,10 @@
 
 use std::collections::HashMap;
 
+use super::builtin_prompts::{
+    EXPLORE_SYSTEM_PROMPT, GENERAL_PURPOSE_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT,
+};
+
 /// Read-only tool allowlist shared by `explore` and `plan` built-ins.
 pub const READ_ONLY_ALLOWLIST: &[&str] = &["grep", "glob", "read_file", "bash"];
 
@@ -35,8 +39,10 @@ impl AgentDefinition {
     pub fn explore() -> Self {
         Self {
             subagent_type: "explore".to_string(),
-            when_to_use: "Search logs, configs, services, network state, or code locations; read-only investigation.".to_string(),
-            system_prompt: "You are a read-only explore sub-agent for shell operations. Investigate using only your allowed tools. Do not modify files or spawn nested agents. Return a concise conclusion.".to_string(),
+            when_to_use: "Read-only investigation across logs, configs, services, or paths. \
+Use for open-ended search; specify thoroughness in the Agent prompt: quick, medium, or thorough."
+                .to_string(),
+            system_prompt: EXPLORE_SYSTEM_PROMPT.to_string(),
             max_turns: 15,
             tool_strategy: ToolStrategy::Allowlist(read_only_allowlist()),
         }
@@ -45,8 +51,11 @@ impl AgentDefinition {
     pub fn plan() -> Self {
         Self {
             subagent_type: "plan".to_string(),
-            when_to_use: "Design changes, runbooks, or implementation plans; read-only planning.".to_string(),
-            system_prompt: "You are a read-only planning sub-agent for shell operations. Analyze and propose plans using only your allowed tools. Do not modify files, enter plan mode, or spawn nested agents. Return a concise plan or recommendation.".to_string(),
+            when_to_use:
+                "Read-only architect for implementation plans, runbooks, or design advice \
+returned as one conclusion — NOT for enter_plan_mode or writing `.aish/plans/` files."
+                    .to_string(),
+            system_prompt: PLAN_SYSTEM_PROMPT.to_string(),
             max_turns: 20,
             tool_strategy: ToolStrategy::Allowlist(read_only_allowlist()),
         }
@@ -55,8 +64,10 @@ impl AgentDefinition {
     pub fn general_purpose() -> Self {
         Self {
             subagent_type: "general-purpose".to_string(),
-            when_to_use: "General sub-tasks that need the parent's tools without nested Agent delegation.".to_string(),
-            system_prompt: "You are a general-purpose sub-agent. Complete the delegated task using your available tools. Do not spawn nested agents. Return a concise conclusion.".to_string(),
+            when_to_use: "Focused sub-tasks that need the parent's tool pool (including writes) \
+without nested Agent delegation — not for broad read-only exploration (use explore)."
+                .to_string(),
+            system_prompt: GENERAL_PURPOSE_SYSTEM_PROMPT.to_string(),
             max_turns: 25,
             tool_strategy: ToolStrategy::Denylist(vec!["Agent".to_string()]),
         }
@@ -117,6 +128,21 @@ impl Default for AgentRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_explore_system_prompt_covers_search_strategy() {
+        let def = AgentDefinition::explore();
+        assert!(def.system_prompt.contains("READ-ONLY"));
+        assert!(def.system_prompt.contains("broad recursive pattern"));
+        assert!(def.system_prompt.contains("thoroughness"));
+    }
+
+    #[test]
+    fn test_plan_system_prompt_is_read_only_architect() {
+        let def = AgentDefinition::plan();
+        assert!(def.system_prompt.contains("READ-ONLY"));
+        assert!(def.system_prompt.contains("Do not execute the plan"));
+    }
 
     #[test]
     fn test_resolve_explore_succeeds() {
