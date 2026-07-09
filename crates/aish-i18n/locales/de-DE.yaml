@@ -116,6 +116,16 @@ cli:
     invalid_value_for_option: "Ungültiger Wert für {option}: {reason}"
     generic: "Ungültige Argumente: {message}"
 
+status:
+  session: "Chat"
+  live_session: "Term"
+  model: "Modell"
+  host: "Host"
+  up: "Laufzeit"
+  services: "Dienste"
+  errors_today: "Fehler heute"
+  na: "k.A."
+
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -153,6 +163,8 @@ shell:
     doctor: "Systemdiagnose ausführen"
     diagnose: "Schreibgeschützte Diagnose des letzten fehlgeschlagenen Befehls"
     status: "Systemumgebungsstatus anzeigen"
+    live_sessions: "Aktive PTY-Sitzungen auflisten"
+    kill_live_sessions: "PTY-Sitzung(en) nach ID beenden"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -310,6 +322,39 @@ shell:
     no_matches: "Keine passenden Sitzungen."
     current_marker: "(aktuell)"
     selector_footer: "Tippen zum Suchen · ↑/↓ zum Auswählen · Enter zum Fortsetzen · Esc zum Abbrechen"
+
+  live_sessions:
+    daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "Keine aktiven PTY-Sitzungen."
+    panel_title: "Aktive PTY-Sitzungen"
+    search_placeholder: "Suchen..."
+    panel_footer: "↑/↓ navigieren · Enter wählen · Esc abbrechen"
+    create_new: "Neue Sitzung erstellen"
+    already_current: "Bereits in dieser Sitzung."
+    started_label: "gestartet: {age}"
+    current_tag: "[aktuell]"
+
+  kill_live_sessions:
+    daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "Keine aktiven PTY-Sitzungen."
+    list_header: "Aktive PTY-Sitzungen:"
+    usage_hint: "Verwendung: /kill_live_sessions <id> [id ...]  ·  /kill_live_sessions all"
+    no_others: "Keine weiteren Sitzungen zum Beenden."
+    killing: "Beende {id} ..."
+    kill_done: "erledigt"
+    kill_failed: "fehlgeschlagen: {error}"
+    not_found: "Sitzung '{id}' nicht gefunden."
+    is_current: "{id} ist die aktuelle Sitzung — verwenden Sie 'exit' zum Beenden."
+    summary: "{killed} beendet, {failed} fehlgeschlagen."
+    all_terminated: "{count} Sitzung(en) beendet."
+
+  time:
+    seconds_ago: "vor {seconds}s"
+    minutes_ago: "vor {minutes}min"
+    hours_ago: "vor {hours}h"
+
   ask_user:
     default_title: "Benutzereingabe erforderlich"
     default_hint: "[Standard: {value}]"

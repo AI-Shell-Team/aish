@@ -304,6 +304,16 @@ cli:
     models_auth:
       provider_example: "Example: {command}"
 
+status:
+  session: "chat"
+  live_session: "term"
+  model: "model"
+  host: "host"
+  up: "up"
+  services: "services"
+  errors_today: "errors today"
+  na: "N/A"
+
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -352,6 +362,8 @@ shell:
     doctor: "Run system diagnostics"
     diagnose: "Read-only diagnosis for last failed command"
     status: "Show system environment status"
+    live_sessions: "List live PTY sessions"
+    kill_live_sessions: "Kill live PTY session(s) by ID"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -522,6 +534,38 @@ shell:
     no_matches: "No matching sessions."
     current_marker: "(current)"
     selector_footer: "Type to search · ↑/↓ to select · Enter to resume · Esc to cancel"
+
+  live_sessions:
+    daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "No active PTY sessions."
+    panel_title: "Live PTY Sessions"
+    search_placeholder: "Search..."
+    panel_footer: "Up/Down navigate · Enter select · Esc cancel"
+    create_new: "Create new session"
+    already_current: "Already in this session."
+    started_label: "started: {age}"
+    current_tag: "[current]"
+
+  kill_live_sessions:
+    daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "No active PTY sessions."
+    list_header: "Active PTY sessions:"
+    usage_hint: "Usage: /kill_live_sessions <id> [id ...]  ·  /kill_live_sessions all"
+    no_others: "No other live sessions to kill."
+    killing: "Killing {id} ..."
+    kill_done: "done"
+    kill_failed: "failed: {error}"
+    not_found: "Live session '{id}' not found."
+    is_current: "{id} is the current session — use 'exit' to quit."
+    summary: "{killed} killed, {failed} failed."
+    all_terminated: "{count} live session(s) terminated."
+
+  time:
+    seconds_ago: "{seconds}s ago"
+    minutes_ago: "{minutes}min ago"
+    hours_ago: "{hours}h ago"
 
   panel:
     history_title: "Output History ({count} records)"

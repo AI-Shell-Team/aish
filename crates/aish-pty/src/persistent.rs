@@ -3703,6 +3703,36 @@ impl PersistentPty {
         self.running.load(Ordering::SeqCst)
     }
 
+    /// PTY master file descriptor (for use in external select loops, e.g. daemon).
+    pub fn master_fd(&self) -> RawFd {
+        self.master_fd
+    }
+
+    /// Control pipe read file descriptor (for use in external select loops).
+    pub fn control_fd(&self) -> RawFd {
+        self.control_fd
+    }
+
+    /// Bash child process PID.
+    pub fn child_pid(&self) -> Pid {
+        self.child_pid
+    }
+
+    /// Write raw bytes directly to the PTY master fd.
+    pub fn write_master_pub(&self, data: &[u8]) -> aish_core::Result<()> {
+        self.write_master(data)
+    }
+
+    /// Current terminal rows.
+    pub fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    /// Current terminal columns.
+    pub fn cols(&self) -> u16 {
+        self.cols
+    }
+
     pub fn last_exit_code(&self) -> i32 {
         self.command_state.last_exit_code()
     }

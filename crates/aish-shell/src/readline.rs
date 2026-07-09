@@ -34,6 +34,8 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/doctor", "Run system diagnostics"),
     ("/diagnose", "Read-only diagnosis for last failed command"),
     ("/status", "Show system environment status"),
+    ("/live_sessions", "List live PTY sessions"),
+    ("/kill_live_sessions", "Kill live PTY session(s) by ID"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -678,6 +680,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 12);
+        assert_eq!(SLASH_COMMANDS.len(), 14);
     }
 }

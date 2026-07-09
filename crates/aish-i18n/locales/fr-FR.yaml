@@ -116,6 +116,16 @@ cli:
     invalid_value_for_option: "Valeur invalide pour {option} : {reason}"
     generic: "Arguments invalides : {message}"
 
+status:
+  session: "chat"
+  live_session: "term"
+  model: "modele"
+  host: "hote"
+  up: "duree"
+  services: "services"
+  errors_today: "erreurs aujourd'hui"
+  na: "N/A"
+
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -153,6 +163,8 @@ shell:
     doctor: "Exécuter les diagnostics système"
     diagnose: "Diagnostic en lecture seule de la dernière commande échouée"
     status: "Afficher l'état de l'environnement système"
+    live_sessions: "Lister les sessions PTY actives"
+    kill_live_sessions: "Terminer session(s) PTY par ID"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -310,6 +322,39 @@ shell:
     no_matches: "Aucune session correspondante."
     current_marker: "(actuelle)"
     selector_footer: "Tapez pour rechercher · ↑/↓ pour selectionner · Enter pour reprendre · Esc pour annuler"
+
+  live_sessions:
+    daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "Aucune session PTY active."
+    panel_title: "Sessions PTY Actives"
+    search_placeholder: "Rechercher..."
+    panel_footer: "↑/↓ naviguer · Enter selectionner · Esc annuler"
+    create_new: "Creer une nouvelle session"
+    already_current: "Deja dans cette session."
+    started_label: "demarre: {age}"
+    current_tag: "[actuel]"
+
+  kill_live_sessions:
+    daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "Aucune session PTY active."
+    list_header: "Sessions PTY actives :"
+    usage_hint: "Usage: /kill_live_sessions <id> [id ...]  ·  /kill_live_sessions all"
+    no_others: "Aucune autre session a terminer."
+    killing: "Terminaison de {id} ..."
+    kill_done: "fait"
+    kill_failed: "echec: {error}"
+    not_found: "Session '{id}' introuvable."
+    is_current: "{id} est la session actuelle — utilisez 'exit' pour quitter."
+    summary: "{killed} terminees, {failed} echouees."
+    all_terminated: "{count} session(s) terminee(s)."
+
+  time:
+    seconds_ago: "il y a {seconds}s"
+    minutes_ago: "il y a {minutes}min"
+    hours_ago: "il y a {hours}h"
+
   ask_user:
     default_title: "Saisie utilisateur requise"
     default_hint: "[defaut : {value}]"

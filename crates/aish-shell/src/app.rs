@@ -2641,6 +2641,8 @@ impl AishShell {
             Some("/doctor") => self.handle_doctor_command(&parts),
             Some("/diagnose") => self.handle_failure_diagnose_command(),
             Some("/status") => self.handle_status_command(),
+            Some("/live_sessions") => self.handle_live_sessions_command(),
+            Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -2657,6 +2659,297 @@ impl AishShell {
             1 => self.select_recent_session(),
             2 => self.resume_session(parts[1]),
             _ => eprintln!("{}", t("shell.resume.usage")),
+        }
+    }
+
+    /// List all live PTY daemon sessions with interactive selection.
+    fn handle_live_sessions_command(&self) {
+        use aish_i18n::{t, t_with_args};
+
+        if !self.config.pty_daemon_enabled {
+            eprintln!(
+                "\x1b[33m{}\x1b[0m",
+                t("shell.live_sessions.daemon_disabled")
+            );
+            eprintln!("{}", t("shell.live_sessions.daemon_disabled_hint"));
+            return;
+        }
+        let sessions = aish_pty::discover_sessions();
+        if sessions.is_empty() {
+            println!("{}", t("shell.live_sessions.none_active"));
+            return;
+        }
+
+        let current_id = std::env::var("AISH_SESSION_ID").ok();
+        let home = dirs::home_dir()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut items: Vec<aish_ui::SearchSelectItem> = sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let short = &s.session_id[..8.min(s.session_id.len())];
+                let is_current = current_id
+                    .as_ref()
+                    .map(|c| c == &s.session_id || s.session_id.starts_with(c))
+                    .unwrap_or(false);
+                let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
+                    format!("~{}", &s.cwd[home.len()..])
+                } else {
+                    s.cwd.clone()
+                };
+                let age_str = format_age(now.saturating_sub(s.started_at));
+                let detail = if is_current {
+                    format!(
+                        "{} {}",
+                        t_with_args("shell.live_sessions.started_label", &age_args(age_str)),
+                        t("shell.live_sessions.current_tag")
+                    )
+                } else {
+                    t_with_args("shell.live_sessions.started_label", &age_args(age_str))
+                };
+                aish_ui::SearchSelectItem::new(
+                    format!("session:{}", i),
+                    format!("{} {}", short, cwd_display),
+                )
+                .with_detail(detail)
+                .with_badge(if is_current {
+                    "\u{25cf}".to_string()
+                } else {
+                    "\u{25cb}".to_string()
+                })
+            })
+            .collect();
+
+        items.push(aish_ui::SearchSelectItem::new(
+            "new",
+            t("shell.live_sessions.create_new").to_string(),
+        ));
+
+        let panel = aish_ui::SearchSelectPanel::new(
+            t("shell.live_sessions.panel_title"),
+            t("shell.live_sessions.search_placeholder"),
+            items,
+        )
+        .with_footer(t("shell.live_sessions.panel_footer"));
+
+        if let Ok(aish_ui::PanelOutcome::Submitted(aish_ui::SearchSelectOutcome::Selected(value))) =
+            aish_ui::PanelRuntime::new().run(panel)
+        {
+            if value == "new" {
+                emit_osc("new");
+                return;
+            }
+            if let Some(idx_str) = value.strip_prefix("session:") {
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    if idx < sessions.len() {
+                        let s = &sessions[idx];
+                        let is_current = current_id
+                            .as_ref()
+                            .map(|c| c == &s.session_id)
+                            .unwrap_or(false);
+                        if is_current {
+                            println!("{}", t("shell.live_sessions.already_current"));
+                        } else {
+                            emit_osc(&format!(
+                                "switch:{}",
+                                &s.session_id[..8.min(s.session_id.len())]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Kill live PTY session(s) by ID prefix.
+    ///
+    /// - `/kill_live_sessions` with no args: list all active sessions.
+    /// - `/kill_live_sessions <id> [<id> ...]`: kill each matching session.
+    /// - `/kill_live_sessions all`: kill every active session except current.
+    fn handle_kill_live_sessions_command(&self, parts: &[&str]) {
+        use aish_i18n::{t, t_with_args};
+
+        if !self.config.pty_daemon_enabled {
+            eprintln!(
+                "\x1b[33m{}\x1b[0m",
+                t("shell.kill_live_sessions.daemon_disabled")
+            );
+            eprintln!("{}", t("shell.kill_live_sessions.daemon_disabled_hint"));
+            return;
+        }
+
+        let sessions = aish_pty::discover_sessions();
+        if sessions.is_empty() {
+            println!("{}", t("shell.kill_live_sessions.none_active"));
+            return;
+        }
+
+        let current_id = std::env::var("AISH_SESSION_ID").ok();
+        let home = dirs::home_dir()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let format_session_line = |s: &aish_pty::DaemonSessionInfo| {
+            let short = &s.session_id[..8.min(s.session_id.len())];
+            let is_current = current_id
+                .as_ref()
+                .map(|c| c == &s.session_id || s.session_id.starts_with(c))
+                .unwrap_or(false);
+            let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
+                format!("~{}", &s.cwd[home.len()..])
+            } else {
+                s.cwd.clone()
+            };
+            let age_str = format_age(now.saturating_sub(s.started_at));
+            let current = if is_current {
+                format!("  \x1b[32m{}\x1b[0m", t("shell.live_sessions.current_tag"))
+            } else {
+                String::new()
+            };
+            format!("  {} {}  {}{}", short, cwd_display, age_str, current)
+        };
+
+        // No args: list sessions so the user can pick an ID.
+        if parts.len() < 2 {
+            println!(
+                "\x1b[1m{}\x1b[0m",
+                t("shell.kill_live_sessions.list_header")
+            );
+            for s in &sessions {
+                println!("{}", format_session_line(s));
+            }
+            println!(
+                "\n\x1b[2m{}\x1b[0m",
+                t("shell.kill_live_sessions.usage_hint")
+            );
+            return;
+        }
+
+        // `/kill_live_sessions all`
+        if parts[1] == "all" {
+            let targets: Vec<_> = sessions
+                .iter()
+                .filter(|s| {
+                    !current_id
+                        .as_ref()
+                        .map(|c| s.session_id == *c || s.session_id.starts_with(c.as_str()))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if targets.is_empty() {
+                println!("{}", t("shell.kill_live_sessions.no_others"));
+                return;
+            }
+            for s in &targets {
+                let short = &s.session_id[..8.min(s.session_id.len())];
+                let mut kill_args = std::collections::HashMap::new();
+                kill_args.insert("id".to_string(), short.to_string());
+                print!(
+                    "{}",
+                    t_with_args("shell.kill_live_sessions.killing", &kill_args)
+                );
+                match aish_pty::kill_session(&s.socket_path) {
+                    Ok(()) => {
+                        println!("\x1b[32m{}\x1b[0m", t("shell.kill_live_sessions.kill_done"))
+                    }
+                    Err(e) => {
+                        let mut err_args = std::collections::HashMap::new();
+                        err_args.insert("error".to_string(), e.to_string());
+                        println!(
+                            "\x1b[31m{}\x1b[0m",
+                            t_with_args("shell.kill_live_sessions.kill_failed", &err_args)
+                        );
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let mut count_args = std::collections::HashMap::new();
+            count_args.insert("count".to_string(), targets.len().to_string());
+            println!(
+                "\n{}",
+                t_with_args("shell.kill_live_sessions.all_terminated", &count_args)
+            );
+            return;
+        }
+
+        // Kill each specified ID prefix.
+        let mut killed = 0u32;
+        let mut errors = 0u32;
+        for id in &parts[1..] {
+            let target = sessions
+                .iter()
+                .find(|s| s.session_id == *id || s.session_id.starts_with(id));
+            match target {
+                Some(s) => {
+                    let short = &s.session_id[..8.min(s.session_id.len())];
+                    let is_current = current_id
+                        .as_ref()
+                        .map(|c| s.session_id == *c || s.session_id.starts_with(c.as_str()))
+                        .unwrap_or(false);
+                    if is_current {
+                        let mut cur_args = std::collections::HashMap::new();
+                        cur_args.insert("id".to_string(), short.to_string());
+                        eprintln!(
+                            "\x1b[33m{}\x1b[0m",
+                            t_with_args("shell.kill_live_sessions.is_current", &cur_args)
+                        );
+                        errors += 1;
+                        continue;
+                    }
+                    let mut kill_args = std::collections::HashMap::new();
+                    kill_args.insert("id".to_string(), short.to_string());
+                    print!(
+                        "{}",
+                        t_with_args("shell.kill_live_sessions.killing", &kill_args)
+                    );
+                    match aish_pty::kill_session(&s.socket_path) {
+                        Ok(()) => {
+                            println!("\x1b[32m{}\x1b[0m", t("shell.kill_live_sessions.kill_done"));
+                            killed += 1;
+                        }
+                        Err(e) => {
+                            let mut err_args = std::collections::HashMap::new();
+                            err_args.insert("error".to_string(), e.to_string());
+                            println!(
+                                "\x1b[31m{}\x1b[0m",
+                                t_with_args("shell.kill_live_sessions.kill_failed", &err_args)
+                            );
+                            errors += 1;
+                        }
+                    }
+                }
+                None => {
+                    let mut nf_args = std::collections::HashMap::new();
+                    nf_args.insert("id".to_string(), id.to_string());
+                    eprintln!(
+                        "\x1b[31m{}\x1b[0m",
+                        t_with_args("shell.kill_live_sessions.not_found", &nf_args)
+                    );
+                    errors += 1;
+                }
+            }
+        }
+        if killed > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if killed + errors > 1 {
+            let mut sum_args = std::collections::HashMap::new();
+            sum_args.insert("killed".to_string(), killed.to_string());
+            sum_args.insert("failed".to_string(), errors.to_string());
+            println!(
+                "\n{}",
+                t_with_args("shell.kill_live_sessions.summary", &sum_args)
+            );
         }
     }
 
@@ -2863,10 +3156,12 @@ impl AishShell {
     }
 
     fn handle_status_command(&mut self) {
+        let live_id = std::env::var("AISH_SESSION_ID").ok();
         crate::status::run_status(
             &self.pty,
             &self.version,
             &self.session_uuid,
+            live_id.as_deref(),
             &self.config.model,
         );
     }
@@ -6355,6 +6650,39 @@ fn summary_preview_from_context(messages: &[SessionContextMessage]) -> Option<St
                     .then(|| truncate_resume_field(&message.content, 120))
             })
         })
+}
+
+/// Emit an OSC 5151 escape sequence to signal the outer PTY client.
+/// The sequence is invisible (stripped by the outer client's scanner)
+/// and triggers session switch/new/detach operations.
+fn emit_osc(op: &str) {
+    use std::io::Write;
+    // OSC 5151 ; <op> BEL
+    let _ = write!(std::io::stdout(), "\x1b]5151;{}\x07", op);
+    let _ = std::io::stdout().flush();
+}
+
+/// Format a duration in seconds as a localized "N s/min/h ago" string.
+fn format_age(secs: u64) -> String {
+    use aish_i18n::t_with_args;
+    let mut args = std::collections::HashMap::new();
+    if secs < 60 {
+        args.insert("seconds".to_string(), secs.to_string());
+        t_with_args("shell.time.seconds_ago", &args)
+    } else if secs < 3600 {
+        args.insert("minutes".to_string(), (secs / 60).to_string());
+        t_with_args("shell.time.minutes_ago", &args)
+    } else {
+        args.insert("hours".to_string(), (secs / 3600).to_string());
+        t_with_args("shell.time.hours_ago", &args)
+    }
+}
+
+/// Build a single-entry `{age => val}` map for `t_with_args`.
+fn age_args(age: String) -> std::collections::HashMap<String, String> {
+    let mut args = std::collections::HashMap::new();
+    args.insert("age".to_string(), age);
+    args
 }
 
 fn first_summary_line(content: &str) -> Option<String> {

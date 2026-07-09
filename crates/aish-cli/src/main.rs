@@ -54,14 +54,49 @@ struct Cli {
     #[arg(long, hide = true)]
     sandbox_worker: bool,
 
+    // Hidden entry point: run as PTY daemon holding a bash session.
+    #[arg(long, hide = true)]
+    pty_daemon: bool,
+
+    // Unix socket path for the PTY daemon to listen on.
+    #[arg(long, hide = true)]
+    pty_socket: Option<String>,
+
+    // Session UUID the PTY daemon is bound to.
+    #[arg(long, hide = true)]
+    pty_session: Option<String>,
+
+    // Kill every active PTY daemon session and exit.
+    #[arg(long, hide = true)]
+    kill_pty_session: bool,
+
+    // Attach to an existing PTY daemon via socket path (raw terminal passthrough).
+    #[arg(long, hide = true)]
+    pty_attach: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the AI Shell (default)
+    /// Run the AI Shell (default) — attaches to existing PTY session or creates new
     Run,
+
+    /// Start a new PTY session (like `tmux new`)
+    New,
+
+    /// List all active (live) PTY sessions
+    LiveSessions,
+
+    /// Kill PTY session(s) by ID prefix. Supports multiple IDs and `all`.
+    Kill {
+        /// Session ID(s) to kill (prefix match). Use `all` to kill every session.
+        ids: Vec<String>,
+    },
+
+    /// Kill all PTY sessions
+    KillAll,
 
     /// Resume a previous AI Shell session
     Resume {
@@ -177,6 +212,63 @@ fn main() {
         return;
     }
 
+    // Hidden PTY daemon entry point: hold a PTY running aish, serve clients
+    // over a Unix socket. Survives client disconnects; replays scrollback
+    // on reattach.
+    if cli.pty_daemon {
+        let cwd = std::env::var("AISH_DAEMON_CWD").unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        });
+        let socket_path = cli.pty_socket.expect("--pty-socket required");
+        let session_id = cli.pty_session.expect("--pty-session required");
+        let shell_exe =
+            std::env::var("AISH_DAEMON_SHELL_EXE").unwrap_or_else(|_| "aish".to_string());
+
+        let (rows, cols) = get_terminal_size();
+
+        if let Err(e) = aish_pty::run_pty_daemon_shell(
+            &cwd,
+            rows,
+            cols,
+            std::path::Path::new(&socket_path),
+            &session_id,
+            &shell_exe,
+        ) {
+            eprintln!("PTY daemon error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Hidden entry: discover and kill every active PTY daemon session.
+    if cli.kill_pty_session {
+        let sessions = aish_pty::discover_sessions();
+        if sessions.is_empty() {
+            println!("No active PTY sessions found.");
+            return;
+        }
+        for s in &sessions {
+            println!("Killing session {} (pid {})...", s.session_id, s.child_pid);
+            let _ = aish_pty::kill_session(&s.socket_path);
+        }
+        // Give daemons a moment to clean up their sockets/session files.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        return;
+    }
+
+    // Hidden entry: raw terminal passthrough attach to an existing daemon.
+    if let Some(socket_path) = &cli.pty_attach {
+        let session_id = cli
+            .pty_session
+            .clone()
+            .unwrap_or_else(|| "attach".to_string());
+        let _ = run_pty_raw_attach(socket_path, &session_id);
+        return;
+    }
+
     // Load configuration
     let config_path = cli.config.as_deref().map(std::path::Path::new);
     let mut config = match aish_config::ConfigLoader::load(config_path) {
@@ -200,6 +292,10 @@ fn main() {
 
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => run_shell(config),
+        Commands::New => run_shell_new(config),
+        Commands::LiveSessions => list_sessions(),
+        Commands::Kill { ids } => kill_session_by_id(&ids),
+        Commands::KillAll => kill_all_sessions(),
         Commands::Resume { session_id } => run_shell_resume(config, &session_id),
         Commands::Info => show_info(&config),
         Commands::Setup => {
@@ -264,8 +360,236 @@ fn load_config(config_path: Option<&str>) -> aish_config::ConfigModel {
     aish_config::ConfigLoader::load(path).unwrap_or_default()
 }
 
-fn run_shell(mut config: aish_config::ConfigModel) {
-    // Auto-trigger setup wizard on first run if config is incomplete
+/// Query stdout's window size via TIOCGWINSZ; fall back to 24x80.
+fn get_terminal_size() -> (u16, u16) {
+    use std::os::fd::AsRawFd;
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let fd = std::io::stdout().as_raw_fd();
+    let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+    if ret == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
+        (ws.ws_row, ws.ws_col)
+    } else {
+        (24, 80) // fallback
+    }
+}
+
+/// Spawn a detached PTY daemon process (via exec of the current binary) and
+/// return its session info. The daemon survives client disconnects and keeps
+/// the underlying bash PTY alive. Blocks up to 3 seconds waiting for the
+/// daemon's Unix socket to accept connections.
+///
+/// `child_pid` is left as 0 here because the real bash child pid lives inside
+/// the daemon process; callers that need it should read the persisted session
+/// file via `aish_pty::discover_sessions()`.
+fn spawn_pty_daemon(
+    cwd: &str,
+    model: Option<&str>,
+    api_base: Option<&str>,
+) -> Result<aish_pty::DaemonSessionInfo, Box<dyn std::error::Error>> {
+    use uuid::Uuid;
+
+    let session_id = Uuid::new_v4().to_string();
+    let socket_dir = aish_pty::pty_socket_dir().map_err(|e| e.to_string())?;
+    let socket_path = socket_dir.join(format!("pty-{}.sock", &session_id[..8]));
+
+    // Spawn daemon process
+    let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(&current_exe);
+    cmd.arg("--pty-daemon")
+        .arg("--pty-socket")
+        .arg(&socket_path)
+        .arg("--pty-session")
+        .arg(&session_id);
+
+    // Pass configuration to the daemon via environment.
+    cmd.env("AISH_DAEMON_CWD", cwd);
+    if let Some(m) = model {
+        cmd.env("AISH_DAEMON_MODEL", m);
+    }
+    if let Some(b) = api_base {
+        cmd.env("AISH_DAEMON_API_BASE", b);
+    }
+    // The daemon runs the aish binary itself inside a PTY, so the full
+    // AishShell UI (prompt, AI mode, completions) is preserved.
+    cmd.env("AISH_DAEMON_SHELL_EXE", &current_exe);
+
+    // Detach: redirect stdio so the daemon does not touch our terminal.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    // Put daemon in a new process group so terminal SIGHUP doesn't kill it.
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+
+    // Start process
+    cmd.spawn().map_err(|e| e.to_string())?;
+
+    // Wait for socket to be ready (aish takes longer to start than bare bash)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        if aish_pty::check_daemon_alive(&socket_path) {
+            return Ok(aish_pty::DaemonSessionInfo {
+                session_id,
+                socket_path,
+                daemon_pid: 0, // real pid is in session JSON written by daemon
+                child_pid: 0,
+                started_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                cwd: cwd.to_string(),
+                model: model.map(String::from),
+                api_base: api_base.map(String::from),
+            });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    Err(format!(
+        "PTY daemon failed to start within 3 seconds (socket: {:?})",
+        socket_path
+    )
+    .into())
+}
+
+fn run_shell(config: aish_config::ConfigModel) {
+    let pty_daemon_enabled = config.pty_daemon_enabled
+        && std::env::var("AISH_PTY_DAEMON")
+            .map(|v| v != "0" && v != "false" && v != "no")
+            .unwrap_or(true);
+
+    if !pty_daemon_enabled {
+        run_shell_normal(config);
+        return;
+    }
+
+    let mut sessions = aish_pty::discover_sessions();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+
+    if !sessions.is_empty() {
+        match show_session_picker(&sessions) {
+            SessionAction::Attach(idx) => {
+                let s = &sessions[idx];
+                eprintln!(
+                    "\x1b[32m[aish] Attaching to session {}\x1b[0m",
+                    &s.session_id[..8.min(s.session_id.len())]
+                );
+                if run_pty_raw_attach(&s.socket_path.to_string_lossy(), &s.session_id) {
+                    return;
+                }
+                eprintln!("\x1b[33m[aish] Attach failed.\x1b[0m");
+            }
+            SessionAction::New => {}
+            SessionAction::Cancel => return,
+        }
+    }
+
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    eprintln!("\x1b[32m[aish] Starting new PTY daemon session...\x1b[0m");
+    match spawn_pty_daemon(
+        &cwd,
+        if config.model.is_empty() {
+            None
+        } else {
+            Some(config.model.as_str())
+        },
+        if config.api_base.is_empty() {
+            None
+        } else {
+            Some(config.api_base.as_str())
+        },
+    ) {
+        Ok(info) => {
+            if run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id) {
+                return;
+            }
+        }
+        Err(e) => eprintln!("\x1b[33m[aish] PTY daemon failed: {}\x1b[0m", e),
+    }
+    eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
+    run_shell_normal(config);
+}
+
+enum SessionAction {
+    Attach(usize),
+    New,
+    Cancel,
+}
+
+/// Interactive session picker using arrow-key navigation.
+fn show_session_picker(sessions: &[aish_pty::DaemonSessionInfo]) -> SessionAction {
+    use aish_ui::{
+        PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+    };
+
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut items: Vec<SearchSelectItem> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
+                format!("~{}", &s.cwd[home.len()..])
+            } else {
+                s.cwd.clone()
+            };
+            let age = now.saturating_sub(s.started_at);
+            let age_str = if age < 60 {
+                format!("{}s ago", age)
+            } else if age < 3600 {
+                format!("{}min ago", age / 60)
+            } else {
+                format!("{}h ago", age / 3600)
+            };
+            let short_id = &s.session_id[..8.min(s.session_id.len())];
+            SearchSelectItem::new(
+                format!("session:{}", i),
+                format!("{}  {}", short_id, cwd_display),
+            )
+            .with_detail(format!("started: {}", age_str))
+        })
+        .collect();
+
+    // "Create new" is the default (last item, pre-selected)
+    items.push(SearchSelectItem::new(
+        "new",
+        "Create new session".to_string(),
+    ));
+
+    let panel = SearchSelectPanel::new("Select PTY Session", "Type to search sessions...", items)
+        .with_footer(
+            "↑↓ navigate · Enter select · Esc cancel · Run 'aish kill <id>' to terminate a session",
+        )
+        .with_selected_value(Some("new"));
+
+    match PanelRuntime::new().run(panel) {
+        Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => {
+            if value == "new" {
+                SessionAction::New
+            } else if let Some(idx_str) = value.strip_prefix("session:") {
+                match idx_str.parse::<usize>() {
+                    Ok(idx) if idx < sessions.len() => SessionAction::Attach(idx),
+                    _ => SessionAction::New,
+                }
+            } else {
+                SessionAction::New
+            }
+        }
+        _ => SessionAction::Cancel,
+    }
+}
+/// Run the normal (non-daemon) AishShell.
+fn run_shell_normal(mut config: aish_config::ConfigModel) {
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
         if !run_setup(&mut config) {
@@ -275,13 +599,11 @@ fn run_shell(mut config: aish_config::ConfigModel) {
             );
             std::process::exit(1);
         }
-        // Reload config with the saved values
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
             config = loaded;
         }
     }
-
     match aish_shell::AishShell::new(config) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
@@ -297,7 +619,215 @@ fn run_shell(mut config: aish_config::ConfigModel) {
     }
 }
 
-fn run_shell_resume(mut config: aish_config::ConfigModel, session_id: &str) {
+/// List all active PTY sessions.
+fn list_sessions() {
+    let sessions = aish_pty::discover_sessions();
+    if sessions.is_empty() {
+        println!("No active PTY sessions.");
+        println!("Run 'aish' to start one.");
+        return;
+    }
+    println!("Active PTY sessions:\n");
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for s in &sessions {
+        let short_id = &s.session_id[..8.min(s.session_id.len())];
+        let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
+            format!("~{}", &s.cwd[home.len()..])
+        } else {
+            s.cwd.clone()
+        };
+        let age = format_duration(now.saturating_sub(s.started_at));
+        let model = s.model.as_deref().unwrap_or("");
+        println!(
+            "  {id}  cwd: {cwd:<20}  started: {age}{model}",
+            id = short_id,
+            cwd = cwd_display,
+            age = age,
+            model = if model.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", model)
+            }
+        );
+    }
+    println!("\n{} session(s) total", sessions.len());
+}
+
+fn kill_session_by_id(ids: &[String]) {
+    let sessions = aish_pty::discover_sessions();
+    if sessions.is_empty() {
+        println!("No active PTY sessions.");
+        return;
+    }
+
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // No args: list sessions so the user can pick an ID.
+    if ids.is_empty() {
+        println!("\x1b[1mActive PTY sessions:\x1b[0m");
+        for s in &sessions {
+            let short = &s.session_id[..8.min(s.session_id.len())];
+            let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
+                format!("~{}", &s.cwd[home.len()..])
+            } else {
+                s.cwd.clone()
+            };
+            println!("  {} {}", short, cwd_display);
+        }
+        println!("\n\x1b[2mUsage: aish kill <id> [id ...]  ·  aish kill all\x1b[0m");
+        return;
+    }
+
+    // `aish kill all`
+    if ids.len() == 1 && ids[0] == "all" {
+        for s in &sessions {
+            let short = &s.session_id[..8.min(s.session_id.len())];
+            print!("Killing {} ... ", short);
+            match aish_pty::kill_session(&s.socket_path) {
+                Ok(()) => println!("done"),
+                Err(e) => println!("failed: {}", e),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        println!("\n{} session(s) terminated.", sessions.len());
+        return;
+    }
+
+    // Kill each specified ID prefix.
+    let mut killed = 0u32;
+    let mut errors = 0u32;
+    for id in ids {
+        let target = sessions
+            .iter()
+            .find(|s| s.session_id == *id || s.session_id.starts_with(id.as_str()));
+        match target {
+            Some(s) => {
+                let short = &s.session_id[..8.min(s.session_id.len())];
+                print!("Killing {} ... ", short);
+                match aish_pty::kill_session(&s.socket_path) {
+                    Ok(()) => {
+                        println!("done");
+                        killed += 1;
+                    }
+                    Err(e) => {
+                        println!("failed: {}", e);
+                        errors += 1;
+                    }
+                }
+            }
+            None => {
+                eprintln!("Session '{}' not found.", id);
+                errors += 1;
+            }
+        }
+    }
+    if killed > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if killed + errors > 1 {
+        println!("\n{} killed, {} failed.", killed, errors);
+    }
+    if errors > 0 {
+        std::process::exit(1);
+    }
+}
+
+fn kill_all_sessions() {
+    let sessions = aish_pty::discover_sessions();
+    if sessions.is_empty() {
+        println!("No active PTY sessions.");
+        return;
+    }
+    for s in &sessions {
+        print!(
+            "Killing {} ... ",
+            &s.session_id[..8.min(s.session_id.len())]
+        );
+        match aish_pty::kill_session(&s.socket_path) {
+            Ok(()) => println!("done"),
+            Err(e) => println!("failed: {}", e),
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    println!("\nAll sessions terminated.");
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}min ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+fn run_shell_new(config: aish_config::ConfigModel) {
+    let cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    eprintln!("\x1b[32m[aish] Creating new PTY daemon session...\x1b[0m");
+    match spawn_pty_daemon(
+        &cwd,
+        if config.model.is_empty() {
+            None
+        } else {
+            Some(config.model.as_str())
+        },
+        if config.api_base.is_empty() {
+            None
+        } else {
+            Some(config.api_base.as_str())
+        },
+    ) {
+        Ok(info) => {
+            if run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id) {
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("\x1b[33m[aish] PTY daemon failed: {}\x1b[0m", e);
+        }
+    }
+    eprintln!("\x1b[33m[aish] Falling back to normal shell.\x1b[0m");
+    run_shell_normal(config);
+}
+
+fn run_shell_resume(config: aish_config::ConfigModel, session_id: &str) {
+    // First check if this is an active daemon session (by UUID or 8-char prefix)
+    let sessions = aish_pty::discover_sessions();
+    if let Some(session) = sessions
+        .iter()
+        .find(|s| s.session_id == session_id || s.session_id.starts_with(session_id))
+    {
+        eprintln!(
+            "\x1b[32m[aish] Resuming daemon session {}\x1b[0m",
+            &session.session_id[..8.min(session.session_id.len())]
+        );
+        run_pty_raw_attach(&session.socket_path.to_string_lossy(), &session.session_id);
+        return;
+    }
+
+    // Not a daemon session — fall back to SQLite AI context resume
+    eprintln!(
+        "\x1b[33m[aish] No active daemon session '{}', resuming AI context.\x1b[0m",
+        session_id
+    );
+    run_shell_normal_resume(config, session_id);
+}
+
+fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &str) {
     // Auto-trigger setup wizard on first run if config is incomplete
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
@@ -527,6 +1057,435 @@ fn check_langfuse(
             eprintln!("Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY environment variables,");
             eprintln!("or add langfuse_public_key and langfuse_secret_key to config.yaml.");
         }
+    }
+}
+
+/// Raw terminal passthrough: attach to a PTY daemon and relay stdin/stdout.
+///
+/// This is a simple terminal forwarder that connects to the daemon's Unix
+/// socket and passes bytes back and forth. It demonstrates the detach/reattach
+/// lifecycle: exiting this function (via Ctrl+Q) detaches from the daemon
+/// without killing the underlying bash process.
+fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
+    use aish_pty::PtyBackend;
+    use std::os::fd::AsRawFd;
+
+    let (mut rows, mut cols) = get_terminal_size();
+
+    let mut backend = match aish_pty::AttachedBackend::attach(
+        std::path::Path::new(socket_path),
+        session_id,
+        rows,
+        cols,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("\x1b[33m[aish] Failed to attach: {}\x1b[0m", e);
+            return false;
+        }
+    };
+
+    // Save terminal state and switch to raw mode
+    let stdin_fd = std::io::stdin().as_raw_fd();
+    let mut orig_termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(stdin_fd, &mut orig_termios) } != 0 {
+        eprintln!("\x1b[31m[aish] Failed to get terminal attributes\x1b[0m");
+        std::process::exit(1);
+    }
+    let mut raw = orig_termios;
+    unsafe { libc::cfmakeraw(&mut raw) };
+    raw.c_iflag &= !libc::IXON;
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
+    if unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) } != 0 {
+        eprintln!("\x1b[31m[aish] Failed to set raw mode\x1b[0m");
+        std::process::exit(1);
+    }
+
+    let stdout_fd = std::io::stdout().as_raw_fd();
+    let mut osc = OscScanner::new();
+    // When true, OSC 5151 commands extracted from PTY output are ignored.
+    // Set after every session switch so that stale OSC sequences surviving
+    // in the scrollback replay (defence-in-depth: the daemon should have
+    // stripped them, but TYPE_PTY_OUTPUT frames that arrive during the
+    // attach handshake are also buffered as scrollback) don't re-trigger
+    // a switch. Cleared after the first `drain_events` call consumes the
+    // buffered scrollback.
+    let mut skip_osc_commands = false;
+
+    unsafe {
+        let msg = b"\r\n\x1b[32m[aish] Attached (Ctrl+Q to detach)\x1b[0m\r\n";
+        libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
+    }
+
+    // Flush scrollback immediately. The attach handshake consumed all
+    // scrollback bytes from the socket into `pending_events`, so the
+    // kernel socket buffer is now empty. Without this explicit drain,
+    // select() would not report the socket readable and the buffered
+    // scrollback (including the prompt) would never be displayed until
+    // the user presses a key to generate new output.
+    let mut initial_exit = false;
+    if let Ok(events) = backend.drain_events() {
+        for event in events {
+            match event {
+                aish_pty::PtyEvent::Output(bytes) => {
+                    if !bytes.is_empty() {
+                        let (clean, _cmds) = osc.process(&bytes);
+                        if !clean.is_empty() {
+                            unsafe {
+                                libc::write(stdout_fd, clean.as_ptr() as *const _, clean.len());
+                            }
+                        }
+                    }
+                }
+                aish_pty::PtyEvent::Control(evt) => {
+                    if matches!(evt, aish_pty::BackendControlEvent::ShellExiting { .. }) {
+                        initial_exit = true;
+                    }
+                }
+            }
+        }
+    }
+    // Discard any partial OSC bytes the scanner may have buffered from
+    // scrollback so they don't leak into live-output processing.
+    osc.clear();
+
+    if initial_exit || !backend.is_running() {
+        let _ = backend.detach();
+        unsafe {
+            libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
+        }
+        return true;
+    }
+
+    let mut stdin_buf = [0u8; 1024];
+
+    loop {
+        let socket_fd = backend.readable_fds()[0];
+
+        let mut read_set: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut read_set);
+            libc::FD_SET(stdin_fd, &mut read_set);
+            libc::FD_SET(socket_fd, &mut read_set);
+        }
+        let max_fd = stdin_fd.max(socket_fd);
+        let mut tv = libc::timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+
+        let ret = unsafe {
+            libc::select(
+                max_fd + 1,
+                &mut read_set,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+
+        if ret < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            break;
+        }
+
+        // stdin → daemon
+        if unsafe { libc::FD_ISSET(stdin_fd, &read_set) } {
+            let n =
+                unsafe { libc::read(stdin_fd, stdin_buf.as_mut_ptr() as *mut _, stdin_buf.len()) };
+            if n > 0 {
+                let data = &stdin_buf[..n as usize];
+                if let Some(qpos) = data.iter().position(|&b| b == 0x11) {
+                    if qpos > 0 {
+                        let _ = backend.write_input(&data[..qpos]);
+                    }
+                    break;
+                }
+                if data.len() == 1 && data[0] == 0x04 {
+                    break;
+                }
+                if let Err(e) = backend.write_input(data) {
+                    eprint!("\r\n[aish] write error: {}\r\n", e);
+                    break;
+                }
+            } else if n == 0 {
+                break;
+            }
+        }
+
+        // socket → stdout (with OSC scanning)
+        if unsafe { libc::FD_ISSET(socket_fd, &read_set) } {
+            match backend.drain_events() {
+                Ok(events) => {
+                    let mut should_exit = false;
+                    let mut osc_action: Option<String> = None;
+                    for event in events {
+                        match event {
+                            aish_pty::PtyEvent::Output(bytes) => {
+                                if bytes.is_empty() {
+                                    continue;
+                                }
+                                let (clean, cmds) = osc.process(&bytes);
+                                if !clean.is_empty() {
+                                    unsafe {
+                                        libc::write(
+                                            stdout_fd,
+                                            clean.as_ptr() as *const _,
+                                            clean.len(),
+                                        );
+                                    }
+                                }
+                                // Ignore OSC commands while draining scrollback
+                                // (the first drain_events after attach/switch).
+                                if !skip_osc_commands {
+                                    for cmd in cmds {
+                                        osc_action = Some(cmd);
+                                    }
+                                }
+                            }
+                            aish_pty::PtyEvent::Control(evt) => {
+                                if matches!(evt, aish_pty::BackendControlEvent::ShellExiting { .. })
+                                {
+                                    should_exit = true;
+                                }
+                            }
+                        }
+                    }
+
+                    // First drain after attach/switch consumed all buffered
+                    // scrollback — re-enable OSC command extraction and clear
+                    // any partial OSC bytes the scanner may have buffered.
+                    if skip_osc_commands {
+                        skip_osc_commands = false;
+                        osc.clear();
+                    }
+
+                    // Handle OSC command (session switch/new/detach)
+                    if let Some(action) = osc_action {
+                        match handle_osc_action(
+                            &mut backend,
+                            &action,
+                            &mut rows,
+                            &mut cols,
+                            stdout_fd,
+                        ) {
+                            OscResult::Continue => {
+                                // Clear scanner buffer after switch
+                                osc.clear();
+                                // Ignore OSC from the next drain (scrollback
+                                // replay of the newly-attached session).
+                                skip_osc_commands = true;
+                                // Trigger prompt redraw in new session
+                                use aish_pty::PtyBackend;
+                                let _ = backend.write_input(b"\n");
+                            }
+                            OscResult::Exit => break,
+                        }
+                    }
+
+                    if should_exit {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprint!("\r\n\x1b[31m[aish] connection lost: {}\x1b[0m\r\n", e);
+                    break;
+                }
+            }
+        }
+
+        if !backend.is_running() {
+            break;
+        }
+
+        // Terminal resize polling
+        let (cur_rows, cur_cols) = get_terminal_size();
+        if cur_rows != rows || cur_cols != cols {
+            rows = cur_rows;
+            cols = cur_cols;
+            let _ = backend.resize(rows, cols);
+        }
+    }
+
+    let _ = backend.detach();
+    unsafe {
+        libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
+    }
+    eprintln!("\x1b[32m[aish] Detached. Run `aish` to reattach.\x1b[0m");
+    true
+}
+
+/// Result of OSC action handling.
+enum OscResult {
+    Continue,
+    Exit,
+}
+
+/// Handle an OSC 5151 command by switching/creating/detaching sessions.
+/// Strategy: connect to new session FIRST, then detach old — so failures
+/// don't leave the user disconnected.
+fn handle_osc_action(
+    backend: &mut aish_pty::AttachedBackend,
+    action: &str,
+    rows: &mut u16,
+    cols: &mut u16,
+    stdout_fd: i32,
+) -> OscResult {
+    if action == "detach" {
+        return OscResult::Exit;
+    }
+
+    if action == "new" {
+        eprint!("\r\n\x1b[32m[aish] Creating new session...\x1b[0m\r\n");
+        let cwd = std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let info = match spawn_pty_daemon(&cwd, None, None) {
+            Ok(info) => info,
+            Err(e) => {
+                eprint!(
+                    "\r\n\x1b[31m[aish] Spawn failed: {} — staying on current session.\x1b[0m\r\n",
+                    e
+                );
+                return OscResult::Continue;
+            }
+        };
+        let new_backend = match aish_pty::AttachedBackend::attach(
+            std::path::Path::new(&info.socket_path),
+            &info.session_id,
+            *rows,
+            *cols,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                eprint!(
+                    "\r\n\x1b[31m[aish] Attach failed: {} — staying on current session.\x1b[0m\r\n",
+                    e
+                );
+                return OscResult::Continue;
+            }
+        };
+        // Success — switch over: detach old (ignore errors), assign new
+        let _ = backend.detach();
+        unsafe {
+            libc::write(stdout_fd, b"\x1b[2J\x1b[H".as_ptr() as *const _, 7);
+        }
+        *backend = new_backend;
+        return OscResult::Continue;
+    }
+
+    if let Some(target_id) = action.strip_prefix("switch:") {
+        // Find target BEFORE detaching
+        let sessions = aish_pty::discover_sessions();
+        let target = match sessions
+            .iter()
+            .find(|s| s.session_id == target_id || s.session_id.starts_with(target_id))
+        {
+            Some(t) => t,
+            None => {
+                eprint!(
+                    "\r\n\x1b[31m[aish] Session {} not found — staying on current.\x1b[0m\r\n",
+                    target_id
+                );
+                return OscResult::Continue;
+            }
+        };
+        // Attach to target FIRST
+        let new_backend = match aish_pty::AttachedBackend::attach(
+            &target.socket_path,
+            &target.session_id,
+            *rows,
+            *cols,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                eprint!(
+                    "\r\n\x1b[31m[aish] Attach failed: {} — staying on current.\x1b[0m\r\n",
+                    e
+                );
+                return OscResult::Continue;
+            }
+        };
+        // Success — switch over
+        let _ = backend.detach();
+        unsafe {
+            libc::write(stdout_fd, b"\x1b[2J\x1b[H".as_ptr() as *const _, 7);
+        }
+        eprint!(
+            "\r\n\x1b[32m[aish] Switched to session {}.\x1b[0m\r\n",
+            target_id
+        );
+        *backend = new_backend;
+        return OscResult::Continue;
+    }
+
+    OscResult::Continue
+}
+
+/// Scanner for OSC 5151 escape sequences in PTY output.
+/// Strips the sequences and extracts embedded commands.
+struct OscScanner {
+    pending: Vec<u8>,
+}
+
+impl OscScanner {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Process a chunk of output bytes. Returns (clean_bytes, osc_commands).
+    fn process(&mut self, data: &[u8]) -> (Vec<u8>, Vec<String>) {
+        let mut buf = Vec::with_capacity(self.pending.len() + data.len());
+        buf.extend_from_slice(&self.pending);
+        buf.extend_from_slice(data);
+        self.pending.clear();
+
+        let mut clean = Vec::with_capacity(buf.len());
+        let mut commands = Vec::new();
+        let mut i = 0;
+        let prefix = b"\x1b]5151;";
+
+        while i < buf.len() {
+            if i + prefix.len() <= buf.len() && &buf[i..i + prefix.len()] == prefix {
+                // Found OSC 5151 start, find terminator
+                let op_start = i + prefix.len();
+                let mut found = None;
+                for j in op_start..buf.len() {
+                    if buf[j] == 0x07 {
+                        found = Some((j, 1));
+                        break;
+                    }
+                    if j + 1 < buf.len() && buf[j] == 0x1b && buf[j + 1] == b'\\' {
+                        found = Some((j, 2));
+                        break;
+                    }
+                }
+                if let Some((end, term_len)) = found {
+                    let op = String::from_utf8_lossy(&buf[op_start..end]).to_string();
+                    commands.push(op);
+                    i = end + term_len;
+                } else {
+                    // Incomplete — save for next chunk
+                    self.pending = buf[i..].to_vec();
+                    break;
+                }
+            } else {
+                clean.push(buf[i]);
+                i += 1;
+            }
+        }
+
+        (clean, commands)
     }
 }
 

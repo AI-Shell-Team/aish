@@ -45,6 +45,7 @@ pub fn run_status(
     pty: &Mutex<aish_pty::PersistentPty>,
     version: &str,
     session_id: &str,
+    live_session_id: Option<&str>,
     model: &str,
 ) {
     let sys = system_info::collect();
@@ -57,7 +58,16 @@ pub fn run_status(
         (ip, svcs, errors)
     };
 
-    render(version, session_id, model, &sys, &ip, &svcs, &errors);
+    render(
+        version,
+        session_id,
+        live_session_id,
+        model,
+        &sys,
+        &ip,
+        &svcs,
+        &errors,
+    );
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -86,28 +96,42 @@ fn format_uptime(secs: u64) -> String {
 fn render(
     version: &str,
     session_id: &str,
+    live_session_id: Option<&str>,
     model: &str,
     sys: &SystemInfo,
     ip: &Option<String>,
     svcs: &Option<Vec<ServiceStatus>>,
     errors: &Option<usize>,
 ) {
+    use aish_i18n::t;
     let mut lines: Vec<String> = Vec::new();
 
     // Line 1: aish info
     let session_short = &session_id[..session_id.len().min(6)];
-    lines.push(format!(
-        "aish {} │ session: {} │ model: {}",
-        version, session_short, model
-    ));
+    let mut line1 = format!(
+        "aish {} │ {}: {} │ {}: {}",
+        version,
+        t("status.session"),
+        session_short,
+        t("status.model"),
+        model,
+    );
+    if let Some(live) = live_session_id {
+        let live_short = &live[..live.len().min(8)];
+        line1.push_str(&format!(" │ {}: {}", t("status.live_session"), live_short));
+    }
+    lines.push(line1);
 
     // Line 2: host info
-    let ip_str = ip.as_deref().unwrap_or("N/A");
+    let na = t("status.na");
+    let ip_str = ip.as_deref().unwrap_or(&na);
     lines.push(format!(
-        "host: {} ({}) │ {} │ up {}",
+        "{}: {} ({}) │ {} │ {} {}",
+        t("status.host"),
         sys.hostname,
         ip_str,
         sys.os_version,
+        t("status.up"),
         format_uptime(sys.uptime_secs)
     ));
 
@@ -128,30 +152,30 @@ fn render(
                 .iter()
                 .map(|s| {
                     if s.active {
-                        format!("\x1b[32m{}●\x1b[0m", s.name)
+                        format!("\x1b[32m{}\u{25cf}\x1b[0m", s.name)
                     } else {
-                        format!("\x1b[2m{}○\x1b[0m", s.name)
+                        format!("\x1b[2m{}\u{25cb}\x1b[0m", s.name)
                     }
                 })
                 .collect();
-            lines.push(format!("services: {}", parts.join(" ")));
+            lines.push(format!("{}: {}", t("status.services"), parts.join(" ")));
         }
     }
 
     // Line 5: errors (optional)
     if let Some(count) = errors {
-        lines.push(format!("errors today: {}", count));
+        lines.push(format!("{}: {}", t("status.errors_today"), count));
     }
 
     // Render with box drawing
     let total = lines.len();
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
-            println!("┌─ {}", line);
+            println!("\u{250c}\u{2500} {}", line);
         } else if i == total - 1 {
-            println!("└─ {}", line);
+            println!("\u{2514}\u{2500} {}", line);
         } else {
-            println!("├─ {}", line);
+            println!("\u{251c}\u{2500} {}", line);
         }
     }
 }
@@ -173,25 +197,33 @@ fn render_to_string(
     model: &str,
     rs: &remote::RemoteStatus,
 ) -> String {
+    use aish_i18n::t;
     let mut lines: Vec<String> = Vec::new();
 
     let session_short = &session_id[..session_id.len().min(6)];
     lines.push(format!(
-        "aish {} │ session: {} │ model: {}",
-        version, session_short, model
+        "aish {} │ {}: {} │ {}: {}",
+        version,
+        t("status.session"),
+        session_short,
+        t("status.model"),
+        model
     ));
 
-    let ip_str = rs.ip.as_deref().unwrap_or("N/A");
+    let na = t("status.na");
+    let ip_str = rs.ip.as_deref().unwrap_or(&na);
     let os_str = rs.os_info.as_deref().unwrap_or("?");
     let up_str = rs
         .uptime_secs
         .map(|s| format_uptime(s))
         .unwrap_or_else(|| "?".into());
     lines.push(format!(
-        "host: {} ({}) │ {} │ up {}",
+        "{}: {} ({}) │ {} │ {} {}",
+        t("status.host"),
         rs.hostname.as_deref().unwrap_or("?"),
         ip_str,
         os_str,
+        t("status.up"),
         up_str
     ));
 
@@ -215,29 +247,29 @@ fn render_to_string(
                 .iter()
                 .map(|(name, active)| {
                     if *active {
-                        format!("\x1b[32m{}●\x1b[0m", name)
+                        format!("\x1b[32m{}\u{25cf}\x1b[0m", name)
                     } else {
-                        format!("\x1b[2m{}○\x1b[0m", name)
+                        format!("\x1b[2m{}\u{25cb}\x1b[0m", name)
                     }
                 })
                 .collect();
-            lines.push(format!("services: {}", parts.join(" ")));
+            lines.push(format!("{}: {}", t("status.services"), parts.join(" ")));
         }
     }
 
     if let Some(count) = rs.error_count {
-        lines.push(format!("errors today: {}", count));
+        lines.push(format!("{}: {}", t("status.errors_today"), count));
     }
 
     let total = lines.len();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
-            out.push_str(&format!("┌─ {}\n", line));
+            out.push_str(&format!("\u{250c}\u{2500} {}\n", line));
         } else if i == total - 1 {
-            out.push_str(&format!("└─ {}", line));
+            out.push_str(&format!("\u{2514}\u{2500} {}", line));
         } else {
-            out.push_str(&format!("├─ {}\n", line));
+            out.push_str(&format!("\u{251c}\u{2500} {}\n", line));
         }
     }
     out

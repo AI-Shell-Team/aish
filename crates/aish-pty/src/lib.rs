@@ -13,9 +13,12 @@
     clippy::too_many_arguments
 )]
 
+pub mod backend;
 pub mod command_state;
 pub mod control;
 pub mod ctrl_o;
+pub mod daemon;
+pub mod daemon_protocol;
 pub mod executor;
 pub mod exit_code;
 pub mod nl_detect;
@@ -23,6 +26,7 @@ pub mod offload;
 pub mod output_buffer;
 pub mod persistent;
 pub mod readline_tab;
+pub mod scrollback;
 pub mod session_interceptor;
 pub mod types;
 
@@ -34,10 +38,20 @@ pub struct SshSecretCheckResult {
     pub detected_secrets: Vec<aish_security::secret::SecretMatch>,
 }
 
+pub use backend::{AttachedBackend, OwnedBackend, PtyBackend, PtyEvent};
 pub use command_state::CommandState;
 pub use control::{
     decode_control_chunk, encode_control_event, BackendControlEvent, CompletionCandidate,
     CompletionResponse,
+};
+pub use daemon::{
+    check_daemon_alive, discover_sessions, kill_session, pty_session_dir, pty_socket_dir,
+    run_pty_daemon, run_pty_daemon_shell, DaemonSessionInfo,
+};
+pub use daemon_protocol::{
+    read_frame_blocking, try_decode_frame, write_frame, AttachAck, AttachRequest,
+    DaemonError as PtyDaemonError, ExitNotice, Frame, FrameDecodeError, FrameReader, ResizeRequest,
+    ScrollbackEnd, SessionInfo, MAX_FRAME_PAYLOAD, PROTOCOL_VERSION,
 };
 pub use executor::PtyExecutor;
 pub use offload::{
@@ -47,6 +61,7 @@ pub use offload::{
 pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use readline_tab::{should_complete_path_locally, ReadlineTabResult};
+pub use scrollback::{ScrollbackBuffer, DEFAULT_SCROLLBACK_SIZE, SCROLLBACK_CHUNK_SIZE};
 pub use session_interceptor::{
     pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,
     AskUserOption, AskUserRequest, BashExecResult, FollowupCallback, InterceptorState,
