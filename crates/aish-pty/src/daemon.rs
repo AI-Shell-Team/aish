@@ -21,12 +21,10 @@ use aish_core::{AishError, Result};
 use libc::{self, c_int};
 use nix::unistd::Pid;
 
-use crate::control::{decode_control_chunk, BackendControlEvent};
 use crate::daemon_protocol::{
     AttachAck, AttachRequest, Frame, FrameReader, ScrollbackEnd, PROTOCOL_VERSION, TYPE_ATTACH,
     TYPE_DETACH, TYPE_INPUT, TYPE_KILL_SESSION, TYPE_RESIZE, TYPE_SCROLLBACK,
 };
-use crate::persistent::PersistentPty;
 use crate::scrollback::ScrollbackBuffer;
 
 // Frame type constants re-exported for convenience
@@ -42,9 +40,20 @@ struct SigchldPipe {
     _write_fd: OwnedFd,
 }
 
+// SAFETY: [Category 9 — incorrect Send/Sync + Category 8 — FFI]
+// `SIGCHLD_WRITE_FD` is a process-global fd written from an async-signal
+// handler. Access is safe because: (1) only one signal handler runs at a time
+// per thread (POSIX guarantee), (2) the value is set once during install()
+// before the handler is registered and only reset to -1 in Drop after the
+// handler is unregistered, (3) `libc::write` is async-signal-safe per
+// POSIX.1-2017 §2.4.1.
 static mut SIGCHLD_WRITE_FD: c_int = -1;
 
 extern "C" fn sigchld_handler(_sig: c_int) {
+    // SAFETY: [Category 8 — FFI] [Category 9 — Send/Sync]
+    // `write()` is async-signal-safe (POSIX). The guard `>= 0` check and the
+    // single-byte write are non-branching and cannot allocate, satisfying the
+    // async-signal-safety constraints. See `SIGCHLD_WRITE_FD` comment above.
     unsafe {
         if SIGCHLD_WRITE_FD >= 0 {
             let buf = [1u8];
@@ -56,6 +65,8 @@ extern "C" fn sigchld_handler(_sig: c_int) {
 impl SigchldPipe {
     fn install() -> Result<Self> {
         let mut fds = [0i32; 2];
+        // SAFETY: [Category 8 — FFI] `pipe()` writes two c_int into the
+        // 8-byte array `fds`. The pointer is valid and properly aligned.
         let ret = unsafe { libc::pipe(fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(AishError::Pty(format!(
@@ -73,19 +84,36 @@ impl SigchldPipe {
             set_fd_cloexec(*fd)?;
         }
 
+        // SAFETY: [Category 13 — unsafe contract] `from_raw_fd` takes
+        // ownership of an fd that was just created by `pipe()` and not yet
+        // owned by any `OwnedFd`. The fd is valid (pipe succeeded). After
+        // this, `fds[0]`/`fds[1]` must not be used directly — the `OwnedFd`
+        // drops will close them.
         let read_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
         let write_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
+        // SAFETY: [Category 9 — Send/Sync] Store the write fd number for the
+        // signal handler. This runs before `sigaction` registers the handler,
+        // so no concurrent signal can race. The `OwnedFd` `write_fd` is kept
+        // alive in the struct to prevent the fd from being reused.
         unsafe {
             SIGCHLD_WRITE_FD = fds[1];
         }
 
         // Install signal handler
+        // SAFETY: [Category 4 — Uninitialized memory] `sigaction` is a POD
+        // C struct; `zeroed()` produces a valid zero-initialised instance
+        // whose fields we overwrite immediately below.
         let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
         sa.sa_sigaction = sigchld_handler as *const () as usize;
         sa.sa_flags = libc::SA_RESTART | libc::SA_NOCLDSTOP;
+        // SAFETY: [Category 8 — FFI] `sigaction` with SIGCHLD installs our
+        // handler. `&sa` is a valid pointer to the initialised struct.
         let ret = unsafe { libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut()) };
         if ret != 0 {
+            // SAFETY: [Category 9 — Send/Sync] Disarm the global before
+            // returning; the handler is not yet installed (sigaction failed),
+            // so no race is possible.
             unsafe {
                 SIGCHLD_WRITE_FD = -1;
             }
@@ -142,12 +170,20 @@ impl SigchldPipe {
 
 impl Drop for SigchldPipe {
     fn drop(&mut self) {
+        // SAFETY: [Category 9 — Send/Sync] Disarm the global so the signal
+        // handler becomes a no-op. Drop runs after the select loop exits, so
+        // no concurrent handler invocation reads the fd while it is being
+        // closed by the `OwnedFd` drop that follows.
         unsafe {
             SIGCHLD_WRITE_FD = -1;
         }
         // Restore default SIGCHLD
+        // SAFETY: [Category 4 — Uninitialized memory] `sigaction` is a POD
+        // C struct; zero-initialise then set SIG_DFL before the call.
         let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
         sa.sa_sigaction = libc::SIG_DFL;
+        // SAFETY: [Category 8 — FFI] `sigaction` restores the default
+        // SIGCHLD disposition. `&sa` points to the initialised struct.
         unsafe {
             libc::sigaction(libc::SIGCHLD, &sa, std::ptr::null_mut());
         }
@@ -159,6 +195,8 @@ impl Drop for SigchldPipe {
 // ---------------------------------------------------------------------------
 
 fn set_fd_nonblocking(fd: RawFd) -> Result<()> {
+    // SAFETY: [Category 8 — FFI] `fcntl(F_GETFL)` reads the fd's status flags.
+    // `fd` is a valid open fd passed by the caller.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(AishError::Pty(format!(
@@ -166,6 +204,8 @@ fn set_fd_nonblocking(fd: RawFd) -> Result<()> {
             io::Error::last_os_error()
         )));
     }
+    // SAFETY: [Category 8 — FFI] `fcntl(F_SETFL, …)` sets the fd's status
+    // flags. `fd` is valid and `flags | O_NONBLOCK` is a well-formed bitmask.
     let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if ret < 0 {
         return Err(AishError::Pty(format!(
@@ -177,6 +217,8 @@ fn set_fd_nonblocking(fd: RawFd) -> Result<()> {
 }
 
 fn set_fd_cloexec(fd: RawFd) -> Result<()> {
+    // SAFETY: [Category 8 — FFI] `fcntl(F_GETFD)` reads the fd's descriptor
+    // flags. `fd` is a valid open fd passed by the caller.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     if flags < 0 {
         return Err(AishError::Pty(format!(
@@ -184,6 +226,8 @@ fn set_fd_cloexec(fd: RawFd) -> Result<()> {
             io::Error::last_os_error()
         )));
     }
+    // SAFETY: [Category 8 — FFI] `fcntl(F_SETFD, …)` sets the fd's descriptor
+    // flags. `fd` is valid and `flags | FD_CLOEXEC` is a well-formed bitmask.
     let ret = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
     if ret < 0 {
         return Err(AishError::Pty(format!(
@@ -436,591 +480,6 @@ pub struct DaemonSessionInfo {
     pub api_base: Option<String>,
 }
 
-/// The PTY daemon process. Holds a bash PTY and serves clients over Unix socket.
-pub struct PtyDaemon {
-    pty: PersistentPty,
-    listener: UnixListener,
-    socket_path: PathBuf,
-    session_id: String,
-    scrollback: ScrollbackBuffer,
-    clients: Vec<ClientConnection>,
-    sigchld: SigchldPipe,
-    /// Control event decode buffer (daemon reads control_fd incrementally)
-    control_buffer: String,
-    /// Current session metadata
-    session_info: DaemonSessionInfo,
-    /// Whether bash has exited
-    bash_exited: bool,
-    bash_exit_code: i32,
-}
-
-impl PtyDaemon {
-    /// Start the daemon: create PTY + bind socket.
-    pub fn start(
-        cwd: &str,
-        rows: u16,
-        cols: u16,
-        socket_path: &Path,
-        session_id: &str,
-        model: Option<&str>,
-        api_base: Option<&str>,
-    ) -> Result<Self> {
-        // Ignore SIGHUP so the daemon survives terminal disconnects.
-        unsafe {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = libc::SIG_IGN;
-            libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
-        }
-
-        // Install SIGCHLD handler BEFORE forking bash
-        let sigchld = SigchldPipe::install()?;
-
-        // Create PTY (fork bash)
-        let pty = PersistentPty::start(cwd, rows, cols)?;
-
-        let child_pid = pty.child_pid().as_raw() as u32;
-
-        // Create socket directory
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AishError::Pty(format!("create socket dir {parent:?}: {e}")))?;
-        }
-
-        // Remove stale socket file
-        let _ = std::fs::remove_file(socket_path);
-
-        // Bind Unix socket
-        let listener = UnixListener::bind(socket_path)
-            .map_err(|e| AishError::Pty(format!("bind socket {socket_path:?}: {e}")))?;
-
-        // Set socket permissions (user-only)
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| AishError::Pty(format!("set socket permissions: {e}")))?;
-
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| AishError::Pty(format!("listener set_nonblocking: {e}")))?;
-
-        let session_info = DaemonSessionInfo {
-            session_id: session_id.to_string(),
-            socket_path: socket_path.to_path_buf(),
-            daemon_pid: std::process::id(),
-            child_pid,
-            started_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            cwd: cwd.to_string(),
-            model: model.map(|s| s.to_string()),
-            api_base: api_base.map(|s| s.to_string()),
-        };
-
-        tracing::info!(
-            session_id,
-            socket = ?socket_path,
-            child_pid,
-            "PTY daemon started"
-        );
-
-        let mut daemon = Self {
-            pty,
-            listener,
-            socket_path: socket_path.to_path_buf(),
-            session_id: session_id.to_string(),
-            scrollback: ScrollbackBuffer::with_default_size(),
-            clients: Vec::new(),
-            sigchld,
-            control_buffer: String::new(),
-            session_info,
-            bash_exited: false,
-            bash_exit_code: 0,
-        };
-
-        // PersistentPty::start() drains initial bash output to stdout
-        // (which is /dev/null in the daemon). Push any remaining data to
-        // scrollback and trigger bash to re-display its prompt.
-        daemon.capture_residual_output();
-        daemon.trigger_prompt_redraw();
-
-        Ok(daemon)
-    }
-
-    /// Read any data still in the master_fd buffer and push to scrollback.
-    fn capture_residual_output(&mut self) {
-        let master_fd = self.pty.master_fd();
-        let mut buf = [0u8; 8192];
-        loop {
-            match nix::unistd::read(master_fd, &mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let clean = strip_osc_5151(&buf[..n]);
-                    if !clean.is_empty() {
-                        self.scrollback.push(&clean);
-                    }
-                }
-                Err(nix::errno::Errno::EAGAIN) => break,
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(_) => break,
-            }
-        }
-    }
-
-    /// Configure bash for daemon mode: re-enable echo and set a visible PS1.
-    /// The bash rc wrapper disables echo and sets PS1='' (designed for the
-    /// AishShell frontend which handles all display). In daemon raw
-    /// passthrough mode, we need bash's native display.
-    fn trigger_prompt_redraw(&mut self) {
-        // Re-enable terminal echo + set PROMPT_COMMAND to keep control
-        // events but also set a visible PS1.
-        let setup = concat!(
-            r#" stty echo echonl 2>/dev/null;"#,
-            r#" PROMPT_COMMAND='__aish_prompt_command; PS1="\u@\h:\w\$ "';"#,
-            r#" PS1='\u@\h:\w\$ '; "#,
-            "\n",
-        );
-        let _ = self.pty.write_master_pub(setup.as_bytes());
-        std::thread::sleep(Duration::from_millis(200));
-        self.capture_residual_output();
-    }
-
-    /// Main event loop. Runs until bash exits or KillSession received.
-    /// Always calls cleanup_on_exit before returning.
-    pub fn run(&mut self) -> Result<()> {
-        let result = self.run_loop();
-        // Ensure cleanup always runs, even on error
-        self.cleanup_on_exit();
-        result
-    }
-
-    fn run_loop(&mut self) -> Result<()> {
-        tracing::info!("PTY daemon entering main loop");
-
-        loop {
-            // Build fd_set for select
-            let master_fd = self.pty.master_fd();
-            let control_fd = self.pty.control_fd();
-            let sigchld_fd = self.sigchld.read_fd();
-            let listener_fd = self.listener.as_raw_fd();
-
-            let mut read_fds = vec![master_fd, control_fd, sigchld_fd, listener_fd];
-            let mut write_fds = Vec::new();
-
-            for client in &self.clients {
-                read_fds.push(client.fd());
-                if client.has_pending_writes() {
-                    write_fds.push(client.fd());
-                }
-            }
-
-            // Select with timeout
-            let timeout = Duration::from_millis(50);
-            match select_multi(&read_fds, &write_fds, Some(timeout)) {
-                Ok(SelectResult {
-                    readable, writable, ..
-                }) => {
-                    // 1. SIGCHLD
-                    if readable.contains(&sigchld_fd) {
-                        self.sigchld.drain();
-                        self.sigchld.reap_children();
-                    }
-
-                    // 2. Control events (process BEFORE PTY output for correct ordering)
-                    if readable.contains(&control_fd) {
-                        self.process_control_events()?;
-                    }
-
-                    // 3. PTY output
-                    if readable.contains(&master_fd) {
-                        self.process_pty_output()?;
-                    }
-
-                    // 4. Process all client I/O (reverse order for safe removal)
-                    let mut to_remove = Vec::new();
-                    for i in (0..self.clients.len()).rev() {
-                        let fd = self.clients[i].fd();
-                        let mut remove = false;
-
-                        if readable.contains(&fd) {
-                            remove = self.process_client_by_index(i)?;
-                        }
-                        if writable.contains(&fd) && !remove {
-                            self.flush_client_writes_by_index(i);
-                        }
-                        if remove {
-                            to_remove.push(i);
-                        }
-                    }
-                    for i in to_remove {
-                        let removed = self.clients.swap_remove(i);
-                        tracing::info!(
-                            fd = removed.fd(),
-                            remaining = self.clients.len(),
-                            "client removed"
-                        );
-                    }
-
-                    // 5. Timeout stale handshaking clients
-                    let now = std::time::Instant::now();
-                    for i in (0..self.clients.len()).rev() {
-                        if self.clients[i].state == ClientState::Handshaking {
-                            if let Some(dl) = self.clients[i].handshake_deadline {
-                                if now > dl {
-                                    tracing::warn!("handshake timeout, removing client");
-                                    self.clients.swap_remove(i);
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. New connection
-                    if readable.contains(&listener_fd) {
-                        self.accept_new_connection()?;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("select error: {e}");
-                }
-            }
-
-            // Check for bash exit
-            if self.bash_exited || !self.pty.is_running() {
-                tracing::info!("bash exited, daemon shutting down");
-                break;
-            }
-
-            // 6. Scrollback replay continuation for all Replaying clients
-            for client in &mut self.clients {
-                if client.state == ClientState::Replaying {
-                    if !client.scrollback_queue.is_empty() {
-                        client.flush_scrollback_to_write_buf();
-                    }
-                    if client.scrollback_queue.is_empty() {
-                        client.state = ClientState::Live;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Process a client by index. Returns true if client should be removed.
-    fn process_client_by_index(&mut self, idx: usize) -> Result<bool> {
-        // Read data
-        let alive = match self.clients[idx].do_read() {
-            Ok(true) => true,
-            Ok(false) => return Ok(true), // EOF
-            Err(e) => {
-                tracing::warn!("client read error: {e}");
-                return Ok(true);
-            }
-        };
-        if !alive {
-            return Ok(true);
-        }
-
-        let frames = self.clients[idx].drain_frames().unwrap_or_default();
-
-        for frame in frames {
-            // KillSession is allowed from ANY client state (even pre-handshake)
-            // so that `aish kill <id>` works without full attach.
-            if frame.frame_type == TYPE_KILL_SESSION {
-                tracing::info!("client requested kill session");
-                self.cleanup_on_exit();
-                self.pty.stop();
-                self.bash_exited = true;
-                return Ok(true);
-            }
-
-            // Handle Attach frame for Handshaking clients
-            if self.clients[idx].state == ClientState::Handshaking {
-                if frame.frame_type == TYPE_ATTACH {
-                    let should_remove = self.complete_handshake(idx, frame)?;
-                    if should_remove {
-                        return Ok(true);
-                    }
-                    continue;
-                }
-                // Ignore other non-Attach frames during handshake
-                continue;
-            }
-
-            match frame.frame_type {
-                TYPE_INPUT => {
-                    if let Err(e) = self.pty.write_master_pub(&frame.payload) {
-                        tracing::warn!("write to master_fd failed: {e}");
-                    }
-                }
-                TYPE_RESIZE => {
-                    if let Ok(req) = frame.as_resize_request() {
-                        self.clients[idx].rows = req.rows;
-                        self.clients[idx].cols = req.cols;
-                        self.pty.resize(req.rows, req.cols);
-                    }
-                }
-                TYPE_DETACH => {
-                    tracing::info!("client {} requested detach", idx);
-                    return Ok(true);
-                }
-                TYPE_KILL_SESSION => {
-                    tracing::info!("client requested kill session");
-                    self.cleanup_on_exit();
-                    self.pty.stop();
-                    self.bash_exited = true;
-                    return Ok(true);
-                }
-                _ => {
-                    tracing::debug!("unexpected frame type: 0x{:02x}", frame.frame_type);
-                }
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Complete the attach handshake for a Handshaking client.
-    /// Returns Ok(true) if client should be removed (handshake failed),
-    /// Ok(false) if handshake succeeded.
-    fn complete_handshake(&mut self, idx: usize, attach_frame: Frame) -> Result<bool> {
-        let req: AttachRequest = match attach_frame.as_attach_request() {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("invalid attach request: {e}");
-                self.clients[idx].queue_frame(&Frame::daemon_error(
-                    "bad_request",
-                    format!("invalid attach request: {e}"),
-                ));
-                return Ok(true); // remove this client, don't crash daemon
-            }
-        };
-
-        if req.protocol_version != PROTOCOL_VERSION {
-            tracing::warn!(
-                client_version = req.protocol_version,
-                daemon_version = PROTOCOL_VERSION,
-                "protocol version mismatch"
-            );
-            self.clients[idx].queue_frame(&Frame::daemon_error(
-                "version_mismatch",
-                format!(
-                    "protocol version mismatch: client={}, daemon={}",
-                    req.protocol_version, PROTOCOL_VERSION
-                ),
-            ));
-            return Ok(true); // remove this client, don't crash daemon
-        }
-
-        // Resize PTY to client's terminal size
-        self.pty.resize(req.rows, req.cols);
-        self.clients[idx].rows = req.rows;
-        self.clients[idx].cols = req.cols;
-        self.clients[idx].session_id = Some(req.session_id.clone());
-
-        // Send AttachAck
-        let ack = AttachAck {
-            protocol_version: PROTOCOL_VERSION,
-            session_id: self.session_id.clone(),
-            scrollback_size: self.scrollback.len(),
-        };
-        self.clients[idx].queue_frame(&Frame::attach_ack(&ack));
-
-        // Queue scrollback for replay
-        let chunks = self
-            .scrollback
-            .replay_chunks(crate::scrollback::SCROLLBACK_CHUNK_SIZE);
-        self.clients[idx].start_scrollback_replay(chunks);
-
-        // Queue ScrollbackEnd (sent after all scrollback chunks)
-        let end_info = ScrollbackEnd {
-            child_pid: self.session_info.child_pid,
-            cwd: self.session_info.cwd.clone(),
-            running: self.pty.is_running(),
-            model: self.session_info.model.clone(),
-            api_base: self.session_info.api_base.clone(),
-        };
-        self.clients[idx].queue_frame(&Frame::scrollback_end(&end_info));
-
-        // Transition to Replaying state
-        self.clients[idx].state = ClientState::Replaying;
-
-        tracing::info!(
-            idx,
-            fd = self.clients[idx].fd(),
-            scrollback_bytes = self.scrollback.len(),
-            total_clients = self.clients.len(),
-            "client attached"
-        );
-
-        Ok(false) // handshake succeeded, keep client
-    }
-    fn flush_client_writes_by_index(&mut self, idx: usize) {
-        match self.clients[idx].do_write() {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("client {} write error: {}", idx, e);
-            }
-        }
-    }
-
-    /// Read PTY output from master_fd, push to scrollback, forward to client.
-    fn process_pty_output(&mut self) -> Result<()> {
-        let master_fd = self.pty.master_fd();
-        let mut buf = [0u8; 8192];
-
-        loop {
-            match nix::unistd::read(master_fd, &mut buf) {
-                Ok(0) => {
-                    // EOF — bash exited
-                    self.bash_exited = true;
-                    break;
-                }
-                Ok(n) => {
-                    let data = &buf[..n];
-
-                    // Broadcast raw bytes to all Live clients (the outer
-                    // client needs OSC 5151 to detect session switches).
-                    for client in &mut self.clients {
-                        if client.state == ClientState::Live {
-                            for chunk in data.chunks(proto::MAX_FRAME_PAYLOAD) {
-                                let frame = Frame::pty_output(chunk);
-                                client.queue_frame(&frame);
-                            }
-                        }
-                    }
-
-                    // Store OSC-stripped bytes in scrollback so re-attach
-                    // does not replay stale session-switch commands.
-                    let clean = strip_osc_5151(data);
-                    if !clean.is_empty() {
-                        self.scrollback.push(&clean);
-                    }
-                }
-                Err(nix::errno::Errno::EAGAIN) => break,
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(nix::errno::Errno::EIO) => {
-                    // PTY slave closed
-                    self.bash_exited = true;
-                    break;
-                }
-                Err(e) => {
-                    return Err(AishError::Pty(format!("daemon read master_fd: {e}")));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Read control events from control_fd, forward to client.
-    fn process_control_events(&mut self) -> Result<()> {
-        let control_fd = self.pty.control_fd();
-        let mut buf = [0u8; 4096];
-
-        loop {
-            match nix::unistd::read(control_fd, &mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let events = decode_control_chunk(&mut self.control_buffer, &buf[..n]);
-
-                    // Update session metadata from events
-                    for evt in &events {
-                        self.update_session_meta(evt);
-                    }
-
-                    // Broadcast to all Live clients
-                    for client in &mut self.clients {
-                        if client.state == ClientState::Live {
-                            for evt in &events {
-                                let frame = Frame::control_event(evt);
-                                client.queue_frame(&frame);
-                            }
-                        }
-                    }
-                }
-                Err(nix::errno::Errno::EAGAIN) => break,
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(e) => {
-                    return Err(AishError::Pty(format!("daemon read control_fd: {e}")));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update internal session metadata based on control events.
-    fn update_session_meta(&mut self, event: &BackendControlEvent) {
-        match event {
-            BackendControlEvent::PromptReady { cwd, .. } => {
-                self.session_info.cwd = cwd.clone();
-            }
-            BackendControlEvent::SessionReady { cwd, .. } => {
-                self.session_info.cwd = cwd.clone();
-            }
-            BackendControlEvent::ShellExiting { exit_code } => {
-                self.bash_exit_code = *exit_code;
-            }
-            _ => {}
-        }
-    }
-
-    /// Accept a new connection (non-blocking). Just adds to clients list;
-    /// the Attach frame is processed in the main select loop.
-    fn accept_new_connection(&mut self) -> Result<()> {
-        const MAX_CLIENTS: usize = 8;
-
-        match self.listener.accept() {
-            Ok((stream, _addr)) => {
-                if self.clients.len() >= MAX_CLIENTS {
-                    // Too many clients, reject
-                    let _ = stream.set_nonblocking(true);
-                    let frame = Frame::daemon_error(
-                        "too_many_clients",
-                        format!("Max {} clients per session", MAX_CLIENTS),
-                    );
-                    let encoded = proto::encode_frame(&frame);
-                    let _ = (&stream).write_all(&encoded);
-                    tracing::warn!("rejected connection: too many clients");
-                    return Ok(());
-                }
-
-                let conn = ClientConnection::new(stream);
-                tracing::info!(
-                    fd = conn.fd(),
-                    total_clients = self.clients.len() + 1,
-                    "new client accepted (handshaking)"
-                );
-                self.clients.push(conn);
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                tracing::warn!("accept failed: {e}");
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Cleanup on daemon exit: remove socket file.
-    fn cleanup_on_exit(&mut self) {
-        // Notify all clients
-        for client in &mut self.clients {
-            let notice = Frame::exit_notice(self.bash_exit_code, "bash exited");
-            client.queue_frame(&notice);
-            let _ = client.do_write();
-        }
-
-        let _ = std::fs::remove_file(&self.socket_path);
-        tracing::info!("daemon cleanup complete, socket removed");
-    }
-
-    /// Get session info for persistence.
-    pub fn session_info(&self) -> &DaemonSessionInfo {
-        &self.session_info
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Select wrapper
 // ---------------------------------------------------------------------------
@@ -1035,9 +494,13 @@ fn select_multi(
     write_fds: &[RawFd],
     timeout: Option<Duration>,
 ) -> Result<SelectResult> {
+    // SAFETY: [Category 4 — Uninitialized memory] `fd_set` is a POD C struct
+    // (bitmask of fds). `zeroed()` produces a valid all-zero instance. All
+    // `FD_*` macros below operate on these initialised sets in-place.
     let mut read_set: libc::fd_set = unsafe { std::mem::zeroed() };
     let mut write_set: libc::fd_set = unsafe { std::mem::zeroed() };
 
+    // SAFETY: [Category 8 — FFI] `FD_ZERO` clears the fd_set to empty.
     unsafe {
         libc::FD_ZERO(&mut read_set);
         libc::FD_ZERO(&mut write_set);
@@ -1048,6 +511,8 @@ fn select_multi(
         if fd as usize >= libc::FD_SETSIZE {
             return Err(AishError::Pty(format!("fd {} exceeds FD_SETSIZE", fd)));
         }
+        // SAFETY: [Category 8 — FFI] `FD_SET` adds `fd` to the set. `fd` is
+        // below FD_SETSIZE (checked above) and `read_set` is initialised.
         unsafe { libc::FD_SET(fd, &mut read_set) };
         if fd > max_fd {
             max_fd = fd;
@@ -1057,6 +522,7 @@ fn select_multi(
         if fd as usize >= libc::FD_SETSIZE {
             return Err(AishError::Pty(format!("fd {} exceeds FD_SETSIZE", fd)));
         }
+        // SAFETY: [Category 8 — FFI] Same as the read_fds FD_SET above.
         unsafe { libc::FD_SET(fd, &mut write_set) };
         if fd > max_fd {
             max_fd = fd;
@@ -1080,6 +546,9 @@ fn select_multi(
         std::ptr::null()
     };
 
+    // SAFETY: [Category 8 — FFI] `select()` polls the fd_sets for readiness.
+    // `max_fd+1` is the nfds argument, `read_set`/`write_set` are initialised,
+    // `timeout_ptr` is null (infinite) or points to a valid `timeval`.
     let ret = unsafe {
         libc::select(
             max_fd + 1,
@@ -1105,44 +574,21 @@ fn select_multi(
     let mut writable = Vec::new();
 
     for &fd in read_fds {
+        // SAFETY: [Category 8 — FFI] `FD_ISSET` tests membership of `fd` in
+        // the post-select `read_set`. The set was initialised and passed to
+        // select; `fd` is below FD_SETSIZE.
         if unsafe { libc::FD_ISSET(fd, &read_set) } {
             readable.push(fd);
         }
     }
     for &fd in write_fds {
+        // SAFETY: [Category 8 — FFI] Same as the FD_ISSET above for write_set.
         if unsafe { libc::FD_ISSET(fd, &write_set) } {
             writable.push(fd);
         }
     }
 
     Ok(SelectResult { readable, writable })
-}
-
-// ---------------------------------------------------------------------------
-// Entry point: run daemon as a process
-// ---------------------------------------------------------------------------
-
-/// Run the PTY daemon process. Blocks until bash exits or kill session.
-pub fn run_pty_daemon(
-    cwd: &str,
-    rows: u16,
-    cols: u16,
-    socket_path: &Path,
-    session_id: &str,
-    model: Option<&str>,
-    api_base: Option<&str>,
-) -> Result<()> {
-    let mut daemon = PtyDaemon::start(cwd, rows, cols, socket_path, session_id, model, api_base)?;
-
-    // Write session file for discovery
-    write_session_file(&daemon.session_info());
-
-    daemon.run()?;
-
-    // Cleanup session file
-    remove_session_file(session_id);
-
-    Ok(())
 }
 
 /// Get the directory for PTY session files.
@@ -1159,6 +605,8 @@ pub fn pty_session_dir() -> Result<PathBuf> {
 pub fn pty_socket_dir() -> Result<PathBuf> {
     let dir = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
+        // SAFETY: [Category 8 — FFI] `getuid()` never fails (always returns
+        // the real UID of the calling process) and has no UB surface.
         .unwrap_or_else(|_| PathBuf::from(format!("/tmp/aish-{}", unsafe { libc::getuid() })));
     let socket_dir = dir.join("aish");
 
@@ -1166,6 +614,7 @@ pub fn pty_socket_dir() -> Result<PathBuf> {
     if !std::path::Path::new(&dir).starts_with("/run/user") {
         if let Ok(meta) = std::fs::metadata(&dir) {
             use std::os::unix::fs::MetadataExt;
+            // SAFETY: [Category 8 — FFI] `getuid()` — see above, never fails.
             let uid = unsafe { libc::getuid() };
             if meta.uid() != uid {
                 return Err(AishError::Pty(format!(
@@ -1196,6 +645,7 @@ fn write_session_file(info: &DaemonSessionInfo) {
     };
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("{}.json", info.session_id));
+    // SAFETY: [Category 8 — FFI] `getuid()` — see `pty_socket_dir` above.
     let uid = unsafe { libc::getuid() };
     let json = serde_json::json!({
         "session_uuid": info.session_id,
@@ -1236,6 +686,9 @@ fn is_pid_alive(pid: u32) -> bool {
         return false;
     }
     // kill(pid, 0) returns 0 if the process exists, -1 otherwise.
+    // SAFETY: [Category 8 — FFI] `kill(pid, 0)` sends no signal — it only
+    // checks process existence. `pid` is non-zero (guarded above). ESRCH
+    // (process gone) is reported via return value, not UB.
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
@@ -1331,9 +784,8 @@ pub fn kill_session(socket_path: &Path) -> Result<()> {
 /// inside a PTY. The daemon holds the PTY master fd, serves clients via
 /// Unix socket, and replays scrollback on reattach.
 ///
-/// Unlike `run_pty_daemon` (which uses PersistentPty + bash), this mode
-/// runs the FULL aish process inside the PTY — preserving all UI features
-/// (prompt, AI mode, slash commands, completions, status bar).
+/// This mode runs the FULL aish process inside the PTY — preserving all UI
+/// features (prompt, AI mode, slash commands, completions, status bar).
 pub fn run_pty_daemon_shell(
     cwd: &str,
     rows: u16,
@@ -1345,6 +797,10 @@ pub fn run_pty_daemon_shell(
     use nix::unistd::ForkResult;
 
     // Ignore SIGHUP so daemon survives terminal disconnects.
+    // SAFETY: [Category 4 — Uninitialized memory] [Category 8 — FFI]
+    // `sigaction` is zeroed then set to SIG_IGN. `sigaction(SIGHUP, …)`
+    // installs the ignore disposition. Runs before any threads exist (the
+    // daemon is single-threaded), so no race.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_sigaction = libc::SIG_IGN;
@@ -1354,11 +810,17 @@ pub fn run_pty_daemon_shell(
     let sigchld = SigchldPipe::install()?;
 
     // Create PTY pair
+    // SAFETY: [Category 4 — Uninitialized memory] `winsize` is a POD C struct;
+    // `zeroed()` produces a valid instance. We set `ws_row`/`ws_col` before use.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     ws.ws_row = rows;
     ws.ws_col = cols;
     let mut master_pty: libc::c_int = -1;
     let mut slave_pty: libc::c_int = -1;
+    // SAFETY: [Category 8 — FFI] `openpty()` allocates a PTY pair and writes
+    // the master/slave fds into `master_pty`/`slave_pty`. The pointers are
+    // valid (stack locals), name buffer is null (we don't need the tty name),
+    // and `&ws` points to the initialised winsize. Returns 0 on success.
     let ret = unsafe {
         libc::openpty(
             &raw mut master_pty,
@@ -1379,9 +841,21 @@ pub fn run_pty_daemon_shell(
     set_fd_cloexec(master_pty)?;
 
     // Fork
+    // SAFETY: [Category 8 — FFI] `fork()` duplicates the process. In the
+    // child, only async-signal-safe calls are used (setsid, ioctl, dup2,
+    // close, setenv, execvp) before `_exit`. The parent continues with the
+    // master fd. `nix::unistd::fork` is a thin safe wrapper that returns
+    // the `ForkResult` enum.
     match unsafe { nix::unistd::fork() } {
         Ok(ForkResult::Child) => {
             // Child: set up slave as terminal and exec aish
+            // SAFETY: [Category 8 — FFI] All calls here are async-signal-safe
+            // post-fork: `setsid()` creates a new session, `ioctl(TIOCSCTTY)`
+            // makes the slave the controlling terminal, `dup2` duplicates it
+            // onto stdin/stdout/stderr, `close` drops the originals, `setenv`
+            // sets environment variables. `slave_pty` and `master_pty` are
+            // valid fds from `openpty` above. After `execvp`, only `_exit`
+            // runs if exec failed.
             unsafe {
                 libc::setsid();
                 libc::ioctl(slave_pty, libc::TIOCSCTTY, 0);
@@ -1404,11 +878,18 @@ pub fn run_pty_daemon_shell(
                 let err = nix::unistd::execvp(&exe_cstr, &[&arg_cstr]);
                 eprintln!("exec failed: {:?}", err);
             }
+            // SAFETY: [Category 8 — FFI] `_exit(127)` terminates the child
+            // immediately after exec failure. Must not run destructors (no
+            // `std::process::exit`) because the forked address space may be
+            // in an inconsistent state.
             unsafe {
                 libc::_exit(127);
             }
         }
         Ok(ForkResult::Parent { child }) => {
+            // SAFETY: [Category 8 — FFI] `close(slave_pty)` — the parent does
+            // not need the slave end. `slave_pty` is a valid fd from openpty
+            // and is not owned by any `OwnedFd`.
             unsafe {
                 libc::close(slave_pty);
             }
@@ -1568,6 +1049,15 @@ pub fn run_pty_daemon_shell(
                                                 let data = &frame.payload;
                                                 let mut written = 0;
                                                 while written < data.len() {
+                                                    // SAFETY: [Category 8 — FFI]
+                                                    // `write(master_pty, …)` forwards
+                                                    // user input to the PTY. `master_pty`
+                                                    // is a valid open fd. The slice
+                                                    // `data[written..]` is valid (written
+                                                    // <= data.len, checked by the while
+                                                    // condition). On EAGAIN we retry
+                                                    // after a brief sleep; on real error
+                                                    // we log and drop the remaining data.
                                                     let n = unsafe {
                                                         libc::write(
                                                             master_pty,
@@ -1688,12 +1178,18 @@ pub fn run_pty_daemon_shell(
 
             let _ = std::fs::remove_file(socket_path);
             remove_session_file(session_id);
+            // SAFETY: [Category 8 — FFI] `close(master_pty)` — the daemon is
+            // exiting; `master_pty` is a valid fd from openpty not owned by
+            // any `OwnedFd`.
             unsafe {
                 libc::close(master_pty);
             }
             Ok(())
         }
         Err(e) => {
+            // SAFETY: [Category 8 — FFI] `close()` both PTY fds on fork
+            // failure. Both are valid fds from openpty, not owned by any
+            // `OwnedFd`.
             unsafe {
                 libc::close(master_pty);
                 libc::close(slave_pty);
@@ -1753,9 +1249,14 @@ fn shell_daemon_handshake(
 
 /// Helper: resize PTY via ioctl.
 fn do_resize(master_fd: RawFd, rows: u16, cols: u16) {
+    // SAFETY: [Category 4 — Uninitialized memory] `winsize` is a POD C struct;
+    // `zeroed()` produces a valid instance. We set ws_row/ws_col before use.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     ws.ws_row = rows;
     ws.ws_col = cols;
+    // SAFETY: [Category 8 — FFI] `ioctl(TIOCSWINSZ)` sets the PTY window size.
+    // `master_fd` is a valid open fd (the PTY master). `&mut ws` points to the
+    // initialised struct. A failure is non-fatal (the PTY keeps its old size).
     unsafe {
         libc::ioctl(master_fd, libc::TIOCSWINSZ, &mut ws);
     }

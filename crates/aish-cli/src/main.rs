@@ -295,7 +295,7 @@ fn main() {
         Commands::New => run_shell_new(config),
         Commands::LiveSessions => list_sessions(),
         Commands::Kill { ids } => kill_session_by_id(&ids),
-        Commands::KillAll => kill_all_sessions(),
+        Commands::KillAll => kill_session_by_id(&["all".to_string()]),
         Commands::Resume { session_id } => run_shell_resume(config, &session_id),
         Commands::Info => show_info(&config),
         Commands::Setup => {
@@ -363,8 +363,13 @@ fn load_config(config_path: Option<&str>) -> aish_config::ConfigModel {
 /// Query stdout's window size via TIOCGWINSZ; fall back to 24x80.
 fn get_terminal_size() -> (u16, u16) {
     use std::os::fd::AsRawFd;
+    // SAFETY: [Category 4 — Uninitialized memory] `winsize` is a POD C struct;
+    // `zeroed()` produces a valid instance filled by ioctl below.
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
     let fd = std::io::stdout().as_raw_fd();
+    // SAFETY: [Category 8 — FFI] `ioctl(TIOCGWINSZ)` queries the terminal
+    // size. `fd` is stdout (a valid open fd). `&mut ws` points to the
+    // initialised struct. A non-zero return means stdout is not a terminal.
     let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
     if ret == 0 && ws.ws_row > 0 && ws.ws_col > 0 {
         (ws.ws_row, ws.ws_col)
@@ -375,7 +380,7 @@ fn get_terminal_size() -> (u16, u16) {
 
 /// Spawn a detached PTY daemon process (via exec of the current binary) and
 /// return its session info. The daemon survives client disconnects and keeps
-/// the underlying bash PTY alive. Blocks up to 3 seconds waiting for the
+/// the underlying bash PTY alive. Blocks up to 8 seconds waiting for the
 /// daemon's Unix socket to accept connections.
 ///
 /// `child_pid` is left as 0 here because the real bash child pid lives inside
@@ -447,7 +452,7 @@ fn spawn_pty_daemon(
     }
 
     Err(format!(
-        "PTY daemon failed to start within 3 seconds (socket: {:?})",
+        "PTY daemon failed to start within 8 seconds (socket: {:?})",
         socket_path
     )
     .into())
@@ -526,9 +531,6 @@ fn show_session_picker(sessions: &[aish_pty::DaemonSessionInfo]) -> SessionActio
         PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
     };
 
-    let home = dirs::home_dir()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_default();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -538,19 +540,8 @@ fn show_session_picker(sessions: &[aish_pty::DaemonSessionInfo]) -> SessionActio
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
-                format!("~{}", &s.cwd[home.len()..])
-            } else {
-                s.cwd.clone()
-            };
-            let age = now.saturating_sub(s.started_at);
-            let age_str = if age < 60 {
-                format!("{}s ago", age)
-            } else if age < 3600 {
-                format!("{}min ago", age / 60)
-            } else {
-                format!("{}h ago", age / 3600)
-            };
+            let cwd_display = display_cwd(&s.cwd);
+            let age_str = format_duration(now.saturating_sub(s.started_at));
             let short_id = &s.session_id[..8.min(s.session_id.len())];
             SearchSelectItem::new(
                 format!("session:{}", i),
@@ -628,20 +619,13 @@ fn list_sessions() {
         return;
     }
     println!("Active PTY sessions:\n");
-    let home = dirs::home_dir()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_default();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     for s in &sessions {
         let short_id = &s.session_id[..8.min(s.session_id.len())];
-        let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
-            format!("~{}", &s.cwd[home.len()..])
-        } else {
-            s.cwd.clone()
-        };
+        let cwd_display = display_cwd(&s.cwd);
         let age = format_duration(now.saturating_sub(s.started_at));
         let model = s.model.as_deref().unwrap_or("");
         println!(
@@ -666,21 +650,12 @@ fn kill_session_by_id(ids: &[String]) {
         return;
     }
 
-    let home = dirs::home_dir()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_default();
-
     // No args: list sessions so the user can pick an ID.
     if ids.is_empty() {
         println!("\x1b[1mActive PTY sessions:\x1b[0m");
         for s in &sessions {
             let short = &s.session_id[..8.min(s.session_id.len())];
-            let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
-                format!("~{}", &s.cwd[home.len()..])
-            } else {
-                s.cwd.clone()
-            };
-            println!("  {} {}", short, cwd_display);
+            println!("  {} {}", short, display_cwd(&s.cwd));
         }
         println!("\n\x1b[2mUsage: aish kill <id> [id ...]  ·  aish kill all\x1b[0m");
         return;
@@ -740,26 +715,6 @@ fn kill_session_by_id(ids: &[String]) {
     }
 }
 
-fn kill_all_sessions() {
-    let sessions = aish_pty::discover_sessions();
-    if sessions.is_empty() {
-        println!("No active PTY sessions.");
-        return;
-    }
-    for s in &sessions {
-        print!(
-            "Killing {} ... ",
-            &s.session_id[..8.min(s.session_id.len())]
-        );
-        match aish_pty::kill_session(&s.socket_path) {
-            Ok(()) => println!("done"),
-            Err(e) => println!("failed: {}", e),
-        }
-    }
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    println!("\nAll sessions terminated.");
-}
-
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{}s ago", secs)
@@ -769,6 +724,18 @@ fn format_duration(secs: u64) -> String {
         format!("{}h ago", secs / 3600)
     } else {
         format!("{}d ago", secs / 86400)
+    }
+}
+
+/// Render a cwd path with the home directory abbreviated to `~`.
+fn display_cwd(cwd: &str) -> String {
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if !home.is_empty() && cwd.starts_with(&home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd.to_string()
     }
 }
 
@@ -1087,16 +1054,26 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
 
     // Save terminal state and switch to raw mode
     let stdin_fd = std::io::stdin().as_raw_fd();
+    // SAFETY: [Category 4 — Uninitialized memory] `termios` is a POD C struct;
+    // `zeroed()` produces a valid instance filled by tcgetattr below.
     let mut orig_termios: libc::termios = unsafe { std::mem::zeroed() };
+    // SAFETY: [Category 8 — FFI] `tcgetattr` reads the terminal attributes
+    // into `orig_termios`. `stdin_fd` is stdin (a valid open fd). Non-zero
+    // return means stdin is not a terminal.
     if unsafe { libc::tcgetattr(stdin_fd, &mut orig_termios) } != 0 {
         eprintln!("\x1b[31m[aish] Failed to get terminal attributes\x1b[0m");
         std::process::exit(1);
     }
     let mut raw = orig_termios;
+    // SAFETY: [Category 8 — FFI] `cfmakeraw` mutates the `termios` struct
+    // in place to set raw mode flags. `raw` is a valid initialised struct.
     unsafe { libc::cfmakeraw(&mut raw) };
     raw.c_iflag &= !libc::IXON;
     raw.c_cc[libc::VMIN] = 1;
     raw.c_cc[libc::VTIME] = 0;
+    // SAFETY: [Category 8 — FFI] `tcsetattr(TCSANOW)` applies the raw-mode
+    // attributes immediately. `stdin_fd` is stdin (valid). `&raw` points to
+    // the initialised struct.
     if unsafe { libc::tcsetattr(stdin_fd, libc::TCSANOW, &raw) } != 0 {
         eprintln!("\x1b[31m[aish] Failed to set raw mode\x1b[0m");
         std::process::exit(1);
@@ -1113,6 +1090,9 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     // buffered scrollback.
     let mut skip_osc_commands = false;
 
+    // SAFETY: [Category 8 — FFI] `write()` to stdout_fd — a single short
+    // message. `stdout_fd` is stdout (valid). The byte slice is a static
+    // literal; `.as_ptr()` is valid for its lifetime.
     unsafe {
         let msg = b"\r\n\x1b[32m[aish] Attached (Ctrl+Q to detach)\x1b[0m\r\n";
         libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
@@ -1132,6 +1112,9 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                     if !bytes.is_empty() {
                         let (clean, _cmds) = osc.process(&bytes);
                         if !clean.is_empty() {
+                            // SAFETY: [Category 8 — FFI] `write()` to stdout.
+                            // `stdout_fd` is valid; `clean` is a Vec whose
+                            // buffer is valid for the duration of the call.
                             unsafe {
                                 libc::write(stdout_fd, clean.as_ptr() as *const _, clean.len());
                             }
@@ -1152,6 +1135,8 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
 
     if initial_exit || !backend.is_running() {
         let _ = backend.detach();
+        // SAFETY: [Category 8 — FFI] `tcsetattr` restores the original
+        // terminal attributes saved at attach time. `stdin_fd` is valid.
         unsafe {
             libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
         }
@@ -1163,7 +1148,13 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     loop {
         let socket_fd = backend.readable_fds()[0];
 
+        // SAFETY: [Category 4 — Uninitialized memory] `fd_set` is a POD C
+        // struct; `zeroed()` produces a valid instance. FD_ZERO/FD_SET below
+        // populate it.
         let mut read_set: libc::fd_set = unsafe { std::mem::zeroed() };
+        // SAFETY: [Category 8 — FFI] FD_ZERO clears, FD_SET adds stdin and the
+        // socket fd. Both fds are below FD_SETSIZE (stdin=0, socket is a
+        // UnixStream fd allocated by the kernel, well within FD_SETSIZE).
         unsafe {
             libc::FD_ZERO(&mut read_set);
             libc::FD_SET(stdin_fd, &mut read_set);
@@ -1175,6 +1166,9 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
             tv_usec: 0,
         };
 
+        // SAFETY: [Category 8 — FFI] `select()` polls stdin and the socket for
+        // readability. `max_fd+1` is nfds, `read_set` is initialised, the
+        // other sets are null, `&mut tv` is a valid 1-second timeout.
         let ret = unsafe {
             libc::select(
                 max_fd + 1,
@@ -1193,7 +1187,12 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
         }
 
         // stdin → daemon
+        // SAFETY: [Category 8 — FFI] `FD_ISSET` tests if stdin is in the
+        // post-select `read_set`. `stdin_fd` and `read_set` are valid.
         if unsafe { libc::FD_ISSET(stdin_fd, &read_set) } {
+            // SAFETY: [Category 8 — FFI] `read()` from stdin into `stdin_buf`.
+            // `stdin_fd` is valid; `stdin_buf` is a 1024-byte stack array;
+            // the pointer and length are within bounds.
             let n =
                 unsafe { libc::read(stdin_fd, stdin_buf.as_mut_ptr() as *mut _, stdin_buf.len()) };
             if n > 0 {
@@ -1217,6 +1216,8 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
         }
 
         // socket → stdout (with OSC scanning)
+        // SAFETY: [Category 8 — FFI] `FD_ISSET` tests if the socket is in the
+        // post-select `read_set`. `socket_fd` and `read_set` are valid.
         if unsafe { libc::FD_ISSET(socket_fd, &read_set) } {
             match backend.drain_events() {
                 Ok(events) => {
@@ -1230,6 +1231,9 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                                 }
                                 let (clean, cmds) = osc.process(&bytes);
                                 if !clean.is_empty() {
+                                    // SAFETY: [Category 8 — FFI] `write()` to
+                                    // stdout. `stdout_fd` is valid; `clean`
+                                    // is a Vec whose buffer is valid.
                                     unsafe {
                                         libc::write(
                                             stdout_fd,
@@ -1311,6 +1315,8 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     }
 
     let _ = backend.detach();
+    // SAFETY: [Category 8 — FFI] `tcsetattr` restores the original terminal
+    // attributes saved at attach time. `stdin_fd` is valid.
     unsafe {
         libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
     }
@@ -1371,6 +1377,8 @@ fn handle_osc_action(
         };
         // Success — switch over: detach old (ignore errors), assign new
         let _ = backend.detach();
+        // SAFETY: [Category 8 — FFI] `write()` clears the terminal screen.
+        // `stdout_fd` is valid; the byte slice is a static literal (7 bytes).
         unsafe {
             libc::write(stdout_fd, b"\x1b[2J\x1b[H".as_ptr() as *const _, 7);
         }
@@ -1412,6 +1420,8 @@ fn handle_osc_action(
         };
         // Success — switch over
         let _ = backend.detach();
+        // SAFETY: [Category 8 — FFI] `write()` clears the terminal screen.
+        // `stdout_fd` is valid; the byte slice is a static literal (7 bytes).
         unsafe {
             libc::write(stdout_fd, b"\x1b[2J\x1b[H".as_ptr() as *const _, 7);
         }

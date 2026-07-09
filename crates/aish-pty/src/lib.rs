@@ -46,12 +46,12 @@ pub use control::{
 };
 pub use daemon::{
     check_daemon_alive, discover_sessions, kill_session, pty_session_dir, pty_socket_dir,
-    run_pty_daemon, run_pty_daemon_shell, DaemonSessionInfo,
+    run_pty_daemon_shell, DaemonSessionInfo,
 };
 pub use daemon_protocol::{
-    read_frame_blocking, try_decode_frame, write_frame, AttachAck, AttachRequest,
-    DaemonError as PtyDaemonError, ExitNotice, Frame, FrameDecodeError, FrameReader, ResizeRequest,
-    ScrollbackEnd, SessionInfo, MAX_FRAME_PAYLOAD, PROTOCOL_VERSION,
+    try_decode_frame, AttachAck, AttachRequest, DaemonError as PtyDaemonError, ExitNotice, Frame,
+    FrameDecodeError, FrameReader, ResizeRequest, ScrollbackEnd, SessionInfo, MAX_FRAME_PAYLOAD,
+    PROTOCOL_VERSION,
 };
 pub use executor::PtyExecutor;
 pub use offload::{

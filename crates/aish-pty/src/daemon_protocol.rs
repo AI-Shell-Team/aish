@@ -3,8 +3,6 @@
 //! Frame format: `[type:1B][length:2B LE][payload:N bytes]`
 //! Maximum payload size: 65535 bytes (u16).
 
-use std::io::{self, Read, Write};
-
 use crate::control::BackendControlEvent;
 use aish_core::AishError;
 use serde::{Deserialize, Serialize};
@@ -273,12 +271,6 @@ pub fn encode_frame(frame: &Frame) -> Vec<u8> {
     buf
 }
 
-/// Write a frame directly to a writer (e.g. UnixStream).
-pub fn write_frame<W: Write>(writer: &mut W, frame: &Frame) -> io::Result<()> {
-    let encoded = encode_frame(frame);
-    writer.write_all(&encoded)
-}
-
 /// Read one complete frame from a buffer of bytes.
 ///
 /// Returns `(frame, bytes_consumed)` if a complete frame is available,
@@ -317,7 +309,6 @@ pub fn try_decode_frame(buf: &[u8]) -> Result<Option<(Frame, usize)>, FrameDecod
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameDecodeError {
     PayloadTooLarge { claimed: usize, max: usize },
-    UnknownFrameType { frame_type: u8 },
 }
 
 impl std::fmt::Display for FrameDecodeError {
@@ -325,9 +316,6 @@ impl std::fmt::Display for FrameDecodeError {
         match self {
             Self::PayloadTooLarge { claimed, max } => {
                 write!(f, "frame payload too large: {claimed} > {max}")
-            }
-            Self::UnknownFrameType { frame_type } => {
-                write!(f, "unknown frame type: 0x{frame_type:02x}")
             }
         }
     }
@@ -371,11 +359,6 @@ impl FrameReader {
             frames.push(frame);
         }
         Ok(frames)
-    }
-
-    /// Whether the internal buffer has enough data for at least one frame header.
-    pub fn has_pending(&self) -> bool {
-        self.buf.len() >= HEADER_SIZE
     }
 }
 
@@ -447,30 +430,6 @@ impl Frame {
     pub fn is_daemon_message(&self) -> bool {
         (0x01..=0x0F).contains(&self.frame_type)
     }
-}
-
-/// Read a complete frame from a blocking reader. Useful for handshake phase.
-pub fn read_frame_blocking<R: Read>(reader: &mut R) -> io::Result<Frame> {
-    let mut header = [0u8; HEADER_SIZE];
-    reader.read_exact(&mut header)?;
-
-    let frame_type = header[0];
-    let payload_len = u16::from_le_bytes([header[1], header[2]]) as usize;
-
-    if payload_len > MAX_FRAME_PAYLOAD {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("frame payload too large: {payload_len}"),
-        ));
-    }
-
-    let mut payload = vec![0u8; payload_len];
-    reader.read_exact(&mut payload)?;
-
-    Ok(Frame {
-        frame_type,
-        payload,
-    })
 }
 
 #[cfg(test)]
@@ -642,23 +601,6 @@ mod tests {
             }
             other => panic!("expected PromptReady, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_read_frame_blocking() {
-        let f1 = Frame::pty_output(b"blocking read test");
-        let f2 = Frame::resize(30, 120);
-        let mut data = encode_frame(&f1);
-        data.extend(encode_frame(&f2));
-
-        let mut cursor = std::io::Cursor::new(data);
-        let decoded1 = read_frame_blocking(&mut cursor).unwrap();
-        assert_eq!(decoded1.payload, b"blocking read test");
-
-        let decoded2 = read_frame_blocking(&mut cursor).unwrap();
-        let resize = decoded2.as_resize_request().unwrap();
-        assert_eq!(resize.rows, 30);
-        assert_eq!(resize.cols, 120);
     }
 
     #[test]
