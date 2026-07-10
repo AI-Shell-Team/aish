@@ -2694,6 +2694,7 @@ impl AishShell {
             .enumerate()
             .map(|(i, s)| {
                 let short = &s.session_id[..8.min(s.session_id.len())];
+                let name = s.name.as_deref().unwrap_or("");
                 let is_current = current_id
                     .as_ref()
                     .map(|c| c == &s.session_id || s.session_id.starts_with(c))
@@ -2713,16 +2714,23 @@ impl AishShell {
                 } else {
                     t_with_args("shell.live_sessions.started_label", &age_args(age_str))
                 };
-                aish_ui::SearchSelectItem::new(
-                    format!("session:{}", i),
-                    format!("{} {}", short, cwd_display),
-                )
-                .with_detail(detail)
-                .with_badge(if is_current {
-                    "\u{25cf}".to_string()
+                // Label shows name (if set) or short_id, followed by cwd.
+                let label = if !name.is_empty() {
+                    format!("{} {}", name, cwd_display)
                 } else {
-                    "\u{25cb}".to_string()
-                })
+                    format!("{} {}", short, cwd_display)
+                };
+                // Search text includes name + short_id + cwd so users can
+                // search by any of them.
+                let search_text = format!("{} {} {}", name, short, cwd_display);
+                aish_ui::SearchSelectItem::new(format!("session:{}", i), label)
+                    .with_detail(detail)
+                    .with_search_text(search_text)
+                    .with_badge(if is_current {
+                        "\u{25cf}".to_string()
+                    } else {
+                        "\u{25cb}".to_string()
+                    })
             })
             .collect();
 
@@ -2801,6 +2809,7 @@ impl AishShell {
 
         let format_session_line = |s: &aish_pty::DaemonSessionInfo| {
             let short = &s.session_id[..8.min(s.session_id.len())];
+            let name = s.name.as_deref().unwrap_or("");
             let is_current = current_id
                 .as_ref()
                 .map(|c| c == &s.session_id || s.session_id.starts_with(c))
@@ -2816,7 +2825,15 @@ impl AishShell {
             } else {
                 String::new()
             };
-            format!("  {} {}  {}{}", short, cwd_display, age_str, current)
+            // Show name (if set) before short_id; otherwise just short_id.
+            if !name.is_empty() {
+                format!(
+                    "  {} ({}) {}  {}{}",
+                    name, short, cwd_display, age_str, current
+                )
+            } else {
+                format!("  {} {}  {}{}", short, cwd_display, age_str, current)
+            }
         };
 
         // No args: list sessions so the user can pick an ID.
@@ -2886,9 +2903,11 @@ impl AishShell {
         let mut killed = 0u32;
         let mut errors = 0u32;
         for id in &parts[1..] {
-            let target = sessions
-                .iter()
-                .find(|s| s.session_id == *id || s.session_id.starts_with(id));
+            let target = sessions.iter().find(|s| {
+                s.session_id == *id
+                    || s.session_id.starts_with(id)
+                    || s.name.as_deref() == Some(*id)
+            });
             match target {
                 Some(s) => {
                     let short = &s.session_id[..8.min(s.session_id.len())];

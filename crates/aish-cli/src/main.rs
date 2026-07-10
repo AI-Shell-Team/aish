@@ -86,8 +86,8 @@ enum Commands {
     /// Start a new PTY session (like `tmux new`)
     New,
 
-    /// List all active (live) PTY sessions
-    LiveSessions,
+    /// Rename a live PTY session interactively
+    RenameLiveSessions,
 
     /// Kill PTY session(s) by ID prefix. Supports multiple IDs and `all`.
     Kill {
@@ -293,7 +293,7 @@ fn main() {
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => run_shell(config),
         Commands::New => run_shell_new(config),
-        Commands::LiveSessions => list_sessions(),
+        Commands::RenameLiveSessions => rename_live_sessions(),
         Commands::Kill { ids } => kill_session_by_id(&ids),
         Commands::KillAll => kill_session_by_id(&["all".to_string()]),
         Commands::Resume { session_id } => run_shell_resume(config, &session_id),
@@ -544,17 +544,19 @@ fn show_session_picker(sessions: &[aish_pty::DaemonSessionInfo]) -> SessionActio
             let cwd_display = display_cwd(&s.cwd);
             let age_str = format_duration(now.saturating_sub(s.started_at));
             let short_id = &s.session_id[..8.min(s.session_id.len())];
-            let mut item = SearchSelectItem::new(
-                format!("session:{}", i),
-                format!("{}  {}", short_id, cwd_display),
-            )
-            .with_detail(format!("started: {}", age_str));
-            if let Some(n) = &s.name {
-                if !n.is_empty() {
-                    item = item.with_badge(n.clone());
-                }
-            }
-            item
+            let name = s.name.as_deref().unwrap_or("");
+            // Label shows name (if set) or short_id, followed by cwd.
+            let label = if !name.is_empty() {
+                format!("{}  {}", name, cwd_display)
+            } else {
+                format!("{}  {}", short_id, cwd_display)
+            };
+            // Search text includes both name and short_id so users can
+            // search by either.
+            let search_text = format!("{} {} {}", name, short_id, cwd_display);
+            SearchSelectItem::new(format!("session:{}", i), label)
+                .with_detail(format!("started: {}", age_str))
+                .with_search_text(search_text)
         })
         .collect();
 
@@ -617,10 +619,10 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
     }
 }
 
-/// List all active PTY sessions. With active sessions, opens an interactive
-/// panel: select a session to rename it (Enter), Esc to cancel. Without
-/// active sessions, prints a hint and exits.
-fn list_sessions() {
+/// Interactively rename a live PTY session. With active sessions, opens an
+/// interactive panel: select a session to rename it (Enter), Esc to cancel.
+/// Without active sessions, prints a hint and exits.
+fn rename_live_sessions() {
     let sessions = aish_pty::discover_sessions();
     if sessions.is_empty() {
         println!("No active PTY sessions.");
