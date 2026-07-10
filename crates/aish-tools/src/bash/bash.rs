@@ -284,6 +284,53 @@ impl BashTool {
         self.cancellation_token = Some(token);
     }
 
+    /// Build a sub-session bash that shares PTY/vault slots but uses `token` for cancel.
+    pub fn for_sub_session_token(&self, token: Arc<CancellationToken>) -> Self {
+        let mut bash = BashTool::new();
+        bash.set_cancellation_token(token);
+        bash.set_pty_slot(Arc::clone(&self.pty_slot));
+        bash.set_secret_vault(Arc::clone(&self.secret_vault));
+        bash
+    }
+
+    /// Test helper: shared cancel token currently wired into this tool, if any.
+    #[cfg(test)]
+    pub fn cancellation_token_for_test(&self) -> Option<Arc<CancellationToken>> {
+        self.cancellation_token.clone()
+    }
+
+    fn user_cancelled_result() -> ToolResult {
+        ToolResult {
+            ok: false,
+            output: aish_i18n::t("shell.interrupted"),
+            meta: Some(serde_json::json!({
+                "dispatch_status": "short_circuit",
+                "reason": "user_cancelled",
+            })),
+        }
+    }
+
+    /// After PTY/executor returns, map cancel-token state to a short-circuit
+    /// result. Raw-mode Ctrl+C sets `user_interrupt` on the PTY token only;
+    /// propagate that to the session token so tool loops abort.
+    fn outcome_if_cancelled(&self, cancel_token: &CancelToken) -> Option<ToolResult> {
+        if cancel_token.is_user_interrupt() {
+            if let Some(ref ct) = self.cancellation_token {
+                ct.cancel();
+            }
+            return Some(Self::user_cancelled_result());
+        }
+        if cancel_token.is_cancelled()
+            && self
+                .cancellation_token
+                .as_ref()
+                .is_some_and(|t| t.is_cancelled())
+        {
+            return Some(Self::user_cancelled_result());
+        }
+        None
+    }
+
     /// Set the shared PersistentPty slot for Ctrl+Z/bg/fg support.
     pub fn set_pty_slot(&mut self, slot: PtySlot) {
         self.pty_slot = slot;
@@ -366,6 +413,10 @@ impl BashTool {
         let result =
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
         done.store(true, Ordering::SeqCst);
+
+        if let Some(cancelled) = self.outcome_if_cancelled(&cancel_token) {
+            return cancelled;
+        }
 
         match result {
             Ok((output, exit_code, cwd)) => {
@@ -455,6 +506,10 @@ impl BashTool {
         let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result = executor.execute_blocking(command, env_vars, &cancel_token);
         done.store(true, Ordering::SeqCst);
+
+        if let Some(cancelled) = self.outcome_if_cancelled(&cancel_token) {
+            return cancelled;
+        }
 
         match result {
             Ok(result) => {
@@ -565,6 +620,15 @@ impl Tool for BashTool {
 
         result
     }
+
+    fn for_sub_session(&self, sub: &aish_llm::LlmSession) -> Option<std::sync::Arc<dyn Tool>> {
+        // Sub-agents get a dedicated bash instance bound to the child cancel token
+        // (parent→child cascade still cancels via forward_cancellation → sub token).
+        // Share PTY/vault slots so remote/secret wiring from the parent still works.
+        Some(Arc::new(
+            self.for_sub_session_token(sub.cancellation_token_arc()),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -577,6 +641,71 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn test_for_sub_session_token_binds_child_not_parent() {
+        let parent_token = Arc::new(CancellationToken::new());
+        let child_token = Arc::new(CancellationToken::new());
+        let mut parent_bash = BashTool::new();
+        parent_bash.set_cancellation_token(Arc::clone(&parent_token));
+
+        let child_bash = parent_bash.for_sub_session_token(Arc::clone(&child_token));
+        let bound = child_bash
+            .cancellation_token_for_test()
+            .expect("child bash should have a cancel token");
+        assert!(
+            Arc::ptr_eq(&bound, &child_token),
+            "sub-session bash must watch the child cancel token"
+        );
+        assert!(
+            !Arc::ptr_eq(&bound, &parent_token),
+            "sub-session bash must not keep the parent cancel token"
+        );
+    }
+
+    #[test]
+    fn test_user_interrupt_cancels_session_and_short_circuits() {
+        let session_token = Arc::new(CancellationToken::new());
+        let mut bash = BashTool::new();
+        bash.set_cancellation_token(Arc::clone(&session_token));
+
+        let pty_token = CancelToken::new();
+        pty_token.cancel_as_user_interrupt();
+
+        let result = bash
+            .outcome_if_cancelled(&pty_token)
+            .expect("user interrupt must short-circuit");
+        assert!(!result.ok);
+        assert_eq!(result.output, aish_i18n::t("shell.interrupted"));
+        assert_eq!(
+            result
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("reason"))
+                .and_then(|v| v.as_str()),
+            Some("user_cancelled")
+        );
+        assert!(
+            session_token.is_cancelled(),
+            "session token must be cancelled so tool loops abort"
+        );
+    }
+
+    #[test]
+    fn test_timeout_cancel_without_session_cancel_does_not_short_circuit() {
+        let session_token = Arc::new(CancellationToken::new());
+        let mut bash = BashTool::new();
+        bash.set_cancellation_token(Arc::clone(&session_token));
+
+        let pty_token = CancelToken::new();
+        pty_token.cancel(); // timeout / plain cancel, not Ctrl+C
+
+        assert!(bash.outcome_if_cancelled(&pty_token).is_none());
+        assert!(
+            !session_token.is_cancelled(),
+            "timeout must not cancel the LLM session"
+        );
+    }
 
     #[test]
     fn test_needs_interactive_sudo() {

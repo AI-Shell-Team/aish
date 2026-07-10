@@ -5,8 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use aish_llm::{
-    spawn_builtin, AgentDefinition, AgentRegistry, LlmSession, LoopStatus, SpawnResult, Tool,
-    ToolResult, ToolSpec,
+    spawn_builtin, AgentRegistry, LlmSession, LoopStatus, SpawnResult, Tool, ToolResult,
 };
 
 use super::prompt;
@@ -23,26 +22,15 @@ pub type SpawnFn = Arc<
         + Sync,
 >;
 
-/// Optional skill callbacks for `general-purpose` sub-agents.
-pub type SkillLookupFn = Arc<dyn Fn(&str) -> Option<crate::SkillInfo> + Send + Sync>;
-pub type SkillListFn = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
-pub type SkillCallbacks = (SkillLookupFn, SkillListFn);
-
 /// Tool that spawns built-in sub-agents (`explore`, `plan`, `general-purpose`).
 pub struct AgentTool {
     registry: AgentRegistry,
     description: String,
     spawn_fn: Option<SpawnFn>,
-    skill_callbacks: Option<SkillCallbacks>,
 }
 
 impl AgentTool {
     pub fn new() -> Self {
-        Self::with_skill_callbacks(None)
-    }
-
-    /// Create an `AgentTool` that can register inherited `skill` tools for general-purpose spawns.
-    pub fn with_skill_callbacks(skill_callbacks: Option<SkillCallbacks>) -> Self {
         let registry = AgentRegistry::builtin();
         let description = format!(
             "{}\n{}\n\nAvailable subagent types:\n{}\n\n{}\n\n{}",
@@ -56,7 +44,6 @@ impl AgentTool {
             registry,
             description,
             spawn_fn: None,
-            skill_callbacks,
         }
     }
 
@@ -90,7 +77,9 @@ impl AgentTool {
         match result.status {
             LoopStatus::Complete | LoopStatus::Incomplete => ToolResult::success(result.text),
             LoopStatus::Cancelled => {
-                Self::short_circuit_error("Sub-agent cancelled", "sub_agent_cancelled")
+                // User-facing copy matches shell Ctrl+C (`shell.interrupted`);
+                // meta.reason stays machine-readable for short-circuit handling.
+                Self::short_circuit_error(aish_i18n::t("shell.interrupted"), "sub_agent_cancelled")
             }
             LoopStatus::Fatal => Self::short_circuit_error("Sub-agent failed", "sub_agent_fatal"),
         }
@@ -104,72 +93,6 @@ impl AgentTool {
                 "dispatch_status": "short_circuit",
                 "reason": reason,
             })),
-        }
-    }
-
-    fn register_read_only_tools(sub: &mut LlmSession, specs: &[ToolSpec]) {
-        for spec in specs {
-            match spec.function.name.as_str() {
-                "grep" => sub.register_tool(Box::new(crate::GrepTool::new())),
-                "glob" => sub.register_tool(Box::new(crate::GlobTool::new())),
-                "read_file" => sub.register_tool(Box::new(crate::ReadFileTool::new())),
-                "bash" => {
-                    let mut bash = crate::bash::BashTool::new();
-                    bash.set_cancellation_token(sub.cancellation_token_arc());
-                    sub.register_tool(Box::new(bash));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn register_general_purpose_tools(
-        sub: &mut LlmSession,
-        specs: &[ToolSpec],
-        skill_callbacks: &Option<SkillCallbacks>,
-    ) {
-        for spec in specs {
-            match spec.function.name.as_str() {
-                "grep" => sub.register_tool(Box::new(crate::GrepTool::new())),
-                "glob" => sub.register_tool(Box::new(crate::GlobTool::new())),
-                "read_file" => sub.register_tool(Box::new(crate::ReadFileTool::new())),
-                "write_file" => sub.register_tool(Box::new(crate::WriteFileTool::new())),
-                "edit_file" => sub.register_tool(Box::new(crate::EditFileTool::new())),
-                "bash" => {
-                    let mut bash = crate::bash::BashTool::new();
-                    bash.set_cancellation_token(sub.cancellation_token_arc());
-                    sub.register_tool(Box::new(bash));
-                }
-                "skill" => {
-                    if let Some((lookup, list)) = skill_callbacks {
-                        sub.register_tool(Box::new(crate::SkillTool::new(
-                            Box::new({
-                                let lookup = Arc::clone(lookup);
-                                move |name| lookup(name)
-                            }),
-                            Box::new({
-                                let list = Arc::clone(list);
-                                move || list()
-                            }),
-                        )));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn register_tools_for_definition(
-        &self,
-        sub: &mut LlmSession,
-        def: &AgentDefinition,
-        specs: &[ToolSpec],
-    ) {
-        match def.subagent_type.as_str() {
-            "general-purpose" => {
-                Self::register_general_purpose_tools(sub, specs, &self.skill_callbacks)
-            }
-            _ => Self::register_read_only_tools(sub, specs),
         }
     }
 }
@@ -208,29 +131,35 @@ impl Tool for AgentTool {
                 Err(err) => return err,
             };
 
-            let def = match self.registry.resolve(subagent_type) {
-                Ok(def) => def.clone(),
-                Err(err) => return ToolResult::error(err),
-            };
+            if let Err(err) = self.registry.resolve(subagent_type) {
+                return ToolResult::error(err);
+            }
 
             if let Some(spawn_fn) = &self.spawn_fn {
                 let result = match spawn_fn(session, subagent_type, prompt).await {
                     Ok(result) => result,
                     Err(err) => return ToolResult::error(err),
                 };
+                if result.status == LoopStatus::Cancelled {
+                    session.cancellation_token().cancel();
+                }
                 return Self::spawn_result_to_tool_result(result);
             }
 
             let registry = self.registry.clone();
             let result =
-                match spawn_builtin(session, &registry, subagent_type, prompt, |sub, specs| {
-                    self.register_tools_for_definition(sub, &def, specs);
-                })
-                .await
+                match spawn_builtin(session, &registry, subagent_type, prompt, |_sub, _specs| {})
+                    .await
                 {
                     Ok(result) => result,
                     Err(err) => return ToolResult::error(err),
                 };
+
+            if result.status == LoopStatus::Cancelled {
+                // Ensure the parent session is marked cancelled so the shell
+                // prints a single `已中断` even when Ctrl+C arrived as PTY 0x03.
+                session.cancellation_token().cancel();
+            }
 
             Self::spawn_result_to_tool_result(result)
         })

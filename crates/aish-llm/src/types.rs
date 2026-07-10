@@ -590,6 +590,18 @@ pub trait Tool: Send + Sync {
         let _ = session;
         self.execute_async(args)
     }
+
+    /// Optionally adapt this tool when inheriting it into a sub-agent session.
+    ///
+    /// Return `Some` to register a sub-session-specific instance (e.g. bash rebound
+    /// to the child cancel token). Return `None` to share the parent handle as-is.
+    fn for_sub_session(
+        &self,
+        sub: &crate::session::LlmSession,
+    ) -> Option<std::sync::Arc<dyn Tool>> {
+        let _ = sub;
+        None
+    }
 }
 
 /// Token used to cancel an in-progress LLM request.

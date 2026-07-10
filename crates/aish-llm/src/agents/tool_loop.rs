@@ -208,6 +208,11 @@ pub async fn run_tool_loop_until_done(
             let tool_msg = ChatMessage::tool_result(&tc.id, result.output);
             messages.push(tool_msg.clone());
             loop_messages.push(tool_msg);
+            // User Ctrl+C during a tool cancels the session token; stop before
+            // another LLM "thinking" turn invents a timeout story.
+            if session.cancellation_token().is_cancelled() {
+                return LoopOutcome::cancelled();
+            }
         }
     }
 }
@@ -382,5 +387,72 @@ mod tests {
         .await;
 
         assert_eq!(outcome.status, LoopStatus::Cancelled);
+    }
+
+    /// Simulates Ctrl+C during a tool: the tool cancels the session token.
+    /// The loop must abort before consuming another LLM turn (no invented
+    /// "timeout" follow-up from the model).
+    struct CancelSessionTool {
+        token: std::sync::Arc<crate::CancellationToken>,
+    }
+
+    impl Tool for CancelSessionTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+
+        fn description(&self) -> &str {
+            "mock cancel"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+            self.token.cancel();
+            crate::types::ToolResult {
+                ok: false,
+                output: "已中断".into(),
+                meta: Some(serde_json::json!({
+                    "dispatch_status": "short_circuit",
+                    "reason": "user_cancelled",
+                })),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_loop_stops_after_tool_cancels_session() {
+        let mut session = test_session_with_responses(vec![
+            Ok(mock_tool_call_response(&[(
+                "c1",
+                "bash",
+                r#"{"command":"sleep 90"}"#,
+            )])),
+            // Must not be consumed — would be the "continue thinking" turn.
+            Ok(mock_text_response(
+                "sleep was interrupted by built-in timeout",
+            )),
+        ]);
+        let token = session.cancellation_token_arc();
+        session.register_tool(Box::new(CancelSessionTool { token }));
+
+        let outcome = run_tool_loop_until_done(
+            &session,
+            &ChatMessage::user("sleep 90"),
+            &[],
+            &ToolLoopConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert_eq!(outcome.status, LoopStatus::Cancelled);
+        assert!(
+            session.cancellation_token().is_cancelled(),
+            "session token must stay cancelled"
+        );
     }
 }

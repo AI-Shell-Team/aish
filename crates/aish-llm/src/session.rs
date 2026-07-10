@@ -28,7 +28,7 @@ const COMPACT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize old AI Shell context 
 pub struct LlmSession {
     stream_ctx: StreamContext,
     api_dialect: ApiDialect,
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
     cancellation_token: Arc<CancellationToken>,
     event_callback: Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>>,
     confirmation_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync>>,
@@ -125,7 +125,23 @@ impl LlmSession {
     }
 
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
+        self.register_shared_tool(Arc::from(tool));
+    }
+
+    /// Register a shared tool handle (used when inheriting parent tools into a sub-session).
+    pub fn register_shared_tool(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
+    }
+
+    /// Return shared handles for tools whose names appear in `names` (order preserved).
+    pub fn shared_tools_by_names<'a, I>(&self, names: I) -> Vec<Arc<dyn Tool>>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        names
+            .into_iter()
+            .filter_map(|name| self.tools.get(name).cloned())
+            .collect()
     }
 
     pub fn set_event_callback(
@@ -604,7 +620,15 @@ impl LlmSession {
                                 timestamp: now_timestamp(),
                                 metadata: None,
                             });
-                            let text = if self.security_notice_callback.is_some() {
+                            // Sub-agent cancel is shown by the shell as `shell.interrupted`
+                            // (same as Ctrl+C); do not return the tool string as AI body.
+                            let suppress_body = result.meta.as_ref().is_some_and(|meta| {
+                                matches!(
+                                    meta.get("reason").and_then(|v| v.as_str()),
+                                    Some("sub_agent_cancelled") | Some("user_cancelled")
+                                )
+                            });
+                            let text = if self.security_notice_callback.is_some() || suppress_body {
                                 String::new()
                             } else {
                                 output
@@ -984,7 +1008,15 @@ impl LlmSession {
                                 timestamp: now_timestamp(),
                                 metadata: None,
                             });
-                            let text = if self.security_notice_callback.is_some() {
+                            // Sub-agent cancel is shown by the shell as `shell.interrupted`
+                            // (same as Ctrl+C); do not return the tool string as AI body.
+                            let suppress_body = result.meta.as_ref().is_some_and(|meta| {
+                                matches!(
+                                    meta.get("reason").and_then(|v| v.as_str()),
+                                    Some("sub_agent_cancelled") | Some("user_cancelled")
+                                )
+                            });
+                            let text = if self.security_notice_callback.is_some() || suppress_body {
                                 String::new()
                             } else {
                                 output

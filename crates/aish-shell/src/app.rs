@@ -653,8 +653,8 @@ impl AishShell {
         )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
-        // AgentTool registration is deferred until after skill loading so general-purpose
-        // sub-agents can inherit skill callbacks when the parent session has skills.
+        // AgentTool is registered after skill loading so the parent session already
+        // has SkillTool when general-purpose / future built-ins inherit the tool pool.
 
         // System diagnose tool — needs session credentials to spawn sub-sessions.
         // The shared event callback holder allows setting the callback after
@@ -783,21 +783,12 @@ impl AishShell {
                     })
                     .collect();
             let skill_names: Vec<String> = skills_snapshot.keys().cloned().collect();
-            let agent_skills = skills_snapshot.clone();
-            let agent_skill_names = skill_names.clone();
-            let agent_lookup =
-                std::sync::Arc::new(move |name: &str| agent_skills.get(name).cloned())
-                    as std::sync::Arc<dyn Fn(&str) -> Option<aish_tools::SkillInfo> + Send + Sync>;
-            let agent_list = std::sync::Arc::new(move || agent_skill_names.clone())
-                as std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>;
-            tool_registry.register(Box::new(aish_tools::AgentTool::with_skill_callbacks(Some(
-                (agent_lookup, agent_list),
-            ))));
             let lookup = Box::new(move |name: &str| skills_snapshot.get(name).cloned());
             let list = Box::new(move || skill_names.clone());
             aish_tools::SkillTool::new(lookup, list)
         };
         tool_registry.register(Box::new(skill_tool));
+        tool_registry.register(Box::new(aish_tools::AgentTool::new()));
 
         // Create SystemDiagnoseTool with skill callbacks wired from the loaded skills
         {
@@ -1361,7 +1352,7 @@ impl AishShell {
                         sub_agent_animation_ref.stop();
                         animation_ref.stop();
                         clear_reasoning();
-                        println!("\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                        // Outer AI handlers print `shell.interrupted` once; avoid a second line.
                     }
                     LlmEventType::ToolConfirmationRequired => {
                         // Handled by separate confirmation_callback
@@ -2027,7 +2018,11 @@ impl AishShell {
 
                     match result {
                         Ok(response) => {
-                            if !did_stream && !response.trim().is_empty() {
+                            if self.ai_handler.cancellation_token().is_cancelled() {
+                                // Agent short-circuit cancel returns Ok("") — show the same
+                                // user-facing line as Err(Cancelled).
+                                println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                            } else if !did_stream && !response.trim().is_empty() {
                                 // Non-streaming fallback: print full response with formatting
                                 let mut sep_renderer = ShellRenderer::new();
                                 sep_renderer.set_shared_recorder(self.shared_recorder.clone());
@@ -2317,7 +2312,9 @@ impl AishShell {
                                 let did_stream = self.streamed_content.load(Ordering::SeqCst);
                                 match result {
                                     Ok(response) => {
-                                        if !did_stream && !response.trim().is_empty() {
+                                        if self.ai_handler.cancellation_token().is_cancelled() {
+                                            println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                                        } else if !did_stream && !response.trim().is_empty() {
                                             let mut sep_renderer = ShellRenderer::new();
                                             sep_renderer
                                                 .set_shared_recorder(self.shared_recorder.clone());
