@@ -354,6 +354,7 @@ shell:
     seconds_ago: "vor {seconds}s"
     minutes_ago: "vor {minutes}min"
     hours_ago: "vor {hours}h"
+    days_ago: "vor {days}T"
 
   ask_user:
     default_title: "Benutzereingabe erforderlich"

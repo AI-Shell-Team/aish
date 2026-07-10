@@ -43,13 +43,24 @@ impl ScrollbackBuffer {
     }
 
     /// Append raw PTY output bytes. Overwrites oldest data when full.
+    ///
+    /// Copies data in contiguous chunks (up to the wrap point, then the
+    /// remainder) rather than per-byte, to reduce overhead on the daemon's
+    /// hot PTY-output path.
     pub fn push(&mut self, data: &[u8]) {
-        for &byte in data {
-            self.buf[self.write_pos] = byte;
-            self.write_pos = (self.write_pos + 1) % self.capacity;
-            if self.len < self.capacity {
-                self.len += 1;
-            }
+        if data.is_empty() {
+            return;
+        }
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let chunk_end = self.write_pos + remaining.len().min(self.capacity);
+            let copy_len = chunk_end.min(self.capacity) - self.write_pos;
+            self.buf[self.write_pos..self.write_pos + copy_len]
+                .copy_from_slice(&remaining[..copy_len]);
+            self.write_pos = (self.write_pos + copy_len) % self.capacity;
+            let new_len = self.len.saturating_add(copy_len).min(self.capacity);
+            self.len = new_len;
+            remaining = &remaining[copy_len..];
         }
     }
 

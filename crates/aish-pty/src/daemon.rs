@@ -933,18 +933,35 @@ pub fn run_pty_daemon_shell(
             }
             let child_pid = child.as_raw() as u32;
 
-            // Bind listener
+            // Bind listener.
+            // On any error below, kill the forked child and close master_pty
+            // to avoid leaking a process and an fd.
             if let Some(parent) = socket_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::remove_file(socket_path);
-            let listener = UnixListener::bind(socket_path)
-                .map_err(|e| AishError::Pty(format!("bind socket: {e}")))?;
+            let listener = match UnixListener::bind(socket_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = nix::sys::signal::kill(child, Some(nix::sys::signal::Signal::SIGTERM));
+                    // SAFETY: [Category 8 — FFI] close master_pty — valid fd
+                    // from openpty, not owned by OwnedFd.
+                    unsafe {
+                        libc::close(master_pty);
+                    }
+                    return Err(AishError::Pty(format!("bind socket: {e}")));
+                }
+            };
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
-            listener
-                .set_nonblocking(true)
-                .map_err(|e| AishError::Pty(format!("listener nonblocking: {e}")))?;
+            if let Err(e) = listener.set_nonblocking(true) {
+                let _ = nix::sys::signal::kill(child, Some(nix::sys::signal::Signal::SIGTERM));
+                // SAFETY: [Category 8 — FFI] close master_pty — valid fd.
+                unsafe {
+                    libc::close(master_pty);
+                }
+                return Err(AishError::Pty(format!("listener nonblocking: {e}")));
+            }
 
             let session_info = DaemonSessionInfo {
                 session_id: session_id.to_string(),
@@ -1084,7 +1101,18 @@ pub fn run_pty_daemon_shell(
                                         }
                                         match frame.frame_type {
                                             TYPE_INPUT => {
-                                                // Write to PTY master, retry on EAGAIN
+                                                // Write to PTY master, retry on EAGAIN.
+                                                // NOTE: On EAGAIN we sleep 1ms and retry
+                                                // in-place. This briefly blocks the select
+                                                // loop, but user keystrokes are tiny (1-16
+                                                // bytes) and the PTY kernel buffer is
+                                                // typically 4KB+, so EAGAIN only fires on
+                                                // very large pastes — a rare case where a
+                                                // few ms of blocking is acceptable. A full
+                                                // fix would queue unwritten bytes and retry
+                                                // when select reports master_pty writable,
+                                                // but that adds significant complexity for
+                                                // a marginal edge case.
                                                 let data = &frame.payload;
                                                 let mut written = 0;
                                                 while written < data.len() {
@@ -1135,18 +1163,6 @@ pub fn run_pty_daemon_shell(
                                                 }
                                             }
                                             TYPE_DETACH => remove = true,
-                                            TYPE_KILL_SESSION => {
-                                                let _ = nix::sys::signal::kill(
-                                                    child,
-                                                    Some(nix::sys::signal::Signal::SIGTERM),
-                                                );
-                                                std::thread::sleep(Duration::from_millis(200));
-                                                let _ = nix::sys::signal::kill(
-                                                    child,
-                                                    Some(nix::sys::signal::Signal::SIGKILL),
-                                                );
-                                                child_exited = true;
-                                            }
                                             _ => {}
                                         }
                                     }

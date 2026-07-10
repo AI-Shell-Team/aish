@@ -566,6 +566,7 @@ shell:
     seconds_ago: "{seconds}s ago"
     minutes_ago: "{minutes}min ago"
     hours_ago: "{hours}h ago"
+    days_ago: "{days}d ago"
 
   panel:
     history_title: "Output History ({count} records)"

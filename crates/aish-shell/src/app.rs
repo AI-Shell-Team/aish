@@ -2699,11 +2699,7 @@ impl AishShell {
                     .as_ref()
                     .map(|c| c == &s.session_id || s.session_id.starts_with(c))
                     .unwrap_or(false);
-                let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
-                    format!("~{}", &s.cwd[home.len()..])
-                } else {
-                    s.cwd.clone()
-                };
+                let cwd_display = cwd_display(&s.cwd, &home);
                 let age_str = format_age(now.saturating_sub(s.started_at));
                 let detail = if is_current {
                     format!(
@@ -2814,11 +2810,7 @@ impl AishShell {
                 .as_ref()
                 .map(|c| c == &s.session_id || s.session_id.starts_with(c))
                 .unwrap_or(false);
-            let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
-                format!("~{}", &s.cwd[home.len()..])
-            } else {
-                s.cwd.clone()
-            };
+            let cwd_display = cwd_display(&s.cwd, &home);
             let age_str = format_age(now.saturating_sub(s.started_at));
             let current = if is_current {
                 format!("  \x1b[32m{}\x1b[0m", t("shell.live_sessions.current_tag"))
@@ -6682,6 +6674,15 @@ fn emit_osc(op: &str) {
 }
 
 /// Format a duration in seconds as a localized "N s/min/h ago" string.
+/// Render a cwd path with the home directory abbreviated to `~`.
+fn cwd_display(cwd: &str, home: &str) -> String {
+    if !home.is_empty() && cwd.starts_with(home) {
+        format!("~{}", &cwd[home.len()..])
+    } else {
+        cwd.to_string()
+    }
+}
+
 fn format_age(secs: u64) -> String {
     use aish_i18n::t_with_args;
     let mut args = std::collections::HashMap::new();
@@ -6691,9 +6692,12 @@ fn format_age(secs: u64) -> String {
     } else if secs < 3600 {
         args.insert("minutes".to_string(), (secs / 60).to_string());
         t_with_args("shell.time.minutes_ago", &args)
-    } else {
+    } else if secs < 86400 {
         args.insert("hours".to_string(), (secs / 3600).to_string());
         t_with_args("shell.time.hours_ago", &args)
+    } else {
+        args.insert("days".to_string(), (secs / 86400).to_string());
+        t_with_args("shell.time.days_ago", &args)
     }
 }
 
