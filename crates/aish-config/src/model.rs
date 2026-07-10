@@ -407,6 +407,14 @@ pub struct ConfigModel {
     /// Inline AI completion (ghost-text suggestions in AI mode).
     #[serde(default)]
     pub inline_completion: InlineCompletionConfig,
+
+    /// Enable PTY daemon session persistence (tmux-like).
+    /// When true, aish runs inside a daemon-managed PTY that survives
+    /// terminal disconnects. Sessions can be resumed with 'aish' or
+    /// listed with 'aish sessions'. Default: true.
+    /// When false, aish runs standalone (old behavior: exit = close).
+    #[serde(default = "default_true")]
+    pub pty_daemon_enabled: bool,
 }
 
 impl Default for ConfigModel {
@@ -457,6 +465,7 @@ impl Default for ConfigModel {
             history_size: default_history_size(),
             terminal_resize_mode: default_terminal_resize_mode(),
             inline_completion: InlineCompletionConfig::default(),
+            pty_daemon_enabled: default_true(),
         }
     }
 }

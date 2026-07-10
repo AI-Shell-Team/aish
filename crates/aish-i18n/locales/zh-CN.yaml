@@ -304,6 +304,16 @@ cli:
     models_auth:
       provider_example: "示例：{command}"
 
+status:
+  session: "对话"
+  live_session: "终端"
+  model: "模型"
+  host: "主机"
+  up: "运行"
+  services: "服务"
+  errors_today: "今日错误"
+  na: "无"
+
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -352,6 +362,8 @@ shell:
     doctor: "运行系统诊断"
     diagnose: "对上次失败命令进行只读诊断"
     status: "显示系统环境状态"
+    live_sessions: "列出活跃 PTY 会话"
+    kill_live_sessions: "按 ID 终止活跃 PTY 会话"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -522,6 +534,39 @@ shell:
     no_matches: "没有匹配的会话。"
     current_marker: "(当前)"
     selector_footer: "输入以搜索 · ↑/↓ 选择 · Enter 恢复 · Esc 取消"
+
+  live_sessions:
+    daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "没有活跃的 PTY 会话。"
+    panel_title: "活跃 PTY 会话"
+    search_placeholder: "搜索..."
+    panel_footer: "↑/↓ 导航 · Enter 选择 · Esc 取消"
+    create_new: "创建新会话"
+    already_current: "已在当前会话中。"
+    started_label: "启动于: {age}"
+    current_tag: "[当前]"
+
+  kill_live_sessions:
+    daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "没有活跃的 PTY 会话。"
+    list_header: "活跃 PTY 会话："
+    usage_hint: "用法: /kill_live_sessions <id> [id ...]  ·  /kill_live_sessions all"
+    no_others: "没有其他可终止的活跃会话。"
+    killing: "正在终止 {id} ..."
+    kill_done: "完成"
+    kill_failed: "失败: {error}"
+    not_found: "未找到活跃会话 '{id}'。"
+    is_current: "{id} 是当前会话 — 请使用 'exit' 退出。"
+    summary: "已终止 {killed} 个，失败 {failed} 个。"
+    all_terminated: "已终止 {count} 个活跃会话。"
+
+  time:
+    seconds_ago: "{seconds}秒前"
+    minutes_ago: "{minutes}分钟前"
+    hours_ago: "{hours}小时前"
+    days_ago: "{days}天前"
 
   panel:
     history_title: "输出历史（{count} 条记录）"

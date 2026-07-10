@@ -37,6 +37,9 @@ pub struct ChoicePanel {
     max_visible_items: usize,
     custom_input_active: bool,
     custom_input: String,
+    /// When true, an empty custom input submits as `CustomInput("")` instead of
+    /// staying in input mode. Off by default to preserve existing behaviour.
+    allow_empty_custom_input: bool,
 }
 
 impl ChoicePanel {
@@ -66,6 +69,7 @@ impl ChoicePanel {
             max_visible_items: DEFAULT_VISIBLE_ITEMS,
             custom_input_active: false,
             custom_input: String::new(),
+            allow_empty_custom_input: false,
         }
     }
 
@@ -101,6 +105,13 @@ impl ChoicePanel {
 
     pub fn with_max_visible_items(mut self, max_visible_items: usize) -> Self {
         self.max_visible_items = max_visible_items.max(1);
+        self
+    }
+
+    /// Allow an empty custom input to submit (as `CustomInput("")`).
+    /// Default is `false` — empty input stays in edit mode.
+    pub fn with_allow_empty_custom_input(mut self, allow: bool) -> Self {
+        self.allow_empty_custom_input = allow;
         self
     }
 
@@ -168,6 +179,9 @@ impl ChoicePanel {
     fn submit_custom_input(&mut self) -> PanelEvent<ChoiceOutcome> {
         let trimmed = self.custom_input.trim().to_string();
         if trimmed.is_empty() {
+            if self.allow_empty_custom_input {
+                return PanelEvent::Submit(ChoiceOutcome::CustomInput(String::new()));
+            }
             self.custom_input_active = false;
             return PanelEvent::Continue;
         }

@@ -116,6 +116,16 @@ cli:
     invalid_value_for_option: "{option} の値が無効です: {reason}"
     generic: "無効な引数です: {message}"
 
+status:
+  session: "チャット"
+  live_session: "端末"
+  model: "モデル"
+  host: "ホスト"
+  up: "稼働"
+  services: "サービス"
+  errors_today: "今日のエラー"
+  na: "なし"
+
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -153,6 +163,8 @@ shell:
     doctor: "システム診断を実行"
     diagnose: "直前の失敗コマンドを読み取り専用で診断"
     status: "システム環境の状態を表示"
+    live_sessions: "アクティブPTYセッション一覧"
+    kill_live_sessions: "IDでPTYセッション終了"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -310,6 +322,40 @@ shell:
     no_matches: "一致するセッションはありません。"
     current_marker: "(現在)"
     selector_footer: "入力して検索 · ↑/↓ で選択 · Enter で復元 · Esc でキャンセル"
+
+  live_sessions:
+    daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "アクティブなPTYセッションがありません。"
+    panel_title: "アクティブPTYセッション"
+    search_placeholder: "検索..."
+    panel_footer: "↑/↓ 移動 · Enter 選択 · Esc キャンセル"
+    create_new: "新規セッション作成"
+    already_current: "現在のセッションです。"
+    started_label: "開始: {age}"
+    current_tag: "[現在]"
+
+  kill_live_sessions:
+    daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："
+    daemon_disabled_hint: "  pty_daemon_enabled: true"
+    none_active: "アクティブなPTYセッションがありません。"
+    list_header: "アクティブPTYセッション："
+    usage_hint: "使用法: /kill_live_sessions <id> [id ...]  ·  /kill_live_sessions all"
+    no_others: "終了する他のセッションがありません。"
+    killing: "{id} を終了中 ..."
+    kill_done: "完了"
+    kill_failed: "失敗: {error}"
+    not_found: "セッション '{id}' が見つかりません。"
+    is_current: "{id} は現在のセッションです — 'exit' で終了してください。"
+    summary: "{killed} 件終了、{failed} 件失敗。"
+    all_terminated: "{count} 件のセッションを終了しました。"
+
+  time:
+    seconds_ago: "{seconds}秒前"
+    minutes_ago: "{minutes}分前"
+    hours_ago: "{hours}時間前"
+    days_ago: "{days}日前"
+
   ask_user:
     default_title: "ユーザー入力が必要です"
     default_hint: "[既定値: {value}]"
