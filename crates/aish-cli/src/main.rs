@@ -446,6 +446,7 @@ fn spawn_pty_daemon(
                 cwd: cwd.to_string(),
                 model: model.map(String::from),
                 api_base: api_base.map(String::from),
+                name: None,
             });
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -543,11 +544,17 @@ fn show_session_picker(sessions: &[aish_pty::DaemonSessionInfo]) -> SessionActio
             let cwd_display = display_cwd(&s.cwd);
             let age_str = format_duration(now.saturating_sub(s.started_at));
             let short_id = &s.session_id[..8.min(s.session_id.len())];
-            SearchSelectItem::new(
+            let mut item = SearchSelectItem::new(
                 format!("session:{}", i),
                 format!("{}  {}", short_id, cwd_display),
             )
-            .with_detail(format!("started: {}", age_str))
+            .with_detail(format!("started: {}", age_str));
+            if let Some(n) = &s.name {
+                if !n.is_empty() {
+                    item = item.with_badge(n.clone());
+                }
+            }
+            item
         })
         .collect();
 
@@ -610,7 +617,9 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
     }
 }
 
-/// List all active PTY sessions.
+/// List all active PTY sessions. With active sessions, opens an interactive
+/// panel: select a session to rename it (Enter), Esc to cancel. Without
+/// active sessions, prints a hint and exits.
 fn list_sessions() {
     let sessions = aish_pty::discover_sessions();
     if sessions.is_empty() {
@@ -618,19 +627,129 @@ fn list_sessions() {
         println!("Run 'aish' to start one.");
         return;
     }
-    println!("Active PTY sessions:\n");
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    for s in &sessions {
-        let short_id = &s.session_id[..8.min(s.session_id.len())];
+
+    // Build the session selection panel.
+    use aish_ui::{
+        ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime, SearchSelectItem,
+        SearchSelectOutcome, SearchSelectPanel,
+    };
+
+    let items: Vec<SearchSelectItem> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let cwd_display = display_cwd(&s.cwd);
+            let age_str = format_duration(now.saturating_sub(s.started_at));
+            let short_id = &s.session_id[..8.min(s.session_id.len())];
+            let mut item = SearchSelectItem::new(
+                format!("session:{}", i),
+                format!("{}  {}", short_id, cwd_display),
+            )
+            .with_detail(format!("started: {}", age_str));
+            if let Some(n) = &s.name {
+                if !n.is_empty() {
+                    item = item.with_badge(n.clone());
+                }
+            }
+            item
+        })
+        .collect();
+
+    let panel = SearchSelectPanel::new(
+        "Live PTY Sessions",
+        "Select a session to rename (Enter) · Esc to cancel",
+        items,
+    )
+    .with_footer("↑↓ navigate · Enter rename · Esc cancel");
+
+    let selected = match PanelRuntime::new().run(panel) {
+        Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => value,
+        _ => {
+            // User cancelled; fall back to printing the plain list.
+            print_session_list(&sessions, now);
+            return;
+        }
+    };
+
+    let idx = match selected.strip_prefix("session:") {
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) if n < sessions.len() => n,
+            _ => {
+                print_session_list(&sessions, now);
+                return;
+            }
+        },
+        None => {
+            print_session_list(&sessions, now);
+            return;
+        }
+    };
+
+    let session = &sessions[idx];
+    let short_id = &session.session_id[..8.min(session.session_id.len())];
+    let current = session.name.as_deref().unwrap_or("");
+
+    // Second step: enter a new name via ChoicePanel custom input.
+    let rename_panel = ChoicePanel::new(
+        format!("Rename session {}", short_id),
+        format!(
+            "Current name: {}",
+            if current.is_empty() {
+                "(none)"
+            } else {
+                current
+            }
+        ),
+        Vec::new(),
+    )
+    .with_custom_label("Enter new name (empty to clear)")
+    .with_allow_cancel(true)
+    .with_allow_empty_custom_input(true)
+    .with_footer("Type a name | Enter save | Esc cancel");
+
+    match PanelRuntime::new().run(rename_panel) {
+        Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(name))) => {
+            match aish_pty::rename_session(&session.session_id, &name) {
+                Ok(()) => {
+                    if name.trim().is_empty() {
+                        println!("Cleared name for session {}.", short_id);
+                    } else {
+                        println!("Renamed session {} → \"{}\".", short_id, name.trim());
+                    }
+                }
+                Err(e) => eprintln!("\x1b[31mFailed to rename: {}\x1b[0m", e),
+            }
+        }
+        _ => {
+            // Cancelled or selected an empty list item — just print the list.
+        }
+    }
+
+    // Re-discover so the printed list reflects the rename we just performed.
+    let refreshed = aish_pty::discover_sessions();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    print_session_list(&refreshed, now);
+}
+
+/// Print the session list in plain (non-interactive) form.
+fn print_session_list(sessions: &[aish_pty::DaemonSessionInfo], now: u64) {
+    println!("Active PTY sessions:\n");
+    for s in sessions {
         let cwd_display = display_cwd(&s.cwd);
         let age = format_duration(now.saturating_sub(s.started_at));
         let model = s.model.as_deref().unwrap_or("");
+        let label = session_label(s);
         println!(
-            "  {id}  cwd: {cwd:<20}  started: {age}{model}",
-            id = short_id,
+            "  {label}  cwd: {cwd:<20}  started: {age}{model}",
+            label = label,
             cwd = cwd_display,
             age = age,
             model = if model.is_empty() {
@@ -654,8 +773,7 @@ fn kill_session_by_id(ids: &[String]) {
     if ids.is_empty() {
         println!("\x1b[1mActive PTY sessions:\x1b[0m");
         for s in &sessions {
-            let short = &s.session_id[..8.min(s.session_id.len())];
-            println!("  {} {}", short, display_cwd(&s.cwd));
+            println!("  {} {}", session_label(s), display_cwd(&s.cwd));
         }
         println!("\n\x1b[2mUsage: aish kill <id> [id ...]  ·  aish kill all\x1b[0m");
         return;
@@ -664,8 +782,7 @@ fn kill_session_by_id(ids: &[String]) {
     // `aish kill all`
     if ids.len() == 1 && ids[0] == "all" {
         for s in &sessions {
-            let short = &s.session_id[..8.min(s.session_id.len())];
-            print!("Killing {} ... ", short);
+            print!("Killing {} ... ", session_label(s));
             match aish_pty::kill_session(&s.socket_path) {
                 Ok(()) => println!("done"),
                 Err(e) => println!("failed: {}", e),
@@ -685,8 +802,7 @@ fn kill_session_by_id(ids: &[String]) {
             .find(|s| s.session_id == *id || s.session_id.starts_with(id.as_str()));
         match target {
             Some(s) => {
-                let short = &s.session_id[..8.min(s.session_id.len())];
-                print!("Killing {} ... ", short);
+                print!("Killing {} ... ", session_label(s));
                 match aish_pty::kill_session(&s.socket_path) {
                     Ok(()) => {
                         println!("done");
@@ -736,6 +852,16 @@ fn display_cwd(cwd: &str) -> String {
         format!("~{}", &cwd[home.len()..])
     } else {
         cwd.to_string()
+    }
+}
+
+/// Render a session's primary label: its custom name if set, otherwise the
+/// 8-char short ID. Used by the attach picker, `live-sessions`, and `kill`.
+fn session_label(s: &aish_pty::DaemonSessionInfo) -> String {
+    let short_id = &s.session_id[..8.min(s.session_id.len())];
+    match &s.name {
+        Some(n) if !n.is_empty() => format!("{} ({})", n, short_id),
+        _ => short_id.to_string(),
     }
 }
 

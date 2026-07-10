@@ -46,7 +46,7 @@ pub use control::{
 };
 pub use daemon::{
     check_daemon_alive, discover_sessions, kill_session, pty_session_dir, pty_socket_dir,
-    run_pty_daemon_shell, DaemonSessionInfo,
+    rename_session, run_pty_daemon_shell, DaemonSessionInfo,
 };
 pub use daemon_protocol::{
     try_decode_frame, AttachAck, AttachRequest, DaemonError as PtyDaemonError, ExitNotice, Frame,

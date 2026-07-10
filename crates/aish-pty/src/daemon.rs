@@ -478,6 +478,8 @@ pub struct DaemonSessionInfo {
     pub cwd: String,
     pub model: Option<String>,
     pub api_base: Option<String>,
+    /// Optional user-defined name for the session.
+    pub name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +659,7 @@ fn write_session_file(info: &DaemonSessionInfo) {
         "cwd": info.cwd,
         "model": info.model,
         "api_base": info.api_base,
+        "name": info.name,
     });
     if std::fs::write(
         &path,
@@ -677,6 +680,40 @@ fn remove_session_file(session_id: &str) {
     };
     let path = dir.join(format!("{session_id}.json"));
     let _ = std::fs::remove_file(&path);
+}
+
+/// Set or clear the user-defined name of a live session.
+///
+/// `name` is an empty string to clear the name, or a non-empty string to set
+/// it. The name is persisted into the session JSON file so it survives
+/// `aish` restarts and is shown by `live-sessions`, the attach picker, and
+/// `kill`.
+///
+/// Returns `Err` if the session file cannot be found, read, or written.
+pub fn rename_session(session_id: &str, name: &str) -> Result<()> {
+    let dir = pty_session_dir()?;
+    let path = dir.join(format!("{session_id}.json"));
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| AishError::Pty(format!("read session file: {e}")))?;
+    let mut json: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| AishError::Pty(format!("parse session file: {e}")))?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        if let Some(obj) = json.as_object_mut() {
+            obj.remove("name");
+        }
+    } else if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "name".to_string(),
+            serde_json::Value::String(trimmed.to_string()),
+        );
+    }
+    let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
+    std::fs::write(&path, pretty)
+        .map_err(|e| AishError::Pty(format!("write session file: {e}")))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 /// Check if a daemon process is alive by PID (non-perturbing, does not
@@ -750,6 +787,7 @@ pub fn discover_sessions() -> Vec<DaemonSessionInfo> {
                                 .get("api_base")
                                 .and_then(|v| v.as_str())
                                 .map(String::from),
+                            name: json.get("name").and_then(|v| v.as_str()).map(String::from),
                         });
                     } else {
                         // Stale session file, clean up
@@ -920,6 +958,7 @@ pub fn run_pty_daemon_shell(
                 cwd: cwd.to_string(),
                 model: None,
                 api_base: None,
+                name: None,
             };
             write_session_file(&session_info);
             tracing::info!(session_id, child_pid, "shell daemon started");
