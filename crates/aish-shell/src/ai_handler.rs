@@ -854,6 +854,7 @@ pub struct FailureDiagnoseReport {
     pub suggested_fix: Option<String>,
     pub verify_commands: Vec<String>,
     pub risk_notes: Option<String>,
+    pub has_alternatives: bool,
     pub confidence: DiagnoseConfidence,
 }
 
@@ -924,6 +925,7 @@ pub(crate) fn parse_diagnose_report_response(response: &str) -> FailureDiagnoseP
             suggested_fix: None,
             verify_commands: vec![],
             risk_notes: None,
+            has_alternatives: false,
             confidence: DiagnoseConfidence::Low,
         },
         outcome: DiagnoseParseOutcome::ProseFallback,
@@ -937,6 +939,7 @@ fn empty_diagnose_report() -> FailureDiagnoseReport {
         suggested_fix: None,
         verify_commands: vec![],
         risk_notes: None,
+        has_alternatives: false,
         confidence: DiagnoseConfidence::Low,
     }
 }
@@ -1058,46 +1061,18 @@ pub(crate) fn is_auto_executable_suggested_fix(cmd: &str) -> bool {
     true
 }
 
-/// `risk_notes` describes another plausible fix path → do not auto-confirm execute.
-pub(crate) fn risk_notes_imply_alternate_fixes(notes: Option<&str>) -> bool {
-    let Some(notes) = notes.map(str::trim).filter(|s| !s.is_empty()) else {
-        return false;
-    };
-    let lower = notes.to_ascii_lowercase();
-    const MARKERS: &[&str] = &[
-        "也可",
-        "也可以",
-        "或者",
-        "另一",
-        "替代",
-        "不想改",
-        "alternatively",
-        "another option",
-        "or you can",
-        "instead of",
-        "if you prefer",
-        "you could also",
-    ];
-    MARKERS
-        .iter()
-        .any(|m| notes.contains(m) || lower.contains(m))
-}
-
 /// Offer confirm-execute only for a unique, pasteable suggested fix.
 pub(crate) fn should_offer_confirm_execute(
     suggested_fix: Option<&str>,
-    risk_notes: Option<&str>,
+    has_alternatives: bool,
 ) -> bool {
     let Some(fix) = suggested_fix.map(str::trim).filter(|s| !s.is_empty()) else {
         return false;
     };
-    if !is_auto_executable_suggested_fix(fix) {
+    if has_alternatives {
         return false;
     }
-    if risk_notes_imply_alternate_fixes(risk_notes) {
-        return false;
-    }
-    true
+    is_auto_executable_suggested_fix(fix)
 }
 
 fn parse_diagnose_report_json(json: &serde_json::Value) -> Option<FailureDiagnoseReport> {
@@ -1150,6 +1125,10 @@ fn parse_diagnose_report_json(json: &serde_json::Value) -> Option<FailureDiagnos
             }
         })
         .filter(|s| !s.is_empty());
+    let has_alternatives = json
+        .get("has_alternatives")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let confidence = json
         .get("confidence")
         .and_then(|v| v.as_str())
@@ -1161,6 +1140,7 @@ fn parse_diagnose_report_json(json: &serde_json::Value) -> Option<FailureDiagnos
         suggested_fix,
         verify_commands,
         risk_notes,
+        has_alternatives,
         confidence,
     })
 }
@@ -1746,21 +1726,22 @@ mod tests {
     }
 
     #[test]
-    fn test_should_offer_confirm_execute_skips_when_risk_notes_have_alternatives() {
+    fn test_should_offer_confirm_execute_skips_when_has_alternatives() {
         let fix = "sed -i \"s/#alias ll='ls -l'/alias ll='ls -l'/\" ~/.bashrc && source ~/.bashrc";
         assert!(is_auto_executable_suggested_fix(fix));
-        assert!(risk_notes_imply_alternate_fixes(Some(
-            "若不想改 .bashrc，也可在 ~/.bash_aliases 追加 alias ll='ls -l' 后 source"
-        )));
-        assert!(!should_offer_confirm_execute(
-            Some(fix),
-            Some("若不想改 .bashrc，也可在 ~/.bash_aliases 追加 alias ll='ls -l' 后 source")
-        ));
+        assert!(!should_offer_confirm_execute(Some(fix), true));
         assert!(should_offer_confirm_execute(
             Some("sudo apt install foo"),
-            Some("requires sudo privileges")
+            false
         ));
-        assert!(!should_offer_confirm_execute(None, None));
+        assert!(!should_offer_confirm_execute(None, false));
+    }
+
+    #[test]
+    fn test_parse_diagnose_report_has_alternatives() {
+        let response = r#"{"root_cause":"x","evidence":["y"],"has_alternatives":true}"#;
+        let parsed = parse_diagnose_report_response(response);
+        assert!(parsed.report.has_alternatives);
     }
 
     #[test]

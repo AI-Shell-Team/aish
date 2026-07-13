@@ -2932,10 +2932,9 @@ impl AishShell {
     fn handle_failure_diagnose_command(&mut self) {
         use crate::ai_handler::{
             effective_verify_exit_code, format_failure_diagnose_error,
-            print_failure_diagnose_report, risk_notes_imply_alternate_fixes,
-            should_offer_confirm_execute, summarize_verification_conclusion,
-            verify_outcome_from_execution, DiagnoseParseOutcome, FailureDiagnoseConclusion,
-            VerifyOutcome, VerifyStepResult,
+            print_failure_diagnose_report, should_offer_confirm_execute,
+            summarize_verification_conclusion, verify_outcome_from_execution, DiagnoseParseOutcome,
+            FailureDiagnoseConclusion, VerifyOutcome, VerifyStepResult,
         };
         use aish_i18n::{t, t_with_args};
         use aish_tools::bash::{BashTool, ReadOnlyVerdict};
@@ -3005,9 +3004,9 @@ impl AishShell {
         if let Some(ref fix_cmd) = report.suggested_fix {
             if !should_offer_confirm_execute(
                 report.suggested_fix.as_deref(),
-                report.risk_notes.as_deref(),
+                report.has_alternatives,
             ) {
-                if risk_notes_imply_alternate_fixes(report.risk_notes.as_deref()) {
+                if report.has_alternatives {
                     println!("{}", t("shell.failure_diagnose.fix_has_alternatives"));
                 } else {
                     println!("{}", t("shell.failure_diagnose.fix_not_auto_executable"));
