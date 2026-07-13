@@ -354,7 +354,6 @@ shell:
     seconds_ago: "{seconds}秒前"
     minutes_ago: "{minutes}分前"
     hours_ago: "{hours}時間前"
-    days_ago: "{days}日前"
 
   ask_user:
     default_title: "ユーザー入力が必要です"
