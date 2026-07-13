@@ -954,7 +954,9 @@ impl PersistentPty {
                             // the loop breaks.
                             let _ = self.write_master(b"\x03");
                             if let Some(ref ct) = cancel_token {
-                                ct.cancel();
+                                // Mark as user interrupt so bash can abort the
+                                // LLM session — raw-mode Ctrl+C is 0x03, not SIGINT.
+                                ct.cancel_as_user_interrupt();
                             }
                             cancelled = true;
                             break 'select_loop;

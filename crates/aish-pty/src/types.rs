@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Simple cancellation token backed by an atomic bool.
 pub struct CancelToken {
     cancelled: AtomicBool,
+    /// Set when cancellation came from a user Ctrl+C (0x03), not an external
+    /// timeout / session-cancel bridge.
+    user_interrupt: AtomicBool,
 }
 
 impl Default for CancelToken {
@@ -15,6 +18,7 @@ impl CancelToken {
     pub fn new() -> Self {
         Self {
             cancelled: AtomicBool::new(false),
+            user_interrupt: AtomicBool::new(false),
         }
     }
 
@@ -22,8 +26,18 @@ impl CancelToken {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
+    /// Cancel and mark as a user Ctrl+C interrupt.
+    pub fn cancel_as_user_interrupt(&self) {
+        self.user_interrupt.store(true, Ordering::SeqCst);
+        self.cancel();
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub fn is_user_interrupt(&self) -> bool {
+        self.user_interrupt.load(Ordering::SeqCst)
     }
 }
 
@@ -106,6 +120,24 @@ impl CommandSubmission {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cancel_as_user_interrupt_sets_both_flags() {
+        let token = CancelToken::new();
+        assert!(!token.is_cancelled());
+        assert!(!token.is_user_interrupt());
+        token.cancel_as_user_interrupt();
+        assert!(token.is_cancelled());
+        assert!(token.is_user_interrupt());
+    }
+
+    #[test]
+    fn test_plain_cancel_is_not_user_interrupt() {
+        let token = CancelToken::new();
+        token.cancel();
+        assert!(token.is_cancelled());
+        assert!(!token.is_user_interrupt());
+    }
 
     #[test]
     fn test_command_source_display() {

@@ -116,6 +116,10 @@ async fn test_agent_tool_mock_spawn_cancelled_errors() {
     let spawn_fn: SpawnFn = Arc::new(mock_spawn_cancelled);
     let tool = AgentTool::with_spawn_fn(spawn_fn);
     let session = aish_llm::LlmSession::new("http://localhost", "key", "model", None, None);
+    assert!(
+        !session.cancellation_token().is_cancelled(),
+        "precondition: parent session starts uncancelled"
+    );
     let result = tool
         .execute_async_in_session(
             serde_json::json!({
@@ -127,7 +131,7 @@ async fn test_agent_tool_mock_spawn_cancelled_errors() {
         )
         .await;
     assert!(!result.ok);
-    assert!(result.output.contains("cancelled"));
+    assert_eq!(result.output, aish_i18n::t("shell.interrupted"));
     assert_eq!(
         result
             .meta
@@ -135,6 +139,18 @@ async fn test_agent_tool_mock_spawn_cancelled_errors() {
             .and_then(|m| m.get("dispatch_status"))
             .and_then(|v| v.as_str()),
         Some("short_circuit")
+    );
+    assert_eq!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("reason"))
+            .and_then(|v| v.as_str()),
+        Some("sub_agent_cancelled")
+    );
+    assert!(
+        session.cancellation_token().is_cancelled(),
+        "Cancelled spawn must cancel the parent session so the shell prints one interrupt line"
     );
 }
 

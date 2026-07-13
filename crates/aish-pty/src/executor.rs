@@ -506,6 +506,7 @@ impl PtyExecutor {
                         let data = &tmp[..n as usize];
                         // Check for Ctrl-C (0x03).
                         if data.contains(&0x03) {
+                            cancel_token.cancel_as_user_interrupt();
                             let _ = kill_pg(child_pid, Signal::SIGINT);
                         }
                         write_buf.extend_from_slice(data);

@@ -89,14 +89,15 @@ where
 
 /// Spawn a built-in sub-agent from `parent`.
 ///
-/// `register_tools` receives the sub-session and filtered parent tool specs; it must
-/// register concrete tool implementations on the sub-session.
+/// Filtered parent tools are inherited by shared handle (`Arc`) so the sub-session
+/// tool set matches [`resolve_tools_for_agent`] — no per-type re-registration.
+/// `configure` may still adjust the sub-session (e.g. mock LLM responses in tests).
 pub async fn spawn_builtin<F>(
     parent: &LlmSession,
     registry: &AgentRegistry,
     subagent_type: &str,
     prompt: &str,
-    register_tools: F,
+    configure: F,
 ) -> Result<SpawnResult, String>
 where
     F: FnOnce(&mut LlmSession, &[ToolSpec]),
@@ -105,6 +106,8 @@ where
     let parent_tools = parent.tool_specs();
     let parent_has_skill = parent_has_skill_tool(&parent_tools);
     let allowed_specs = resolve_tools_for_agent(def, &parent_tools, parent_has_skill);
+    let inherited_tools =
+        parent.shared_tools_by_names(allowed_specs.iter().map(|spec| spec.function.name.as_str()));
     let enforce_read_only_bash = matches!(def.tool_strategy, ToolStrategy::Allowlist(_));
     let max_turns = effective_max_turns(def.max_turns);
     let spawn_id = Uuid::new_v4().to_string();
@@ -126,7 +129,13 @@ where
                 enforce_read_only_bash,
             });
             install_sub_agent_event_proxy(sub, &agent_type, &spawn_id);
-            register_tools(sub, &allowed_specs);
+            for tool in &inherited_tools {
+                let registered = tool
+                    .for_sub_session(sub)
+                    .unwrap_or_else(|| Arc::clone(tool));
+                sub.register_shared_tool(registered);
+            }
+            configure(sub, &allowed_specs);
         },
     )
     .await;
@@ -161,10 +170,13 @@ async fn forward_cancellation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{mock_text_response, mock_tool_call_response, AgentRegistry};
+    use crate::agents::{
+        mock_text_response, mock_tool_call_response, AgentDefinition, AgentRegistry, ToolStrategy,
+    };
     use crate::client::LlmResponse;
     use crate::types::Tool;
     use aish_context::ContextBudgetPolicy;
+    use aish_core::AishError;
 
     fn disable_context_budget(session: &mut LlmSession) {
         session.set_context_budget_policy(ContextBudgetPolicy {
@@ -203,11 +215,19 @@ mod tests {
         }
     }
 
-    fn register_mock_from_specs(sub: &mut LlmSession, specs: &[ToolSpec]) {
+    fn configure_spawn_test(sub: &mut LlmSession, responses: Vec<Result<LlmResponse, AishError>>) {
         disable_context_budget(sub);
-        for spec in specs {
-            sub.register_tool(Box::new(MockTool::new(&spec.function.name)));
-        }
+        sub.set_test_chat_responses(responses);
+    }
+
+    fn sub_tool_names(sub: &LlmSession) -> Vec<String> {
+        let mut names: Vec<_> = sub
+            .tool_specs()
+            .into_iter()
+            .map(|s| s.function.name)
+            .collect();
+        names.sort();
+        names
     }
 
     #[tokio::test]
@@ -219,18 +239,24 @@ mod tests {
 
         let registry = AgentRegistry::builtin();
         let result = spawn_builtin(&parent, &registry, "explore", "find nginx", |sub, specs| {
-            sub.set_test_chat_responses(vec![
-                Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
-                Ok(mock_tool_call_response(&[("c2", "read_file", "{}")])),
-                Ok(mock_text_response("nginx at /etc/nginx")),
-            ]);
+            configure_spawn_test(
+                sub,
+                vec![
+                    Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                    Ok(mock_tool_call_response(&[("c2", "read_file", "{}")])),
+                    Ok(mock_text_response("nginx at /etc/nginx")),
+                ],
+            );
             assert!(specs
                 .iter()
                 .any(|spec| spec.function.name.as_str() == "read_file"));
             assert!(!specs
                 .iter()
                 .any(|spec| spec.function.name.as_str() == "write_file"));
-            register_mock_from_specs(sub, specs);
+            let names = sub_tool_names(sub);
+            assert!(names.contains(&"grep".to_string()));
+            assert!(names.contains(&"read_file".to_string()));
+            assert!(!names.contains(&"write_file".to_string()));
         })
         .await
         .expect("spawn_builtin should succeed");
@@ -249,9 +275,8 @@ mod tests {
         let specs_before = parent.tool_specs();
 
         let registry = AgentRegistry::builtin();
-        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, specs| {
-            sub.set_test_chat_responses(vec![Ok(mock_text_response("done"))]);
-            register_mock_from_specs(sub, specs);
+        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(sub, vec![Ok(mock_text_response("done"))]);
         })
         .await
         .expect("spawn_builtin should succeed");
@@ -281,12 +306,12 @@ mod tests {
             "plan",
             "design rollout",
             |sub, specs| {
-                sub.set_test_chat_responses(vec![Ok(mock_text_response("rollout plan"))]);
+                configure_spawn_test(sub, vec![Ok(mock_text_response("rollout plan"))]);
                 let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
                 assert!(names.contains(&"grep"));
                 assert!(!names.contains(&"write_file"));
                 assert!(!names.contains(&"enter_plan_mode"));
-                register_mock_from_specs(sub, specs);
+                assert_eq!(sub_tool_names(sub), vec!["grep".to_string()]);
             },
         )
         .await
@@ -297,10 +322,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_spawn_builtin_general_purpose_excludes_agent() {
+    async fn test_spawn_builtin_general_purpose_inherits_parent_pool_minus_agent() {
         let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
         parent.register_tool(Box::new(MockTool::new("bash")));
         parent.register_tool(Box::new(MockTool::new("read_file")));
+        parent.register_tool(Box::new(MockTool::new("WebFetch")));
+        parent.register_tool(Box::new(MockTool::new("skill")));
         parent.register_tool(Box::new(MockTool::new("Agent")));
 
         let registry = AgentRegistry::builtin();
@@ -310,12 +337,22 @@ mod tests {
             "general-purpose",
             "run sub task",
             |sub, specs| {
-                sub.set_test_chat_responses(vec![Ok(mock_text_response("sub task done"))]);
+                configure_spawn_test(sub, vec![Ok(mock_text_response("sub task done"))]);
                 let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
                 assert!(names.contains(&"bash"));
                 assert!(names.contains(&"read_file"));
+                assert!(names.contains(&"WebFetch"));
+                assert!(names.contains(&"skill"));
                 assert!(!names.contains(&"Agent"));
-                register_mock_from_specs(sub, specs);
+                assert_eq!(
+                    sub_tool_names(sub),
+                    vec![
+                        "WebFetch".to_string(),
+                        "bash".to_string(),
+                        "read_file".to_string(),
+                        "skill".to_string(),
+                    ]
+                );
             },
         )
         .await
@@ -323,6 +360,105 @@ mod tests {
 
         assert_eq!(result.status, LoopStatus::Complete);
         assert_eq!(result.text, "sub task done");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_allowlist_inherits_skill_when_in_specs() {
+        // Future built-ins (e.g. troubleshoot) may allowlist skill; inheritance
+        // must not depend on the general-purpose registration branch.
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("bash")));
+        parent.register_tool(Box::new(MockTool::new("read_file")));
+        parent.register_tool(Box::new(MockTool::new("skill")));
+        parent.register_tool(Box::new(MockTool::new("write_file")));
+
+        let mut registry = AgentRegistry::builtin();
+        registry.insert_for_test(AgentDefinition {
+            subagent_type: "skill-readonly".to_string(),
+            when_to_use: "test".to_string(),
+            system_prompt: "test".to_string(),
+            max_turns: 5,
+            tool_strategy: ToolStrategy::Allowlist(vec![
+                "bash".to_string(),
+                "read_file".to_string(),
+                "skill".to_string(),
+            ]),
+        });
+
+        let result = spawn_builtin(
+            &parent,
+            &registry,
+            "skill-readonly",
+            "use skill",
+            |sub, specs| {
+                configure_spawn_test(sub, vec![Ok(mock_text_response("ok"))]);
+                let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
+                assert!(names.contains(&"skill"));
+                assert!(!names.contains(&"write_file"));
+                assert_eq!(
+                    sub_tool_names(sub),
+                    vec![
+                        "bash".to_string(),
+                        "read_file".to_string(),
+                        "skill".to_string(),
+                    ]
+                );
+            },
+        )
+        .await
+        .expect("allowlist+skill spawn should succeed");
+
+        assert_eq!(result.status, LoopStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_invokes_for_sub_session_adapter() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct AdaptingTool {
+            adapted: Arc<AtomicBool>,
+        }
+
+        impl Tool for AdaptingTool {
+            fn name(&self) -> &str {
+                "grep"
+            }
+
+            fn description(&self) -> &str {
+                "mock"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+
+            fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+                crate::types::ToolResult::success("ok")
+            }
+
+            fn for_sub_session(&self, _sub: &LlmSession) -> Option<Arc<dyn Tool>> {
+                self.adapted.store(true, Ordering::SeqCst);
+                Some(Arc::new(MockTool::new("grep")))
+            }
+        }
+
+        let adapted = Arc::new(AtomicBool::new(false));
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(AdaptingTool {
+            adapted: Arc::clone(&adapted),
+        }));
+
+        let registry = AgentRegistry::builtin();
+        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(sub, vec![Ok(mock_text_response("done"))]);
+        })
+        .await
+        .expect("spawn_builtin should succeed");
+
+        assert!(
+            adapted.load(Ordering::SeqCst),
+            "spawn_builtin must call Tool::for_sub_session when inheriting tools"
+        );
     }
 
     #[tokio::test]
@@ -630,10 +766,8 @@ mod tests {
             &registry,
             "explore",
             "deep search",
-            |sub, specs| {
-                disable_context_budget(sub);
-                sub.set_test_chat_responses(responses);
-                register_mock_from_specs(sub, specs);
+            |sub, _specs| {
+                configure_spawn_test(sub, responses);
             },
         )
         .await
@@ -661,13 +795,21 @@ mod tests {
         }));
 
         let registry = AgentRegistry::builtin();
-        let _ = spawn_builtin(&parent, &registry, "explore", "find nginx", |sub, specs| {
-            sub.set_test_chat_responses(vec![
-                Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
-                Ok(mock_text_response("done")),
-            ]);
-            register_mock_from_specs(sub, specs);
-        })
+        let _ = spawn_builtin(
+            &parent,
+            &registry,
+            "explore",
+            "find nginx",
+            |sub, _specs| {
+                configure_spawn_test(
+                    sub,
+                    vec![
+                        Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                        Ok(mock_text_response("done")),
+                    ],
+                );
+            },
+        )
         .await
         .expect("spawn_builtin should succeed");
 

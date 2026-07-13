@@ -117,6 +117,12 @@ impl AgentRegistry {
         lines.sort();
         lines.join("\n")
     }
+
+    /// Insert or replace a definition (tests / future dynamic agents).
+    #[cfg(test)]
+    pub fn insert_for_test(&mut self, def: AgentDefinition) {
+        self.agents.insert(def.subagent_type.clone(), def);
+    }
 }
 
 impl Default for AgentRegistry {
