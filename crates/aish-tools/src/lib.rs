@@ -53,13 +53,6 @@ pub mod channel_bash {
     pub use self::channel_bash::*;
 }
 
-pub mod final_answer {
-    mod final_answer;
-    mod prompt;
-
-    pub use self::final_answer::*;
-}
-
 pub mod edit_file {
     mod edit_file;
     mod prompt;
@@ -139,13 +132,6 @@ pub mod skill_tool {
     pub use self::skill_tool::*;
 }
 
-pub mod system_diagnose {
-    mod prompt;
-    mod system_diagnose;
-
-    pub use self::system_diagnose::*;
-}
-
 pub mod web_fetch {
     mod preapproved;
     mod prompt;
@@ -166,7 +152,6 @@ pub use agent_tool::{AgentTool, SpawnFn};
 pub use ask_user::AskUserTool;
 pub use channel_ask_user::ChannelAskUserTool;
 pub use channel_bash::ChannelBashTool;
-pub use final_answer::FinalAnswerTool;
 pub use fs::{EditFileTool, ReadFileTool, WriteFileTool};
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
@@ -177,6 +162,4 @@ pub use python::PythonTool;
 pub use registry::ToolRegistry;
 pub use secure_bash::SecureBashTool;
 pub use skill_tool::{SkillInfo, SkillTool};
-pub use system_diagnose::SharedEventCallback;
-pub use system_diagnose::SystemDiagnoseTool;
 pub use web_fetch::WebFetchTool;

@@ -209,4 +209,69 @@ mod tests {
             assert!(!names.contains(&"skill"));
         }
     }
+
+    #[test]
+    fn test_troubleshoot_allowlist_includes_readonly_plus_skill_excludes_write_agent() {
+        let parent = vec![
+            "grep",
+            "glob",
+            "read_file",
+            "bash",
+            "skill",
+            "write_file",
+            "edit_file",
+            "Agent",
+        ];
+        let names = resolve_tool_names_for_agent(&troubleshoot_def(), &parent, true);
+        assert_eq!(
+            names,
+            vec![
+                "grep".to_string(),
+                "glob".to_string(),
+                "read_file".to_string(),
+                "bash".to_string(),
+                "skill".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_troubleshoot_excludes_skill_when_not_in_parent_pool() {
+        let parent = vec!["grep", "bash", "read_file", "Agent"];
+        let names = resolve_tool_names_for_agent(&troubleshoot_def(), &parent, false);
+        assert!(!names.iter().any(|n| n == "skill"));
+        assert!(!names.iter().any(|n| n == "Agent"));
+    }
+
+    #[test]
+    fn test_command_diagnose_allowlist_excludes_skill_and_writes() {
+        let parent = vec![
+            "grep",
+            "glob",
+            "read_file",
+            "bash",
+            "skill",
+            "write_file",
+            "Agent",
+        ];
+        let names = resolve_tool_names_for_agent(&command_diagnose_def(), &parent, true);
+        assert_eq!(
+            names,
+            vec![
+                "grep".to_string(),
+                "glob".to_string(),
+                "read_file".to_string(),
+                "bash".to_string(),
+            ]
+        );
+        assert!(!names.iter().any(|n| n == "skill"));
+    }
+
+    fn troubleshoot_def() -> AgentDefinition {
+        AgentDefinition::troubleshoot()
+    }
+
+    fn command_diagnose_def() -> AgentDefinition {
+        AgentDefinition::command_diagnose("sys".into())
+    }
 }

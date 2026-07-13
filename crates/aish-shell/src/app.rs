@@ -110,8 +110,8 @@ fn truncate_ssh_history(h: &mut Vec<ChatMessage>) {
     }
 }
 
-/// ReAct sub-sessions (`/diagnose`, `system_diagnose_agent`) tag events with this source.
-/// Their UI should keep one thinking spinner for the whole `OpStart`..`OpEnd` window.
+/// Legacy ReAct sub-sessions tagged events with `source=react_agent`.
+/// Kept so leftover events (if any) do not break the main thinking spinner.
 fn react_agent_llm_event(event: &LlmEvent) -> bool {
     event
         .metadata
@@ -654,23 +654,7 @@ impl AishShell {
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
         // AgentTool is registered after skill loading so the parent session already
-        // has SkillTool when general-purpose / future built-ins inherit the tool pool.
-
-        // System diagnose tool — needs session credentials to spawn sub-sessions.
-        // The shared event callback holder allows setting the callback after
-        // tool registration (the event callback is created later).
-        let diagnose_event_callback: aish_tools::SharedEventCallback =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
-        // SystemDiagnoseTool registration is deferred until after skill loading
-        // so we can wire skill callbacks. Store the construction parameters.
-        let diagnose_tool_params = (
-            config.api_base.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
-            config.temperature,
-            config.max_tokens,
-            diagnose_event_callback.clone(),
-        );
+        // has SkillTool when general-purpose / troubleshoot inherit the tool pool.
 
         // Initialize shared memory manager (best-effort)
         let memory_manager: SharedMemoryManager = Arc::new(Mutex::new(
@@ -789,44 +773,6 @@ impl AishShell {
         };
         tool_registry.register(Box::new(skill_tool));
         tool_registry.register(Box::new(aish_tools::AgentTool::new()));
-
-        // Create SystemDiagnoseTool with skill callbacks wired from the loaded skills
-        {
-            let (api_base, api_key, model, temp, max_tok, ev_cb) = diagnose_tool_params;
-            let diag_tool = aish_tools::SystemDiagnoseTool::new(
-                &api_base,
-                &api_key,
-                &model,
-                Some(temp),
-                max_tok,
-                ev_cb,
-            );
-            // Build skill callbacks for the diagnose agent (separate snapshot from main SkillTool)
-            let diag_skills: std::collections::HashMap<String, aish_tools::SkillInfo> =
-                skill_manager
-                    .list_skills()
-                    .iter()
-                    .map(|s| {
-                        (
-                            s.metadata.name.clone(),
-                            aish_tools::SkillInfo {
-                                name: s.metadata.name.clone(),
-                                content: s.content.clone(),
-                                description: s.metadata.description.clone(),
-                                base_dir: s.base_dir.clone(),
-                            },
-                        )
-                    })
-                    .collect();
-            let diag_skill_names: Vec<String> = diag_skills.keys().cloned().collect();
-            let diag_lookup = std::sync::Arc::new(move |name: &str| diag_skills.get(name).cloned())
-                as std::sync::Arc<dyn Fn(&str) -> Option<aish_tools::SkillInfo> + Send + Sync>;
-            let diag_list = std::sync::Arc::new(move || diag_skill_names.clone())
-                as std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync>;
-            let callbacks: aish_tools::system_diagnose::SkillCallbacks =
-                Some((diag_lookup, diag_list));
-            tool_registry.register(Box::new(diag_tool.with_skill_callbacks(callbacks)));
-        }
 
         let tools: Vec<(String, Box<dyn aish_llm::Tool>)> = tool_registry.drain_tools();
         for (_name, tool) in tools {
@@ -1372,10 +1318,6 @@ impl AishShell {
             });
 
         llm_session.set_event_callback(event_callback.clone());
-
-        // Share the event callback with the diagnose tool so it can forward
-        // sub-session events (bash_exec, read_file, etc.) to the UI.
-        *diagnose_event_callback.lock().unwrap() = Some(event_callback);
 
         // Set up confirmation callback for tool approval flow
         let confirmation_callback: Arc<
@@ -2990,7 +2932,8 @@ impl AishShell {
     fn handle_failure_diagnose_command(&mut self) {
         use crate::ai_handler::{
             effective_verify_exit_code, format_failure_diagnose_error,
-            print_failure_diagnose_report, summarize_verification_conclusion,
+            print_failure_diagnose_report, risk_notes_imply_alternate_fixes,
+            should_offer_confirm_execute, summarize_verification_conclusion,
             verify_outcome_from_execution, DiagnoseParseOutcome, FailureDiagnoseConclusion,
             VerifyOutcome, VerifyStepResult,
         };
@@ -3060,6 +3003,19 @@ impl AishShell {
         let report = report.report;
 
         if let Some(ref fix_cmd) = report.suggested_fix {
+            if !should_offer_confirm_execute(
+                report.suggested_fix.as_deref(),
+                report.risk_notes.as_deref(),
+            ) {
+                if risk_notes_imply_alternate_fixes(report.risk_notes.as_deref()) {
+                    println!("{}", t("shell.failure_diagnose.fix_has_alternatives"));
+                } else {
+                    println!("{}", t("shell.failure_diagnose.fix_not_auto_executable"));
+                }
+                self.state.can_correct_error = false;
+                return;
+            }
+
             let prompt = format!(
                 "{}\x1b[1;36m{}\x1b[0m{}",
                 t("shell.failure_diagnose.confirm_fix_prefix"),

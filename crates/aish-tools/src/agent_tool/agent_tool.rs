@@ -182,7 +182,9 @@ mod tests {
         assert!(tool.description().contains("explore"));
         assert!(tool.description().contains("plan"));
         assert!(tool.description().contains("general-purpose"));
+        assert!(tool.description().contains("troubleshoot"));
         assert!(tool.description().contains("read-only"));
+        assert!(!tool.description().contains("command-diagnose"));
     }
 
     #[test]
@@ -208,5 +210,8 @@ mod tests {
         assert!(names.contains(&"explore"));
         assert!(names.contains(&"plan"));
         assert!(names.contains(&"general-purpose"));
+        assert!(names.contains(&"troubleshoot"));
+        assert!(!names.contains(&"command-diagnose"));
+        assert!(!names.contains(&"diagnose"));
     }
 }

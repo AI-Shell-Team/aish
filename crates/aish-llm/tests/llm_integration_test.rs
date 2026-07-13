@@ -4,13 +4,12 @@
 // 1. LlmClient construction and provider prefix stripping
 // 2. Message types handle all roles (system, user, assistant, tool)
 // 3. Provider detection from model names and API bases
-// 4. DiagnoseAgent construction and system prompt
-// 5. SubSessionConfig defaults
+// 4. SubSessionConfig defaults
 
 use aish_llm::{
     detect_provider, detect_provider_from_model, normalize_model_for_provider,
-    refine_provider_from_api_base, resolve_model_for_api, ChatMessage, DiagnoseAgent, LlmClient,
-    SubSessionConfig, DEFAULT_MAX_TOKENS,
+    refine_provider_from_api_base, resolve_model_for_api, ChatMessage, LlmClient, SubSessionConfig,
+    DEFAULT_MAX_TOKENS,
 };
 
 #[test]
@@ -191,36 +190,6 @@ fn test_combined_provider_detection() {
 
     let provider3 = detect_provider("claude-3-opus", "");
     assert_eq!(provider3.id, "anthropic");
-}
-
-#[test]
-fn test_diagnose_agent_construction() {
-    let _agent = DiagnoseAgent::new();
-
-    let config = SubSessionConfig {
-        max_iterations: 20,
-        max_context_messages: 100,
-        system_prompt: Some("Custom prompt".to_string()),
-        enforce_read_only_bash: false,
-    };
-    let _agent2 = DiagnoseAgent::with_config(config);
-}
-
-#[test]
-fn test_diagnose_system_prompt() {
-    use aish_llm::diagnose_agent::build_diagnose_prompt;
-    let prompt = build_diagnose_prompt();
-
-    assert!(prompt.contains("system diagnosis expert"));
-    assert!(prompt.contains("System Information:"));
-    assert!(prompt.contains("Hostname:"));
-    assert!(prompt.contains("User:"));
-    assert!(prompt.contains("OS:"));
-    assert!(prompt.contains("Kernel:"));
-    assert!(prompt.contains("Thought:"));
-    assert!(prompt.contains("Action:"));
-    assert!(prompt.contains("Observation:"));
-    assert!(prompt.contains("Final Answer:"));
 }
 
 #[test]

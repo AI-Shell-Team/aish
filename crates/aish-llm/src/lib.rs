@@ -13,11 +13,9 @@
     clippy::too_many_arguments
 )]
 
-pub mod agent;
 pub mod agents;
 pub mod api;
 pub mod client;
-pub mod diagnose_agent;
 pub mod langfuse;
 pub mod llm_stream;
 pub mod model_id;
@@ -35,19 +33,17 @@ pub mod tool_context;
 pub mod types;
 pub mod usage;
 
-pub use agent::{AgentConfig, AgentStep, ReActAgent};
 pub use agents::{
     effective_max_turns, parent_has_skill_tool, resolve_tool_names_for_agent,
-    resolve_tools_for_agent, run_tool_loop_until_done, spawn, spawn_builtin, AgentDefinition,
-    AgentRegistry, LoopOutcome, LoopStatus, SpawnConfig, SpawnResult, ToolLoopConfig, ToolStrategy,
-    GLOBAL_MAX_TURNS,
+    resolve_tools_for_agent, run_tool_loop_until_done, spawn, spawn_builtin, spawn_definition,
+    AgentDefinition, AgentRegistry, LoopOutcome, LoopStatus, SpawnConfig, SpawnResult,
+    ToolLoopConfig, ToolStrategy, GLOBAL_MAX_TURNS,
 };
 pub use api::{
     resolve_anthropic_messages_url, resolve_api_dialect, stream_simple,
     test_connection as test_api_connection, ApiDialect, StreamContext,
 };
 pub use client::{LlmClient, LlmResponse, DEFAULT_MAX_TOKENS};
-pub use diagnose_agent::DiagnoseAgent;
 pub use langfuse::{LangfuseClient, LangfuseConfig};
 pub use model_id::{normalize_model_for_provider, resolve_model_for_api, trim_model_name};
 pub use models::{

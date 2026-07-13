@@ -274,9 +274,9 @@ You should be concise, direct, and to the point. Response in {{output_language}}
 
 ## Task
 The previous shell command failed. You are in **read-only diagnosis mode**:
-- Use bash and read_file to gather evidence (e.g. which, journalctl, systemctl status, cat)
+- Use grep, glob, read_file, and bash to gather evidence (e.g. which, journalctl, systemctl status)
 - **Do not** write files, change configuration, install software, start/stop services, or otherwise mutate system state
-- When done, **must** call the `final_answer` tool with your diagnosis report
+- When done, stop tool use and respond with the diagnosis report JSON in your **final assistant message**
 
 ## Failure context
 - Failed command: {{failed_command}}
@@ -288,7 +288,7 @@ The previous shell command failed. You are in **read-only diagnosis mode**:
 ```
 
 ## Output format
-When calling `final_answer`, the `answer` argument must be the **only** JSON string, shaped as:
+Your final message must contain **only** a JSON object (optionally wrapped in a ```json fence), shaped as:
 
 ```json
 {
@@ -303,7 +303,10 @@ When calling `final_answer`, the `answer` argument must be the **only** JSON str
 ```
 
 - `root_cause` and `evidence` (non-empty array) are required
-- Commands in `verify_commands` must be read-only checks
+- Default `suggested_fix` to `null`. Only set it when there is **exactly one** clear, uniquely recommended fix
+- If temporary vs permanent, edit file A vs file B, multiple packages, or any other plausible alternative exists, you **must** set `suggested_fix` to `null` and describe the options in `risk_notes`. Do **not** pick a default among alternatives just to fill the field
+- When set, `suggested_fix` must be one single-line pasteable shell command (no menus, numbered lists, or prose). A short `cmd1 && cmd2` chain is allowed only for that unique fix
+- Commands in `verify_commands` must be single-line read-only checks
 - `confidence` must be one of: high / medium / low"#;
 
 const SKILL_PROMPT: &str = r#"Base directory for this skill: {{base_dir}}
