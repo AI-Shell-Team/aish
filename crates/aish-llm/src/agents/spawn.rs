@@ -87,22 +87,20 @@ where
     }
 }
 
-/// Spawn a built-in sub-agent from `parent`.
+/// Spawn a sub-agent from an [`AgentDefinition`] (built-in or shell-only).
 ///
 /// Filtered parent tools are inherited by shared handle (`Arc`) so the sub-session
 /// tool set matches [`resolve_tools_for_agent`] — no per-type re-registration.
 /// `configure` may still adjust the sub-session (e.g. mock LLM responses in tests).
-pub async fn spawn_builtin<F>(
+pub async fn spawn_definition<F>(
     parent: &LlmSession,
-    registry: &AgentRegistry,
-    subagent_type: &str,
+    def: &super::registry::AgentDefinition,
     prompt: &str,
     configure: F,
-) -> Result<SpawnResult, String>
+) -> SpawnResult
 where
     F: FnOnce(&mut LlmSession, &[ToolSpec]),
 {
-    let def = registry.resolve(subagent_type)?;
     let parent_tools = parent.tool_specs();
     let parent_has_skill = parent_has_skill_tool(&parent_tools);
     let allowed_specs = resolve_tools_for_agent(def, &parent_tools, parent_has_skill);
@@ -114,7 +112,7 @@ where
     let agent_type = def.subagent_type.clone();
     let system_prompt = def.system_prompt.clone();
 
-    let result = spawn(
+    spawn(
         parent,
         prompt,
         SpawnConfig {
@@ -138,9 +136,22 @@ where
             configure(sub, &allowed_specs);
         },
     )
-    .await;
+    .await
+}
 
-    Ok(result)
+/// Spawn a built-in sub-agent from `parent`.
+pub async fn spawn_builtin<F>(
+    parent: &LlmSession,
+    registry: &AgentRegistry,
+    subagent_type: &str,
+    prompt: &str,
+    configure: F,
+) -> Result<SpawnResult, String>
+where
+    F: FnOnce(&mut LlmSession, &[ToolSpec]),
+{
+    let def = registry.resolve(subagent_type)?;
+    Ok(spawn_definition(parent, def, prompt, configure).await)
 }
 
 fn install_sub_agent_event_proxy(sub: &mut LlmSession, agent_type: &str, spawn_id: &str) {
@@ -468,7 +479,7 @@ mod tests {
         let err = spawn_builtin(
             &parent,
             &registry,
-            "troubleshoot",
+            "not-a-real-agent",
             "task",
             |_sub, _specs| {},
         )
@@ -854,5 +865,67 @@ mod tests {
         assert!(sub_events
             .iter()
             .any(|event| event.event_type == LlmEventType::ToolExecutionStart));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_definition_command_diagnose_without_registry() {
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.register_tool(Box::new(MockTool::new("glob")));
+        parent.register_tool(Box::new(MockTool::new("read_file")));
+        parent.register_tool(Box::new(MockTool::new("bash")));
+        parent.register_tool(Box::new(MockTool::new("skill")));
+        parent.register_tool(Box::new(MockTool::new("Agent")));
+
+        let def = AgentDefinition::command_diagnose("diagnose prompt".into());
+        let result = spawn_definition(&parent, &def, "why failed", |sub, specs| {
+            configure_spawn_test(
+                sub,
+                vec![Ok(mock_text_response(
+                    r#"{"type":"diagnose_report","root_cause":"x","evidence":["e"],"suggested_fix":null,"verify_commands":[],"risk_notes":null,"confidence":"high"}"#,
+                ))],
+            );
+            let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
+            for expected in ["grep", "glob", "read_file", "bash"] {
+                assert!(names.contains(&expected), "missing {expected}");
+            }
+            assert_eq!(names.len(), 4);
+            assert!(!names.contains(&"skill"));
+            assert!(!names.contains(&"Agent"));
+        })
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Complete);
+        assert!(result.text.contains("diagnose_report"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_builtin_troubleshoot_inherits_skill() {
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.register_tool(Box::new(MockTool::new("bash")));
+        parent.register_tool(Box::new(MockTool::new("read_file")));
+        parent.register_tool(Box::new(MockTool::new("skill")));
+        parent.register_tool(Box::new(MockTool::new("write_file")));
+
+        let registry = AgentRegistry::builtin();
+        let result = spawn_builtin(
+            &parent,
+            &registry,
+            "troubleshoot",
+            "system slow",
+            |sub, specs| {
+                configure_spawn_test(sub, vec![Ok(mock_text_response("cpu contended"))]);
+                let names: Vec<_> = specs.iter().map(|s| s.function.name.as_str()).collect();
+                assert!(names.contains(&"skill"));
+                assert!(names.contains(&"bash"));
+                assert!(!names.contains(&"write_file"));
+            },
+        )
+        .await
+        .expect("troubleshoot spawn");
+
+        assert_eq!(result.status, LoopStatus::Complete);
+        assert_eq!(result.text, "cpu contended");
     }
 }

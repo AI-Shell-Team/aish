@@ -345,7 +345,7 @@ impl AiHandler {
         );
     }
 
-    /// Run read-only failure diagnosis via an isolated DiagnoseAgent sub-session.
+    /// Run read-only failure diagnosis via shell-only `command-diagnose` spawn.
     pub async fn handle_failure_diagnose(
         &mut self,
         command: &str,
@@ -353,8 +353,7 @@ impl AiHandler {
         output: &str,
         cwd: &str,
     ) -> aish_core::Result<FailureDiagnoseParseResult> {
-        use aish_llm::diagnose_agent::DiagnoseAgent;
-        use aish_llm::{SubSessionConfig, Tool};
+        use aish_llm::{spawn_definition, AgentDefinition, LoopStatus};
 
         let output_trunc = if output.len() > 4096 {
             &output[..floor_char_boundary(output, 4096)]
@@ -363,32 +362,28 @@ impl AiHandler {
         };
 
         let query = format!(
-            "Investigate why this command failed and submit a diagnose_report JSON via final_answer.\n\
+            "Investigate why this command failed and put a diagnose_report JSON in your final message.\n\
              Command: {command}\nExit code: {exit_code}\nCWD: {cwd}"
         );
 
         let system_prompt =
             self.failure_diagnose_system_prompt(command, exit_code, output_trunc, cwd);
+        let def = AgentDefinition::command_diagnose(system_prompt);
 
-        let config = SubSessionConfig {
-            max_context_messages: 30,
-            max_iterations: 10,
-            system_prompt: Some(system_prompt),
-            enforce_read_only_bash: true,
-        };
-
-        let agent = DiagnoseAgent::with_config(config);
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(aish_tools::bash::BashTool::new()),
-            Box::new(aish_tools::fs::ReadFileTool::new()),
-            Box::new(aish_tools::FinalAnswerTool::new()),
-        ];
-
-        let raw = agent.diagnose(&self.llm_session, &query, tools).await?;
+        let result = spawn_definition(&self.llm_session, &def, &query, |_sub, _specs| {}).await;
 
         self.persist_token_usage();
 
-        Ok(parse_diagnose_report_response(&raw))
+        match result.status {
+            LoopStatus::Cancelled => Err(aish_core::AishError::Cancelled),
+            LoopStatus::Fatal => Err(aish_core::AishError::Llm(format!(
+                "command-diagnose failed: {}",
+                result.text
+            ))),
+            LoopStatus::Complete | LoopStatus::Incomplete => {
+                Ok(parse_diagnose_report_response(&result.text))
+            }
+        }
     }
 
     fn failure_diagnose_system_prompt(
@@ -1020,6 +1015,91 @@ pub(crate) fn extract_json_object_from_text(text: &str) -> Option<serde_json::Va
     None
 }
 
+/// Whether `suggested_fix` is safe to offer as confirm-and-execute.
+///
+/// Must be a single pasteable shell command. Multi-option menus and instructional
+/// prose are rejected so Workflow never feeds them to `execute_external_command`.
+pub(crate) fn is_auto_executable_suggested_fix(cmd: &str) -> bool {
+    static NUMBERED_ITEM: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"(^|[\s；;。])\d+[\.\)、]\s").expect("numbered-item regex")
+    });
+
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    if cmd.contains('\n') || cmd.contains('\r') {
+        return false;
+    }
+    if NUMBERED_ITEM.is_match(cmd) {
+        return false;
+    }
+
+    let lower = cmd.to_ascii_lowercase();
+    const PROSE_MARKERS: &[&str] = &[
+        "执行以下",
+        "以下命令之一",
+        "one of the following",
+        "choose one of",
+        "或者：",
+        "或：",
+    ];
+    if PROSE_MARKERS
+        .iter()
+        .any(|m| cmd.contains(m) || lower.contains(m))
+    {
+        return false;
+    }
+    if (cmd.contains("临时") && cmd.contains("永久"))
+        || (lower.contains("temporary") && lower.contains("permanent"))
+    {
+        return false;
+    }
+    true
+}
+
+/// `risk_notes` describes another plausible fix path → do not auto-confirm execute.
+pub(crate) fn risk_notes_imply_alternate_fixes(notes: Option<&str>) -> bool {
+    let Some(notes) = notes.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = notes.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "也可",
+        "也可以",
+        "或者",
+        "另一",
+        "替代",
+        "不想改",
+        "alternatively",
+        "another option",
+        "or you can",
+        "instead of",
+        "if you prefer",
+        "you could also",
+    ];
+    MARKERS
+        .iter()
+        .any(|m| notes.contains(m) || lower.contains(m))
+}
+
+/// Offer confirm-execute only for a unique, pasteable suggested fix.
+pub(crate) fn should_offer_confirm_execute(
+    suggested_fix: Option<&str>,
+    risk_notes: Option<&str>,
+) -> bool {
+    let Some(fix) = suggested_fix.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    if !is_auto_executable_suggested_fix(fix) {
+        return false;
+    }
+    if risk_notes_imply_alternate_fixes(risk_notes) {
+        return false;
+    }
+    true
+}
+
 fn parse_diagnose_report_json(json: &serde_json::Value) -> Option<FailureDiagnoseReport> {
     if !is_diagnose_report_candidate(json) {
         return None;
@@ -1188,7 +1268,6 @@ pub(crate) fn print_failure_diagnose_report(result: &FailureDiagnoseParseResult)
     if let Some(ref notes) = report.risk_notes {
         println!("{} {}", t("shell.failure_diagnose.risk_notes"), notes);
     }
-    println!("{}", t("shell.failure_diagnose.readonly_footer"));
 }
 
 /// Format a model/API error from failure diagnosis for display.
@@ -1637,6 +1716,51 @@ mod tests {
         let parsed = parse_diagnose_report_response(response);
         assert_eq!(parsed.outcome, DiagnoseParseOutcome::ProseFallback);
         assert_eq!(parsed.report.root_cause, response);
+    }
+
+    #[test]
+    fn test_is_auto_executable_suggested_fix_accepts_single_command() {
+        assert!(is_auto_executable_suggested_fix("sudo apt install foo"));
+        assert!(is_auto_executable_suggested_fix(
+            "sed -i \"s/#alias ll=/alias ll=/\" ~/.bashrc && source ~/.bashrc"
+        ));
+        assert!(is_auto_executable_suggested_fix("alias ll='ls -l'"));
+    }
+
+    #[test]
+    fn test_is_auto_executable_suggested_fix_rejects_menus_and_prose() {
+        assert!(!is_auto_executable_suggested_fix(""));
+        assert!(!is_auto_executable_suggested_fix("line1\nline2"));
+        assert!(!is_auto_executable_suggested_fix(
+            "执行以下命令之一：1. 临时启用 alias ll='ls -l' 2. 永久取消注释 ~/.bashrc"
+        ));
+        assert!(!is_auto_executable_suggested_fix(
+            "1. 临时: alias ll='ls -l'；2. 永久: edit bashrc"
+        ));
+        assert!(!is_auto_executable_suggested_fix(
+            "Choose one of: apt install foo or yum install foo"
+        ));
+        assert!(!is_auto_executable_suggested_fix(
+            "Temporary: alias ll='ls -l'; permanent: uncomment in bashrc"
+        ));
+    }
+
+    #[test]
+    fn test_should_offer_confirm_execute_skips_when_risk_notes_have_alternatives() {
+        let fix = "sed -i \"s/#alias ll='ls -l'/alias ll='ls -l'/\" ~/.bashrc && source ~/.bashrc";
+        assert!(is_auto_executable_suggested_fix(fix));
+        assert!(risk_notes_imply_alternate_fixes(Some(
+            "若不想改 .bashrc，也可在 ~/.bash_aliases 追加 alias ll='ls -l' 后 source"
+        )));
+        assert!(!should_offer_confirm_execute(
+            Some(fix),
+            Some("若不想改 .bashrc，也可在 ~/.bash_aliases 追加 alias ll='ls -l' 后 source")
+        ));
+        assert!(should_offer_confirm_execute(
+            Some("sudo apt install foo"),
+            Some("requires sudo privileges")
+        ));
+        assert!(!should_offer_confirm_execute(None, None));
     }
 
     #[test]

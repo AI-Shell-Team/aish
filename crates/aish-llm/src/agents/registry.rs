@@ -4,9 +4,11 @@ use std::collections::HashMap;
 
 use super::builtin_prompts::{
     EXPLORE_SYSTEM_PROMPT, GENERAL_PURPOSE_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT,
+    TROUBLESHOOT_SYSTEM_PROMPT,
 };
 
-/// Read-only tool allowlist shared by `explore` and `plan` built-ins.
+/// Read-only tool allowlist shared by explore/plan/troubleshoot/command-diagnose
+/// (troubleshoot additionally allowlists `skill`).
 pub const READ_ONLY_ALLOWLIST: &[&str] = &["grep", "glob", "read_file", "bash"];
 
 /// Tool filtering strategy for a built-in sub-agent.
@@ -40,7 +42,8 @@ impl AgentDefinition {
         Self {
             subagent_type: "explore".to_string(),
             when_to_use: "Read-only investigation across logs, configs, services, or paths. \
-Use for open-ended search; specify thoroughness in the Agent prompt: quick, medium, or thorough."
+Use for open-ended search; specify thoroughness in the Agent prompt: quick, medium, or thorough. \
+For open-ended host/system health diagnosis prefer troubleshoot."
                 .to_string(),
             system_prompt: EXPLORE_SYSTEM_PROMPT.to_string(),
             max_turns: 15,
@@ -72,6 +75,33 @@ without nested Agent delegation — not for broad read-only exploration (use exp
             tool_strategy: ToolStrategy::Denylist(vec!["Agent".to_string()]),
         }
     }
+
+    /// Open-ended read-only system ops investigation (LLM-visible built-in).
+    pub fn troubleshoot() -> Self {
+        let mut allowlist = read_only_allowlist();
+        allowlist.push("skill".to_string());
+        Self {
+            subagent_type: "troubleshoot".to_string(),
+            when_to_use: "Read-only deep diagnosis of open-ended system, service, network, \
+filesystem, or performance issues. Prefer this over ad-hoc bash when investigation needs \
+multiple probes; do not use for last-failed-command slash /diagnose."
+                .to_string(),
+            system_prompt: TROUBLESHOOT_SYSTEM_PROMPT.to_string(),
+            max_turns: 15,
+            tool_strategy: ToolStrategy::Allowlist(allowlist),
+        }
+    }
+
+    /// Shell-only definition for `/diagnose` (never registered on `AgentRegistry`).
+    pub fn command_diagnose(system_prompt: String) -> Self {
+        Self {
+            subagent_type: "command-diagnose".to_string(),
+            when_to_use: String::new(),
+            system_prompt,
+            max_turns: 10,
+            tool_strategy: ToolStrategy::Allowlist(read_only_allowlist()),
+        }
+    }
 }
 
 /// Registry of built-in sub-agent types available via the `Agent` tool.
@@ -81,13 +111,14 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
-    /// Phase 1 built-ins: `explore`, `plan`, and `general-purpose`.
+    /// LLM-visible built-ins for the `Agent` tool.
     pub fn builtin() -> Self {
         let mut agents = HashMap::new();
         for def in [
             AgentDefinition::explore(),
             AgentDefinition::plan(),
             AgentDefinition::general_purpose(),
+            AgentDefinition::troubleshoot(),
         ] {
             agents.insert(def.subagent_type.clone(), def);
         }
@@ -179,9 +210,45 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_troubleshoot_succeeds() {
+        let registry = AgentRegistry::builtin();
+        let def = registry
+            .resolve("troubleshoot")
+            .expect("troubleshoot should exist");
+        assert_eq!(def.subagent_type, "troubleshoot");
+        assert_eq!(def.max_turns, 15);
+        assert!(matches!(def.tool_strategy, ToolStrategy::Allowlist(_)));
+        assert!(def.system_prompt.contains("READ-ONLY"));
+    }
+
+    #[test]
+    fn test_command_diagnose_is_not_in_registry() {
+        let registry = AgentRegistry::builtin();
+        let err = registry.resolve("command-diagnose").unwrap_err();
+        assert!(err.contains("Unknown subagent_type"));
+        let types = registry.subagent_types();
+        assert!(!types.iter().any(|t| t == "command-diagnose"));
+        assert!(!types.iter().any(|t| t == "diagnose"));
+    }
+
+    #[test]
+    fn test_command_diagnose_definition_max_turns_and_allowlist() {
+        let def = AgentDefinition::command_diagnose("prompt".into());
+        assert_eq!(def.subagent_type, "command-diagnose");
+        assert_eq!(def.max_turns, 10);
+        match &def.tool_strategy {
+            ToolStrategy::Allowlist(names) => {
+                assert_eq!(*names, read_only_allowlist());
+                assert!(!names.iter().any(|n| n == "skill"));
+            }
+            ToolStrategy::Denylist(_) => panic!("expected allowlist"),
+        }
+    }
+
+    #[test]
     fn test_resolve_unknown_type_errors() {
         let registry = AgentRegistry::builtin();
-        let err = registry.resolve("troubleshoot").unwrap_err();
+        let err = registry.resolve("not-a-real-agent").unwrap_err();
         assert!(err.contains("Unknown subagent_type"));
     }
 
@@ -192,7 +259,9 @@ mod tests {
         assert!(desc.contains("`explore`"));
         assert!(desc.contains("`plan`"));
         assert!(desc.contains("`general-purpose`"));
+        assert!(desc.contains("`troubleshoot`"));
         assert!(desc.contains("read-only"));
+        assert!(!desc.contains("`command-diagnose`"));
     }
 
     #[test]
@@ -204,6 +273,7 @@ mod tests {
                 "explore".to_string(),
                 "general-purpose".to_string(),
                 "plan".to_string(),
+                "troubleshoot".to_string(),
             ]
         );
     }

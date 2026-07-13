@@ -11,11 +11,13 @@ pub const ROUTING_SECTION: &str = "\
 |-------------|------|
 | Plan/runbook/advice only, no files, no approval flow | Agent(subagent_type=plan) |
 | Multi-step work needing an approvable plan file (`.aish/plans/`) before execution | enter_plan_mode |
-| Open-ended read-only search / facts across paths | Agent(subagent_type=explore) |
+| Open-ended read-only search / facts across paths or code | Agent(subagent_type=explore) |
+| Open-ended system/service/network/performance diagnosis | Agent(subagent_type=troubleshoot) |
 | Focused sub-task needing parent tools (including writes) | Agent(subagent_type=general-purpose) |
 
 Do NOT use enter_plan_mode when the user only wants a textual plan or runbook.
-Do NOT use Agent(plan) when the user explicitly wants a saved plan artifact reviewed in plan mode.";
+Do NOT use Agent(plan) when the user explicitly wants a saved plan artifact reviewed in plan mode.
+Do NOT use Agent(explore) for host/system diagnosis — prefer Agent(troubleshoot).";
 
 pub const WHEN_NOT_SECTION: &str = "\
 ## When NOT to use the Agent tool
@@ -26,7 +28,8 @@ pub const WHEN_NOT_SECTION: &str = "\
 - Tasks unrelated to the built-in subagent descriptions above
 
 Prefer Agent(subagent_type=explore) over many grep/glob/read_file rounds in this session when \
-investigation is open-ended or spans many paths.";
+investigation is open-ended path/code search. Prefer Agent(subagent_type=troubleshoot) when \
+the user asks why the system, a service, network, disk, or performance is unhealthy.";
 
 pub const USAGE_SECTION: &str = "\
 ## Usage notes

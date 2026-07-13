@@ -13,6 +13,7 @@ fn agent_description_contains_planning_routing_table() {
     assert!(description.contains("Agent(subagent_type=plan)"));
     assert!(description.contains("enter_plan_mode"));
     assert!(description.contains("Agent(subagent_type=explore)"));
+    assert!(description.contains("Agent(subagent_type=troubleshoot)"));
 }
 
 #[test]
@@ -54,6 +55,7 @@ fn agent_description_contains_delegation_guidance() {
     assert!(description.contains("## Usage notes"));
     assert!(description.contains("read_file (not Agent)"));
     assert!(description.contains("subagent_type=explore"));
+    assert!(description.contains("subagent_type=troubleshoot"));
     assert!(description.contains("general-purpose"));
     assert!(description.contains("thoroughness"));
 }
@@ -87,6 +89,7 @@ fn search_tools_route_open_ended_exploration_to_agent() {
     let grep = grep_tool.description();
 
     assert!(bash.contains("subagent_type=explore"));
+    assert!(bash.contains("subagent_type=troubleshoot"));
     assert!(glob.contains("Agent(subagent_type=explore)"));
     assert!(grep.contains("Agent(subagent_type=explore)"));
 }

@@ -1,4 +1,4 @@
-//! Regression guards for sub-agent termination semantics (AC-7, AC-13).
+//! Regression guards for sub-agent termination semantics (AC-7, AC-13) and Phase 2 cleanup.
 
 #[test]
 fn agents_modules_do_not_use_react_or_diagnose_agents() {
@@ -19,6 +19,19 @@ fn agents_modules_do_not_use_react_or_diagnose_agents() {
             "{name} must not use DiagnoseAgent (AC-7)"
         );
     }
+}
+
+#[test]
+fn crate_has_no_legacy_system_diagnose_agent_symbol() {
+    let lib = include_str!("../src/lib.rs");
+    assert!(
+        !lib.contains("diagnose_agent"),
+        "aish-llm must not export diagnose_agent"
+    );
+    assert!(
+        !lib.contains("ReActAgent"),
+        "aish-llm must not export ReActAgent"
+    );
 }
 
 #[test]
