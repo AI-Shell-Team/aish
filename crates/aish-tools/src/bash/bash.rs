@@ -414,15 +414,20 @@ impl BashTool {
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
         done.store(true, Ordering::SeqCst);
 
+        // Sync cwd even on cancel — e.g. `cd /tmp; sleep 90` then Ctrl+C must
+        // leave the process (and later shell sync) on /tmp, not the old cwd.
+        if let Ok((_, _, cwd)) = &result {
+            if !cwd.is_empty() {
+                let _ = std::env::set_current_dir(cwd);
+            }
+        }
+
         if let Some(cancelled) = self.outcome_if_cancelled(&cancel_token) {
             return cancelled;
         }
 
         match result {
-            Ok((output, exit_code, cwd)) => {
-                if !cwd.is_empty() {
-                    let _ = std::env::set_current_dir(&cwd);
-                }
+            Ok((output, exit_code, _cwd)) => {
                 let raw_line_count = output.lines().count();
                 let session_uuid = uuid::Uuid::new_v4().to_string();
                 let cwd = std::env::current_dir()

@@ -2020,128 +2020,133 @@ impl AishShell {
                         Ok(response) => {
                             if self.ai_handler.cancellation_token().is_cancelled() {
                                 // Agent short-circuit cancel returns Ok("") — show the same
-                                // user-facing line as Err(Cancelled).
+                                // user-facing line as Err(Cancelled). Do not treat as success
+                                // (no plan approval / history-as-ok).
                                 println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
-                            } else if !did_stream && !response.trim().is_empty() {
-                                // Non-streaming fallback: print full response with formatting
-                                let mut sep_renderer = ShellRenderer::new();
-                                sep_renderer.set_shared_recorder(self.shared_recorder.clone());
-                                sep_renderer.render_separator();
-                                print_md_with_recording(&response, &self.shared_recorder);
-                                sep_renderer.render_separator();
-                            } else if did_stream {
-                                // Streaming display already handled by event callback
-                                // No additional output needed here.
-                            }
+                            } else {
+                                if !did_stream && !response.trim().is_empty() {
+                                    // Non-streaming fallback: print full response with formatting
+                                    let mut sep_renderer = ShellRenderer::new();
+                                    sep_renderer.set_shared_recorder(self.shared_recorder.clone());
+                                    sep_renderer.render_separator();
+                                    print_md_with_recording(&response, &self.shared_recorder);
+                                    sep_renderer.render_separator();
+                                } else if did_stream {
+                                    // Streaming display already handled by event callback
+                                    // No additional output needed here.
+                                }
 
-                            self.persist_session_snapshot();
+                                self.persist_session_snapshot();
 
-                            // Check if plan mode was exited during this AI turn.
-                            // If exit_plan_mode tool was called, show plan approval UI.
-                            let plan_state = self.ai_handler.plan_state();
-                            if plan_state.phase == aish_core::PlanPhase::Normal
-                                && plan_state.plan_id.is_some()
-                            {
-                                if let Some(artifact_path) = plan_state.artifact_path.as_ref() {
-                                    // Plan was exited — read artifact and present for approval
-                                    let artifact_text =
-                                        aish_core::plan::read_artifact_text(artifact_path);
+                                // Check if plan mode was exited during this AI turn.
+                                // If exit_plan_mode tool was called, show plan approval UI.
+                                let plan_state = self.ai_handler.plan_state();
+                                if plan_state.phase == aish_core::PlanPhase::Normal
+                                    && plan_state.plan_id.is_some()
+                                {
+                                    if let Some(artifact_path) = plan_state.artifact_path.as_ref() {
+                                        // Plan was exited — read artifact and present for approval
+                                        let artifact_text =
+                                            aish_core::plan::read_artifact_text(artifact_path);
 
-                                    // Use the enhanced plan approval flow
-                                    use crate::wizard::plan_approval::{
-                                        PlanApprovalDecision, PlanApprovalFlow,
-                                    };
-                                    let decision = PlanApprovalFlow::review_plan(
-                                        &artifact_text,
-                                        plan_state.summary.as_deref(),
-                                        if plan_state.draft_revision > 0 {
-                                            Some(plan_state.draft_revision)
-                                        } else {
-                                            None
-                                        },
-                                    );
+                                        // Use the enhanced plan approval flow
+                                        use crate::wizard::plan_approval::{
+                                            PlanApprovalDecision, PlanApprovalFlow,
+                                        };
+                                        let decision = PlanApprovalFlow::review_plan(
+                                            &artifact_text,
+                                            plan_state.summary.as_deref(),
+                                            if plan_state.draft_revision > 0 {
+                                                Some(plan_state.draft_revision)
+                                            } else {
+                                                None
+                                            },
+                                        );
 
-                                    match decision {
-                                        PlanApprovalDecision::Approved => {
-                                            // Create approved snapshot and transition state
-                                            let mut state = self.ai_handler.plan_state();
-                                            if let Ok(_snapshot) =
-                                                aish_core::plan::create_approved_snapshot(
-                                                    &mut state,
-                                                )
-                                            {
-                                                println!(
-                                                    "\x1b[32m{}\x1b[0m",
-                                                    t("shell.plan_approved")
-                                                );
-                                                println!(
-                                                    "\x1b[2m  {}\x1b[0m",
-                                                    t_with_args(
-                                                        "shell.plan_approved_hint",
-                                                        &std::collections::HashMap::new()
+                                        match decision {
+                                            PlanApprovalDecision::Approved => {
+                                                // Create approved snapshot and transition state
+                                                let mut state = self.ai_handler.plan_state();
+                                                if let Ok(_snapshot) =
+                                                    aish_core::plan::create_approved_snapshot(
+                                                        &mut state,
                                                     )
-                                                );
+                                                {
+                                                    println!(
+                                                        "\x1b[32m{}\x1b[0m",
+                                                        t("shell.plan_approved")
+                                                    );
+                                                    println!(
+                                                        "\x1b[2m  {}\x1b[0m",
+                                                        t_with_args(
+                                                            "shell.plan_approved_hint",
+                                                            &std::collections::HashMap::new()
+                                                        )
+                                                    );
+                                                }
                                             }
-                                        }
-                                        PlanApprovalDecision::ChangesRequested { feedback } => {
-                                            // Keep in planning phase — re-enter plan mode with feedback
-                                            println!(
-                                                "\x1b[33m{}\x1b[0m",
-                                                t("shell.plan_changes_requested")
-                                            );
-
-                                            // Re-enter plan mode to let the AI revise
-                                            self.ai_handler.enter_plan_mode(&self.session_uuid);
-
-                                            // Set the approval status and feedback directly on the mutex
-                                            {
-                                                let plan_state_lock =
-                                                    self.ai_handler.plan_state_ptr();
-                                                let mut ps = plan_state_lock.lock().unwrap();
-                                                ps.approval_status =
-                                                    aish_core::PlanApprovalStatus::ChangesRequested;
-                                                ps.approval_feedback_summary =
-                                                    if feedback.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(feedback.clone())
-                                                    };
-                                                // Bump revision since we're requesting changes
-                                                aish_core::plan::bump_draft_revision(&mut ps);
-                                                // Preserve the artifact path from the previous plan
-                                                ps.artifact_path = plan_state.artifact_path.clone();
-                                                ps.plan_id = plan_state.plan_id.clone();
-                                            }
-
-                                            // If feedback was provided, send it back to the AI
-                                            // by injecting it as context
-                                            if !feedback.is_empty() {
-                                                let feedback_msg = format!(
-                                                    "[Plan Review Feedback]\nThe user requested changes to the plan:\n{}\n\nPlease revise the plan accordingly and use exit_plan_mode when ready.",
-                                                    feedback
-                                                );
-                                                self.ai_handler.add_shell_context(&feedback_msg);
+                                            PlanApprovalDecision::ChangesRequested { feedback } => {
+                                                // Keep in planning phase — re-enter plan mode with feedback
                                                 println!(
-                                                    "\x1b[2m  {}\x1b[0m",
-                                                    t("shell.plan_feedback_sent")
+                                                    "\x1b[33m{}\x1b[0m",
+                                                    t("shell.plan_changes_requested")
+                                                );
+
+                                                // Re-enter plan mode to let the AI revise
+                                                self.ai_handler.enter_plan_mode(&self.session_uuid);
+
+                                                // Set the approval status and feedback directly on the mutex
+                                                {
+                                                    let plan_state_lock =
+                                                        self.ai_handler.plan_state_ptr();
+                                                    let mut ps = plan_state_lock.lock().unwrap();
+                                                    ps.approval_status =
+                                                    aish_core::PlanApprovalStatus::ChangesRequested;
+                                                    ps.approval_feedback_summary =
+                                                        if feedback.is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(feedback.clone())
+                                                        };
+                                                    // Bump revision since we're requesting changes
+                                                    aish_core::plan::bump_draft_revision(&mut ps);
+                                                    // Preserve the artifact path from the previous plan
+                                                    ps.artifact_path =
+                                                        plan_state.artifact_path.clone();
+                                                    ps.plan_id = plan_state.plan_id.clone();
+                                                }
+
+                                                // If feedback was provided, send it back to the AI
+                                                // by injecting it as context
+                                                if !feedback.is_empty() {
+                                                    let feedback_msg = format!(
+                                                        "[Plan Review Feedback]\nThe user requested changes to the plan:\n{}\n\nPlease revise the plan accordingly and use exit_plan_mode when ready.",
+                                                        feedback
+                                                    );
+                                                    self.ai_handler
+                                                        .add_shell_context(&feedback_msg);
+                                                    println!(
+                                                        "\x1b[2m  {}\x1b[0m",
+                                                        t("shell.plan_feedback_sent")
+                                                    );
+                                                }
+                                            }
+                                            PlanApprovalDecision::Cancelled => {
+                                                println!(
+                                                    "\x1b[33m{}\x1b[0m",
+                                                    t("shell.plan_review_cancelled")
+                                                );
+                                                println!(
+                                                    "\x1b[2m{}\x1b[0m",
+                                                    t("shell.plan_review_hint")
                                                 );
                                             }
-                                        }
-                                        PlanApprovalDecision::Cancelled => {
-                                            println!(
-                                                "\x1b[33m{}\x1b[0m",
-                                                t("shell.plan_review_cancelled")
-                                            );
-                                            println!(
-                                                "\x1b[2m{}\x1b[0m",
-                                                t("shell.plan_review_hint")
-                                            );
                                         }
                                     }
                                 }
-                            }
 
-                            self.record_history(input, 0);
+                                self.record_history(input, 0);
+                            }
                         }
                         Err(aish_core::AishError::Cancelled) => {
                             self.animation.stop();
@@ -2313,20 +2318,24 @@ impl AishShell {
                                 match result {
                                     Ok(response) => {
                                         if self.ai_handler.cancellation_token().is_cancelled() {
+                                            // Same as Err(Cancelled): do not persist/history as success.
                                             println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
-                                        } else if !did_stream && !response.trim().is_empty() {
-                                            let mut sep_renderer = ShellRenderer::new();
-                                            sep_renderer
-                                                .set_shared_recorder(self.shared_recorder.clone());
-                                            sep_renderer.render_separator();
-                                            print_md_with_recording(
-                                                &response,
-                                                &self.shared_recorder,
-                                            );
-                                            sep_renderer.render_separator();
+                                        } else {
+                                            if !did_stream && !response.trim().is_empty() {
+                                                let mut sep_renderer = ShellRenderer::new();
+                                                sep_renderer.set_shared_recorder(
+                                                    self.shared_recorder.clone(),
+                                                );
+                                                sep_renderer.render_separator();
+                                                print_md_with_recording(
+                                                    &response,
+                                                    &self.shared_recorder,
+                                                );
+                                                sep_renderer.render_separator();
+                                            }
+                                            self.persist_session_snapshot();
+                                            self.record_history(input, 0);
                                         }
-                                        self.persist_session_snapshot();
-                                        self.record_history(input, 0);
                                     }
                                     Err(aish_core::AishError::Cancelled) => {
                                         self.animation.stop();
