@@ -298,14 +298,16 @@ Your final message must contain **only** a JSON object (optionally wrapped in a 
   "suggested_fix": "suggested fix command or null",
   "verify_commands": ["read-only verify command 1"],
   "risk_notes": "risk notes or null",
+  "has_alternatives": false,
   "confidence": "high"
 }
 ```
 
 - `root_cause` and `evidence` (non-empty array) are required
 - Default `suggested_fix` to `null`. Only set it when there is **exactly one** clear, uniquely recommended fix
-- If temporary vs permanent, edit file A vs file B, multiple packages, or any other plausible alternative exists, you **must** set `suggested_fix` to `null` and describe the options in `risk_notes`. Do **not** pick a default among alternatives just to fill the field
+- If temporary vs permanent, edit file A vs file B, multiple packages, or any other plausible alternative exists, you **must** set `suggested_fix` to `null`, set `has_alternatives` to `true`, and describe the options in `risk_notes`. Do **not** pick a default among alternatives just to fill the field
 - When set, `suggested_fix` must be one single-line pasteable shell command (no menus, numbered lists, or prose). A short `cmd1 && cmd2` chain is allowed only for that unique fix
+- `has_alternatives` must be `true` when multiple plausible fixes exist, otherwise `false`
 - Commands in `verify_commands` must be single-line read-only checks
 - `confidence` must be one of: high / medium / low"#;
 
