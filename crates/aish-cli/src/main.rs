@@ -1594,7 +1594,6 @@ impl OscScanner {
         let prefix = b"\x1b]5151;";
 
         while i < buf.len() {
-            // Check for OSC 5151 prefix at this position
             if i + prefix.len() <= buf.len() && &buf[i..i + prefix.len()] == prefix {
                 // Found OSC 5151 start, find terminator
                 let op_start = i + prefix.len();
@@ -1614,17 +1613,10 @@ impl OscScanner {
                     commands.push(op);
                     i = end + term_len;
                 } else {
-                    // Incomplete payload — save for next chunk
+                    // Incomplete — save for next chunk
                     self.pending = buf[i..].to_vec();
                     break;
                 }
-            } else if buf[i] == 0x1b && i + prefix.len() > buf.len() {
-                // Partial prefix at buffer end: the ESC byte and possibly a
-                // few following bytes could be the start of an OSC 5151
-                // sequence split across chunks. Save them for next time
-                // instead of emitting as clean output.
-                self.pending = buf[i..].to_vec();
-                break;
             } else {
                 clean.push(buf[i]);
                 i += 1;

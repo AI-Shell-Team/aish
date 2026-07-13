@@ -566,7 +566,6 @@ shell:
     seconds_ago: "{seconds}秒前"
     minutes_ago: "{minutes}分钟前"
     hours_ago: "{hours}小时前"
-    days_ago: "{days}天前"
 
   panel:
     history_title: "输出历史（{count} 条记录）"

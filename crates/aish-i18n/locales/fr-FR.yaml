@@ -354,7 +354,6 @@ shell:
     seconds_ago: "il y a {seconds}s"
     minutes_ago: "il y a {minutes}min"
     hours_ago: "il y a {hours}h"
-    days_ago: "il y a {days}j"
 
   ask_user:
     default_title: "Saisie utilisateur requise"

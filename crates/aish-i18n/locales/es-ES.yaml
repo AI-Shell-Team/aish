@@ -164,7 +164,7 @@ shell:
     diagnose: "Diagnóstico de solo lectura del último comando fallido"
     status: "Mostrar estado del entorno del sistema"
     live_sessions: "Listar sesiones PTY activas"
-    kill_live_sessions: "Terminar sesión(es) PTY por ID"
+    kill_live_sessions: "Terminar sesion(es) PTY por ID"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -330,8 +330,8 @@ shell:
     panel_title: "Sesiones PTY Activas"
     search_placeholder: "Buscar..."
     panel_footer: "↑/↓ navegar · Enter seleccionar · Esc cancelar"
-    create_new: "Crear nueva sesión"
-    already_current: "Ya en esta sesión."
+    create_new: "Crear nueva sesion"
+    already_current: "Ya en esta sesion."
     started_label: "iniciado: {age}"
     current_tag: "[actual]"
 
@@ -346,15 +346,14 @@ shell:
     kill_done: "hecho"
     kill_failed: "fallo: {error}"
     not_found: "Sesion '{id}' no encontrada."
-    is_current: "{id} es la sesión actual — use 'exit' para salir."
+    is_current: "{id} es la sesion actual — use 'exit' para salir."
     summary: "{killed} terminadas, {failed} fallaron."
-    all_terminated: "{count} sesión(es) terminada(s)."
+    all_terminated: "{count} sesion(es) terminada(s)."
 
   time:
     seconds_ago: "hace {seconds}s"
     minutes_ago: "hace {minutes}min"
     hours_ago: "hace {hours}h"
-    days_ago: "hace {days}d"
 
   ask_user:
     default_title: "Se requiere entrada del usuario"
