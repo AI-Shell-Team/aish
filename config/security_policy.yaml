@@ -13,6 +13,8 @@
 #     但会降级为”无法可靠评估风险，请确认后执行”。
 #
 # - audit: 审计日志开关。enabled: false 时不记录；启用后建议同步配置 log_path。
+#          include_commands: true 时同时记录用户输入的 shell 命令（默认仅记录
+#          AI 工具调用和安全决策）。
 #
 # - input_guard: 在命令/提示送入 shell 执行前进行正则预筛查。
 #   - enabled: 总开关。
@@ -66,6 +68,7 @@ global:
 # 审计日志（默认关闭；启用时建议同步设置 log_path）
 audit:
   enabled: false
+  # include_commands: false   # 设为 true 同时记录用户输入的 shell 命令
   # log_path: /var/log/aish/audit.log
 
 # InputGuard 预执行筛查（在命令送入 shell 之前按正则阻断或要求确认）

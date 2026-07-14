@@ -165,6 +165,7 @@ shell:
     status: "システム環境の状態を表示"
     live_sessions: "アクティブPTYセッション一覧"
     kill_live_sessions: "IDでPTYセッション終了"
+    audit: "監査ログを照会（誰/いつ/何/AI提案/確認）"
 
   feedback:
     select_type: "フィードバックの種類を選択"

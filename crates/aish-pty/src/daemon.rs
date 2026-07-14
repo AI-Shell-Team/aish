@@ -904,6 +904,7 @@ pub fn run_pty_daemon_shell(
                     libc::close(slave_pty);
                 }
                 libc::close(master_pty);
+                crate::fd_util::close_inherited_fds_from(3);
                 std::env::set_var("TERM", "xterm-256color");
                 std::env::set_var("AISH_PTY_DAEMON", "0");
                 std::env::set_var("AISH_SESSION_ID", session_id);

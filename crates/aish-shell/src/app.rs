@@ -8,7 +8,7 @@ use aish_context::{
     context_window_hard_min_tokens, context_window_warn_below_tokens,
     effective_reserved_output_tokens, resolve_context_window_tokens, ContextBudgetPolicy,
 };
-use aish_core::{LlmEvent, LlmEventType, MemoryCategory};
+use aish_core::{AuditEventType, AuditSink, LlmEvent, LlmEventType, MemoryCategory};
 use aish_i18n::{t, t_with_args};
 use aish_llm::{
     langfuse::{LangfuseClient, LangfuseConfig},
@@ -230,6 +230,38 @@ fn context_budget_policy_from_config(config: &ConfigModel) -> ContextBudgetPolic
     policy
 }
 
+/// Resolve the current user's name via `getuid()` + `getpwuid_r()`.
+/// Unlike `$USER`, this cannot be spoofed by setting an environment variable.
+/// Falls back to the numeric UID string if the name cannot be resolved.
+fn current_user_name() -> Option<String> {
+    // SAFETY: [Category 8 — FFI] `getuid()` never fails (always returns the
+    // real UID of the calling process) and has no side effects.
+    let uid = unsafe { libc::getuid() };
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result = std::ptr::null_mut();
+    let mut buffer = vec![0_u8; 4096];
+    // SAFETY: [Category 8 — FFI] `getpwuid_r` writes into `pwd` and `buffer`;
+    // both are valid mutable buffers of the expected sizes.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buffer.as_mut_ptr() as *mut libc::c_char,
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if rc == 0 && !result.is_null() && !pwd.pw_name.is_null() {
+        let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+            .to_string_lossy()
+            .into_owned();
+        Some(name)
+    } else {
+        // Fallback: numeric UID is still more reliable than $USER
+        Some(uid.to_string())
+    }
+}
+
 #[cfg(test)]
 mod context_budget_tests {
     use super::*;
@@ -321,6 +353,10 @@ pub struct AishShell {
         std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync>,
     secret_vault: std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>,
     pub session_store: Option<SessionStore>,
+    audit_store: Option<std::sync::Arc<aish_session::AuditStore>>,
+    audit_user: Option<String>,
+    audit_host: Option<String>,
+    current_remote_host: Arc<Mutex<Option<String>>>,
     pub skill_manager: SkillManager,
     pub skill_hot_reloader: Option<SkillHotReloader>,
     pub memory_manager: SharedMemoryManager,
@@ -794,6 +830,41 @@ impl AishShell {
         } else {
             uuid::Uuid::new_v4().to_string()
         };
+
+        // Open audit store when audit is enabled in the security policy.
+        let audit_enabled = security_manager.policy().audit_enabled;
+        let audit_store = if audit_enabled {
+            let audit_path = security_manager
+                .policy()
+                .audit_log_path
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    config
+                        .session_db_path
+                        .as_ref()
+                        .map(|s| std::path::PathBuf::from(s))
+                });
+            let open_result = match audit_path {
+                Some(ref p) => aish_session::AuditStore::open(Some(p)),
+                None => aish_session::AuditStore::open(None),
+            };
+            match open_result {
+                Ok(store) => Some(std::sync::Arc::new(store)),
+                Err(e) => {
+                    let msg = format!(
+                        "audit is enabled in security policy but the audit store failed to open: {e}"
+                    );
+                    tracing::error!("{msg}");
+                    eprintln!("WARNING: {msg}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let audit_user = current_user_name();
+        let audit_host = sysinfo::System::host_name();
 
         // Resolve memory config (use defaults if not specified)
         let memory_config = config.memory.clone().unwrap_or_default();
@@ -1369,6 +1440,19 @@ impl AishShell {
 
         llm_session.set_confirmation_callback(confirmation_callback);
 
+        if let Some(ref audit) = audit_store {
+            let scanner = security_manager.secret_scanner().clone();
+            let redactor: Arc<dyn Fn(&str) -> String + Send + Sync> =
+                Arc::new(move |text: &str| aish_security::secret::redact_secrets(text, &scanner));
+            llm_session.set_audit_context(
+                audit.clone() as Arc<dyn aish_core::AuditSink>,
+                Some(redactor),
+                session_uuid.clone(),
+                audit_user.clone(),
+                audit_host.clone(),
+            );
+        }
+
         // Set iteration limit callback: ask user whether to continue after 20 tool-call rounds
         let iteration_limit_callback: Arc<dyn Fn(u32) -> bool + Send + Sync> =
             Arc::new(|iterations: u32| {
@@ -1496,6 +1580,10 @@ impl AishShell {
             secret_check_closure,
             secret_vault,
             session_store,
+            audit_store,
+            audit_user,
+            audit_host,
+            current_remote_host: Arc::new(Mutex::new(None)),
             skill_manager: shell_skill_manager,
             skill_hot_reloader,
             memory_manager: memory_manager.clone(),
@@ -2516,15 +2604,18 @@ impl AishShell {
         }
     }
 
-    /// Record a command to the session store.
     fn record_history(&self, command: &str, returncode: i32) {
+        self.record_history_sourced(command, "user", returncode);
+    }
+
+    fn record_history_sourced(&self, command: &str, source: &str, returncode: i32) {
         if let Some(ref store) = self.session_store {
             let now = chrono::Utc::now();
             let _ = store.add_history_entry(&aish_session::HistoryEntry {
                 id: None,
                 session_uuid: self.session_uuid.clone(),
                 command: command.to_string(),
-                source: "user".to_string(),
+                source: source.to_string(),
                 returncode: Some(returncode),
                 stdout: None,
                 stderr: None,
@@ -2532,6 +2623,37 @@ impl AishShell {
             });
             let snapshot = self.session_state_snapshot(now);
             let _ = store.update_session_state(&self.session_uuid, &snapshot);
+        }
+
+        if let Some(ref audit) = self.audit_store {
+            if self.security_manager.policy().audit_include_commands {
+                let redacted = aish_security::secret::redact_secrets(
+                    command,
+                    self.security_manager.secret_scanner(),
+                );
+                let remote = self
+                    .current_remote_host
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let host = remote
+                    .as_deref()
+                    .map(|h| h.split_once('@').map_or(h, |(_, host)| host).to_string())
+                    .or_else(|| self.audit_host.clone());
+                let user = remote
+                    .as_deref()
+                    .and_then(|h| h.split_once('@').map(|(u, _)| u.to_string()))
+                    .or_else(|| self.audit_user.clone());
+                audit.record(aish_core::AuditEvent::command(
+                    chrono::Utc::now(),
+                    Some(self.session_uuid.clone()),
+                    user,
+                    host,
+                    redacted,
+                    source.to_string(),
+                    returncode,
+                ));
+            }
         }
     }
 
@@ -2591,6 +2713,7 @@ impl AishShell {
             Some("/status") => self.handle_status_command(),
             Some("/live_sessions") => self.handle_live_sessions_command(),
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
+            Some("/audit") => self.handle_audit_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -2600,6 +2723,146 @@ impl AishShell {
             }
         }
         true
+    }
+
+    fn handle_audit_command(&self, parts: &[&str]) {
+        let Some(ref audit) = self.audit_store else {
+            eprintln!("audit is not enabled. Set 'audit.enabled: true' in security_policy.yaml.");
+            return;
+        };
+
+        let mut query = aish_session::AuditQuery::new();
+        query.limit = 20;
+
+        let mut i = 1;
+        while i < parts.len() {
+            match parts[i] {
+                "--user" if i + 1 < parts.len() => {
+                    query.user = Some(parts[i + 1].to_string());
+                    i += 2;
+                    continue;
+                }
+                "--host" if i + 1 < parts.len() => {
+                    query.host = Some(parts[i + 1].to_string());
+                    i += 2;
+                    continue;
+                }
+                "--event-type" if i + 1 < parts.len() => {
+                    match parts[i + 1].parse::<AuditEventType>() {
+                        Ok(t) => query.event_type = Some(t),
+                        Err(e) => {
+                            eprintln!("invalid event type: {e}");
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--since" if i + 1 < parts.len() => {
+                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
+                        Ok(dt) => query.since = Some(dt.with_timezone(&chrono::Utc)),
+                        Err(_) => {
+                            eprintln!("invalid --since datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--limit" if i + 1 < parts.len() => {
+                    if let Ok(n) = parts[i + 1].parse::<usize>() {
+                        query.limit = n;
+                    }
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        // Access control: non-root users may not query another user's events
+        // by name. Without --user, all events are shown (the user field in
+        // audit records reflects the REMOTE SSH user, not the local OS user,
+        // so filtering by local user would hide SSH session events).
+        // SAFETY: getuid() never fails.
+        let current_uid = unsafe { libc::getuid() };
+        if current_uid != 0 {
+            let me = self
+                .audit_user
+                .clone()
+                .unwrap_or_else(|| current_uid.to_string());
+            if let Some(ref requested) = query.user {
+                if requested != &me {
+                    eprintln!(
+                        "permission denied: non-root users can only query their own audit events"
+                    );
+                    return;
+                }
+            }
+        }
+
+        let events = match audit.query(&query) {
+            Ok(events) => events,
+            Err(e) => {
+                eprintln!("failed to query audit log: {e}");
+                return;
+            }
+        };
+
+        if events.is_empty() {
+            println!("No audit events found.");
+            return;
+        }
+
+        println!(
+            "{:<26} {:<18} {:<10} {:<12} DETAILS",
+            "TIMESTAMP", "EVENT", "USER", "HOST"
+        );
+        println!("{}", "─".repeat(100));
+        for ev in &events {
+            let detail = match ev.event_type {
+                AuditEventType::Command => {
+                    let cmd = ev.command.as_deref().unwrap_or("");
+                    let source = ev.source.as_deref().unwrap_or("");
+                    match ev.return_code {
+                        Some(rc) if rc != 0 => format!("[{}] rc={} {}", source, rc, cmd),
+                        _ => format!("[{}] {}", source, cmd),
+                    }
+                }
+                AuditEventType::AiTool => {
+                    let tool = ev.ai_tool.as_deref().unwrap_or("?");
+                    let args_raw = ev.ai_args.as_deref().unwrap_or("");
+                    let args_display = serde_json::from_str::<serde_json::Value>(args_raw)
+                        .map(|v| format_tool_args_for_display(tool, &v))
+                        .unwrap_or_else(|_| truncate_str(args_raw, 80).to_string());
+                    format!("{} › {}", tool, args_display)
+                }
+                AuditEventType::SecurityDecision => {
+                    let dec = ev.decision.as_deref().unwrap_or("?").to_uppercase();
+                    let mut parts = vec![dec];
+                    if let Some(choice) = ev.user_choice.as_deref().filter(|c| !c.is_empty()) {
+                        parts.push(format!("user={}", choice));
+                    }
+                    if let Some(rule) = ev.matched_rule.as_deref().filter(|r| !r.is_empty()) {
+                        parts.push(format!("rule={}", rule));
+                    }
+                    if let Some(cmd) = ev.command.as_deref().filter(|c| !c.is_empty()) {
+                        parts.push(truncate_str(cmd, 60).to_string());
+                    }
+                    parts.join(" ")
+                }
+            };
+            println!(
+                "{:<26} {:<18} {:<10} {:<12} {}",
+                ev.ts.format("%Y-%m-%d %H:%M:%S"),
+                ev.event_type,
+                ev.user.as_deref().unwrap_or("-"),
+                ev.host.as_deref().unwrap_or("-"),
+                detail
+            );
+        }
+        println!("\n{} event(s) shown.", events.len());
     }
 
     fn handle_resume_command(&mut self, parts: &[&str]) {
@@ -3644,12 +3907,30 @@ impl AishShell {
 
         let result = {
             let mut pty = self.lock_pty();
-            let shared_host = Arc::new(Mutex::new(remote_host.clone()));
+            if is_session {
+                if let Some(ref host) = remote_host {
+                    *self
+                        .current_remote_host
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(host.clone());
+                }
+            }
+            let shared_host = self.current_remote_host.clone();
             let ai_cb = Self::build_session_ai_callback(
                 &self.config,
                 &self.animation,
                 shared_host.clone(),
                 self.shared_recorder.clone(),
+                self.audit_store.clone().map(|s| s as Arc<dyn AuditSink>),
+                {
+                    let scanner = self.security_manager.secret_scanner().clone();
+                    Some(Arc::new(move |text: &str| {
+                        aish_security::secret::redact_secrets(text, &scanner)
+                    })
+                        as Arc<dyn Fn(&str) -> String + Send + Sync>)
+                },
+                self.session_uuid.clone(),
+                self.audit_user.clone(),
             );
             let on_output: Option<Box<dyn Fn(&str) + Send>> = if is_session {
                 let recorder = self.shared_recorder.clone();
@@ -3691,6 +3972,14 @@ impl AishShell {
                 self.config.remote_show_kube,
             )
         };
+
+        if is_session {
+            *self
+                .current_remote_host
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+
         let (exit_code, cwd, output) = match result {
             Ok(result) => result,
             Err(e) => {
@@ -4964,6 +5253,10 @@ impl AishShell {
         animation: &Arc<crate::animation::SharedAnimation>,
         shared_host: Arc<Mutex<Option<String>>>,
         shared_recorder: crate::recorder::SharedRecorder,
+        audit_sink: Option<Arc<dyn AuditSink>>,
+        audit_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
+        audit_session_uuid: String,
+        audit_user: Option<String>,
     ) -> Option<Box<aish_pty::AiCallback>> {
         let api_base = config.api_base.clone();
         let api_key = config.api_key.clone();
@@ -4973,9 +5266,12 @@ impl AishShell {
         let max_tokens = config.max_tokens;
         let animation = animation.clone();
         let shared_recorder = shared_recorder.clone();
+        let audit_sink_cb = audit_sink;
+        let audit_redactor_cb = audit_redactor;
+        let audit_session_uuid_cb = audit_session_uuid;
+        let audit_user_cb = audit_user;
 
         // Load skills snapshot for SSH sessions (same as local session).
-        // Stored in Arc so each AI query closure can create a fresh SkillTool.
         let ssh_skills_snapshot: std::sync::Arc<
             std::collections::HashMap<String, aish_tools::SkillInfo>,
         > = {
@@ -5203,6 +5499,11 @@ impl AishShell {
             let skills_snapshot_th = ssh_skills_snapshot.clone();
             let skill_names_th = ssh_skill_names.clone();
             let shared_recorder_th = shared_recorder.clone();
+            let audit_sink_th = audit_sink_cb.clone();
+            let audit_redactor_th = audit_redactor_cb.clone();
+            let audit_session_uuid_th = audit_session_uuid_cb.clone();
+            let audit_user_th = audit_user_cb.clone();
+            let audit_host_th = dossier_host.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5217,6 +5518,27 @@ impl AishShell {
                         Some(temperature),
                         max_tokens,
                     );
+
+                    if let Some(ref sink) = audit_sink_th {
+                        let raw_host = audit_host_th
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone();
+                        let user = raw_host
+                            .as_deref()
+                            .and_then(|h| h.split_once('@').map(|(u, _)| u.to_string()))
+                            .or_else(|| audit_user_th.clone());
+                        let host = raw_host
+                            .as_deref()
+                            .map(|h| h.split_once('@').map_or(h, |(_, host)| host).to_string());
+                        session.set_audit_context(
+                            sink.clone(),
+                            audit_redactor_th.clone(),
+                            audit_session_uuid_th.clone(),
+                            user,
+                            host,
+                        );
+                    }
 
                     // Send cancellation token to main thread
                     let _ = token_tx.send(session.cancellation_token_arc());
@@ -6472,6 +6794,44 @@ fn format_tool_args_for_display(tool_name: &str, args: &serde_json::Value) -> St
         }
     }
 
+    if let Some(obj) = args.as_object() {
+        let primary = match tool_name {
+            "bash" | "secure_bash" => "command",
+            "read_file" | "edit_file" => "path",
+            "grep" | "glob" => "pattern",
+            "web_fetch" => "url",
+            "ask_user" | "agent" => "prompt",
+            _ => "",
+        };
+        if !primary.is_empty() {
+            if let Some(val) = obj.get(primary) {
+                let main = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let extras: Vec<String> = obj
+                    .iter()
+                    .filter(|(k, _)| *k != primary && *k != "content")
+                    .filter_map(|(k, v)| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(format!("{}={}", k, truncate_str(&s, 30)))
+                        }
+                    })
+                    .collect();
+                if extras.is_empty() {
+                    return truncate_str(&main, 120).to_string();
+                }
+                return format!("{} ({})", truncate_str(&main, 80), extras.join(", "));
+            }
+        }
+    }
+
     truncate_str(&args.to_string(), 120)
 }
 
@@ -6854,7 +7214,6 @@ mod extract_remote_host_tests {
     }
 }
 
-/// Shell error prefixes used by various shells (e.g. "bash: command: not found").
 /// Each variant appears with and without the leading login-shell dash.
 const SHELL_ERROR_PREFIXES: &[&str] = &[
     "-bash: ", "bash: ", "-ksh: ", "ksh: ", "-zsh: ", "zsh: ", "-ash: ", "ash: ", "-dash: ",

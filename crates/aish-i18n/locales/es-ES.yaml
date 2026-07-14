@@ -165,6 +165,7 @@ shell:
     status: "Mostrar estado del entorno del sistema"
     live_sessions: "Listar sesiones PTY activas"
     kill_live_sessions: "Terminar sesion(es) PTY por ID"
+    audit: "Consultar el registro de auditoría (quién/cuándo/qué/sugerencia de IA/confirmación)"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"

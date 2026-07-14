@@ -14,6 +14,8 @@ use nix::unistd::{close, dup2, execvp, fork, getuid, pipe, ForkResult, Pid};
 use aish_core::AishError;
 use tracing::debug;
 
+use crate::fd_util::{close_inherited_fds_from, set_cloexec};
+
 use crate::command_state::CommandState;
 use crate::control::{decode_control_chunk, BackendControlEvent};
 use crate::types::{CancelToken, CommandSource};
@@ -748,9 +750,11 @@ impl PersistentPty {
 
         // Set master non-blocking.
         set_nonblocking(&master_fd)?;
+        set_cloexec(&master_fd)?;
 
         // Set control pipe read end non-blocking.
         set_nonblocking(&control_read)?;
+        set_cloexec(&control_read)?;
 
         // Sync terminal size.
         let stdin_fd = libc::STDIN_FILENO;
@@ -5424,6 +5428,11 @@ fn child_main(slave_fd: RawFd, control_write_fd: RawFd, rcfile_path: &str, cwd: 
 
     let args = vec![c_shell.clone(), c_rcfile_flag, c_rcfile, c_interactive];
 
+    // Defense-in-depth: close inherited parent fds (master, control_read, etc.)
+    // above fd 3. CLOEXEC (set in start()) already closes them at exec time;
+    // this loop is a backup in case a future fd is added without CLOEXEC.
+    close_inherited_fds_from(4);
+
     let _ = execvp(&c_shell, &args);
 
     // execvp failed.
@@ -7820,6 +7829,45 @@ mod tests {
             waitpid(child_pid, Some(WaitPidFlag::WNOHANG)),
             Err(nix::errno::Errno::ECHILD)
         ));
+    }
+
+    /// Regression test: the forked bash child must NOT inherit the PTY master
+    /// fd (/dev/ptmx) or the control pipe read end. Without FD_CLOEXEC +
+    /// explicit child-side fd cleanup, bash holds the master open, preventing
+    /// PTY hangup/SIGHUP when aish dies — causing zombie bash accumulation.
+    #[test]
+    fn test_child_does_not_inherit_master_fd() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let child_pid = pty.child_pid.as_raw();
+
+        let fds_dir = format!("/proc/{child_pid}/fd");
+        let targets: Vec<String> = std::fs::read_dir(&fds_dir)
+            .expect("read child /proc/fd")
+            .flatten()
+            .filter_map(|e| {
+                let link = std::fs::read_link(e.path()).ok()?;
+                Some(link.display().to_string())
+            })
+            .collect();
+
+        let has_ptmx = targets.iter().any(|t| t.contains("/dev/ptmx"));
+        let pipe_count = targets.iter().filter(|t| t.starts_with("pipe:")).count();
+
+        pty.stop();
+
+        assert!(
+            !has_ptmx,
+            "child inherited PTY master (/dev/ptmx) — fd leak regression!\nfds: {targets:?}"
+        );
+        // Child should have exactly ONE pipe: the control pipe write end (fd 3).
+        // The read end (control_read) must not be inherited.
+        assert_eq!(
+            pipe_count, 1,
+            "expected exactly 1 pipe (control write), got {pipe_count}\nfds: {targets:?}"
+        );
     }
 
     #[test]

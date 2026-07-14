@@ -5,9 +5,11 @@ use rusqlite::params;
 use tracing::debug;
 use uuid::Uuid;
 
-use aish_core::{AishError, Result};
+use aish_core::{AishError, AuditEvent, AuditEventType, AuditSink, Result};
 
-use crate::models::{HistoryEntry, SessionRecord, SessionStateSnapshot};
+use crate::models::{
+    AuditEventRecord, AuditQuery, HistoryEntry, SessionRecord, SessionStateSnapshot,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -33,6 +35,30 @@ CREATE TABLE IF NOT EXISTS history (
 
 CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_uuid);
 CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    session_uuid  TEXT,
+    user          TEXT,
+    host          TEXT,
+    event_type    TEXT NOT NULL,
+    command       TEXT,
+    source        TEXT,
+    return_code   INTEGER,
+    ai_tool       TEXT,
+    ai_args       TEXT,
+    ai_result     TEXT,
+    decision      TEXT,
+    user_choice   TEXT,
+    matched_rule  TEXT,
+    risk_level    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_events(user);
+CREATE INDEX IF NOT EXISTS idx_audit_host ON audit_events(host);
+CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_events(event_type);
 "#;
 
 /// SQLite-backed store for sessions and command history.
@@ -69,6 +95,12 @@ impl SessionStore {
         // Enable WAL for better concurrent read performance.
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| AishError::Session(format!("failed to enable WAL mode: {e}")))?;
+
+        // Set busy timeout so concurrent writes from separate connections
+        // (e.g. SessionStore + AuditStore on the same file) retry instead of
+        // failing immediately with SQLITE_BUSY.
+        conn.execute_batch("PRAGMA busy_timeout=5000;")
+            .map_err(|e| AishError::Session(format!("failed to set busy_timeout: {e}")))?;
 
         // Create tables.
         conn.execute_batch(SCHEMA)
@@ -300,6 +332,151 @@ impl SessionStore {
             .close()
             .map_err(|(_, e)| AishError::Session(format!("failed to close session db: {e}")))
     }
+
+    // -----------------------------------------------------------------
+    // Audit events
+    // -----------------------------------------------------------------
+
+    /// Persist a single audit event and return its row id.
+    pub fn add_audit_event(&self, event: &AuditEvent) -> Result<i64> {
+        let ts_str = event.timestamp.to_rfc3339();
+        self.conn
+            .execute(
+                "INSERT INTO audit_events
+                 (ts, session_uuid, user, host, event_type,
+                  command, source, return_code,
+                  ai_tool, ai_args, ai_result,
+                  decision, user_choice, matched_rule, risk_level)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    ts_str,
+                    event.session_uuid,
+                    event.user,
+                    event.host,
+                    event.event_type.to_string(),
+                    event.command,
+                    event.source,
+                    event.return_code,
+                    event.ai_tool,
+                    event.ai_args,
+                    event.ai_result,
+                    event.decision,
+                    event.user_choice,
+                    event.matched_rule,
+                    event.risk_level,
+                ],
+            )
+            .map_err(|e| AishError::Session(format!("failed to insert audit event: {e}")))?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Query audit events with optional filters, newest first.
+    pub fn query_audit_events(&self, query: &AuditQuery) -> Result<Vec<AuditEventRecord>> {
+        let mut sql = String::from(
+            "SELECT id, ts, session_uuid, user, host, event_type,
+                    command, source, return_code,
+                    ai_tool, ai_args, ai_result,
+                    decision, user_choice, matched_rule, risk_level
+             FROM audit_events WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(ref user) = query.user {
+            sql.push_str(" AND user = ?");
+            params_vec.push(Box::new(user.clone()));
+        }
+        if let Some(ref host) = query.host {
+            sql.push_str(" AND host = ?");
+            params_vec.push(Box::new(host.clone()));
+        }
+        if let Some(ref event_type) = query.event_type {
+            sql.push_str(" AND event_type = ?");
+            params_vec.push(Box::new(event_type.to_string()));
+        }
+        if let Some(since) = query.since {
+            sql.push_str(" AND ts >= ?");
+            params_vec.push(Box::new(since.to_rfc3339()));
+        }
+
+        sql.push_str(" ORDER BY ts DESC LIMIT ?");
+        params_vec.push(Box::new(query.limit as i64));
+
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| AishError::Session(format!("failed to prepare audit query: {e}")))?;
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                Ok(AuditEventRecord {
+                    id: row.get(0)?,
+                    ts: parse_datetime(&row.get::<_, String>(1)?),
+                    session_uuid: row.get(2)?,
+                    user: row.get(3)?,
+                    host: row.get(4)?,
+                    event_type: {
+                        let raw = row.get::<_, String>(5)?;
+                        raw.parse().unwrap_or_else(|_| {
+                            tracing::warn!(raw = %raw, "unknown audit event_type in db, falling back to Command");
+                            AuditEventType::Command
+                        })
+                    },
+                    command: row.get(6)?,
+                    source: row.get(7)?,
+                    return_code: row.get(8)?,
+                    ai_tool: row.get(9)?,
+                    ai_args: row.get(10)?,
+                    ai_result: row.get(11)?,
+                    decision: row.get(12)?,
+                    user_choice: row.get(13)?,
+                    matched_rule: row.get(14)?,
+                    risk_level: row.get(15)?,
+                })
+            })
+            .map_err(|e| AishError::Session(format!("failed to query audit events: {e}")))?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(
+                row.map_err(|e| AishError::Session(format!("failed to read audit row: {e}")))?,
+            );
+        }
+        Ok(events)
+    }
+}
+
+/// Thin wrapper that makes [`SessionStore`] usable as a thread-safe
+/// [`AuditSink`].  Opens a **separate** SQLite connection to the same
+/// database file — WAL mode allows multiple connections safely.
+pub struct AuditStore(std::sync::Mutex<SessionStore>);
+
+impl AuditStore {
+    /// Open a dedicated connection for audit writes.
+    pub fn open(path: Option<&Path>) -> Result<Self> {
+        let store = SessionStore::open(path)?;
+        Ok(Self(std::sync::Mutex::new(store)))
+    }
+
+    /// Query audit events (delegates to the inner [`SessionStore`]).
+    pub fn query(&self, q: &AuditQuery) -> Result<Vec<AuditEventRecord>> {
+        let guard = self
+            .0
+            .lock()
+            .map_err(|e| AishError::Session(format!("audit store lock poisoned: {e}")))?;
+        guard.query_audit_events(q)
+    }
+}
+
+impl AuditSink for AuditStore {
+    fn record(&self, event: AuditEvent) {
+        let store = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = store.add_audit_event(&event) {
+            tracing::warn!(%e, "failed to write audit event");
+        }
+    }
 }
 
 /// Parse an RFC 3339 datetime string, falling back to UTC now on failure.
@@ -392,5 +569,82 @@ mod tests {
         assert_eq!(parsed.minute(), 55);
         assert_eq!(parsed.second(), 56);
         assert_eq!(parsed.timestamp_subsec_micros(), 246970);
+    }
+
+    #[test]
+    fn audit_store_writes_and_queries_events() {
+        use aish_core::{AuditEvent, AuditEventType, AuditSink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("audit.db");
+        let audit = AuditStore::open(Some(&db_path)).unwrap();
+
+        let now = Utc::now();
+        audit.record(AuditEvent::command(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("prod-host".into()),
+            "ls -la".into(),
+            "user".into(),
+            0,
+        ));
+        audit.record(AuditEvent::ai_tool(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("prod-host".into()),
+            "bash".into(),
+            r#"{"command":"rm -rf /tmp/x"}"#.into(),
+            "done".into(),
+        ));
+        audit.record(AuditEvent::security_decision(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("prod-host".into()),
+            Some("rm -rf /tmp".into()),
+            "confirm".into(),
+            Some("yes".into()),
+            Some("H-001".into()),
+            Some("HIGH".into()),
+        ));
+
+        let all = audit
+            .query(&AuditQuery {
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 3);
+
+        let commands = audit
+            .query(&AuditQuery {
+                event_type: Some(AuditEventType::Command),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].command.as_deref(), Some("ls -la"));
+        assert_eq!(commands[0].source.as_deref(), Some("user"));
+
+        let user_filtered = audit
+            .query(&AuditQuery {
+                user: Some("root".into()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(user_filtered.len(), 3);
+
+        let other_user = audit
+            .query(&AuditQuery {
+                user: Some("nobody".into()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(other_user.is_empty());
     }
 }

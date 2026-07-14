@@ -13,10 +13,12 @@
     clippy::too_many_arguments
 )]
 
+pub mod audit;
 pub mod error;
 pub mod plan;
 pub mod types;
 
+pub use audit::{AuditEvent, AuditEventType, AuditSink, NullAuditSink};
 pub use error::{AishError, Result};
 pub use plan::*;
 pub use types::*;

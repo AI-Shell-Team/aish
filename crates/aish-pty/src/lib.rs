@@ -21,6 +21,7 @@ pub mod daemon;
 pub mod daemon_protocol;
 pub mod executor;
 pub mod exit_code;
+pub mod fd_util;
 pub mod nl_detect;
 pub mod offload;
 pub mod output_buffer;

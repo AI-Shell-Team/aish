@@ -107,6 +107,11 @@ mod tests {
         assert_eq!(classify_input("/help"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/quit"), InputIntent::SpecialCommand);
         assert_eq!(classify_input("/diagnose"), InputIntent::SpecialCommand);
+        assert_eq!(classify_input("/audit"), InputIntent::SpecialCommand);
+        assert_eq!(
+            classify_input("/audit --limit 20"),
+            InputIntent::SpecialCommand
+        );
     }
 
     #[test]

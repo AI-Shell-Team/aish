@@ -11,6 +11,8 @@ use nix::unistd::{close, dup2, execvp, fork, pipe, ForkResult, Pid};
 
 use aish_core::{AishError, CommandResult, CommandStatus};
 
+use crate::fd_util::{close_inherited_fds_from, set_cloexec};
+
 use tracing::{debug, warn};
 
 use crate::offload::PtyOutputOffload;
@@ -104,6 +106,8 @@ impl PtyExecutor {
 
         // Set master fd to non-blocking.
         set_nonblocking(&master_fd)?;
+        set_cloexec(&master_fd)?;
+        set_cloexec(&stderr_pipe_read)?;
 
         // Save current terminal settings so we can restore them later.
         let stdin_fd: RawFd = libc::STDIN_FILENO;
@@ -208,6 +212,8 @@ impl PtyExecutor {
 
         // Set master fd to non-blocking.
         set_nonblocking(&master_fd)?;
+        set_cloexec(&master_fd)?;
+        set_cloexec(&stderr_pipe_read)?;
 
         // Sync window size from real terminal.
         let stdin_fd = libc::STDIN_FILENO;
@@ -697,6 +703,9 @@ fn child_main(
         std::ffi::CString::new(command).unwrap_or_else(|_| std::ffi::CString::new("true").unwrap());
 
     let args = vec![c_shell.clone(), c_arg1, c_cmd];
+
+    // Defense-in-depth: close inherited parent fds above fd 2 before exec.
+    close_inherited_fds_from(3);
 
     let _ = execvp(&c_shell, &args);
 

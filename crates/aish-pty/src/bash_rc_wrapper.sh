@@ -195,10 +195,25 @@ __aish_on_debug() {
     # local PTY has -echo set by this wrapper, and SSH propagates these
     # settings to the remote server, which can confuse the remote shell's
     # readline.
-    local __aish_cmd_name="${BASH_COMMAND%% *}"
+    #
+    # Also re-enable echo for interactive sub-shells (bash, sh, zsh, ...)
+    # started by the user.  When the user runs e.g. `bash`, the child
+    # shell inherits the PTY termios with ECHO off.  Bash's readline
+    # normally renders input itself, but when the child is launched in a
+    # context where readline is disabled (e.g. inheriting `set +o emacs`
+    # via the rcfile, or non-readline shells like dash), the user's
+    # keystrokes never appear on screen — commands execute "blind".
+    # Restoring ECHO before the child takes the foreground makes
+    # keystrokes visible again.  __aish_prompt_command re-disables ECHO
+    # when the child exits and the aish prompt returns.
+    local __aish_cmd_name="$BASH_COMMAND"
+    while [[ "$__aish_cmd_name" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; do
+        __aish_cmd_name="${__aish_cmd_name#* }"
+    done
+    __aish_cmd_name="${__aish_cmd_name%% *}"
     __aish_cmd_name="${__aish_cmd_name##*/}"
     case "$__aish_cmd_name" in
-        ssh|telnet|mosh|nc|netcat|ftp|sftp)
+        ssh|telnet|mosh|nc|netcat|ftp|sftp|bash|sh|zsh|ksh|mksh|dash|rbash|fish|csh|tcsh)
             stty echo 2>/dev/null || true
             ;;
     esac

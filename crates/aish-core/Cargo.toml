@@ -7,6 +7,7 @@ edition.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 uuid = { version = "1.10", features = ["v4"] }
 sha2 = "0.10"
 hex = "0.4"

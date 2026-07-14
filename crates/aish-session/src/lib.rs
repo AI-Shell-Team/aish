@@ -16,5 +16,8 @@
 pub mod models;
 pub mod store;
 
-pub use models::{HistoryEntry, SessionContextMessage, SessionRecord, SessionStateSnapshot};
-pub use store::SessionStore;
+pub use models::{
+    AuditEventRecord, AuditQuery, HistoryEntry, SessionContextMessage, SessionRecord,
+    SessionStateSnapshot,
+};
+pub use store::{AuditStore, SessionStore};
