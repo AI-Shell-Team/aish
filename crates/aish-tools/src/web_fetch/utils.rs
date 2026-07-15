@@ -396,14 +396,26 @@ fn regex_replace_all(input: &str, pattern: &str, replacement: &str) -> String {
 }
 
 fn decode_html_entities(input: &str) -> String {
-    input
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
+    // Decode all entities in a single pass so that `&amp;lt;` (which
+    // represents the literal text `&lt;`) is not double-decoded into `<`.
+    //
+    // The previous chained `.replace()` approach decoded `&amp;` first,
+    // turning `&amp;lt;` into `&lt;`, which was then decoded again into
+    // `<` — corrupting the original content.
+    static ENTITY_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = ENTITY_RE.get_or_init(|| {
+        Regex::new(r"&(?:amp|lt|gt|quot|apos|nbsp|#39);").expect("valid regex")
+    });
+    re.replace_all(input, |caps: &regex::Captures| match &caps[0] {
+        "&amp;" => "&",
+        "&lt;" => "<",
+        "&gt;" => ">",
+        "&quot;" => "\"",
+        "&apos;" | "&#39;" => "'",
+        "&nbsp;" => " ",
+        _ => unreachable!(),
+    })
+    .to_string()
 }
 
 fn normalize_text_whitespace(input: &str) -> String {
@@ -529,5 +541,29 @@ mod tests {
         let prompt = make_secondary_model_prompt("content", "summarize", false);
         assert!(prompt.contains("125-character maximum"));
         assert!(prompt.contains("summarize"));
+    }
+
+    #[test]
+    fn decode_html_entities_basic() {
+        assert_eq!(decode_html_entities("&lt;"), "<");
+        assert_eq!(decode_html_entities("&gt;"), ">");
+        assert_eq!(decode_html_entities("&amp;"), "&");
+        assert_eq!(decode_html_entities("&quot;"), "\"");
+        assert_eq!(decode_html_entities("&#39;"), "'");
+        assert_eq!(decode_html_entities("&apos;"), "'");
+        assert_eq!(decode_html_entities("&nbsp;"), " ");
+    }
+
+    #[test]
+    fn decode_html_entities_no_double_decode() {
+        // `&amp;lt;` in HTML represents the literal text `&lt;`, not `<`.
+        // The old chained-replace approach decoded `&amp;` first,
+        // turning `&amp;lt;` into `&lt;`, then decoded `&lt;` into `<`.
+        // A single-pass decoder must leave `&amp;lt;` → `&lt;`.
+        assert_eq!(decode_html_entities("&amp;lt;"), "&lt;");
+        assert_eq!(decode_html_entities("&amp;gt;"), "&gt;");
+        assert_eq!(decode_html_entities("&amp;quot;"), "&quot;");
+        assert_eq!(decode_html_entities("&amp;#39;"), "&#39;");
+        assert_eq!(decode_html_entities("&amp;apos;"), "&apos;");
     }
 }
