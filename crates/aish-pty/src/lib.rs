@@ -10,7 +10,8 @@
     clippy::new_without_default,
     clippy::needless_borrow,
     clippy::manual_strip,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::manual_pattern_char_comparison
 )]
 
 pub mod backend;

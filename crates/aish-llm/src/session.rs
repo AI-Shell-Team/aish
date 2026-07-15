@@ -59,7 +59,11 @@ pub struct LlmSession {
     audit_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
     audit_session_uuid: Option<String>,
     audit_user: Option<String>,
-    audit_host: Option<String>,
+    /// Dynamic host reference — updated by the PTY forwarding loop when the
+    /// user enters or exits nested SSH sessions.  Stored as a shared mutex so
+    /// that audit events always reflect the *current* remote host, not a
+    /// snapshot taken at session creation time.
+    audit_host: Option<Arc<Mutex<Option<String>>>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
@@ -214,13 +218,17 @@ impl LlmSession {
     /// Wire up the audit sink and identity context for tool-call / security
     /// audit instrumentation.  When `sink` is set, [`execute_tool`] and
     /// [`run_tool_preflight`] emit audit events.
+    ///
+    /// `host` is a shared mutex so nested SSH host changes (detected by the
+    /// PTY forwarding loop) are reflected in every audit event without
+    /// requiring a new `set_audit_context` call.
     pub fn set_audit_context(
         &mut self,
         sink: Arc<dyn AuditSink>,
         redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
         session_uuid: String,
         user: Option<String>,
-        host: Option<String>,
+        host: Option<Arc<Mutex<Option<String>>>>,
     ) {
         self.audit_sink = Some(sink);
         self.audit_redactor = redactor;
@@ -236,8 +244,38 @@ impl LlmSession {
         }
     }
 
-    fn emit_audit(&self, event: AuditEvent) {
+    /// Resolve the current (user, host) pair from the shared host mutex.
+    /// The mutex value uses `user@host` format (from SSH command parsing);
+    /// we split it into separate fields.  Falls back to `audit_user` when
+    /// the mutex is absent or has no user@ prefix.
+    fn current_audit_identity(&self) -> (Option<String>, Option<String>) {
+        let raw = self
+            .audit_host
+            .as_ref()
+            .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .filter(|s| !s.is_empty());
+
+        match &raw {
+            Some(val) => {
+                let (user, host) = val
+                    .split_once('@')
+                    .map(|(u, h)| (Some(u.to_string()), h.to_string()))
+                    .unwrap_or((None, val.clone()));
+                (user.or_else(|| self.audit_user.clone()), Some(host))
+            }
+            None => (self.audit_user.clone(), None),
+        }
+    }
+
+    fn emit_audit(&self, mut event: AuditEvent) {
         if let Some(ref sink) = self.audit_sink {
+            let (user, host) = self.current_audit_identity();
+            if user.is_some() {
+                event.user = user;
+            }
+            if host.is_some() {
+                event.host = host;
+            }
             sink.record(event);
         }
     }
@@ -1340,8 +1378,8 @@ impl LlmSession {
             self.emit_audit(AuditEvent::ai_tool(
                 chrono::Utc::now(),
                 self.audit_session_uuid.clone(),
-                self.audit_user.clone(),
-                self.audit_host.clone(),
+                None,
+                None,
                 tool_call.name.clone(),
                 audited_args,
                 result_summary,
@@ -1410,8 +1448,8 @@ impl LlmSession {
                 self.emit_audit(AuditEvent::security_decision(
                     chrono::Utc::now(),
                     self.audit_session_uuid.clone(),
-                    self.audit_user.clone(),
-                    self.audit_host.clone(),
+                    None,
+                    None,
                     None,
                     "allow".to_string(),
                     None,
@@ -1438,8 +1476,8 @@ impl LlmSession {
                 self.emit_audit(AuditEvent::security_decision(
                     chrono::Utc::now(),
                     self.audit_session_uuid.clone(),
-                    self.audit_user.clone(),
-                    self.audit_host.clone(),
+                    None,
+                    None,
                     security.target.as_ref().map(|t| self.redact(t)),
                     "confirm".to_string(),
                     Some(if approved {
@@ -1472,8 +1510,8 @@ impl LlmSession {
                 self.emit_audit(AuditEvent::security_decision(
                     chrono::Utc::now(),
                     self.audit_session_uuid.clone(),
-                    self.audit_user.clone(),
-                    self.audit_host.clone(),
+                    None,
+                    None,
                     security.target.as_ref().map(|t| self.redact(t)),
                     "block".to_string(),
                     None,

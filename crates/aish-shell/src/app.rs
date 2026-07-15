@@ -1449,7 +1449,7 @@ impl AishShell {
                 Some(redactor),
                 session_uuid.clone(),
                 audit_user.clone(),
-                audit_host.clone(),
+                Some(Arc::new(Mutex::new(audit_host.clone()))),
             );
         }
 
@@ -5520,23 +5520,12 @@ impl AishShell {
                     );
 
                     if let Some(ref sink) = audit_sink_th {
-                        let raw_host = audit_host_th
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .clone();
-                        let user = raw_host
-                            .as_deref()
-                            .and_then(|h| h.split_once('@').map(|(u, _)| u.to_string()))
-                            .or_else(|| audit_user_th.clone());
-                        let host = raw_host
-                            .as_deref()
-                            .map(|h| h.split_once('@').map_or(h, |(_, host)| host).to_string());
                         session.set_audit_context(
                             sink.clone(),
                             audit_redactor_th.clone(),
                             audit_session_uuid_th.clone(),
-                            user,
-                            host,
+                            audit_user_th.clone(),
+                            Some(audit_host_th.clone()),
                         );
                     }
 
