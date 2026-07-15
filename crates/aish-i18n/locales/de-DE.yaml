@@ -165,6 +165,7 @@ shell:
     status: "Systemumgebungsstatus anzeigen"
     live_sessions: "Aktive PTY-Sitzungen auflisten"
     kill_live_sessions: "PTY-Sitzung(en) nach ID beenden"
+    audit: "Audit-Protokoll abfragen (wer/wann/was/KI-Vorschlag/Bestaetigung)"
 
   feedback:
     select_type: "Feedback-Typ auswählen"

@@ -10,7 +10,8 @@
     clippy::new_without_default,
     clippy::needless_borrow,
     clippy::manual_strip,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::manual_pattern_char_comparison
 )]
 
 pub mod backend;
@@ -21,6 +22,7 @@ pub mod daemon;
 pub mod daemon_protocol;
 pub mod executor;
 pub mod exit_code;
+pub mod fd_util;
 pub mod nl_detect;
 pub mod offload;
 pub mod output_buffer;

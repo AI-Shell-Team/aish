@@ -1,4 +1,4 @@
-use aish_core::MemoryType;
+use aish_core::{AuditEventType, MemoryType};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -55,4 +55,53 @@ pub struct HistoryEntry {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// A persisted audit event row (maps to the `audit_events` table).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEventRecord {
+    pub id: i64,
+    pub ts: DateTime<Utc>,
+    pub session_uuid: Option<String>,
+    pub user: Option<String>,
+    pub host: Option<String>,
+    pub event_type: AuditEventType,
+    pub command: Option<String>,
+    pub source: Option<String>,
+    pub return_code: Option<i32>,
+    pub ai_tool: Option<String>,
+    pub ai_args: Option<String>,
+    pub ai_result: Option<String>,
+    pub decision: Option<String>,
+    pub user_choice: Option<String>,
+    pub matched_rule: Option<String>,
+    pub risk_level: Option<String>,
+}
+
+/// Optional filters for querying audit events.
+#[derive(Debug, Clone)]
+pub struct AuditQuery {
+    pub user: Option<String>,
+    pub host: Option<String>,
+    pub event_type: Option<AuditEventType>,
+    pub since: Option<DateTime<Utc>>,
+    pub limit: usize,
+}
+
+impl Default for AuditQuery {
+    fn default() -> Self {
+        Self {
+            user: None,
+            host: None,
+            event_type: None,
+            since: None,
+            limit: 100,
+        }
+    }
+}
+
+impl AuditQuery {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }

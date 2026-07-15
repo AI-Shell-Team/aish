@@ -36,6 +36,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/status", "Show system environment status"),
     ("/live_sessions", "List live PTY sessions"),
     ("/kill_live_sessions", "Kill live PTY session(s) by ID"),
+    (
+        "/audit",
+        "Query audit log (who/when/what/AI suggestion/confirm)",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -680,6 +684,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 14);
+        assert_eq!(SLASH_COMMANDS.len(), 15);
     }
 }

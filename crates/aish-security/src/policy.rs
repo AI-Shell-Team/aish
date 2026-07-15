@@ -61,6 +61,7 @@ pub struct SecurityPolicy {
     pub audit_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit_log_path: Option<String>,
+    pub audit_include_commands: bool,
     pub rules: Vec<PolicyRule>,
     #[serde(default)]
     pub invalid_fallback_rules: Vec<InvalidFallbackRule>,
@@ -81,6 +82,7 @@ impl Default for SecurityPolicy {
             default_risk_level: RiskLevel::Low,
             audit_enabled: false,
             audit_log_path: None,
+            audit_include_commands: false,
             rules: default_rules(),
             invalid_fallback_rules: Vec::new(),
             validation_issues: Vec::new(),
@@ -105,6 +107,7 @@ global:\n\
 \n\
 audit:\n\
   enabled: false\n\
+  # include_commands: false   # set true to also audit regular shell commands\n\
   # log_path: /var/log/aish/audit.log\n\
 \n\
 # InputGuard pre-screens shell commands and AI prompts before execution.\n\
@@ -448,6 +451,10 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         .and_then(|m| mapping_get(m, "log_path"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let audit_include_commands = parse_bool_strict(
+        audit_cfg.and_then(|m| mapping_get(m, "include_commands")),
+        false,
+    );
 
     let rule_mappings: Vec<&Mapping> = root
         .and_then(|m| mapping_get(m, "rules"))
@@ -516,6 +523,7 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         default_risk_level,
         audit_enabled,
         audit_log_path,
+        audit_include_commands,
         rules,
         invalid_fallback_rules,
         validation_issues,

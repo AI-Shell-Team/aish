@@ -364,6 +364,7 @@ shell:
     status: "显示系统环境状态"
     live_sessions: "列出活跃 PTY 会话"
     kill_live_sessions: "按 ID 终止活跃 PTY 会话"
+    audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
 
   record:
     started: "⏺ 录制已开始: {path}"

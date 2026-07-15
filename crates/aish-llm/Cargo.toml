@@ -10,6 +10,7 @@ aish-i18n.workspace = true
 aish-security.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true

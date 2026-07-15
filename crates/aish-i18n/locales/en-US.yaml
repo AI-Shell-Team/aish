@@ -364,6 +364,7 @@ shell:
     status: "Show system environment status"
     live_sessions: "List live PTY sessions"
     kill_live_sessions: "Kill live PTY session(s) by ID"
+    audit: "Query audit log (who/when/what/AI suggestion/confirm)"
 
   record:
     started: "⏺ Recording started: {path}"

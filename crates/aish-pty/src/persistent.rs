@@ -14,6 +14,8 @@ use nix::unistd::{close, dup2, execvp, fork, getuid, pipe, ForkResult, Pid};
 use aish_core::AishError;
 use tracing::debug;
 
+use crate::fd_util::{close_inherited_fds_from, set_cloexec};
+
 use crate::command_state::CommandState;
 use crate::control::{decode_control_chunk, BackendControlEvent};
 use crate::types::{CancelToken, CommandSource};
@@ -748,9 +750,11 @@ impl PersistentPty {
 
         // Set master non-blocking.
         set_nonblocking(&master_fd)?;
+        set_cloexec(&master_fd)?;
 
         // Set control pipe read end non-blocking.
         set_nonblocking(&control_read)?;
+        set_cloexec(&control_read)?;
 
         // Sync terminal size.
         let stdin_fd = libc::STDIN_FILENO;
@@ -1295,6 +1299,14 @@ impl PersistentPty {
         // should not be injected during search - it would corrupt the search
         // input. Clear when we see a shell prompt indicating search ended.
         let mut in_search_mode = false;
+        // Mirrors `in_search_mode` but is set from the *stdin* side (Ctrl+R
+        // / Ctrl+S keypress) rather than the PTY-output echo.  This fires
+        // immediately — before the PTY has time to echo `^R` — so the very
+        // first search characters don't pollute `stdin_shadow`.  Without this,
+        // `stdin_shadow` accumulates search characters (e.g. "ss" for "ssh")
+        // and `parse_ssh_command` on Enter sees a truncated string instead of
+        // the full command that bash actually executes.
+        let mut stdin_in_search = false;
         // Tracks the remote host for which we have already baked the
         // `[ssh:host]` marker into PS1. Reset (to None) implicitly by
         // comparing against `remote_host_for_probe` — when the user enters
@@ -1974,7 +1986,12 @@ impl PersistentPty {
                                                     remote_info_for_probe = Some(info);
                                                     remote_host_for_probe = Some(host.clone());
                                                     if let Some(ref sh) = shared_host {
-                                                        *sh.lock().unwrap() = Some(host);
+                                                        let prev = sh.lock().unwrap().clone();
+                                                        *sh.lock().unwrap() = Some(host.clone());
+                                                        tracing::debug!(
+                                                        "stdin_scan: updated shared_host {:?} -> {:?}",
+                                                        prev, &host
+                                                    );
                                                     }
                                                     probe_injected = false;
                                                     probe_active = false;
@@ -1987,6 +2004,7 @@ impl PersistentPty {
                                                     nested_confirm_buf.clear();
                                                     at_password_prompt = false;
                                                     in_search_mode = false;
+                                                    stdin_in_search = false;
                                                 }
                                             }
                                         }
@@ -2131,63 +2149,151 @@ impl PersistentPty {
                                         // which can miss readline echoes.
                                         match byte {
                                             b'\r' | b'\n' => {
-                                                let line = String::from_utf8_lossy(&stdin_shadow);
-                                                if let Some(info) = parse_ssh_command(line.trim()) {
-                                                    if is_session_command(line.trim()) {
-                                                        let host = info.dest_raw.clone();
-                                                        debug!(
-                                                            "stdin: nested session \
-                                                             detected: {:?} -> {}",
-                                                            remote_host_for_probe, host,
-                                                        );
-                                                        const MAX_NESTING: usize = 8;
-                                                        if nested_host_stack.len() < MAX_NESTING {
-                                                            if let Some(cur_info) =
-                                                                remote_info_for_probe.take()
-                                                            {
-                                                                nested_host_stack.push(cur_info);
-                                                                ps1_marker_done_stack.push(
-                                                                    ps1_marker_done_for.take(),
+                                                if stdin_in_search {
+                                                    stdin_in_search = false;
+                                                    stdin_shadow.clear();
+                                                    let nested_cmd =
+                                                        extract_isearch_command(&output_ssh_scan);
+                                                    if let Some(ref line_str) = nested_cmd {
+                                                        if let Some(info) =
+                                                            parse_ssh_command(line_str.trim())
+                                                        {
+                                                            if is_session_command(line_str.trim()) {
+                                                                let host = info.dest_raw.clone();
+                                                                debug!(
+                                                                    "stdin: nested session \
+                                                                     (Ctrl+R): {:?} -> {}",
+                                                                    remote_host_for_probe, host,
                                                                 );
+                                                                const MAX_NESTING: usize = 8;
+                                                                if nested_host_stack.len()
+                                                                    < MAX_NESTING
+                                                                {
+                                                                    if let Some(cur_info) =
+                                                                        remote_info_for_probe.take()
+                                                                    {
+                                                                        nested_host_stack
+                                                                            .push(cur_info);
+                                                                        ps1_marker_done_stack.push(
+                                                                            ps1_marker_done_for
+                                                                                .take(),
+                                                                        );
+                                                                    }
+                                                                    remote_info_for_probe =
+                                                                        Some(info);
+                                                                    remote_host_for_probe =
+                                                                        Some(host.clone());
+                                                                    if let Some(ref sh) =
+                                                                        shared_host
+                                                                    {
+                                                                        *sh.lock().unwrap() =
+                                                                            Some(host);
+                                                                    }
+                                                                    probe_injected = false;
+                                                                    probe_active = false;
+                                                                    nested_probe_pending = true;
+                                                                    session_command_just_sent =
+                                                                        true;
+                                                                    probe_sections.clear();
+                                                                    probe_current_section.clear();
+                                                                    probe_start = None;
+                                                                    output_ssh_scan.clear();
+                                                                    nested_confirm_buf.clear();
+                                                                    at_password_prompt = false;
+                                                                    in_search_mode = false;
+                                                                }
                                                             }
-                                                            // Mirror the line-level branch:
-                                                            // update both the legacy host
-                                                            // string and the structured info
-                                                            // so the injection block sees
-                                                            // the new SSH destination.
-                                                            remote_info_for_probe = Some(info);
-                                                            remote_host_for_probe =
-                                                                Some(host.clone());
-                                                            if let Some(ref sh) = shared_host {
-                                                                *sh.lock().unwrap() = Some(host);
-                                                            }
-                                                            probe_injected = false;
-                                                            probe_active = false;
-                                                            nested_probe_pending = true;
-                                                            session_command_just_sent = true;
-                                                            probe_sections.clear();
-                                                            probe_current_section.clear();
-                                                            probe_start = None;
-                                                            output_ssh_scan.clear();
-                                                            at_password_prompt = false;
-                                                            in_search_mode = false;
                                                         }
                                                     }
+                                                } else {
+                                                    let line =
+                                                        String::from_utf8_lossy(&stdin_shadow);
+                                                    if let Some(info) =
+                                                        parse_ssh_command(line.trim())
+                                                    {
+                                                        if is_session_command(line.trim()) {
+                                                            let host = info.dest_raw.clone();
+                                                            debug!(
+                                                                "stdin: nested session \
+                                                                 detected: {:?} -> {}",
+                                                                remote_host_for_probe, host,
+                                                            );
+                                                            const MAX_NESTING: usize = 8;
+                                                            if nested_host_stack.len() < MAX_NESTING
+                                                            {
+                                                                if let Some(cur_info) =
+                                                                    remote_info_for_probe.take()
+                                                                {
+                                                                    nested_host_stack
+                                                                        .push(cur_info);
+                                                                    ps1_marker_done_stack.push(
+                                                                        ps1_marker_done_for.take(),
+                                                                    );
+                                                                }
+                                                                // Mirror the line-level branch:
+                                                                // update both the legacy host
+                                                                // string and the structured info
+                                                                // so the injection block sees
+                                                                // the new SSH destination.
+                                                                remote_info_for_probe = Some(info);
+                                                                remote_host_for_probe =
+                                                                    Some(host.clone());
+                                                                if let Some(ref sh) = shared_host {
+                                                                    *sh.lock().unwrap() =
+                                                                        Some(host);
+                                                                }
+                                                                probe_injected = false;
+                                                                probe_active = false;
+                                                                nested_probe_pending = true;
+                                                                session_command_just_sent = true;
+                                                                probe_sections.clear();
+                                                                probe_current_section.clear();
+                                                                probe_start = None;
+                                                                output_ssh_scan.clear();
+                                                                nested_confirm_buf.clear();
+                                                                at_password_prompt = false;
+                                                                in_search_mode = false;
+                                                            }
+                                                        }
+                                                    }
+                                                    stdin_shadow.clear();
                                                 }
+                                            }
+                                            0x12 | 0x13 => {
+                                                // Ctrl+R / Ctrl+S: enter reverse/forward
+                                                // incremental search.  Characters typed
+                                                // from here until Enter are search keys,
+                                                // not command input.
+                                                stdin_in_search = true;
                                                 stdin_shadow.clear();
                                             }
                                             0x03 | 0x15 => {
+                                                stdin_in_search = false;
                                                 stdin_shadow.clear();
                                             }
                                             0x7F | 0x08 => {
                                                 crate::pop_last_utf8_char(&mut stdin_shadow);
                                             }
                                             0x1B => {
+                                                stdin_in_search = false;
                                                 stdin_shadow.clear();
                                             }
-                                            0x00..=0x1F => {}
+                                            0x00..=0x1F => {
+                                                // Any control char other than
+                                                // Ctrl+R/Ctrl+S (handled above)
+                                                // exits bash's incremental search.
+                                                // Even if it doesn't, the
+                                                // `!in_search_mode` guard in the
+                                                // `_ =>` branch prevents false
+                                                // accumulation.
+                                                if stdin_in_search {
+                                                    stdin_in_search = false;
+                                                }
+                                            }
                                             _ => {
-                                                stdin_shadow.push(byte);
+                                                if !stdin_in_search && !in_search_mode {
+                                                    stdin_shadow.push(byte);
+                                                }
                                             }
                                         }
                                     }
@@ -2874,7 +2980,13 @@ impl PersistentPty {
                                         });
                                         remote_host_for_probe = Some(host.clone());
                                         if let Some(ref sh) = shared_host {
+                                            let prev = sh.lock().unwrap().clone();
                                             *sh.lock().unwrap() = Some(host.clone());
+                                            tracing::debug!(
+                                                "output_scan: updated shared_host {:?} -> {:?}",
+                                                prev,
+                                                host
+                                            );
                                         }
                                         probe_injected = false;
                                         probe_active = false;
@@ -2933,9 +3045,10 @@ impl PersistentPty {
                                 if let Some(closed_host) =
                                     scan_output_for_disconnect(&output_ssh_scan)
                                 {
-                                    let is_current = remote_host_for_probe
+                                    let current_host = remote_host_for_probe
                                         .as_deref()
-                                        .is_some_and(|h| h == closed_host);
+                                        .map(|h| h.rsplit('@').next().unwrap_or(h));
+                                    let is_current = current_host.is_some_and(|h| h == closed_host);
                                     if is_current {
                                         if !nested_host_stack.is_empty() {
                                             debug!(
@@ -3289,6 +3402,17 @@ impl PersistentPty {
                                         // success-signal accumulator so the
                                         // next nested ssh starts fresh.
                                         nested_confirm_buf.clear();
+                                        // Re-enable the output scanner: the
+                                        // current session's PS1 is fully set
+                                        // up, so any future `ssh` appearing
+                                        // in PTY output (typed, pasted, or
+                                        // Ctrl+R-recalled) is a *nested*
+                                        // session, not a re-trigger of this
+                                        // one.  Without this clear the gate
+                                        // `!nested_probe_pending` blocks all
+                                        // scanning and Ctrl+R-launched nested
+                                        // SSH goes undetected.
+                                        nested_probe_pending = false;
                                     } else {
                                         debug!(
                                             "PS1 marker write failed for host {}, will retry on next prompt",
@@ -5424,6 +5548,11 @@ fn child_main(slave_fd: RawFd, control_write_fd: RawFd, rcfile_path: &str, cwd: 
 
     let args = vec![c_shell.clone(), c_rcfile_flag, c_rcfile, c_interactive];
 
+    // Defense-in-depth: close inherited parent fds (master, control_read, etc.)
+    // above fd 3. CLOEXEC (set in start()) already closes them at exec time;
+    // this loop is a backup in case a future fd is added without CLOEXEC.
+    close_inherited_fds_from(4);
+
     let _ = execvp(&c_shell, &args);
 
     // execvp failed.
@@ -6420,9 +6549,48 @@ fn scan_output_for_ssh_host(output: &str) -> Option<String> {
         Some(pos) => &output[..pos + 1],
         None => return None,
     };
-    let clean = strip_ansi_escapes(scanable);
-    for line in clean.lines() {
-        let line = line.trim();
+    // Split on \r AND \n BEFORE strip_ansi_escapes, because
+    // strip_ansi_escapes removes bare \r (used by bash to redraw
+    // lines during reverse-i-search).  Without splitting on \r first,
+    // the search display and the redrawn command merge into one
+    // line — the merged line contains `(reverse-i-search)` and gets
+    // skipped, hiding the real command.
+    for segment in scanable.split(|c| c == '\n' || c == '\r') {
+        // Truncate at the first run of 2+ consecutive \x08 bytes.
+        // After Ctrl+R Enter, bash redraws [prompt]$ command then sends
+        // a burst of backspaces for cursor repositioning.  strip_ansi_escapes
+        // would apply these as character deletions, eating the command text.
+        let seg_bytes = segment.as_bytes();
+        let mut trunc_len = seg_bytes.len();
+        let mut k = 0;
+        while k < seg_bytes.len() {
+            if seg_bytes[k] == 0x08 {
+                let run_start = k;
+                while k < seg_bytes.len() && seg_bytes[k] == 0x08 {
+                    k += 1;
+                }
+                if k - run_start >= 2 {
+                    trunc_len = run_start;
+                    break;
+                }
+            } else {
+                k += 1;
+            }
+        }
+        let segment = &segment[..trunc_len];
+        let clean = strip_ansi_escapes(segment);
+        let stripped: String = clean.chars().filter(|c| !c.is_control()).collect();
+        let line = stripped.trim();
+        if line.is_empty() {
+            continue;
+        }
+        tracing::debug!(
+            "scan_output_for_ssh_host: segment={:?} (raw_len={} clean_len={} stripped_len={})",
+            line,
+            segment.len(),
+            clean.len(),
+            stripped.len()
+        );
         // Skip reverse-i-search lines — they show history matches, not
         // executed commands.  When the user confirms a search with Enter,
         // the command appears as a normal line in subsequent PTY output.
@@ -6472,6 +6640,113 @@ fn scan_output_for_ssh_host(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract the matched command from the last `(reverse-i-search)` line
+/// in the PTY output buffer.  When the user presses Enter after a
+/// reverse-i-search, bash executes the *matched* command but does not
+/// echo `[prompt]$ command` — so neither stdin_shadow nor the output
+/// scanner can see the command.  The only place it appears is inside the
+/// `(reverse-i-search)\`search': command` line that bash drew while
+/// searching.
+///
+/// Returns the command portion, or `None` if no search line is found.
+fn extract_isearch_command(output: &str) -> Option<String> {
+    let pos = output
+        .rfind("(reverse-i-search)")
+        .or_else(|| output.rfind("(i-search)"))?;
+    let mut end = (pos + 1024).min(output.len());
+    while end > pos && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let chunk = &output[pos..end];
+    let bytes = chunk.as_bytes();
+
+    let mut visible: Vec<(usize, u8)> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                    i += 2;
+                    while i < bytes.len() && !((0x40..=0x7e).contains(&bytes[i])) {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1;
+                    }
+                } else {
+                    i += 2;
+                }
+            }
+            0x08 | 0x0d => {
+                i += 1;
+            }
+            _ => {
+                visible.push((i, bytes[i]));
+                i += 1;
+            }
+        }
+    }
+
+    let mut ssh_byte_start = None;
+    for j in 0..visible.len().saturating_sub(4) {
+        if visible[j].1 == b' '
+            && visible[j + 1].1 == b's'
+            && visible[j + 2].1 == b's'
+            && visible[j + 3].1 == b'h'
+            && visible[j + 4].1 == b' '
+        {
+            ssh_byte_start = Some(visible[j + 1].0);
+            break;
+        }
+    }
+
+    let start = ssh_byte_start?;
+
+    let mut cmd_bytes: Vec<u8> = Vec::new();
+    let mut j = start;
+    while j < bytes.len() {
+        match bytes[j] {
+            0x0d | 0x0a => break,
+            0x08 => {
+                let run_start = j;
+                while j < bytes.len() && bytes[j] == 0x08 {
+                    j += 1;
+                }
+                if j - run_start >= 2 {
+                    break;
+                }
+            }
+            0x1b => {
+                if j + 1 < bytes.len() && bytes[j + 1] == b'[' {
+                    j += 2;
+                    while j < bytes.len() && !((0x40..=0x7e).contains(&bytes[j])) {
+                        j += 1;
+                    }
+                    if j < bytes.len() {
+                        j += 1;
+                    }
+                } else {
+                    j += 2;
+                }
+            }
+            b if b < 0x20 => {
+                j += 1;
+            }
+            b => {
+                cmd_bytes.push(b);
+                j += 1;
+            }
+        }
+    }
+
+    let cmd = String::from_utf8_lossy(&cmd_bytes).trim().to_string();
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd)
+    }
 }
 
 /// Decide whether `host` looks like a real SSH destination (IPv4, hostname,
@@ -7820,6 +8095,45 @@ mod tests {
             waitpid(child_pid, Some(WaitPidFlag::WNOHANG)),
             Err(nix::errno::Errno::ECHILD)
         ));
+    }
+
+    /// Regression test: the forked bash child must NOT inherit the PTY master
+    /// fd (/dev/ptmx) or the control pipe read end. Without FD_CLOEXEC +
+    /// explicit child-side fd cleanup, bash holds the master open, preventing
+    /// PTY hangup/SIGHUP when aish dies — causing zombie bash accumulation.
+    #[test]
+    fn test_child_does_not_inherit_master_fd() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let child_pid = pty.child_pid.as_raw();
+
+        let fds_dir = format!("/proc/{child_pid}/fd");
+        let targets: Vec<String> = std::fs::read_dir(&fds_dir)
+            .expect("read child /proc/fd")
+            .flatten()
+            .filter_map(|e| {
+                let link = std::fs::read_link(e.path()).ok()?;
+                Some(link.display().to_string())
+            })
+            .collect();
+
+        let has_ptmx = targets.iter().any(|t| t.contains("/dev/ptmx"));
+        let pipe_count = targets.iter().filter(|t| t.starts_with("pipe:")).count();
+
+        pty.stop();
+
+        assert!(
+            !has_ptmx,
+            "child inherited PTY master (/dev/ptmx) — fd leak regression!\nfds: {targets:?}"
+        );
+        // Child should have exactly ONE pipe: the control pipe write end (fd 3).
+        // The read end (control_read) must not be inherited.
+        assert_eq!(
+            pipe_count, 1,
+            "expected exactly 1 pipe (control write), got {pipe_count}\nfds: {targets:?}"
+        );
     }
 
     #[test]

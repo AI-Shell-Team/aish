@@ -85,6 +85,7 @@ dependencies = [
 name = "aish-core"
 version = "0.3.6"
 dependencies = [
+ "chrono",
  "dirs 5.0.1",
  "hex",
  "serde",
@@ -128,6 +129,7 @@ dependencies = [
  "aish-tools",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "futures",
  "langfuse-ergonomic",
  "rand 0.9.4",

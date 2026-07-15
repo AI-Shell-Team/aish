@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aish_context::{ContextBudgetPolicy, ContextMessage, ContextPressureLevel, MicrocompactReport};
-use aish_core::{AishError, LlmEvent, LlmEventType, MemoryType, PlanModeState, PlanPhase};
+use aish_core::{
+    AishError, AuditEvent, AuditSink, LlmEvent, LlmEventType, MemoryType, PlanModeState, PlanPhase,
+};
 
 use crate::api::{resolve_api_dialect, stream_simple, ApiDialect, StreamContext};
 use crate::client::LlmResponse;
@@ -17,6 +19,23 @@ fn is_short_circuit_result(result: &ToolResult) -> bool {
         .and_then(|meta| meta.get("dispatch_status"))
         .and_then(|value| value.as_str())
         .is_some_and(|status| status.eq_ignore_ascii_case("short_circuit"))
+}
+
+fn audit_security_info(security: &PreflightSecurityContext) -> (Option<String>, Option<String>) {
+    let Some(ref decision) = security.decision else {
+        return (None, None);
+    };
+    let rule = decision
+        .analysis
+        .matched_rule
+        .as_ref()
+        .and_then(|r| r.id.clone().or(r.name.clone()));
+    let level = match decision.level {
+        aish_security::RiskLevel::Low => "LOW",
+        aish_security::RiskLevel::Medium => "MEDIUM",
+        aish_security::RiskLevel::High => "HIGH",
+    };
+    (rule, Some(level.to_string()))
 }
 
 /// Maximum consecutive tool failures before pausing for user confirmation.
@@ -36,6 +55,15 @@ pub struct LlmSession {
     /// Callback invoked when the tool-call iteration limit is reached.
     /// Receives the current iteration count and returns true to reset and continue.
     iteration_limit_callback: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
+    audit_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
+    audit_session_uuid: Option<String>,
+    audit_user: Option<String>,
+    /// Dynamic host reference — updated by the PTY forwarding loop when the
+    /// user enters or exits nested SSH sessions.  Stored as a shared mutex so
+    /// that audit events always reflect the *current* remote host, not a
+    /// snapshot taken at session creation time.
+    audit_host: Option<Arc<Mutex<Option<String>>>>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
@@ -94,6 +122,11 @@ impl LlmSession {
             confirmation_callback: None,
             security_notice_callback: None,
             iteration_limit_callback: None,
+            audit_sink: None,
+            audit_redactor: None,
+            audit_session_uuid: None,
+            audit_user: None,
+            audit_host: None,
             temperature,
             max_tokens,
             langfuse: None,
@@ -180,6 +213,71 @@ impl LlmSession {
     /// reset the counter and continue, or false to stop.
     pub fn set_iteration_limit_callback(&mut self, cb: Arc<dyn Fn(u32) -> bool + Send + Sync>) {
         self.iteration_limit_callback = Some(cb);
+    }
+
+    /// Wire up the audit sink and identity context for tool-call / security
+    /// audit instrumentation.  When `sink` is set, [`execute_tool`] and
+    /// [`run_tool_preflight`] emit audit events.
+    ///
+    /// `host` is a shared mutex so nested SSH host changes (detected by the
+    /// PTY forwarding loop) are reflected in every audit event without
+    /// requiring a new `set_audit_context` call.
+    pub fn set_audit_context(
+        &mut self,
+        sink: Arc<dyn AuditSink>,
+        redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
+        session_uuid: String,
+        user: Option<String>,
+        host: Option<Arc<Mutex<Option<String>>>>,
+    ) {
+        self.audit_sink = Some(sink);
+        self.audit_redactor = redactor;
+        self.audit_session_uuid = Some(session_uuid);
+        self.audit_user = user;
+        self.audit_host = host;
+    }
+
+    fn redact(&self, text: &str) -> String {
+        match self.audit_redactor {
+            Some(ref r) => r(text),
+            None => text.to_string(),
+        }
+    }
+
+    /// Resolve the current (user, host) pair from the shared host mutex.
+    /// The mutex value uses `user@host` format (from SSH command parsing);
+    /// we split it into separate fields.  Falls back to `audit_user` when
+    /// the mutex is absent or has no user@ prefix.
+    fn current_audit_identity(&self) -> (Option<String>, Option<String>) {
+        let raw = self
+            .audit_host
+            .as_ref()
+            .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .filter(|s| !s.is_empty());
+
+        match &raw {
+            Some(val) => {
+                let (user, host) = val
+                    .split_once('@')
+                    .map(|(u, h)| (Some(u.to_string()), h.to_string()))
+                    .unwrap_or((None, val.clone()));
+                (user.or_else(|| self.audit_user.clone()), Some(host))
+            }
+            None => (self.audit_user.clone(), None),
+        }
+    }
+
+    fn emit_audit(&self, mut event: AuditEvent) {
+        if let Some(ref sink) = self.audit_sink {
+            let (user, host) = self.current_audit_identity();
+            if user.is_some() {
+                event.user = user;
+            }
+            if host.is_some() {
+                event.host = host;
+            }
+            sink.record(event);
+        }
     }
 
     pub fn cancellation_token(&self) -> &CancellationToken {
@@ -1262,6 +1360,31 @@ impl LlmSession {
                 metadata: None,
             });
 
+            // Audit: record the AI tool invocation.
+            let audited_args = self.redact(&tool_call.arguments);
+            let result_summary = {
+                let full = self.redact(&result.output);
+                const MAX_AUDIT_RESULT: usize = 1024;
+                if full.len() > MAX_AUDIT_RESULT {
+                    let mut end = MAX_AUDIT_RESULT;
+                    while end > 0 && !full.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...(truncated)", &full[..end])
+                } else {
+                    full
+                }
+            };
+            self.emit_audit(AuditEvent::ai_tool(
+                chrono::Utc::now(),
+                self.audit_session_uuid.clone(),
+                None,
+                None,
+                tool_call.name.clone(),
+                audited_args,
+                result_summary,
+            ));
+
             result
         } else {
             ToolResult::error(format!("Unknown tool: {}", tool_call.name))
@@ -1283,6 +1406,11 @@ impl LlmSession {
             confirmation_callback: self.confirmation_callback.clone(),
             security_notice_callback: self.security_notice_callback.clone(),
             iteration_limit_callback: self.iteration_limit_callback.clone(),
+            audit_sink: self.audit_sink.clone(),
+            audit_redactor: self.audit_redactor.clone(),
+            audit_session_uuid: self.audit_session_uuid.clone(),
+            audit_user: self.audit_user.clone(),
+            audit_host: self.audit_host.clone(),
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             langfuse: self.langfuse.clone(),
@@ -1316,7 +1444,20 @@ impl LlmSession {
 
         let ctx = crate::tool_context::ToolContext::for_session(self);
         match tool.preflight_with_context(args, &ctx) {
-            PreflightResult::Allow => None,
+            PreflightResult::Allow => {
+                self.emit_audit(AuditEvent::security_decision(
+                    chrono::Utc::now(),
+                    self.audit_session_uuid.clone(),
+                    None,
+                    None,
+                    None,
+                    "allow".to_string(),
+                    None,
+                    None,
+                    Some("LOW".to_string()),
+                ));
+                None
+            }
             PreflightResult::Confirm { message, security } => {
                 let security = security.unwrap_or_else(|| {
                     PreflightSecurityContext::fallback(
@@ -1331,6 +1472,22 @@ impl LlmSession {
                 } else {
                     true
                 };
+                let (matched_rule, risk_level) = audit_security_info(&security);
+                self.emit_audit(AuditEvent::security_decision(
+                    chrono::Utc::now(),
+                    self.audit_session_uuid.clone(),
+                    None,
+                    None,
+                    security.target.as_ref().map(|t| self.redact(t)),
+                    "confirm".to_string(),
+                    Some(if approved {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    }),
+                    matched_rule,
+                    risk_level,
+                ));
                 if approved {
                     None
                 } else {
@@ -1349,6 +1506,18 @@ impl LlmSession {
                         SecurityPanelMode::Blocked,
                     )
                 });
+                let (matched_rule, risk_level) = audit_security_info(&security);
+                self.emit_audit(AuditEvent::security_decision(
+                    chrono::Utc::now(),
+                    self.audit_session_uuid.clone(),
+                    None,
+                    None,
+                    security.target.as_ref().map(|t| self.redact(t)),
+                    "block".to_string(),
+                    None,
+                    matched_rule,
+                    risk_level,
+                ));
                 if let Some(ref cb) = self.security_notice_callback {
                     cb(&security);
                 }
