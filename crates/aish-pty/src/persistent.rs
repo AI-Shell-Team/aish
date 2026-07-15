@@ -2198,6 +2198,7 @@ impl PersistentPty {
                                                                     probe_current_section.clear();
                                                                     probe_start = None;
                                                                     output_ssh_scan.clear();
+                                                                    nested_confirm_buf.clear();
                                                                     at_password_prompt = false;
                                                                     in_search_mode = false;
                                                                 }
@@ -2249,6 +2250,7 @@ impl PersistentPty {
                                                                 probe_current_section.clear();
                                                                 probe_start = None;
                                                                 output_ssh_scan.clear();
+                                                                nested_confirm_buf.clear();
                                                                 at_password_prompt = false;
                                                                 in_search_mode = false;
                                                             }
@@ -6649,20 +6651,16 @@ fn scan_output_for_ssh_host(output: &str) -> Option<String> {
 ///
 /// Returns the command portion, or `None` if no search line is found.
 fn extract_isearch_command(output: &str) -> Option<String> {
-    // Find the last (reverse-i-search) or (i-search) occurrence.
     let pos = output
         .rfind("(reverse-i-search)")
         .or_else(|| output.rfind("(i-search)"))?;
-    let end = (pos + 1024).min(output.len());
+    let mut end = (pos + 1024).min(output.len());
+    while end > pos && !output.is_char_boundary(end) {
+        end -= 1;
+    }
     let chunk = &output[pos..end];
     let bytes = chunk.as_bytes();
 
-    // Build a list of (byte_offset, char) for visible characters,
-    // skipping ANSI sequences, backspace, and CR.  This lets us search
-    // for " ssh " across ANSI-highlighted text (bash wraps matched
-    // portions in \x1b[7m...\x1b[27m) without the ANSI bytes breaking
-    // the pattern match.  Backspace is treated as a no-op during the
-    // search phase — it is applied only during command extraction.
     let mut visible: Vec<(usize, u8)> = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -6690,7 +6688,6 @@ fn extract_isearch_command(output: &str) -> Option<String> {
         }
     }
 
-    // Search the visible-character sequence for " ssh ".
     let mut ssh_byte_start = None;
     for j in 0..visible.len().saturating_sub(4) {
         if visible[j].1 == b' '
@@ -6706,15 +6703,7 @@ fn extract_isearch_command(output: &str) -> Option<String> {
 
     let start = ssh_byte_start?;
 
-    // Extract the command text.  The command ends at:
-    //   - \r or \n (line boundary), or
-    //   - a run of 2+ consecutive \x08 (readline cursor repositioning
-    //     after drawing the matched command — single \x08 inside the
-    //     command text is harmless and skipped, but a burst of
-    //     backspaces signals the start of readline redraw machinery
-    //     that would pollute the extracted command with search-term
-    //     fragments like "s': sh").
-    let mut cmd = String::new();
+    let mut cmd_bytes: Vec<u8> = Vec::new();
     let mut j = start;
     while j < bytes.len() {
         match bytes[j] {
@@ -6745,13 +6734,13 @@ fn extract_isearch_command(output: &str) -> Option<String> {
                 j += 1;
             }
             b => {
-                cmd.push(b as char);
+                cmd_bytes.push(b);
                 j += 1;
             }
         }
     }
 
-    let cmd = cmd.trim().to_string();
+    let cmd = String::from_utf8_lossy(&cmd_bytes).trim().to_string();
     if cmd.is_empty() {
         None
     } else {
