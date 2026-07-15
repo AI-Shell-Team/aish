@@ -207,7 +207,9 @@ mod tests {
 
         let handle = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
-            thread::sleep(Duration::from_millis(1_200));
+            // Sleep well beyond the clamped timeout (1s minimum) so the
+            // client read reliably times out regardless of CI scheduling.
+            thread::sleep(Duration::from_secs(3));
         });
 
         let request = SandboxRunRequest {
