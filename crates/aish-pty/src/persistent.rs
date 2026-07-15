@@ -3045,9 +3045,10 @@ impl PersistentPty {
                                 if let Some(closed_host) =
                                     scan_output_for_disconnect(&output_ssh_scan)
                                 {
-                                    let is_current = remote_host_for_probe
+                                    let current_host = remote_host_for_probe
                                         .as_deref()
-                                        .is_some_and(|h| h == closed_host);
+                                        .map(|h| h.rsplit('@').next().unwrap_or(h));
+                                    let is_current = current_host.is_some_and(|h| h == closed_host);
                                     if is_current {
                                         if !nested_host_stack.is_empty() {
                                             debug!(
