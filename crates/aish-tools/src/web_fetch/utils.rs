@@ -403,9 +403,8 @@ fn decode_html_entities(input: &str) -> String {
     // turning `&amp;lt;` into `&lt;`, which was then decoded again into
     // `<` — corrupting the original content.
     static ENTITY_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = ENTITY_RE.get_or_init(|| {
-        Regex::new(r"&(?:amp|lt|gt|quot|apos|nbsp|#39);").expect("valid regex")
-    });
+    let re = ENTITY_RE
+        .get_or_init(|| Regex::new(r"&(?:amp|lt|gt|quot|apos|nbsp|#39);").expect("valid regex"));
     re.replace_all(input, |caps: &regex::Captures| match &caps[0] {
         "&amp;" => "&",
         "&lt;" => "<",
