@@ -223,6 +223,7 @@ pub fn render_prompt(
     last_exit_code: i32,
     mode: &str,
     recording: bool,
+    prompt_style: Option<&str>,
 ) -> String {
     let home = dirs::home_dir()
         .map(|h| h.to_string_lossy().to_string())
@@ -260,11 +261,17 @@ pub fn render_prompt(
         }
     }
 
-    // Prompt symbol based on last exit code
+    // Prompt symbol based on last exit code. A custom `prompt_style`
+    // overrides the default arrow (doubled on error to match the default).
+    let ok_sym = prompt_style.unwrap_or(theme::PROMPT_OK);
+    let err_sym = match prompt_style {
+        Some(s) => format!("{s}{s}"),
+        None => theme::PROMPT_ERR.to_string(),
+    };
     if last_exit_code == 0 {
-        prompt.push_str(&format!("{} ", theme::success(theme::PROMPT_OK)));
+        prompt.push_str(&format!("{} ", theme::success(ok_sym)));
     } else {
-        prompt.push_str(&format!("{} ", theme::error(theme::PROMPT_ERR)));
+        prompt.push_str(&format!("{} ", theme::error(&err_sym)));
     }
 
     prompt
@@ -680,7 +687,7 @@ mod tests {
     fn test_render_prompt_with_home_substitution() {
         let home = dirs::home_dir().expect("home dir should exist");
         let cwd = home.join("projects").to_string_lossy().to_string();
-        let result = render_prompt(&cwd, "test-model", 0, "aish", false);
+        let result = render_prompt(&cwd, "test-model", 0, "aish", false, None);
         assert!(
             result.contains("~"),
             "should substitute home with ~: {}",
@@ -693,7 +700,7 @@ mod tests {
     #[test]
     fn test_render_prompt_without_git() {
         // /tmp is very unlikely to be inside a git repo
-        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false, None);
         // Should NOT contain git branch separator '|'
         assert!(
             !result.contains("|"),
@@ -704,7 +711,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_success_symbol() {
-        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false, None);
         assert!(
             result.contains("➜"),
             "should have single arrow prompt on success: {}",
@@ -718,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_error_symbol() {
-        let result = render_prompt("/tmp", "test-model", 1, "aish", false);
+        let result = render_prompt("/tmp", "test-model", 1, "aish", false, None);
         assert!(
             result.contains("➜➜"),
             "should have double arrow prompt on error: {}",
@@ -728,13 +735,13 @@ mod tests {
 
     #[test]
     fn test_render_prompt_aish_mode_badge() {
-        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false, None);
         assert!(result.contains("◆ aish"), "should show aish mode badge");
     }
 
     #[test]
     fn test_render_prompt_plan_mode_badge() {
-        let result = render_prompt("/tmp", "test-model", 0, "plan", false);
+        let result = render_prompt("/tmp", "test-model", 0, "plan", false, None);
         assert!(result.contains("◆ plan"), "should show plan mode badge");
     }
 
@@ -806,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_recording_indicator() {
-        let result = render_prompt("/tmp", "test-model", 0, "aish", true);
+        let result = render_prompt("/tmp", "test-model", 0, "aish", true, None);
         assert!(
             result.contains("⏺"),
             "should contain recording indicator: {}",
@@ -816,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_render_prompt_no_recording_indicator() {
-        let result = render_prompt("/tmp", "test-model", 0, "aish", false);
+        let result = render_prompt("/tmp", "test-model", 0, "aish", false, None);
         assert!(
             !result.contains("⏺"),
             "should not contain recording indicator when not recording: {}",

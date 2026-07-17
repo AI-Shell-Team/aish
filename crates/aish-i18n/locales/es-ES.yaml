@@ -155,6 +155,7 @@ shell:
     help: "Mostrar información de ayuda"
     model: "Mostrar o cambiar modelo de IA"
     setup: "Abrir asistente de configuración"
+    setting: "Abrir el panel de configuración interactivo"
     plan: "Control del modo plan"
     token: "Mostrar uso de tokens"
     resume: "Reanudar sesión anterior"
@@ -306,6 +307,197 @@ shell:
     no_config_manager: "No se puede reconfigurar: el gestor de configuración no está disponible"
     cancelled: "Configuración cancelada; se conservan los ajustes actuales"
     applied: "Configuración actualizada; modelo actual: {model}"
+
+  setting:
+    title: "Ajustes"
+    search_entry: "Buscar ajustes..."
+    search_desc: "Salta a cualquier ajuste por palabra clave en todas las categorías"
+    search_title: "Buscar ajustes"
+    search_placeholder: "Escribe para filtrar (nombre / descripción / categoría)"
+    search_footer: "↑/↓ mover  Escribe para filtrar  Enter editar  Esc volver"
+    search_empty: "No hay ajustes coincidentes"
+    restart_summary: "{count} cambio(s) se aplicarán tras reiniciar"
+    subtitle: "Elige una categoría para configurar (Esc para salir)"
+    select_setting: "Selecciona un ajuste para editar (Esc para volver)"
+    on: "activado"
+    off: "desactivado"
+    not_set: "(sin definir)"
+    current_tag: "actual"
+    applied: "Guardado {label} = {value}"
+    applied_clear: "Borrado {label}"
+    invalid: "Valor no válido: {error}"
+    restart_hint: "(se aplica tras reiniciar)"
+    cat:
+      model: "Modelo y proveedor"
+      appearance: "Apariencia"
+      ai: "Comportamiento de IA"
+      security: "Seguridad"
+      context: "Contexto y memoria"
+      remote: "Prompt remoto"
+      advanced: "Avanzado"
+    cat_desc:
+      model: "Modelo LLM, endpoint y credenciales"
+      appearance: "Símbolo del prompt e idioma de respuesta"
+      ai: "Completado, contexto y manejo de tokens"
+      security: "InputGuard, sandbox y nivel de riesgo"
+      context: "Recuperación de memoria, compactación e historial"
+      remote: "Segmentos de prompt SSH/telnet"
+      advanced: "Registro, trazas y demonio PTY"
+    k:
+      model:
+        label: "Modelo de IA"
+        desc: "Nombre del modelo enviado al proveedor, p. ej. gpt-4o, glm-4.6, deepseek-chat"
+      api_base:
+        label: "API Base URL"
+        desc: "URL del endpoint compatible con OpenAI para chat completions"
+      api_key:
+        label: "Clave API"
+        desc: "Clave secreta para el proveedor LLM (guardada en config.yaml)"
+      temperature:
+        label: "Temperature"
+        desc: "Aleatoriedad de muestreo 0.0–2.0; mayor = más creativo"
+      max_tokens:
+        label: "Tokens máximos"
+        desc: "Límite de tokens de respuesta (vacío = predeterminado del proveedor)"
+      prompt_style:
+        label: "Símbolo del prompt"
+        desc: "Símbolo de prompt personalizado (vacío = flecha predeterminada)"
+      output_language:
+        label: "Idioma de salida"
+        desc: "Idioma preferido para las respuestas de la IA (zh-CN, en-US, ja-JP, de-DE, fr-FR, es-ES)"
+      auto_suggest:
+        label: "Autosugerir"
+        desc: "Mostrar sugerencias basadas en el historial mientras escribes"
+      inline_completion:
+        label: "Completado en línea"
+        desc: "Completado de IA en línea mientras escribes"
+      inline_debounce_ms:
+        label: "Debounce en línea (ms)"
+        desc: "Retardo antes de activar el completado en línea tras dejar de escribir"
+      inline_context_lines:
+        label: "Líneas de contexto en línea"
+        desc: "Número de líneas recientes del shell enviadas como contexto al completado en línea"
+      inline_max_tokens:
+        label: "Tokens máx. en línea"
+        desc: "Límite de tokens para las respuestas del completado en línea"
+      inline_min_input_chars:
+        label: "Caracteres mín. de entrada en línea"
+        desc: "Caracteres mínimos escritos antes de activar el completado en línea"
+      inline_timeout_secs:
+        label: "Tiempo de espera en línea (s)"
+        desc: "Segundos de espera para un completado en línea antes de cancelar"
+      inline_disable_thinking:
+        label: "Desactivar pensamiento en línea"
+        desc: "Suprimir tokens de razonamiento/pensamiento en el completado en línea"
+      inline_enforce_json:
+        label: "Forzar JSON en línea"
+        desc: "Forzar que el completado en línea devuelva JSON estricto"
+      max_llm_messages:
+        label: "Mensajes LLM máx."
+        desc: "Máximo de turnos de conversación conservados en el historial del LLM"
+      enable_token_estimation:
+        label: "Estimación de tokens"
+        desc: "Usar tiktoken para estimar conteos de tokens en el recorte de contexto"
+      input_guard_enabled:
+        label: "InputGuard"
+        desc: "Revisar previamente la entrada contra reglas de comandos peligrosos"
+      enable_sandbox:
+        label: "Activar sandbox"
+        desc: "Ejecutar comandos arriesgados en un sandbox antes de permitirlos"
+      default_risk_level:
+        label: "Nivel de riesgo predeterminado"
+        desc: "Calificación de riesgo base para comandos no reconocidos (low/medium/high)"
+      sandbox_off_action:
+        label: "Acción sandbox desactivado"
+        desc: "Qué hacer cuando el sandbox no está disponible (allow/confirm/block)"
+      sandbox_timeout_seconds:
+        label: "Tiempo de espera del sandbox (s)"
+        desc: "Segundos antes de matar una preejecución del sandbox"
+      memory_auto_recall:
+        label: "Recuperación automática de memoria"
+        desc: "Mostrar automáticamente memorias relevantes a largo plazo en el contexto de la IA"
+      memory_auto_retain:
+        label: "Retención automática de memoria"
+        desc: "Persistir automáticamente hechos notables en la memoria a largo plazo"
+      context_auto_compact:
+        label: "Compactación automática de contexto"
+        desc: "Compactar automáticamente la conversación cuando aumente la presión del contexto"
+      compact_full_enabled:
+        label: "Compactación completa"
+        desc: "Activar el paso de compactación completa que resume turnos antiguos"
+      compact_context_window_tokens:
+        label: "Tokens de ventana de contexto"
+        desc: "Tamaño de ventana de contexto del modelo usado para el cálculo de compactación"
+      compact_micro_keep_recent:
+        label: "Conservar recientes en micro-compactación"
+        desc: "Turnos conservados literalmente durante la micro-compactación"
+      compact_shell_keep_recent:
+        label: "Conservar recientes en shell"
+        desc: "Turnos de comandos del shell conservados durante la compactación del shell"
+      compact_summary_max_tokens:
+        label: "Tokens máx. del resumen de compactación"
+        desc: "Límite de tokens para el resumen producido por la compactación completa"
+      compact_max_consecutive_failures:
+        label: "Fallos consecutivos máx."
+        desc: "Fallos de compactación antes de recurrir a un recorte"
+      compact_reserved_output_tokens:
+        label: "Tokens reservados de salida"
+        desc: "Tokens reservados para la respuesta del modelo, restados del presupuesto de contexto"
+      history_size:
+        label: "Tamaño del historial"
+        desc: "Máximo de entradas del historial del shell conservadas"
+      max_shell_messages:
+        label: "Mensajes de shell máx."
+        desc: "Máximo de turnos de comandos del shell retenidos en el contexto de la IA"
+      context_token_budget:
+        label: "Presupuesto de tokens de contexto"
+        desc: "Límite duro opcional del total de tokens de contexto (vacío = ilimitado)"
+      enable_remote_git_prompt:
+        label: "Prompt de git remoto"
+        desc: "Mostrar la rama git en prompts remotos (SSH/telnet) de bash"
+      remote_rich_prompt:
+        label: "Prompt enriquecido remoto"
+        desc: "Activar prompts remotos multilínea enriquecidos (user@host, cwd, git)"
+      remote_show_venv:
+        label: "Mostrar venv remoto"
+        desc: "Mostrar el venv de Python activo en prompts remotos"
+      remote_show_container:
+        label: "Mostrar contenedor remoto"
+        desc: "Mostrar marcadores de contenedor/runtime en prompts remotos"
+      remote_show_kube:
+        label: "Mostrar kube remoto"
+        desc: "Mostrar el contexto de Kubernetes en prompts remotos"
+      remote_danger_patterns:
+        label: "Patrones de peligro remoto"
+        desc: "Expresiones regulares de nombre de host que marcan PS1 remoto como peligro (separadas por comas)"
+      enable_langfuse:
+        label: "Activar Langfuse"
+        desc: "Activar trazas de observabilidad LLM de Langfuse"
+      langfuse_public_key:
+        label: "Clave pública de Langfuse"
+        desc: "Clave pública de Langfuse"
+      langfuse_secret_key:
+        label: "Clave secreta de Langfuse"
+        desc: "Clave secreta de Langfuse"
+      langfuse_host:
+        label: "Host de Langfuse"
+        desc: "URL de instancia autoalojada de Langfuse"
+      enable_scripts:
+        label: "Activar scripts"
+        desc: "Activar el sistema de scripts .aish y los hooks de ciclo de vida"
+      log_level:
+        label: "Nivel de registro"
+        desc: "Verbosidad del registro de trazas (error/warn/info/debug/trace)"
+      pty_daemon_enabled:
+        label: "Demonio PTY"
+        desc: "Persistir sesiones PTY entre desconexiones mediante un demonio en segundo plano"
+      codex_auth_path:
+        label: "Ruta de auth de Codex"
+        desc: "Ruta a auth.json de OpenAI Codex/ChatGPT"
+      session_db_path:
+        label: "Ruta de BD de sesión"
+        desc: "Ubicación personalizada de la base de datos de sesiones (vacío = predeterminado)"
+
   session:
     iteration_limit_reached: "Se han completado {count} iteraciones de llamadas a herramientas."
     iteration_limit_title: "⏸ Límite de llamadas a herramientas alcanzado"
@@ -515,6 +707,7 @@ help:
       | `/quit` | Salir de AI Shell |
       | `/model [nombre]` | Mostrar o cambiar el modelo de IA |
       | `/setup` | Reconfigurar ajustes de API |
+      | `/setting` | Abrir el panel de configuración interactivo |
       | `/plan [start\|status\|exit]` | Control del modo plan |
       | `/token` | Mostrar uso de tokens (últimos 7 días) |
       | `/resume [id]` | Reanudar sesión anterior |

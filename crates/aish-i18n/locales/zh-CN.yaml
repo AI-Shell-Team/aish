@@ -354,6 +354,7 @@ shell:
     help: "显示帮助信息"
     model: "显示或切换 AI 模型"
     setup: "打开设置向导"
+    setting: "打开交互式设置面板"
     plan: "计划模式控制"
     token: "显示令牌用量"
     resume: "恢复之前的会话"
@@ -671,6 +672,196 @@ shell:
     cancelled: "配置已取消，保持当前设置不变"
     applied: "配置已更新，当前模型: {model}"
 
+  setting:
+    title: "设置"
+    search_entry: "搜索设置..."
+    search_desc: "按关键字跨分类跳转到任意设置"
+    search_title: "搜索设置"
+    search_placeholder: "输入关键字过滤（名称 / 描述 / 分类）"
+    search_footer: "↑↓ 移动  输入即过滤  Enter 编辑  Esc 返回"
+    search_empty: "没有匹配的设置"
+    restart_summary: "共有 {count} 项改动将在重启后生效"
+    subtitle: "选择要配置的分类（Esc 退出）"
+    select_setting: "选择要修改的设置项（Esc 返回）"
+    on: "开"
+    off: "关"
+    not_set: "（未设置）"
+    current_tag: "当前"
+    applied: "已保存 {label} = {value}"
+    applied_clear: "已清除 {label}"
+    invalid: "无效的值：{error}"
+    restart_hint: "（重启后生效）"
+    cat:
+      model: "模型与接入"
+      appearance: "外观"
+      ai: "AI 行为"
+      security: "安全"
+      context: "上下文与记忆"
+      remote: "远程提示符"
+      advanced: "高级"
+    cat_desc:
+      model: "LLM 模型、接口地址和密钥"
+      appearance: "提示符符号和回复语言"
+      ai: "补全、上下文与 token 处理"
+      security: "输入防护、沙箱和风险等级"
+      context: "记忆召回、自动压缩和历史"
+      remote: "SSH/telnet 提示符段"
+      advanced: "日志、追踪和 PTY 守护进程"
+    k:
+      model:
+        label: "AI 模型"
+        desc: "发送给服务商的模型名，例如 gpt-4o、glm-4.6、deepseek-chat"
+      api_base:
+        label: "API 接口地址"
+        desc: "OpenAI 兼容的对话补全接口 URL"
+      api_key:
+        label: "API 密钥"
+        desc: "用于向服务商鉴权的密钥"
+      temperature:
+        label: "采样温度"
+        desc: "采样随机性，0.0-2.0。越低越确定、越聚焦"
+      max_tokens:
+        label: "最大输出 token"
+        desc: "回复长度上限。留空 = 使用模型默认值"
+      prompt_style:
+        label: "提示符符号"
+        desc: "输入光标前显示的字符，例如 ->、$ 或表情符号（留空=默认箭头）"
+      output_language:
+        label: "AI 回复语言"
+        desc: "AI 回复所用的语言（覆盖终端 locale）"
+      auto_suggest:
+        label: "自动建议"
+        desc: "输入时显示 shell 命令建议"
+      inline_completion:
+        label: "行内 AI 补全"
+        desc: "输入 AI 提示时显示灰色幽灵文本建议"
+      max_llm_messages:
+        label: "AI 最大消息数"
+        desc: "上下文中保留的 AI 对话轮数"
+      enable_token_estimation:
+        label: "token 估算"
+        desc: "估算 token 用量以自动裁剪上下文"
+      input_guard_enabled:
+        label: "输入防护"
+        desc: "执行前拦截危险输入模式"
+      enable_sandbox:
+        label: "沙箱"
+        desc: "在隔离沙箱中预运行危险命令（需 systemd 服务）"
+      default_risk_level:
+        label: "默认风险等级"
+        desc: "命令确认的安全阈值基准"
+      sandbox_off_action:
+        label: "沙箱回退动作"
+        desc: "沙箱不可用时的处理：allow、confirm 或 block"
+      sandbox_timeout_seconds:
+        label: "沙箱超时"
+        desc: "沙箱预运行被终止的秒数（1-300）"
+      memory_auto_recall:
+        label: "记忆自动召回"
+        desc: "将相关长期记忆注入 AI 上下文"
+      memory_auto_retain:
+        label: "记忆自动保存"
+        desc: "自动将重要事实存入长期记忆"
+      context_auto_compact:
+        label: "上下文自动压缩"
+        desc: "接近 token 上限时摘要旧上下文"
+      history_size:
+        label: "历史大小"
+        desc: "shell 历史中保留的最大命令数"
+      max_shell_messages:
+        label: "Shell 最大消息数"
+        desc: "AI 上下文中保留的 shell 历史条数"
+      context_token_budget:
+        label: "上下文 token 预算"
+        desc: "上下文 token 硬上限；留空=不限"
+      enable_remote_git_prompt:
+        label: "远程 Git 提示符"
+        desc: "SSH/telnet 会话中在提示符显示 git 分支"
+      remote_rich_prompt:
+        label: "远程富提示符"
+        desc: "探测远程主机以生成环境感知的提示符段"
+      remote_show_venv:
+        label: "远程显示 Venv"
+        desc: "在远程提示符中显示 venv/conda 名称段"
+      remote_show_container:
+        label: "远程显示容器"
+        desc: "在远程提示符中显示容器（docker/podman）段"
+      remote_show_kube:
+        label: "远程显示 Kube"
+        desc: "在远程提示符中显示 kube 上下文段"
+      log_level:
+        label: "日志级别"
+        desc: "日志文件的详细程度"
+      enable_langfuse:
+        label: "Langfuse 追踪"
+        desc: "将 LLM trace 发送到 Langfuse 用于可观测性（需密钥）"
+      langfuse_public_key:
+        label: "Langfuse 公钥"
+        desc: "LLM 可观测性追踪的项目公钥"
+      langfuse_secret_key:
+        label: "Langfuse 密钥"
+        desc: "项目密钥（显示时脱敏）"
+      langfuse_host:
+        label: "Langfuse 主机"
+        desc: "Langfuse 服务地址（自托管或云端）"
+      enable_scripts:
+        label: "技能与钩子"
+        desc: "启动时加载技能插件和生命周期钩子"
+      pty_daemon_enabled:
+        label: "PTY 守护进程"
+        desc: "终端断开后保持 shell 会话存活"
+      inline_debounce_ms:
+        label: "内联补全防抖 (ms)"
+        desc: "停止输入后多久请求一次幽灵文本建议"
+      inline_context_lines:
+        label: "内联上下文行数"
+        desc: "作为上下文发送的最近 shell 历史行数"
+      inline_max_tokens:
+        label: "内联最大 Tokens"
+        desc: "建议后缀的 token 硬上限"
+      inline_min_input_chars:
+        label: "内联最小输入字符数"
+        desc: "触发建议的最小字符数"
+      inline_timeout_secs:
+        label: "内联超时 (秒)"
+        desc: "建议请求超过此秒数则放弃"
+      inline_disable_thinking:
+        label: "内联禁用思考"
+        desc: "发送标志抑制建议中的思维链"
+      inline_enforce_json:
+        label: "内联强制 JSON"
+        desc: "强制建议以 JSON 模式输出（部分网关返回 400）"
+      compact_full_enabled:
+        label: "完整压缩"
+        desc: "微压缩不够时允许完整摘要压缩"
+      compact_context_window_tokens:
+        label: "上下文窗口 Tokens"
+        desc: "覆盖模型的上下文窗口大小（留空=自动）"
+      compact_micro_keep_recent:
+        label: "微压缩保留近况"
+        desc: "微压缩时保留的最近消息数"
+      compact_shell_keep_recent:
+        label: "保留 Shell 近况"
+        desc: "上下文压缩时保留的 shell 命令数"
+      compact_summary_max_tokens:
+        label: "摘要最大 Tokens"
+        desc: "生成的压缩摘要最大 token 数"
+      compact_max_consecutive_failures:
+        label: "最大压缩失败次数"
+        desc: "连续压缩失败多少次后放弃"
+      compact_reserved_output_tokens:
+        label: "预留输出 Tokens"
+        desc: "为模型输出预留的 token 数（留空=自动）"
+      remote_danger_patterns:
+        label: "远程危险模式"
+        desc: "将远程 PS1 标记为危险的主机名正则（逗号分隔）"
+      codex_auth_path:
+        label: "Codex 认证路径"
+        desc: "OpenAI Codex/ChatGPT 的 auth.json 路径"
+      session_db_path:
+        label: "会话数据库路径"
+        desc: "自定义会话数据库位置（留空=默认）"
+
   ask_user:
     default_title: "需要用户输入"
     default_hint: "[默认: {value}]"
@@ -917,6 +1108,7 @@ help:
       | `/quit` | 退出 AI Shell |
       | `/model [名称]` | 查看或切换 AI 模型 |
       | `/setup` | 重新配置 API 设置 |
+      | `/setting` | 打开交互式设置面板 |
       | `/plan [start\|status\|exit]` | 计划模式控制 |
       | `/token` | 显示令牌用量（近 7 天） |
       | `/resume [id]` | 恢复之前的会话 |

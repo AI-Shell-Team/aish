@@ -25,6 +25,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show help information"),
     ("/model", "Show or switch AI model"),
     ("/setup", "Open setup wizard"),
+    ("/setting", "Open interactive settings panel"),
     ("/plan", "Plan mode control"),
     ("/token", "Show token usage"),
     ("/resume", "Resume previous session"),
@@ -320,6 +321,9 @@ struct ShellHelper {
     engine: Arc<CompletionEngine>,
     autosuggest: Arc<Mutex<AutoSuggest>>,
     inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
+    /// When false, history-based autosuggest hints are suppressed (the
+    /// `auto_suggest` config knob). Inline AI completion is unaffected.
+    auto_suggest: bool,
 }
 
 impl ShellHelper {
@@ -327,11 +331,13 @@ impl ShellHelper {
         engine: Arc<CompletionEngine>,
         autosuggest: Arc<Mutex<AutoSuggest>>,
         inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
+        auto_suggest: bool,
     ) -> Self {
         Self {
             engine,
             autosuggest,
             inline_ai,
+            auto_suggest,
         }
     }
 }
@@ -365,6 +371,11 @@ impl Hinter for ShellHelper {
             ai.cancel();
         }
 
+        // History-based autosuggest is gated by the `auto_suggest` config
+        // knob. Inline AI completion above is independent of this toggle.
+        if !self.auto_suggest {
+            return None;
+        }
         let trimmed = line.trim_start();
         let guard = self.autosuggest.lock().unwrap();
         guard.suggest(trimmed).and_then(|s| {
@@ -432,6 +443,8 @@ impl ShellReadline {
         pty: Arc<Mutex<aish_pty::PersistentPty>>,
         autosuggest: Arc<Mutex<AutoSuggest>>,
         inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
+        history_size: usize,
+        auto_suggest: bool,
     ) -> rustyline::Result<Self> {
         let engine = Arc::new(CompletionEngine::new(pty));
 
@@ -446,8 +459,9 @@ impl ShellReadline {
             engine.clone(),
             autosuggest.clone(),
             inline_ai.clone(),
+            auto_suggest,
         )));
-        editor.set_max_history_size(500)?;
+        editor.set_max_history_size(history_size.max(1))?;
 
         editor.bind_sequence(
             KeyEvent(KeyCode::Tab, Modifiers::NONE),
@@ -684,6 +698,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 15);
+        assert_eq!(SLASH_COMMANDS.len(), 16);
     }
 }

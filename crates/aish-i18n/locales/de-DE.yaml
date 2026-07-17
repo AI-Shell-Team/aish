@@ -155,6 +155,7 @@ shell:
     help: "Hilfeinformationen anzeigen"
     model: "KI-Modell anzeigen oder wechseln"
     setup: "Setup-Assistenten öffnen"
+    setting: "Interaktiven Einstellungsbereich öffnen"
     plan: "Planmodus steuern"
     token: "Token-Nutzung anzeigen"
     resume: "Vorherige Sitzung fortsetzen"
@@ -306,6 +307,197 @@ shell:
     no_config_manager: "Neukonfiguration nicht möglich: Konfigurationsmanager nicht verfügbar"
     cancelled: "Einrichtung abgebrochen; aktuelle Einstellungen werden beibehalten"
     applied: "Konfiguration aktualisiert, aktuelles Modell: {model}"
+
+  setting:
+    title: "Einstellungen"
+    search_entry: "Einstellungen suchen..."
+    search_desc: "Per Stichwort zu jeder Einstellung in allen Kategorien springen"
+    search_title: "Einstellungen suchen"
+    search_placeholder: "Tippen zum Filtern (Name / Beschreibung / Kategorie)"
+    search_footer: "↑/↓ bewegen · Tippen filtert · Enter bearbeiten · Esc zurück"
+    search_empty: "Keine passenden Einstellungen"
+    restart_summary: "{count} Änderung(en) werden nach Neustart wirksam"
+    subtitle: "Kategorie zum Konfigurieren wählen (Esc zum Beenden)"
+    select_setting: "Einstellung zum Bearbeiten wählen (Esc zurück)"
+    on: "an"
+    off: "aus"
+    not_set: "(nicht gesetzt)"
+    current_tag: "aktuell"
+    applied: "Gespeichert {label} = {value}"
+    applied_clear: "Gelöscht {label}"
+    invalid: "Ungültiger Wert: {error}"
+    restart_hint: "(wirksam nach Neustart)"
+    cat:
+      model: "Modell & Anbieter"
+      appearance: "Erscheinungsbild"
+      ai: "KI-Verhalten"
+      security: "Sicherheit"
+      context: "Kontext & Gedächtnis"
+      remote: "Remote-Prompt"
+      advanced: "Erweitert"
+    cat_desc:
+      model: "LLM-Modell, Endpoint und Zugangsdaten"
+      appearance: "Prompt-Symbol und Antwort-Sprache"
+      ai: "Completion, Kontext und Token-Verwaltung"
+      security: "Input Guard, Sandbox und Risikostufe"
+      context: "Gedächtnis-Recall, Compaction und Verlauf"
+      remote: "SSH/telnet-Prompt-Segmente"
+      advanced: "Logging, Tracing und PTY-Daemon"
+    k:
+      model:
+        label: "KI-Modell"
+        desc: "Modellname, der an den Anbieter gesendet wird, z. B. gpt-4o, glm-4.6, deepseek-chat"
+      api_base:
+        label: "API-Basis-URL"
+        desc: "OpenAI-kompatible Endpoint-URL für Chat-Completions"
+      api_key:
+        label: "API-Schlüssel"
+        desc: "Geheimschlüssel für den LLM-Anbieter (in config.yaml gespeichert)"
+      temperature:
+        label: "Temperatur"
+        desc: "Sampling-Zufälligkeit 0.0–2.0; höher = kreativer"
+      max_tokens:
+        label: "Max Tokens"
+        desc: "Token-Obergrenze für Antworten (leer = Anbieter-Standard)"
+      prompt_style:
+        label: "Prompt-Symbol"
+        desc: "Benutzerdefiniertes Prompt-Symbol (leer = Standardpfeil)"
+      output_language:
+        label: "Ausgabesprache"
+        desc: "Bevorzugte Sprache für KI-Antworten (zh-CN, en-US, ja-JP, de-DE, fr-FR, es-ES)"
+      auto_suggest:
+        label: "Auto-Suggest"
+        desc: "Verlaufsbasierte Auto-Suggest-Hinweise beim Tippen anzeigen"
+      inline_completion:
+        label: "Inline-Completion"
+        desc: "KI-Inline-Completion beim Tippen"
+      inline_debounce_ms:
+        label: "Inline-Debounce (ms)"
+        desc: "Verzögerung vor Auslösen der Inline-Completion nach Tippen-Stop"
+      inline_context_lines:
+        label: "Inline-Kontextzeilen"
+        desc: "Anzahl aktueller Shell-Zeilen, die als Kontext an Inline-Completion gesendet werden"
+      inline_max_tokens:
+        label: "Inline Max Tokens"
+        desc: "Token-Obergrenze für Inline-Completion-Antworten"
+      inline_min_input_chars:
+        label: "Inline Min Input Chars"
+        desc: "Mindestzeichen vor Auslösen der Inline-Completion"
+      inline_timeout_secs:
+        label: "Inline-Timeout (s)"
+        desc: "Sekunden Wartezeit auf Inline-Completion vor Abbruch"
+      inline_disable_thinking:
+        label: "Inline Disable Thinking"
+        desc: "Reasoning/Thinking-Tokens in Inline-Completion unterdrücken"
+      inline_enforce_json:
+        label: "Inline Enforce JSON"
+        desc: "Inline-Completion zwingen, striktes JSON zurückzugeben"
+      max_llm_messages:
+        label: "Max LLM-Messages"
+        desc: "Maximale Konversations-Turns im LLM-Verlauf"
+      enable_token_estimation:
+        label: "Token-Estimation aktivieren"
+        desc: "tiktoken zur Schätzung der Token-Anzahl für Kontext-Trimming verwenden"
+      input_guard_enabled:
+        label: "Input Guard"
+        desc: "Eingabe gegen gefährliche-Befehl-Regeln vorab prüfen"
+      enable_sandbox:
+        label: "Sandbox aktivieren"
+        desc: "Risikobefehle in einer Sandbox vorab ausführen, bevor sie erlaubt werden"
+      default_risk_level:
+        label: "Standard-Risikostufe"
+        desc: "Basis-Risikoeinstufung für unbekannte Befehle (low/medium/high)"
+      sandbox_off_action:
+        label: "Sandbox-Off-Aktion"
+        desc: "Verhalten, wenn Sandbox nicht verfügbar (allow/confirm/block)"
+      sandbox_timeout_seconds:
+        label: "Sandbox-Timeout (s)"
+        desc: "Sekunden bis zum Abbruch einer Sandbox-Vorabausführung"
+      memory_auto_recall:
+        label: "Memory Auto-Recall"
+        desc: "Relevante langfristige Erinnerungen automatisch in KI-Kontext einbringen"
+      memory_auto_retain:
+        label: "Memory Auto-Retain"
+        desc: "Nennenswerte Fakten automatisch ins langfristige Gedächtnis speichern"
+      context_auto_compact:
+        label: "Context Auto-Compact"
+        desc: "Konversation bei steigendem Kontextdruck automatisch kompaktieren"
+      compact_full_enabled:
+        label: "Full Compaction"
+        desc: "Vollständigen Compaction-Durchlauf aktivieren, der alte Turns zusammenfasst"
+      compact_context_window_tokens:
+        label: "Context-Window-Tokens"
+        desc: "Modell-Kontextfenstergröße für Compaction-Berechnung"
+      compact_micro_keep_recent:
+        label: "Micro-Compact Keep Recent"
+        desc: "Wörtlich erhaltene Turns bei Micro-Compaction"
+      compact_shell_keep_recent:
+        label: "Shell-Compact Keep Recent"
+        desc: "Shell-Befehls-Turns, die bei Shell-Compaction erhalten bleiben"
+      compact_summary_max_tokens:
+        label: "Compact-Summary Max Tokens"
+        desc: "Token-Obergrenze für die von Full Compaction erzeugte Zusammenfassung"
+      compact_max_consecutive_failures:
+        label: "Max aufeinanderfolgende Fehler"
+        desc: "Compaction-Fehler vor Fallback auf Trim"
+      compact_reserved_output_tokens:
+        label: "Reserved Output Tokens"
+        desc: "Für Modell-Antwort reservierte Tokens, vom Kontext-Budget abgezogen"
+      history_size:
+        label: "Verlaufsgröße"
+        desc: "Maximale Shell-Verlaufseinträge"
+      max_shell_messages:
+        label: "Max Shell-Messages"
+        desc: "Maximale Shell-Befehls-Turns im KI-Kontext"
+      context_token_budget:
+        label: "Kontext-Token-Budget"
+        desc: "Optionale harte Obergrenze für gesamte Kontext-Tokens (leer = unbegrenzt)"
+      enable_remote_git_prompt:
+        label: "Remote Git-Prompt"
+        desc: "git-Branch in Remote- (SSH/telnet) Bash-Prompts anzeigen"
+      remote_rich_prompt:
+        label: "Remote Rich-Prompt"
+        desc: "Mehrzeilige Remote-Prompts aktivieren (user@host, cwd, git)"
+      remote_show_venv:
+        label: "Remote Venv anzeigen"
+        desc: "Aktives Python-venv in Remote-Prompts anzeigen"
+      remote_show_container:
+        label: "Remote Container anzeigen"
+        desc: "Container/Runtime-Markierungen in Remote-Prompts anzeigen"
+      remote_show_kube:
+        label: "Remote Kube anzeigen"
+        desc: "Kubernetes-Kontext in Remote-Prompts anzeigen"
+      remote_danger_patterns:
+        label: "Remote Danger Patterns"
+        desc: "Hostname-Regexe, die Remote-PS1 als Gefahr markieren (kommagetrennt)"
+      enable_langfuse:
+        label: "Langfuse aktivieren"
+        desc: "Langfuse LLM-Observability-Tracing aktivieren"
+      langfuse_public_key:
+        label: "Langfuse Public Key"
+        desc: "Langfuse Public Key"
+      langfuse_secret_key:
+        label: "Langfuse Secret Key"
+        desc: "Langfuse Secret Key"
+      langfuse_host:
+        label: "Langfuse Host"
+        desc: "Langfuse Self-Host-Instanz-URL"
+      enable_scripts:
+        label: "Skripte aktivieren"
+        desc: ".aish-Skriptsystem und Lifecycle-Hooks aktivieren"
+      log_level:
+        label: "Log Level"
+        desc: "Tracing-Log-Detaillierungsgrad (error/warn/info/debug/trace)"
+      pty_daemon_enabled:
+        label: "PTY-Daemon"
+        desc: "PTY-Sitzungen über Verbindungsabbrüche hinweg via Hintergrund-Daemon erhalten"
+      codex_auth_path:
+        label: "Codex Auth Path"
+        desc: "Pfad zu OpenAI Codex/ChatGPT auth.json"
+      session_db_path:
+        label: "Session-DB-Pfad"
+        desc: "Benutzerdefinierter Sitzungs-Datenbankort (leer = Standard)"
+
   session:
     iteration_limit_reached: "{count} Tool-Aufruf-Iterationen abgeschlossen."
     iteration_limit_title: "⏸ Tool-Aufruf-Limit erreicht"
@@ -515,6 +707,7 @@ help:
       | `/quit` | AI Shell beenden |
       | `/model [Name]` | KI-Modell anzeigen oder wechseln |
       | `/setup` | API-Einstellungen neu konfigurieren |
+      | `/setting` | Interaktiven Einstellungsbereich öffnen |
       | `/plan [start\|status\|exit]` | Planmodus steuern |
       | `/token` | Token-Nutzung anzeigen (letzte 7 Tage) |
       | `/resume [id]` | Vorherige Sitzung fortsetzen |

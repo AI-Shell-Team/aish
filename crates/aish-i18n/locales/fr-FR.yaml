@@ -155,6 +155,7 @@ shell:
     help: "Afficher les informations d'aide"
     model: "Afficher ou changer le modèle IA"
     setup: "Ouvrir l'assistant de configuration"
+    setting: "Ouvrir le panneau de configuration interactif"
     plan: "Contrôle du mode plan"
     token: "Afficher l'utilisation des tokens"
     resume: "Reprendre la session précédente"
@@ -306,6 +307,197 @@ shell:
     no_config_manager: "Reconfiguration impossible : gestionnaire de configuration indisponible"
     cancelled: "Configuration annulee, les parametres actuels sont conserves"
     applied: "Configuration mise a jour, modele actuel : {model}"
+
+  setting:
+    title: "Paramètres"
+    search_entry: "Rechercher un paramètre..."
+    search_desc: "Accéder à n'importe quel paramètre par mot-clé dans toutes les catégories"
+    search_title: "Rechercher un paramètre"
+    search_placeholder: "Tapez pour filtrer (nom / description / catégorie)"
+    search_footer: "↑/↓ naviguer  Tapez pour filtrer  Enter modifier  Esc retour"
+    search_empty: "Aucun paramètre correspondant"
+    restart_summary: "{count} modification(s) prendront effet après le redémarrage"
+    subtitle: "Choisir une catégorie à configurer (Esc pour quitter)"
+    select_setting: "Sélectionner un paramètre à modifier (Esc pour revenir)"
+    on: "activé"
+    off: "désactivé"
+    not_set: "(non défini)"
+    current_tag: "actuel"
+    applied: "{label} enregistré = {value}"
+    applied_clear: "{label} effacé"
+    invalid: "Valeur invalide : {error}"
+    restart_hint: "(prend effet après le redémarrage)"
+    cat:
+      model: "Modèle & Fournisseur"
+      appearance: "Apparence"
+      ai: "Comportement IA"
+      security: "Sécurité"
+      context: "Contexte & Mémoire"
+      remote: "Invite distante"
+      advanced: "Avancé"
+    cat_desc:
+      model: "Modèle LLM, endpoint et identifiants"
+      appearance: "Symbole d'invite et langue des réponses"
+      ai: "Complétion, contexte et gestion des tokens"
+      security: "Input guard, sandbox et niveau de risque"
+      context: "Rappel mémoire, compactage et historique"
+      remote: "Segments d'invite SSH/telnet"
+      advanced: "Journalisation, tracing et daemon PTY"
+    k:
+      model:
+        label: "Modèle IA"
+        desc: "Nom du modèle envoyé au fournisseur, par ex. gpt-4o, glm-4.6, deepseek-chat"
+      api_base:
+        label: "URL de base API"
+        desc: "URL d'endpoint compatible OpenAI pour les chat completions"
+      api_key:
+        label: "Clé API"
+        desc: "Clé secrète pour le fournisseur LLM (conservée dans config.yaml)"
+      temperature:
+        label: "Température"
+        desc: "Aléatoire d'échantillonnage 0.0–2.0 ; plus élevé = plus créatif"
+      max_tokens:
+        label: "Tokens max"
+        desc: "Plafond de tokens de réponse (vide = valeur par défaut du fournisseur)"
+      prompt_style:
+        label: "Symbole d'invite"
+        desc: "Symbole d'invite personnalisé (vide = flèche par défaut)"
+      output_language:
+        label: "Langue de sortie"
+        desc: "Langue préférée pour les réponses de l'IA (zh-CN, en-US, ja-JP, de-DE, fr-FR, es-ES)"
+      auto_suggest:
+        label: "Suggestion auto"
+        desc: "Afficher des suggestions automatiques basées sur l'historique pendant la frappe"
+      inline_completion:
+        label: "Complétion en ligne"
+        desc: "Complétion IA en ligne pendant la frappe"
+      inline_debounce_ms:
+        label: "Anti-rebond en ligne (ms)"
+        desc: "Délai avant de déclencher la complétion en ligne après l'arrêt de la frappe"
+      inline_context_lines:
+        label: "Lignes de contexte en ligne"
+        desc: "Nombre de lignes récentes du shell envoyées comme contexte à la complétion en ligne"
+      inline_max_tokens:
+        label: "Tokens max en ligne"
+        desc: "Plafond de tokens pour les réponses de complétion en ligne"
+      inline_min_input_chars:
+        label: "Caractères min en ligne"
+        desc: "Caractères minimum saisis avant le déclenchement de la complétion en ligne"
+      inline_timeout_secs:
+        label: "Délai d'attente en ligne (s)"
+        desc: "Secondes d'attente d'une complétion en ligne avant annulation"
+      inline_disable_thinking:
+        label: "Désactiver le raisonnement en ligne"
+        desc: "Supprimer les tokens de raisonnement/réflexion dans la complétion en ligne"
+      inline_enforce_json:
+        label: "Forcer JSON en ligne"
+        desc: "Forcer la complétion en ligne à renvoyer du JSON strict"
+      max_llm_messages:
+        label: "Messages LLM max"
+        desc: "Tours de conversation maximum conservés dans l'historique LLM"
+      enable_token_estimation:
+        label: "Activer l'estimation des tokens"
+        desc: "Utiliser tiktoken pour estimer le nombre de tokens afin de réduire le contexte"
+      input_guard_enabled:
+        label: "Input Guard"
+        desc: "Pré-filtrer la saisie selon les règles de commandes dangereuses"
+      enable_sandbox:
+        label: "Activer la sandbox"
+        desc: "Exécuter les commandes risquées dans une sandbox avant de les autoriser"
+      default_risk_level:
+        label: "Niveau de risque par défaut"
+        desc: "Niveau de risque de base pour les commandes non reconnues (low/medium/high)"
+      sandbox_off_action:
+        label: "Action sandbox désactivée"
+        desc: "Action lorsque la sandbox est indisponible (allow/confirm/block)"
+      sandbox_timeout_seconds:
+        label: "Délai d'attente sandbox (s)"
+        desc: "Secondes avant l'arrêt d'une pré-exécution sandbox"
+      memory_auto_recall:
+        label: "Rappel mémoire auto"
+        desc: "Afficher automatiquement les mémoires long terme pertinentes dans le contexte IA"
+      memory_auto_retain:
+        label: "Conservation mémoire auto"
+        desc: "Conserver automatiquement les faits notables dans la mémoire long terme"
+      context_auto_compact:
+        label: "Compactage auto du contexte"
+        desc: "Compacter automatiquement la conversation lorsque la pression du contexte augmente"
+      compact_full_enabled:
+        label: "Compactage complet"
+        desc: "Activer la passe de compactage complet qui résume les anciens tours"
+      compact_context_window_tokens:
+        label: "Tokens de fenêtre de contexte"
+        desc: "Taille de fenêtre de contexte du modèle utilisée pour le calcul de compactage"
+      compact_micro_keep_recent:
+        label: "Conservation récent micro-compactage"
+        desc: "Tours conservés tels quels pendant le micro-compactage"
+      compact_shell_keep_recent:
+        label: "Conservation récent compactage shell"
+        desc: "Tours de commandes shell conservés pendant le compactage shell"
+      compact_summary_max_tokens:
+        label: "Tokens max du résumé de compactage"
+        desc: "Plafond de tokens pour le résumé produit par le compactage complet"
+      compact_max_consecutive_failures:
+        label: "Échecs consécutifs max"
+        desc: "Échecs de compactage avant repli vers une troncature"
+      compact_reserved_output_tokens:
+        label: "Tokens de sortie réservés"
+        desc: "Tokens réservés pour la réponse du modèle, soustraits du budget de contexte"
+      history_size:
+        label: "Taille de l'historique"
+        desc: "Nombre maximum d'entrées conservées dans l'historique du shell"
+      max_shell_messages:
+        label: "Messages shell max"
+        desc: "Tours de commandes shell maximum conservés dans le contexte IA"
+      context_token_budget:
+        label: "Budget de tokens du contexte"
+        desc: "Plafond strict optionnel sur le total des tokens de contexte (vide = illimité)"
+      enable_remote_git_prompt:
+        label: "Invite git distante"
+        desc: "Afficher la branche git dans les invites bash distantes (SSH/telnet)"
+      remote_rich_prompt:
+        label: "Invite distante riche"
+        desc: "Activer les invites distantes riches multi-lignes (user@host, cwd, git)"
+      remote_show_venv:
+        label: "Afficher venv distant"
+        desc: "Afficher le venv Python actif dans les invites distantes"
+      remote_show_container:
+        label: "Afficher conteneur distant"
+        desc: "Afficher les marqueurs de conteneur/runtime dans les invites distantes"
+      remote_show_kube:
+        label: "Afficher kube distant"
+        desc: "Afficher le contexte Kubernetes dans les invites distantes"
+      remote_danger_patterns:
+        label: "Motifs de danger distants"
+        desc: "Regex de noms d'hôte marquant le PS1 distant comme dangereux (séparés par des virgules)"
+      enable_langfuse:
+        label: "Activer Langfuse"
+        desc: "Activer le tracing d'observabilité LLM Langfuse"
+      langfuse_public_key:
+        label: "Clé publique Langfuse"
+        desc: "Clé publique Langfuse"
+      langfuse_secret_key:
+        label: "Clé secrète Langfuse"
+        desc: "Clé secrète Langfuse"
+      langfuse_host:
+        label: "Hôte Langfuse"
+        desc: "URL de l'instance Langfuse auto-hébergée"
+      enable_scripts:
+        label: "Activer les scripts"
+        desc: "Activer le système de scripts .aish et les hooks de cycle de vie"
+      log_level:
+        label: "Niveau de journalisation"
+        desc: " Verbosité du journal de tracing (error/warn/info/debug/trace)"
+      pty_daemon_enabled:
+        label: "Daemon PTY"
+        desc: "Conserver les sessions PTY entre les déconnexions via un daemon en arrière-plan"
+      codex_auth_path:
+        label: "Chemin d'auth Codex"
+        desc: "Chemin vers le fichier auth.json d'OpenAI Codex/ChatGPT"
+      session_db_path:
+        label: "Chemin de la base de sessions"
+        desc: "Emplacement personnalisé de la base de données des sessions (vide = valeur par défaut)"
+
   session:
     iteration_limit_reached: "{count} iterations d'appels d'outils terminees."
     iteration_limit_title: "⏸ Limite d'appels d'outils atteinte"
@@ -515,6 +707,7 @@ help:
       | `/quit` | Quitter AI Shell |
       | `/model [nom]` | Afficher ou changer le modèle IA |
       | `/setup` | Reconfigurer les paramètres API |
+      | `/setting` | Ouvrir le panneau de configuration interactif |
       | `/plan [start\|status\|exit]` | Contrôle du mode plan |
       | `/token` | Afficher l'utilisation des tokens (7 derniers jours) |
       | `/resume [id]` | Reprendre une session précédente |

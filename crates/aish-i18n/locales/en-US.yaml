@@ -354,6 +354,7 @@ shell:
     help: "Show help information"
     model: "Show or switch AI model"
     setup: "Open setup wizard"
+    setting: "Open interactive settings panel"
     plan: "Plan mode control"
     token: "Show token usage"
     resume: "Resume previous session"
@@ -671,6 +672,196 @@ shell:
     cancelled: "Setup cancelled, keeping current settings"
     applied: "Configuration updated, current model: {model}"
 
+  setting:
+    title: "Settings"
+    search_entry: "Search settings..."
+    search_desc: "Jump to any setting by keyword across all categories"
+    search_title: "Search settings"
+    search_placeholder: "Type to filter (name / description / category)"
+    search_footer: "Up/Down move  Type to filter  Enter edit  Esc back"
+    search_empty: "No matching settings"
+    restart_summary: "{count} change(s) will take effect after restart"
+    subtitle: "Choose a category to configure (Esc to exit)"
+    select_setting: "Select a setting to edit (Esc to go back)"
+    on: "on"
+    off: "off"
+    not_set: "(not set)"
+    current_tag: "current"
+    applied: "Saved {label} = {value}"
+    applied_clear: "Cleared {label}"
+    invalid: "Invalid value: {error}"
+    restart_hint: "(takes effect after restart)"
+    cat:
+      model: "Model & Provider"
+      appearance: "Appearance"
+      ai: "AI Behavior"
+      security: "Security"
+      context: "Context & Memory"
+      remote: "Remote Prompt"
+      advanced: "Advanced"
+    cat_desc:
+      model: "LLM model, endpoint and credentials"
+      appearance: "Prompt symbol and response language"
+      ai: "Completion, context and token handling"
+      security: "Input guard, sandbox and risk level"
+      context: "Memory recall, compaction and history"
+      remote: "SSH/telnet prompt segments"
+      advanced: "Logging, tracing and PTY daemon"
+    k:
+      model:
+        label: "AI Model"
+        desc: "Model name sent to the provider, e.g. gpt-4o, glm-4.6, deepseek-chat"
+      api_base:
+        label: "API Base URL"
+        desc: "OpenAI-compatible endpoint URL for chat completions"
+      api_key:
+        label: "API Key"
+        desc: "Secret key used to authenticate with the provider"
+      temperature:
+        label: "Temperature"
+        desc: "Sampling randomness, 0.0-2.0. Lower is more focused and deterministic"
+      max_tokens:
+        label: "Max Output Tokens"
+        desc: "Cap on response length. Blank = use the model default"
+      prompt_style:
+        label: "Prompt Symbol"
+        desc: "Character shown before the input cursor, e.g. ->, $, or an emoji (blank = default arrow)"
+      output_language:
+        label: "AI Response Language"
+        desc: "Language the AI replies in (overrides the terminal locale)"
+      auto_suggest:
+        label: "Auto-Suggest"
+        desc: "Show shell command suggestions while you type"
+      inline_completion:
+        label: "Inline AI Completion"
+        desc: "Gray ghost-text AI suggestions while typing an AI prompt"
+      max_llm_messages:
+        label: "Max AI Messages"
+        desc: "How many AI conversation turns to keep in context"
+      enable_token_estimation:
+        label: "Token Estimation"
+        desc: "Estimate token usage to trim context automatically"
+      input_guard_enabled:
+        label: "Input Guard"
+        desc: "Block dangerous input patterns before execution"
+      enable_sandbox:
+        label: "Sandbox"
+        desc: "Pre-run risky commands in an isolated sandbox (needs the systemd service)"
+      default_risk_level:
+        label: "Default Risk Level"
+        desc: "Baseline security threshold for command confirmation"
+      sandbox_off_action:
+        label: "Sandbox Fallback Action"
+        desc: "What to do when the sandbox is unavailable: allow, confirm, or block"
+      sandbox_timeout_seconds:
+        label: "Sandbox Timeout"
+        desc: "Seconds before a sandboxed pre-run is killed (1-300)"
+      memory_auto_recall:
+        label: "Memory Auto-Recall"
+        desc: "Inject relevant long-term memories into AI context"
+      memory_auto_retain:
+        label: "Memory Auto-Retain"
+        desc: "Automatically save important facts to long-term memory"
+      context_auto_compact:
+        label: "Context Auto-Compact"
+        desc: "Summarize old context when nearing the token limit"
+      history_size:
+        label: "History Size"
+        desc: "Maximum number of commands kept in shell history"
+      max_shell_messages:
+        label: "Max Shell Messages"
+        desc: "How many shell history entries to keep in AI context"
+      context_token_budget:
+        label: "Context Token Budget"
+        desc: "Hard cap on context tokens; blank = no limit"
+      enable_remote_git_prompt:
+        label: "Remote Git Prompt"
+        desc: "Show git branch in the prompt during SSH/telnet sessions"
+      remote_rich_prompt:
+        label: "Remote Rich Prompt"
+        desc: "Probe remote host for environment-aware prompt segments"
+      remote_show_venv:
+        label: "Remote Show Venv"
+        desc: "Show venv/conda name segment in the remote prompt"
+      remote_show_container:
+        label: "Remote Show Container"
+        desc: "Show container (docker/podman) segment in the remote prompt"
+      remote_show_kube:
+        label: "Remote Show Kube"
+        desc: "Show kube context segment in the remote prompt"
+      log_level:
+        label: "Log Level"
+        desc: "Verbosity of the log file"
+      enable_langfuse:
+        label: "Langfuse Tracing"
+        desc: "Send LLM traces to Langfuse for observability (needs keys)"
+      langfuse_public_key:
+        label: "Langfuse Public Key"
+        desc: "Project public key for LLM observability tracing"
+      langfuse_secret_key:
+        label: "Langfuse Secret Key"
+        desc: "Project secret key (masked on display)"
+      langfuse_host:
+        label: "Langfuse Host"
+        desc: "Langfuse server URL (self-hosted or cloud)"
+      enable_scripts:
+        label: "Skills & Hooks"
+        desc: "Load skill plugins and lifecycle hooks at startup"
+      pty_daemon_enabled:
+        label: "PTY Daemon"
+        desc: "Persist shell sessions across terminal disconnects"
+      inline_debounce_ms:
+        label: "Inline Debounce (ms)"
+        desc: "Delay after typing stops before requesting a ghost-text suggestion"
+      inline_context_lines:
+        label: "Inline Context Lines"
+        desc: "Recent shell-history lines sent as context for suggestions"
+      inline_max_tokens:
+        label: "Inline Max Tokens"
+        desc: "Hard cap on tokens for the suggested suffix"
+      inline_min_input_chars:
+        label: "Inline Min Input Chars"
+        desc: "Minimum characters before a suggestion is triggered"
+      inline_timeout_secs:
+        label: "Inline Timeout (s)"
+        desc: "Abandon a suggestion request after this many seconds"
+      inline_disable_thinking:
+        label: "Inline Disable Thinking"
+        desc: "Send flags to suppress chain-of-thought in suggestions"
+      inline_enforce_json:
+        label: "Inline Enforce JSON"
+        desc: "Force JSON-mode output for suggestions (some gateways return 400)"
+      compact_full_enabled:
+        label: "Full Compaction"
+        desc: "Allow full summary compaction when micro-compact isn't enough"
+      compact_context_window_tokens:
+        label: "Context Window Tokens"
+        desc: "Override the model context window size (blank = auto)"
+      compact_micro_keep_recent:
+        label: "Micro-compact Keep Recent"
+        desc: "Messages retained during a micro-compaction pass"
+      compact_shell_keep_recent:
+        label: "Shell Keep Recent"
+        desc: "Shell commands retained during context compaction"
+      compact_summary_max_tokens:
+        label: "Summary Max Tokens"
+        desc: "Maximum tokens for the generated compaction summary"
+      compact_max_consecutive_failures:
+        label: "Max Compact Failures"
+        desc: "Consecutive compaction failures before giving up"
+      compact_reserved_output_tokens:
+        label: "Reserved Output Tokens"
+        desc: "Tokens reserved for model output (blank = auto)"
+      remote_danger_patterns:
+        label: "Remote Danger Patterns"
+        desc: "Hostname regexes marking remote PS1 as danger (comma-separated)"
+      codex_auth_path:
+        label: "Codex Auth Path"
+        desc: "Path to OpenAI Codex/ChatGPT auth.json"
+      session_db_path:
+        label: "Session DB Path"
+        desc: "Custom session database location (blank = default)"
+
   ask_user:
     default_title: "User input required"
     default_hint: "[default: {value}]"
@@ -918,6 +1109,7 @@ help:
       | `/quit` | Exit AI Shell |
       | `/model [name]` | Show or switch AI model |
       | `/setup` | Reconfigure API settings |
+      | `/setting` | Open the interactive settings panel |
       | `/plan [start\|status\|exit]` | Plan mode control |
       | `/token` | Show token usage (last 7 days) |
       | `/resume [id]` | Resume a previous session |
