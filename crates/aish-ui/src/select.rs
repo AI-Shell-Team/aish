@@ -34,6 +34,8 @@ pub struct SearchSelectItem {
     pub detail: Option<String>,
     pub badge: Option<String>,
     pub search_text: String,
+    /// Whether Ctrl+E rename is allowed for this item (default: false).
+    pub renamable: bool,
 }
 
 impl SearchSelectItem {
@@ -48,6 +50,7 @@ impl SearchSelectItem {
             detail: None,
             badge: None,
             search_text,
+            renamable: false,
         }
     }
 
@@ -72,6 +75,11 @@ impl SearchSelectItem {
 
     pub fn with_search_text(mut self, search_text: impl Into<String>) -> Self {
         self.search_text = search_text.into().to_lowercase();
+        self
+    }
+    /// Allow Ctrl+E rename for this item.
+    pub fn with_renamable(mut self) -> Self {
+        self.renamable = true;
         self
     }
 }
@@ -221,6 +229,9 @@ impl SearchSelectPanel {
         match entry {
             SelectEntry::Item(index) => {
                 let item = self.items.get(*index)?;
+                if !item.renamable {
+                    return None;
+                }
                 Some(SearchSelectOutcome::Rename(item.value.clone()))
             }
         }
@@ -860,8 +871,8 @@ mod tests {
             "Sessions",
             "Search",
             vec![
-                item("session:0", "Alpha", "session:0 alpha"),
-                item("session:1", "Beta", "session:1 beta"),
+                item("session:0", "Alpha", "session:0 alpha").with_renamable(),
+                item("session:1", "Beta", "session:1 beta").with_renamable(),
             ],
         );
 
@@ -886,6 +897,16 @@ mod tests {
         // Filter down to nothing, then Ctrl+E must not submit.
         panel.handle_event(key(KeyCode::Char('z')));
         assert!(panel.filtered_entries().is_empty());
+        assert_eq!(panel.handle_event(ctrl('e')), PanelEvent::Continue);
+    }
+    #[test]
+    fn ctrl_e_noop_for_non_renamable_item() {
+        let mut panel = SearchSelectPanel::new(
+            "Sessions",
+            "Search",
+            vec![item("session:0", "Alpha", "session:0 alpha")],
+        );
+        // renamable defaults to false → Ctrl+E must be a no-op.
         assert_eq!(panel.handle_event(ctrl('e')), PanelEvent::Continue);
     }
 

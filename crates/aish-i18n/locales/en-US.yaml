@@ -557,9 +557,9 @@ shell:
     rename_done: "Renamed {id} → \"{name}\""
     rename_cleared: "Cleared name for {id}"
     rename_failed: "Failed to rename: {err}"
-    exit_no_note_title: "Add a note before exiting?"
+    exit_no_note_title: "Add a note before detaching?"
     exit_no_note_hint: "This session has no note — unnamed sessions are hard to tell apart after detach."
-    exit_no_note_footer: "Enter save & exit · Esc exit without"
+    exit_no_note_footer: "Enter save & detach · Esc detach without naming"
 
   kill_live_sessions:
     daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"

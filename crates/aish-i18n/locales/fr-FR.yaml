@@ -346,9 +346,9 @@ shell:
     rename_done: "Session {id} renommee → \"{name}\""
     rename_cleared: "Nom efface pour la session {id}"
     rename_failed: "Echec du renommage : {err}"
-    exit_no_note_title: "Ajouter une note avant de quitter ?"
+    exit_no_note_title: "Ajouter une note avant de détacher ?"
     exit_no_note_hint: "Cette session n'a pas de note — les sessions sans nom sont difficiles a distinguer apres déconnexion."
-    exit_no_note_footer: "Enter enregistrer & quitter · Esc quitter sans"
+    exit_no_note_footer: "Enter enregistrer & détacher · Esc détacher sans nommer"
 
   kill_live_sessions:
     daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"

@@ -13,11 +13,19 @@ use unicode_width::UnicodeWidthChar;
 
 /// Whether the current terminal supports 24-bit truecolor.
 /// Detected once from `COLORTERM` and cached for the process lifetime.
+/// Honors the `NO_COLOR` convention: any value disables all color.
 static TRUECOLOR: LazyLock<bool> = LazyLock::new(|| {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
     std::env::var("COLORTERM")
         .map(|v| v == "truecolor" || v == "24bit")
         .unwrap_or(false)
 });
+
+/// Whether all color output is disabled via the `NO_COLOR` environment
+/// variable (convention: presence of any value, including empty, disables).
+static NO_COLOR: LazyLock<bool> = LazyLock::new(|| std::env::var_os("NO_COLOR").is_some());
 
 fn supports_truecolor() -> bool {
     *TRUECOLOR
@@ -28,7 +36,11 @@ fn supports_truecolor() -> bool {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Apply foreground truecolor (or 256-color fallback) to `text`.
+/// Returns plain text when `NO_COLOR` is set.
 fn fg_rgb(r: u8, g: u8, b: u8, fallback256: u8, text: &str) -> String {
+    if *NO_COLOR {
+        return text.to_string();
+    }
     if supports_truecolor() {
         format!("\x1b[38;2;{r};{g};{b}m{text}\x1b[0m")
     } else {
@@ -231,6 +243,10 @@ static SHIMMER_ANSI: LazyLock<ShimmerAnsi> = LazyLock::new(|| ShimmerAnsi {
 /// Brightness is modulated by the cosine bump: dim at rest, vivid at the crest.
 /// On 256-color terminals, falls back to a three-tier monochrome palette.
 pub fn shimmer_text(text: &str, time_ms: u64) -> String {
+    // NO_COLOR convention: return plain text without ANSI.
+    if *NO_COLOR {
+        return text.to_string();
+    }
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
     if len == 0 {

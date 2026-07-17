@@ -346,9 +346,9 @@ shell:
     rename_done: "セッション {id} を \"{name}\" に変更しました"
     rename_cleared: "セッション {id} の名前をクリアしました"
     rename_failed: "名前変更に失敗: {err}"
-    exit_no_note_title: "終了前にメモを追加しますか？"
+    exit_no_note_title: "切り離し前にメモを追加しますか？"
     exit_no_note_hint: "このセッションにはメモがありません。名前のないセッションは切断後に見分けがつきません。"
-    exit_no_note_footer: "Enter 保存して終了 · Esc そのまま終了"
+    exit_no_note_footer: "Enter 保存して切り離し · Esc 名前なしで切り離し"
 
   kill_live_sessions:
     daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："

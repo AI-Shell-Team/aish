@@ -792,11 +792,16 @@ mod tests {
             .iter()
             .find(|line| line.contains("..."))
             .expect("expected a truncated changelog line in the output");
-        assert!(
-            truncated_line.ends_with("\x1b[0m"),
-            "truncated line must end with reset so padding stays neutral: {:?}",
-            truncated_line,
-        );
+        // With NO_COLOR set, theme functions emit plain text (no ANSI), so
+        // there is no color to reset. Otherwise the right border's own reset
+        // makes the line end with \x1b[0m, keeping padding neutral.
+        if std::env::var_os("NO_COLOR").is_none() {
+            assert!(
+                truncated_line.ends_with("\x1b[0m"),
+                "truncated line must end with reset so padding stays neutral: {:?}",
+                truncated_line,
+            );
+        }
     }
 
     #[test]

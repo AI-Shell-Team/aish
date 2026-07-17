@@ -569,8 +569,16 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
                 let label = format!("{short_id}  {cwd_display}");
                 let search_text = format!("{name} {short_id} {cwd_display}");
                 let mut item = SearchSelectItem::new(format!("session:{i}"), label)
-                    .with_detail(format!("started: {age_str}"))
-                    .with_search_text(search_text);
+                    .with_detail(aish_i18n::t_with_args(
+                        "shell.live_sessions.started_label",
+                        &{
+                            let mut a = std::collections::HashMap::new();
+                            a.insert("age".to_string(), age_str);
+                            a
+                        },
+                    ))
+                    .with_search_text(search_text)
+                    .with_renamable();
                 if !name.is_empty() {
                     item = item.with_highlight(name);
                 }
@@ -581,15 +589,16 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
         // "Create new" is the last item and the default selection.
         items.push(SearchSelectItem::new(
             "new",
-            "Create new session".to_string(),
+            aish_i18n::t("shell.live_sessions.create_new"),
         ));
 
-        let panel =
-            SearchSelectPanel::new("Select PTY Session", "Type to search sessions...", items)
-                .with_footer(
-                    "↑↓ navigate · Enter select · Ctrl+E rename · Esc cancel · Run 'aish kill <id>' to terminate a session",
-                )
-                .with_selected_value(Some("new"));
+        let panel = SearchSelectPanel::new(
+            aish_i18n::t("shell.live_sessions.panel_title"),
+            aish_i18n::t("shell.live_sessions.search_placeholder"),
+            items,
+        )
+        .with_footer(aish_i18n::t("shell.live_sessions.panel_footer"))
+        .with_selected_value(Some("new"));
 
         match PanelRuntime::new().run(panel) {
             Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => {
@@ -661,32 +670,62 @@ fn rename_session_interactive(session: &aish_pty::DaemonSessionInfo) -> bool {
     let current = session.name.as_deref().unwrap_or("");
 
     let panel = ChoicePanel::new(
-        format!("Rename session {short_id}"),
+        aish_i18n::t_with_args("shell.live_sessions.rename_title", &{
+            let mut a = std::collections::HashMap::new();
+            a.insert("id".to_string(), short_id.to_string());
+            a
+        }),
         if current.is_empty() {
-            "Current name: (none)".to_string()
+            aish_i18n::t("shell.live_sessions.rename_current_none")
         } else {
-            format!("Current name: {current}")
+            aish_i18n::t_with_args("shell.live_sessions.rename_current_set", &{
+                let mut a = std::collections::HashMap::new();
+                a.insert("name".to_string(), current.to_string());
+                a
+            })
         },
         Vec::new(),
     )
-    .with_custom_label("Enter new name (empty to clear)")
+    .with_custom_label(aish_i18n::t("shell.live_sessions.rename_input_label"))
     .with_allow_cancel(true)
     .with_allow_empty_custom_input(true)
-    .with_footer("Type a name | Enter save | Esc cancel");
+    .with_footer(aish_i18n::t("shell.live_sessions.rename_input_footer"));
 
     match PanelRuntime::new().run(panel) {
         Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(name))) => {
             match aish_pty::rename_session(&session.session_id, &name) {
                 Ok(()) => {
                     if name.trim().is_empty() {
-                        println!("Cleared name for session {short_id}.");
+                        println!(
+                            "{}",
+                            aish_i18n::t_with_args("shell.live_sessions.rename_cleared", &{
+                                let mut a = std::collections::HashMap::new();
+                                a.insert("id".to_string(), short_id.to_string());
+                                a
+                            })
+                        );
                     } else {
-                        println!("Renamed session {short_id} → \"{}\".", name.trim());
+                        println!(
+                            "{}",
+                            aish_i18n::t_with_args("shell.live_sessions.rename_done", &{
+                                let mut a = std::collections::HashMap::new();
+                                a.insert("id".to_string(), short_id.to_string());
+                                a.insert("name".to_string(), name.trim().to_string());
+                                a
+                            })
+                        );
                     }
                     true
                 }
                 Err(e) => {
-                    eprintln!("\x1b[31mFailed to rename: {e}\x1b[0m");
+                    eprintln!(
+                        "{}",
+                        aish_i18n::t_with_args("shell.live_sessions.rename_failed", &{
+                            let mut a = std::collections::HashMap::new();
+                            a.insert("err".to_string(), e.to_string());
+                            a
+                        })
+                    );
                     false
                 }
             }

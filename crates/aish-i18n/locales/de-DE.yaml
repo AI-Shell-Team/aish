@@ -346,9 +346,9 @@ shell:
     rename_done: "Sitzung {id} → \"{name}\" umbenannt"
     rename_cleared: "Name fuer Sitzung {id} geloescht"
     rename_failed: "Umbenennen fehlgeschlagen: {err}"
-    exit_no_note_title: "Vor dem Beenden einen Namen hinzufuegen?"
+    exit_no_note_title: "Notiz vor dem Trennen hinzufuegen?"
     exit_no_note_hint: "Diese Sitzung hat keinen Namen — unbenannte Sitzungen sind nach dem Trennen schwer zu unterscheiden."
-    exit_no_note_footer: "Enter speichern & beenden · Esc ohne beenden"
+    exit_no_note_footer: "Enter speichern & trennen · Esc ohne Namen trennen"
 
   kill_live_sessions:
     daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"

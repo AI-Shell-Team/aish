@@ -836,9 +836,8 @@ impl LlmSession {
                                         let (events, chunk_usage) =
                                             StreamParser::parse_sse_chunk(line);
                                         if let Some(u) = chunk_usage {
-                                            stream_prompt_tokens += u.prompt_tokens;
-                                            stream_completion_tokens += u.completion_tokens;
-                                            self.record_usage(u);
+                                            stream_prompt_tokens = u.prompt_tokens;
+                                            stream_completion_tokens = u.completion_tokens;
                                         }
                                         for event in events {
                                             match event {
@@ -952,6 +951,17 @@ impl LlmSession {
                                 return Err(AishError::Llm(format!("Stream error: {}", e)));
                             }
                         }
+                    }
+
+                    // Record usage once after the stream completes. The final
+                    // chunk carries cumulative totals — assigning (not +=)
+                    // avoids double-counting if a non-compliant server sends
+                    // usage in multiple chunks.
+                    if stream_prompt_tokens > 0 || stream_completion_tokens > 0 {
+                        self.record_usage(crate::usage::TokenUsage {
+                            prompt_tokens: stream_prompt_tokens,
+                            completion_tokens: stream_completion_tokens,
+                        });
                     }
 
                     // End reasoning if it was started

@@ -1249,27 +1249,27 @@ impl AishShell {
                             // Snapshot old file content for write_file/edit_file
                             // so we can render a colored diff at ToolExecutionEnd.
                             if name == "write_file" || name == "edit_file" {
-                                if let Some(path) = event
+                                let path = event
                                     .data
                                     .get("tool_args")
                                     .and_then(|a| a.get("path"))
-                                    .and_then(|p| p.as_str())
-                                {
-                                    // Snapshot old content for diff rendering at tool end.
-                                    // Always assign (None on failure/oversize) so a failed
-                                    // read cannot leave a stale snapshot from a prior call.
-                                    *file_edit_snapshot_ref.lock() =
-                                        match std::fs::read_to_string(path) {
-                                            Ok(c) if c.len() <= 64 * 1024 => {
-                                                Some((path.to_string(), c))
-                                            }
-                                            Ok(_) => None,
-                                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                                Some((path.to_string(), String::new()))
-                                            }
-                                            Err(_) => None,
-                                        };
-                                }
+                                    .and_then(|p| p.as_str());
+                                // Always reset the snapshot slot: Some on
+                                // success / new-file, None on failure or when
+                                // the tool call lacks a path argument.
+                                *file_edit_snapshot_ref.lock() = match path {
+                                    Some(path) => match std::fs::read_to_string(path) {
+                                        Ok(c) if c.len() <= 64 * 1024 => {
+                                            Some((path.to_string(), c))
+                                        }
+                                        Ok(_) => None,
+                                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                            Some((path.to_string(), String::new()))
+                                        }
+                                        Err(_) => None,
+                                    },
+                                    None => None,
+                                };
                             }
                             // Ensure we're on a fresh line after content streaming
                             if content_started_flag.load(Ordering::SeqCst) {
