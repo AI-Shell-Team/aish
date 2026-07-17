@@ -36,8 +36,8 @@ pub mod usage;
 pub use agents::{
     effective_max_turns, parent_has_skill_tool, resolve_tool_names_for_agent,
     resolve_tools_for_agent, run_tool_loop_until_done, spawn, spawn_builtin, spawn_definition,
-    AgentDefinition, AgentRegistry, LoopOutcome, LoopStatus, SpawnConfig, SpawnResult,
-    ToolLoopConfig, ToolStrategy, GLOBAL_MAX_TURNS,
+    spawn_request, AgentDefinition, AgentRegistry, LoopOutcome, LoopStatus, SpawnConfig,
+    SpawnLabels, SpawnRequest, SpawnResult, ToolLoopConfig, ToolStrategy, GLOBAL_MAX_TURNS,
 };
 pub use api::{
     resolve_anthropic_messages_url, resolve_api_dialect, stream_simple,

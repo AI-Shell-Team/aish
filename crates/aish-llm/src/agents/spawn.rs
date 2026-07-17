@@ -7,11 +7,10 @@ use uuid::Uuid;
 
 use crate::prompt::PromptContext;
 use crate::session::LlmSession;
-use crate::tool_context::ToolExecutionPolicy;
 use crate::types::{ChatMessage, LlmCallbackResult, ToolSpec};
 
-use super::event_metadata::forward_sub_agent_event;
-use super::registry::{AgentRegistry, ToolStrategy};
+use super::event_metadata::forward_sub_agent_event_with_skill;
+use super::registry::AgentRegistry;
 use super::tool_loop::{run_tool_loop_until_done, LoopStatus, ToolLoopConfig};
 use super::tools::{parent_has_skill_tool, resolve_tools_for_agent};
 
@@ -29,6 +28,7 @@ pub struct SpawnConfig {
     pub max_turns: u32,
     pub system_message: Option<String>,
     pub prompt_context: PromptContext,
+    pub context_messages: Vec<ChatMessage>,
 }
 
 impl Default for SpawnConfig {
@@ -37,6 +37,7 @@ impl Default for SpawnConfig {
             max_turns: 20,
             system_message: None,
             prompt_context: PromptContext::MainChat,
+            context_messages: Vec::new(),
         }
     }
 }
@@ -46,6 +47,29 @@ impl Default for SpawnConfig {
 pub struct SpawnResult {
     pub text: String,
     pub status: LoopStatus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SpawnLabels {
+    pub skill_name: Option<String>,
+}
+
+pub struct SpawnRequest<'a> {
+    pub definition: &'a super::registry::AgentDefinition,
+    pub prompt: &'a str,
+    pub context_messages: Vec<ChatMessage>,
+    pub labels: SpawnLabels,
+}
+
+impl<'a> SpawnRequest<'a> {
+    pub fn new(definition: &'a super::registry::AgentDefinition, prompt: &'a str) -> Self {
+        Self {
+            definition,
+            prompt,
+            context_messages: Vec::new(),
+            labels: SpawnLabels::default(),
+        }
+    }
 }
 
 /// Create an isolated sub-session from `parent`, apply `configure`, then run the tool loop
@@ -72,7 +96,7 @@ where
         ..ToolLoopConfig::default()
     };
     let user_msg = ChatMessage::user(prompt);
-    let run = run_tool_loop_until_done(&sub, &user_msg, &[], &loop_config);
+    let run = run_tool_loop_until_done(&sub, &user_msg, &config.context_messages, &loop_config);
 
     let outcome = tokio::select! {
         outcome = run => outcome,
@@ -101,32 +125,48 @@ pub async fn spawn_definition<F>(
 where
     F: FnOnce(&mut LlmSession, &[ToolSpec]),
 {
+    spawn_request(parent, SpawnRequest::new(def, prompt), configure).await
+}
+
+/// Spawn from an [`AgentDefinition`] with additional untrusted context messages.
+///
+/// The messages are inserted after the agent system prompt and before the task prompt.
+/// Agent tool filtering, cancellation, and event forwarding remain unchanged.
+pub async fn spawn_request<F>(
+    parent: &LlmSession,
+    request: SpawnRequest<'_>,
+    configure: F,
+) -> SpawnResult
+where
+    F: FnOnce(&mut LlmSession, &[ToolSpec]),
+{
+    let def = request.definition;
     let parent_tools = parent.tool_specs();
     let parent_has_skill = parent_has_skill_tool(&parent_tools);
     let allowed_specs = resolve_tools_for_agent(def, &parent_tools, parent_has_skill);
     let inherited_tools =
         parent.shared_tools_by_names(allowed_specs.iter().map(|spec| spec.function.name.as_str()));
-    let enforce_read_only_bash = matches!(def.tool_strategy, ToolStrategy::Allowlist(_));
+    let tool_execution_policy = def.tool_execution_policy;
     let max_turns = effective_max_turns(def.max_turns);
     let spawn_id = Uuid::new_v4().to_string();
     let agent_type = def.subagent_type.clone();
     let system_prompt = def.system_prompt.clone();
+    let skill_name = request.labels.skill_name;
 
     spawn(
         parent,
-        prompt,
+        request.prompt,
         SpawnConfig {
             max_turns,
             system_message: Some(system_prompt),
             prompt_context: PromptContext::SubAgent {
                 subagent_type: agent_type.clone(),
             },
+            context_messages: request.context_messages,
         },
         |sub| {
-            sub.set_tool_execution_policy(ToolExecutionPolicy {
-                enforce_read_only_bash,
-            });
-            install_sub_agent_event_proxy(sub, &agent_type, &spawn_id);
+            sub.set_tool_execution_policy(tool_execution_policy);
+            install_sub_agent_event_proxy(sub, &agent_type, &spawn_id, skill_name.as_deref());
             for tool in &inherited_tools {
                 let registered = tool
                     .for_sub_session(sub)
@@ -154,16 +194,28 @@ where
     Ok(spawn_definition(parent, def, prompt, configure).await)
 }
 
-fn install_sub_agent_event_proxy(sub: &mut LlmSession, agent_type: &str, spawn_id: &str) {
+fn install_sub_agent_event_proxy(
+    sub: &mut LlmSession,
+    agent_type: &str,
+    spawn_id: &str,
+    skill_name: Option<&str>,
+) {
     let Some(parent_cb) = sub.event_callback_arc() else {
         return;
     };
     let agent_type = agent_type.to_string();
     let spawn_id = spawn_id.to_string();
+    let skill_name = skill_name.map(str::to_string);
 
     let proxy: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
         Arc::new(move |event: LlmEvent| {
-            forward_sub_agent_event(parent_cb.as_ref(), event, &agent_type, &spawn_id)
+            forward_sub_agent_event_with_skill(
+                parent_cb.as_ref(),
+                event,
+                &agent_type,
+                &spawn_id,
+                skill_name.as_deref(),
+            )
         });
     sub.set_event_callback(proxy);
 }
@@ -394,6 +446,9 @@ mod tests {
                 "read_file".to_string(),
                 "skill".to_string(),
             ]),
+            tool_execution_policy: crate::tool_context::ToolExecutionPolicy {
+                enforce_read_only_bash: true,
+            },
         });
 
         let result = spawn_builtin(

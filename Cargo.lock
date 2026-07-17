@@ -294,6 +294,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tracing",
 ]
 
@@ -306,6 +307,7 @@ dependencies = [
  "aish-llm",
  "aish-pty",
  "aish-security",
+ "aish-skills",
  "aish-ui",
  "futures",
  "glob",

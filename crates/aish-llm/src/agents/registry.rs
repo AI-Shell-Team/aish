@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::tool_context::ToolExecutionPolicy;
+
 use super::builtin_prompts::{
     EXPLORE_SYSTEM_PROMPT, GENERAL_PURPOSE_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT,
     TROUBLESHOOT_SYSTEM_PROMPT,
@@ -28,6 +30,7 @@ pub struct AgentDefinition {
     pub system_prompt: String,
     pub max_turns: u32,
     pub tool_strategy: ToolStrategy,
+    pub tool_execution_policy: ToolExecutionPolicy,
 }
 
 fn read_only_allowlist() -> Vec<String> {
@@ -48,6 +51,9 @@ For open-ended host/system health diagnosis prefer troubleshoot."
             system_prompt: EXPLORE_SYSTEM_PROMPT.to_string(),
             max_turns: 15,
             tool_strategy: ToolStrategy::Allowlist(read_only_allowlist()),
+            tool_execution_policy: ToolExecutionPolicy {
+                enforce_read_only_bash: true,
+            },
         }
     }
 
@@ -61,6 +67,9 @@ returned as one conclusion — NOT for enter_plan_mode or writing `.aish/plans/`
             system_prompt: PLAN_SYSTEM_PROMPT.to_string(),
             max_turns: 20,
             tool_strategy: ToolStrategy::Allowlist(read_only_allowlist()),
+            tool_execution_policy: ToolExecutionPolicy {
+                enforce_read_only_bash: true,
+            },
         }
     }
 
@@ -73,6 +82,7 @@ without nested Agent delegation — not for broad read-only exploration (use exp
             system_prompt: GENERAL_PURPOSE_SYSTEM_PROMPT.to_string(),
             max_turns: 25,
             tool_strategy: ToolStrategy::Denylist(vec!["Agent".to_string()]),
+            tool_execution_policy: ToolExecutionPolicy::default(),
         }
     }
 
@@ -89,6 +99,9 @@ multiple probes; do not use for last-failed-command slash /diagnose."
             system_prompt: TROUBLESHOOT_SYSTEM_PROMPT.to_string(),
             max_turns: 15,
             tool_strategy: ToolStrategy::Allowlist(allowlist),
+            tool_execution_policy: ToolExecutionPolicy {
+                enforce_read_only_bash: true,
+            },
         }
     }
 
@@ -100,6 +113,9 @@ multiple probes; do not use for last-failed-command slash /diagnose."
             system_prompt,
             max_turns: 10,
             tool_strategy: ToolStrategy::Allowlist(read_only_allowlist()),
+            tool_execution_policy: ToolExecutionPolicy {
+                enforce_read_only_bash: true,
+            },
         }
     }
 }

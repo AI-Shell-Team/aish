@@ -3,6 +3,13 @@ name: diagnose_system_lag
 version: 2.0.0
 description: 系统卡顿诊断专家 - 检测 CPU/内存/Swap/磁盘瓶颈，分析原因并给出安全的进程关闭建议（适用于 Debian/Deepin 系统）
 author: user
+context: subagent
+agent: troubleshoot
+allowed-tools:
+  - bash
+  - read_file
+  - grep
+  - glob
 triggers:
   - diagnose_system_lag
   - 系统卡顿诊断
@@ -35,7 +42,7 @@ distributions:
 
 ---
 
-## 🎯 Claude 助手执行指南
+## 🎯 助手执行指南
 
 **重要：当用户触发以下任一关键词时，请立即执行本 skill：**
 - 系统卡不卡
@@ -47,24 +54,22 @@ distributions:
 
 ### 标准执行流程
 
-#### 步骤 1：执行诊断脚本
+#### 步骤 1：采集只读诊断信号
 
 ```bash
-bash ~/.claude/skills/diagnose_system_lag/scripts/diagnose.sh
+uptime
+free -h
+df -h
+vmstat 1 5
+ps -eo pid,ppid,comm,%cpu,%mem,state --sort=-%cpu | head -15
+ps -eo pid,ppid,comm,%cpu,%mem,state --sort=-%mem | head -15
 ```
 
-此脚本会自动：
-1. 收集系统指标（CPU、内存、Swap、磁盘、进程）
-2. 分析瓶颈原因
-3. 生成诊断报告到 `reports/` 目录
-4. 记录日志到 `logs/` 目录
+根据症状按需补充 `journalctl`、`systemctl status`、`ss`、`iostat` 或 `dmesg` 等只读探针。不要执行本 Skill 附带的 `scripts/diagnose.sh`、`quickstart.sh` 或其他会创建报告和日志的脚本；隔离诊断必须保持只读。
 
-#### 步骤 2：读取并分析报告
+#### 步骤 2：在当前子会话中分析输出
 
-```bash
-# 读取最新生成的报告
-cat $(ls -t ~/.claude/skills/diagnose_system_lag/reports/diagnose-*.txt | head -1)
-```
+交叉分析负载、CPU idle/iowait、可用内存、Swap、磁盘空间和 TOP 进程。只在已有证据不足时继续探测，不生成中间报告文件。
 
 #### 步骤 3：向用户展示结果
 

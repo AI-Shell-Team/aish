@@ -133,6 +133,14 @@ impl SkillManager {
 
         let metadata: SkillMetadata = serde_yaml::from_str(frontmatter_yaml)
             .map_err(|e| aish_core::AishError::Skill(format!("Invalid YAML frontmatter: {}", e)))?;
+        if metadata.context == crate::SkillExecutionContext::SubAgent
+            && metadata.agent.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(aish_core::AishError::Skill(format!(
+                "Skill '{}' uses context=subagent but does not declare an agent",
+                metadata.name
+            )));
+        }
 
         let base_dir = skill_path
             .parent()
@@ -343,6 +351,51 @@ fn replace_path_prefix(haystack: &str, needle: &str, replacement: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_rejects_subagent_skill_without_agent() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: broken\ndescription: Broken isolated skill\ncontext: subagent\n---\nDo work\n",
+        )
+        .expect("write skill");
+        let mut manager = SkillManager::new();
+
+        let error = manager
+            .reload_skill(&path)
+            .expect_err("subagent skill without agent must be rejected");
+
+        assert!(error.to_string().contains("agent"));
+        assert!(manager.get_skill("broken").is_none());
+    }
+
+    #[test]
+    fn packaged_system_lag_skill_uses_read_only_troubleshoot_subagent() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../skills/diagnose_system_lag/SKILL.md");
+        let manager = SkillManager::new();
+
+        let skill = manager
+            .parse_skill_file(SkillSource::Builtin, &path)
+            .expect("packaged system lag skill should parse");
+
+        assert_eq!(
+            skill.metadata.context,
+            crate::SkillExecutionContext::SubAgent
+        );
+        assert_eq!(skill.metadata.agent.as_deref(), Some("troubleshoot"));
+        assert_eq!(
+            skill.metadata.allowed_tools,
+            Some(vec![
+                "bash".to_string(),
+                "read_file".to_string(),
+                "grep".to_string(),
+                "glob".to_string(),
+            ])
+        );
+    }
 
     #[test]
     fn rewrite_replaces_claude_path() {

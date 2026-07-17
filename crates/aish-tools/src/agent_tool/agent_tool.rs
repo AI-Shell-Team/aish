@@ -73,7 +73,7 @@ impl AgentTool {
         Ok((description, prompt, subagent_type))
     }
 
-    fn spawn_result_to_tool_result(result: SpawnResult) -> ToolResult {
+    pub(crate) fn spawn_result_to_tool_result(result: SpawnResult) -> ToolResult {
         match result.status {
             LoopStatus::Complete | LoopStatus::Incomplete => ToolResult::success(result.text),
             LoopStatus::Cancelled => {
