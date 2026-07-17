@@ -3122,7 +3122,8 @@ impl AishShell {
                             "\u{25cf}".to_string()
                         } else {
                             "\u{25cb}".to_string()
-                        });
+                        })
+                        .with_renamable();
                     if !name.is_empty() {
                         item = item.with_highlight(name);
                     }
