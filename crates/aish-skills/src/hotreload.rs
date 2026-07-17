@@ -96,37 +96,36 @@ impl SkillHotReloader {
 
     /// Apply pending changes to a [`SkillManager`].
     ///
-    /// For each changed path the method determines whether it is a create /
-    /// modify (reload) or a delete (remove), and calls the appropriate
-    /// manager method. Returns the list of skill names that were affected.
+    /// Reloads all skill roots so User/Claude/Builtin precedence stays correct
+    /// (e.g. deleting a User override restores the Builtin skill of the same name).
+    /// Returns skill names associated with changed `SKILL.md` paths when known.
     pub fn apply_changes(&self, manager: &mut SkillManager) -> Vec<String> {
         let paths = self.take_changes();
         let mut affected = Vec::new();
 
         for path in &paths {
             if is_skill_file(path) {
-                if path.exists() {
-                    // File was created or modified.
-                    match manager.reload_skill(path) {
-                        Ok(()) => {
-                            if let Some(skill) = manager.get_skill_by_path(path) {
-                                affected.push(skill.metadata.name.clone());
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to reload skill {:?}: {}", path, e);
-                        }
-                    }
-                } else {
-                    // File was deleted — remove by path lookup.
-                    if let Some(name) = manager.find_skill_name_by_path(path) {
-                        manager.remove_skill(&name);
-                        affected.push(name);
-                    }
+                if let Some(name) = manager.find_skill_name_by_path(path) {
+                    affected.push(name);
+                } else if let Some(name) = path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                {
+                    // Create/rename before the manager knows the path yet.
+                    affected.push(name);
                 }
             }
         }
 
+        if paths.iter().any(|path| is_skill_file(path)) {
+            if let Err(error) = manager.load_all_skills() {
+                tracing::warn!("Failed to reload skills after filesystem change: {}", error);
+            }
+        }
+
+        affected.sort();
+        affected.dedup();
         affected
     }
 }

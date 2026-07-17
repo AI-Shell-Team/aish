@@ -13,10 +13,11 @@
     clippy::too_many_arguments
 )]
 
+pub mod bundled;
 pub mod hotreload;
 pub mod manager;
 pub mod models;
 pub mod validator;
 
-pub use manager::SkillManager;
+pub use manager::{SharedSkillManager, SkillManager};
 pub use models::{Skill, SkillExecutionContext, SkillList, SkillMetadata};

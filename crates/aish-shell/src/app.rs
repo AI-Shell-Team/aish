@@ -18,7 +18,7 @@ use aish_memory::MemoryManager;
 use aish_security::{load_policy, SecurityManager};
 use aish_session::{SessionContextMessage, SessionRecord, SessionStateSnapshot, SessionStore};
 use aish_skills::hotreload::SkillHotReloader;
-use aish_skills::SkillManager;
+use aish_skills::{SharedSkillManager, SkillManager};
 use aish_tools::ToolRegistry;
 use std::path::PathBuf;
 
@@ -37,6 +37,18 @@ use crate::types::ShellState;
 /// Format prompt + command as displayed after Enter (without trailing newline).
 fn format_user_submitted_line(prompt: &str, command: &str) -> String {
     format!("{prompt}{command}")
+}
+
+fn skill_to_tool_info(skill: &aish_skills::Skill) -> aish_tools::SkillInfo {
+    aish_tools::SkillInfo {
+        name: skill.metadata.name.clone(),
+        content: skill.content.clone(),
+        description: skill.metadata.description.clone(),
+        base_dir: skill.base_dir.clone(),
+        context: skill.metadata.context,
+        agent: skill.metadata.agent.clone(),
+        allowed_tools: skill.metadata.allowed_tools.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +459,7 @@ pub struct AishShell {
     audit_user: Option<String>,
     audit_host: Option<String>,
     current_remote_host: Arc<Mutex<Option<String>>>,
-    pub skill_manager: SkillManager,
+    pub skill_manager: SharedSkillManager,
     pub skill_hot_reloader: Option<SkillHotReloader>,
     pub memory_manager: SharedMemoryManager,
     pub version: String,
@@ -871,18 +883,25 @@ impl AishShell {
             }),
         );
         tool_registry.register(Box::new(memory_tool));
-        // Load skills (best-effort, before tool registration so SkillTool can use real data)
-        let mut skill_manager = SkillManager::new();
+        // Load skills (best-effort, before tool registration so SkillTool can use real data).
+        // Shared with AiHandler + hot-reload so Builtin/User precedence and live edits apply.
         // Skill/hook loading is gated by `enable_scripts`; when false the
         // directories are still known but nothing is loaded or hot-reloaded.
-        if config.enable_scripts {
-            let _ = skill_manager.load_all_skills();
-        }
-        let skill_count = skill_manager.list_skills().len();
+        let skill_manager: SharedSkillManager = Arc::new(Mutex::new(SkillManager::new()));
+        let skill_count = {
+            let mut manager = skill_manager.lock().unwrap_or_else(|e| e.into_inner());
+            if config.enable_scripts {
+                let _ = manager.load_all_skills();
+            }
+            manager.list_skills().len()
+        };
 
         // Start skill hot-reloader if skill directories exist
-        let skill_hot_reloader = {
-            let dirs = skill_manager.get_skill_dirs();
+        let skill_hot_reloader = if config.enable_scripts {
+            let dirs = skill_manager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_skill_dirs();
             if dirs.is_empty() {
                 None
             } else {
@@ -890,32 +909,26 @@ impl AishShell {
                 reloader.start();
                 Some(reloader)
             }
+        } else {
+            None
         };
 
-        // Wire SkillTool with real callbacks that look up skills from the loaded manager
+        // Wire SkillTool to the live shared manager (no startup snapshot).
         let skill_tool = {
-            let skills_snapshot: std::collections::HashMap<String, aish_tools::SkillInfo> =
-                skill_manager
+            let lookup_manager = Arc::clone(&skill_manager);
+            let list_manager = Arc::clone(&skill_manager);
+            let lookup = Box::new(move |name: &str| {
+                let manager = lookup_manager.lock().unwrap_or_else(|e| e.into_inner());
+                manager.get_skill(name).map(skill_to_tool_info)
+            });
+            let list = Box::new(move || {
+                let manager = list_manager.lock().unwrap_or_else(|e| e.into_inner());
+                manager
                     .list_skills()
                     .iter()
-                    .map(|s| {
-                        (
-                            s.metadata.name.clone(),
-                            aish_tools::SkillInfo {
-                                name: s.metadata.name.clone(),
-                                content: s.content.clone(),
-                                description: s.metadata.description.clone(),
-                                base_dir: s.base_dir.clone(),
-                                context: s.metadata.context,
-                                agent: s.metadata.agent.clone(),
-                                allowed_tools: s.metadata.allowed_tools.clone(),
-                            },
-                        )
-                    })
-                    .collect();
-            let skill_names: Vec<String> = skills_snapshot.keys().cloned().collect();
-            let lookup = Box::new(move |name: &str| skills_snapshot.get(name).cloned());
-            let list = Box::new(move || skill_names.clone());
+                    .map(|skill| skill.metadata.name.clone())
+                    .collect()
+            });
             aish_tools::SkillTool::new(lookup, list)
         };
         tool_registry.register(Box::new(skill_tool));
@@ -1735,7 +1748,7 @@ impl AishShell {
         let ai_handler = AiHandler::new(
             llm_session,
             memory_manager.clone(),
-            skill_manager,
+            Arc::clone(&skill_manager),
             memory_config,
             config.max_llm_messages,
             config.max_shell_messages,
@@ -1784,10 +1797,6 @@ impl AishShell {
             *slot = Some(pty.clone());
         }
 
-        // Placeholder instances for struct fields.  The real subsystems live
-        // inside AiHandler which needs mutable access during each turn.
-        let shell_skill_manager = SkillManager::new();
-
         let secret_check_closure =
             Self::build_secret_check_closure(security_manager.secret_scanner().clone());
 
@@ -1815,7 +1824,7 @@ impl AishShell {
             audit_user,
             audit_host,
             current_remote_host: Arc::new(Mutex::new(None)),
-            skill_manager: shell_skill_manager,
+            skill_manager,
             skill_hot_reloader,
             memory_manager: memory_manager.clone(),
             version,
@@ -1978,9 +1987,12 @@ impl AishShell {
                 break;
             }
 
-            // Check for skill hot-reload changes
+            // Check for skill hot-reload changes (shared manager used by SkillTool / AiHandler)
             if let Some(ref reloader) = self.skill_hot_reloader {
-                let affected = reloader.apply_changes(&mut self.skill_manager);
+                let affected = {
+                    let mut manager = self.skill_manager.lock().unwrap_or_else(|e| e.into_inner());
+                    reloader.apply_changes(&mut manager)
+                };
                 if !affected.is_empty() {
                     for name in &affected {
                         tracing::info!("Skill '{}' hot-reloaded", name);
@@ -6011,29 +6023,16 @@ impl AishShell {
         let audit_session_uuid_cb = audit_session_uuid;
         let audit_user_cb = audit_user;
 
-        // Load skills snapshot for SSH sessions (same as local session).
+        // Load skills snapshot for SSH sessions (includes Builtin roots at connect time).
         let ssh_skills_snapshot: std::sync::Arc<
             std::collections::HashMap<String, aish_tools::SkillInfo>,
         > = {
-            let mut sm = aish_skills::SkillManager::new();
+            let mut sm = SkillManager::new();
             let _ = sm.load_all_skills();
             std::sync::Arc::new(
                 sm.list_skills()
                     .iter()
-                    .map(|s| {
-                        (
-                            s.metadata.name.clone(),
-                            aish_tools::SkillInfo {
-                                name: s.metadata.name.clone(),
-                                content: s.content.clone(),
-                                description: s.metadata.description.clone(),
-                                base_dir: s.base_dir.clone(),
-                                context: s.metadata.context,
-                                agent: s.metadata.agent.clone(),
-                                allowed_tools: s.metadata.allowed_tools.clone(),
-                            },
-                        )
-                    })
+                    .map(|s| (s.metadata.name.clone(), skill_to_tool_info(s)))
                     .collect(),
             )
         };

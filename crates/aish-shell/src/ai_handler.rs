@@ -11,7 +11,7 @@ use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent, Tool}
 use aish_memory::MemoryManager;
 use aish_prompts::PromptManager;
 use aish_session::SessionContextMessage;
-use aish_skills::SkillManager;
+use aish_skills::SharedSkillManager;
 
 /// Shared handle for the memory manager, accessible from both AiHandler and tools.
 pub type SharedMemoryManager = Arc<Mutex<Option<MemoryManager>>>;
@@ -169,7 +169,7 @@ pub struct AiHandler {
     llm_session: LlmSession,
     context_manager: ContextManager,
     memory_manager: SharedMemoryManager,
-    skill_manager: SkillManager,
+    skill_manager: SharedSkillManager,
     memory_config: MemoryConfig,
     prompt_manager: PromptManager,
     token_store: crate::token_store::TokenUsageStore,
@@ -179,7 +179,7 @@ impl AiHandler {
     pub fn new(
         llm_session: LlmSession,
         memory_manager: SharedMemoryManager,
-        skill_manager: SkillManager,
+        skill_manager: SharedSkillManager,
         memory_config: MemoryConfig,
         max_llm_messages: usize,
         max_shell_messages: usize,
@@ -667,12 +667,13 @@ impl AiHandler {
     /// Extract @skill_name references and inject skill prefix.
     /// Example: "@grep do this" → "use grep skill to do this.\n\ndo this"
     fn inject_skill_prefix(&self, text: &str) -> String {
-        let available: Vec<String> = self
-            .skill_manager
+        let manager = self.skill_manager.lock().unwrap_or_else(|e| e.into_inner());
+        let available: Vec<String> = manager
             .list_skills()
             .iter()
             .map(|s| s.metadata.name.to_lowercase())
             .collect();
+        drop(manager);
 
         if available.is_empty() {
             return text.to_string();
@@ -776,23 +777,27 @@ impl AiHandler {
     /// Inject loaded skill descriptions into the context so the AI can use them.
     /// Uses stable injection — only updates when skills actually change.
     fn inject_skills(&mut self) {
-        let skills = self.skill_manager.list_skills();
-        if skills.is_empty() {
-            self.context_manager.inject_knowledge_stable("skills", "");
-            return;
-        }
-
-        let descriptions: Vec<String> = skills
-            .iter()
-            .map(|s| {
+        let content = {
+            let manager = self.skill_manager.lock().unwrap_or_else(|e| e.into_inner());
+            let skills = manager.list_skills();
+            if skills.is_empty() {
+                String::new()
+            } else {
+                let descriptions: Vec<String> = skills
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "## {}\n{}\nPath: {}",
+                            s.metadata.name, s.metadata.description, s.file_path
+                        )
+                    })
+                    .collect();
                 format!(
-                    "## {}\n{}\nPath: {}",
-                    s.metadata.name, s.metadata.description, s.file_path
+                    "<available-skills>\n{}\n</available-skills>",
+                    descriptions.join("\n\n")
                 )
-            })
-            .collect();
-        let text = descriptions.join("\n\n");
-        let content = format!("<available-skills>\n{}\n</available-skills>", text);
+            }
+        };
 
         self.context_manager
             .inject_knowledge_stable("skills", &content);

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use aish_core::SkillSource;
 
@@ -8,6 +9,9 @@ use crate::models::*;
 
 /// Regex to extract YAML frontmatter from markdown files.
 const FRONTMATTER_REGEX: &str = r"(?s)^---\s*\n(.*?)\n---\s*\n";
+
+/// Shared skill cache used by the shell, hot-reloader, and `SkillTool` lookups.
+pub type SharedSkillManager = Arc<Mutex<SkillManager>>;
 
 /// Discovers, loads, and manages skill plugins from filesystem directories.
 pub struct SkillManager {
@@ -31,7 +35,13 @@ impl SkillManager {
         }
     }
 
-    /// Scan and return skill root directories in priority order: USER > CLAUDE.
+    /// Scan and return skill root directories in priority order:
+    /// `User` > `Claude` > `Builtin`.
+    ///
+    /// Builtin skills are **embedded in the binary** and materialized into an
+    /// app-managed cache. They are not read from `/usr/share` and are not owned
+    /// by the user config directory. A same-named User or Claude skill shadows
+    /// Builtin.
     pub fn scan_skill_roots(&self) -> Vec<(SkillSource, PathBuf)> {
         let mut roots = Vec::new();
 
@@ -50,6 +60,11 @@ impl SkillManager {
             roots.push((SkillSource::Claude, home.join(".claude").join("skills")));
         }
 
+        // 3. BUILTIN: product-embedded skills (lowest priority)
+        if let Some(path) = crate::bundled::bundled_skills_root() {
+            roots.push((SkillSource::Builtin, path));
+        }
+
         roots.into_iter().filter(|(_, p)| p.is_dir()).collect()
     }
 
@@ -58,10 +73,15 @@ impl SkillManager {
     /// Skills from higher-priority sources (listed first) shadow skills with
     /// the same name from lower-priority sources.
     pub fn load_all_skills(&mut self) -> aish_core::Result<()> {
+        self.load_from_roots(self.scan_skill_roots())
+    }
+
+    /// Load skills from an explicit root list (first-wins by name).
+    pub fn load_from_roots(&mut self, roots: Vec<(SkillSource, PathBuf)>) -> aish_core::Result<()> {
         let mut loaded_skills: HashMap<String, Skill> = HashMap::new();
         let mut skill_lists: Vec<SkillList> = Vec::new();
 
-        for (source, root_path) in self.scan_skill_roots() {
+        for (source, root_path) in roots {
             let skill_list = self.load_skills(source, &root_path)?;
             skill_lists.push(skill_list);
 
@@ -178,12 +198,15 @@ impl SkillManager {
         self.skills_version
     }
 
-    /// Return the list of skill root directories that should be watched.
+    /// Return skill root directories that should be watched for hot-reload.
+    ///
+    /// Builtin (embedded) skills are excluded — they change with the binary, not
+    /// via filesystem edits under the cache.
     pub fn get_skill_dirs(&self) -> Vec<PathBuf> {
         self.scan_skill_roots()
             .into_iter()
-            .filter(|(_, p)| p.is_dir())
-            .map(|(_, p)| p)
+            .filter(|(source, path)| *source != SkillSource::Builtin && path.is_dir())
+            .map(|(_, path)| path)
             .collect()
     }
 
@@ -314,6 +337,8 @@ fn rewrite_skill_paths(content: &str, skill_name: &str, base_dir: &str) -> Strin
         format!("~/.config/aish/skills/{}", skill_name),
         format!("$HOME/.claude/skills/{}", skill_name),
         format!("$HOME/.config/aish/skills/{}", skill_name),
+        format!("/usr/local/share/aish/skills/{}", skill_name),
+        format!("/usr/share/aish/skills/{}", skill_name),
     ];
     let mut result = content.to_string();
     for p in patterns {
@@ -351,6 +376,58 @@ fn replace_path_prefix(haystack: &str, needle: &str, replacement: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_skill(dir: &Path, name: &str, description: &str, body: &str) {
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n{body}\n"),
+        )
+        .expect("write skill");
+    }
+
+    #[test]
+    fn user_skill_shadows_builtin_of_same_name() {
+        let user = tempfile::tempdir().expect("user dir");
+        let builtin = tempfile::tempdir().expect("builtin dir");
+        write_skill(user.path(), "demo", "user copy", "from user");
+        write_skill(builtin.path(), "demo", "builtin copy", "from builtin");
+        write_skill(
+            builtin.path(),
+            "only-builtin",
+            "builtin only",
+            "builtin body",
+        );
+
+        let mut manager = SkillManager::new();
+        manager
+            .load_from_roots(vec![
+                (SkillSource::User, user.path().to_path_buf()),
+                (SkillSource::Builtin, builtin.path().to_path_buf()),
+            ])
+            .expect("load");
+
+        let demo = manager.get_skill("demo").expect("demo");
+        assert_eq!(demo.source, SkillSource::User);
+        assert!(demo.content.contains("from user"));
+        assert_eq!(
+            manager.get_skill("only-builtin").map(|s| s.source.clone()),
+            Some(SkillSource::Builtin)
+        );
+    }
+
+    #[test]
+    fn scan_includes_embedded_builtin_root() {
+        let roots = SkillManager::new().scan_skill_roots();
+        assert!(
+            roots
+                .iter()
+                .any(|(source, path)| *source == SkillSource::Builtin
+                    && path.join("diagnose_system_lag/SKILL.md").is_file()),
+            "Builtin root should materialize embedded skills: {roots:?}"
+        );
+    }
 
     #[test]
     fn reload_rejects_subagent_skill_without_agent() {
