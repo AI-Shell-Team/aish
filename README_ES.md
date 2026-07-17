@@ -291,8 +291,6 @@ Directorios de escaneo predeterminados y prioridad:
 
 Las versiones empaquetadas intentan copiar las skills a nivel sistema en el directorio del usuario en el primer inicio (p. ej., `/usr/share/aish/skills`).
 
-Para más detalles: `docs/skills-guide.md`
-
 ---
 
 ## Datos y privacidad
@@ -313,7 +311,6 @@ Recomendaciones:
 
 - Guía de configuración: `CONFIGURATION.md`
 - Inicio rápido: `QUICKSTART.md`
-- Uso de Skills: `docs/skills-guide.md`
 - Mecanismo de corrección de comandos: `docs/command-interaction-correction.md`
 
 ---

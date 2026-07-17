@@ -5,7 +5,6 @@ BINDIR ?= $(PREFIX)/bin
 SYSCONFDIR ?= /etc
 SHAREDIR ?= $(PREFIX)/share
 DATADIR ?= $(SHAREDIR)/aish
-DOCDIR ?= $(SHAREDIR)/doc/aish
 SYSTEMD_UNITDIR ?= /etc/systemd/system
 DESTDIR ?=
 
@@ -70,8 +69,6 @@ install:
 	install -m 0755 target/$(TARGET)/release/aish "$(DESTDIR)$(BINDIR)/aish"
 	install -d "$(DESTDIR)$(SYSCONFDIR)/aish"
 	install -m 0644 config/security_policy.yaml "$(DESTDIR)$(SYSCONFDIR)/aish/security_policy.yaml"
-	install -d "$(DESTDIR)$(DOCDIR)"
-	install -m 0644 docs/skills-guide.md "$(DESTDIR)$(DOCDIR)/skills-guide.md"
 	install -d "$(DESTDIR)$(SYSTEMD_UNITDIR)"
 	sed 's|@AISH_BINDIR@|$(BINDIR)|g' packaging/systemd/aish-sandbox.service.in > "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	chmod 0644 "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
