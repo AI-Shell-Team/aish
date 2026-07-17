@@ -340,7 +340,7 @@ impl Helper for ShellHelper {}
 
 impl Highlighter for ShellHelper {
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[38;5;242m{}\x1b[0m", hint))
+        Cow::Owned(crate::theme::dim(hint))
     }
 }
 

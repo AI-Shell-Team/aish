@@ -72,6 +72,10 @@ pub fn select_resume_session(items: &[ResumeSessionItem]) -> io::Result<Option<S
 
     match PanelRuntime::new().run(panel).map_err(io::Error::other)? {
         PanelOutcome::Submitted(SearchSelectOutcome::Selected(session_id)) => Ok(Some(session_id)),
+        // Rename does not apply to persisted sessions; treat as a no-op.
+        PanelOutcome::Submitted(SearchSelectOutcome::Rename(_)) => Ok(None),
+        // Quit (Ctrl+Q) is not meaningful for the resume picker; cancel.
+        PanelOutcome::Submitted(SearchSelectOutcome::Quit) => Ok(None),
         PanelOutcome::Cancelled => Ok(None),
     }
 }

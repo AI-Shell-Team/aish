@@ -45,8 +45,12 @@ pub fn is_parent_agent_spawn_tool_event(event: &LlmEvent) -> bool {
 pub fn sub_agent_indent(depth: u32) -> String {
     match depth {
         0 => String::new(),
-        1 => "  └─ ".to_string(),
-        n => format!("{}  └─ ", "  ".repeat(n as usize - 1)),
+        1 => format!("  {} ", crate::theme::TREE_LAST),
+        n => format!(
+            "{}  {} ",
+            "  ".repeat(n as usize - 1),
+            crate::theme::TREE_LAST
+        ),
     }
 }
 
@@ -68,16 +72,17 @@ pub fn format_sub_agent_thinking_line(ctx: &SubAgentContext, status: &str) -> St
         "{}{} · {}",
         sub_agent_indent(ctx.depth),
         ctx.agent_type,
-        status
+        crate::theme::muted(status)
     )
 }
 
 pub fn format_sub_agent_tool_line(ctx: &SubAgentContext, name: &str, args_preview: &str) -> String {
     format!(
-        "\x1b[36m{}🔧 {} ({})\x1b[0m",
+        "{}{} {} {}",
         sub_agent_child_indent(ctx.depth),
-        name,
-        args_preview
+        crate::theme::accent(crate::theme::TOOL_PREFIX),
+        crate::theme::accent(name),
+        crate::theme::muted(&format!("({})", args_preview))
     )
 }
 
@@ -94,7 +99,7 @@ pub fn print_sub_agent_generation_start(event: &LlmEvent) {
     if let Some(ctx) = sub_agent_context(event) {
         let status = aish_i18n::t("shell.sub_agent.thinking");
         let line = format_sub_agent_thinking_line(&ctx, &status);
-        println!("\x1b[2m{}\x1b[0m", line);
+        println!("{}", crate::theme::muted(&line));
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 }
@@ -184,7 +189,9 @@ mod tests {
             spawn_id: "id".into(),
         };
         let line = format_sub_agent_tool_line(&ctx, "grep", "pattern=x");
-        assert!(line.starts_with("\x1b[36m    🔧 grep"));
+        assert!(line.starts_with("    "));
+        assert!(line.contains("❯"));
+        assert!(line.contains("grep"));
         assert!(!line.contains("plan"));
         assert!(line.contains("pattern=x"));
     }

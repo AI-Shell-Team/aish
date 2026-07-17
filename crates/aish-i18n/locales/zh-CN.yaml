@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "检查 Langfuse 配置"
   setup_command_help: "运行交互式配置并退出"
   check_tool_support_command_help: "调试 tool-call 在线验证"
+  detach_hint: "已脱离会话。运行 `aish -c` 重新连接。"
 
   models_auth_title: "模型认证: {provider}"
   models_auth_relogin_hint: "用于重新登录或轮换凭证。首次配置请在 `aish setup` 向导内完成认证。"
@@ -434,6 +435,7 @@ shell:
   ctrl_c_again: "1 秒内再次按 Ctrl+C 退出"
   exiting: "正在退出..."
   exit_goodbye: "正在退出 Shell。再见！"
+  exit_daemon_hint: "※ 可用 Ctrl+Q 分离会话（保持后台运行），之后用 aish -c 重连"
 
   # 确认对话框
   confirm_dialog_title: "工具执行"
@@ -520,7 +522,7 @@ shell:
     iteration_continue_prompt: "是否继续？[Y/n]"
 
   resume:
-    exit_command: "恢复会话: aish resume {session_id}"
+    exit_command: "恢复 AI 上下文: aish resume {session_id}"
     usage: "用法: /resume [session_id]"
     session_store_unavailable: "会话存储不可用。"
     no_sessions: "未找到历史会话。"
@@ -542,11 +544,22 @@ shell:
     none_active: "没有活跃的 PTY 会话。"
     panel_title: "活跃 PTY 会话"
     search_placeholder: "搜索..."
-    panel_footer: "↑/↓ 导航 · Enter 选择 · Esc 取消"
+    panel_footer: "↑/↓ 导航 · Enter 选择 · Ctrl+E 重命名 · Esc 取消"
     create_new: "创建新会话"
     already_current: "已在当前会话中。"
     started_label: "启动于: {age}"
     current_tag: "[当前]"
+    rename_title: "重命名会话 {id}"
+    rename_current_none: "当前名称：（无）"
+    rename_current_set: "当前名称：{name}"
+    rename_input_label: "输入新名称（留空清除）"
+    rename_input_footer: "输入名称 | Enter 保存 | Esc 取消"
+    rename_done: "已重命名会话 {id} → \"{name}\""
+    rename_cleared: "已清除会话 {id} 的名称"
+    rename_failed: "重命名失败：{err}"
+    exit_no_note_title: "退出前添加备注？"
+    exit_no_note_hint: "当前会话没有备注——脱离后未命名会话难以辨认。"
+    exit_no_note_footer: "Enter 保存并退出 · Esc 直接退出"
 
   kill_live_sessions:
     daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："
@@ -920,6 +933,11 @@ help:
       - 优先级：命令行参数 > 环境变量（`AISH_MODEL`、`AISH_API_KEY`、`AISH_API_BASE`） > 配置文件
       - 运行 `/setup` 或 `aish setup` 进行交互式配置
 
+      ## 会话管理
+      - `aish -c` — 连接到已有的活动会话（或从列表选择）
+      - `Ctrl+Q` — 分离当前会话（后台保持运行）；用 `aish -c` 重新连接
+      - `Ctrl+E` — 在选择器中重命名选中的会话
+
       ## 快捷键
       | 按键 | 功能 |
       |------|------|
@@ -927,6 +945,8 @@ help:
       | `Ctrl+D` | 退出 Shell |
       | `Shift+Tab` / `F2` | 切换计划模式 |
       | `Ctrl+O` | 浏览输出历史 |
+      | `Ctrl+Q` | 分离会话（用 `aish -c` 重连） |
+      | `Ctrl+E` | 重命名会话（选择器中） |
       | 空行按 `/` | 斜杠命令选择器 |
 
       ## 帮助页面
@@ -1108,6 +1128,13 @@ help:
         | `Ctrl+D` | 退出 Shell |
         | `Ctrl+O` | 浏览输出历史 |
         | `Esc` | 取消当前输入 |
+
+        ## 会话管理
+
+        | 按键 | 操作 |
+        |------|------|
+        | `Ctrl+Q` | 分离会话（保持运行；用 `aish -c` 重连） |
+        | `Ctrl+E` | 重命名选中会话（选择器中） |
 
         ## 模式切换
 

@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Langfuse の設定を確認します"
   setup_command_help: "対話式セットアップを実行して終了します"
   check_tool_support_command_help: "ツール呼び出しのライブ検証をデバッグします"
+  detach_hint: "セッションを切り離しました。`aish -c` で再接続できます。"
   resume_failed: "セッションの復元に失敗しました: {error}"
 
   option:
@@ -234,6 +235,7 @@ shell:
     choice_prompt: "選択してください（既定: n）: "
 
   exit_goodbye: "シェルを終了します。さようなら！"
+  exit_daemon_hint: "※ ヒント: Ctrl+Q でセッションを切り離し（バックグラウンド継続）、aish -c で再接続"
   command_cancelled: "コマンドをキャンセルしました"
   error_correction:
     press_semicolon_hint: "コマンド実行に失敗しました。; でクイック修正、または /diagnose で診断。"
@@ -309,7 +311,7 @@ shell:
     iteration_limit_title: "⏸ ツール呼び出し上限に達しました"
     iteration_continue_prompt: "続行しますか？[Y/n]"
   resume:
-    exit_command: "復元するには: aish resume {session_id}"
+    exit_command: "AIコンテキストを復元: aish resume {session_id}"
     usage: "使い方: /resume [session_id]"
     session_store_unavailable: "セッションストアを利用できません。"
     no_sessions: "以前のセッションは見つかりませんでした。"
@@ -331,11 +333,22 @@ shell:
     none_active: "アクティブなPTYセッションがありません。"
     panel_title: "アクティブPTYセッション"
     search_placeholder: "検索..."
-    panel_footer: "↑/↓ 移動 · Enter 選択 · Esc キャンセル"
+    panel_footer: "↑/↓ 移動 · Enter 選択 · Ctrl+E 名前変更 · Esc キャンセル"
     create_new: "新規セッション作成"
     already_current: "現在のセッションです。"
     started_label: "開始: {age}"
     current_tag: "[現在]"
+    rename_title: "セッション {id} の名前を変更"
+    rename_current_none: "現在の名前: (なし)"
+    rename_current_set: "現在の名前: {name}"
+    rename_input_label: "新しい名前を入力(空でクリア)"
+    rename_input_footer: "名前を入力 | Enter 保存 | Esc キャンセル"
+    rename_done: "セッション {id} を \"{name}\" に変更しました"
+    rename_cleared: "セッション {id} の名前をクリアしました"
+    rename_failed: "名前変更に失敗: {err}"
+    exit_no_note_title: "終了前にメモを追加しますか？"
+    exit_no_note_hint: "このセッションにはメモがありません。名前のないセッションは切断後に見分けがつきません。"
+    exit_no_note_footer: "Enter 保存して終了 · Esc そのまま終了"
 
   kill_live_sessions:
     daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："
@@ -512,6 +525,11 @@ help:
       - 優先度：コマンドライン引数 > 環境変数（`AISH_MODEL`、`AISH_API_KEY`、`AISH_API_BASE`） > 設定ファイル
       - `/setup` または `aish setup` でインタラクティブに設定
 
+      ## セッション管理
+      - `aish -c` — 既存のライブセッションに接続（またはリストから選択）
+      - `Ctrl+Q` — 現在のセッションを切り離す（バックグラウンドで継続）；`aish -c` で再接続
+      - `Ctrl+E` — ピッカーで選択中のセッションの名前を変更
+
       ## キーボードショートカット
       | キー | 操作 |
       |------|------|
@@ -519,6 +537,8 @@ help:
       | `Ctrl+D` | シェルを終了 |
       | `Shift+Tab` / `F2` | プランモード切替 |
       | `Ctrl+O` | 出力履歴を閲覧 |
+      | `Ctrl+Q` | セッションを切り離す（`aish -c` で再接続） |
+      | `Ctrl+E` | セッションの名前を変更（ピッカー内） |
       | 空行で `/` | スラッシュコマンドピッカー |
 
       ## ヘルプページ
@@ -700,6 +720,13 @@ help:
         | `Ctrl+D` | シェルを終了 |
         | `Ctrl+O` | 出力履歴を参照 |
         | `Esc` | 現在の入力をキャンセル |
+
+        ## セッション管理
+
+        | キー | 操作 |
+        |------|------|
+        | `Ctrl+Q` | セッションを切り離す（継続実行；`aish -c` で再接続） |
+        | `Ctrl+E` | 選択中のセッションの名前を変更（ピッカー内） |
 
         ## モード切替
 

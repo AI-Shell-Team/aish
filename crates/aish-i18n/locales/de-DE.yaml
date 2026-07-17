@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Langfuse-Konfiguration prüfen"
   setup_command_help: "Interaktive Einrichtung ausführen und beenden"
   check_tool_support_command_help: "Live-Prüfung der Tool-Call-Unterstützung debuggen"
+  detach_hint: "Getrennt. `aish -c` ausfuehren, um wieder zu verbinden."
   resume_failed: "Sitzung konnte nicht fortgesetzt werden: {error}"
 
   option:
@@ -234,6 +235,7 @@ shell:
     choice_prompt: "Ihre Auswahl (Standard: n): "
 
   exit_goodbye: "Shell wird beendet. Auf Wiedersehen!"
+  exit_daemon_hint: "※ Tipp: Strg+Q zum Trennen (Sitzung bleibt aktiv), dann aish -c zum Neuverbinden"
   command_cancelled: "Befehl abgebrochen"
   error_correction:
     press_semicolon_hint: "Die Befehlsausführung ist fehlgeschlagen. ; für Schnellreparatur oder /diagnose für Diagnose."
@@ -309,7 +311,7 @@ shell:
     iteration_limit_title: "⏸ Tool-Aufruf-Limit erreicht"
     iteration_continue_prompt: "Fortfahren? [Y/n]"
   resume:
-    exit_command: "Fortsetzen mit: aish resume {session_id}"
+    exit_command: "KI-Kontext fortsetzen: aish resume {session_id}"
     usage: "Verwendung: /resume [session_id]"
     session_store_unavailable: "Sitzungsspeicher ist nicht verfügbar."
     no_sessions: "Keine früheren Sitzungen gefunden."
@@ -331,11 +333,22 @@ shell:
     none_active: "Keine aktiven PTY-Sitzungen."
     panel_title: "Aktive PTY-Sitzungen"
     search_placeholder: "Suchen..."
-    panel_footer: "↑/↓ navigieren · Enter wählen · Esc abbrechen"
+    panel_footer: "↑/↓ navigieren · Enter wählen · Ctrl+E umbenennen · Esc abbrechen"
     create_new: "Neue Sitzung erstellen"
     already_current: "Bereits in dieser Sitzung."
     started_label: "gestartet: {age}"
     current_tag: "[aktuell]"
+    rename_title: "Sitzung {id} umbenennen"
+    rename_current_none: "Aktueller Name: (keiner)"
+    rename_current_set: "Aktueller Name: {name}"
+    rename_input_label: "Neuen Namen eingeben (leer zum Loeschen)"
+    rename_input_footer: "Namen eingeben | Enter speichern | Esc abbrechen"
+    rename_done: "Sitzung {id} → \"{name}\" umbenannt"
+    rename_cleared: "Name fuer Sitzung {id} geloescht"
+    rename_failed: "Umbenennen fehlgeschlagen: {err}"
+    exit_no_note_title: "Vor dem Beenden einen Namen hinzufuegen?"
+    exit_no_note_hint: "Diese Sitzung hat keinen Namen — unbenannte Sitzungen sind nach dem Trennen schwer zu unterscheiden."
+    exit_no_note_footer: "Enter speichern & beenden · Esc ohne beenden"
 
   kill_live_sessions:
     daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"
@@ -512,6 +525,11 @@ help:
       - Priorität: CLI-Argumente > Umgebungsvariablen (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > Konfigurationsdatei
       - `/setup` oder `aish setup` für interaktive Konfiguration
 
+      ## Sitzungsverwaltung
+      - `aish -c` — an eine aktive Sitzung anhaengen (oder aus Liste waehlen)
+      - `Ctrl+Q` — aktuelle Sitzung trennen (laeuft im Hintergrund); mit `aish -c` wieder verbinden
+      - `Ctrl+E` — markierte Sitzung im Auswahlmenue umbenennen
+
       ## Tastenkombinationen
       | Taste | Aktion |
       |-------|--------|
@@ -519,6 +537,8 @@ help:
       | `Ctrl+D` | Shell beenden |
       | `Shift+Tab` / `F2` | Planmodus umschalten |
       | `Ctrl+O` | Ausgabeverlauf durchsuchen |
+      | `Ctrl+Q` | Sitzung trennen (mit `aish -c` verbinden) |
+      | `Ctrl+E` | Sitzung umbenennen (im Auswahlmenue) |
       | `/` in leerer Zeile | Slash-Befehlsauswahl |
 
       ## Hilfeseiten
@@ -700,6 +720,13 @@ help:
         | `Ctrl+D` | Shell beenden |
         | `Ctrl+O` | Ausgabeverlauf durchsuchen |
         | `Esc` | Aktuelle Eingabe abbrechen |
+
+        ## Sitzungsverwaltung
+
+        | Taste | Aktion |
+        |-------|--------|
+        | `Ctrl+Q` | Sitzung trennen (bleibt aktiv; mit `aish -c` verbinden) |
+        | `Ctrl+E` | Markierte Sitzung umbenennen (im Auswahlmenue) |
 
         ## Moduswechsel
 

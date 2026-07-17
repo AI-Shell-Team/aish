@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+use crate::theme;
 use aish_i18n::{t, t_with_args};
 
 /// Whether the current locale is a CJK (Chinese/Japanese/Korean) locale.
@@ -67,16 +69,44 @@ pub fn read_git_branch(cwd: &str) -> Option<String> {
     }
 }
 
+/// Cache for git dirty status: (checked_at, cwd, is_dirty).
+/// Prevents spawning `git status` on every prompt render — without this,
+/// each prompt (every Enter keypress) blocks ~50ms+ while git scans the
+/// worktree (worse on NFS-mounted repos).
+static GIT_DIRTY_CACHE: Mutex<Option<(Instant, String, bool)>> = Mutex::new(None);
+
+/// How long a cached dirty result remains valid.
+const DIRTY_CACHE_TTL: Duration = Duration::from_secs(2);
+
 /// Check if the git working tree has uncommitted changes.
+///
+/// Cached per-cwd with a 2-second TTL so repeated prompts within the same
+/// repo don't re-spawn `git status`.
 fn is_git_dirty(cwd: &str) -> bool {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
-        .output();
-    match output {
-        Ok(o) => !o.stdout.is_empty(),
-        Err(_) => false,
+    let now = Instant::now();
+
+    // Fast path: return cached result if still fresh for this cwd.
+    if let Ok(cache) = GIT_DIRTY_CACHE.lock() {
+        if let Some((checked_at, cached_cwd, dirty)) = cache.as_ref() {
+            if *cached_cwd == cwd && now.duration_since(*checked_at) < DIRTY_CACHE_TTL {
+                return *dirty;
+            }
+        }
     }
+
+    // Cache miss: spawn git status for the authoritative answer.
+    let dirty = std::process::Command::new("git")
+        .args(["--no-optional-locks", "status", "--porcelain"])
+        .current_dir(cwd)
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    if let Ok(mut cache) = GIT_DIRTY_CACHE.lock() {
+        *cache = Some((now, cwd.to_string(), dirty));
+    }
+
+    dirty
 }
 
 /// Abbreviate a path by keeping `~` and the last component intact,
@@ -181,12 +211,12 @@ fn truncate_ansi(s: &str, max_visible: usize) -> String {
 
 /// Render the shell prompt in compact.aish theme style.
 ///
-/// Format: `<mode> ~/n/x/g/aish|branch●➜ `
+/// Format: `◆ aish ~/n/x/g/aish ⎇ branch ●➜ `
 ///
-/// - Mode badge: magenta `<aish>` or yellow `<plan>`
-/// - Path is abbreviated and colored blue
-/// - Git branch in magenta with clean (green ●) or dirty (red ●) indicator
-/// - Prompt symbol: green ➜ on success, red ➜➜ on error
+/// - Mode badge: accent-blue `◆ aish` or warning-amber `◆ plan`
+/// - Path is abbreviated and muted
+/// - Git branch in gold with the `⎇` icon; clean (green `●`) or dirty (amber `●`) dot
+/// - Prompt symbol: green `➜` on success, red `➜➜` on error
 pub fn render_prompt(
     cwd: &str,
     _model: &str,
@@ -201,32 +231,40 @@ pub fn render_prompt(
     // Recording indicator
     let mut prompt = String::new();
     if recording {
-        prompt.push_str("\x1b[31m⏺\x1b[0m ");
+        prompt.push_str(&format!("{} ", theme::error("⏺")));
     }
 
-    // Mode badge (magenta for aish, yellow for plan)
-    let mode_color = if mode == "plan" { "33" } else { "35" };
-    prompt.push_str(&format!("\x1b[{}m<{}>\x1b[0m ", mode_color, mode));
+    // Mode badge (accent for aish, warning for plan)
+    let badge = if mode == "plan" {
+        theme::warning(&format!("{} {}", theme::MODE_ICON, mode))
+    } else {
+        theme::accent(&format!("{} {}", theme::MODE_ICON, mode))
+    };
+    prompt.push_str(&format!("{} ", badge));
 
-    // Abbreviated path in blue
+    // Abbreviated path (muted)
     let abbreviated = abbreviate_path(cwd, &home);
-    prompt.push_str(&format!("\x1b[34m{}\x1b[0m", abbreviated));
+    prompt.push_str(&theme::muted(&abbreviated));
 
-    // Git branch and status
+    // Git branch and status: "⎇ branch ●" — a space before the git icon and
+    // between the branch name and the dirty/clean dot for readability.
     if let Some(branch) = read_git_branch(cwd) {
-        prompt.push_str(&format!("|\x1b[35m{}\x1b[0m", branch));
+        prompt.push_str(&format!(
+            " {}",
+            theme::gold(&format!("{} {}", theme::ICON_GIT, branch))
+        ));
         if is_git_dirty(cwd) {
-            prompt.push_str("\x1b[31m●\x1b[0m");
+            prompt.push_str(&format!(" {}", theme::warning("●")));
         } else {
-            prompt.push_str("\x1b[32m●\x1b[0m");
+            prompt.push_str(&format!(" {}", theme::success("●")));
         }
     }
 
     // Prompt symbol based on last exit code
     if last_exit_code == 0 {
-        prompt.push_str("\x1b[32m➜\x1b[0m ");
+        prompt.push_str(&format!("{} ", theme::success(theme::PROMPT_OK)));
     } else {
-        prompt.push_str("\x1b[31m➜➜\x1b[0m ");
+        prompt.push_str(&format!("{} ", theme::error(theme::PROMPT_ERR)));
     }
 
     prompt
@@ -283,13 +321,21 @@ pub fn render_welcome(
     let mut content_lines = vec![
         String::new(),
         format!(
-            "  \x1b[1m{}:\x1b[0m {} \x1b[2m{}\x1b[0m",
-            model_label, model, model_hint
+            "  {}: {} {}",
+            theme::bold(&format!("{}:", model_label)),
+            model,
+            theme::faint(&model_hint)
         ),
-        format!("  \x1b[1m{}:\x1b[0m {}", config_label, config_path),
         format!(
-            "  \x1b[1m{}:\x1b[0m \x1b[92m#{}\x1b[0m {}",
-            skills_label, skill_count, skills_suffix
+            "  {}: {}",
+            theme::bold(&format!("{}:", config_label)),
+            config_path
+        ),
+        format!(
+            "  {}: {} {}",
+            theme::bold(&format!("{}:", skills_label)),
+            theme::success(&format!("#{}", skill_count)),
+            skills_suffix
         ),
         String::new(),
     ];
@@ -313,23 +359,31 @@ pub fn render_welcome(
             let hint_prefix = t_with_args("shell.welcome2.changelog_hint_prefix", &hint_args);
             let hint_suffix = t("shell.welcome2.changelog_hint_suffix");
             format!(
-                "  \x1b[1;36m{}\x1b[0m \x1b[2m·\x1b[0m \x1b[2m{} \x1b[1;36mCtrl+O\x1b[0m\x1b[2m {}\x1b[0m",
-                title, hint_prefix, hint_suffix,
+                "  {} {} {} {}",
+                theme::accent(&theme::bold(&title)),
+                theme::faint("·"),
+                theme::faint(&format!(
+                    "{} {} {}",
+                    hint_prefix,
+                    theme::accent("Ctrl+O"),
+                    hint_suffix
+                )),
+                ""
             )
         } else {
-            format!("  \x1b[1;36m{}\x1b[0m", title)
+            format!("  {}", theme::accent(&theme::bold(&title)))
         };
         content_lines.push(header);
 
         for entry in &changelog[..entries_to_show] {
             let cat = entry.category.as_str();
-            let (badge, color) = match cat {
-                "Added" => ("[+]", "\x1b[32m"),
-                "Changed" => ("[*]", "\x1b[33m"),
-                "Fixed" => ("[!]", "\x1b[31m"),
-                _ => ("[-]", "\x1b[37m"),
+            let badge_styled = match cat {
+                "Added" => theme::success("[+]"),
+                "Changed" => theme::warning("[*]"),
+                "Fixed" => theme::error("[!]"),
+                _ => theme::dim("[-]"),
             };
-            let mut line = format!("  {}{} {}{}", color, badge, entry.text, "\x1b[0m");
+            let mut line = format!("  {} {}", badge_styled, entry.text);
             let visible = strip_ansi_len(&line);
             if visible > inner_width {
                 let truncated = truncate_ansi(&line, inner_width - 3);
@@ -346,31 +400,34 @@ pub fn render_welcome(
     let title = format!(" {} ", header);
     let title_len = strip_ansi_len(&title);
     let top_fill = inner_width.saturating_sub(title_len + 1);
-    out.push_str(&format!(
-        "\x1b[37m╭─{}{}╮\x1b[0m\n",
+    out.push_str(&theme::dim(&format!(
+        "╭─{}{}╮",
         title,
         "─".repeat(top_fill)
-    ));
+    )));
+    out.push('\n');
 
     // Render content lines
     for line in &content_lines {
         let visible_len = strip_ansi_len(line);
         let padding = inner_width.saturating_sub(visible_len);
-        out.push_str(&format!(
-            "\x1b[37m│\x1b[0m{}{}\x1b[37m│\x1b[0m\n",
-            line,
-            " ".repeat(padding)
-        ));
+        out.push_str(&theme::dim("│"));
+        out.push_str(line);
+        out.push_str(&" ".repeat(padding));
+        out.push_str(&theme::dim("│"));
+        out.push('\n');
     }
 
     // Render rounded box bottom
-    out.push_str(&format!("\x1b[37m╰{}╯\x1b[0m\n", "─".repeat(inner_width)));
+    out.push_str(&theme::dim(&format!("╰{}╯", "─".repeat(inner_width))));
+    out.push('\n');
 
     out.push('\n');
 
     // Quick start section
     let qs_title = t("shell.welcome2.quick_start.title");
-    out.push_str(&format!("\x1b[1m{}\x1b[0m\n", qs_title));
+    out.push_str(&theme::bold(&qs_title));
+    out.push('\n');
 
     let item1_prefix = t("shell.welcome2.quick_start.item1_prefix");
     let cmd_ls = t("shell.welcome2.quick_start.cmd_ls");
@@ -401,15 +458,14 @@ pub fn render_welcome(
     let mut quick_1 = String::new();
     quick_1.push_str(&quick_1_prefix);
     quick_1.push_str(&" ".repeat(content_start.saturating_sub(strip_ansi_len(&quick_1_prefix))));
-    quick_1.push_str("\x1b[1;36m");
-    quick_1.push_str(&cmd_ls);
-    quick_1.push_str("\x1b[0m, \x1b[1;36m");
-    quick_1.push_str(&cmd_top);
-    quick_1.push_str("\x1b[0m, \x1b[1;36m");
-    quick_1.push_str(&cmd_vim);
-    quick_1.push_str("\x1b[0m, \x1b[1;36m");
-    quick_1.push_str(&cmd_ssh);
-    quick_1.push_str("\x1b[0m");
+    let cmds = format!(
+        "{}, {}, {}, {}",
+        theme::accent(&cmd_ls),
+        theme::accent(&cmd_top),
+        theme::accent(&cmd_vim),
+        theme::accent(&cmd_ssh)
+    );
+    quick_1.push_str(&cmds);
     quick_1.push_str(&item1_suffix);
     out.push_str(&quick_1);
     out.push('\n');
@@ -421,7 +477,7 @@ pub fn render_welcome(
     if let Some(first_part) = item2_parts.first() {
         quick_2.push_str(first_part);
         for part in item2_parts.iter().skip(1) {
-            quick_2.push_str("\x1b[1;36m;\x1b[0m");
+            quick_2.push_str(&theme::accent(";"));
             quick_2.push_str(part);
         }
     }
@@ -432,9 +488,7 @@ pub fn render_welcome(
     quick_3.push_str(&quick_3_prefix);
     quick_3.push_str(&" ".repeat(content_start.saturating_sub(strip_ansi_len(&quick_3_prefix))));
     quick_3.push_str(&item3_suffix_1);
-    quick_3.push_str("\x1b[1;36m");
-    quick_3.push_str(&item3_keyword);
-    quick_3.push_str("\x1b[0m");
+    quick_3.push_str(&theme::accent(&item3_keyword));
     quick_3.push_str(&item3_suffix_2);
     out.push_str(&quick_3);
     out.push('\n');
@@ -443,7 +497,8 @@ pub fn render_welcome(
 
     // Risk warning
     let risk = t("shell.welcome2.risk");
-    out.push_str(&format!("\x1b[2m{}\x1b[0m\n", risk));
+    out.push_str(&theme::faint(&risk));
+    out.push('\n');
 
     out
 }
@@ -632,7 +687,7 @@ mod tests {
             result
         );
         assert!(result.contains("➜"), "should contain prompt symbol");
-        assert!(result.contains("<aish>"), "should contain mode badge");
+        assert!(result.contains("◆ aish"), "should contain mode badge");
     }
 
     #[test]
@@ -651,8 +706,9 @@ mod tests {
     fn test_render_prompt_success_symbol() {
         let result = render_prompt("/tmp", "test-model", 0, "aish", false);
         assert!(
-            result.contains("\x1b[32m➜\x1b[0m"),
-            "should have green single arrow on success"
+            result.contains("➜"),
+            "should have single arrow prompt on success: {}",
+            result
         );
         assert!(
             !result.contains("➜➜"),
@@ -664,29 +720,22 @@ mod tests {
     fn test_render_prompt_error_symbol() {
         let result = render_prompt("/tmp", "test-model", 1, "aish", false);
         assert!(
-            result.contains("\x1b[31m➜➜\x1b[0m"),
-            "should have red double arrow on error"
+            result.contains("➜➜"),
+            "should have double arrow prompt on error: {}",
+            result
         );
     }
 
     #[test]
     fn test_render_prompt_aish_mode_badge() {
         let result = render_prompt("/tmp", "test-model", 0, "aish", false);
-        assert!(result.contains("<aish>"), "should show aish mode badge");
-        assert!(
-            result.contains("\x1b[35m<aish>"),
-            "aish badge should be magenta"
-        );
+        assert!(result.contains("◆ aish"), "should show aish mode badge");
     }
 
     #[test]
     fn test_render_prompt_plan_mode_badge() {
         let result = render_prompt("/tmp", "test-model", 0, "plan", false);
-        assert!(result.contains("<plan>"), "should show plan mode badge");
-        assert!(
-            result.contains("\x1b[33m<plan>"),
-            "plan badge should be yellow"
-        );
+        assert!(result.contains("◆ plan"), "should show plan mode badge");
     }
 
     #[test]

@@ -97,29 +97,24 @@ impl StreamParser {
             Ok(v) => v,
             Err(_) => return (Vec::new(), None),
         };
-
-        // Check for usage data in the top-level response (present in final streaming chunk)
+        // Extract usage from top-level "usage" field if present.
+        // With stream_options.include_usage=true, the final chunk carries
+        // usage alongside (or instead of) choices.
         let mut extracted_usage = None;
-        if let Some(choice) = json
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-        {
-            if choice.get("finish_reason").is_some() {
-                let usage = TokenUsage::from_response_json(&json);
-                if usage.prompt_tokens > 0 || usage.completion_tokens > 0 {
-                    extracted_usage = Some(usage);
-                }
-            }
+        let top_usage = TokenUsage::from_response_json(&json);
+        if top_usage.prompt_tokens > 0 || top_usage.completion_tokens > 0 {
+            extracted_usage = Some(top_usage);
         }
 
         let choices = match json.get("choices").and_then(|c| c.as_array()) {
-            Some(c) => c,
-            None => return (Vec::new(), None),
+            Some(c) if !c.is_empty() => c,
+            // Empty or missing choices — return usage if we found it
+            // (APIs may send a usage-only final chunk).
+            _ => return (Vec::new(), extracted_usage),
         };
         let choice = match choices.first() {
             Some(c) => c,
-            None => return (Vec::new(), None),
+            None => return (Vec::new(), extracted_usage),
         };
 
         let delta = choice.get("delta");
@@ -129,7 +124,7 @@ impl StreamParser {
         if let Some(content) = extract_message_text(delta.and_then(|d| d.get("content"))) {
             if !content.is_empty() {
                 events.push(SseEvent::ContentDelta(content.to_string()));
-                return (events, None);
+                return (events, extracted_usage);
             }
         }
 
@@ -140,7 +135,7 @@ impl StreamParser {
         {
             if !reasoning.is_empty() {
                 events.push(SseEvent::ReasoningDelta(reasoning.to_string()));
-                return (events, None);
+                return (events, extracted_usage);
             }
         }
 
@@ -175,7 +170,7 @@ impl StreamParser {
                 });
             }
             if !events.is_empty() {
-                return (events, None);
+                return (events, extracted_usage);
             }
         }
 
@@ -185,7 +180,7 @@ impl StreamParser {
             return (events, extracted_usage);
         }
 
-        (Vec::new(), None)
+        (Vec::new(), extracted_usage)
     }
 }
 
@@ -261,6 +256,74 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             SseEvent::ContentDelta(text) => assert_eq!(text, "总结已生成"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_chunk_extracts_usage_from_empty_choices_final_chunk() {
+        // Regression test: when stream_options.include_usage is true, OpenAI emits
+        // a final chunk carrying `usage` alongside an EMPTY `choices: []` array.
+        // The parser must surface the usage instead of dropping it with the
+        // empty choices (the original bug returned None here).
+        let line = r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}"#;
+
+        let (events, usage) = StreamParser::parse_sse_chunk(line);
+        // Empty choices produce no stream events.
+        assert!(
+            events.is_empty(),
+            "expected no events for empty-choices chunk"
+        );
+        // ...but the usage must still be propagated.
+        let usage = usage.expect("usage must be extracted from empty-choices final chunk");
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 50);
+    }
+
+    #[test]
+    fn parse_sse_chunk_extracts_usage_alongside_finish_event() {
+        // Usage may arrive on the same chunk that carries a finish_reason with
+        // non-empty choices. Both the Finish event and the usage must be returned.
+        let line = r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":80,"total_tokens":280}}"#;
+
+        let (events, usage) = StreamParser::parse_sse_chunk(line);
+        let usage = usage.expect("usage must be extracted from finish chunk");
+        assert_eq!(usage.prompt_tokens, 200);
+        assert_eq!(usage.completion_tokens, 80);
+
+        // The finish event must still be emitted alongside the usage.
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::Finish(reason) => assert_eq!(reason, "stop"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_chunk_returns_no_usage_for_content_delta() {
+        // A mid-stream content delta carries no usage field; the parser must
+        // report None so callers do not record phantom zero-token usage.
+        let line = r#"data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}"#;
+
+        let (events, usage) = StreamParser::parse_sse_chunk(line);
+        assert!(usage.is_none(), "content delta must not report usage");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::ContentDelta(text) => assert_eq!(text, "hello"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_sse_chunk_done_marker_carries_no_usage() {
+        // The terminal [DONE] sentinel never carries usage; None is expected.
+        let line = "data: [DONE]";
+
+        let (events, usage) = StreamParser::parse_sse_chunk(line);
+        assert!(usage.is_none(), "[DONE] marker must not report usage");
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::Done => {}
             other => panic!("unexpected event: {:?}", other),
         }
     }

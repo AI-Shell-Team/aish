@@ -39,6 +39,7 @@ pub mod renderer;
 pub mod resume_selector;
 pub mod security_panel;
 pub mod status;
+pub mod theme;
 pub mod token_store;
 pub mod tui;
 pub mod types;

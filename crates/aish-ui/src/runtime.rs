@@ -13,6 +13,16 @@ pub trait PanelComponent {
     fn desired_height(&self, terminal_width: u16, terminal_height: u16) -> u16;
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect);
     fn handle_event(&mut self, event: event::Event) -> PanelEvent<Self::Output>;
+    /// Periodic redraw interval for animated panels. When `Some`, the runtime
+    /// polls for input with this timeout and, on timeout, calls [`tick`](Self::tick)
+    /// then redraws — enabling animations (e.g. a shimmer sweep). `None` (the
+    /// default) means the panel only redraws on input events.
+    fn tick_interval(&self) -> Option<Duration> {
+        None
+    }
+    /// Advance animation state by one tick. Called by the runtime whenever no
+    /// input arrives within [`tick_interval`](Self::tick_interval). Default no-op.
+    fn tick(&mut self) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +71,20 @@ impl PanelRuntime {
         let outcome = loop {
             terminal.draw(|frame| component.render(frame, frame.area()))?;
 
-            let event = event::read()?;
+            // Animated panels request a tick interval; block for at most that
+            // long so we redraw on timeout (advancing the animation) even
+            // without input. Non-animated panels block indefinitely on input.
+            let event = match component.tick_interval() {
+                Some(interval) => {
+                    if event::poll(interval)? {
+                        event::read()?
+                    } else {
+                        component.tick();
+                        continue;
+                    }
+                }
+                None => event::read()?,
+            };
             match component.handle_event(event) {
                 PanelEvent::Continue => continue,
                 PanelEvent::Submit(value) => break PanelOutcome::Submitted(value),

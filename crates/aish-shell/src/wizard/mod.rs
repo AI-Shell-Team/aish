@@ -376,8 +376,8 @@ impl SetupWizard {
             let mut args = std::collections::HashMap::new();
             args.insert("model".to_string(), normalized.clone());
             println!(
-                "  \x1b[2m{}\x1b[0m",
-                t_with_args("cli.setup.model_custom_saved_as", &args)
+                "  {}",
+                crate::theme::faint(&t_with_args("cli.setup.model_custom_saved_as", &args))
             );
         }
         self.selected_model = Some(normalized);

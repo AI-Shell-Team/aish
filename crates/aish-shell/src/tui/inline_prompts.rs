@@ -160,26 +160,42 @@ fn fallback_stdin_selection(
     allow_cancel: bool,
 ) -> DialogResult {
     // Print title
-    println!("\x1b[1m{}\x1b[0m", title);
+    println!("{}", crate::theme::bold(title));
     // Print question
-    println!("\x1b[36m{}\x1b[0m", question);
+    println!("{}", crate::theme::accent(question));
 
     // Print numbered options
     for (i, opt) in options.iter().enumerate() {
         if let Some(ref desc) = opt.description {
-            println!("  \x1b[33m{}.\x1b[0m {} - {}", i + 1, opt.label, desc);
+            println!(
+                "  {} {} - {}",
+                crate::theme::warning(&format!("{}.", i + 1)),
+                opt.label,
+                desc
+            );
         } else {
-            println!("  \x1b[33m{}.\x1b[0m {}", i + 1, opt.label);
+            println!(
+                "  {} {}",
+                crate::theme::warning(&format!("{}.", i + 1)),
+                opt.label
+            );
         }
     }
 
     // Custom input option
     if allow_custom {
-        println!("  \x1b[33m0.\x1b[0m \x1b[2m(type custom answer)\x1b[0m");
+        println!(
+            "  {} {}",
+            crate::theme::warning("0."),
+            crate::theme::faint("(type custom answer)")
+        );
     }
 
     if allow_cancel {
-        println!("  \x1b[2m(press Enter with empty input to cancel)\x1b[0m");
+        println!(
+            "  {}",
+            crate::theme::faint("(press Enter with empty input to cancel)")
+        );
     }
 
     print!("Your answer: ");

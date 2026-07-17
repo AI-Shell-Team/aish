@@ -45,6 +45,10 @@ struct Cli {
     #[arg(long)]
     config: Option<String>,
 
+    /// Continue: attach to an existing live session or pick from a list
+    #[arg(short = 'c', long = "continue")]
+    continue_session: bool,
+
     #[arg(long, hide = true)]
     sandbox_daemon: bool,
 
@@ -80,14 +84,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the AI Shell (default) — attaches to existing PTY session or creates new
+    /// Run the AI Shell — creates a new PTY session by default.
+    /// Use --continue/-c to attach to an existing live session.
     Run,
-
-    /// Start a new PTY session (like `tmux new`)
-    New,
-
-    /// Rename a live PTY session interactively
-    RenameLiveSessions,
 
     /// Kill PTY session(s) by ID prefix. Supports multiple IDs and `all`.
     Kill {
@@ -290,47 +289,53 @@ fn main() {
         config.api_base = api_base;
     }
 
-    match cli.command.unwrap_or(Commands::Run) {
-        Commands::Run => run_shell(config),
-        Commands::New => run_shell_new(config),
-        Commands::RenameLiveSessions => rename_live_sessions(),
-        Commands::Kill { ids } => kill_session_by_id(&ids),
-        Commands::KillAll => kill_session_by_id(&["all".to_string()]),
-        Commands::Resume { session_id } => run_shell_resume(config, &session_id),
-        Commands::Info => show_info(&config),
-        Commands::Setup => {
+    match cli.command {
+        // `aish` or `aish run`: start a fresh shell by default.
+        // Use --continue/-c to attach to an existing live session.
+        None | Some(Commands::Run) => {
+            if cli.continue_session {
+                run_shell_continue(config);
+            } else {
+                run_shell_new(config);
+            }
+        }
+        Some(Commands::Kill { ids }) => kill_session_by_id(&ids),
+        Some(Commands::KillAll) => kill_session_by_id(&["all".to_string()]),
+        Some(Commands::Resume { session_id }) => run_shell_resume(config, &session_id),
+        Some(Commands::Info) => show_info(&config),
+        Some(Commands::Setup) => {
             if !run_setup(&mut config) {
                 std::process::exit(1);
             }
         }
-        Commands::ModelsUsage => show_models_usage(&config),
-        Commands::CheckToolSupport {
+        Some(Commands::ModelsUsage) => show_models_usage(&config),
+        Some(Commands::CheckToolSupport {
             model,
             api_base,
             api_key,
-        } => check_tool_support(&config, model, api_base, api_key),
-        Commands::CheckLangfuse {
+        }) => check_tool_support(&config, model, api_base, api_key),
+        Some(Commands::CheckLangfuse {
             public_key,
             secret_key,
             host,
-        } => check_langfuse(&config, public_key, secret_key, host),
-        Commands::Update {
+        }) => check_langfuse(&config, public_key, secret_key, host),
+        Some(Commands::Update {
             check_only,
             pre_release,
-        } => {
+        }) => {
             update::run_update(check_only, pre_release);
         }
-        Commands::Uninstall { purge } => {
+        Some(Commands::Uninstall { purge }) => {
             uninstall::run_uninstall(purge);
         }
-        Commands::Doctor { fix } => {
+        Some(Commands::Doctor { fix }) => {
             let doctor = aish_shell::doctor::Doctor::new();
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
                 doctor.run(fix).await;
             });
         }
-        Commands::ModelsAuth {
+        Some(Commands::ModelsAuth {
             provider,
             model,
             set_default,
@@ -339,7 +344,7 @@ fn main() {
             open_browser,
             callback_port,
             config: auth_config,
-        } => {
+        }) => {
             let mut cfg = load_config(auth_config.as_deref());
             models_auth::run_models_auth(
                 &mut cfg,
@@ -459,43 +464,24 @@ fn spawn_pty_daemon(
     .into())
 }
 
-fn run_shell(config: aish_config::ConfigModel) {
-    let pty_daemon_enabled = config.pty_daemon_enabled
+/// Whether PTY daemon mode is active: enabled in config *and* not
+/// suppressed by `AISH_PTY_DAEMON=0` (set inside daemon children to
+/// prevent infinite recursion).
+fn is_daemon_mode(config: &aish_config::ConfigModel) -> bool {
+    config.pty_daemon_enabled
         && std::env::var("AISH_PTY_DAEMON")
             .map(|v| v != "0" && v != "false" && v != "no")
-            .unwrap_or(true);
+            .unwrap_or(true)
+}
 
-    if !pty_daemon_enabled {
-        run_shell_normal(config);
-        return;
-    }
-
-    let mut sessions = aish_pty::discover_sessions();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
-
-    if !sessions.is_empty() {
-        match show_session_picker(&sessions) {
-            SessionAction::Attach(idx) => {
-                let s = &sessions[idx];
-                eprintln!(
-                    "\x1b[32m[aish] Attaching to session {}\x1b[0m",
-                    &s.session_id[..8.min(s.session_id.len())]
-                );
-                if run_pty_raw_attach(&s.socket_path.to_string_lossy(), &s.session_id) {
-                    return;
-                }
-                eprintln!("\x1b[33m[aish] Attach failed.\x1b[0m");
-            }
-            SessionAction::New => {}
-            SessionAction::Cancel => return,
-        }
-    }
-
+/// Spawn a fresh PTY daemon session from the current executable and
+/// attach to it.  Returns `true` on successful attach (caller returns),
+/// `false` if spawning or attaching failed (caller falls back).
+fn spawn_daemon_and_attach(config: &aish_config::ConfigModel) -> bool {
     let cwd = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    eprintln!("\x1b[32m[aish] Starting new PTY daemon session...\x1b[0m");
     match spawn_pty_daemon(
         &cwd,
         if config.model.is_empty() {
@@ -509,84 +495,131 @@ fn run_shell(config: aish_config::ConfigModel) {
             Some(config.api_base.as_str())
         },
     ) {
-        Ok(info) => {
-            if run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id) {
-                return;
-            }
+        Ok(info) => run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id),
+        Err(e) => {
+            eprintln!("\x1b[33m[aish] PTY daemon failed: {}\x1b[0m", e);
+            false
         }
-        Err(e) => eprintln!("\x1b[33m[aish] PTY daemon failed: {}\x1b[0m", e),
     }
-    eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
-    run_shell_normal(config);
+}
+
+fn run_shell_continue(config: aish_config::ConfigModel) {
+    if !is_daemon_mode(&config) {
+        run_shell_normal(config);
+        return;
+    }
+
+    let sessions = aish_pty::discover_sessions();
+
+    if !sessions.is_empty() {
+        match show_session_picker(sessions) {
+            SessionAction::Attach(s) => {
+                let short = &s.session_id[..8.min(s.session_id.len())];
+                eprintln!("\x1b[32m[aish] Attaching to session {short}\x1b[0m");
+                if run_pty_raw_attach(&s.socket_path.to_string_lossy(), &s.session_id) {
+                    return;
+                }
+                eprintln!("\x1b[33m[aish] Attach failed.\x1b[0m");
+            }
+            SessionAction::New => {}
+            SessionAction::Cancel => return,
+        }
+    }
+
+    if !spawn_daemon_and_attach(&config) {
+        eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
+        run_shell_normal(config);
+    }
 }
 
 enum SessionAction {
-    Attach(usize),
+    Attach(aish_pty::DaemonSessionInfo),
     New,
     Cancel,
 }
 
-/// Interactive session picker using arrow-key navigation.
-fn show_session_picker(sessions: &[aish_pty::DaemonSessionInfo]) -> SessionAction {
+/// Interactive session picker with inline rename support. Arrow keys move,
+/// Enter attaches to the highlighted session, Ctrl+E renames it (then re-shows
+/// the refreshed list), and Esc cancels. "Create new session" spawns a fresh
+/// daemon. Owns the session list so renames can refresh it between rounds.
+fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> SessionAction {
     use aish_ui::{
         PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let mut sessions = initial_sessions;
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
 
-    let mut items: Vec<SearchSelectItem> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let cwd_display = display_cwd(&s.cwd);
-            let age_str = format_duration(now.saturating_sub(s.started_at));
-            let short_id = &s.session_id[..8.min(s.session_id.len())];
-            let name = s.name.as_deref().unwrap_or("");
-            // Label shows name (if set) or short_id, followed by cwd.
-            let label = if !name.is_empty() {
-                format!("{}  {}", name, cwd_display)
-            } else {
-                format!("{}  {}", short_id, cwd_display)
-            };
-            // Search text includes both name and short_id so users can
-            // search by either.
-            let search_text = format!("{} {} {}", name, short_id, cwd_display);
-            SearchSelectItem::new(format!("session:{}", i), label)
-                .with_detail(format!("started: {}", age_str))
-                .with_search_text(search_text)
-        })
-        .collect();
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
-    // "Create new" is the default (last item, pre-selected)
-    items.push(SearchSelectItem::new(
-        "new",
-        "Create new session".to_string(),
-    ));
-
-    let panel = SearchSelectPanel::new("Select PTY Session", "Type to search sessions...", items)
-        .with_footer(
-            "↑↓ navigate · Enter select · Esc cancel · Run 'aish kill <id>' to terminate a session",
-        )
-        .with_selected_value(Some("new"));
-
-    match PanelRuntime::new().run(panel) {
-        Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => {
-            if value == "new" {
-                SessionAction::New
-            } else if let Some(idx_str) = value.strip_prefix("session:") {
-                match idx_str.parse::<usize>() {
-                    Ok(idx) if idx < sessions.len() => SessionAction::Attach(idx),
-                    _ => SessionAction::New,
+        let mut items: Vec<SearchSelectItem> = sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let cwd_display = display_cwd(&s.cwd);
+                let age_str = format_duration(now.saturating_sub(s.started_at));
+                let short_id = &s.session_id[..8.min(s.session_id.len())];
+                let name = s.name.as_deref().unwrap_or("");
+                // Label is the short id + cwd; a custom name (if any) is the
+                // bold green highlight prefix so it stands out at a glance.
+                let label = format!("{short_id}  {cwd_display}");
+                let search_text = format!("{name} {short_id} {cwd_display}");
+                let mut item = SearchSelectItem::new(format!("session:{i}"), label)
+                    .with_detail(format!("started: {age_str}"))
+                    .with_search_text(search_text);
+                if !name.is_empty() {
+                    item = item.with_highlight(name);
                 }
-            } else {
-                SessionAction::New
+                item
+            })
+            .collect();
+
+        // "Create new" is the last item and the default selection.
+        items.push(SearchSelectItem::new(
+            "new",
+            "Create new session".to_string(),
+        ));
+
+        let panel =
+            SearchSelectPanel::new("Select PTY Session", "Type to search sessions...", items)
+                .with_footer(
+                    "↑↓ navigate · Enter select · Ctrl+E rename · Esc cancel · Run 'aish kill <id>' to terminate a session",
+                )
+                .with_selected_value(Some("new"));
+
+        match PanelRuntime::new().run(panel) {
+            Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => {
+                if value == "new" {
+                    return SessionAction::New;
+                }
+                if let Some(idx) = index_from_value(&value, sessions.len()) {
+                    return SessionAction::Attach(sessions[idx].clone());
+                }
+                return SessionAction::New;
             }
+            Ok(PanelOutcome::Submitted(SearchSelectOutcome::Rename(value))) => {
+                if let Some(idx) = index_from_value(&value, sessions.len()) {
+                    rename_session_interactive(&sessions[idx]);
+                }
+                // Refresh so the new name shows up, then re-show the picker.
+                sessions = aish_pty::discover_sessions();
+                sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+                continue;
+            }
+            _ => return SessionAction::Cancel,
         }
-        _ => SessionAction::Cancel,
     }
+}
+
+/// Parse a picker item value like "session:3" into a bounded index.
+fn index_from_value(value: &str, len: usize) -> Option<usize> {
+    let idx_str = value.strip_prefix("session:")?;
+    let idx: usize = idx_str.parse().ok()?;
+    (idx < len).then_some(idx)
 }
 /// Run the normal (non-daemon) AishShell.
 fn run_shell_normal(mut config: aish_config::ConfigModel) {
@@ -619,94 +652,21 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
     }
 }
 
-/// Interactively rename a live PTY session. With active sessions, opens an
-/// interactive panel: select a session to rename it (Enter), Esc to cancel.
-/// Without active sessions, prints a hint and exits.
-fn rename_live_sessions() {
-    let sessions = aish_pty::discover_sessions();
-    if sessions.is_empty() {
-        println!("No active PTY sessions.");
-        println!("Run 'aish' to start one.");
-        return;
-    }
+/// Open a text-input panel to rename a live session. Returns `true` when the
+/// name was written to disk (so callers can refresh their session list).
+fn rename_session_interactive(session: &aish_pty::DaemonSessionInfo) -> bool {
+    use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime};
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    // Build the session selection panel.
-    use aish_ui::{
-        ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime, SearchSelectItem,
-        SearchSelectOutcome, SearchSelectPanel,
-    };
-
-    let items: Vec<SearchSelectItem> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let cwd_display = display_cwd(&s.cwd);
-            let age_str = format_duration(now.saturating_sub(s.started_at));
-            let short_id = &s.session_id[..8.min(s.session_id.len())];
-            let mut item = SearchSelectItem::new(
-                format!("session:{}", i),
-                format!("{}  {}", short_id, cwd_display),
-            )
-            .with_detail(format!("started: {}", age_str));
-            if let Some(n) = &s.name {
-                if !n.is_empty() {
-                    item = item.with_badge(n.clone());
-                }
-            }
-            item
-        })
-        .collect();
-
-    let panel = SearchSelectPanel::new(
-        "Live PTY Sessions",
-        "Select a session to rename (Enter) · Esc to cancel",
-        items,
-    )
-    .with_footer("↑↓ navigate · Enter rename · Esc cancel");
-
-    let selected = match PanelRuntime::new().run(panel) {
-        Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => value,
-        _ => {
-            // User cancelled; fall back to printing the plain list.
-            print_session_list(&sessions, now);
-            return;
-        }
-    };
-
-    let idx = match selected.strip_prefix("session:") {
-        Some(s) => match s.parse::<usize>() {
-            Ok(n) if n < sessions.len() => n,
-            _ => {
-                print_session_list(&sessions, now);
-                return;
-            }
-        },
-        None => {
-            print_session_list(&sessions, now);
-            return;
-        }
-    };
-
-    let session = &sessions[idx];
     let short_id = &session.session_id[..8.min(session.session_id.len())];
     let current = session.name.as_deref().unwrap_or("");
 
-    // Second step: enter a new name via ChoicePanel custom input.
-    let rename_panel = ChoicePanel::new(
-        format!("Rename session {}", short_id),
-        format!(
-            "Current name: {}",
-            if current.is_empty() {
-                "(none)"
-            } else {
-                current
-            }
-        ),
+    let panel = ChoicePanel::new(
+        format!("Rename session {short_id}"),
+        if current.is_empty() {
+            "Current name: (none)".to_string()
+        } else {
+            format!("Current name: {current}")
+        },
         Vec::new(),
     )
     .with_custom_label("Enter new name (empty to clear)")
@@ -714,54 +674,25 @@ fn rename_live_sessions() {
     .with_allow_empty_custom_input(true)
     .with_footer("Type a name | Enter save | Esc cancel");
 
-    match PanelRuntime::new().run(rename_panel) {
+    match PanelRuntime::new().run(panel) {
         Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(name))) => {
             match aish_pty::rename_session(&session.session_id, &name) {
                 Ok(()) => {
                     if name.trim().is_empty() {
-                        println!("Cleared name for session {}.", short_id);
+                        println!("Cleared name for session {short_id}.");
                     } else {
-                        println!("Renamed session {} → \"{}\".", short_id, name.trim());
+                        println!("Renamed session {short_id} → \"{}\".", name.trim());
                     }
+                    true
                 }
-                Err(e) => eprintln!("\x1b[31mFailed to rename: {}\x1b[0m", e),
+                Err(e) => {
+                    eprintln!("\x1b[31mFailed to rename: {e}\x1b[0m");
+                    false
+                }
             }
         }
-        _ => {
-            // Cancelled or selected an empty list item — just print the list.
-        }
+        _ => false,
     }
-
-    // Re-discover so the printed list reflects the rename we just performed.
-    let refreshed = aish_pty::discover_sessions();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    print_session_list(&refreshed, now);
-}
-
-/// Print the session list in plain (non-interactive) form.
-fn print_session_list(sessions: &[aish_pty::DaemonSessionInfo], now: u64) {
-    println!("Active PTY sessions:\n");
-    for s in sessions {
-        let cwd_display = display_cwd(&s.cwd);
-        let age = format_duration(now.saturating_sub(s.started_at));
-        let model = s.model.as_deref().unwrap_or("");
-        let label = session_label(s);
-        println!(
-            "  {label}  cwd: {cwd:<20}  started: {age}{model}",
-            label = label,
-            cwd = cwd_display,
-            age = age,
-            model = if model.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", model)
-            }
-        );
-    }
-    println!("\n{} session(s) total", sessions.len());
 }
 
 fn kill_session_by_id(ids: &[String]) {
@@ -862,41 +793,24 @@ fn display_cwd(cwd: &str) -> String {
 fn session_label(s: &aish_pty::DaemonSessionInfo) -> String {
     let short_id = &s.session_id[..8.min(s.session_id.len())];
     match &s.name {
-        Some(n) if !n.is_empty() => format!("{} ({})", n, short_id),
-        _ => short_id.to_string(),
+        // Bold green name + dim short id, so custom names stand out at a glance.
+        Some(n) if !n.is_empty() => {
+            format!("\x1b[1;32m{n}\x1b[0m \x1b[2m({short_id})\x1b[0m")
+        }
+        _ => format!("\x1b[2m{short_id}\x1b[0m"),
     }
 }
 
 fn run_shell_new(config: aish_config::ConfigModel) {
-    let cwd = std::env::current_dir()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    eprintln!("\x1b[32m[aish] Creating new PTY daemon session...\x1b[0m");
-    match spawn_pty_daemon(
-        &cwd,
-        if config.model.is_empty() {
-            None
-        } else {
-            Some(config.model.as_str())
-        },
-        if config.api_base.is_empty() {
-            None
-        } else {
-            Some(config.api_base.as_str())
-        },
-    ) {
-        Ok(info) => {
-            if run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id) {
-                return;
-            }
-        }
-        Err(e) => {
-            eprintln!("\x1b[33m[aish] PTY daemon failed: {}\x1b[0m", e);
-        }
+    if !is_daemon_mode(&config) {
+        run_shell_normal(config);
+        return;
     }
-    eprintln!("\x1b[33m[aish] Falling back to normal shell.\x1b[0m");
-    run_shell_normal(config);
+
+    if !spawn_daemon_and_attach(&config) {
+        eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
+        run_shell_normal(config);
+    }
 }
 
 fn run_shell_resume(config: aish_config::ConfigModel, session_id: &str) {
@@ -1218,14 +1132,6 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     // buffered scrollback.
     let mut skip_osc_commands = false;
 
-    // SAFETY: [Category 8 — FFI] `write()` to stdout_fd — a single short
-    // message. `stdout_fd` is stdout (valid). The byte slice is a static
-    // literal; `.as_ptr()` is valid for its lifetime.
-    unsafe {
-        let msg = b"\r\n\x1b[32m[aish] Attached (Ctrl+Q to detach)\x1b[0m\r\n";
-        libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
-    }
-
     // Flush scrollback immediately. The attach handshake consumed all
     // scrollback bytes from the socket into `pending_events`, so the
     // kernel socket buffer is now empty. Without this explicit drain,
@@ -1272,6 +1178,10 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     }
 
     let mut stdin_buf = [0u8; 1024];
+    // True when the inner shell sent ShellExiting (user typed `exit`/`logout`).
+    // Distinguishes a true detach (Ctrl+Q — session still alive) from a shell
+    // exit (session is dying, nothing to reattach to).
+    let mut shell_exited = false;
 
     loop {
         let socket_fd = backend.readable_fds()[0];
@@ -1329,6 +1239,14 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                     if qpos > 0 {
                         let _ = backend.write_input(&data[..qpos]);
                     }
+                    // Ctrl+Q detaches. Restore cooked terminal mode and, when
+                    // the current session is still unnamed, prompt for a note
+                    // so it stays identifiable in `aish -c`.
+                    // SAFETY: tcsetattr restores `orig_termios` saved at attach.
+                    unsafe {
+                        libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
+                    }
+                    ctrl_q_detach_nudge(session_id);
                     break;
                 }
                 if data.len() == 1 && data[0] == 0x04 {
@@ -1382,6 +1300,7 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                                 if matches!(evt, aish_pty::BackendControlEvent::ShellExiting { .. })
                                 {
                                     should_exit = true;
+                                    shell_exited = true;
                                 }
                             }
                         }
@@ -1448,8 +1367,49 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     unsafe {
         libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
     }
-    eprintln!("\x1b[32m[aish] Detached. Run `aish` to reattach.\x1b[0m");
+    // Only show the reattach hint when the session is actually still alive
+    // (Ctrl+Q/Ctrl+D detach). When the inner shell typed `exit`, the daemon
+    // sends EXIT_NOTICE which sets running=false — nothing to reattach to.
+    if !shell_exited && backend.is_running() {
+        eprintln!("\x1b[32m[aish] {}\x1b[0m", aish_i18n::t("cli.detach_hint"));
+    }
     true
+}
+
+/// Ctrl+Q detach nudge: when the current session has no user note, prompt for
+/// one so it stays identifiable in `aish -c` after detach. Enter saves &
+/// detaches; Esc (or an empty submit) detaches without naming. The caller
+/// must restore cooked terminal mode first so the panel can render.
+fn ctrl_q_detach_nudge(session_id: &str) {
+    use aish_i18n::t;
+    use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime};
+
+    let needs_note = aish_pty::discover_sessions()
+        .into_iter()
+        .find(|s| s.session_id == session_id)
+        .map(|s| s.name.as_deref().unwrap_or("").trim().is_empty())
+        .unwrap_or(false);
+    if !needs_note {
+        return;
+    }
+
+    let panel = ChoicePanel::new(
+        t("shell.live_sessions.exit_no_note_title"),
+        t("shell.live_sessions.exit_no_note_hint"),
+        Vec::new(),
+    )
+    .with_custom_label(t("shell.live_sessions.rename_input_label"))
+    .with_allow_cancel(true)
+    .with_allow_empty_custom_input(true)
+    .with_footer(t("shell.live_sessions.exit_no_note_footer"));
+
+    if let Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(name))) =
+        PanelRuntime::new().run(panel)
+    {
+        if !name.trim().is_empty() {
+            let _ = aish_pty::rename_session(session_id, &name);
+        }
+    }
 }
 
 /// Result of OSC action handling.

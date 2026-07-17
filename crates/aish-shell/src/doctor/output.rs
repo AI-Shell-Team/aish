@@ -1,20 +1,23 @@
 use crate::doctor::checker::{CheckItem, CheckResult, CheckStatus};
-use crossterm::style::{Color, Stylize};
+use crate::theme;
 
 pub struct Output;
 
 impl Output {
     pub fn print_header() {
         println!();
-        println!("{}", Self::header("       AISH Basic Config Diagnostics"));
+        println!(
+            "{}",
+            theme::accent(&theme::bold("       AISH Basic Config Diagnostics"))
+        );
         println!();
     }
 
     pub fn print_result(result: &CheckResult) {
         let icon = match result.status {
-            CheckStatus::Pass => Self::colored("✓", Color::Green),
-            CheckStatus::Warn => Self::colored("⚠", Color::Yellow),
-            CheckStatus::Fail => Self::colored("✗", Color::Red),
+            CheckStatus::Pass => theme::success(theme::ICON_SUCCESS),
+            CheckStatus::Warn => theme::warning(theme::ICON_WARNING),
+            CheckStatus::Fail => theme::error(theme::ICON_ERROR),
         };
         println!("[{}] {}", icon, result.checker);
         for item in &result.items {
@@ -24,14 +27,14 @@ impl Output {
 
     fn print_item(item: &CheckItem) {
         let icon = match item.status {
-            CheckStatus::Pass => Self::colored("✓", Color::Green),
-            CheckStatus::Warn => Self::colored("⚠", Color::Yellow),
-            CheckStatus::Fail => Self::colored("✗", Color::Red),
+            CheckStatus::Pass => theme::success(theme::ICON_SUCCESS),
+            CheckStatus::Warn => theme::warning(theme::ICON_WARNING),
+            CheckStatus::Fail => theme::error(theme::ICON_ERROR),
         };
         let indent = "    ";
         println!("{}{} {}", indent, icon, item.message);
         if let Some(hint) = &item.hint {
-            println!("{}{} {}", indent, Self::colored("→", Color::Cyan), hint);
+            println!("{}{} {}", indent, theme::accent("→"), hint);
         }
     }
 
@@ -42,9 +45,9 @@ impl Output {
         issues: &[String],
     ) {
         println!();
-        println!("{}", Self::separator());
+        println!("{}", theme::dim(&"─".repeat(50)));
         if fail_count == 0 && warn_count == 0 {
-            println!("{}", Self::colored("  All checks passed!", Color::Green));
+            println!("{}", theme::success("  All checks passed!"));
         } else {
             println!("  Found {} issue(s)", fail_count + warn_count);
             if !issues.is_empty() {
@@ -56,34 +59,31 @@ impl Output {
                 println!();
                 println!(
                     "  {}",
-                    Self::colored(
-                        &format!(
-                            "Tip: run 'aish doctor --fix' to auto-fix ({} fixable)",
-                            fixable_count
-                        ),
-                        Color::DarkGrey
-                    )
+                    theme::dim(&format!(
+                        "Tip: run 'aish doctor --fix' to auto-fix ({} fixable)",
+                        fixable_count
+                    ))
                 );
             }
         }
-        println!("{}", Self::separator());
+        println!("{}", theme::dim(&"─".repeat(50)));
     }
 
     pub fn print_fix_summary(fixed_count: usize, remaining: &[String]) {
         println!();
-        println!("{}", Self::separator());
+        println!("{}", theme::dim(&"─".repeat(50)));
         if fixed_count > 0 {
             println!(
                 "  {}",
-                Self::colored(&format!("Fixed {} issue(s).", fixed_count), Color::Green)
+                theme::success(&format!("Fixed {} issue(s).", fixed_count))
             );
             if !remaining.is_empty() {
                 println!(
                     "  {}",
-                    Self::colored(
-                        &format!("{} issue(s) require manual intervention:", remaining.len()),
-                        Color::Yellow
-                    )
+                    theme::warning(&format!(
+                        "{} issue(s) require manual intervention:",
+                        remaining.len()
+                    ))
                 );
                 println!();
                 for (i, issue) in remaining.iter().enumerate() {
@@ -91,19 +91,7 @@ impl Output {
                 }
             }
         }
-        println!("{}", Self::separator());
+        println!("{}", theme::dim(&"─".repeat(50)));
         println!();
-    }
-
-    fn header(s: &str) -> String {
-        Self::colored(s, Color::Cyan).to_string()
-    }
-
-    fn separator() -> String {
-        Self::colored(&"─".repeat(50), Color::DarkGrey).to_string()
-    }
-
-    fn colored(s: &str, color: Color) -> String {
-        format!("{}", crossterm::style::style(s).with(color))
     }
 }

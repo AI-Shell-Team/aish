@@ -6,7 +6,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
-use unicode_width::UnicodeWidthStr;
+use std::time::Duration;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{PanelComponent, PanelEvent};
 
@@ -16,10 +17,20 @@ const MIN_PANEL_HEIGHT: u16 = 6;
 const PANEL_PADDING_X: u16 = 2;
 const DESCRIPTION_INDENT: &str = "    ";
 
+// Shimmer sweep tunables (mirrors aish-shell's theme::shimmer_text): a cosine
+// bump band travels left→right across the highlighted row's text.
+const SHIMMER_SPEED: f64 = 30.0; // cells per second
+const SHIMMER_PADDING: f64 = 10.0; // virtual padding for smooth enter/exit
+const SHIMMER_BAND_HALF: f64 = 6.0; // half-width of the cosine bump
+const SHIMMER_TICK_MS: u64 = 33; // ~30fps animation tick
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchSelectItem {
     pub value: String,
     pub label: String,
+    /// Optional emphasized prefix rendered in bold accent color before the
+    /// label (e.g. a session's custom name), so it stands out at a glance.
+    pub highlight: Option<String>,
     pub detail: Option<String>,
     pub badge: Option<String>,
     pub search_text: String,
@@ -33,6 +44,7 @@ impl SearchSelectItem {
         Self {
             value,
             label,
+            highlight: None,
             detail: None,
             badge: None,
             search_text,
@@ -49,6 +61,15 @@ impl SearchSelectItem {
         self
     }
 
+    /// Set the emphasized prefix rendered in bold accent color before the
+    /// label. Used to make a key field (e.g. a custom session name) visually
+    /// distinct from the rest of the label.
+    pub fn with_highlight(mut self, highlight: impl Into<String>) -> Self {
+        let highlight = highlight.into();
+        self.highlight = (!highlight.trim().is_empty()).then_some(highlight);
+        self
+    }
+
     pub fn with_search_text(mut self, search_text: impl Into<String>) -> Self {
         self.search_text = search_text.into().to_lowercase();
         self
@@ -58,6 +79,10 @@ impl SearchSelectItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SearchSelectOutcome {
     Selected(String),
+    /// Rename the item carrying the given value (triggered by Ctrl+E).
+    Rename(String),
+    /// Exit the panel (triggered by Ctrl+Q). Callers decide exit semantics.
+    Quit,
 }
 
 /// Match when every whitespace-separated token in `query` is a substring of `search_text`.
@@ -83,6 +108,11 @@ pub struct SearchSelectPanel {
     query: String,
     selected: usize,
     max_visible_items: usize,
+    /// Value of the item whose row gets the animated shimmer sweep (the live
+    /// "current" session). `None` disables animation.
+    shimmer_value: Option<String>,
+    /// Animation clock in milliseconds, advanced one tick per redraw.
+    anim_ms: u64,
 }
 
 impl SearchSelectPanel {
@@ -102,11 +132,20 @@ impl SearchSelectPanel {
             query: String::new(),
             selected: 0,
             max_visible_items: DEFAULT_VISIBLE_ITEMS,
+            shimmer_value: None,
+            anim_ms: 0,
         }
     }
 
     pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
         self.footer = Some(footer.into());
+        self
+    }
+
+    /// Mark the item with `value` as the "current" row that gets an animated
+    /// shimmer sweep. Pass `None` (or omit) for a static panel.
+    pub fn with_shimmer(mut self, value: Option<&str>) -> Self {
+        self.shimmer_value = value.map(|v| v.to_string());
         self
     }
 
@@ -170,6 +209,20 @@ impl SearchSelectPanel {
             SelectEntry::Item(index) => Some(SearchSelectOutcome::Selected(
                 self.items.get(*index)?.value.clone(),
             )),
+        }
+    }
+
+    /// Build a `Rename` outcome for the currently highlighted entry.
+    /// Returns `None` when no entry is highlighted (empty list), so callers
+    /// can treat Ctrl+E on an empty list as a no-op.
+    fn rename_current(&self) -> Option<SearchSelectOutcome> {
+        let entries = self.filtered_entries();
+        let entry = entries.get(self.selected)?;
+        match entry {
+            SelectEntry::Item(index) => {
+                let item = self.items.get(*index)?;
+                Some(SearchSelectOutcome::Rename(item.value.clone()))
+            }
         }
     }
 
@@ -281,6 +334,18 @@ impl PanelComponent for SearchSelectPanel {
         self.render_footer(frame, chunks[5]);
     }
 
+    fn tick_interval(&self) -> Option<Duration> {
+        // Only animate when a shimmer row is configured, so static panels
+        // still block on input (no busy redraw loop).
+        self.shimmer_value
+            .as_ref()
+            .map(|_| Duration::from_millis(SHIMMER_TICK_MS))
+    }
+
+    fn tick(&mut self) {
+        self.anim_ms = self.anim_ms.wrapping_add(SHIMMER_TICK_MS);
+    }
+
     fn handle_event(&mut self, event: Event) -> PanelEvent<Self::Output> {
         let Event::Key(key) = event else {
             return PanelEvent::Continue;
@@ -308,6 +373,13 @@ impl PanelComponent for SearchSelectPanel {
                 .select_current()
                 .map(PanelEvent::Submit)
                 .unwrap_or(PanelEvent::Continue),
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => self
+                .rename_current()
+                .map(PanelEvent::Submit)
+                .unwrap_or(PanelEvent::Continue),
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                PanelEvent::Submit(SearchSelectOutcome::Quit)
+            }
             KeyCode::Up => {
                 self.move_up(1);
                 PanelEvent::Continue
@@ -510,7 +582,32 @@ impl SearchSelectPanel {
             SelectEntry::Item(index) => {
                 let item = &self.items[index];
                 let mut spans = vec![Span::styled(marker, marker_style)];
-                spans.push(Span::styled(item.label.as_str(), label_style));
+                let is_shimmer = self
+                    .shimmer_value
+                    .as_deref()
+                    .is_some_and(|v| v == item.value);
+                if is_shimmer {
+                    // Animated rainbow sweep across the row's text.
+                    let text = match &item.highlight {
+                        Some(h) if !h.is_empty() => format!("{h}  {}", item.label),
+                        _ => item.label.clone(),
+                    };
+                    spans.extend(shimmer_spans(&text, self.anim_ms));
+                } else {
+                    if let Some(highlight) = &item.highlight {
+                        spans.push(Span::styled(
+                            highlight.as_str(),
+                            Style::default()
+                                // Accent electric blue — aish's signature colour
+                                // (matches theme::accent rgb 0,180,255), bold so
+                                // the note stands out from id + cwd.
+                                .fg(Color::Rgb(0, 180, 255))
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.push(Span::styled(item.label.as_str(), label_style));
+                }
                 if let Some(badge) = &item.badge {
                     spans.push(Span::styled(
                         format!(" {badge}"),
@@ -523,6 +620,89 @@ impl SearchSelectPanel {
             }
         }
     }
+}
+
+/// Build per-character ratatui spans with a cosine-bump rainbow sweep, the
+/// same algorithm as `aish_shell::theme::shimmer_text` but emitted as styled
+/// `Span`s (ratatui does not render raw ANSI). Each char gets its own
+/// `Color::Rgb` from an HSL hue that drifts with position and time, modulated
+/// by a travelling brightness bump.
+fn shimmer_spans(text: &str, time_ms: u64) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    let mut total_width = 0.0_f64;
+    let char_pos: Vec<f64> = chars
+        .iter()
+        .map(|&ch| {
+            let start = total_width;
+            total_width += UnicodeWidthChar::width(ch).unwrap_or(0) as f64;
+            start
+        })
+        .collect();
+    let period = total_width + SHIMMER_PADDING * 2.0;
+    let pos = ((time_ms as f64 / 1000.0) * SHIMMER_SPEED) % period;
+
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, &ch)| {
+            let idx = char_pos[i];
+            let dist = (idx + SHIMMER_PADDING - pos).abs();
+            let intensity = if dist >= SHIMMER_BAND_HALF {
+                0.0
+            } else {
+                0.5 * (1.0 + (std::f64::consts::PI * dist / SHIMMER_BAND_HALF).cos())
+            };
+            let hue = (i as f64) * 28.0 + time_ms as f64 * 0.05;
+            let sat = 0.45 + intensity * 0.45;
+            let light = 0.30 + intensity * 0.42;
+            let (r, g, b) = hsl_to_rgb(hue, sat, light);
+            Span::styled(ch.to_string(), Style::default().fg(Color::Rgb(r, g, b)))
+        })
+        .collect()
+}
+
+/// HSL → 8-bit RGB. Ported from `aish_shell::theme` so this crate stays
+/// independent of the shell layer.
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0) / 360.0;
+    let s = s.clamp(0.0, 1.0);
+    let l = l.clamp(0.0, 1.0);
+    if s == 0.0 {
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let f = |t: f64| -> f64 {
+        let t = if t < 0.0 {
+            t + 1.0
+        } else if t > 1.0 {
+            t - 1.0
+        } else {
+            t
+        };
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (
+        (f(h + 1.0 / 3.0) * 255.0).round() as u8,
+        (f(h) * 255.0).round() as u8,
+        (f(h - 1.0 / 3.0) * 255.0).round() as u8,
+    )
 }
 
 fn padded_area(area: Rect) -> Rect {
@@ -566,6 +746,10 @@ mod tests {
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl(ch: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL))
     }
 
     #[test]
@@ -668,5 +852,79 @@ mod tests {
             required_panel.handle_event(key(KeyCode::Esc)),
             PanelEvent::Continue
         );
+    }
+
+    #[test]
+    fn ctrl_e_emits_rename_for_selected_item() {
+        let mut panel = SearchSelectPanel::new(
+            "Sessions",
+            "Search",
+            vec![
+                item("session:0", "Alpha", "session:0 alpha"),
+                item("session:1", "Beta", "session:1 beta"),
+            ],
+        );
+
+        // Default selection is the first item → Ctrl+E renames it.
+        assert_eq!(
+            panel.handle_event(ctrl('e')),
+            PanelEvent::Submit(SearchSelectOutcome::Rename("session:0".to_string()))
+        );
+
+        // Move down, then Ctrl+E renames the now-highlighted second item.
+        panel.handle_event(key(KeyCode::Down));
+        assert_eq!(
+            panel.handle_event(ctrl('e')),
+            PanelEvent::Submit(SearchSelectOutcome::Rename("session:1".to_string()))
+        );
+    }
+
+    #[test]
+    fn ctrl_e_on_empty_list_is_noop() {
+        let mut panel =
+            SearchSelectPanel::new("Sessions", "Search", vec![item("a", "Alpha", "a alpha")]);
+        // Filter down to nothing, then Ctrl+E must not submit.
+        panel.handle_event(key(KeyCode::Char('z')));
+        assert!(panel.filtered_entries().is_empty());
+        assert_eq!(panel.handle_event(ctrl('e')), PanelEvent::Continue);
+    }
+
+    #[test]
+    fn ctrl_q_emits_quit() {
+        let mut panel = SearchSelectPanel::new(
+            "Sessions",
+            "Search",
+            vec![item("session:0", "Alpha", "session:0 alpha")],
+        );
+        assert_eq!(
+            panel.handle_event(ctrl('q')),
+            PanelEvent::Submit(SearchSelectOutcome::Quit)
+        );
+    }
+
+    #[test]
+    fn shimmer_only_animates_when_configured() {
+        // No shimmer configured → no tick interval (static, blocks on input).
+        let panel =
+            SearchSelectPanel::new("Sessions", "Search", vec![item("a", "Alpha", "a alpha")]);
+        assert_eq!(panel.tick_interval(), None);
+
+        // Shimmer configured → tick interval present, tick advances the clock.
+        let mut panel = panel.with_shimmer(Some("a"));
+        assert_eq!(
+            panel.tick_interval(),
+            Some(std::time::Duration::from_millis(SHIMMER_TICK_MS))
+        );
+        assert_eq!(panel.anim_ms, 0);
+        panel.tick();
+        assert_eq!(panel.anim_ms, SHIMMER_TICK_MS);
+    }
+
+    #[test]
+    fn shimmer_spans_produces_one_span_per_char() {
+        let spans = shimmer_spans("abc", 0);
+        assert_eq!(spans.len(), 3);
+        // Empty input → no spans.
+        assert!(shimmer_spans("", 500).is_empty());
     }
 }

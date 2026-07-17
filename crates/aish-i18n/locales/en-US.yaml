@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Check Langfuse configuration"
   setup_command_help: "Run interactive setup and exit"
   check_tool_support_command_help: "Debug live tool-call support check"
+  detach_hint: "Detached. Run `aish -c` to reattach."
 
   models_auth_title: "Models Auth: {provider}"
   models_auth_relogin_hint: "Re-sign in or rotate credentials. First-time setup runs auth inside `aish setup`."
@@ -434,6 +435,7 @@ shell:
   ctrl_c_again: "Ctrl+C again within 1s to exit"
   exiting: "Exiting..."
   exit_goodbye: "Exiting shell. Goodbye!"
+  exit_daemon_hint: "※ Tip: Press Ctrl+Q to detach (keeps session alive), then aish -c to reconnect"
 
   # Confirm dialog
   confirm_dialog_title: "Tool Execution"
@@ -520,7 +522,7 @@ shell:
     iteration_continue_prompt: "Continue? [Y/n]"
 
   resume:
-    exit_command: "Resume with: aish resume {session_id}"
+    exit_command: "Resume AI context: aish resume {session_id}"
     usage: "Usage: /resume [session_id]"
     session_store_unavailable: "Session store is not available."
     no_sessions: "No previous sessions found."
@@ -542,11 +544,22 @@ shell:
     none_active: "No active PTY sessions."
     panel_title: "Live PTY Sessions"
     search_placeholder: "Search..."
-    panel_footer: "Up/Down navigate · Enter select · Esc cancel"
+    panel_footer: "Up/Down navigate · Enter select · Ctrl+E rename · Esc cancel"
     create_new: "Create new session"
     already_current: "Already in this session."
     started_label: "started: {age}"
     current_tag: "[current]"
+    rename_title: "Rename session {id}"
+    rename_current_none: "Current name: (none)"
+    rename_current_set: "Current name: {name}"
+    rename_input_label: "Enter new name (empty to clear)"
+    rename_input_footer: "Type a name | Enter save | Esc cancel"
+    rename_done: "Renamed {id} → \"{name}\""
+    rename_cleared: "Cleared name for {id}"
+    rename_failed: "Failed to rename: {err}"
+    exit_no_note_title: "Add a note before exiting?"
+    exit_no_note_hint: "This session has no note — unnamed sessions are hard to tell apart after detach."
+    exit_no_note_footer: "Enter save & exit · Esc exit without"
 
   kill_live_sessions:
     daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"
@@ -921,6 +934,11 @@ help:
       - CLI args > env vars (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > config file
       - Run `/setup` or `aish setup` for interactive configuration
 
+      ## Session Management
+      - `aish -c` — attach to an existing live session (or pick from a list)
+      - `Ctrl+Q` — detach the current session (keeps running in background); reconnect with `aish -c`
+      - `Ctrl+E` — rename the highlighted session in the picker
+
       ## Keyboard Shortcuts
       | Key | Action |
       |-----|--------|
@@ -928,6 +946,8 @@ help:
       | `Ctrl+D` | Exit shell |
       | `Shift+Tab` / `F2` | Toggle plan mode |
       | `Ctrl+O` | Browse output history |
+      | `Ctrl+Q` | Detach session (reconnect with `aish -c`) |
+      | `Ctrl+E` | Rename session (in picker) |
       | `/` on empty line | Slash command picker |
 
       ## Help Pages
@@ -1110,6 +1130,13 @@ help:
         | `Ctrl+D` | Exit shell |
         | `Ctrl+O` | Browse output history |
         | `Esc` | Cancel current input |
+
+        ## Session Management
+
+        | Key | Action |
+        |-----|--------|
+        | `Ctrl+Q` | Detach session (keeps it alive; reconnect with `aish -c`) |
+        | `Ctrl+E` | Rename highlighted session (in picker) |
 
         ## Mode Switching
 

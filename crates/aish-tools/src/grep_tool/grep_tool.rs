@@ -129,7 +129,13 @@ impl Tool for GrepTool {
                 };
                 if re.is_match(&line) {
                     let truncated = if line.len() > MAX_LINE_LENGTH {
-                        format!("{}...", &line[..MAX_LINE_LENGTH])
+                        let end = line
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .take_while(|&i| i <= MAX_LINE_LENGTH)
+                            .last()
+                            .unwrap_or(0);
+                        format!("{}...", &line[..end])
                     } else {
                         line
                     };

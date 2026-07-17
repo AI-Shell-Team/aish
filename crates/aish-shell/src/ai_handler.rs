@@ -335,6 +335,21 @@ impl AiHandler {
         self.token_store.stats()
     }
 
+    /// Return cumulative token usage for the current session (not persisted store).
+    pub fn session_token_stats(&self) -> aish_llm::TokenStats {
+        self.llm_session.token_stats()
+    }
+
+    /// Return locally estimated prompt tokens from the last API call.
+    pub fn last_prompt_estimate(&self) -> u64 {
+        self.llm_session.last_prompt_estimate()
+    }
+
+    /// Return current context budget state (estimated tokens, pressure, %).
+    pub fn context_budget_state(&self) -> aish_context::ContextBudgetState {
+        self.context_manager.budget_state()
+    }
+
     /// Persist token usage delta from the current session to disk.
     pub fn persist_token_usage(&mut self) {
         let stats = self.llm_session.token_stats();
@@ -451,21 +466,30 @@ impl AiHandler {
             for img in &extracted.attached {
                 if img.size_bytes >= 1024 {
                     eprintln!(
-                        "\x1b[2m📎 Attached image: {} ({:.1} KB)\x1b[0m",
-                        img.filename,
-                        img.size_bytes as f64 / 1024.0
+                        "{}",
+                        crate::theme::faint(&format!(
+                            "📎 Attached image: {} ({:.1} KB)",
+                            img.filename,
+                            img.size_bytes as f64 / 1024.0
+                        ))
                     );
                 } else {
                     eprintln!(
-                        "\x1b[2m📎 Attached image: {} ({} B)\x1b[0m",
-                        img.filename, img.size_bytes
+                        "{}",
+                        crate::theme::faint(&format!(
+                            "📎 Attached image: {} ({} B)",
+                            img.filename, img.size_bytes
+                        ))
                     );
                 }
             }
             if extracted.attached.len() > 1 {
                 eprintln!(
-                    "\x1b[2m📎 {} images attached\x1b[0m",
-                    extracted.attached.len()
+                    "{}",
+                    crate::theme::faint(&format!(
+                        "📎 {} images attached",
+                        extracted.attached.len()
+                    ))
                 );
             }
         }
@@ -1199,8 +1223,8 @@ pub(crate) fn print_failure_diagnose_report(result: &FailureDiagnoseParseResult)
     use aish_i18n::t;
     if result.outcome == DiagnoseParseOutcome::FormatError {
         println!(
-            "\x1b[33m{}\x1b[0m",
-            t("shell.failure_diagnose.parse_format_error")
+            "{}",
+            crate::theme::warning(&t("shell.failure_diagnose.parse_format_error"))
         );
         return;
     }
@@ -1208,8 +1232,8 @@ pub(crate) fn print_failure_diagnose_report(result: &FailureDiagnoseParseResult)
     println!("{}", t("shell.failure_diagnose.report_title"));
     if result.outcome == DiagnoseParseOutcome::ProseFallback {
         println!(
-            "\x1b[33m{}\x1b[0m",
-            t("shell.failure_diagnose.parse_prose_fallback")
+            "{}",
+            crate::theme::warning(&t("shell.failure_diagnose.parse_prose_fallback"))
         );
     }
     println!(
