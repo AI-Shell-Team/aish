@@ -291,8 +291,6 @@ Skills はAIのドメイン知識とワークフローを拡張し、ホット�
 
 パッケージ版は初回起動時にシステムレベルのSkillsをユーザーディレクトリへコピーしようとします（例：`/usr/share/aish/skills`）。
 
-詳細：`docs/skills-guide.md`
-
 ---
 
 ## データとプライバシー
@@ -313,7 +311,6 @@ Skills はAIのドメイン知識とワークフローを拡張し、ホット�
 
 - 設定ガイド：`CONFIGURATION.md`
 - クイックスタート：`QUICKSTART.md`
-- Skills の使い方：`docs/skills-guide.md`
 - コマンド修正メカニズム：`docs/command-interaction-correction.md`
 
 ---

@@ -286,8 +286,6 @@ Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优
 
 打包版本会在首次启动时尝试把系统级技能复制到用户目录（如 `/usr/share/aish/skills`）。
 
-更多说明见：`docs/skills-guide.md`
-
 ---
 
 ## 数据与隐私
@@ -308,7 +306,6 @@ Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优
 
 - 配置说明：`CONFIGURATION.md`
 - 快速入门：`QUICKSTART.md`
-- Skills 使用：`docs/skills-guide.md`
 - 命令纠错机制：`docs/command-interaction-correction.md`
 
 ---

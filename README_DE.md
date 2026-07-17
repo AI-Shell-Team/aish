@@ -291,8 +291,6 @@ Standard-Scan-Verzeichnisse und Priorität:
 
 Paketierte Versionen versuchen beim ersten Start, systemweite Skills in das Benutzerverzeichnis zu kopieren (z. B. `/usr/share/aish/skills`).
 
-Weitere Details: `docs/skills-guide.md`
-
 ---
 
 ## Daten & Datenschutz
@@ -313,7 +311,6 @@ Empfehlungen:
 
 - Konfigurationsleitfaden: `CONFIGURATION.md`
 - Schnellstart: `QUICKSTART.md`
-- Skills‑Nutzung: `docs/skills-guide.md`
 - Mechanismus zur Befehlskorrektur: `docs/command-interaction-correction.md`
 
 ---

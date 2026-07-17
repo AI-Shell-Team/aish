@@ -291,8 +291,6 @@ Default scan directories and priority:
 
 Packaged versions will attempt to copy system-level skills to user directory on first launch (e.g., `/usr/share/aish/skills`).
 
-For more details, see: `docs/skills-guide.md`
-
 ---
 
 ## Data & Privacy
@@ -313,7 +311,6 @@ Recommendations:
 
 - Configuration Guide: `CONFIGURATION.md`
 - Quick Start: `QUICKSTART.md`
-- Skills Usage: `docs/skills-guide.md`
 - Command Correction Mechanism: `docs/command-interaction-correction.md`
 
 ---

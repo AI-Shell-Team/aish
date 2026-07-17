@@ -28,7 +28,6 @@
           - "src/aish/skills/**"
           - "src/aish/tools/skill.py"
           - "skills/**"
-          - "docs/skills-guide.md"
 
 "tools":
   - changed-files:

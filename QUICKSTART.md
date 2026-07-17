@@ -209,10 +209,6 @@ Skills extend AI capabilities with specialized knowledge.
 - `~/.config/aish/skills/` (or `$AISH_CONFIG_DIR/skills`)
 - `~/.claude/skills/`
 
-### Documentation
-
-See `docs/skills-guide.md` for details.
-
 ## 📁 Data and Privacy
 
 ### Local Storage

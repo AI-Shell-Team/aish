@@ -291,8 +291,6 @@ Répertoires analysés par défaut et priorité :
 
 Les versions packagées tentent de copier les skills système dans le répertoire utilisateur au premier lancement (p. ex. `/usr/share/aish/skills`).
 
-Pour plus de détails : `docs/skills-guide.md`
-
 ---
 
 ## Données et confidentialité
@@ -313,7 +311,6 @@ Recommandations :
 
 - Guide de configuration : `CONFIGURATION.md`
 - Démarrage rapide : `QUICKSTART.md`
-- Utilisation des Skills : `docs/skills-guide.md`
 - Mécanisme de correction de commandes : `docs/command-interaction-correction.md`
 
 ---
