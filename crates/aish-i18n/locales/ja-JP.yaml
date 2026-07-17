@@ -155,6 +155,7 @@ shell:
     help: "ヘルプ情報を表示"
     model: "AI モデルの表示・切替"
     setup: "セットアップウィザードを開く"
+    setting: "対話型設定パネルを開く"
     plan: "プランモードの制御"
     token: "トークン使用量を表示"
     resume: "前回のセッションを再開"
@@ -306,6 +307,197 @@ shell:
     no_config_manager: "再設定できません: 設定マネージャーを利用できません"
     cancelled: "セットアップをキャンセルしました。現在の設定を維持します"
     applied: "設定を更新しました。現在のモデル: {model}"
+
+  setting:
+    title: "設定"
+    search_entry: "設定を検索..."
+    search_desc: "すべてのカテゴリーからキーワードで設定にジャンプ"
+    search_title: "設定を検索"
+    search_placeholder: "入力して絞り込み（名前 / 説明 / カテゴリー）"
+    search_footer: "↑/↓ 移動  入力で絞り込み  Enter で編集  Esc で戻る"
+    search_empty: "一致する設定はありません"
+    restart_summary: "{count} 件の変更は再起動後に反映されます"
+    subtitle: "設定するカテゴリーを選択（Esc で終了）"
+    select_setting: "編集する設定を選択（Esc で戻る）"
+    on: "オン"
+    off: "オフ"
+    not_set: "（未設定）"
+    current_tag: "現在"
+    applied: "保存しました {label} = {value}"
+    applied_clear: "クリアしました {label}"
+    invalid: "無効な値: {error}"
+    restart_hint: "（再起動後に反映されます）"
+    cat:
+      model: "モデルとプロバイダー"
+      appearance: "外観"
+      ai: "AI の動作"
+      security: "セキュリティ"
+      context: "コンテキストとメモリ"
+      remote: "リモートプロンプト"
+      advanced: "高度な設定"
+    cat_desc:
+      model: "LLM モデル、エンドポイント、認証情報"
+      appearance: "プロンプト記号と応答言語"
+      ai: "補完、コンテキスト、トークン処理"
+      security: "InputGuard、サンドボックス、リスクレベル"
+      context: "メモリ再呼び出し、圧縮、履歴"
+      remote: "SSH/telnet プロンプト要素"
+      advanced: "ロギング、トレーシング、PTY デーモン"
+    k:
+      model:
+        label: "AI モデル"
+        desc: "プロバイダーに送信するモデル名（例: gpt-4o, glm-4.6, deepseek-chat）"
+      api_base:
+        label: "API Base URL"
+        desc: "chat completions 用の OpenAI 互換エンドポイント URL"
+      api_key:
+        label: "API キー"
+        desc: "LLM プロバイダーのシークレットキー（config.yaml に保持）"
+      temperature:
+        label: "Temperature"
+        desc: "サンプリングのランダム性 0.0〜2.0、高いほど創造的"
+      max_tokens:
+        label: "最大トークン数"
+        desc: "応答のトークン上限（空欄 = プロバイダーの既定値）"
+      prompt_style:
+        label: "プロンプト記号"
+        desc: "カスタムプロンプト記号（空欄 = 既定の矢印）"
+      output_language:
+        label: "出力言語"
+        desc: "AI 応答の優先言語（zh-CN, en-US, ja-JP, de-DE, fr-FR, es-ES）"
+      auto_suggest:
+        label: "自動サジェスト"
+        desc: "入力中に履歴に基づくサジェストヒントを表示"
+      inline_completion:
+        label: "インライン補完"
+        desc: "入力中に AI インライン補完を提供"
+      inline_debounce_ms:
+        label: "インライン デバウンス (ms)"
+        desc: "入力停止後にインライン補完を開始するまでの遅延"
+      inline_context_lines:
+        label: "インライン コンテキスト行数"
+        desc: "インライン補完にコンテキストとして送る直近のシェル行数"
+      inline_max_tokens:
+        label: "インライン最大トークン数"
+        desc: "インライン補完の応答トークン上限"
+      inline_min_input_chars:
+        label: "インライン最小入力文字数"
+        desc: "インライン補完が開始される最小入力文字数"
+      inline_timeout_secs:
+        label: "インライン タイムアウト (秒)"
+        desc: "インライン補完を待機してからキャンセルする秒数"
+      inline_disable_thinking:
+        label: "インライン思考無効"
+        desc: "インライン補完で推論/思考トークンを抑制"
+      inline_enforce_json:
+        label: "インライン JSON 強制"
+        desc: "インライン補完で厳密な JSON を返すよう強制"
+      max_llm_messages:
+        label: "最大 LLM メッセージ数"
+        desc: "LLM 履歴に保持する最大会話ターン数"
+      enable_token_estimation:
+        label: "トークン推定を有効化"
+        desc: "tiktoken を用いてコンテキスト切り詰め用のトークン数を推定"
+      input_guard_enabled:
+        label: "InputGuard"
+        desc: "危険なコマンドルールに対して入力を事前検査"
+      enable_sandbox:
+        label: "サンドボックスを有効化"
+        desc: "危険なコマンドを許可前にサンドボックスで実行"
+      default_risk_level:
+        label: "既定のリスクレベル"
+        desc: "未認識コマンドの基本リスク評価（low/medium/high）"
+      sandbox_off_action:
+        label: "サンドボックス無効時の動作"
+        desc: "サンドボックスが利用できない場合の動作（allow/confirm/block）"
+      sandbox_timeout_seconds:
+        label: "サンドボックス タイムアウト (秒)"
+        desc: "サンドボックス事前実行を強制終了するまでの秒数"
+      memory_auto_recall:
+        label: "メモリ自動再呼び出し"
+        desc: "関連する長期メモリを AI コンテキストに自動表示"
+      memory_auto_retain:
+        label: "メモリ自動保持"
+        desc: "注目すべき事実を長期メモリに自動保存"
+      context_auto_compact:
+        label: "コンテキスト自動圧縮"
+        desc: "コンテキスト圧力が高まると会話を自動的に圧縮"
+      compact_full_enabled:
+        label: "完全圧縮"
+        desc: "古いターンを要約する完全圧縮パスを有効化"
+      compact_context_window_tokens:
+        label: "コンテキストウィンドウトークン数"
+        desc: "圧縮計算に使用するモデルのコンテキストウィンドウサイズ"
+      compact_micro_keep_recent:
+        label: "マイクロ圧縮で保持する最近"
+        desc: "マイクロ圧縮中にそのまま保持するターン数"
+      compact_shell_keep_recent:
+        label: "シェル圧縮で保持する最近"
+        desc: "シェル圧縮中に保持するシェルコマンドのターン数"
+      compact_summary_max_tokens:
+        label: "圧縮サマリー最大トークン数"
+        desc: "完全圧縮で生成されるサマリーのトークン上限"
+      compact_max_consecutive_failures:
+        label: "最大連続失敗数"
+        desc: "トリムにフォールバックするまでの圧縮失敗回数"
+      compact_reserved_output_tokens:
+        label: "予約済み出力トークン数"
+        desc: "モデルの応答に予約するトークン数、コンテキスト予算から差し引き"
+      history_size:
+        label: "履歴サイズ"
+        desc: "保持するシェル履歴の最大エントリ数"
+      max_shell_messages:
+        label: "最大シェルメッセージ数"
+        desc: "AI コンテキストに保持するシェルコマンドターンの最大数"
+      context_token_budget:
+        label: "コンテキストトークン予算"
+        desc: "コンテキスト合計トークンの任意の上限（空欄 = 無制限）"
+      enable_remote_git_prompt:
+        label: "リモート Git プロンプト"
+        desc: "リモート (SSH/telnet) の bash プロンプトに git ブランチを表示"
+      remote_rich_prompt:
+        label: "リモートリッチプロンプト"
+        desc: "複数行のリッチリモートプロンプトを有効化（user@host, cwd, git）"
+      remote_show_venv:
+        label: "リモート venv 表示"
+        desc: "リモートプロンプトにアクティブな Python venv を表示"
+      remote_show_container:
+        label: "リモートコンテナ表示"
+        desc: "リモートプロンプトにコンテナ/ランタイムマーカーを表示"
+      remote_show_kube:
+        label: "リモート Kube 表示"
+        desc: "リモートプロンプトに Kubernetes コンテキストを表示"
+      remote_danger_patterns:
+        label: "リモート危険パターン"
+        desc: "リモート PS1 を危険と判定するホスト名の正規表現（カンマ区切り）"
+      enable_langfuse:
+        label: "Langfuse を有効化"
+        desc: "Langfuse の LLM オブザーバビリティトレーシングを有効化"
+      langfuse_public_key:
+        label: "Langfuse 公開鍵"
+        desc: "Langfuse の公開鍵"
+      langfuse_secret_key:
+        label: "Langfuse 秘密鍵"
+        desc: "Langfuse の秘密鍵"
+      langfuse_host:
+        label: "Langfuse ホスト"
+        desc: "Langfuse のセルフホストインスタンス URL"
+      enable_scripts:
+        label: "スクリプトを有効化"
+        desc: ".aish スクリプトシステムとライフサイクルフックを有効化"
+      log_level:
+        label: "ログレベル"
+        desc: "トレーシングログの詳細度（error/warn/info/debug/trace）"
+      pty_daemon_enabled:
+        label: "PTY デーモン"
+        desc: "バックグラウンドデーモンで切断をまたいで PTY セッションを保持"
+      codex_auth_path:
+        label: "Codex 認証パス"
+        desc: "OpenAI Codex/ChatGPT の auth.json へのパス"
+      session_db_path:
+        label: "セッション DB パス"
+        desc: "セッションデータベースのカスタム位置（空欄 = 既定値）"
+
   session:
     iteration_limit_reached: "{count} 回のツール呼び出しが完了しました。"
     iteration_limit_title: "⏸ ツール呼び出し上限に達しました"
@@ -515,6 +707,7 @@ help:
       | `/quit` | AI Shell を終了 |
       | `/model [名前]` | AI モデルを表示または切り替え |
       | `/setup` | API 設定を再構成 |
+      | `/setting` | 対話型設定パネルを開く |
       | `/plan [start\|status\|exit]` | プランモードの制御 |
       | `/token` | トークン使用量を表示（過去 7 日間） |
       | `/resume [id]` | 前回のセッションを再開 |

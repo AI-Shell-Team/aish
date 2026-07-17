@@ -185,14 +185,22 @@ enum Commands {
 }
 
 fn main() {
-    // Initialize logging
+    let cli = Cli::parse();
+
+    // Initialize logging. RUST_LOG wins; otherwise honor the selected
+    // config's `log_level` (best-effort early load). Passing the --config
+    // path here (not None) matters: load() runs an additive migration that
+    // rewrites the file when keys are missing, so load(None) would touch the
+    // DEFAULT path even when --config points elsewhere. Falls back to "warn".
+    let config_path = cli.config.as_deref().map(std::path::Path::new);
+    let log_level = aish_config::ConfigLoader::load(config_path)
+        .map(|c| c.log_level)
+        .unwrap_or_else(|_| "warn".to_string());
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)),
         )
         .init();
-
-    let cli = Cli::parse();
 
     if cli.sandbox_daemon {
         let socket_path = cli.sandbox_socket.as_deref().map(std::path::Path::new);

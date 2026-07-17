@@ -1452,19 +1452,50 @@ pub(crate) fn basic_env_info() -> String {
         .clone()
 }
 
-/// Get output language from locale.
+/// Process-wide override for the AI output language, sourced from
+/// `config.output_language`. When `Some(non-empty)`, it takes precedence
+/// over the LANG-derived default. Set once at startup.
+static OUTPUT_LANG_OVERRIDE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Install a config-driven override for the AI response language.
+/// Pass `None` to fall back to the locale-derived default.
+pub(crate) fn set_output_language_override(lang: Option<String>) {
+    let _ = OUTPUT_LANG_OVERRIDE.set(lang);
+}
+
+/// Map a locale/language code to a friendly name the model understands.
+fn friendly_language_name(code: &str) -> String {
+    let lower = code.to_lowercase();
+    let primary = lower.split(['_', '-']).next().unwrap_or("");
+    match primary {
+        "zh" => "Chinese".to_string(),
+        "ja" => "Japanese".to_string(),
+        "ko" => "Korean".to_string(),
+        "fr" => "French".to_string(),
+        "de" => "German".to_string(),
+        "es" => "Spanish".to_string(),
+        "ru" => "Russian".to_string(),
+        // English or anything unrecognized: return as-is (models handle
+        // codes like "en-US", "pt-BR" fine).
+        _ => code.to_string(),
+    }
+}
+
+/// Get output language for AI responses.
+/// Honors `config.output_language` when set; otherwise derives from `LANG`.
 /// Result is cached for the process lifetime since it doesn't change.
 pub(crate) fn output_language() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| {
+            if let Some(Some(lang)) = OUTPUT_LANG_OVERRIDE.get() {
+                if !lang.is_empty() {
+                    return friendly_language_name(lang);
+                }
+            }
             let locale = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".to_string());
             let lang = locale.split('.').next().unwrap_or("en");
-            if lang.starts_with("zh") {
-                "Chinese".to_string()
-            } else {
-                "English".to_string()
-            }
+            friendly_language_name(lang)
         })
         .clone()
 }
