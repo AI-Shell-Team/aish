@@ -1196,13 +1196,11 @@ impl SetupWizard {
             .as_ref()
             .map(|path| path.display().to_string());
 
-        // Save to config file.
+        // Save to config file. ConfigLoader::save ensures the parent
+        // directory exists (first-run case where ~/.config/aish/ does
+        // not yet exist) and reports the path in the error message.
         let config_path = self.config_dir.join("config.yaml");
-        let yaml_content = serde_yaml::to_string(&config)
-            .map_err(|e| AishError::Config(format!("Failed to serialize config: {}", e)))?;
-
-        std::fs::write(&config_path, yaml_content)
-            .map_err(|e| AishError::Config(format!("Failed to write config: {}", e)))?;
+        aish_config::ConfigLoader::save(&config, &config_path)?;
 
         let path = format_config_path(&config_path);
         let mut args = std::collections::HashMap::new();
