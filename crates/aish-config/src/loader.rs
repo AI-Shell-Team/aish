@@ -343,4 +343,22 @@ mod tests {
             None => std::env::remove_var("AISH_CODEX_AUTH_PATH"),
         }
     }
+    #[test]
+    fn save_creates_missing_parent_directory() {
+        // Regression for first-run setup wizard: when ~/.config/aish/ does
+        // not yet exist, ConfigLoader::save must create it rather than fail
+        // with ENOENT/EACCES. The setup wizard previously called
+        // std::fs::write directly and hit this bug.
+        let dir = tempfile::tempdir().unwrap();
+        // Parent dir does not exist yet — the nested aish/ folder.
+        let path = dir.path().join("aish").join("config.yaml");
+        assert!(!path.parent().unwrap().exists());
+
+        let config = ConfigModel::default();
+        ConfigLoader::save(&config, &path).unwrap();
+
+        assert!(path.exists(), "config file should have been created");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("model:"));
+    }
 }
