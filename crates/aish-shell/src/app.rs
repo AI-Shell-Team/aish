@@ -797,6 +797,9 @@ impl AishShell {
                                 content: s.content.clone(),
                                 description: s.metadata.description.clone(),
                                 base_dir: s.base_dir.clone(),
+                                context: s.metadata.context,
+                                agent: s.metadata.agent.clone(),
+                                allowed_tools: s.metadata.allowed_tools.clone(),
                             },
                         )
                     })
@@ -5585,6 +5588,9 @@ impl AishShell {
                                 content: s.content.clone(),
                                 description: s.metadata.description.clone(),
                                 base_dir: s.base_dir.clone(),
+                                context: s.metadata.context,
+                                agent: s.metadata.agent.clone(),
+                                allowed_tools: s.metadata.allowed_tools.clone(),
                             },
                         )
                     })
@@ -5651,7 +5657,7 @@ impl AishShell {
                 system_msg_with_dossier.push_str(&format!(
                     "\n\n**SSH Remote Session Context (overrides tool list above):** \
                      \n- The user is connected to a remote host **{host}** via SSH. \
-                     \n- **Available tools:** `bash`, `ask_user`, `host_note`, `read_file`, and `skill`. \
+                     \n- **Available tools:** `bash`, `ask_user`, `host_note`, `read_file`, `skill`, and `Agent`. \
                      \n- **DO NOT** call python_exec, write_file, edit_file, \
                      grep, glob, or any other tool — they do NOT exist in this session. \
                      \n- `bash` tool runs commands on the remote host. The command will be \
@@ -5672,6 +5678,8 @@ impl AishShell {
                      \n- `skill` tool invokes a loaded skill plugin by name (use `skill_name` parameter). \
                      Do NOT use 'list' as a skill name — list the skills below instead. \
                      When the user's request matches a skill, invoke it BEFORE generating any other response. \
+                     Skills configured with `context: subagent` run in an isolated sub-agent automatically. \
+                     Use `Agent(subagent_type=troubleshoot)` for open-ended remote system diagnosis when no more specific skill applies. \
                      \n- **Available skills:**\n{ssh_skills_description} \
                      \n- **For reading/writing/searching files on the REMOTE host:** use `bash` tool with \
                      `cat`, `head`, `tail`, `echo`, `tee`, `grep`, `find`, `awk`, etc. \
@@ -6104,6 +6112,7 @@ impl AishShell {
                         let list = Box::new(move || names.clone());
                         session.register_tool(Box::new(aish_tools::SkillTool::new(lookup, list)));
                     }
+                    session.register_tool(Box::new(aish_tools::AgentTool::new()));
 
                     let user_msg_t = ChatMessage::user(&context_for_thread);
                     session

@@ -161,5 +161,5 @@ pub use plan_tool::{EnterPlanModeTool, ExitPlanModeTool, ListTemplatesTool};
 pub use python::PythonTool;
 pub use registry::ToolRegistry;
 pub use secure_bash::SecureBashTool;
-pub use skill_tool::{SkillInfo, SkillTool};
+pub use skill_tool::{SkillInfo, SkillSpawnFn, SkillSpawnRequest, SkillTool};
 pub use web_fetch::WebFetchTool;

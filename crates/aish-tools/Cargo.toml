@@ -9,6 +9,7 @@ aish-i18n.workspace = true
 aish-llm.workspace = true
 aish-pty.workspace = true
 aish-security.workspace = true
+aish-skills.workspace = true
 aish-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

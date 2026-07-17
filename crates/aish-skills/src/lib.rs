@@ -19,4 +19,4 @@ pub mod models;
 pub mod validator;
 
 pub use manager::SkillManager;
-pub use models::{Skill, SkillList, SkillMetadata};
+pub use models::{Skill, SkillExecutionContext, SkillList, SkillMetadata};

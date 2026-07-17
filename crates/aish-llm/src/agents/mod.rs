@@ -19,8 +19,8 @@ pub use outcome::{
 };
 pub use registry::{AgentDefinition, AgentRegistry, ToolStrategy};
 pub use spawn::{
-    effective_max_turns, spawn, spawn_builtin, spawn_definition, SpawnConfig, SpawnResult,
-    GLOBAL_MAX_TURNS,
+    effective_max_turns, spawn, spawn_builtin, spawn_definition, spawn_request, SpawnConfig,
+    SpawnLabels, SpawnRequest, SpawnResult, GLOBAL_MAX_TURNS,
 };
 pub use tool_loop::{run_tool_loop_until_done, LoopOutcome, LoopStatus, ToolLoopConfig};
 pub use tools::{parent_has_skill_tool, resolve_tool_names_for_agent, resolve_tools_for_agent};
