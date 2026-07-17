@@ -423,7 +423,6 @@ pub fn build_default_provider(
 }
 
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use aish_config::InlineCompletionConfig;
@@ -432,12 +431,12 @@ use aish_llm::CancellationToken;
 use crate::autosuggest::AutoSuggest;
 use crate::input::extract_ai_question;
 
-/// Single-cell spinner that replaces the `<aish>` mode badge in the prompt
-/// while an inline-completion LLM call is in flight.
+/// Single-cell spinner that replaces the `◆` icon in the `◆ aish` mode badge
+/// while an inline-completion LLM call is in flight. `aish` stays visible.
 ///
-/// Each frame is `<` + 4 chars + `>` (6 cols) — a dot bouncing through 4
-/// positions inside the angle brackets. The width matches `<aish>` exactly
-/// so the rest of the prompt never shifts.
+/// Each frame is a Braille spinner glyph + space + `aish` (6 cols),
+/// cycling through the 8-frame `theme::SPINNER_STATUS` Braille pattern. The
+/// width matches `◆ aish` exactly so the rest of the prompt never shifts.
 ///
 /// Writes go directly to stderr via `\x1b7` (save cursor) + optional
 /// `\x1b[<N>A` (move up N lines, navigating to the prompt line when input
@@ -542,10 +541,10 @@ impl PromptSpinner {
         // wrap" (last column of the current line) or auto-wraps it to the
         // next line — and we cannot tell which from width alone. Guessing
         // wrong makes lines_up off-by-one, so the animation (and the
-        // stop() restore that writes <aish>) lands on the wrong row,
+        // stop() restore that writes ◆ aish) lands on the wrong row,
         // overwriting the wrapped input instead of the prompt badge.
         // Skipping start() also makes stop() a no-op (no token set), so
-        // the prompt's original <aish> stays untouched. The ghost text
+        // the prompt's original ◆ aish stays untouched. The ghost text
         // still renders normally — only the spinner animation is skipped.
         let cols = self.terminal_cols.load(Ordering::SeqCst);
         let total = self.prompt_width.load(Ordering::SeqCst)
@@ -564,7 +563,7 @@ impl PromptSpinner {
 
         let me = self.clone();
         let handle = runtime.spawn(async move {
-            let frames = bounce_frames();
+            let frames = spinner_frames();
             let mut idx = 0usize;
             loop {
                 if tok.is_cancelled() {
@@ -585,7 +584,7 @@ impl PromptSpinner {
                 }
                 idx = idx.wrapping_add(1);
                 let mut elapsed_ms: u64 = 0;
-                while elapsed_ms < 120 {
+                while elapsed_ms < 80 {
                     if tok.is_cancelled() {
                         return;
                     }
@@ -608,7 +607,8 @@ impl PromptSpinner {
         self.handle.lock().unwrap().take();
         let up = Self::up_prefix(self.lines_up());
         let mut stderr = std::io::stderr().lock();
-        let _ = write!(stderr, "\x1b7{}\x1b[1G\x1b[35m<aish>\x1b[0m\x1b8", up);
+        let badge = crate::theme::accent(&format!("{} aish", crate::theme::MODE_ICON));
+        let _ = write!(stderr, "\x1b7{}\x1b[1G{}\x1b8", up, badge);
     }
 
     /// Cancel current task without writing restore (used internally by
@@ -622,31 +622,29 @@ impl PromptSpinner {
     }
 }
 
-/// Bouncing-dot frame sequence: `<•   >` → `<   •>` → back. 6 frames
-/// per cycle (forward 4 + reverse 2, excluding endpoints to avoid dup).
-/// Each frame is exactly 6 visible cols: `<` + 4 chars + `>`, matching
-/// `<aish>` width.
-fn bounce_frames() -> &'static [String] {
-    static FRAMES: OnceLock<Vec<String>> = OnceLock::new();
-    FRAMES.get_or_init(|| {
-        let positions: [usize; 6] = [0, 1, 2, 3, 2, 1];
-        positions
+/// Spinner frame sequence using Braille glyphs from `theme::SPINNER_STATUS`
+/// (the 8-frame "⣾⣽⣻⢿⡿⣟⣯⣷" cycle). The spinner glyph replaces only the `◆`
+/// icon while `aish` stays visible.
+///
+/// The `◆` badge glyph (U+25C6) is East-Asian-Width Ambiguous — it occupies
+/// 2 columns in CJK locales but 1 elsewhere — while Braille spinner glyphs are
+/// Neutral (always 1 column). Each frame pads the spinner glyph so its visible
+/// width matches the badge in every locale, keeping `aish` aligned and avoiding
+/// a stale trailing cell during the animation.
+fn spinner_frames() -> &'static [String] {
+    static FRAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        let icon_w =
+            crate::prompt::term_char_width(crate::theme::MODE_ICON.chars().next().unwrap_or('◆'));
+        crate::theme::SPINNER_STATUS
             .iter()
-            .map(|&pos| {
-                let mut f = String::with_capacity(24);
-                f.push_str("\x1b[35m<");
-                for i in 0..4usize {
-                    if i == pos {
-                        f.push('•');
-                    } else {
-                        f.push(' ');
-                    }
-                }
-                f.push_str(">\x1b[0m");
-                f
+            .map(|&ch| {
+                let glyph = ch.chars().next().unwrap_or(' ');
+                let pad = icon_w.saturating_sub(crate::prompt::term_char_width(glyph));
+                crate::theme::accent(&format!("{}{} aish", ch, " ".repeat(pad)))
             })
             .collect()
-    })
+    });
+    &FRAMES
 }
 
 /// RAII guard: stops the spinner on drop. Used in `prefetch()` to guarantee
@@ -751,7 +749,7 @@ impl InlineCompleter {
         // Input changed — any pending hint is now stale.
         state.hint = None;
         // Cancel any in-flight task. Stop the spinner immediately so the
-        // prompt snaps back to `<aish>` on this keypress — the cancelled
+        // prompt snaps back to `◆ aish` on this keypress — the cancelled
         // prefetch task will exit on its own within ~20ms.
         if let Some((_, tok)) = state.pending.take() {
             tok.cancel();
@@ -919,7 +917,7 @@ impl InlineCompleter {
         // DECSC saves the cursor position to navigate back to the prompt
         // badge row. If the restore ran AFTER render_ghost and the ghost
         // wrapped the cursor onto a new line, the saved position would be
-        // wrong and <aish> would land on the wrapped input row. Dropping
+        // wrong and ◆ aish would land on the wrapped input row. Dropping
         // the guard here ensures stop() runs while the cursor is still at
         // the input end. On early-return paths (cancel/timeout/error above)
         // the guard still drops automatically.
@@ -961,9 +959,9 @@ fn render_ghost(suffix: &str) {
     // wraps across lines: the previous approach used \x1b[<N>D to move
     // the cursor back, but that sequence can only move left within the
     // current row. A wrapped ghost stranded the cursor on the wrong line,
-    // which in turn made the spinner's <aish> restore (via SpinnerGuard)
+    // which in turn made the spinner's ◆ aish restore (via SpinnerGuard)
     // write to the wrong row.
-    let _ = write!(stderr, "\x1b7\x1b[K\x1b[38;5;242m{}\x1b[0m\x1b8", suffix);
+    let _ = write!(stderr, "\x1b7\x1b[K{}\x1b8", crate::theme::dim(suffix));
     let _ = stderr.flush();
 }
 

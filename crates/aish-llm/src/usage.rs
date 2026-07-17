@@ -46,6 +46,9 @@ pub struct TokenStats {
     pub total_input: u64,
     pub total_output: u64,
     pub request_count: u64,
+    /// Prompt tokens from the most recent API call — the actual context
+    /// window consumption at the current conversation depth.
+    pub last_prompt_tokens: u64,
 }
 
 impl TokenStats {
@@ -53,6 +56,7 @@ impl TokenStats {
     pub fn record(&mut self, usage: TokenUsage) {
         self.total_input += usage.prompt_tokens;
         self.total_output += usage.completion_tokens;
+        self.last_prompt_tokens = usage.prompt_tokens;
         self.request_count += 1;
     }
 

@@ -385,7 +385,7 @@ fn resolve_text_answer(
 }
 
 fn print_validation_error(error: &TextValidationError) {
-    println!("\x1b[31m{}\x1b[0m", error.message());
+    println!("{}", crate::theme::error(&error.message()));
 }
 
 #[cfg(test)]

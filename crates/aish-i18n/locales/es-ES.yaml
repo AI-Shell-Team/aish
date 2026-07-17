@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Comprobar la configuración de Langfuse"
   setup_command_help: "Ejecutar la configuración interactiva y salir"
   check_tool_support_command_help: "Depurar la comprobación en vivo de soporte de llamadas a herramientas"
+  detach_hint: "Sesión desconectada. Ejecuta `aish -c` para reconectar."
   resume_failed: "No se pudo reanudar la sesión: {error}"
 
   option:
@@ -234,6 +235,7 @@ shell:
     choice_prompt: "Tu elección (predeterminado: n): "
 
   exit_goodbye: "Saliendo del shell. ¡Adiós!"
+  exit_daemon_hint: "※ Consejo: Pulsa Ctrl+Q para desconectar (sesión activa), luego aish -c para reconectar"
   command_cancelled: "Comando cancelado"
   error_correction:
     press_semicolon_hint: "La ejecución del comando falló. ; para corrección rápida o /diagnose para diagnóstico."
@@ -309,7 +311,7 @@ shell:
     iteration_limit_title: "⏸ Límite de llamadas a herramientas alcanzado"
     iteration_continue_prompt: "¿Continuar? [Y/n]"
   resume:
-    exit_command: "Reanudar con: aish resume {session_id}"
+    exit_command: "Reanudar contexto de IA: aish resume {session_id}"
     usage: "Uso: /resume [session_id]"
     session_store_unavailable: "El almacén de sesiones no está disponible."
     no_sessions: "No se encontraron sesiones anteriores."
@@ -331,11 +333,22 @@ shell:
     none_active: "No hay sesiones PTY activas."
     panel_title: "Sesiones PTY Activas"
     search_placeholder: "Buscar..."
-    panel_footer: "↑/↓ navegar · Enter seleccionar · Esc cancelar"
+    panel_footer: "↑/↓ navegar · Enter seleccionar · Ctrl+E renombrar · Esc cancelar"
     create_new: "Crear nueva sesion"
     already_current: "Ya en esta sesion."
     started_label: "iniciado: {age}"
     current_tag: "[actual]"
+    rename_title: "Renombrar sesion {id}"
+    rename_current_none: "Nombre actual: (ninguno)"
+    rename_current_set: "Nombre actual: {name}"
+    rename_input_label: "Ingrese nuevo nombre (vacio para borrar)"
+    rename_input_footer: "Escriba un nombre | Enter guardar | Esc cancelar"
+    rename_done: "Sesion {id} renombrada → \"{name}\""
+    rename_cleared: "Nombre borrado para la sesion {id}"
+    rename_failed: "Error al renombrar: {err}"
+    exit_no_note_title: "¿Añadir una nota antes de desconectar?"
+    exit_no_note_hint: "Esta sesion no tiene nota — las sesiones sin nombre son dificiles de distinguir tras desconectar."
+    exit_no_note_footer: "Enter guardar y desconectar · Esc desconectar sin nombre"
 
   kill_live_sessions:
     daemon_disabled: "Demonio PTY deshabilitado. Habilitar en config.yaml:"
@@ -512,6 +525,11 @@ help:
       - Prioridad: argumentos CLI > variables de entorno (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > archivo de config
       - Ejecuta `/setup` o `aish setup` para configuración interactiva
 
+      ## Gestión de sesiones
+      - `aish -c` — conectar a una sesión activa (o elegir de una lista)
+      - `Ctrl+Q` — desconectar la sesión actual (sigue en segundo plano); reconectar con `aish -c`
+      - `Ctrl+E` — renombrar la sesión seleccionada en el selector
+
       ## Atajos de teclado
       | Tecla | Acción |
       |-------|--------|
@@ -519,6 +537,8 @@ help:
       | `Ctrl+D` | Salir del shell |
       | `Shift+Tab` / `F2` | Alternar modo plan |
       | `Ctrl+O` | Navegar historial de salida |
+      | `Ctrl+Q` | Desconectar sesión (reconectar con `aish -c`) |
+      | `Ctrl+E` | Renombrar sesión (en selector) |
       | `/` en línea vacía | Selector de comandos slash |
 
       ## Páginas de ayuda
@@ -700,6 +720,13 @@ help:
         | `Ctrl+D` | Salir del shell |
         | `Ctrl+O` | Explorar historial de salida |
         | `Esc` | Cancelar entrada actual |
+
+        ## Gestión de sesiones
+
+        | Tecla | Acción |
+        |-------|--------|
+        | `Ctrl+Q` | Desconectar sesión (sigue activa; reconectar con `aish -c`) |
+        | `Ctrl+E` | Renombrar sesión seleccionada (en selector) |
 
         ## Cambio de modo
 

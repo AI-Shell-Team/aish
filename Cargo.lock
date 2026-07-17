@@ -262,6 +262,7 @@ dependencies = [
  "libc",
  "nix 0.29.0",
  "open",
+ "parking_lot",
  "ratatui",
  "regex",
  "reqwest",

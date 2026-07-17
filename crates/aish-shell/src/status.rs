@@ -8,6 +8,8 @@ mod system_info;
 
 use std::sync::Mutex;
 
+use crate::theme;
+
 /// System information collected via sysinfo crate.
 struct SystemInfo {
     hostname: String,
@@ -152,9 +154,9 @@ fn render(
                 .iter()
                 .map(|s| {
                     if s.active {
-                        format!("\x1b[32m{}\u{25cf}\x1b[0m", s.name)
+                        theme::success(&format!("{} {}", s.name, theme::ICON_SUCCESS))
                     } else {
-                        format!("\x1b[2m{}\u{25cb}\x1b[0m", s.name)
+                        theme::faint(&format!("{} {}", s.name, theme::ICON_DONE))
                     }
                 })
                 .collect();
@@ -171,11 +173,11 @@ fn render(
     let total = lines.len();
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
-            println!("\u{250c}\u{2500} {}", line);
+            println!("{} {}", theme::TREE_CORNER, line);
         } else if i == total - 1 {
-            println!("\u{2514}\u{2500} {}", line);
+            println!("{} {}", theme::TREE_LAST, line);
         } else {
-            println!("\u{251c}\u{2500} {}", line);
+            println!("{} {}", theme::TREE_BRANCH, line);
         }
     }
 }
@@ -247,9 +249,9 @@ fn render_to_string(
                 .iter()
                 .map(|(name, active)| {
                     if *active {
-                        format!("\x1b[32m{}\u{25cf}\x1b[0m", name)
+                        theme::success(&format!("{} {}", name, theme::ICON_SUCCESS))
                     } else {
-                        format!("\x1b[2m{}\u{25cb}\x1b[0m", name)
+                        theme::faint(&format!("{} {}", name, theme::ICON_DONE))
                     }
                 })
                 .collect();
@@ -265,11 +267,11 @@ fn render_to_string(
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         if i == 0 {
-            out.push_str(&format!("\u{250c}\u{2500} {}\n", line));
+            out.push_str(&format!("{} {}\n", theme::TREE_CORNER, line));
         } else if i == total - 1 {
-            out.push_str(&format!("\u{2514}\u{2500} {}", line));
+            out.push_str(&format!("{} {}\n", theme::TREE_LAST, line));
         } else {
-            out.push_str(&format!("\u{251c}\u{2500} {}\n", line));
+            out.push_str(&format!("{} {}\n", theme::TREE_BRANCH, line));
         }
     }
     out

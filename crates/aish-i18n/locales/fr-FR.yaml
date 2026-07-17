@@ -6,6 +6,7 @@ cli:
   check_langfuse_command_help: "Verifier la configuration de Langfuse"
   setup_command_help: "Executer la configuration interactive et quitter"
   check_tool_support_command_help: "Depanner la verification en direct de la prise en charge des appels d'outils"
+  detach_hint: "Session détachée. Lancez `aish -c` pour vous reconnecter."
   resume_failed: "Echec de la reprise de session : {error}"
 
   option:
@@ -234,6 +235,7 @@ shell:
     choice_prompt: "Votre choix (par defaut : n) : "
 
   exit_goodbye: "Fermeture du shell. Au revoir !"
+  exit_daemon_hint: "※ Astuce : Ctrl+Q pour détacher (session active), puis aish -c pour se reconnecter"
   command_cancelled: "Commande annulee"
   error_correction:
     press_semicolon_hint: "L'execution de la commande a echoue. ; pour correction rapide ou /diagnose pour diagnostic."
@@ -309,7 +311,7 @@ shell:
     iteration_limit_title: "⏸ Limite d'appels d'outils atteinte"
     iteration_continue_prompt: "Continuer ? [Y/n]"
   resume:
-    exit_command: "Reprendre avec : aish resume {session_id}"
+    exit_command: "Reprendre le contexte IA : aish resume {session_id}"
     usage: "Utilisation : /resume [session_id]"
     session_store_unavailable: "Le stockage des sessions n'est pas disponible."
     no_sessions: "Aucune session precedente trouvee."
@@ -331,11 +333,22 @@ shell:
     none_active: "Aucune session PTY active."
     panel_title: "Sessions PTY Actives"
     search_placeholder: "Rechercher..."
-    panel_footer: "↑/↓ naviguer · Enter selectionner · Esc annuler"
+    panel_footer: "↑/↓ naviguer · Enter selectionner · Ctrl+E renommer · Esc annuler"
     create_new: "Creer une nouvelle session"
     already_current: "Deja dans cette session."
     started_label: "demarre: {age}"
     current_tag: "[actuel]"
+    rename_title: "Renommer la session {id}"
+    rename_current_none: "Nom actuel : (aucun)"
+    rename_current_set: "Nom actuel : {name}"
+    rename_input_label: "Entrez un nouveau nom (vide pour effacer)"
+    rename_input_footer: "Tapez un nom | Enter enregistrer | Esc annuler"
+    rename_done: "Session {id} renommee → \"{name}\""
+    rename_cleared: "Nom efface pour la session {id}"
+    rename_failed: "Echec du renommage : {err}"
+    exit_no_note_title: "Ajouter une note avant de détacher ?"
+    exit_no_note_hint: "Cette session n'a pas de note — les sessions sans nom sont difficiles a distinguer apres déconnexion."
+    exit_no_note_footer: "Enter enregistrer & détacher · Esc détacher sans nommer"
 
   kill_live_sessions:
     daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"
@@ -512,6 +525,11 @@ help:
       - Priorité : arguments CLI > variables d'environnement (`AISH_MODEL`, `AISH_API_KEY`, `AISH_API_BASE`) > fichier de config
       - Exécutez `/setup` ou `aish setup` pour la configuration interactive
 
+      ## Gestion des sessions
+      - `aish -c` — se connecter à une session active (ou choisir dans une liste)
+      - `Ctrl+Q` — détacher la session courante (continue en arrière-plan) ; reconnecter avec `aish -c`
+      - `Ctrl+E` — renommer la session sélectionnée dans le sélecteur
+
       ## Raccourcis clavier
       | Touche | Action |
       |--------|--------|
@@ -519,6 +537,8 @@ help:
       | `Ctrl+D` | Quitter le shell |
       | `Shift+Tab` / `F2` | Basculer le mode plan |
       | `Ctrl+O` | Parcourir l'historique de sortie |
+      | `Ctrl+Q` | Détacher la session (reconnecter avec `aish -c`) |
+      | `Ctrl+E` | Renommer la session (dans le sélecteur) |
       | `/` sur ligne vide | Sélecteur de commandes slash |
 
       ## Pages d'aide
@@ -700,6 +720,13 @@ help:
         | `Ctrl+D` | Quitter le shell |
         | `Ctrl+O` | Parcourir l'historique de sortie |
         | `Échap` | Annuler la saisie en cours |
+
+        ## Gestion des sessions
+
+        | Touche | Action |
+        |--------|--------|
+        | `Ctrl+Q` | Détacher la session (reste active ; reconnecter avec `aish -c`) |
+        | `Ctrl+E` | Renommer la session sélectionnée (dans le sélecteur) |
 
         ## Changement de mode
 

@@ -31,6 +31,7 @@ use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
 use crate::resume_selector::{select_resume_session, ResumeSessionItem};
+use crate::theme;
 use crate::types::ShellState;
 
 /// Format prompt + command as displayed after Enter (without trailing newline).
@@ -71,8 +72,6 @@ async fn poll_cancelled(token: *const CancellationToken) {
     }
 }
 
-/// Braille spinner frames used in the reasoning overlay.
-const DOTS_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"];
 const RESUME_LIST_LIMIT: usize = 20;
 
 const SSH_CONTEXT_CAP: usize = 40;
@@ -456,7 +455,7 @@ impl AishShell {
     /// Display a yellow InputGuard warning and ask y/N confirmation.
     /// Returns `true` if the user explicitly confirms (y/yes).
     fn confirm_action(reason: &str, prompt_label: &str) -> bool {
-        eprintln!("\x1b[33m{}\x1b[0m", reason);
+        eprintln!("{}", theme::warning(reason));
         print!("{} [y/N] ", prompt_label);
         let _ = std::io::stdout().flush();
 
@@ -523,7 +522,7 @@ impl AishShell {
         let verdict = self.input_guard.check(input, context);
         match &verdict {
             aish_security::input_guard::InputVerdict::Block { .. } => {
-                eprintln!("\x1b[31m{}\x1b[0m", verdict.format_display());
+                eprintln!("{}", theme::error(&verdict.format_display()));
                 if record_on_block {
                     self.record_history(input, 1);
                 }
@@ -591,7 +590,7 @@ impl AishShell {
         match choice {
             crate::tui::SecretDialogChoice::Abort => {
                 let aborted = t("shell.security.secret.aborted");
-                println!("\x1b[33m{}\x1b[0m", aborted);
+                println!("{}", theme::warning(&aborted));
                 false
             }
             crate::tui::SecretDialogChoice::Redact => {
@@ -601,7 +600,7 @@ impl AishShell {
                     let mut rargs = std::collections::HashMap::new();
                     rargs.insert("count".to_string(), count.to_string());
                     let msg = t_with_args("shell.security.secret.redacted", &rargs);
-                    println!("\x1b[33m{}\x1b[0m", msg);
+                    println!("{}", theme::warning(&msg));
                     *question = redacted;
                 }
                 true
@@ -918,6 +917,11 @@ impl AishShell {
         // Shared history of collapsed bash outputs for Ctrl+O browsing.
         let expand_history = Arc::new(Mutex::new(crate::expand_history::ExpandHistory::new()));
         let expand_history_ref = expand_history.clone();
+        // Snapshot of (file_path, old_content) captured at ToolExecutionStart
+        // for write_file/edit_file, used to render a colored diff at end.
+        let file_edit_snapshot: Arc<parking_lot::Mutex<Option<(String, String)>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let file_edit_snapshot_ref = file_edit_snapshot.clone();
 
         // Set global Ctrl+O live handler for bash output viewing during
         // PTY command execution.
@@ -1015,8 +1019,11 @@ impl AishShell {
                             let mut ttft_args = std::collections::HashMap::new();
                             ttft_args.insert("time".to_string(), format!("{:.1}", ttft));
                             println!(
-                                "\x1b[2m{}\x1b[0m",
-                                aish_i18n::t_with_args("shell.thinking_time", &ttft_args)
+                                "{}",
+                                theme::faint(&aish_i18n::t_with_args(
+                                    "shell.thinking_time",
+                                    &ttft_args
+                                ))
                             );
                         }
                         *thinking_start_ref.lock().unwrap() = None;
@@ -1031,7 +1038,7 @@ impl AishShell {
                         animation_ref.stop();
                         if !compaction_notice_shown_ref.swap(true, Ordering::SeqCst) {
                             if let Some(message) = context_compaction_notice(&event) {
-                                println!("\x1b[2m{}\x1b[0m", message);
+                                println!("{}", theme::faint(&message));
                             }
                         }
                     }
@@ -1098,11 +1105,12 @@ impl AishShell {
                                 if !content_started_flag.load(Ordering::SeqCst) {
                                     content_started_flag.store(true, Ordering::SeqCst);
                                     renderer_ref.lock().unwrap().render_separator();
+                                    let ai_prefix = theme::muted("🤖 ");
                                     crate::recorder::shared_record_output(
                                         &shared_recorder_cb,
-                                        "\x1b[1;90m🤖 ",
+                                        &ai_prefix,
                                     );
-                                    print!("\x1b[1;90m🤖 ");
+                                    print!("{}", ai_prefix);
                                 }
                                 // Accumulate delta and print raw text
                                 renderer_ref.lock().unwrap().append_delta(delta);
@@ -1143,7 +1151,11 @@ impl AishShell {
                                     .saturating_sub(4);
 
                                 let frame = reasoning_frame_ref.fetch_add(1, Ordering::SeqCst);
-                                let spinner = DOTS_FRAMES[frame % DOTS_FRAMES.len()];
+                                let spinner = crate::theme::spinner_frame(
+                                    crate::theme::SPINNER_STATUS,
+                                    frame,
+                                );
+                                let spinner = crate::theme::accent(spinner);
 
                                 // Elapsed time for header
                                 let elapsed_str = thinking_start_ref
@@ -1179,18 +1191,15 @@ impl AishShell {
 
                                 // Header line
                                 if display_lines.is_empty() {
-                                    print!(
-                                        "\r\x1b[K\x1b[90m{}{}...\x1b[0m\n",
-                                        spinner, elapsed_str
-                                    );
+                                    print!("\r\x1b[K{}{}...\n", spinner, elapsed_str);
                                 } else {
-                                    print!("\r\x1b[K\x1b[90m{}{}\x1b[0m\n", spinner, elapsed_str);
+                                    print!("\r\x1b[K{}{}\n", spinner, elapsed_str);
                                 }
 
                                 // Content lines
                                 for line in &display_lines {
                                     let truncated = truncate_display_width(line.trim(), max_cols);
-                                    print!("\r\x1b[K\x1b[90m{}\x1b[0m\n", truncated);
+                                    print!("\r\x1b[K{}\n", crate::theme::muted(&truncated));
                                 }
 
                                 // Clear leftover lines from previous larger display
@@ -1237,6 +1246,31 @@ impl AishShell {
                                 .get("tool_args")
                                 .map(|a| format_tool_args_for_display(name, a))
                                 .unwrap_or_default();
+                            // Snapshot old file content for write_file/edit_file
+                            // so we can render a colored diff at ToolExecutionEnd.
+                            if name == "write_file" || name == "edit_file" {
+                                let path = event
+                                    .data
+                                    .get("tool_args")
+                                    .and_then(|a| a.get("path"))
+                                    .and_then(|p| p.as_str());
+                                // Always reset the snapshot slot: Some on
+                                // success / new-file, None on failure or when
+                                // the tool call lacks a path argument.
+                                *file_edit_snapshot_ref.lock() = match path {
+                                    Some(path) => match std::fs::read_to_string(path) {
+                                        Ok(c) if c.len() <= 64 * 1024 => {
+                                            Some((path.to_string(), c))
+                                        }
+                                        Ok(_) => None,
+                                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                            Some((path.to_string(), String::new()))
+                                        }
+                                        Err(_) => None,
+                                    },
+                                    None => None,
+                                };
+                            }
                             // Ensure we're on a fresh line after content streaming
                             if content_started_flag.load(Ordering::SeqCst) {
                                 println!();
@@ -1250,10 +1284,11 @@ impl AishShell {
                                     )
                                 } else {
                                     format!(
-                                        "\x1b[36m{}: {} ({})\x1b[0m",
-                                        t("shell.tool.prefix"),
-                                        name,
-                                        args_preview
+                                        "{} {} {} {}",
+                                        theme::dim(theme::TOOL_BOX_TOP),
+                                        theme::accent(theme::TOOL_PREFIX),
+                                        theme::accent(name),
+                                        theme::muted(&format!("({})", args_preview))
                                     )
                                 };
                             crate::recorder::shared_record_output(
@@ -1262,12 +1297,38 @@ impl AishShell {
                             );
                             println!("{}", tool_line);
                             let _ = io::stdout().flush();
+                            // Start progress spinner for non-interactive tools.
+                            // Skip animation when the tool needs interactive
+                            // terminal input (sudo password, ssh, TUI apps) —
+                            // the spinner's \r\x1b[K would erase the prompt.
+                            let is_interactive_tool = matches!(name, "ask_user" | "resolve");
+                            let bash_needs_tty = name == "bash"
+                                && event
+                                    .data
+                                    .get("tool_args")
+                                    .and_then(|a| a.get("command"))
+                                    .and_then(|c| c.as_str())
+                                    .is_some_and(aish_tools::bash::command_needs_interactive);
+                            if crate::llm_event_ui::sub_agent_context(&event).is_none()
+                                && !react_agent_llm_event(&event)
+                                && !is_interactive_tool
+                                && !bash_needs_tty
+                            {
+                                animation_ref.start(&theme::tool_status_label(name));
+                            }
                         }
                     }
                     LlmEventType::ToolExecutionEnd => {
                         if crate::llm_event_ui::is_parent_agent_spawn_tool_event(&event) {
                             sub_agent_ui_active_ref.store(false, Ordering::SeqCst);
                         }
+                        // Stop progress spinner started at ToolExecutionStart.
+                        animation_ref.stop();
+                        let tool_ok = event
+                            .data
+                            .get("ok")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(true);
                         if let Some(preview) =
                             event.data.get("output_preview").and_then(|p| p.as_str())
                         {
@@ -1297,13 +1358,23 @@ impl AishShell {
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or_else(|| content.lines().count() as u64)
                                         as usize;
+                                    let rail = theme::dim(theme::TOOL_BOX_MID);
                                     let collapsed = collapse_display_lines(&content, 2);
-                                    let mut preview_ansi = format!("\x1b[2m{}\x1b[0m", collapsed);
+                                    let mut preview_ansi = collapsed
+                                        .lines()
+                                        .map(|l| format!("{}   {}", rail, theme::dim(l)))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
                                     if total_lines > 2 {
                                         let hidden = total_lines - 2;
+                                        let ctrl_o = theme::bold(&theme::accent("Ctrl+O"));
                                         preview_ansi.push_str(&format!(
-                                            "\x1b[2m\n  ... {} lines hidden ─── \x1b[1;36mCtrl+O\x1b[0m\x1b[2m to expand ...\x1b[0m",
-                                            hidden
+                                            "\n{}   {}{} lines hidden ─── {}{}",
+                                            rail,
+                                            theme::dim("... "),
+                                            hidden,
+                                            ctrl_o,
+                                            theme::dim(" to expand ...")
                                         ));
                                     }
                                     preview_ansi.push('\n');
@@ -1347,6 +1418,60 @@ impl AishShell {
                                 }
                             }
                         }
+                        // Render colored diff for write_file/edit_file tools.
+                        // Only consume the snapshot when this End event matches
+                        // a write_file/edit_file call — otherwise leave it for
+                        // the paired End event of the tool that stored it.
+                        let end_tool = event
+                            .data
+                            .get("tool_name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("");
+                        if end_tool == "write_file" || end_tool == "edit_file" {
+                            let diff_snapshot = file_edit_snapshot_ref.lock().take();
+                            if let Some((path, old_content)) = diff_snapshot {
+                                if let Ok(new_content) = std::fs::read_to_string(&path) {
+                                    if new_content.len() <= 64 * 1024 {
+                                        let diff =
+                                            theme::render_diff(&old_content, &new_content, 20);
+                                        if !diff.is_empty() {
+                                            let rail = theme::dim(theme::TOOL_BOX_MID);
+                                            let diff_ansi: String = diff
+                                                .lines()
+                                                .map(|l| format!("{}   {}", rail, l))
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            println!("{}", diff_ansi);
+                                            let _ = io::stdout().flush();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Always print completion indicator with box bottom corner.
+                        {
+                            let status_line = if tool_ok {
+                                format!(
+                                    "{} {} {}",
+                                    theme::dim(theme::TOOL_BOX_BOT),
+                                    theme::success(theme::ICON_SUCCESS),
+                                    theme::dim("done")
+                                )
+                            } else {
+                                format!(
+                                    "{} {} {}",
+                                    theme::dim(theme::TOOL_BOX_BOT),
+                                    theme::error(theme::ICON_ERROR),
+                                    theme::dim("failed")
+                                )
+                            };
+                            crate::recorder::shared_record_output(
+                                &shared_recorder_cb,
+                                &format!("{}\n", status_line),
+                            );
+                            println!("{}", status_line);
+                            let _ = io::stdout().flush();
+                        }
                     }
                     LlmEventType::Error => {
                         sub_agent_animation_ref.stop();
@@ -1363,7 +1488,7 @@ impl AishShell {
                             args.insert("error".to_string(), error_msg.to_string());
                             t_with_args("shell.error.llm_error_message", &args)
                         };
-                        eprintln!("\x1b[31m{}\x1b[0m", msg);
+                        eprintln!("{}", theme::error(&msg));
                     }
                     LlmEventType::Cancelled => {
                         sub_agent_animation_ref.stop();
@@ -1381,7 +1506,7 @@ impl AishShell {
                             .and_then(|p| p.as_str())
                             .unwrap_or("");
                         if !prompt_text.is_empty() {
-                            println!("\x1b[36m{}\x1b[0m", prompt_text);
+                            println!("{}", theme::accent(prompt_text));
                         }
                     }
                 }
@@ -1401,24 +1526,21 @@ impl AishShell {
             let inner_width = width.saturating_sub(4).max(20);
             let border = "─".repeat(inner_width);
             println!();
-            println!("\x1b[33m╭{}╮\x1b[0m", border);
-            print_panel_line(
-                "\x1b[1;33m ⚠  Security Confirmation Required\x1b[0m",
-                inner_width,
-            );
+            println!("{}", theme::warning(&format!("╭{}╮", border)));
+            let sec_title = theme::bold(&theme::warning(" ⚠  Security Confirmation Required"));
+            print_panel_line(&sec_title, inner_width);
             print_panel_line("", inner_width);
+            let tool_label = theme::bold(&theme::accent(&t("shell.confirm_dialog_tool")));
             print_panel_line(
-                &format!(
-                    "  \x1b[1;36m{}\x1b[0m   {}",
-                    t("shell.confirm_dialog_tool"),
-                    ctx.tool_name
-                ),
+                &format!("  {}   {}", tool_label, ctx.tool_name),
                 inner_width,
             );
             let reason_lines = wrap_text(&ctx.message, width.saturating_sub(14));
+            let reason_label = theme::bold(&theme::accent("Reason:"));
             print_panel_line(
                 &format!(
-                    "  \x1b[1;36mReason:\x1b[0m {}",
+                    "  {} {}",
+                    reason_label,
                     reason_lines.lines().next().unwrap_or("")
                 ),
                 inner_width,
@@ -1428,10 +1550,10 @@ impl AishShell {
             }
             print_panel_line("", inner_width);
             print_panel_line(
-                &format!("  \x1b[36m{}\x1b[0m", t("shell.confirm_dialog_question")),
+                &format!("  {}", theme::accent(&t("shell.confirm_dialog_question"))),
                 inner_width,
             );
-            println!("\x1b[33m╰{}╯\x1b[0m", border);
+            println!("{}", theme::warning(&format!("╰{}╯", border)));
             print!("  ");
             let _ = std::io::stdout().flush();
 
@@ -1463,14 +1585,11 @@ impl AishShell {
                 let inner_width = width.saturating_sub(4).max(20);
                 let border = "─".repeat(inner_width);
                 println!();
-                println!("\x1b[33m╭{}╮\x1b[0m", border);
-                print_panel_line(
-                    &format!(
-                        "\x1b[1;33m {}\x1b[0m",
-                        aish_i18n::t("shell.session.iteration_limit_title")
-                    ),
-                    inner_width,
-                );
+                println!("{}", theme::warning(&format!("╭{}╮", border)));
+                let iter_title = theme::bold(&theme::warning(&aish_i18n::t(
+                    "shell.session.iteration_limit_title",
+                )));
+                print_panel_line(&format!(" {}", iter_title), inner_width);
                 print_panel_line("", inner_width);
                 print_panel_line(
                     &format!(
@@ -1486,12 +1605,12 @@ impl AishShell {
                 print_panel_line("", inner_width);
                 print_panel_line(
                     &format!(
-                        "  \x1b[36m{}\x1b[0m",
-                        aish_i18n::t("shell.session.iteration_continue_prompt")
+                        "  {}",
+                        theme::accent(&aish_i18n::t("shell.session.iteration_continue_prompt"))
                     ),
                     inner_width,
                 );
-                println!("\x1b[33m╰{}╯\x1b[0m", border);
+                println!("{}", theme::warning(&format!("╰{}╯", border)));
                 print!("  ");
                 let _ = std::io::stdout().flush();
 
@@ -1787,11 +1906,14 @@ impl AishShell {
                         let new_phase = self.ai_handler.toggle_plan_mode(&self.session_uuid);
                         match new_phase {
                             aish_core::PlanPhase::Planning => {
-                                println!("\x1b[1;33m{}\x1b[0m", t("shell.plan_mode_enabled"));
-                                println!("\x1b[2m{}\x1b[0m", t("shell.plan_mode_hint"));
+                                println!(
+                                    "{}",
+                                    theme::bold(&theme::warning(&t("shell.plan_mode_enabled")))
+                                );
+                                println!("{}", theme::faint(&t("shell.plan_mode_hint")));
                             }
                             aish_core::PlanPhase::Normal => {
-                                println!("\x1b[33m{}\x1b[0m", t("shell.plan_mode_disabled"));
+                                println!("{}", theme::warning(&t("shell.plan_mode_disabled")));
                             }
                         }
                         continue;
@@ -1890,9 +2012,9 @@ impl AishShell {
                                         Some(corrected) => {
                                             // Display corrected command and description
                                             let corrected_line = format!(
-                                                "{} \x1b[1;36m{}\x1b[0m",
+                                                "{} {}",
                                                 t("shell.error_correction.corrected_command_title"),
-                                                corrected
+                                                theme::accent(&theme::bold(corrected))
                                             );
                                             println!("{}", corrected_line);
                                             crate::recorder::shared_record_output(
@@ -1910,9 +2032,9 @@ impl AishShell {
                                             }
                                             // Ask user confirmation: Y/n
                                             let prompt = format!(
-                                                "{}\x1b[1;36m{}\x1b[0m{}",
+                                                "{}{}{}",
                                                 t("shell.error_correction.confirm_execute_prefix"),
-                                                corrected,
+                                                theme::accent(&theme::bold(corrected)),
                                                 t("shell.error_correction.confirm_execute_suffix")
                                             );
                                             print!("{}", prompt);
@@ -1945,10 +2067,10 @@ impl AishShell {
                                         }
                                         None => {
                                             // No valid command, show description if available
-                                            let warn_line = format!(
-                                                "\x1b[33m\u{26a0} {}\x1b[0m",
+                                            let warn_line = theme::warning(&format!(
+                                                "\u{26a0} {}",
                                                 t("shell.error_correction.no_valid_command")
-                                            );
+                                            ));
                                             println!("{}", warn_line);
                                             crate::recorder::shared_record_output(
                                                 &self.shared_recorder,
@@ -1969,8 +2091,10 @@ impl AishShell {
                                                 }
                                             }
                                             let hint_line = format!(
-                                                "   \x1b[36m{}\x1b[0m",
-                                                t("shell.error_correction.retry_hint")
+                                                "   {}",
+                                                theme::accent(&t(
+                                                    "shell.error_correction.retry_hint"
+                                                ))
                                             );
                                             println!("{}", hint_line);
                                             crate::recorder::shared_record_output(
@@ -1984,9 +2108,9 @@ impl AishShell {
                                     self.animation.stop();
                                     crate::recorder::shared_record_output(
                                         &self.shared_recorder,
-                                        "\x1b[33mInterrupted\x1b[0m\r\n",
+                                        &format!("{}\r\n", theme::warning("Interrupted")),
                                     );
-                                    println!("\x1b[33mInterrupted\x1b[0m");
+                                    println!("{}", theme::warning("Interrupted"));
                                 }
                                 Err(e) => {
                                     self.animation.stop();
@@ -1996,7 +2120,7 @@ impl AishShell {
                                     if !matches!(e, aish_core::AishError::Llm(_)) {
                                         let msg = t("shell.error.llm_error_message")
                                             .replace("{error}", &e.to_string());
-                                        eprintln!("\x1b[31m{}\x1b[0m", msg);
+                                        eprintln!("{}", theme::error(&msg));
                                     }
                                 }
                             }
@@ -2032,6 +2156,8 @@ impl AishShell {
                         CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
                     let token_ptr =
                         self.ai_handler.cancellation_token() as *const CancellationToken;
+                    let token_stats_before = self.ai_handler.session_token_stats();
+                    let ai_start = std::time::Instant::now();
                     let result = runtime.block_on(async {
                         tokio::select! {
                             r = self.ai_handler.handle_question(&question) => r,
@@ -2040,6 +2166,7 @@ impl AishShell {
                             }
                         }
                     });
+                    let ai_elapsed = ai_start.elapsed().as_secs_f64();
                     esc_watcher.stop();
                     Self::restore_ai_sigint_handler(old_sigint);
                     self.sync_state_from_pty_cwd();
@@ -2052,7 +2179,7 @@ impl AishShell {
                                 // Agent short-circuit cancel returns Ok("") — show the same
                                 // user-facing line as Err(Cancelled). Do not treat as success
                                 // (no plan approval / history-as-ok).
-                                println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                                println!("{}", theme::warning(&t("shell.interrupted")));
                             } else {
                                 if !did_stream && !response.trim().is_empty() {
                                     // Non-streaming fallback: print full response with formatting
@@ -2064,6 +2191,38 @@ impl AishShell {
                                 } else if did_stream {
                                     // Streaming display already handled by event callback
                                     // No additional output needed here.
+                                }
+
+                                // Print response metadata footer (tokens + context usage).
+                                {
+                                    let stats = self.ai_handler.session_token_stats();
+                                    let delta_in = stats
+                                        .total_input
+                                        .saturating_sub(token_stats_before.total_input);
+                                    let delta_out = stats
+                                        .total_output
+                                        .saturating_sub(token_stats_before.total_output);
+                                    let budget = self.ai_handler.context_budget_state();
+                                    let prompt_est = self.ai_handler.last_prompt_estimate();
+                                    let ctx_percent = if budget.effective_context_window > 0 {
+                                        (prompt_est * 100 / budget.effective_context_window as u64)
+                                            .min(100) as u8
+                                    } else {
+                                        0
+                                    };
+                                    let footer = theme::response_footer(
+                                        &self.config.model,
+                                        delta_in,
+                                        delta_out,
+                                        ctx_percent,
+                                        Some(ai_elapsed),
+                                    );
+                                    crate::recorder::shared_record_output(
+                                        &self.shared_recorder,
+                                        &format!("{}\n", footer),
+                                    );
+                                    println!("{}", footer);
+                                    let _ = std::io::stdout().flush();
                                 }
 
                                 self.persist_session_snapshot();
@@ -2103,23 +2262,25 @@ impl AishShell {
                                                     )
                                                 {
                                                     println!(
-                                                        "\x1b[32m{}\x1b[0m",
-                                                        t("shell.plan_approved")
+                                                        "{}",
+                                                        theme::success(&t("shell.plan_approved"))
                                                     );
                                                     println!(
-                                                        "\x1b[2m  {}\x1b[0m",
-                                                        t_with_args(
+                                                        "  {}",
+                                                        theme::faint(&t_with_args(
                                                             "shell.plan_approved_hint",
                                                             &std::collections::HashMap::new()
-                                                        )
+                                                        ))
                                                     );
                                                 }
                                             }
                                             PlanApprovalDecision::ChangesRequested { feedback } => {
                                                 // Keep in planning phase — re-enter plan mode with feedback
                                                 println!(
-                                                    "\x1b[33m{}\x1b[0m",
-                                                    t("shell.plan_changes_requested")
+                                                    "{}",
+                                                    theme::warning(&t(
+                                                        "shell.plan_changes_requested"
+                                                    ))
                                                 );
 
                                                 // Re-enter plan mode to let the AI revise
@@ -2156,19 +2317,23 @@ impl AishShell {
                                                     self.ai_handler
                                                         .add_shell_context(&feedback_msg);
                                                     println!(
-                                                        "\x1b[2m  {}\x1b[0m",
-                                                        t("shell.plan_feedback_sent")
+                                                        "  {}",
+                                                        theme::faint(&t(
+                                                            "shell.plan_feedback_sent"
+                                                        ))
                                                     );
                                                 }
                                             }
                                             PlanApprovalDecision::Cancelled => {
                                                 println!(
-                                                    "\x1b[33m{}\x1b[0m",
-                                                    t("shell.plan_review_cancelled")
+                                                    "{}",
+                                                    theme::warning(&t(
+                                                        "shell.plan_review_cancelled"
+                                                    ))
                                                 );
                                                 println!(
-                                                    "\x1b[2m{}\x1b[0m",
-                                                    t("shell.plan_review_hint")
+                                                    "{}",
+                                                    theme::faint(&t("shell.plan_review_hint"))
                                                 );
                                             }
                                         }
@@ -2180,7 +2345,7 @@ impl AishShell {
                         }
                         Err(aish_core::AishError::Cancelled) => {
                             self.animation.stop();
-                            println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                            println!("{}", theme::warning(&t("shell.interrupted")));
                         }
                         Err(e) => {
                             // Errors are already displayed via the LlmEventType::Error
@@ -2188,7 +2353,7 @@ impl AishShell {
                             if !matches!(e, aish_core::AishError::Llm(_)) {
                                 let msg = t("shell.error.llm_error_message")
                                     .replace("{error}", &e.to_string());
-                                eprintln!("\x1b[31m{}\x1b[0m", msg);
+                                eprintln!("{}", theme::error(&msg));
                             }
                             self.record_history(input, 1);
                         }
@@ -2349,7 +2514,7 @@ impl AishShell {
                                     Ok(response) => {
                                         if self.ai_handler.cancellation_token().is_cancelled() {
                                             // Same as Err(Cancelled): do not persist/history as success.
-                                            println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                                            println!("{}", theme::warning(&t("shell.interrupted")));
                                         } else {
                                             if !did_stream && !response.trim().is_empty() {
                                                 let mut sep_renderer = ShellRenderer::new();
@@ -2369,13 +2534,13 @@ impl AishShell {
                                     }
                                     Err(aish_core::AishError::Cancelled) => {
                                         self.animation.stop();
-                                        println!("\x1b[33m{}\x1b[0m", t("shell.interrupted"));
+                                        println!("{}", theme::warning(&t("shell.interrupted")));
                                     }
                                     Err(e) => {
                                         if !matches!(e, aish_core::AishError::Llm(_)) {
                                             let msg = t("shell.error.llm_error_message")
                                                 .replace("{error}", &e.to_string());
-                                            eprintln!("\x1b[31m{}\x1b[0m", msg);
+                                            eprintln!("{}", theme::error(&msg));
                                         }
                                     }
                                 }
@@ -2423,12 +2588,12 @@ impl AishShell {
                 let _ = rec.flush();
                 *guard = None;
                 println!(
-                    "\x1b[33m{}\x1b[0m",
-                    t_with_args("shell.record.auto_saved", &{
+                    "{}",
+                    theme::warning(&t_with_args("shell.record.auto_saved", &{
                         let mut args = std::collections::HashMap::new();
                         args.insert("path".to_string(), path.display().to_string());
                         args
-                    })
+                    }))
                 );
             }
         }
@@ -2441,6 +2606,13 @@ impl AishShell {
                 args
             })
         );
+        // In daemon mode, remind the user about Ctrl+Q detach + aish -c reconnect.
+        if std::env::var("AISH_DAEMON_MODE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            println!("{}", crate::theme::dim(&t("shell.exit_daemon_hint")));
+        }
 
         drop(rl);
         self.shutdown();
@@ -2524,9 +2696,9 @@ impl AishShell {
         self.state.can_correct_error = exit_code != 0 && exit_code != 130;
         if exit_code != 0 && exit_code != 130 {
             let hint = t("shell.error_correction.press_semicolon_hint");
-            let hint_str = format!("\x1b[2m\x1b[37m<{}>\x1b[0m\n", hint);
+            let hint_str = format!("{}\n", theme::muted(&format!("<{}>", hint)));
             crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
-            eprintln!("\x1b[2m\x1b[37m<{}>\x1b[0m", hint);
+            eprintln!("{}", theme::muted(&format!("<{}>", hint)));
         }
     }
 
@@ -2874,20 +3046,17 @@ impl AishShell {
     }
 
     /// List all live PTY daemon sessions with interactive selection.
+    /// Enter switches/attaches, Ctrl+E renames the highlighted session (then
+    /// re-shows the refreshed list), Esc cancels.
     fn handle_live_sessions_command(&self) {
         use aish_i18n::{t, t_with_args};
 
         if !self.config.pty_daemon_enabled {
             eprintln!(
-                "\x1b[33m{}\x1b[0m",
-                t("shell.live_sessions.daemon_disabled")
+                "{}",
+                theme::warning(&t("shell.live_sessions.daemon_disabled"))
             );
             eprintln!("{}", t("shell.live_sessions.daemon_disabled_hint"));
-            return;
-        }
-        let sessions = aish_pty::discover_sessions();
-        if sessions.is_empty() {
-            println!("{}", t("shell.live_sessions.none_active"));
             return;
         }
 
@@ -2895,92 +3064,186 @@ impl AishShell {
         let home = dirs::home_dir()
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_default();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
 
-        let mut items: Vec<aish_ui::SearchSelectItem> = sessions
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let short = &s.session_id[..8.min(s.session_id.len())];
-                let name = s.name.as_deref().unwrap_or("");
-                let is_current = current_id
-                    .as_ref()
-                    .map(|c| c == &s.session_id || s.session_id.starts_with(c))
-                    .unwrap_or(false);
-                let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
-                    format!("~{}", &s.cwd[home.len()..])
-                } else {
-                    s.cwd.clone()
-                };
-                let age_str = format_age(now.saturating_sub(s.started_at));
-                let detail = if is_current {
-                    format!(
-                        "{} {}",
-                        t_with_args("shell.live_sessions.started_label", &age_args(age_str)),
-                        t("shell.live_sessions.current_tag")
-                    )
-                } else {
-                    t_with_args("shell.live_sessions.started_label", &age_args(age_str))
-                };
-                // Label shows name (if set) or short_id, followed by cwd.
-                let label = if !name.is_empty() {
-                    format!("{} {}", name, cwd_display)
-                } else {
-                    format!("{} {}", short, cwd_display)
-                };
-                // Search text includes name + short_id + cwd so users can
-                // search by any of them.
-                let search_text = format!("{} {} {}", name, short, cwd_display);
-                aish_ui::SearchSelectItem::new(format!("session:{}", i), label)
-                    .with_detail(detail)
-                    .with_search_text(search_text)
-                    .with_badge(if is_current {
-                        "\u{25cf}".to_string()
-                    } else {
-                        "\u{25cb}".to_string()
-                    })
-            })
-            .collect();
-
-        items.push(aish_ui::SearchSelectItem::new(
-            "new",
-            t("shell.live_sessions.create_new").to_string(),
-        ));
-
-        let panel = aish_ui::SearchSelectPanel::new(
-            t("shell.live_sessions.panel_title"),
-            t("shell.live_sessions.search_placeholder"),
-            items,
-        )
-        .with_footer(t("shell.live_sessions.panel_footer"));
-
-        if let Ok(aish_ui::PanelOutcome::Submitted(aish_ui::SearchSelectOutcome::Selected(value))) =
-            aish_ui::PanelRuntime::new().run(panel)
-        {
-            if value == "new" {
-                emit_osc("new");
+        loop {
+            let sessions = aish_pty::discover_sessions();
+            if sessions.is_empty() {
+                println!("{}", t("shell.live_sessions.none_active"));
                 return;
             }
-            if let Some(idx_str) = value.strip_prefix("session:") {
-                if let Ok(idx) = idx_str.parse::<usize>() {
-                    if idx < sessions.len() {
-                        let s = &sessions[idx];
-                        let is_current = current_id
-                            .as_ref()
-                            .map(|c| c == &s.session_id)
-                            .unwrap_or(false);
-                        if is_current {
-                            println!("{}", t("shell.live_sessions.already_current"));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            // Value of the current session's picker row, used to drive the
+            // animated shimmer sweep on that row.
+            let current_value = current_id.as_ref().and_then(|c| {
+                sessions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| c == &s.session_id || s.session_id.starts_with(c))
+                    .map(|(i, _)| format!("session:{i}"))
+            });
+
+            let mut items: Vec<aish_ui::SearchSelectItem> = sessions
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let short = &s.session_id[..8.min(s.session_id.len())];
+                    let name = s.name.as_deref().unwrap_or("");
+                    let is_current = current_id
+                        .as_ref()
+                        .map(|c| c == &s.session_id || s.session_id.starts_with(c))
+                        .unwrap_or(false);
+                    let cwd_display = if !home.is_empty() && s.cwd.starts_with(&home) {
+                        format!("~{}", &s.cwd[home.len()..])
+                    } else {
+                        s.cwd.clone()
+                    };
+                    let age_str = format_age(now.saturating_sub(s.started_at));
+                    let detail = if is_current {
+                        format!(
+                            "{} {}",
+                            t_with_args("shell.live_sessions.started_label", &age_args(age_str)),
+                            t("shell.live_sessions.current_tag")
+                        )
+                    } else {
+                        t_with_args("shell.live_sessions.started_label", &age_args(age_str))
+                    };
+                    // Label is short id + cwd; a custom name (if any) is the
+                    // bold green highlight prefix so it stands out at a glance.
+                    let label = format!("{short} {cwd_display}");
+                    let search_text = format!("{name} {short} {cwd_display}");
+                    let mut item = aish_ui::SearchSelectItem::new(format!("session:{}", i), label)
+                        .with_detail(detail)
+                        .with_search_text(search_text)
+                        .with_badge(if is_current {
+                            "\u{25cf}".to_string()
                         } else {
-                            emit_osc(&format!(
-                                "switch:{}",
-                                &s.session_id[..8.min(s.session_id.len())]
-                            ));
+                            "\u{25cb}".to_string()
+                        })
+                        .with_renamable();
+                    if !name.is_empty() {
+                        item = item.with_highlight(name);
+                    }
+                    item
+                })
+                .collect();
+
+            items.push(aish_ui::SearchSelectItem::new(
+                "new",
+                t("shell.live_sessions.create_new").to_string(),
+            ));
+
+            let panel = aish_ui::SearchSelectPanel::new(
+                t("shell.live_sessions.panel_title"),
+                t("shell.live_sessions.search_placeholder"),
+                items,
+            )
+            .with_footer(t("shell.live_sessions.panel_footer"))
+            .with_shimmer(current_value.as_deref());
+
+            match aish_ui::PanelRuntime::new().run(panel) {
+                Ok(aish_ui::PanelOutcome::Submitted(aish_ui::SearchSelectOutcome::Selected(
+                    value,
+                ))) => {
+                    if value == "new" {
+                        emit_osc("new");
+                        return;
+                    }
+                    if let Some(idx_str) = value.strip_prefix("session:") {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            if idx < sessions.len() {
+                                let s = &sessions[idx];
+                                let is_current = current_id
+                                    .as_ref()
+                                    .map(|c| c == &s.session_id)
+                                    .unwrap_or(false);
+                                if is_current {
+                                    println!("{}", t("shell.live_sessions.already_current"));
+                                } else {
+                                    emit_osc(&format!(
+                                        "switch:{}",
+                                        &s.session_id[..8.min(s.session_id.len())]
+                                    ));
+                                }
+                            }
                         }
                     }
+                    return;
+                }
+                Ok(aish_ui::PanelOutcome::Submitted(aish_ui::SearchSelectOutcome::Rename(
+                    value,
+                ))) => {
+                    if let Some(idx_str) = value.strip_prefix("session:") {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            if idx < sessions.len() {
+                                self.rename_live_session_interactive(&sessions[idx]);
+                            }
+                        }
+                    }
+                    // Refresh so the new name shows up, then re-show the picker.
+                    continue;
+                }
+                _ => return,
+            }
+        }
+    }
+
+    /// Open a text-input panel to rename a live session in place. Used by the
+    /// `/live_sessions` picker (Ctrl+E).
+    fn rename_live_session_interactive(&self, session: &aish_pty::DaemonSessionInfo) {
+        use aish_i18n::{t, t_with_args};
+        use aish_ui::{ChoiceOutcome, ChoicePanel, PanelOutcome, PanelRuntime};
+        use std::collections::HashMap;
+
+        let short = &session.session_id[..8.min(session.session_id.len())];
+        let current = session.name.as_deref().unwrap_or("");
+        let mut id_args = HashMap::new();
+        id_args.insert("id".to_string(), short.to_string());
+
+        let question = if current.is_empty() {
+            t("shell.live_sessions.rename_current_none")
+        } else {
+            let mut a = HashMap::new();
+            a.insert("name".to_string(), current.to_string());
+            t_with_args("shell.live_sessions.rename_current_set", &a)
+        };
+
+        let panel = ChoicePanel::new(
+            t_with_args("shell.live_sessions.rename_title", &id_args),
+            question,
+            Vec::new(),
+        )
+        .with_custom_label(t("shell.live_sessions.rename_input_label"))
+        .with_allow_cancel(true)
+        .with_allow_empty_custom_input(true)
+        .with_footer(t("shell.live_sessions.rename_input_footer"));
+
+        if let Ok(PanelOutcome::Submitted(ChoiceOutcome::CustomInput(name))) =
+            PanelRuntime::new().run(panel)
+        {
+            match aish_pty::rename_session(&session.session_id, &name) {
+                Ok(()) => {
+                    if name.trim().is_empty() {
+                        println!(
+                            "{}",
+                            t_with_args("shell.live_sessions.rename_cleared", &id_args)
+                        );
+                    } else {
+                        let mut a = id_args.clone();
+                        a.insert("name".to_string(), name.trim().to_string());
+                        println!("{}", t_with_args("shell.live_sessions.rename_done", &a));
+                    }
+                }
+                Err(e) => {
+                    let mut a = id_args.clone();
+                    a.insert("err".to_string(), e.to_string());
+                    eprintln!(
+                        "{}",
+                        theme::error(&t_with_args("shell.live_sessions.rename_failed", &a))
+                    );
                 }
             }
         }
@@ -2996,8 +3259,8 @@ impl AishShell {
 
         if !self.config.pty_daemon_enabled {
             eprintln!(
-                "\x1b[33m{}\x1b[0m",
-                t("shell.kill_live_sessions.daemon_disabled")
+                "{}",
+                theme::warning(&t("shell.kill_live_sessions.daemon_disabled"))
             );
             eprintln!("{}", t("shell.kill_live_sessions.daemon_disabled_hint"));
             return;
@@ -3032,7 +3295,10 @@ impl AishShell {
             };
             let age_str = format_age(now.saturating_sub(s.started_at));
             let current = if is_current {
-                format!("  \x1b[32m{}\x1b[0m", t("shell.live_sessions.current_tag"))
+                format!(
+                    "  {}",
+                    theme::success(&t("shell.live_sessions.current_tag"))
+                )
             } else {
                 String::new()
             };
@@ -3050,15 +3316,15 @@ impl AishShell {
         // No args: list sessions so the user can pick an ID.
         if parts.len() < 2 {
             println!(
-                "\x1b[1m{}\x1b[0m",
-                t("shell.kill_live_sessions.list_header")
+                "{}",
+                theme::bold(&t("shell.kill_live_sessions.list_header"))
             );
             for s in &sessions {
                 println!("{}", format_session_line(s));
             }
             println!(
-                "\n\x1b[2m{}\x1b[0m",
-                t("shell.kill_live_sessions.usage_hint")
+                "\n{}",
+                theme::faint(&t("shell.kill_live_sessions.usage_hint"))
             );
             return;
         }
@@ -3088,14 +3354,20 @@ impl AishShell {
                 );
                 match aish_pty::kill_session(&s.socket_path) {
                     Ok(()) => {
-                        println!("\x1b[32m{}\x1b[0m", t("shell.kill_live_sessions.kill_done"))
+                        println!(
+                            "{}",
+                            theme::success(&t("shell.kill_live_sessions.kill_done"))
+                        )
                     }
                     Err(e) => {
                         let mut err_args = std::collections::HashMap::new();
                         err_args.insert("error".to_string(), e.to_string());
                         println!(
-                            "\x1b[31m{}\x1b[0m",
-                            t_with_args("shell.kill_live_sessions.kill_failed", &err_args)
+                            "{}",
+                            theme::error(&t_with_args(
+                                "shell.kill_live_sessions.kill_failed",
+                                &err_args
+                            ))
                         );
                     }
                 }
@@ -3130,8 +3402,11 @@ impl AishShell {
                         let mut cur_args = std::collections::HashMap::new();
                         cur_args.insert("id".to_string(), short.to_string());
                         eprintln!(
-                            "\x1b[33m{}\x1b[0m",
-                            t_with_args("shell.kill_live_sessions.is_current", &cur_args)
+                            "{}",
+                            theme::warning(&t_with_args(
+                                "shell.kill_live_sessions.is_current",
+                                &cur_args
+                            ))
                         );
                         errors += 1;
                         continue;
@@ -3144,15 +3419,21 @@ impl AishShell {
                     );
                     match aish_pty::kill_session(&s.socket_path) {
                         Ok(()) => {
-                            println!("\x1b[32m{}\x1b[0m", t("shell.kill_live_sessions.kill_done"));
+                            println!(
+                                "{}",
+                                theme::success(&t("shell.kill_live_sessions.kill_done"))
+                            );
                             killed += 1;
                         }
                         Err(e) => {
                             let mut err_args = std::collections::HashMap::new();
                             err_args.insert("error".to_string(), e.to_string());
                             println!(
-                                "\x1b[31m{}\x1b[0m",
-                                t_with_args("shell.kill_live_sessions.kill_failed", &err_args)
+                                "{}",
+                                theme::error(&t_with_args(
+                                    "shell.kill_live_sessions.kill_failed",
+                                    &err_args
+                                ))
                             );
                             errors += 1;
                         }
@@ -3162,8 +3443,8 @@ impl AishShell {
                     let mut nf_args = std::collections::HashMap::new();
                     nf_args.insert("id".to_string(), id.to_string());
                     eprintln!(
-                        "\x1b[31m{}\x1b[0m",
-                        t_with_args("shell.kill_live_sessions.not_found", &nf_args)
+                        "{}",
+                        theme::error(&t_with_args("shell.kill_live_sessions.not_found", &nf_args))
                     );
                     errors += 1;
                 }
@@ -3246,11 +3527,11 @@ impl AishShell {
         let report = match diagnose_result {
             Ok(parsed) => parsed,
             Err(aish_core::AishError::Cancelled) => {
-                println!("\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                println!("{}", theme::warning(&t("shell.command_cancelled")));
                 return;
             }
             Err(e) => {
-                eprintln!("\x1b[31m{}\x1b[0m", format_failure_diagnose_error(&e));
+                eprintln!("{}", theme::error(&format_failure_diagnose_error(&e)));
                 return;
             }
         };
@@ -3279,9 +3560,9 @@ impl AishShell {
             }
 
             let prompt = format!(
-                "{}\x1b[1;36m{}\x1b[0m{}",
+                "{}{}{}",
                 t("shell.failure_diagnose.confirm_fix_prefix"),
-                fix_cmd,
+                theme::accent(&theme::bold(&fix_cmd)),
                 t("shell.failure_diagnose.confirm_fix_suffix")
             );
             if !Self::confirm_action(&prompt, "") {
@@ -3598,7 +3879,7 @@ impl AishShell {
         match subcmd {
             "start" => {
                 if guard.is_some() {
-                    eprintln!("\x1b[33m{}\x1b[0m", t("shell.record.already_recording"));
+                    eprintln!("{}", theme::warning(&t("shell.record.already_recording")));
                     return;
                 }
                 let term_size = crossterm::terminal::size().unwrap_or((80, 24));
@@ -3607,22 +3888,22 @@ impl AishShell {
                     Ok(recorder) => {
                         *guard = Some(recorder);
                         println!(
-                            "\x1b[32m{}\x1b[0m",
-                            t_with_args("shell.record.started", &{
+                            "{}",
+                            theme::success(&t_with_args("shell.record.started", &{
                                 let mut args = std::collections::HashMap::new();
                                 args.insert("path".to_string(), file_path.display().to_string());
                                 args
-                            })
+                            }))
                         );
                     }
                     Err(e) => {
                         eprintln!(
-                            "\x1b[31m{}\x1b[0m",
-                            t_with_args("shell.record.start_failed", &{
+                            "{}",
+                            theme::error(&t_with_args("shell.record.start_failed", &{
                                 let mut args = std::collections::HashMap::new();
                                 args.insert("error".to_string(), e.to_string());
                                 args
-                            })
+                            }))
                         );
                     }
                 }
@@ -3641,17 +3922,17 @@ impl AishShell {
                         format!("{:.1} KB", size as f64 / 1024.0)
                     };
                     println!(
-                        "\x1b[32m{}\x1b[0m",
-                        t_with_args("shell.record.stopped", &{
+                        "{}",
+                        theme::success(&t_with_args("shell.record.stopped", &{
                             let mut args = std::collections::HashMap::new();
                             args.insert("path".to_string(), path.display().to_string());
                             args.insert("duration".to_string(), secs.to_string());
                             args.insert("size".to_string(), size_str);
                             args
-                        })
+                        }))
                     );
                 } else {
-                    eprintln!("\x1b[33m{}\x1b[0m", t("shell.record.not_recording"));
+                    eprintln!("{}", theme::warning(&t("shell.record.not_recording")));
                 }
             }
             _ => {
@@ -3660,13 +3941,13 @@ impl AishShell {
                     let path = rec.file_path().display().to_string();
                     let secs = elapsed.as_secs();
                     println!(
-                        "\x1b[33m{}\x1b[0m",
-                        t_with_args("shell.record.recording_status", &{
+                        "{}",
+                        theme::warning(&t_with_args("shell.record.recording_status", &{
                             let mut args = std::collections::HashMap::new();
                             args.insert("path".to_string(), path);
                             args.insert("duration".to_string(), secs.to_string());
                             args
-                        })
+                        }))
                     );
                 } else {
                     println!("{}", t("shell.record.usage"));
@@ -3684,7 +3965,7 @@ impl AishShell {
         }
 
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
-            println!("\x1b[36m{}\x1b[0m", t("shell.model_usage"));
+            println!("{}", theme::accent(&t("shell.model_usage")));
             return;
         }
 
@@ -3718,11 +3999,14 @@ impl AishShell {
         // Persist to config file
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-            eprintln!("\x1b[33m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::new();
-                args.insert("error".to_string(), e.to_string());
-                t_with_args("shell.config_save_warning", &args)
-            });
+            eprintln!(
+                "{}",
+                theme::warning(&{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    t_with_args("shell.config_save_warning", &args)
+                })
+            );
         }
 
         let mut args = std::collections::HashMap::new();
@@ -3735,7 +4019,7 @@ impl AishShell {
         use aish_core::PlanPhase;
 
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
-            println!("\x1b[36mUsage: /plan [start|status|exit]\x1b[0m");
+            println!("{}", theme::accent("Usage: /plan [start|status|exit]"));
             return;
         }
 
@@ -3745,7 +4029,10 @@ impl AishShell {
 
         // Reject unknown subcommands
         if !subcommand.is_empty() && !["start", "status", "exit"].contains(&subcommand) {
-            eprintln!("\x1b[31mUnknown /plan subcommand: {}\x1b[0m", subcommand);
+            eprintln!(
+                "{}",
+                theme::error(&format!("Unknown /plan subcommand: {}", subcommand))
+            );
             return;
         }
 
@@ -3754,12 +4041,12 @@ impl AishShell {
                 match subcommand {
                     "exit" => {
                         self.ai_handler.exit_plan_mode();
-                        println!("\x1b[33mExited plan mode.\x1b[0m");
+                        println!("{}", theme::warning("Exited plan mode."));
                     }
                     _ => {
                         // Bare `/plan` or `/plan status` while planning → show status
                         let plan_id = plan_state.plan_id.as_deref().unwrap_or("unknown");
-                        println!("\x1b[1;36mPlan Mode (active)\x1b[0m");
+                        println!("{}", theme::accent(&theme::bold("Plan Mode (active)")));
                         println!("  Plan ID: {}", plan_id);
                         println!("  Approval: {}", plan_state.approval_status);
                         println!(
@@ -3779,11 +4066,12 @@ impl AishShell {
                         self.ai_handler.enter_plan_mode(&self.session_uuid);
                         let plan_state = self.ai_handler.plan_state();
                         let plan_id = plan_state.plan_id.as_deref().unwrap_or("unknown");
-                        println!("\x1b[1;36m=== Plan Mode ===\x1b[0m");
-                        println!("\x1b[2mPlan ID: {}\x1b[0m", plan_id);
-                        println!("\x1b[2mDuring planning, the AI has access to read-only tools and write_file/edit_file for the plan artifact.\x1b[0m");
+                        println!("{}", theme::accent(&theme::bold("=== Plan Mode ===")));
+                        println!("{}", theme::faint(&format!("Plan ID: {}", plan_id)));
+                        println!("{}", theme::faint("During planning, the AI has access to read-only tools and write_file/edit_file for the plan artifact."));
                         println!(
-                            "\x1b[2mType ; followed by your planning request to start.\x1b[0m"
+                            "{}",
+                            theme::faint("Type ; followed by your planning request to start.")
                         );
                     }
                 }
@@ -3845,15 +4133,15 @@ impl AishShell {
                 let mut args = std::collections::HashMap::new();
                 args.insert("model".to_string(), self.config.model.clone());
                 println!(
-                    "\n\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.setup.applied", &args)
+                    "\n{}",
+                    theme::success(&t_with_args("shell.setup.applied", &args))
                 );
             }
             Err(aish_core::AishError::Cancelled) => {
-                eprintln!("\x1b[33m{}\x1b[0m", t("shell.setup.cancelled"));
+                eprintln!("{}", theme::warning(&t("shell.setup.cancelled")));
             }
             Err(e) => {
-                eprintln!("\x1b[31m{}\x1b[0m", e);
+                eprintln!("{}", theme::error(&e.to_string()));
             }
         }
     }
@@ -3892,7 +4180,7 @@ impl AishShell {
         // can see which host they are about to enter.
         if is_session {
             if let Some(host) = remote_host.as_deref() {
-                let marker = format!("\x1b[33m[ssh:{}]\x1b[0m", host);
+                let marker = theme::warning(&format!("[ssh:{}]", host));
                 eprintln!("{}", marker);
                 // Mirror to the session recorder so cast replay shows the
                 // same banner as the live terminal — without this, replay
@@ -4110,7 +4398,7 @@ impl AishShell {
             Ok(new_pty) => {
                 *self.lock_pty() = new_pty;
                 if show_notice {
-                    println!("\x1b[33mbash session restarted\x1b[0m");
+                    println!("{}", theme::warning("bash session restarted"));
                 }
                 Ok(())
             }
@@ -4147,31 +4435,37 @@ impl AishShell {
                 self.interruption = InterruptionState::ClearPending;
                 self.last_ctrl_c = Some(now);
                 let msg = format!(
-                    "\x1b[33m({})\x1b[0m\r\n",
-                    aish_i18n::t("shell.ctrl_c_again")
+                    "{}\r\n",
+                    theme::warning(&format!("({})", aish_i18n::t("shell.ctrl_c_again")))
                 );
                 crate::recorder::shared_record_output(&self.shared_recorder, &msg);
-                println!("\x1b[33m({})\x1b[0m", aish_i18n::t("shell.ctrl_c_again"));
+                println!(
+                    "{}",
+                    theme::warning(&format!("({})", aish_i18n::t("shell.ctrl_c_again")))
+                );
                 false
             }
             InterruptionState::ClearPending => {
                 if let Some(last) = self.last_ctrl_c {
                     if now.duration_since(last).as_secs() < 1 {
                         self.interruption = InterruptionState::ExitPending;
-                        let msg = format!("\x1b[33m{}\x1b[0m\r\n", aish_i18n::t("shell.exiting"));
+                        let msg = format!("{}\r\n", theme::warning(&aish_i18n::t("shell.exiting")));
                         crate::recorder::shared_record_output(&self.shared_recorder, &msg);
-                        println!("\x1b[33m{}\x1b[0m", aish_i18n::t("shell.exiting"));
+                        println!("{}", theme::warning(&aish_i18n::t("shell.exiting")));
                         return true;
                     }
                 }
                 self.interruption = InterruptionState::ClearPending;
                 self.last_ctrl_c = Some(now);
                 let msg = format!(
-                    "\x1b[33m({})\x1b[0m\r\n",
-                    aish_i18n::t("shell.ctrl_c_again")
+                    "{}\r\n",
+                    theme::warning(&format!("({})", aish_i18n::t("shell.ctrl_c_again")))
                 );
                 crate::recorder::shared_record_output(&self.shared_recorder, &msg);
-                println!("\x1b[33m({})\x1b[0m", aish_i18n::t("shell.ctrl_c_again"));
+                println!(
+                    "{}",
+                    theme::warning(&format!("({})", aish_i18n::t("shell.ctrl_c_again")))
+                );
                 false
             }
             InterruptionState::ExitPending => true,
@@ -4334,7 +4628,7 @@ impl AishShell {
                             script_env.insert("AISH_LAST_OUTPUT".to_string(), response);
                         }
                         Err(e) => {
-                            eprintln!("\x1b[31mAI error: {}\x1b[0m", e);
+                            eprintln!("{}", theme::error(&format!("AI error: {}", e)));
                             returncode = 1;
                         }
                     }
@@ -4570,7 +4864,10 @@ impl AishShell {
                         Ok(rt) => rt,
                         Err(e) => {
                             let _ = event_tx.send(aish_pty::AiEvent::Done(None));
-                            let msg = format!("\r\n\x1b[31mFollowup error: {}\x1b[0m\r\n", e);
+                            let msg = format!(
+                                "\r\n{}\r\n",
+                                theme::error(&format!("Followup error: {}", e))
+                            );
                             unsafe {
                                 nix::libc::write(
                                     nix::libc::STDOUT_FILENO,
@@ -4645,7 +4942,7 @@ impl AishShell {
                                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                                 {
                                     if let Some(message) = context_compaction_notice(&event) {
-                                        println!("\x1b[2m{}\x1b[0m", message);
+                                        println!("{}", theme::faint(&message));
                                     }
                                 }
                             }
@@ -4712,7 +5009,11 @@ impl AishShell {
                                         let max_cols = 76usize;
                                         let frame = reasoning_frame
                                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        let spinner = DOTS_FRAMES[frame % DOTS_FRAMES.len()];
+                                        let spinner = crate::theme::spinner_frame(
+                                            crate::theme::SPINNER_STATUS,
+                                            frame,
+                                        );
+                                        let spinner = crate::theme::accent(spinner);
                                         let elapsed_str = thinking_start_followup
                                             .lock()
                                             .unwrap()
@@ -4751,20 +5052,14 @@ impl AishShell {
                                             print!("\x1b[{}A", prev);
                                         }
                                         if display_lines.is_empty() {
-                                            print!(
-                                                "\r\x1b[K\x1b[90m{}{}...\x1b[0m\n",
-                                                spinner, elapsed_str
-                                            );
+                                            print!("\r\x1b[K{}{}...\n", spinner, elapsed_str);
                                         } else {
-                                            print!(
-                                                "\r\x1b[K\x1b[90m{}{}\x1b[0m\n",
-                                                spinner, elapsed_str
-                                            );
+                                            print!("\r\x1b[K{}{}\n", spinner, elapsed_str);
                                         }
                                         for line in &display_lines {
                                             let truncated =
                                                 truncate_display_width(line.trim(), max_cols);
-                                            print!("\r\x1b[K\x1b[90m{}\x1b[0m\n", truncated);
+                                            print!("\r\x1b[K{}\n", crate::theme::muted(&truncated));
                                         }
                                         for _ in new_count..prev {
                                             print!("\r\x1b[K\n");
@@ -4792,8 +5087,10 @@ impl AishShell {
                                     .or_else(|| event.data.get("error_message"))
                                     .and_then(|e| e.as_str())
                                     .unwrap_or("Unknown error");
-                                let msg =
-                                    format!("\r\n\x1b[31mFollowup LLM error: {}\x1b[0m\r\n", err);
+                                let msg = format!(
+                                    "\r\n{}\r\n",
+                                    theme::error(&format!("Followup LLM error: {}", err))
+                                );
                                 unsafe {
                                     nix::libc::write(
                                         nix::libc::STDOUT_FILENO,
@@ -4992,8 +5289,8 @@ impl AishShell {
                                                 }
                                                 anim_fu.stop();
                                                 let msg = format!(
-                                                    "\r\x1b[33m{}\x1b[0m\r\n",
-                                                    t("shell.command_cancelled")
+                                                    "\r{}\r\n",
+                                                    theme::warning(&t("shell.command_cancelled"))
                                                 );
                                                 unsafe {
                                                     nix::libc::write(
@@ -5039,8 +5336,8 @@ impl AishShell {
                                                     }
                                                     anim_fu.stop();
                                                     let msg = format!(
-                                                        "\r\x1b[33m{}\x1b[0m\r\n",
-                                                        t("shell.command_cancelled")
+                                                        "\r{}\r\n",
+                                                        theme::warning(&t("shell.command_cancelled"))
                                                     );
                                                     unsafe {
                                                         nix::libc::write(
@@ -5119,8 +5416,8 @@ impl AishShell {
                                 }
                                 anim_f.stop();
                                 let msg = format!(
-                                    "\r\x1b[33m{}\x1b[0m\r\n",
-                                    t("shell.command_cancelled")
+                                    "\r{}\r\n",
+                                    theme::warning(&t("shell.command_cancelled"))
                                 );
                                 unsafe {
                                     nix::libc::write(
@@ -5159,8 +5456,8 @@ impl AishShell {
                                     }
                                     anim_f.stop();
                                     let msg = format!(
-                                        "\r\x1b[33m{}\x1b[0m\r\n",
-                                        t("shell.command_cancelled")
+                                        "\r{}\r\n",
+                                        theme::warning(&t("shell.command_cancelled"))
                                     );
                                     unsafe {
                                         nix::libc::write(
@@ -5187,11 +5484,11 @@ impl AishShell {
                     // Check timeout (60s)
                     if followup_start.elapsed() > std::time::Duration::from_secs(60) {
                         anim_f.stop();
-                        let msg = b"\r\n\x1b[31mLLM timeout (60s)\x1b[0m";
+                        let msg = format!("\r\n{}\r\n", theme::error("LLM timeout (60s)"));
                         unsafe {
                             nix::libc::write(
                                 nix::libc::STDOUT_FILENO,
-                                msg.as_ptr() as *mut nix::libc::c_void,
+                                msg.as_ptr() as *const nix::libc::c_void,
                                 msg.len(),
                             );
                         }
@@ -5240,7 +5537,7 @@ impl AishShell {
             args.insert("reasons".to_string(), reasons);
             let title = aish_i18n::t("shell.security.secret.title");
             let message = aish_i18n::t_with_args("shell.security.secret.detected", &args);
-            let warning = format!("\x1b[33m? {}:\x1b[0m {}", title, message);
+            let warning = format!("{} {}", theme::warning(&format!("? {}:", title)), message);
             Some(aish_pty::SshSecretCheckResult {
                 warning,
                 detected_secrets: secrets,
@@ -5585,7 +5882,7 @@ impl AishShell {
                                     .swap(true, std::sync::atomic::Ordering::SeqCst)
                                 {
                                     if let Some(message) = context_compaction_notice(&event) {
-                                        println!("\x1b[2m{}\x1b[0m", message);
+                                        println!("{}", theme::faint(&message));
                                     }
                                 }
                             }
@@ -5652,7 +5949,11 @@ impl AishShell {
                                         let max_cols = 76usize;
                                         let frame = reasoning_frame
                                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        let spinner = DOTS_FRAMES[frame % DOTS_FRAMES.len()];
+                                        let spinner = crate::theme::spinner_frame(
+                                            crate::theme::SPINNER_STATUS,
+                                            frame,
+                                        );
+                                        let spinner = crate::theme::accent(spinner);
                                         let elapsed_str = thinking_start_r
                                             .lock()
                                             .unwrap()
@@ -5691,20 +5992,14 @@ impl AishShell {
                                             print!("\x1b[{}A", prev);
                                         }
                                         if display_lines.is_empty() {
-                                            print!(
-                                                "\r\x1b[K\x1b[90m{}{}...\x1b[0m\n",
-                                                spinner, elapsed_str
-                                            );
+                                            print!("\r\x1b[K{}{}...\n", spinner, elapsed_str);
                                         } else {
-                                            print!(
-                                                "\r\x1b[K\x1b[90m{}{}\x1b[0m\n",
-                                                spinner, elapsed_str
-                                            );
+                                            print!("\r\x1b[K{}{}\n", spinner, elapsed_str);
                                         }
                                         for line in &display_lines {
                                             let truncated =
                                                 truncate_display_width(line.trim(), max_cols);
-                                            print!("\r\x1b[K\x1b[90m{}\x1b[0m\n", truncated);
+                                            print!("\r\x1b[K{}\n", crate::theme::muted(&truncated));
                                         }
                                         for _ in new_count..prev {
                                             print!("\r\x1b[K\n");
@@ -5732,7 +6027,7 @@ impl AishShell {
                                     .or_else(|| event.data.get("error_message"))
                                     .and_then(|e| e.as_str())
                                     .unwrap_or("Unknown error");
-                                eprintln!("\x1b[31mLLM error: {}\x1b[0m", error_msg);
+                                eprintln!("{}", theme::error(&format!("LLM error: {}", error_msg)));
                             }
                             LlmEventType::ToolExecutionStart => {
                                 let tool_name = event
@@ -5750,7 +6045,12 @@ impl AishShell {
                                         .and_then(|p| p.as_str())
                                         .unwrap_or("?");
                                     use std::io::Write;
-                                    println!("\x1b[90m📖 read_file({})\x1b[0m", path);
+                                    println!(
+                                        "{} {}({})",
+                                        crate::theme::accent(crate::theme::TOOL_PREFIX),
+                                        crate::theme::muted("read_file"),
+                                        path
+                                    );
                                     let _ = std::io::stdout().flush();
                                 }
                             }
@@ -5773,7 +6073,7 @@ impl AishShell {
                                             .and_then(|p| p.as_str())
                                             .unwrap_or("error");
                                         use std::io::Write;
-                                        println!("\x1b[31m{}\x1b[0m", preview);
+                                        println!("{}", theme::error(preview));
                                         let _ = std::io::stdout().flush();
                                     }
                                 }
@@ -5868,8 +6168,11 @@ impl AishShell {
                                 let mut elapsed_args = std::collections::HashMap::new();
                                 elapsed_args.insert("time".to_string(), format!("{:.1}", elapsed));
                                 println!(
-                                    "\x1b[2m{}\x1b[0m",
-                                    aish_i18n::t_with_args("shell.thinking_time", &elapsed_args)
+                                    "{}",
+                                    theme::faint(&aish_i18n::t_with_args(
+                                        "shell.thinking_time",
+                                        &elapsed_args
+                                    ))
                                 );
                             }
                             renderer.render_separator();
@@ -5901,10 +6204,7 @@ impl AishShell {
                     }
                     None => Some(aish_pty::AiResponse {
                         command: None,
-                        display_text: format!(
-                            "\x1b[33m{}\x1b[0m",
-                            aish_i18n::t("shell.session.ai_error")
-                        ),
+                        display_text: theme::warning(&aish_i18n::t("shell.session.ai_error")),
                         followup: None,
                         ask_user: None,
                     }),
@@ -5995,7 +6295,7 @@ impl AishShell {
                                 token.cancel();
                             }
                             animation.stop();
-                            println!("\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                            println!("{}", theme::warning(&t("shell.command_cancelled")));
                             break None;
                         } else if byte[0] == 0x1b {
                             // ESC — check for follow-up bytes (arrow/function
@@ -6024,7 +6324,7 @@ impl AishShell {
                                     token.cancel();
                                 }
                                 animation.stop();
-                                println!("\r\n\x1b[33m{}\x1b[0m", t("shell.command_cancelled"));
+                                println!("\r\n{}", theme::warning(&t("shell.command_cancelled")));
                                 break None;
                             }
                             // Follow-up bytes exist (ANSI escape
@@ -6048,7 +6348,7 @@ impl AishShell {
                     .is_some_and(|s| s.elapsed() > std::time::Duration::from_secs(60))
                 {
                     animation.stop();
-                    eprintln!("\x1b[31mLLM timeout (60s)\x1b[0m");
+                    eprintln!("{}", theme::error("LLM timeout (60s)"));
                     break None;
                 }
             };
@@ -6239,8 +6539,10 @@ impl AishShell {
                                                                 }
                                                                 animation.stop();
                                                                 let msg = format!(
-                                                                    "\r\x1b[33m{}\x1b[0m\r\n",
-                                                                    t("shell.command_cancelled")
+                                                                    "\r{}\r\n",
+                                                                    theme::warning(&t(
+                                                                        "shell.command_cancelled"
+                                                                    ))
                                                                 );
                                                                 unsafe {
                                                                     nix::libc::write(
@@ -6286,8 +6588,8 @@ impl AishShell {
                                                                     }
                                                                     animation.stop();
                                                                     let msg = format!(
-                                                                        "\r\x1b[33m{}\x1b[0m\r\n",
-                                                                        t("shell.command_cancelled")
+                                                                        "\r{}\r\n",
+                                                                        theme::warning(&t("shell.command_cancelled"))
                                                                     );
                                                                     unsafe {
                                                                         nix::libc::write(
@@ -6360,8 +6662,8 @@ impl AishShell {
                                                 }
                                                 animation.stop();
                                                 let msg = format!(
-                                                    "\r\x1b[33m{}\x1b[0m\r\n",
-                                                    t("shell.command_cancelled")
+                                                    "\r{}\r\n",
+                                                    theme::warning(&t("shell.command_cancelled"))
                                                 );
                                                 unsafe {
                                                     nix::libc::write(
@@ -6405,8 +6707,10 @@ impl AishShell {
                                                     }
                                                     animation.stop();
                                                     let msg = format!(
-                                                        "\r\x1b[33m{}\x1b[0m\r\n",
-                                                        t("shell.command_cancelled")
+                                                        "\r{}\r\n",
+                                                        theme::warning(&t(
+                                                            "shell.command_cancelled"
+                                                        ))
                                                     );
                                                     unsafe {
                                                         nix::libc::write(
@@ -6688,11 +6992,14 @@ pub fn collapse_output(
 
     let mut result = first.join("\n");
     result.push_str(&format!(
-        "\n\x1b[2m... ({} lines truncated{})\x1b[0m",
-        omitted,
-        offload_path
-            .map(|p| format!(", see {}", p))
-            .unwrap_or_default(),
+        "\n{}",
+        theme::faint(&format!(
+            "... ({} lines truncated{})",
+            omitted,
+            offload_path
+                .map(|p| format!(", see {}", p))
+                .unwrap_or_default(),
+        ))
     ));
     result.push('\n');
     result.push_str(&last.join("\n"));
@@ -6706,8 +7013,8 @@ mod submitted_line_tests {
 
     #[test]
     fn submitted_line_includes_prompt_and_command() {
-        let line = format_user_submitted_line("<aish> ", "/help");
-        assert_eq!(line, "<aish> /help");
+        let line = format_user_submitted_line("◆ aish ", "/help");
+        assert_eq!(line, "◆ aish /help");
     }
 }
 
@@ -6874,9 +7181,11 @@ fn print_panel_line(content: &str, inner_width: usize) {
     let visible = ansi_display_width(&rendered);
     let padding = inner_width.saturating_sub(visible);
     println!(
-        "\x1b[33m│\x1b[0m{}{}\x1b[33m│\x1b[0m",
+        "{}{}{}{}",
+        theme::warning("│"),
         rendered,
-        " ".repeat(padding)
+        " ".repeat(padding),
+        theme::warning("│")
     );
 }
 

@@ -1,22 +1,17 @@
 // Terminal formatting for plan markdown documents.
 //
-// Applies basic ANSI formatting to plan content for display in the
-// plan approval flow: bold headings, dim code blocks, bullet chars.
+// Applies theme-based formatting to plan content for display in the
+// plan approval flow: bold+accent headings, dim code blocks, bullet chars.
 
-/// ANSI escape codes for terminal formatting.
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const CYAN: &str = "\x1b[36m";
-const RESET: &str = "\x1b[0m";
+use crate::theme;
 
 /// Format a plan markdown document for terminal display.
 ///
 /// Applies the following transformations:
-/// - `## Headings` → bold ANSI
+/// - `## Headings` → bold + accent color
 /// - `` ```code blocks``` `` → indented with dim color
 /// - `- bullet points` → bullet character
 /// - numbered items preserved as-is
-/// - reset ANSI at end
 pub fn format_plan_for_display(content: &str) -> String {
     let mut output = String::new();
     let mut in_code_block = false;
@@ -30,9 +25,9 @@ pub fn format_plan_for_display(content: &str) -> String {
                 in_code_block = false;
                 // Format buffered code lines
                 for code_line in code_buffer.lines() {
-                    output.push_str(&format!("{}  │ {}{}\n", DIM, code_line, RESET));
+                    output.push_str(&format!("{}\n", theme::dim(&format!("  │ {}", code_line))));
                 }
-                output.push_str(&format!("{}  └───{}\n", DIM, RESET));
+                output.push_str(&format!("{}\n", theme::dim("  └───")));
                 code_buffer.clear();
             } else {
                 // Start code block
@@ -41,9 +36,12 @@ pub fn format_plan_for_display(content: &str) -> String {
                 // Extract language hint if present
                 let lang = line.trim_start().trim_start_matches('`').trim();
                 if !lang.is_empty() {
-                    output.push_str(&format!("{}  ┌─── {} ───{}\n", DIM, lang, RESET));
+                    output.push_str(&format!(
+                        "{}\n",
+                        theme::dim(&format!("  ┌─── {} ───", lang))
+                    ));
                 } else {
-                    output.push_str(&format!("{}  ┌───{}\n", DIM, RESET));
+                    output.push_str(&format!("{}\n", theme::dim("  ┌───")));
                 }
             }
             continue;
@@ -59,10 +57,16 @@ pub fn format_plan_for_display(content: &str) -> String {
         let trimmed = line.trim();
         if trimmed.starts_with("### ") {
             let heading = trimmed.trim_start_matches('#').trim();
-            output.push_str(&format!("\n{}{}  {}{}\n\n", BOLD, CYAN, heading, RESET));
+            output.push_str(&format!(
+                "\n{}\n\n",
+                theme::bold(&theme::accent(&format!("  {}", heading)))
+            ));
         } else if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
             let heading = trimmed.trim_start_matches('#').trim();
-            output.push_str(&format!("\n{}{}  {}{}\n", BOLD, CYAN, heading, RESET));
+            output.push_str(&format!(
+                "\n{}\n",
+                theme::bold(&theme::accent(&format!("  {}", heading)))
+            ));
         } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
             // Convert markdown bullet markers to bullet character
             let item_text = &trimmed[2..];
@@ -73,11 +77,6 @@ pub fn format_plan_for_display(content: &str) -> String {
             output.push_str(line);
             output.push('\n');
         }
-    }
-
-    // Ensure ANSI reset at end
-    if !output.ends_with(&format!("{}\n", RESET)) && !output.ends_with(RESET) {
-        output.push_str(RESET);
     }
 
     output
@@ -95,9 +94,10 @@ mod tests {
         assert!(output.contains("Title"));
         assert!(output.contains("Section"));
         assert!(output.contains("Subsection"));
-        assert!(output.contains(BOLD));
-        assert!(output.contains(CYAN));
-        assert!(output.contains(RESET));
+        // Headings are indented with two spaces
+        assert!(output.contains("  Title"));
+        assert!(output.contains("  Section"));
+        assert!(output.contains("  Subsection"));
     }
 
     #[test]
@@ -118,7 +118,7 @@ mod tests {
 
         assert!(output.contains("rust"));
         assert!(output.contains("fn main() {}"));
-        assert!(output.contains(DIM));
+        assert!(output.contains("┌───"));
         assert!(output.contains('\u{2502}')); // │ box drawing
     }
 
@@ -134,8 +134,8 @@ mod tests {
     #[test]
     fn test_format_empty_input() {
         let output = format_plan_for_display("");
-        // Should contain at least the reset sequence
-        assert!(output.contains(RESET) || output.is_empty());
+        // Empty input yields empty output (no styling needed)
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -176,7 +176,8 @@ echo "hello"
         assert!(output.contains("1. First step"));
         assert!(output.contains("echo"));
         assert!(output.contains('\u{2022}'));
-        assert!(output.contains(BOLD));
-        assert!(output.contains(RESET));
+        // Headings indented; code fence marker present
+        assert!(output.contains("  Plan"));
+        assert!(output.contains("┌───"));
     }
 }

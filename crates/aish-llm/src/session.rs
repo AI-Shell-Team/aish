@@ -79,6 +79,10 @@ pub struct LlmSession {
     plan_state: Arc<Mutex<PlanModeState>>,
     /// Cumulative token usage statistics for this session.
     token_stats: std::sync::Mutex<crate::usage::TokenStats>,
+    /// Locally estimated prompt tokens from the last API call's message list.
+    /// Updated every iteration — reflects actual context window consumption
+    /// regardless of whether the API reports prompt_tokens in streaming mode.
+    last_prompt_estimate: std::sync::atomic::AtomicU64,
     /// Per-session tool execution policy (read-only bash enforcement, etc.).
     tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
     /// True for sessions created via [`Self::create_subsession`].
@@ -137,6 +141,7 @@ impl LlmSession {
             compact_consecutive_failures: std::sync::Mutex::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
+            last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
             #[cfg(test)]
@@ -324,6 +329,12 @@ impl LlmSession {
     /// Get a reference to the plan state (for external coordination).
     pub fn plan_state(&self) -> Arc<Mutex<PlanModeState>> {
         Arc::clone(&self.plan_state)
+    }
+
+    /// Return the locally estimated prompt token count from the last API call.
+    pub fn last_prompt_estimate(&self) -> u64 {
+        self.last_prompt_estimate
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Return a snapshot of cumulative token usage statistics.
@@ -576,6 +587,12 @@ impl LlmSession {
 
             messages = self.prepare_messages_for_send(messages).await;
 
+            // Estimate prompt tokens locally for the context bar.
+            // This works even when the streaming API doesn't report prompt_tokens.
+            let estimate = estimate_chat_tokens(&messages, &self.context_budget_policy);
+            self.last_prompt_estimate
+                .store(estimate as u64, std::sync::atomic::Ordering::Relaxed);
+
             // Emit generation start BEFORE the API call so the display layer
             // can show a thinking animation while the request is in flight.
             // This matches the Python implementation where generation_start
@@ -819,9 +836,8 @@ impl LlmSession {
                                         let (events, chunk_usage) =
                                             StreamParser::parse_sse_chunk(line);
                                         if let Some(u) = chunk_usage {
-                                            stream_prompt_tokens += u.prompt_tokens;
-                                            stream_completion_tokens += u.completion_tokens;
-                                            self.record_usage(u);
+                                            stream_prompt_tokens = u.prompt_tokens;
+                                            stream_completion_tokens = u.completion_tokens;
                                         }
                                         for event in events {
                                             match event {
@@ -935,6 +951,17 @@ impl LlmSession {
                                 return Err(AishError::Llm(format!("Stream error: {}", e)));
                             }
                         }
+                    }
+
+                    // Record usage once after the stream completes. The final
+                    // chunk carries cumulative totals — assigning (not +=)
+                    // avoids double-counting if a non-compliant server sends
+                    // usage in multiple chunks.
+                    if stream_prompt_tokens > 0 || stream_completion_tokens > 0 {
+                        self.record_usage(crate::usage::TokenUsage {
+                            prompt_tokens: stream_prompt_tokens,
+                            completion_tokens: stream_completion_tokens,
+                        });
                     }
 
                     // End reasoning if it was started
@@ -1423,6 +1450,7 @@ impl LlmSession {
             compact_consecutive_failures: std::sync::Mutex::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
+            last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
             tool_execution_policy: self.tool_execution_policy,
             is_sub_agent: true,
             #[cfg(test)]

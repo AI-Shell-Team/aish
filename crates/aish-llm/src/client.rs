@@ -167,6 +167,13 @@ impl LlmClient {
             "stream": stream,
         });
 
+        // Request usage data in the final SSE chunk when streaming.
+        // Most OpenAI-compatible APIs (OpenAI, Zhipu, DeepSeek, etc.) support
+        // this; unknown fields are ignored by compliant servers.
+        if stream {
+            body["stream_options"] = serde_json::json!({"include_usage": true});
+        }
+
         if let Some(temp) = temperature {
             body["temperature"] = serde_json::json!(temp);
         }

@@ -5,6 +5,8 @@
 
 use std::io::{self, Write};
 
+use crate::theme;
+
 use super::plan_display::format_plan_for_display;
 
 /// User decision after reviewing a plan.
@@ -51,41 +53,55 @@ impl PlanApprovalFlow {
         let left_pad = header_pad / 2;
         let right_pad = header_pad - left_pad;
         println!(
-            "\x1b[1;33m\u{2550}{}\u{2550}\u{2550}{}\u{2550}\x1b[0m",
-            "\u{2550}".repeat(left_pad),
-            "\u{2550}".repeat(right_pad)
+            "{}",
+            theme::warning(&format!(
+                "\u{2550}{}\u{2550}\u{2550}{}\u{2550}",
+                "\u{2550}".repeat(left_pad),
+                "\u{2550}".repeat(right_pad)
+            ))
         );
         println!(
-            "\x1b[1;33m\u{2550}{}\u{2550}\u{2550}{}\u{2550}\x1b[0m",
-            " ".repeat(left_pad),
-            " ".repeat(right_pad)
+            "{}",
+            theme::warning(&format!(
+                "\u{2550}{}\u{2550}\u{2550}{}\u{2550}",
+                " ".repeat(left_pad),
+                " ".repeat(right_pad)
+            ))
         );
         // Center the header text
         println!(
-            "\x1b[1;33m\u{2550}\x1b[1m{}\x1b[1;33m\u{2550}\x1b[0m",
-            center_text(header_text, width)
+            "{}{}{}",
+            theme::warning("\u{2550}"),
+            theme::bold(&center_text(header_text, width)),
+            theme::warning("\u{2550}"),
         );
         println!(
-            "\x1b[1;33m\u{2550}{}\u{2550}\u{2550}{}\u{2550}\x1b[0m",
-            " ".repeat(left_pad),
-            " ".repeat(right_pad)
+            "{}",
+            theme::warning(&format!(
+                "\u{2550}{}\u{2550}\u{2550}{}\u{2550}",
+                " ".repeat(left_pad),
+                " ".repeat(right_pad)
+            ))
         );
         println!(
-            "\x1b[1;33m\u{2550}{}\u{2550}\u{2550}{}\u{2550}\x1b[0m",
-            "\u{2550}".repeat(left_pad),
-            "\u{2550}".repeat(right_pad)
+            "{}",
+            theme::warning(&format!(
+                "\u{2550}{}\u{2550}\u{2550}{}\u{2550}",
+                "\u{2550}".repeat(left_pad),
+                "\u{2550}".repeat(right_pad)
+            ))
         );
 
         // Summary line
         if let Some(s) = summary {
             if !s.is_empty() {
-                println!("\x1b[1m  Summary:\x1b[0m {}", s);
+                println!("{} {}", theme::bold("  Summary:"), s);
             }
         }
 
         // Revision number
         if let Some(rev) = revision {
-            println!("\x1b[2m  Revision: #{}\x1b[0m", rev);
+            println!("{}", theme::faint(&format!("  Revision: #{}", rev)));
         }
 
         println!();
@@ -101,15 +117,18 @@ impl PlanApprovalFlow {
 
         // Separator
         println!(
-            "\x1b[33m\u{2500}{}\x1b[0m",
-            "\u{2500}".repeat(width.saturating_sub(1))
+            "{}",
+            theme::warning(&format!(
+                "\u{2500}{}",
+                "\u{2500}".repeat(width.saturating_sub(1))
+            ))
         );
 
         // Options prompt
-        println!("\x1b[1m  Choose an action:\x1b[0m");
-        println!("    \x1b[32m[A]\x1b[0m Approve plan and proceed");
-        println!("    \x1b[33m[R]\x1b[0m Request changes to the plan");
-        println!("    \x1b[31m[C]\x1b[0m Cancel plan mode");
+        println!("{}", theme::bold("  Choose an action:"));
+        println!("    {} Approve plan and proceed", theme::success("[A]"));
+        println!("    {} Request changes to the plan", theme::warning("[R]"));
+        println!("    {} Cancel plan mode", theme::error("[C]"));
         print!("\n  Your choice: ");
         let _ = io::stdout().flush();
 
@@ -125,7 +144,10 @@ impl PlanApprovalFlow {
             "R" | "REQUEST" => {
                 // Prompt for feedback
                 println!();
-                println!("\x1b[1;33m  Please describe the changes you'd like:\x1b[0m");
+                println!(
+                    "{}",
+                    theme::bold(&theme::warning("  Please describe the changes you'd like:"))
+                );
                 print!("  > ");
                 let _ = io::stdout().flush();
 
@@ -138,7 +160,7 @@ impl PlanApprovalFlow {
                 let feedback = feedback.trim().to_string();
 
                 if feedback.is_empty() {
-                    println!("\x1b[2m  (No feedback provided)\x1b[0m");
+                    println!("{}", theme::faint("  (No feedback provided)"));
                 }
 
                 PlanApprovalDecision::ChangesRequested { feedback }
@@ -146,7 +168,10 @@ impl PlanApprovalFlow {
             "C" | "CANCEL" | "N" | "NO" | "" => PlanApprovalDecision::Cancelled,
             _ => {
                 // Unknown choice, treat as cancel
-                println!("\x1b[33m  Unknown option. Cancelling plan review.\x1b[0m");
+                println!(
+                    "{}",
+                    theme::warning("  Unknown option. Cancelling plan review.")
+                );
                 PlanApprovalDecision::Cancelled
             }
         }
@@ -163,10 +188,10 @@ fn center_text(text: &str, width: usize) -> String {
     let left = pad / 2;
     let right = pad - left;
     format!(
-        "{}{}\x1b[1;33m{}\x1b[0m",
+        "{}{}{}",
         " ".repeat(left),
         text,
-        " ".repeat(right)
+        theme::warning(&" ".repeat(right))
     )
 }
 

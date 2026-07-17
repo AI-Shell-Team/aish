@@ -473,7 +473,7 @@ impl ShellState {
             Some(topic) => self.render_topic_help(topic),
             None => {
                 let title = t("help.general.title");
-                println!("\n\x1b[1;36m{}\x1b[0m\n", title);
+                println!("\n{}\n", crate::theme::accent(&crate::theme::bold(&title)));
                 let markdown = t("help.general.markdown");
                 crate::renderer::ShellRenderer::new().render_markdown(&markdown);
                 BuiltinResult::handled_no_output()
@@ -491,7 +491,7 @@ impl ShellState {
             eprintln!("{}", t_with_args("help.topics.unknown", &args));
             return BuiltinResult::handled_no_output();
         }
-        println!("\n\x1b[1;36m{}\x1b[0m\n", title);
+        println!("\n{}\n", crate::theme::accent(&crate::theme::bold(&title)));
         let md_key = format!("help.topics.{}.markdown", topic);
         let markdown = t(&md_key);
         crate::renderer::ShellRenderer::new().render_markdown(&markdown);

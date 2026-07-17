@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 
 use crate::recorder::SharedRecorder;
-use richrs::color::{Color, StandardColor};
+use crate::theme;
+use richrs::color::Color;
 use richrs::console::Console;
 use richrs::markdown::Markdown;
 use richrs::style::Style;
@@ -300,9 +301,9 @@ fn render_code_block(
 
     // Dim bold language label
     if !lang.is_empty() {
-        let lang_ansi = format!("\x1b[1;2m{}\x1b[0m\n", lang);
+        let lang_ansi = format!("{}\n", theme::bold_faint(lang));
         record_to_shared(shared_recorder, &lang_ansi);
-        println!("\x1b[1;2m{}\x1b[0m", lang);
+        println!("{}", theme::bold_faint(lang));
     }
 
     // Syntax-highlighted code
@@ -373,14 +374,14 @@ impl ShellRenderer {
                 }
                 ContentSegment::Markdown(content) => {
                     let inline_style = Style::new()
-                        .with_color(Color::Standard(StandardColor::Cyan))
+                        .with_color(Color::Rgb {
+                            r: crate::theme::ACCENT_RGB.0,
+                            g: crate::theme::ACCENT_RGB.1,
+                            b: crate::theme::ACCENT_RGB.2,
+                        })
                         .bold();
                     let md = Markdown::new(&content).inline_code_style(inline_style);
                     let segs = md.render(self.terminal_width);
-                    // Record ANSI-rendered output so agg/GIF shows proper formatting.
-                    // richrs adds two trailing newlines per paragraph; the terminal
-                    // removes one with \x1b[1A\x1b[M. Remove one trailing newline
-                    // from the recording to match the terminal display.
                     {
                         let mut ansi = segs.to_ansi();
                         if ansi.ends_with("\n\n") {
@@ -395,9 +396,6 @@ impl ShellRenderer {
         }
         let _ = self.console.flush();
         let _ = io::stdout().flush();
-        // richrs Markdown adds two trailing newlines at paragraph end,
-        // creating a blank line before the bottom separator.
-        // Delete it only when the last segment was a Markdown paragraph.
         if last_was_markdown {
             print!("\x1b[1A\x1b[M");
             let _ = io::stdout().flush();
@@ -410,20 +408,20 @@ impl ShellRenderer {
         if delta.is_empty() {
             return;
         }
-        self.record_output(&format!("\x1b[1;90m{}\x1b[0m", delta));
+        let styled = theme::muted(delta);
+        self.record_output(&styled);
         self.streaming_active = true;
-        print!("\x1b[1;90m{}\x1b[0m", delta);
+        print!("{}", styled);
         let _ = io::stdout().flush();
     }
 
     /// Finalize streaming — print a newline and reset state.
-    /// Matches Python's _finalize_content_preview approach.
     pub fn finalize_stream(&mut self) {
         if !self.streaming_active {
             return;
         }
         self.streaming_active = false;
-        println!();
+        println!("\x1b[0m");
     }
 
     /// Reset state (call at GenerationStart).
@@ -438,19 +436,15 @@ impl ShellRenderer {
 
     /// Helper: record output data to the shared recorder if one is attached.
     fn record_output(&self, data: &str) {
-        if let Some(ref sr) = self.shared_recorder {
+        if let Some(sr) = &self.shared_recorder {
             crate::recorder::shared_record_output(sr, data);
         }
     }
 
-    /// Render a green horizontal separator line spanning the terminal.
-    /// Records a fixed 5-char separator for GIF output (terminal width is
-    /// unknown in asciinema→GIF conversion).
+    /// Print a blank line as a visual spacer between content blocks.
     pub fn render_separator(&mut self) {
-        let width = self.terminal_width.max(20);
-        let sep = "─".repeat(width);
-        self.record_output("\x1b[32m─────\x1b[0m\r\n");
-        print!("\r\x1b[32m{}\x1b[0m\r\n", sep);
+        self.record_output("\r\n");
+        println!();
         let _ = std::io::stdout().flush();
     }
 }
