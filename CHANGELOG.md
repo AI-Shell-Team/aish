@@ -7,15 +7,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.7] - 2026-07-20
+
+### Added
+
+- Added the Agent tool and built-in sub-agents (`explore`, `plan`, `general-purpose`, `troubleshoot`), including spawn progress in the shell TUI and isolated skill execution through spawn.
+- Added an interactive `/setting` panel for config editing, with a flat single-panel layout, choice picker, category memory, and slash-command prefill.
+- Added a centralized theme system with display polish and session management improvements.
+- Added audit logging for shell and agent activity.
+- Added PTY daemon attach architecture for session persistence across reconnects.
+- Added inline AI completion with ghost text in the interactive shell.
+- Added `PromptAssembly` to unify MainChat and sub-agent system prompt and tool spec assembly.
 
 ### Changed
 
-- Added `PromptAssembly` to unify MainChat and sub-agent system prompt and tool spec assembly; removed legacy `LlmSession` prompt filtering APIs.
 - Moved per-tool routing guidance into tool descriptions; tool usage remains in tool prompts. Oracle delegates tool choice to descriptions (no duplicated routing tables). If you customize `~/.config/aish/prompts/oracle.md`, remove duplicated tool-selection sections that mirror tool descriptions.
 - Added explicit routing between `Agent(subagent_type=plan)` and `enter_plan_mode`; `enter_plan_mode` keeps routing in its description and usage-only text in its prompt appendix.
 - Expanded built-in sub-agent system prompts (explore/plan/general-purpose) with read-only rules and efficient search strategy; Agent `prompt` schema now requires scope and thoroughness.
-- Converted embedded LLM prompt templates (`oracle`, `cmd_error`, `failure_diagnose`) to English-only; SSH error-correction context injection is English as well. Removed unused embedded templates (`error_detect`, `system_diagnose`, `guess_command`) and stale copies under `crates/aish-shell/prompts/` (runtime source: `aish-prompts/src/manager.rs`).
+- Converted embedded LLM prompt templates (`oracle`, `cmd_error`, `failure_diagnose`) to English-only; SSH error-correction context injection is English as well.
+- Migrated `/diagnose` to the troubleshoot sub-agent spawn path.
+
+### Fixed
+
+- Fixed `web_fetch` HTML entity decoding to a single pass to prevent double-decoding.
+- Fixed PTY Ctrl+C handling to kill the foreground process group so pagers unblock reliably.
+- Fixed PTY bash rcfile handling to use a unique temp file created with mode `0600`.
+- Fixed a PTY file-descriptor leak and sub-shell echo behavior.
+- Fixed sub-agent tool inheritance from the parent and abort-on-Ctrl+C cancellation.
+- Fixed the sub-agent UI flag reset when the Agent tool ends.
+- Fixed packaged skills seeding so install overwrites bundled skill files as intended.
+- Fixed the setup wizard so the config directory is created before the first-run save.
+- Fixed diagnose confirm-execute to use `has_alternatives` when presenting choices.
+
+### Removed
+
+- Removed unused embedded prompt templates (`error_detect`, `system_diagnose`, `guess_command`) and stale copies under `crates/aish-shell/prompts/`.
+- Removed legacy `LlmSession` prompt filtering APIs in favor of `PromptAssembly`.
+- Removed `docs/skills-guide.md`.
 
 ## [0.3.6] - 2026-07-03
 
