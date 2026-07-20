@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Seed built-in skills into the invoking user's ~/.config/aish/skills/.
 #
-# Skills that already exist in the user directory are preserved as-is, so any
-# local edits the user has made win over the packaged version. New skills that
-# the package ships but the user does not yet have are copied across.
+# Every skill shipped under the system skills directory is copied into the
+# user directory, replacing any existing tree of the same name. Packaged
+# skills are product-owned; upgrades must land on disk so runtime behavior
+# matches the installed aish version. User-authored skills (names not in
+# the package) are left untouched.
 #
 # Usage: seed-skills.sh <system_skills_dir>
 # Must be invoked AFTER the system-level skills directory has been populated
@@ -39,16 +41,14 @@ USER_SKILLS_DIR="$TARGET_HOME/.config/aish/skills"
 mkdir -p "$USER_SKILLS_DIR"
 
 seeded=0
-skipped=0
 for skill_path in "$SYSTEM_SKILLS_DIR"/*/; do
     [[ -d "$skill_path" ]] || continue
     skill_name="$(basename "$skill_path")"
     target="$USER_SKILLS_DIR/$skill_name"
 
+    # Replace any previous copy so package upgrades refresh product skills.
     if [[ -e "$target" ]]; then
-        # Preserve any user edits — never overwrite.
-        skipped=$((skipped + 1))
-        continue
+        rm -rf "$target"
     fi
 
     cp -r "$skill_path" "$target"
@@ -59,5 +59,5 @@ for skill_path in "$SYSTEM_SKILLS_DIR"/*/; do
 done
 
 if [[ $seeded -gt 0 ]]; then
-    echo "Seeded $seeded skill(s) to $USER_SKILLS_DIR ($skipped already present)."
+    echo "Seeded $seeded packaged skill(s) to $USER_SKILLS_DIR (overwrote same-name trees)."
 fi
