@@ -75,6 +75,22 @@ impl SettingCategory {
     ];
 }
 
+impl SettingCategory {
+    /// Short glyph shown next to the category label in chips and row icons.
+    /// Pure ASCII-ish unicode so it renders in any terminal.
+    pub fn icon(self) -> &'static str {
+        match self {
+            SettingCategory::Model => "◆",
+            SettingCategory::Appearance => "◐",
+            SettingCategory::Ai => "✦",
+            SettingCategory::Security => "▓",
+            SettingCategory::Context => "▣",
+            SettingCategory::Remote => "⌘",
+            SettingCategory::Advanced => "⚙",
+        }
+    }
+}
+
 /// How a value is edited in the panel.
 #[derive(Debug, Clone, Copy)]
 pub enum SettingKind {
@@ -513,6 +529,22 @@ pub fn find(key: SettingKey) -> &'static SettingDef {
         .iter()
         .find(|s| s.key == key)
         .expect("SettingKey is exhaustive over SETTINGS")
+}
+
+/// The factory-default raw value for `key`, derived from `ConfigModel::default()`.
+///
+/// Deriving (rather than hand-mirroring the defaults) eliminates drift: if a
+/// default changes in `aish-config`, this function tracks it automatically.
+/// Used to mark a row as "changed" (current != default) and to power the
+/// reset-to-default action.
+pub fn default_raw_of(key: SettingKey) -> String {
+    let cfg = ConfigModel::default();
+    current_raw(&cfg, key)
+}
+
+/// Whether the current raw value differs from the factory default.
+pub fn is_changed(key: SettingKey, current_raw: &str) -> bool {
+    current_raw != default_raw_of(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,5 +1061,38 @@ mod tests {
             live_effect(SettingKey::InputGuardEnabled),
             LiveEffect::InputGuard
         );
+        assert_eq!(live_effect(SettingKey::InputGuardEnabled), LiveEffect::InputGuard);
+    }
+
+    /// Regression: `default_raw_of` must match `current_raw(ConfigModel::default())`
+    /// for every key. Previously `default_raw_of(RemoteDangerPatterns)` was
+    /// hand-mirrored to `""`, which (a) flagged every fresh install as changed
+    /// and (b) made Ctrl+R reset silently wipe the production-safety patterns.
+    /// Deriving from `ConfigModel::default()` makes drift impossible.
+    #[test]
+    fn default_raw_of_matches_configmodel_default_for_all_keys() {
+        let cfg = ConfigModel::default();
+        for def in SETTINGS {
+            let expected = current_raw(&cfg, def.key);
+            let actual = default_raw_of(def.key);
+            assert_eq!(
+                actual, expected,
+                "default_raw_of({:?}) drifts from ConfigModel::default()",
+                def.key
+            );
+        }
+    }
+
+    /// The RemoteDangerPatterns default specifically — non-empty and matches
+    /// the factory list. Catches the original P1 wipe bug directly.
+    #[test]
+    fn default_raw_of_remote_danger_patterns_is_factory_list() {
+        let d = default_raw_of(SettingKey::RemoteDangerPatterns);
+        assert!(!d.is_empty(), "danger patterns default must not be empty");
+        assert!(d.contains("^prod-"));
+        assert!(d.contains("^production"));
+        // Fresh config matches default → is_changed must be false.
+        let fresh = current_raw(&ConfigModel::default(), SettingKey::RemoteDangerPatterns);
+        assert!(!is_changed(SettingKey::RemoteDangerPatterns, &fresh));
     }
 }

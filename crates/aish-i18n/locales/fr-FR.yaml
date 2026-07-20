@@ -314,6 +314,8 @@ shell:
     search_desc: "Accéder à n'importe quel paramètre par mot-clé dans toutes les catégories"
     search_title: "Rechercher un paramètre"
     search_placeholder: "Tapez pour filtrer (nom / description / catégorie)"
+    footer_idle: "↑↓ naviguer · ←/→ catégorie · Space/Enter modifier · Ctrl+R réinitialiser · Esc quitter"
+    footer_editing: "Enter appliquer · Esc annuler"
     search_footer: "↑/↓ naviguer  Tapez pour filtrer  Enter modifier  Esc retour"
     search_empty: "Aucun paramètre correspondant"
     restart_summary: "{count} modification(s) prendront effet après le redémarrage"

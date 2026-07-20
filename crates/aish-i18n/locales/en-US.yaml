@@ -678,6 +678,8 @@ shell:
     search_desc: "Jump to any setting by keyword across all categories"
     search_title: "Search settings"
     search_placeholder: "Type to filter (name / description / category)"
+    footer_idle: "↑↓ move · ←/→ category · Space/Enter edit · Ctrl+R reset · Esc exit"
+    footer_editing: "Enter apply · Esc cancel"
     search_footer: "Up/Down move  Type to filter  Enter edit  Esc back"
     search_empty: "No matching settings"
     restart_summary: "{count} change(s) will take effect after restart"

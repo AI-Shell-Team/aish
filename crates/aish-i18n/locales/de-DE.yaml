@@ -314,6 +314,8 @@ shell:
     search_desc: "Per Stichwort zu jeder Einstellung in allen Kategorien springen"
     search_title: "Einstellungen suchen"
     search_placeholder: "Tippen zum Filtern (Name / Beschreibung / Kategorie)"
+    footer_idle: "↑↓ bewegen · ←/→ Kategorie · Space/Enter bearbeiten · Ctrl+R zurücksetzen · Esc beenden"
+    footer_editing: "Enter anwenden · Esc abbrechen"
     search_footer: "↑/↓ bewegen · Tippen filtert · Enter bearbeiten · Esc zurück"
     search_empty: "Keine passenden Einstellungen"
     restart_summary: "{count} Änderung(en) werden nach Neustart wirksam"

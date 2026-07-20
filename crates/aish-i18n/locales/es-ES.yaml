@@ -314,6 +314,8 @@ shell:
     search_desc: "Salta a cualquier ajuste por palabra clave en todas las categorías"
     search_title: "Buscar ajustes"
     search_placeholder: "Escribe para filtrar (nombre / descripción / categoría)"
+    footer_idle: "↑↓ mover · ←/→ categoría · Space/Enter editar · Ctrl+R restablecer · Esc salir"
+    footer_editing: "Enter aplicar · Esc cancelar"
     search_footer: "↑/↓ mover  Escribe para filtrar  Enter editar  Esc volver"
     search_empty: "No hay ajustes coincidentes"
     restart_summary: "{count} cambio(s) se aplicarán tras reiniciar"
