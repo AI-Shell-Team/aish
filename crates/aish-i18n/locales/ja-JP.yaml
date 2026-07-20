@@ -314,6 +314,8 @@ shell:
     search_desc: "すべてのカテゴリーからキーワードで設定にジャンプ"
     search_title: "設定を検索"
     search_placeholder: "入力して絞り込み（名前 / 説明 / カテゴリー）"
+    footer_idle: "↑↓ 移動 · ←/→ カテゴリ · Space/Enter 編集 · Ctrl+R リセット · Esc 終了"
+    footer_editing: "Enter 適用 · Esc キャンセル"
     search_footer: "↑/↓ 移動  入力で絞り込み  Enter で編集  Esc で戻る"
     search_empty: "一致する設定はありません"
     restart_summary: "{count} 件の変更は再起動後に反映されます"

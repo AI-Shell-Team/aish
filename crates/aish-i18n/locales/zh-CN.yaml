@@ -678,6 +678,8 @@ shell:
     search_desc: "按关键字跨分类跳转到任意设置"
     search_title: "搜索设置"
     search_placeholder: "输入关键字过滤（名称 / 描述 / 分类）"
+    footer_idle: "↑↓ 移动 · ←/→ 切分类 · 空格/Enter 编辑 · Ctrl+R 重置 · Esc 退出"
+    footer_editing: "Enter 应用 · Esc 取消"
     search_footer: "↑↓ 移动  输入即过滤  Enter 编辑  Esc 返回"
     search_empty: "没有匹配的设置"
     restart_summary: "共有 {count} 项改动将在重启后生效"

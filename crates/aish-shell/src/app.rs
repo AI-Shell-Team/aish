@@ -193,12 +193,19 @@ fn mask_secret(s: &str) -> String {
     format!("{head}{}{tail}", "*".repeat(n - 4))
 }
 
-/// Normalize a dialog outcome into a trimmed value, or None when cancelled.
-fn dialog_value(result: crate::tui::DialogResult) -> Option<String> {
-    match result {
-        crate::tui::DialogResult::Selected(v) => Some(v),
-        crate::tui::DialogResult::CustomInput(v) => Some(v.trim().to_string()),
-        crate::tui::DialogResult::Cancelled => None,
+/// Accent color per setting category — used by the chips and row icons in
+/// the new `/setting` panel.
+fn category_color_for(c: crate::settings_panel::SettingCategory) -> ratatui::style::Color {
+    use crate::settings_panel::SettingCategory;
+    use ratatui::style::Color;
+    match c {
+        SettingCategory::Model => Color::Cyan,
+        SettingCategory::Appearance => Color::Magenta,
+        SettingCategory::Ai => Color::LightGreen,
+        SettingCategory::Security => Color::LightRed,
+        SettingCategory::Context => Color::LightBlue,
+        SettingCategory::Remote => Color::LightMagenta,
+        SettingCategory::Advanced => Color::Gray,
     }
 }
 
@@ -4135,61 +4142,91 @@ impl AishShell {
         println!("{}", t_with_args("shell.model.switch_success", &args));
     }
 
-    /// Handle `/setting` — interactive categorized settings panel.
+    /// Handle `/setting` — single-screen settings panel.
     ///
-    /// Two-level loop: pick a category → pick a setting → edit its value →
-    /// apply + persist + run live side-effects. Esc at any level backs out;
-    /// Esc at the category level exits the panel. Model/credentials changes
-    /// are applied to the running LLM session immediately (like `/model`).
+    /// Flat layout: category chips on top, type-to-filter list, inline edit
+    /// for Bool/Choice (Space toggle, `<`/`>` step, Enter cycle), and Enter
+    /// on Text/Int/Float/Secret/StringList pops a one-shot external editor
+    /// then returns to the panel at the same row. Esc exits; Ctrl+R resets
+    /// the highlighted row to factory default.
     fn handle_setting_command(&mut self) {
-        use crate::settings_panel::{entries_for, SettingCategory, SettingDef};
-        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+        use crate::settings_panel::{self, SettingKind};
+        use aish_ui::{PanelOutcome, PanelRuntime, SettingsOutcome, SettingsPanel};
 
         // Count of restart-required edits this session, for an exit summary.
         let mut restart_changes: usize = 0;
+        let mut last_key: Option<String> = None;
+        let mut pending_error: Option<String> = None;
 
-        // ----- level 1: category loop -------------------------------------
         loop {
-            // A leading "search" row lets users jump across all 31 settings
-            // by keyword instead of knowing the category.
-            let mut cat_opts: Vec<DialogOption> =
-                Vec::with_capacity(SettingCategory::ALL.len() + 1);
-            cat_opts.push(
-                DialogOption::new("__search__", t("shell.setting.search_entry"))
-                    .with_description(t("shell.setting.search_desc")),
-            );
-            for &c in SettingCategory::ALL {
-                let label = t(&format!("shell.setting.cat.{}", c.name()));
-                let desc = t(&format!("shell.setting.cat_desc.{}", c.name()));
-                let count = entries_for(c).count();
-                cat_opts.push(
-                    DialogOption::new(c.name(), format!("{}  ({})", label, count))
-                        .with_description(desc),
-                );
-            }
+            // Rebuild items every iteration so values refresh after each edit
+            // (the cursor is restored to `last_key` via with_selected_key).
+            let (cats, items) = Self::build_settings_items(&self.config);
+            let panel = SettingsPanel::new(t("shell.setting.title").to_string(), cats, items)
+                .with_search_placeholder(t("shell.setting.search_placeholder"))
+                .with_footer_idle(t("shell.setting.footer_idle"))
+                .with_footer_editing(t("shell.setting.footer_editing"))
+                .with_selected_key(last_key.as_deref())
+                .with_error(pending_error.clone());
 
-            let title = t("shell.setting.title");
-            let subtitle = t("shell.setting.subtitle");
-            let sel = match show_selection_dialog(&title, &subtitle, &cat_opts, false, true) {
-                DialogResult::Selected(name) => name,
-                _ => break, // Esc / Ctrl+C → exit panel
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
             };
 
-            if sel == "__search__" {
-                self.setting_search_session(&mut restart_changes);
-                continue;
+            match outcome {
+                Ok(PanelOutcome::Submitted(SettingsOutcome::Applied { key, value })) => {
+                    let Some(k) = Self::resolve_setting_key(&key) else {
+                        continue;
+                    };
+                    last_key = Some(key);
+                    self.apply_or_queue_error(k, &value, &mut restart_changes, &mut pending_error);
+                }
+                Ok(PanelOutcome::Submitted(SettingsOutcome::Reset { key })) => {
+                    let Some(k) = Self::resolve_setting_key(&key) else {
+                        continue;
+                    };
+                    let default_val = settings_panel::default_raw_of(k);
+                    self.apply_or_queue_error(
+                        k,
+                        &default_val,
+                        &mut restart_changes,
+                        &mut pending_error,
+                    );
+                    last_key = Some(key);
+                }
+                Ok(PanelOutcome::Submitted(SettingsOutcome::RequestExternalEdit { key })) => {
+                    let Some(k) = Self::resolve_setting_key(&key) else {
+                        continue;
+                    };
+                    last_key = Some(key.clone());
+                    let def = settings_panel::find(k);
+                    let label = setting_label(def);
+                    let desc = setting_desc(def);
+                    let cur_raw = settings_panel::current_raw(&self.config, k);
+                    let secret = matches!(def.kind, SettingKind::Secret);
+                    // Pop a single external input; we return to the panel
+                    // afterwards regardless of outcome.
+                    // Empty submission on a Secret prompt is a no-op (skip),
+                    // not a wipe — mirrors the legacy edit_setting_value guard.
+                    let submitted = prompt_edit_value(&label, &desc, &cur_raw, secret);
+                    let skip = secret && submitted.as_deref().is_some_and(|v| v.is_empty());
+                    if let Some(v) = submitted {
+                        if !skip {
+                            self.apply_or_queue_error(
+                                k,
+                                &v,
+                                &mut restart_changes,
+                                &mut pending_error,
+                            );
+                        }
+                    }
+                }
+                _ => break, // Cancelled / Esc at top level / Ctrl+Q
             }
-
-            let category = match SettingCategory::ALL.iter().find(|c| c.name() == sel) {
-                Some(&c) => c,
-                None => continue,
-            };
-            let defs: Vec<&'static SettingDef> = entries_for(category).collect();
-            let list_title = t(&format!("shell.setting.cat.{}", category.name()));
-            self.setting_list_session(defs, &list_title, &mut restart_changes);
         }
 
-        // Exit summary: surface how many changes need a restart (P1-6).
+        // Exit summary: surface how many changes need a restart.
         if restart_changes > 0 {
             println!(
                 "{}",
@@ -4202,259 +4239,185 @@ impl AishShell {
         }
     }
 
-    /// Live-filter search across the whole catalog in a single
-    /// command-palette panel: type to filter, arrows to move, Enter to edit,
-    /// Esc to return. After each edit the panel re-opens with refreshed
-    /// current values — no need to re-navigate categories.
-    fn setting_search_session(&mut self, restart_changes: &mut usize) {
+    /// Resolve a settings-panel item key back to its `SettingKey`.
+    /// Returns `None` if the catalog was mutated out-of-band (defensive).
+    fn resolve_setting_key(name: &str) -> Option<crate::settings_panel::SettingKey> {
         use crate::settings_panel::SETTINGS;
-        use aish_ui::{
-            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        SETTINGS
+            .iter()
+            .find(|d| d.key.name() == name)
+            .map(|d| d.key)
+    }
+
+    /// Apply `new_val` to `key` and either clear `pending_error` (on success)
+    /// or replace it with the localized validation message (on failure).
+    /// Centralizing this here guarantees the error shown always reflects the
+    /// most recent edit's outcome — no stale messages can persist across
+    /// edits, which was a real bug before this helper existed.
+    fn apply_or_queue_error(
+        &mut self,
+        key: crate::settings_panel::SettingKey,
+        new_val: &str,
+        restart_changes: &mut usize,
+        pending_error: &mut Option<String>,
+    ) {
+        *pending_error = None;
+        if let Err(e) = self.apply_setting_value(key, new_val, restart_changes) {
+            *pending_error = Some(t_with_args("shell.setting.invalid", &{
+                let mut a = std::collections::HashMap::new();
+                a.insert("error".to_string(), e);
+                a
+            }));
+        }
+    }
+
+    /// Apply `new_val` to `key`: validate, persist, run live side-effects,
+    /// emit a confirmation line. On validation failure returns `Err(msg)`
+    /// so the caller can surface it in the panel without losing the cursor.
+    fn apply_setting_value(
+        &mut self,
+        key: crate::settings_panel::SettingKey,
+        new_val: &str,
+        restart_changes: &mut usize,
+    ) -> Result<(), String> {
+        use crate::settings_panel::{self, LiveEffect, SettingKind};
+
+        // Validate against a clone so a bad value can't partially mutate
+        // the live config; only commit on success.
+        let mut trial = self.config.clone();
+        settings_panel::apply(&mut trial, key, new_val)?;
+        self.config = trial;
+
+        // Persist to disk.
+        let config_path = aish_config::ConfigLoader::default_config_path();
+        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
+            eprintln!(
+                "{}",
+                theme::warning(&{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("error".to_string(), e.to_string());
+                    t_with_args("shell.config_save_warning", &a)
+                })
+            );
+        }
+
+        // Live side-effects so the change is felt without restart.
+        match settings_panel::live_effect(key) {
+            LiveEffect::ModelSession => {
+                self.ai_handler.update_model(
+                    &self.config.model,
+                    Some(&self.config.api_base),
+                    Some(&self.config.api_key),
+                );
+                if let Some(ai) = &self.inline_ai {
+                    ai.update_model(&self.config.model);
+                }
+                self.refresh_config_dependent_tools();
+            }
+            LiveEffect::ToolsRefresh => self.refresh_config_dependent_tools(),
+            LiveEffect::InputGuard => {
+                self.input_guard
+                    .set_enabled(self.config.input_guard_enabled);
+            }
+            LiveEffect::None => {}
+        }
+
+        // Confirmation line below the panel.
+        let def = settings_panel::find(key);
+        let label = setting_label(def);
+        if new_val.is_empty() {
+            println!(
+                "{}",
+                theme::success(&t_with_args("shell.setting.applied_clear", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("label".to_string(), label);
+                    a
+                }))
+            );
+        } else {
+            let shown = if matches!(def.kind, SettingKind::Secret) {
+                mask_secret(new_val)
+            } else {
+                new_val.to_string()
+            };
+            println!(
+                "{}",
+                theme::success(&t_with_args("shell.setting.applied", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("label".to_string(), label);
+                    a.insert("value".to_string(), shown);
+                    a
+                }))
+            );
+        }
+        if settings_panel::requires_restart(key) {
+            println!("{}", theme::faint(&t("shell.setting.restart_hint")));
+            *restart_changes += 1;
+        }
+        Ok(())
+    }
+
+    /// Build the panel data from the live config. Pure function so it stays
+    /// easy to test and avoids borrow conflicts against `self`.
+    fn build_settings_items(
+        config: &ConfigModel,
+    ) -> (
+        Vec<aish_ui::SettingsCategoryInfo>,
+        Vec<aish_ui::SettingsItem>,
+    ) {
+        use crate::settings_panel::{self, SettingCategory, SettingKind, SETTINGS};
+        use aish_ui::{SettingsCategoryInfo, SettingsItem, SettingsValueKind};
+
+        let cats: Vec<SettingsCategoryInfo> = SettingCategory::ALL
+            .iter()
+            .map(|&c| SettingsCategoryInfo {
+                label: t(&format!("shell.setting.cat.{}", c.name())).to_string(),
+                icon: c.icon().to_string(),
+                color: category_color_for(c),
+            })
+            .collect();
+
+        let cat_index_of = |c: SettingCategory| {
+            SettingCategory::ALL
+                .iter()
+                .position(|&x| x == c)
+                .unwrap_or(0)
         };
 
-        // Last-edited setting's key — restored as the cursor position when
-        // the panel reopens after an edit, so the user lands back on it.
-        let mut last_edited: Option<String> = None;
-        loop {
-            let items: Vec<SearchSelectItem> = SETTINGS
-                .iter()
-                .map(|def| {
-                    let label = setting_label(def);
-                    let cur = setting_display_current(&self.config, def);
-                    let cat = t(&format!("shell.setting.cat.{}", def.category.name()));
-                    let desc = setting_desc(def);
-                    let search_text = format!("{} {} {} {}", label, desc, def.key.name(), cat);
-                    SearchSelectItem::new(def.key.name(), format!("{}  [{}]", label, cur))
-                        .with_detail(format!("[{}] {}", cat, desc))
-                        .with_search_text(search_text)
-                })
-                .collect();
-
-            // Scope the input guard to the panel run only; edit_one_setting's
-            // own prompts acquire their own guard.
-            let outcome = {
-                let _guard = aish_tools::bash::acquire_interactive_input_guard();
-                let mut panel = SearchSelectPanel::new(
-                    t("shell.setting.search_title").to_string(),
-                    t("shell.setting.search_placeholder").to_string(),
-                    items,
-                )
-                .with_footer(t("shell.setting.search_footer").to_string())
-                .with_empty_message(t("shell.setting.search_empty").to_string());
-                if let Some(k) = &last_edited {
-                    panel = panel.with_selected_value(Some(k));
-                }
-                PanelRuntime::new().run(panel)
-            };
-
-            match outcome {
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(key_name))) => {
-                    let def = match SETTINGS.iter().find(|d| d.key.name() == key_name) {
-                        Some(d) => d,
-                        None => continue,
-                    };
-                    self.edit_one_setting(def, restart_changes);
-                    last_edited = Some(key_name);
-                }
-                _ => return, // Esc / Ctrl+C / Ctrl+Q → back to category menu
-            }
-        }
-    }
-    /// Show a category's settings and let the user edit any of them repeatedly.
-    /// Esc returns to the caller (category menu).
-    fn setting_list_session(
-        &mut self,
-        defs: Vec<&'static crate::settings_panel::SettingDef>,
-        title: &str,
-        restart_changes: &mut usize,
-    ) {
-        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
-        loop {
-            let opts: Vec<DialogOption> = defs
-                .iter()
-                .map(|def| {
-                    let label = setting_label(def);
-                    let cur = setting_display_current(&self.config, def);
-                    DialogOption::new(def.key.name(), format!("{}  [{}]", label, cur))
-                        .with_description(setting_desc(def))
-                })
-                .collect();
-            let key_name = match show_selection_dialog(
-                title,
-                &t("shell.setting.select_setting"),
-                &opts,
-                false,
-                true,
-            ) {
-                DialogResult::Selected(n) => n,
-                _ => return, // Esc → back to categories
-            };
-            let def = match defs.iter().find(|d| d.key.name() == key_name) {
-                Some(d) => *d,
-                None => continue,
-            };
-            self.edit_one_setting(def, restart_changes);
-        }
-    }
-
-    /// Edit one setting's value. Re-prompts the input in place when the value
-    /// is invalid (P0-2) instead of kicking the user back to the list; only
-    /// Esc returns. Persists, runs live side-effects, and accounts restart
-    /// changes.
-    fn edit_one_setting(
-        &mut self,
-        def: &'static crate::settings_panel::SettingDef,
-        restart_changes: &mut usize,
-    ) {
-        use crate::settings_panel::{self, LiveEffect, SettingKind};
-        loop {
-            let cur_raw = settings_panel::current_raw(&self.config, def.key);
-            let new_val = match self.edit_setting_value(def, &cur_raw) {
-                Some(v) => v,
-                None => return, // Esc → back to list
-            };
-            // Validate against a clone so a bad value can't partially mutate
-            // the live config; only commit on success.
-            let mut trial = self.config.clone();
-            if let Err(e) = settings_panel::apply(&mut trial, def.key, &new_val) {
-                eprintln!(
-                    "{}",
-                    theme::error(&t_with_args("shell.setting.invalid", &{
-                        let mut a = std::collections::HashMap::new();
-                        a.insert("error".to_string(), e);
-                        a
-                    }))
-                );
-                continue; // re-prompt the same input
-            }
-            self.config = trial;
-
-            // Persist to disk.
-            let config_path = aish_config::ConfigLoader::default_config_path();
-            if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-                eprintln!(
-                    "{}",
-                    theme::warning(&{
-                        let mut a = std::collections::HashMap::new();
-                        a.insert("error".to_string(), e.to_string());
-                        t_with_args("shell.config_save_warning", &a)
-                    })
-                );
-            }
-
-            // Live side-effects so the change is felt without restart.
-            match settings_panel::live_effect(def.key) {
-                LiveEffect::ModelSession => {
-                    self.ai_handler.update_model(
-                        &self.config.model,
-                        Some(&self.config.api_base),
-                        Some(&self.config.api_key),
-                    );
-                    if let Some(ai) = &self.inline_ai {
-                        ai.update_model(&self.config.model);
-                    }
-                    self.refresh_config_dependent_tools();
-                }
-                LiveEffect::ToolsRefresh => self.refresh_config_dependent_tools(),
-                LiveEffect::InputGuard => {
-                    // screen_input() consults the cached guard, so toggle its
-                    // enabled flag to match the freshly-written config.
-                    self.input_guard
-                        .set_enabled(self.config.input_guard_enabled);
-                }
-                LiveEffect::None => {}
-            }
-
-            // Confirmation.
-            let label = setting_label(def);
-            if new_val.is_empty() {
-                println!(
-                    "{}",
-                    theme::success(&t_with_args("shell.setting.applied_clear", &{
-                        let mut a = std::collections::HashMap::new();
-                        a.insert("label".to_string(), label);
-                        a
-                    }))
-                );
-            } else {
-                let shown = if matches!(def.kind, SettingKind::Secret) {
-                    mask_secret(&new_val)
-                } else {
-                    new_val.clone()
+        let items: Vec<SettingsItem> = SETTINGS
+            .iter()
+            .map(|def| {
+                let cur_raw = settings_panel::current_raw(config, def.key);
+                let display = setting_display_current(config, def);
+                let (kind, options) = match def.kind {
+                    SettingKind::Bool => (SettingsValueKind::Bool, Vec::new()),
+                    SettingKind::Choice(opts) => (
+                        SettingsValueKind::Choice,
+                        opts.iter().map(|s| s.to_string()).collect(),
+                    ),
+                    SettingKind::Text => (SettingsValueKind::Text, Vec::new()),
+                    SettingKind::Float => (SettingsValueKind::Float, Vec::new()),
+                    SettingKind::Int => (SettingsValueKind::Int, Vec::new()),
+                    SettingKind::Secret => (SettingsValueKind::Secret, Vec::new()),
+                    SettingKind::StringList => (SettingsValueKind::StringList, Vec::new()),
                 };
-                println!(
-                    "{}",
-                    theme::success(&t_with_args("shell.setting.applied", &{
-                        let mut a = std::collections::HashMap::new();
-                        a.insert("label".to_string(), label);
-                        a.insert("value".to_string(), shown);
-                        a
-                    }))
-                );
-            }
-            if settings_panel::requires_restart(def.key) {
-                println!("{}", theme::faint(&t("shell.setting.restart_hint")));
-                *restart_changes += 1;
-            }
-            return; // back to the list
-        }
-    }
-
-    /// Build the value-edit dialog for one setting and return the trimmed new
-    /// value, or `None` if the user cancelled.
-    fn edit_setting_value(
-        &self,
-        def: &crate::settings_panel::SettingDef,
-        current_raw: &str,
-    ) -> Option<String> {
-        use crate::settings_panel::SettingKind;
-        use crate::tui::{show_selection_dialog, DialogOption};
-
-        let label = setting_label(def);
-        let desc = setting_desc(def);
-        let on = t("shell.setting.on");
-        let off = t("shell.setting.off");
-
-        match def.kind {
-            SettingKind::Bool => {
-                let opts = vec![
-                    DialogOption::new("true", &on),
-                    DialogOption::new("false", &off),
-                ];
-                dialog_value(show_selection_dialog(&label, &desc, &opts, false, true))
-            }
-            SettingKind::Choice(options) => {
-                // Fixed set — no custom input, so apply() can't receive a
-                // typo that would silently break the consumer.
-                let opts: Vec<DialogOption> = options
-                    .iter()
-                    .map(|o| {
-                        let mut d = DialogOption::new(*o, *o);
-                        if *o == current_raw {
-                            d = d.with_description(t("shell.setting.current_tag"));
-                        }
-                        d
-                    })
-                    .collect();
-                dialog_value(show_selection_dialog(&label, &desc, &opts, false, true))
-            }
-            SettingKind::Text | SettingKind::Float | SettingKind::Int | SettingKind::StringList => {
-                // Free-text/number: edit the current value in place. The value
-                // is prefilled so the user changes it directly (no "pick the
-                // custom row first" step). Empty clears Option-backed fields.
-                // StringList edits the whole list as comma-separated text;
-                // apply() re-splits on commas.
-                prompt_edit_value(&label, &desc, current_raw, false)
-            }
-            SettingKind::Secret => {
-                // Masked input (no prefill — never echo the secret). An empty
-                // submission keeps the current value rather than wiping it.
-                match prompt_edit_value(&label, &desc, "", true) {
-                    Some(v) if !v.is_empty() => Some(v),
-                    _ => None,
+                SettingsItem {
+                    key: def.key.name().to_string(),
+                    label: setting_label(def),
+                    desc: setting_desc(def),
+                    current_raw: cur_raw.clone(),
+                    display_value: display,
+                    default_raw: settings_panel::default_raw_of(def.key).to_string(),
+                    category_index: cat_index_of(def.category),
+                    kind,
+                    options,
+                    changed: settings_panel::is_changed(def.key, &cur_raw),
+                    restart_required: settings_panel::requires_restart(def.key),
                 }
-            }
-        }
+            })
+            .collect();
+
+        (cats, items)
     }
 
     /// Handle `/plan [start|status|exit]` — plan mode lifecycle.
