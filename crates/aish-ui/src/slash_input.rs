@@ -99,8 +99,10 @@ impl SlashInputSession {
         Ok(outcome)
     }
 
-    /// Override input after construction (for integration tests).
-    #[doc(hidden)]
+    /// Pre-fill the input after construction.
+    ///
+    /// Used when re-opening the popup from readline Tab completion on a
+    /// `/` prefix — the popup starts with the text the user had typed.
     pub fn with_input(mut self, input: impl Into<String>) -> Self {
         self.input = input.into();
         self.cursor = self.input.len();
@@ -151,14 +153,6 @@ impl SlashInputSession {
             .collect();
         self.selected = 0;
         self.clamp_selected();
-    }
-
-    fn matching_name_count(&self) -> usize {
-        let query = self.command_query().to_lowercase();
-        self.commands
-            .iter()
-            .filter(|(name, _)| name.to_lowercase().starts_with(&query))
-            .count()
     }
 
     fn replace_command_token(&mut self, new_command: &str) {
@@ -230,12 +224,6 @@ impl SlashInputSession {
             return Some(SlashInputOutcome::Command(trimmed.to_string()));
         }
         if !self.filtered.is_empty() {
-            let query = self.command_query();
-            let match_count = self.matching_name_count();
-            // Ambiguous prefix (e.g. /r): return to readline instead of guessing.
-            if match_count > 1 && query != "/" {
-                return Some(SlashInputOutcome::Dismissed(self.input.clone()));
-            }
             let Some(command) = self.selected_command_name().map(str::to_string) else {
                 return Some(SlashInputOutcome::Dismissed(self.input.clone()));
             };
@@ -573,6 +561,7 @@ mod tests {
             ("/help".into(), "Show help information".into()),
             ("/model".into(), "Show or switch AI model".into()),
             ("/setup".into(), "Open setup wizard".into()),
+            ("/setting".into(), "Open interactive settings panel".into()),
             ("/plan".into(), "Plan mode control".into()),
             ("/token".into(), "Show token usage".into()),
             ("/resume".into(), "Resume previous session".into()),
@@ -728,12 +717,27 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_prefix_enter_dismisses_to_readline() {
+    fn enter_on_ambiguous_prefix_executes_highlighted() {
         let commands = all_slash_commands();
         let mut session = session_with_commands("/r", &commands);
+        // /resume precedes /record; default highlight is the first match.
         assert_eq!(
             session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(SlashInputOutcome::Dismissed("/r".into()))
+            Some(SlashInputOutcome::Command("/resume".into()))
+        );
+    }
+
+    /// Regression: typing `/se`, navigating Down to `/setting`, then pressing
+    /// Enter must execute `/setting` — not dismiss with the partial `/se`.
+    #[test]
+    fn enter_after_down_arrow_executes_selected_command() {
+        let commands = all_slash_commands();
+        let mut session = session_with_commands("/se", &commands);
+        // /se matches /setup (selected=0) and /setting (selected=1).
+        session.handle_event(key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Command("/setting".into()))
         );
     }
 

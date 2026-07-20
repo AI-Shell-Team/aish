@@ -66,13 +66,43 @@ pub struct SettingsCategoryInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsOutcome {
     /// Bool flip, Choice change, or external-edit submit applied.
-    Applied { key: String, value: String },
+    Applied {
+        key: String,
+        value: String,
+        active_category: usize,
+    },
     /// Reset-to-default requested (Ctrl+R on a row).
-    Reset { key: String },
+    Reset { key: String, active_category: usize },
     /// User hit Enter on a Text/Int/Float/Secret/StringList field.
-    RequestExternalEdit { key: String },
+    RequestExternalEdit { key: String, active_category: usize },
+    /// User hit Enter on a Choice field — caller pops a one-shot selection
+    /// list (the user wants to see all options at a glance, not cycle blind).
+    /// `</>` still cycles inline for power users.
+    RequestChoiceSelect { key: String, active_category: usize },
     /// Esc at top level, Ctrl+C, or Ctrl+Q.
-    Cancelled,
+    Cancelled { active_category: usize },
+}
+
+impl SettingsOutcome {
+    /// The chip that was active when this outcome was produced. The caller
+    /// uses it to restore the cursor's chip across panel re-opens.
+    pub fn active_category(&self) -> usize {
+        match self {
+            SettingsOutcome::Applied {
+                active_category, ..
+            }
+            | SettingsOutcome::Reset {
+                active_category, ..
+            }
+            | SettingsOutcome::RequestExternalEdit {
+                active_category, ..
+            }
+            | SettingsOutcome::RequestChoiceSelect {
+                active_category, ..
+            }
+            | SettingsOutcome::Cancelled { active_category } => *active_category,
+        }
+    }
 }
 
 /// Color tint for the four state badges rendered on each row.
@@ -151,6 +181,13 @@ impl SettingsPanel {
                 self.selected = idx;
             }
         }
+        self
+    }
+
+    /// Restore the active category chip across panel re-opens (so editing a
+    /// row in category N does not bounce the user back to "All").
+    pub fn with_active_category(mut self, idx: usize) -> Self {
+        self.set_active_category(idx);
         self
     }
 
@@ -254,6 +291,7 @@ impl SettingsPanel {
         SettingsOutcome::Applied {
             key: item.key.clone(),
             value: next,
+            active_category: self.active_category,
         }
     }
 
@@ -275,6 +313,7 @@ impl SettingsPanel {
         Some(SettingsOutcome::Applied {
             key: item.key.clone(),
             value: item.options[next].clone(),
+            active_category: self.active_category,
         })
     }
 
@@ -282,6 +321,7 @@ impl SettingsPanel {
         let idx = self.current_visible()?;
         Some(SettingsOutcome::Reset {
             key: self.items[idx].key.clone(),
+            active_category: self.active_category,
         })
     }
 
@@ -290,13 +330,17 @@ impl SettingsPanel {
         let item = &self.items[idx];
         match item.kind {
             SettingsValueKind::Bool => Some(self.apply_bool_toggle(item)),
-            SettingsValueKind::Choice => self.apply_choice_step(item, true),
+            SettingsValueKind::Choice => Some(SettingsOutcome::RequestChoiceSelect {
+                key: item.key.clone(),
+                active_category: self.active_category,
+            }),
             SettingsValueKind::Text
             | SettingsValueKind::Float
             | SettingsValueKind::Int
             | SettingsValueKind::Secret
             | SettingsValueKind::StringList => Some(SettingsOutcome::RequestExternalEdit {
                 key: item.key.clone(),
+                active_category: self.active_category,
             }),
         }
     }
@@ -694,7 +738,7 @@ impl SettingsPanel {
                 "Space/Enter toggle · Ctrl+R reset · ←/→ category · Esc exit"
             }
             SettingsValueKind::Choice => {
-                "</> step · Enter cycle · Ctrl+R reset · ←/→ category · Esc exit"
+                "</> step · Enter select · Ctrl+R reset · ←/→ category · Esc exit"
             }
             _ => "Enter edit · Ctrl+R reset · ←/→ category · Esc exit",
         };
@@ -755,14 +799,20 @@ impl PanelComponent for SettingsPanel {
                     self.selected = 0;
                     PanelEvent::Continue
                 } else {
-                    PanelEvent::Cancel
+                    PanelEvent::Submit(SettingsOutcome::Cancelled {
+                        active_category: self.active_category,
+                    })
                 }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                PanelEvent::Cancel
+                PanelEvent::Submit(SettingsOutcome::Cancelled {
+                    active_category: self.active_category,
+                })
             }
             KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                PanelEvent::Submit(SettingsOutcome::Cancelled)
+                PanelEvent::Submit(SettingsOutcome::Cancelled {
+                    active_category: self.active_category,
+                })
             }
             KeyCode::Tab => {
                 self.switch_category(1);
@@ -1007,45 +1057,50 @@ mod tests {
             vec![bool_item("b", "B", "true")],
         );
         let o = panel.activate_current().unwrap();
-        assert_eq!(
-            o,
-            SettingsOutcome::Applied {
-                key: "b".into(),
-                value: "false".into()
-            }
-        );
+        match o {
+            SettingsOutcome::Applied { key, value, .. } if key == "b" && value == "false" => {}
+            other => panic!("expected Applied(b,false), got {:?}", other),
+        }
     }
 
     #[test]
     fn choice_step_wraps_around() {
+        // apply_choice_step (driven by `<`/`>`) still cycles through values.
         let panel = SettingsPanel::new(
             "t",
             vec![cat("A", Color::Cyan)],
             vec![choice_item("c", "low", &["low", "medium", "high"])],
         );
         // forward from index 0 → 1
-        let o = panel.activate_current().unwrap();
-        assert_eq!(
-            o,
-            SettingsOutcome::Applied {
-                key: "c".into(),
-                value: "medium".into()
-            }
-        );
+        match panel.apply_choice_step(&panel.items[0], true).unwrap() {
+            SettingsOutcome::Applied { key, value, .. } if key == "c" && value == "medium" => {}
+            other => panic!("expected Applied(c,medium), got {:?}", other),
+        }
         // Forward from the last wraps to first.
         let panel2 = SettingsPanel::new(
             "t",
             vec![cat("A", Color::Cyan)],
             vec![choice_item("c", "high", &["low", "medium", "high"])],
         );
-        let o = panel2.activate_current().unwrap();
-        assert_eq!(
-            o,
-            SettingsOutcome::Applied {
-                key: "c".into(),
-                value: "low".into()
-            }
+        match panel2.apply_choice_step(&panel2.items[0], true).unwrap() {
+            SettingsOutcome::Applied { key, value, .. } if key == "c" && value == "low" => {}
+            other => panic!("expected Applied(c,low), got {:?}", other),
+        }
+    }
+
+    /// Enter on a Choice row now emits RequestChoiceSelect (caller pops a list),
+    /// not an inline cycle. Power users still cycle inline with `<`/`>`.
+    #[test]
+    fn choice_activate_emits_request_choice_select() {
+        let panel = SettingsPanel::new(
+            "t",
+            vec![cat("A", Color::Cyan)],
+            vec![choice_item("c", "low", &["low", "medium", "high"])],
         );
+        match panel.activate_current().unwrap() {
+            SettingsOutcome::RequestChoiceSelect { key, .. } if key == "c" => {}
+            other => panic!("expected RequestChoiceSelect, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1127,7 +1182,10 @@ mod tests {
         let items = vec![bool_item("b", "B", "true")];
         let panel = SettingsPanel::new("t", vec![cat("A", Color::Cyan)], items);
         let outcome = panel.reset_current().unwrap();
-        assert_eq!(outcome, SettingsOutcome::Reset { key: "b".into() });
+        match outcome {
+            SettingsOutcome::Reset { key, .. } if key == "b" => {}
+            other => panic!("expected Reset(b), got {:?}", other),
+        }
     }
 
     /// `<` on a Choice row steps backward; `>` steps forward.
@@ -1137,22 +1195,16 @@ mod tests {
         let panel = SettingsPanel::new("t", vec![cat("A", Color::Cyan)], items);
         // Backward from medium → low.
         let back = panel.apply_choice_step(&panel.items[0], false).unwrap();
-        assert_eq!(
-            back,
-            SettingsOutcome::Applied {
-                key: "c".into(),
-                value: "low".into()
-            }
-        );
+        match back {
+            SettingsOutcome::Applied { key, value, .. } if key == "c" && value == "low" => {}
+            other => panic!("expected Applied(c,low), got {:?}", other),
+        }
         // Forward from medium → high.
         let fwd = panel.apply_choice_step(&panel.items[0], true).unwrap();
-        assert_eq!(
-            fwd,
-            SettingsOutcome::Applied {
-                key: "c".into(),
-                value: "high".into()
-            }
-        );
+        match fwd {
+            SettingsOutcome::Applied { key, value, .. } if key == "c" && value == "high" => {}
+            other => panic!("expected Applied(c,high), got {:?}", other),
+        }
     }
 
     /// Text-kind rows emit RequestExternalEdit on activate (delegated to caller).
@@ -1174,7 +1226,7 @@ mod tests {
         };
         let panel = SettingsPanel::new("t", vec![cat("A", Color::Cyan)], vec![item]);
         match panel.activate_current().unwrap() {
-            SettingsOutcome::RequestExternalEdit { key } if key == "x" => {}
+            SettingsOutcome::RequestExternalEdit { key, .. } if key == "x" => {}
             other => panic!("expected RequestExternalEdit, got {:?}", other),
         }
     }
