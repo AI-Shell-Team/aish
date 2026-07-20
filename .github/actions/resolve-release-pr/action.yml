@@ -34,7 +34,8 @@ runs:
         GH_TOKEN: ${{ github.token }}
         INPUT_PR_NUMBER: ${{ inputs.pr_number }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
-      run: python3 packaging/scripts/resolve_release_pr.py \
-        --pr-number "$INPUT_PR_NUMBER" \
-        --repository "$INPUT_REPOSITORY" \
-        --github-output "$GITHUB_OUTPUT"
+      run: |
+        python3 packaging/scripts/resolve_release_pr.py \
+          --pr-number "$INPUT_PR_NUMBER" \
+          --repository "$INPUT_REPOSITORY" \
+          --github-output "$GITHUB_OUTPUT"
