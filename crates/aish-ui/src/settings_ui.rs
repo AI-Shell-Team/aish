@@ -88,7 +88,6 @@ enum Badge {
     SecretSet,
 }
 
-
 /// The composite panel itself.
 #[derive(Debug, Clone)]
 pub struct SettingsPanel {
@@ -172,11 +171,11 @@ impl SettingsPanel {
         }
     }
 
-    fn item_matches_filter(&self, idx: usize) -> bool {
+    /// Whether the item matches the search query (independent of the
+    /// active-category filter). Used for chip counts so they reflect the
+    /// query across all categories, not just the active one.
+    fn item_matches_query(&self, idx: usize) -> bool {
         let item = &self.items[idx];
-        if self.active_category != 0 && item.category_index + 1 != self.active_category {
-            return false;
-        }
         let q = self.query.trim().to_lowercase();
         if q.is_empty() {
             return true;
@@ -189,6 +188,14 @@ impl SettingsPanel {
         })
         .to_lowercase();
         q.split_whitespace().all(|tok| hay.contains(tok))
+    }
+
+    fn item_matches_filter(&self, idx: usize) -> bool {
+        let item = &self.items[idx];
+        if self.active_category != 0 && item.category_index + 1 != self.active_category {
+            return false;
+        }
+        self.item_matches_query(idx)
     }
 
     fn visible_indices(&self) -> Vec<usize> {
@@ -307,8 +314,7 @@ impl SettingsPanel {
             return;
         }
         frame.render_widget(
-            Paragraph::new("─".repeat(width))
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("─".repeat(width)).style(Style::default().fg(Color::DarkGray)),
             area,
         );
     }
@@ -339,16 +345,21 @@ impl SettingsPanel {
         if area.width < 8 {
             return;
         }
-        // Count per real category (only among currently filtered).
-        let visible = self.visible_indices();
+        // Count per real category among query-matching items, IGNORING the
+        // active-category filter — otherwise selecting a category collapses
+        // every other chip to (0) and All(N) shows only the active count.
         let mut counts = vec![0usize; self.categories.len()];
-        for &i in &visible {
+        let mut total = 0usize;
+        for i in 0..self.items.len() {
+            if !self.item_matches_query(i) {
+                continue;
+            }
+            total += 1;
             let ci = self.items[i].category_index;
             if ci < counts.len() {
                 counts[ci] += 1;
             }
         }
-        let total = visible.len();
 
         // Build chip descriptors: (text, style, display_width). Index 0 = All.
         let all_active = self.active_category == 0;
@@ -415,7 +426,9 @@ impl SettingsPanel {
         if left_more {
             spans.push(Span::styled(
                 "‹ ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         for (text, style, _) in chips.iter().take(last + 1).skip(first) {
@@ -424,7 +437,9 @@ impl SettingsPanel {
         if right_more {
             spans.push(Span::styled(
                 " ›",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -435,10 +450,15 @@ impl SettingsPanel {
         let area = padded_area(area);
         let prompt_span = Span::styled(
             "search ❯ ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         );
         let (text, style) = if self.query.is_empty() {
-            (self.search_placeholder.clone(), Style::default().fg(Color::DarkGray))
+            (
+                self.search_placeholder.clone(),
+                Style::default().fg(Color::DarkGray),
+            )
         } else {
             (self.query.clone(), Style::default().fg(Color::White))
         };
@@ -493,7 +513,10 @@ impl SettingsPanel {
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let desc = truncate_str(&item.desc, (area.width as usize).saturating_sub(DESCRIPTION_INDENT.width()));
+            let desc = truncate_str(
+                &item.desc,
+                (area.width as usize).saturating_sub(DESCRIPTION_INDENT.width()),
+            );
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::raw(DESCRIPTION_INDENT),
@@ -603,14 +626,13 @@ impl SettingsPanel {
         if item.changed {
             spans.push(Span::styled(
                 " ✱",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         if item.restart_required {
-            spans.push(Span::styled(
-                " ↻",
-                Style::default().fg(Color::LightRed),
-            ));
+            spans.push(Span::styled(" ↻", Style::default().fg(Color::LightRed)));
         }
 
         Line::from(spans)
@@ -640,7 +662,10 @@ impl SettingsPanel {
             let line = Line::from(vec![
                 Span::styled("↳ ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    truncate_str(&item.desc, (area.width as usize).saturating_sub(hint.width() + 3)),
+                    truncate_str(
+                        &item.desc,
+                        (area.width as usize).saturating_sub(hint.width() + 3),
+                    ),
                     Style::default().fg(Color::Gray),
                 ),
                 Span::styled(hint, Style::default().fg(Color::DarkGray)),
@@ -665,8 +690,12 @@ impl SettingsPanel {
 
     fn context_footer(&self, item: &SettingsItem) -> String {
         let base = match item.kind {
-            SettingsValueKind::Bool => "Space/Enter toggle · Ctrl+R reset · ←/→ category · Esc exit",
-            SettingsValueKind::Choice => "</> step · Enter cycle · Ctrl+R reset · ←/→ category · Esc exit",
+            SettingsValueKind::Bool => {
+                "Space/Enter toggle · Ctrl+R reset · ←/→ category · Esc exit"
+            }
+            SettingsValueKind::Choice => {
+                "</> step · Enter cycle · Ctrl+R reset · ←/→ category · Esc exit"
+            }
             _ => "Enter edit · Ctrl+R reset · ←/→ category · Esc exit",
         };
         if item.changed {
@@ -807,7 +836,11 @@ impl PanelComponent for SettingsPanel {
                         }
                     }
                 }
-                self.push_query(if key.code == KeyCode::Char('<') { '<' } else { ',' });
+                self.push_query(if key.code == KeyCode::Char('<') {
+                    '<'
+                } else {
+                    ','
+                });
                 PanelEvent::Continue
             }
             KeyCode::Char('>') | KeyCode::Char('.') => {
@@ -818,7 +851,11 @@ impl PanelComponent for SettingsPanel {
                         }
                     }
                 }
-                self.push_query(if key.code == KeyCode::Char('>') { '>' } else { '.' });
+                self.push_query(if key.code == KeyCode::Char('>') {
+                    '>'
+                } else {
+                    '.'
+                });
                 PanelEvent::Continue
             }
             KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => self
@@ -932,7 +969,11 @@ mod tests {
             label: label.into(),
             desc: "desc".into(),
             current_raw: cur.into(),
-            display_value: if cur == "true" { "on".into() } else { "off".into() },
+            display_value: if cur == "true" {
+                "on".into()
+            } else {
+                "off".into()
+            },
             default_raw: "false".into(),
             category_index: 0,
             kind: SettingsValueKind::Bool,
@@ -1026,6 +1067,36 @@ mod tests {
         assert_eq!(vis, vec![2]);
     }
 
+    /// Regression: chip counts must use the query filter only, NOT the
+    /// active-category filter. Before the fix, selecting a category
+    /// collapsed every other chip to (0) and `All(N)` shrank to the
+    /// active count, misleading users about cross-category matches.
+    #[test]
+    fn chip_counts_ignore_active_category() {
+        let mut items = vec![
+            bool_item("a", "Alpha", "true"),
+            bool_item("b", "Beta", "false"),
+            choice_item("c", "low", &["low", "high"]),
+        ];
+        items[0].category_index = 0; // A
+        items[1].category_index = 0; // A
+        items[2].category_index = 1; // B
+        let cats = vec![cat("A", Color::Cyan), cat("B", Color::Magenta)];
+        let mut panel = SettingsPanel::new("t", cats, items);
+        panel.set_active_category(2); // focus B
+                                      // item_matches_query is the chip-count predicate; it must NOT
+                                      // depend on active_category. All 3 items still match an empty query.
+        let q_matches: Vec<usize> = (0..panel.items.len())
+            .filter(|&i| panel.item_matches_query(i))
+            .collect();
+        assert_eq!(q_matches, vec![0, 1, 2]);
+        // But item_matches_filter (list visibility) honors active_category.
+        let f_matches: Vec<usize> = (0..panel.items.len())
+            .filter(|&i| panel.item_matches_filter(i))
+            .collect();
+        assert_eq!(f_matches, vec![2]);
+    }
+
     /// Categorize/Left/Right/Tab all funnel through `switch_category`; verify
     /// the resulting `active_category` and that `selected` resets to 0.
     #[test]
@@ -1045,7 +1116,7 @@ mod tests {
         assert_eq!(panel.active_category, 2);
         panel.switch_category(1);
         assert_eq!(panel.active_category, 0); // wrapped
-        // Backward from All wraps to last.
+                                              // Backward from All wraps to last.
         panel.switch_category(-1);
         assert_eq!(panel.active_category, 2);
     }
@@ -1112,11 +1183,7 @@ mod tests {
     /// and cursor math stays in bounds.
     #[test]
     fn empty_items_is_safe() {
-        let panel: SettingsPanel = SettingsPanel::new(
-            "t",
-            vec![cat("A", Color::Cyan)],
-            Vec::new(),
-        );
+        let panel: SettingsPanel = SettingsPanel::new("t", vec![cat("A", Color::Cyan)], Vec::new());
         assert!(panel.visible_indices().is_empty());
         assert!(panel.current_visible().is_none());
         assert!(panel.reset_current().is_none());

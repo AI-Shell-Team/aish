@@ -1061,7 +1061,10 @@ mod tests {
             live_effect(SettingKey::InputGuardEnabled),
             LiveEffect::InputGuard
         );
-        assert_eq!(live_effect(SettingKey::InputGuardEnabled), LiveEffect::InputGuard);
+        assert_eq!(
+            live_effect(SettingKey::InputGuardEnabled),
+            LiveEffect::InputGuard
+        );
     }
 
     /// Regression: `default_raw_of` must match `current_raw(ConfigModel::default())`

@@ -209,7 +209,6 @@ fn category_color_for(c: crate::settings_panel::SettingCategory) -> ratatui::sty
     }
 }
 
-
 /// Free-text/number editor for a single setting value.
 ///
 /// Uses a cliclack input (prefilled with `current` for direct in-place editing)
@@ -4163,16 +4162,12 @@ impl AishShell {
             // Rebuild items every iteration so values refresh after each edit
             // (the cursor is restored to `last_key` via with_selected_key).
             let (cats, items) = Self::build_settings_items(&self.config);
-            let panel = SettingsPanel::new(
-                t("shell.setting.title").to_string(),
-                cats,
-                items,
-            )
-            .with_search_placeholder(t("shell.setting.search_placeholder"))
-            .with_footer_idle(t("shell.setting.footer_idle"))
-            .with_footer_editing(t("shell.setting.footer_editing"))
-            .with_selected_key(last_key.as_deref())
-            .with_error(pending_error.clone());
+            let panel = SettingsPanel::new(t("shell.setting.title").to_string(), cats, items)
+                .with_search_placeholder(t("shell.setting.search_placeholder"))
+                .with_footer_idle(t("shell.setting.footer_idle"))
+                .with_footer_editing(t("shell.setting.footer_editing"))
+                .with_selected_key(last_key.as_deref())
+                .with_error(pending_error.clone());
 
             let outcome = {
                 let _guard = aish_tools::bash::acquire_interactive_input_guard();
@@ -4185,27 +4180,19 @@ impl AishShell {
                         continue;
                     };
                     last_key = Some(key);
-                    if let Err(e) = self.apply_setting_value(k, &value, &mut restart_changes) {
-                        pending_error = Some(t_with_args("shell.setting.invalid", &{
-                            let mut a = std::collections::HashMap::new();
-                            a.insert("error".to_string(), e);
-                            a
-                        }));
-                    }
+                    self.apply_or_queue_error(k, &value, &mut restart_changes, &mut pending_error);
                 }
                 Ok(PanelOutcome::Submitted(SettingsOutcome::Reset { key })) => {
                     let Some(k) = Self::resolve_setting_key(&key) else {
                         continue;
                     };
                     let default_val = settings_panel::default_raw_of(k);
-                    if let Err(e) = self.apply_setting_value(k, &default_val, &mut restart_changes)
-                    {
-                        pending_error = Some(t_with_args("shell.setting.invalid", &{
-                            let mut a = std::collections::HashMap::new();
-                            a.insert("error".to_string(), e);
-                            a
-                        }));
-                    }
+                    self.apply_or_queue_error(
+                        k,
+                        &default_val,
+                        &mut restart_changes,
+                        &mut pending_error,
+                    );
                     last_key = Some(key);
                 }
                 Ok(PanelOutcome::Submitted(SettingsOutcome::RequestExternalEdit { key })) => {
@@ -4225,16 +4212,13 @@ impl AishShell {
                     let submitted = prompt_edit_value(&label, &desc, &cur_raw, secret);
                     let skip = secret && submitted.as_deref().is_some_and(|v| v.is_empty());
                     if let Some(v) = submitted {
-                        if skip {
-                            // Preserve cursor on this row, do not commit.
-                        } else if let Err(e) =
-                            self.apply_setting_value(k, &v, &mut restart_changes)
-                        {
-                            pending_error = Some(t_with_args("shell.setting.invalid", &{
-                                let mut a = std::collections::HashMap::new();
-                                a.insert("error".to_string(), e);
-                                a
-                            }));
+                        if !skip {
+                            self.apply_or_queue_error(
+                                k,
+                                &v,
+                                &mut restart_changes,
+                                &mut pending_error,
+                            );
                         }
                     }
                 }
@@ -4259,7 +4243,32 @@ impl AishShell {
     /// Returns `None` if the catalog was mutated out-of-band (defensive).
     fn resolve_setting_key(name: &str) -> Option<crate::settings_panel::SettingKey> {
         use crate::settings_panel::SETTINGS;
-        SETTINGS.iter().find(|d| d.key.name() == name).map(|d| d.key)
+        SETTINGS
+            .iter()
+            .find(|d| d.key.name() == name)
+            .map(|d| d.key)
+    }
+
+    /// Apply `new_val` to `key` and either clear `pending_error` (on success)
+    /// or replace it with the localized validation message (on failure).
+    /// Centralizing this here guarantees the error shown always reflects the
+    /// most recent edit's outcome — no stale messages can persist across
+    /// edits, which was a real bug before this helper existed.
+    fn apply_or_queue_error(
+        &mut self,
+        key: crate::settings_panel::SettingKey,
+        new_val: &str,
+        restart_changes: &mut usize,
+        pending_error: &mut Option<String>,
+    ) {
+        *pending_error = None;
+        if let Err(e) = self.apply_setting_value(key, new_val, restart_changes) {
+            *pending_error = Some(t_with_args("shell.setting.invalid", &{
+                let mut a = std::collections::HashMap::new();
+                a.insert("error".to_string(), e);
+                a
+            }));
+        }
     }
 
     /// Apply `new_val` to `key`: validate, persist, run live side-effects,
@@ -4352,7 +4361,10 @@ impl AishShell {
     /// easy to test and avoids borrow conflicts against `self`.
     fn build_settings_items(
         config: &ConfigModel,
-    ) -> (Vec<aish_ui::SettingsCategoryInfo>, Vec<aish_ui::SettingsItem>) {
+    ) -> (
+        Vec<aish_ui::SettingsCategoryInfo>,
+        Vec<aish_ui::SettingsItem>,
+    ) {
         use crate::settings_panel::{self, SettingCategory, SettingKind, SETTINGS};
         use aish_ui::{SettingsCategoryInfo, SettingsItem, SettingsValueKind};
 
@@ -4404,7 +4416,6 @@ impl AishShell {
                 }
             })
             .collect();
-
 
         (cats, items)
     }
