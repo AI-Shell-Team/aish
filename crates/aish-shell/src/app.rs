@@ -540,7 +540,18 @@ impl AishShell {
                 (name.to_string(), aish_i18n::t(&i18n_key))
             })
             .collect();
-        match aish_ui::SlashInputSession::new(commands, prompt.to_string()).run() {
+        let session = aish_ui::SlashInputSession::new(commands, prompt.to_string());
+        // When triggered by Tab on a `/` prefix, pre-fill the popup with
+        // the text the user had already typed.
+        let session = {
+            let prefill = crate::readline::take_slash_prefill();
+            if prefill.is_empty() {
+                session
+            } else {
+                session.with_input(prefill)
+            }
+        };
+        match session.run() {
             Ok(outcome) => outcome,
             Err(_) => aish_ui::SlashInputOutcome::Cancelled,
         }
@@ -4156,16 +4167,18 @@ impl AishShell {
         // Count of restart-required edits this session, for an exit summary.
         let mut restart_changes: usize = 0;
         let mut last_key: Option<String> = None;
+        let mut last_category: usize = 0;
         let mut pending_error: Option<String> = None;
 
         loop {
-            // Rebuild items every iteration so values refresh after each edit
-            // (the cursor is restored to `last_key` via with_selected_key).
+            // Rebuild items every iteration so values refresh after each edit.
+            // `last_key` restores the cursor; `last_category` keeps the user on
+            // the same chip instead of bouncing back to "All" after each edit.
             let (cats, items) = Self::build_settings_items(&self.config);
             let panel = SettingsPanel::new(t("shell.setting.title").to_string(), cats, items)
                 .with_search_placeholder(t("shell.setting.search_placeholder"))
                 .with_footer_idle(t("shell.setting.footer_idle"))
-                .with_footer_editing(t("shell.setting.footer_editing"))
+                .with_active_category(last_category)
                 .with_selected_key(last_key.as_deref())
                 .with_error(pending_error.clone());
 
@@ -4174,15 +4187,29 @@ impl AishShell {
                 PanelRuntime::new().run(panel)
             };
 
+            let outcome = match outcome {
+                Ok(PanelOutcome::Submitted(o)) => o,
+                Ok(PanelOutcome::Cancelled) => {
+                    // Defensive: panel always submits Cancelled with a chip
+                    // attached, but fall back to the snapshot if not.
+                    break;
+                }
+                Err(_) => break,
+            };
+            // Remember the chip the user ended on — whether they applied an
+            // edit, reset, opened a sub-editor, or cancelled out. This keeps
+            // them on the same chip on the next panel re-open.
+            last_category = outcome.active_category();
+
             match outcome {
-                Ok(PanelOutcome::Submitted(SettingsOutcome::Applied { key, value })) => {
+                SettingsOutcome::Applied { key, value, .. } => {
                     let Some(k) = Self::resolve_setting_key(&key) else {
                         continue;
                     };
                     last_key = Some(key);
                     self.apply_or_queue_error(k, &value, &mut restart_changes, &mut pending_error);
                 }
-                Ok(PanelOutcome::Submitted(SettingsOutcome::Reset { key })) => {
+                SettingsOutcome::Reset { key, .. } => {
                     let Some(k) = Self::resolve_setting_key(&key) else {
                         continue;
                     };
@@ -4195,7 +4222,7 @@ impl AishShell {
                     );
                     last_key = Some(key);
                 }
-                Ok(PanelOutcome::Submitted(SettingsOutcome::RequestExternalEdit { key })) => {
+                SettingsOutcome::RequestExternalEdit { key, .. } => {
                     let Some(k) = Self::resolve_setting_key(&key) else {
                         continue;
                     };
@@ -4206,9 +4233,9 @@ impl AishShell {
                     let cur_raw = settings_panel::current_raw(&self.config, k);
                     let secret = matches!(def.kind, SettingKind::Secret);
                     // Pop a single external input; we return to the panel
-                    // afterwards regardless of outcome.
-                    // Empty submission on a Secret prompt is a no-op (skip),
-                    // not a wipe — mirrors the legacy edit_setting_value guard.
+                    // afterwards regardless of outcome. Empty submission on
+                    // a Secret prompt is a no-op (skip), not a wipe — mirrors
+                    // the legacy edit_setting_value guard.
                     let submitted = prompt_edit_value(&label, &desc, &cur_raw, secret);
                     let skip = secret && submitted.as_deref().is_some_and(|v| v.is_empty());
                     if let Some(v) = submitted {
@@ -4222,7 +4249,18 @@ impl AishShell {
                         }
                     }
                 }
-                _ => break, // Cancelled / Esc at top level / Ctrl+Q
+                SettingsOutcome::RequestChoiceSelect { key, .. } => {
+                    let Some(k) = Self::resolve_setting_key(&key) else {
+                        continue;
+                    };
+                    last_key = Some(key);
+                    // Pop a one-shot choice list (shows every option with the
+                    // current value tagged). Returns to the panel after.
+                    if let Some(v) = self.prompt_choice_value(k) {
+                        self.apply_or_queue_error(k, &v, &mut restart_changes, &mut pending_error);
+                    }
+                }
+                SettingsOutcome::Cancelled { .. } => break,
             }
         }
 
@@ -4236,6 +4274,37 @@ impl AishShell {
                     a
                 }))
             );
+        }
+    }
+
+    /// Pop a one-shot selection list for a `Choice` setting so the user can
+    /// see every option at a glance (instead of cycling blind with `<`/`>`).
+    /// The current value is tagged. Returns `None` on Esc.
+    fn prompt_choice_value(&self, key: crate::settings_panel::SettingKey) -> Option<String> {
+        use crate::settings_panel::{self, SettingKind};
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+
+        let def = settings_panel::find(key);
+        let opts = match def.kind {
+            SettingKind::Choice(o) => o,
+            _ => return None,
+        };
+        let cur = settings_panel::current_raw(&self.config, key);
+        let label = setting_label(def);
+        let desc = setting_desc(def);
+        let options: Vec<DialogOption> = opts
+            .iter()
+            .map(|o| {
+                let mut d = DialogOption::new(*o, *o);
+                if o.eq_ignore_ascii_case(&cur) {
+                    d = d.with_description(t("shell.setting.current_tag"));
+                }
+                d
+            })
+            .collect();
+        match show_selection_dialog(&label, &desc, &options, false, true) {
+            DialogResult::Selected(v) => Some(v),
+            _ => None,
         }
     }
 

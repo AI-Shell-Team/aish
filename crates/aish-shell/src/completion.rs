@@ -27,6 +27,18 @@ impl CompletionEngine {
             return None;
         }
 
+        // Built-in slash command completion: when the first word starts with
+        // `/` and has no whitespace yet, complete from SLASH_COMMANDS. This
+        // covers the case where the popup dismissed to readline (e.g. after
+        // Tab-completing `/setup `) and the user backspaced to a partial
+        // prefix — Tab in readline now completes slash commands natively.
+        if before.starts_with('/') && !before.contains(char::is_whitespace) {
+            let pairs = filter_extending_pairs(line, pos, 0, complete_slash_command(before));
+            if !pairs.is_empty() {
+                return Some((0, pairs));
+            }
+        }
+
         let (word_start, pairs) = if should_complete_path_locally(
             line.get(word_start_at(line, pos)..pos).unwrap_or(""),
         ) {
@@ -91,6 +103,24 @@ fn filter_extending_pairs(
         .collect()
 }
 
+/// Complete built-in slash commands for a `/`-prefixed first word.
+///
+/// `before_cursor` is the line text up to the cursor. Returns matching
+/// command names as `Pair`s (display = name, replacement = name), or an
+/// empty `Vec` when nothing matches. Callers should apply
+/// `filter_extending_pairs` to drop exact matches.
+fn complete_slash_command(before_cursor: &str) -> Vec<Pair> {
+    let query = before_cursor.to_lowercase();
+    crate::readline::SLASH_COMMANDS
+        .iter()
+        .filter(|(name, _)| name.to_lowercase().starts_with(&query))
+        .map(|(name, _)| Pair {
+            display: (*name).to_string(),
+            replacement: (*name).to_string(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +159,42 @@ mod tests {
             "LCP should extend /usr prefix, got {lcp:?}"
         );
         assert_ne!(lcp, "r/");
+    }
+
+    #[test]
+    fn slash_command_completes_partial_prefix() {
+        let pairs = complete_slash_command("/set");
+        let names: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
+        assert!(names.contains(&"/setup"), "expected /setup in {names:?}");
+        assert!(
+            names.contains(&"/setting"),
+            "expected /setting in {names:?}"
+        );
+    }
+
+    #[test]
+    fn slash_command_completes_unambiguous_prefix() {
+        let pairs = complete_slash_command("/setu");
+        let names: Vec<&str> = pairs.iter().map(|p| p.replacement.as_str()).collect();
+        assert_eq!(names, vec!["/setup"]);
+    }
+
+    #[test]
+    fn slash_command_exact_match_filtered_out() {
+        // `/setup` is an exact command — filter_extending_pairs drops it.
+        let pairs = filter_extending_pairs("/setup", 6, 0, complete_slash_command("/setup"));
+        assert!(pairs.is_empty(), "exact match should be filtered out");
+    }
+
+    #[test]
+    fn slash_command_non_matching_prefix_returns_empty() {
+        let pairs = complete_slash_command("/xyz");
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn slash_command_slash_alone_matches_all() {
+        let pairs = complete_slash_command("/");
+        assert!(pairs.len() > 1, "bare `/` should match all commands");
     }
 }

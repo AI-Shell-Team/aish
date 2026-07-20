@@ -53,8 +53,28 @@ static MODE_TOGGLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Flag set by `CtrlOHandler` when Ctrl+O is pressed.
 static CTRL_O_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Flag set by `SlashHandler` when `/` is pressed on an empty line.
+/// Flag set by `SlashHandler` when `/` is pressed on an empty line, or by
+/// `TabCompletionHandler` when Tab is pressed on a `/`-prefixed first word.
 static SLASH_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// When the slash popup is triggered by Tab (not by bare `/`), this holds
+/// the current line text so the popup can pre-fill its input field. Set by
+/// `TabCompletionHandler`, consumed by `run_slash_input_session`.
+static SLASH_PREFILL: Mutex<String> = Mutex::new(String::new());
+
+/// Store the text to pre-fill the slash popup with (called from Tab handler).
+fn set_slash_prefill(text: String) {
+    if let Ok(mut s) = SLASH_PREFILL.lock() {
+        *s = text;
+    }
+}
+/// Consume the stored pre-fill text, returning an empty `String` if none.
+pub(crate) fn take_slash_prefill() -> String {
+    match SLASH_PREFILL.lock() {
+        Ok(mut s) => std::mem::take(&mut *s),
+        Err(_) => String::new(),
+    }
+}
 
 /// Max gap between Tab presses to count as "double Tab" (bash second-tab list).
 const DOUBLE_TAB_MS: u128 = 800;
@@ -127,6 +147,24 @@ impl ConditionalEventHandler for TabCompletionHandler {
 
         let line = ctx.line();
         let pos = clamp_pos(line, ctx.pos());
+
+        // When Tab is pressed on a `/`-prefixed first word that matches a
+        // built-in slash command, re-open the interactive popup (with the
+        // current text pre-filled) instead of showing a bash-style column
+        // list. This covers the case where the popup dismissed to readline
+        // and the user backspaced to a partial prefix.
+        let before = line.get(..pos).unwrap_or(line);
+        if before.starts_with('/') && !before.contains(char::is_whitespace) {
+            let query = before.to_lowercase();
+            if SLASH_COMMANDS
+                .iter()
+                .any(|(name, _)| name.to_lowercase().starts_with(&query))
+            {
+                set_slash_prefill(before.to_string());
+                SLASH_REQUESTED.store(true, Ordering::SeqCst);
+                return Some(Cmd::Interrupt);
+            }
+        }
         let Some((_word_start, pairs)) = self.engine.complete(line, pos) else {
             if let Ok(mut state) = TAB_STATE.lock() {
                 state.pending_list = false;
