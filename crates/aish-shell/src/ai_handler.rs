@@ -345,6 +345,11 @@ impl AiHandler {
         self.llm_session.last_prompt_estimate()
     }
 
+    /// Return the compaction mode applied during the current turn, if any.
+    pub fn last_turn_compaction(&self) -> Option<&'static str> {
+        self.llm_session.last_turn_compaction()
+    }
+
     /// Return current context budget state (estimated tokens, pressure, %).
     pub fn context_budget_state(&self) -> aish_context::ContextBudgetState {
         self.context_manager.budget_state()

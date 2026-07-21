@@ -83,6 +83,11 @@ pub struct LlmSession {
     /// Updated every iteration — reflects actual context window consumption
     /// regardless of whether the API reports prompt_tokens in streaming mode.
     last_prompt_estimate: std::sync::atomic::AtomicU64,
+    /// Compaction mode applied during the current turn
+    /// ("microcompact" | "full_compact"). Reset at the start of each
+    /// `process_input` call; surfaced via the response footer so a shrinking
+    /// ctx bar can be attributed to compaction rather than a miscount.
+    last_turn_compaction: std::sync::Mutex<Option<&'static str>>,
     /// Per-session tool execution policy (read-only bash enforcement, etc.).
     tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
     /// True for sessions created via [`Self::create_subsession`].
@@ -142,6 +147,7 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
+            last_turn_compaction: std::sync::Mutex::new(None),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
             #[cfg(test)]
@@ -337,6 +343,13 @@ impl LlmSession {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Return the compaction mode applied during the current turn, if any.
+    /// `Some("full_compact")` — history was summarized down;
+    /// `Some("microcompact")` — only stale tool output was cleared.
+    pub fn last_turn_compaction(&self) -> Option<&'static str> {
+        *self.last_turn_compaction.lock().unwrap()
+    }
+
     /// Return a snapshot of cumulative token usage statistics.
     pub fn token_stats(&self) -> crate::usage::TokenStats {
         self.token_stats.lock().unwrap().clone()
@@ -472,6 +485,7 @@ impl LlmSession {
         stream: bool,
     ) -> Result<crate::types::ProcessResult, AishError> {
         self.cancellation_token.reset();
+        self.last_turn_compaction.lock().unwrap().take();
 
         // Emit operation start event
         self.emit_event(LlmEvent {
@@ -1423,6 +1437,7 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
+            last_turn_compaction: std::sync::Mutex::new(None),
             tool_execution_policy: self.tool_execution_policy,
             is_sub_agent: true,
             #[cfg(test)]
@@ -1604,9 +1619,11 @@ impl LlmSession {
             let report = microcompact_chat_messages(&mut messages, policy);
             if report.changed_messages > 0 {
                 compaction_changed = true;
+                *self.last_turn_compaction.lock().unwrap() = Some("microcompact");
                 tracing::info!(
                     changed_messages = report.changed_messages,
                     reclaimed_tokens = report.reclaimed_tokens,
+                    compaction = "microcompact",
                     "send-path context microcompact completed"
                 );
             }
@@ -1629,10 +1646,15 @@ impl LlmSession {
                     .full_compact_chat_messages_with_model(messages.clone(), policy)
                     .await
                 {
-                    Ok(compacted) => {
+                    Ok(_compacted) => {
                         *self.compact_consecutive_failures.lock().unwrap() = 0;
                         compaction_changed = true;
-                        messages = compacted;
+                        *self.last_turn_compaction.lock().unwrap() = Some("full_compact");
+                        tracing::info!(
+                            compaction = "full_compact",
+                            "send-path full compact completed, compaction flag set"
+                        );
+                        messages = _compacted;
                     }
                     Err(err) => {
                         let mut guard = self.compact_consecutive_failures.lock().unwrap();
