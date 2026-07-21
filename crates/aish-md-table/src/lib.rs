@@ -171,12 +171,25 @@ fn parse_inline(text: &str) -> Spans {
             }
         }
 
-        // Italic: *...* or _..._
+        // Italic: *...* or _...*
         if c == '*' || c == '_' {
             if let Some(rel) = find_unescaped(&chars[i + 1..], c) {
+                // CommonMark forbids intraword `_` emphasis: `foo_bar_baz`
+                // must not italicize, or identifiers and paths in table cells
+                // get mangled (underscores consumed as delimiters). `*` allows
+                // intraword emphasis, so guard only `_`: reject when a `_`
+                // delimiter is flanked by an alphanumeric on either side.
+                let close = i + 1 + rel;
+                let intraword_underscore = c == '_'
+                    && ((i > 0 && chars[i - 1].is_alphanumeric())
+                        || (close + 1 < n && chars[close + 1].is_alphanumeric()));
                 // Reject `* foo *` — interior must not start with whitespace
                 // (CommonMark rule). Trailing whitespace inside is also invalid.
-                if rel > 0 && !chars[i + 1].is_whitespace() && !chars[i + rel].is_whitespace() {
+                if rel > 0
+                    && !chars[i + 1].is_whitespace()
+                    && !chars[i + rel].is_whitespace()
+                    && !intraword_underscore
+                {
                     flush!();
                     let inner: String = chars[i + 1..i + 1 + rel].iter().collect();
                     for mut s in parse_inline(&inner) {
@@ -679,6 +692,26 @@ mod tests {
         let spans = parse_inline(r"a\*b");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "a*b");
+    }
+
+    #[test]
+    fn intraword_underscore_not_emphasis() {
+        // CommonMark forbids intraword `_` emphasis: identifiers and paths
+        // like `foo_bar_baz` must keep underscores verbatim, not italicize
+        // the middle token.
+        let spans = parse_inline("foo_bar_baz");
+        assert_eq!(spans.len(), 1, "expected a single plain span");
+        assert_eq!(spans[0].text, "foo_bar_baz");
+        assert!(spans[0].style.attributes.italic != Some(true));
+    }
+
+    #[test]
+    fn word_bounded_underscore_is_emphasis() {
+        // `_world_` flanked by spaces remains valid italic emphasis.
+        let spans = parse_inline("hello _world_ end");
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[1].text, "world");
+        assert!(spans[1].style.attributes.italic == Some(true));
     }
 
     #[test]

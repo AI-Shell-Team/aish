@@ -10,6 +10,11 @@ use reqwest::{redirect, Client, StatusCode, Url};
 
 const MAX_URL_LENGTH: usize = 2000;
 const MAX_HTTP_CONTENT_LENGTH: usize = 10 * 1024 * 1024;
+/// Max retry attempts for transient network errors (connect/timeout) on the
+/// initial `.send()`. HTTP status codes are not errors at this layer — they
+/// are returned in the response and classified by the caller — so 4xx/5xx do
+/// not retry here.
+const MAX_FETCH_RETRIES: u32 = 2;
 const FETCH_TIMEOUT_SECS: u64 = 60;
 const MAX_REDIRECTS: usize = 10;
 pub(crate) const MAX_MARKDOWN_LENGTH: usize = 100_000;
@@ -133,6 +138,38 @@ pub(crate) async fn fetch_url_content(raw_url: &str) -> Result<FetchedContent, F
     })
 }
 
+/// Send a GET request, retrying transient network-layer failures
+/// (`is_connect()` / `is_timeout()`) up to [`MAX_FETCH_RETRIES`] times with
+/// short exponential backoff. Non-transient errors (DNS, TLS, body decode)
+/// surface immediately. HTTP status codes live in the returned `Response`
+/// and are classified by the caller — they are not retried here.
+async fn send_with_retry(client: &Client, url: &Url) -> Result<reqwest::Response, FetchFailure> {
+    let mut last_err: Option<String> = None;
+    for attempt in 0..=MAX_FETCH_RETRIES {
+        if attempt > 0 {
+            // 500ms, then 1000ms.
+            tokio::time::sleep(Duration::from_millis(500u64 << (attempt - 1))).await;
+        }
+        match client
+            .get(url.clone())
+            .header(ACCEPT, "text/markdown, text/html, text/plain, */*")
+            .header(USER_AGENT, USER_AGENT_VALUE)
+            .send()
+            .await
+        {
+            Ok(r) => return Ok(r),
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                last_err = Some(e.to_string());
+                continue;
+            }
+            Err(e) => return Err(FetchFailure::Request(e.to_string())),
+        }
+    }
+    Err(FetchFailure::Request(
+        last_err.unwrap_or_else(|| "request failed after retries".into()),
+    ))
+}
+
 async fn get_with_permitted_redirects(
     client: &Client,
     url: Url,
@@ -148,13 +185,7 @@ async fn get_with_permitted_redirects(
     ensure_public_host(&url)
         .await
         .map_err(FetchFailure::Blocked)?;
-    let response = client
-        .get(url.clone())
-        .header(ACCEPT, "text/markdown, text/html, text/plain, */*")
-        .header(USER_AGENT, USER_AGENT_VALUE)
-        .send()
-        .await
-        .map_err(|error| FetchFailure::Request(error.to_string()))?;
+    let response = send_with_retry(client, &url).await?;
 
     if is_redirect_status(response.status()) {
         let location = response
