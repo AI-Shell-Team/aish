@@ -300,7 +300,7 @@ fn walk_dir(dir: &Path) -> Vec<PathBuf> {
 ///
 /// Many skills imported from the Claude ecosystem reference their own scripts as
 /// `~/.claude/skills/<name>/scripts/...`. aish loads the same skill from a different
-/// location (`~/.config/aish/skills/<name>` or `/usr/local/share/aish/skills/<name>`),
+/// location (`~/.config/aish/skills/<name>`),
 /// so without rewriting, LLM-driven `bash` calls would hit non-existent paths. Both
 /// `~/.claude/skills/<name>` and `~/.config/aish/skills/<name>` forms are replaced
 /// with the absolute base_dir, preserving any sub-path that follows.

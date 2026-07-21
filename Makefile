@@ -33,9 +33,11 @@ help:
 test:
 	cargo test --workspace
 	PYTHON="$(PYTHON)" ./packaging/tests/release_scripts_smoke.sh
+	./packaging/tests/seed_skills_ownership_smoke.sh
 
 packaging-test:
 	PYTHON="$(PYTHON)" ./packaging/tests/release_scripts_smoke.sh
+	./packaging/tests/seed_skills_ownership_smoke.sh
 
 prepare-release-files:
 	@test -n "$(VERSION)" || { echo "VERSION is required, for example: make prepare-release-files VERSION=1.0.0-beta.1" >&2; exit 2; }
@@ -73,12 +75,12 @@ install:
 	sed 's|@AISH_BINDIR@|$(BINDIR)|g' packaging/systemd/aish-sandbox.service.in > "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	chmod 0644 "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	install -m 0644 packaging/systemd/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
-	@if [ -d skills ]; then \
+	@if [ -n "$(DESTDIR)" ] && [ -d skills ]; then \
 		install -d "$(DESTDIR)$(DATADIR)"; \
 		cp -a skills "$(DESTDIR)$(DATADIR)/"; \
 	fi
-	@if [ -z "$(DESTDIR)" ]; then \
-		packaging/scripts/seed-skills.sh "$(DATADIR)/skills"; \
+	@if [ -z "$(DESTDIR)" ] && [ -d skills ]; then \
+		packaging/scripts/seed-skills.sh "$(CURDIR)/skills"; \
 	fi
 
 clean:

@@ -15,7 +15,8 @@ usage() {
 	cat <<'EOF'
 Usage: sudo ./install.sh [--force-config] [--prefix=PATH]
 
-Installs AI Shell binaries, default skills, and the security policy.
+Installs AI Shell binaries and the security policy, and seeds packaged
+skills into the invoking user's ~/.config/aish/skills/.
 
 Options:
 	--prefix=PATH       Install into PATH instead of system directories (no sudo needed)
@@ -112,23 +113,6 @@ install_config() {
 	install_file "$source_path" "$2" 0644
 }
 
-install_tree() {
-	local source_dir="$1"
-	local destination_dir
-	destination_dir="$(target_path "$2")"
-	if ! install -d "$destination_dir" 2>/dev/null; then
-		echo "Warning: Failed to create directory $destination_dir" >&2
-		return 0
-	fi
-	# Use cp -r (not -a): -a implies --preserve=all which includes xattr/context that
-	# some filesystems (e.g. deepin's /var/usrlocal overlay) reject, causing cp to
-	# exit non-zero even though files were copied successfully.
-	if ! cp -r "$source_dir/." "$destination_dir/" 2>/dev/null; then
-		echo "Warning: Failed to copy files from $source_dir to $destination_dir" >&2
-		return 0
-	fi
-}
-
 install_systemd_units() {
 	if [[ -n "$INSTALL_PREFIX" ]]; then
 		return
@@ -195,10 +179,6 @@ install_file "$ROOTFS_DIR/usr/bin/aish" "${BIN_DIR}/aish" 0755
 install_file "$SCRIPT_DIR/uninstall.sh" "${BIN_DIR}/aish-uninstall" 0755
 install_config "$ROOTFS_DIR/etc/aish/security_policy.yaml" "/etc/aish/security_policy.yaml"
 
-if [[ -d "$ROOTFS_DIR/usr/share/aish/skills" ]]; then
-	install_tree "$ROOTFS_DIR/usr/share/aish/skills" "/usr/local/share/aish/skills"
-fi
-
 install_systemd_units
 
 if [[ -n "$INSTALL_ROOT" ]]; then
@@ -213,10 +193,11 @@ if [[ -n "$INSTALL_PREFIX" ]]; then
 	exit 0
 fi
 
-# Seed built-in skills to the invoking user's ~/.config/aish/skills/.
+# Seed built-in skills directly into the invoking user's ~/.config/aish/skills/.
+# Source is the bundle payload only — skills are not installed under /usr/local.
 # Skipped if seed-skills.sh is missing (older bundle) or run as bare root.
 if [[ -x "$SCRIPT_DIR/seed-skills.sh" ]]; then
-	"$SCRIPT_DIR/seed-skills.sh" "/usr/local/share/aish/skills"
+	"$SCRIPT_DIR/seed-skills.sh" "$ROOTFS_DIR/usr/share/aish/skills"
 fi
 
 echo "AI Shell installed successfully."

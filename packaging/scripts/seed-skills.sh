@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# Seed built-in skills into the invoking user's ~/.config/aish/skills/.
+# Seed packaged skills into the invoking user's ~/.config/aish/skills/.
 #
-# Every skill shipped under the system skills directory is copied into the
-# user directory, replacing any existing tree of the same name. Packaged
-# skills are product-owned; upgrades must land on disk so runtime behavior
-# matches the installed aish version. User-authored skills (names not in
-# the package) are left untouched.
+# Source is the skills tree shipped with the installer (bundle payload or
+# repo `skills/`). Skills are never installed under /usr or /usr/local;
+# this script writes only into the target user's config directory.
 #
-# Usage: seed-skills.sh <system_skills_dir>
-# Must be invoked AFTER the system-level skills directory has been populated
-# (e.g. by `make install` or install-bundle.sh).
+# Every skill in the source directory is copied into the user directory,
+# replacing any existing tree of the same name. Packaged skills are
+# product-owned; upgrades must land on disk so runtime behavior matches
+# the installed aish version. User-authored skills (names not in the
+# package) are left untouched.
+#
+# Usage: seed-skills.sh <source_skills_dir>
+# Must be invoked with a readable source tree (e.g. bundle rootfs payload
+# or the repo's skills/ directory).
 
 set -euo pipefail
 
-SYSTEM_SKILLS_DIR="${1:-/usr/local/share/aish/skills}"
+SOURCE_SKILLS_DIR="${1:-}"
 
-if [[ ! -d "$SYSTEM_SKILLS_DIR" ]]; then
+if [[ -z "$SOURCE_SKILLS_DIR" ]] || [[ ! -d "$SOURCE_SKILLS_DIR" ]]; then
     exit 0
 fi
 
@@ -37,11 +41,12 @@ if [[ -z "$TARGET_HOME" ]] || [[ ! -d "$TARGET_HOME" ]]; then
     exit 0
 fi
 
-USER_SKILLS_DIR="$TARGET_HOME/.config/aish/skills"
+CONFIG_AISH_DIR="$TARGET_HOME/.config/aish"
+USER_SKILLS_DIR="$CONFIG_AISH_DIR/skills"
 mkdir -p "$USER_SKILLS_DIR"
 
 seeded=0
-for skill_path in "$SYSTEM_SKILLS_DIR"/*/; do
+for skill_path in "$SOURCE_SKILLS_DIR"/*/; do
     [[ -d "$skill_path" ]] || continue
     skill_name="$(basename "$skill_path")"
     target="$USER_SKILLS_DIR/$skill_name"
@@ -52,11 +57,19 @@ for skill_path in "$SYSTEM_SKILLS_DIR"/*/; do
     fi
 
     cp -r "$skill_path" "$target"
-    # cp -r does not preserve ownership, so the copy is owned by root (the sudo caller);
-    # restore ownership (user and group) so the target user can edit their seeded skills.
-    chown -R "$TARGET_USER:" "$target" 2>/dev/null || true
     seeded=$((seeded + 1))
 done
+
+# mkdir/cp under sudo leave the tree root-owned. The user must own
+# ~/.config/aish (not just skill leaves) so first-run can create config.yaml.
+# Also repair ~/.config if we just created it as root.
+if [[ -d "$TARGET_HOME/.config" ]]; then
+    cfg_owner="$(stat -c '%u' "$TARGET_HOME/.config" 2>/dev/null || true)"
+    if [[ "$cfg_owner" == "0" ]]; then
+        chown "$TARGET_USER:" "$TARGET_HOME/.config" 2>/dev/null || true
+    fi
+fi
+chown -R "$TARGET_USER:" "$CONFIG_AISH_DIR" 2>/dev/null || true
 
 if [[ $seeded -gt 0 ]]; then
     echo "Seeded $seeded packaged skill(s) to $USER_SKILLS_DIR (overwrote same-name trees)."

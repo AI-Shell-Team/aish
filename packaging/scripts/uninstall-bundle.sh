@@ -89,7 +89,9 @@ remove_systemd_units
 
 rm -f "$(target_path "${BIN_DIR}/aish")" "$(target_path "${BIN_DIR}/aish-uninstall")"
 
+# Remove legacy system skills tree from older installers (no longer shipped).
 rm -rf "$(target_path "/usr/local/share/aish/skills")"
+rmdir --ignore-fail-on-non-empty "$(target_path "/usr/local/share/aish")" >/dev/null 2>&1 || true
 if [[ "$PURGE_CONFIG" -eq 1 ]]; then
 	rm -f "$(target_path "/etc/aish/security_policy.yaml")"
 	rmdir --ignore-fail-on-non-empty "$(target_path "/etc/aish")" >/dev/null 2>&1 || true
