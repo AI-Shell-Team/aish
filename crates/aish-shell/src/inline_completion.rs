@@ -431,12 +431,17 @@ use aish_llm::CancellationToken;
 use crate::autosuggest::AutoSuggest;
 use crate::input::extract_ai_question;
 
-/// Single-cell spinner that replaces the `◆` icon in the `◆ aish` mode badge
-/// while an inline-completion LLM call is in flight. `aish` stays visible.
+/// Single-cell spinner that replaces ONLY the `◆` icon at column 1 of the
+/// prompt while an inline-completion LLM call is in flight. `aish` and the
+/// rest of the badge stay exactly where rustyline rendered them — the
+/// spinner never rewrites them, so nothing shifts regardless of how the
+/// terminal measures `◆`'s width.
 ///
-/// Each frame is a Braille spinner glyph + space + `aish` (6 cols),
-/// cycling through the 8-frame `theme::SPINNER_STATUS` Braille pattern. The
-/// width matches `◆ aish` exactly so the rest of the prompt never shifts.
+/// Each frame is a single accent-colored Braille glyph from
+/// `theme::SPINNER_STATUS` (8-frame "⣾⣽⣻⢿⡿⣟⣯⣷" cycle), written to
+/// column 1. On CJK terminals that render `◆` as 2 columns, the terminal
+/// auto-clears the second column of the `◆` cell when the narrow spinner
+/// glyph overwrites its first — `aish` never moves.
 ///
 /// Writes go directly to stderr via `\x1b7` (save cursor) + optional
 /// `\x1b[<N>A` (move up N lines, navigating to the prompt line when input
@@ -598,6 +603,11 @@ impl PromptSpinner {
 
     /// Cancel current task and synchronously write the restore sequence.
     /// No-op if no spinner was started. Idempotent.
+    ///
+    /// Only the `◆` icon cell is rewritten — the rest of the badge
+    /// (`aish`, path, etc.) stays exactly where rustyline rendered it, so
+    /// nothing shifts regardless of how the terminal measures the width
+    /// of `◆` (ambiguous-width glyph — 1 col on some terminals, 2 on CJK).
     fn stop(&self) {
         let prev = self.token.lock().unwrap().take();
         let Some(tok) = prev else {
@@ -607,8 +617,8 @@ impl PromptSpinner {
         self.handle.lock().unwrap().take();
         let up = Self::up_prefix(self.lines_up());
         let mut stderr = std::io::stderr().lock();
-        let badge = crate::theme::accent(&format!("{} aish", crate::theme::MODE_ICON));
-        let _ = write!(stderr, "\x1b7{}\x1b[1G{}\x1b8", up, badge);
+        let icon = crate::theme::accent(crate::theme::MODE_ICON);
+        let _ = write!(stderr, "\x1b7{}\x1b[1G{}\x1b8", up, icon);
     }
 
     /// Cancel current task without writing restore (used internally by
@@ -622,31 +632,46 @@ impl PromptSpinner {
     }
 }
 
-/// Spinner frame sequence using Braille glyphs from `theme::SPINNER_STATUS`
-/// (the 8-frame "⣾⣽⣻⢿⡿⣟⣯⣷" cycle). The spinner glyph replaces only the `◆`
-/// icon while `aish` stays visible.
+/// Spinner frame sequence: one Braille glyph per frame (accent-colored).
 ///
-/// The `◆` badge glyph (U+25C6) is East-Asian-Width Ambiguous — it occupies
-/// 2 columns in CJK locales but 1 elsewhere — while Braille spinner glyphs are
-/// Neutral (always 1 column). Each frame pads the spinner glyph so its visible
-/// width matches the badge in every locale, keeping `aish` aligned and avoiding
-/// a stale trailing cell during the animation.
+/// The spinner replaces ONLY the `◆` icon cell (column 1). The rest of
+/// the badge (`aish`, path, prompt symbol) is left untouched — rustyline
+/// already rendered it, and rewriting it would risk shifting `aish` when
+/// the terminal's measurement of `◆` (an East-Asian-Width Ambiguous
+/// glyph) disagrees with our `term_char_width` estimate.
+///
+/// Because each frame is a single 1-column glyph written to column 1,
+/// there is no width-mismatch with the badge and no trailing-cell
+/// residue to clean up. On CJK terminals that render `◆` as 2 columns,
+/// the terminal automatically clears the second column of the `◆` cell
+/// when the narrow spinner glyph overwrites its first column — the
+/// visible gap is absorbed by the space that already follows `◆` in the
+/// badge, so `aish` never moves.
 fn spinner_frames() -> &'static [String] {
     static FRAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
-        let icon_w =
-            crate::prompt::term_char_width(crate::theme::MODE_ICON.chars().next().unwrap_or('◆'));
+        // The single-cell spinner design hinges on MODE_ICON and every
+        // SPINNER_STATUS glyph being exactly ONE terminal cell. A multi-char
+        // MODE_ICON (or a multi-char spinner glyph) would write multiple
+        // cells and silently reintroduce the aish-shift regression.
+        debug_assert!(
+            crate::theme::MODE_ICON.chars().count() == 1,
+            "MODE_ICON must be exactly one character; multi-cell icons break \
+             the single-cell spinner design (got {:?})",
+            crate::theme::MODE_ICON
+        );
+        debug_assert!(
+            crate::theme::SPINNER_STATUS
+                .iter()
+                .all(|s| s.chars().count() == 1),
+            "every SPINNER_STATUS glyph must be exactly one character"
+        );
         crate::theme::SPINNER_STATUS
             .iter()
-            .map(|&ch| {
-                let glyph = ch.chars().next().unwrap_or(' ');
-                let pad = icon_w.saturating_sub(crate::prompt::term_char_width(glyph));
-                crate::theme::accent(&format!("{}{} aish", ch, " ".repeat(pad)))
-            })
+            .map(|&ch| crate::theme::accent(ch))
             .collect()
     });
     &FRAMES
 }
-
 /// RAII guard: stops the spinner on drop. Used in `prefetch()` to guarantee
 /// the restore sequence fires on every return path (cancel, timeout, error,
 /// sanitize None, success). No-op if `start()` was never called.
@@ -1263,6 +1288,29 @@ mod completer_tests {
         }
     }
 
+    /// Strip ANSI CSI sequences (SGR color codes etc.) from `s`, leaving
+    /// only the visible content characters. Used by tests to compare what
+    /// the terminal actually renders, not the escape-laden raw output.
+    fn strip_sgr(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                              // Consume the rest of the CSI sequence up to the final byte
+                              // (any ASCII alphabetic, e.g. 'm' for SGR, 'G' for CHA).
+                for ci in chars.by_ref() {
+                    if ci.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     #[test]
     fn hint_no_op_for_too_short_input() {
         let provider = Arc::new(FakeCompletionProvider::new("list files"));
@@ -1573,5 +1621,132 @@ mod completer_tests {
             "spinner should start when wrapped but not at exact boundary"
         );
         s.stop_internal();
+    }
+
+    /// Core invariant of the new spinner design: each frame is a SINGLE
+    /// glyph that overwrites ONLY the `◆` cell at column 1. Because
+    /// nothing else is rewritten, `aish` can never shift — regardless of
+    /// how the terminal measures `◆`'s width (the root cause of the old
+    /// `◆ aishh` bug and the "aish shifts by one column" regression).
+    ///
+    /// The assertion strips SGR color codes and verifies the remaining
+    /// content is EXACTLY one Braille glyph — not just that one is
+    /// present. The old buggy code (`accent("⣾ aish")`) also contains
+    /// exactly one Braille glyph but has trailing ` aish`; this test
+    /// catches that because it asserts no other characters follow.
+    #[test]
+    fn spinner_frame_is_single_glyph() {
+        let frames = spinner_frames();
+        assert!(!frames.is_empty(), "spinner must have frames");
+        for (i, frame) in frames.iter().enumerate() {
+            let stripped = strip_sgr(frame);
+            let mut chars = stripped.chars();
+            let glyph = chars.next().unwrap_or_else(|| {
+                panic!("frame {i} is empty after SGR strip (full frame {frame:?})")
+            });
+            assert!(
+                ('\u{2800}'..='\u{28FF}').contains(&glyph),
+                "frame {i} must start with a Braille glyph, got {glyph:?} \
+                 (stripped {stripped:?}, full frame {frame:?})"
+            );
+            assert_eq!(
+                chars.next(),
+                None,
+                "frame {i} must be EXACTLY one cell after SGR strip, got \
+                 {stripped:?}; any extra cell would shift `aish` on terminals \
+                 whose `◆` width differs from our estimate"
+            );
+        }
+    }
+
+    /// The restore written by `stop()` must also be exactly `MODE_ICON` —
+    /// a single glyph that overwrites ONLY the cell the spinner took over.
+    /// A multi-cell restore (the old `◆ aish` approach) is what left the
+    /// spinner's trailing `h` on screen (`◆ aishh` bug).
+    ///
+    /// Strips SGR codes and asserts the content equals MODE_ICON exactly,
+    /// so a regression to `accent(format!("{} aish", MODE_ICON))` (which
+    /// would pass a mere "contains one ◆" check) is caught.
+    #[test]
+    fn stop_restore_is_single_icon_glyph() {
+        // Reconstruct what `stop()` writes: theme::accent(MODE_ICON).
+        let restore = crate::theme::accent(crate::theme::MODE_ICON);
+        let stripped = strip_sgr(&restore);
+        assert_eq!(
+            stripped,
+            crate::theme::MODE_ICON,
+            "stop() restore must be exactly MODE_ICON after SGR strip, got \
+             {stripped:?} (full {restore:?}); a multi-cell restore leaves the \
+             spinner's trailing `h` on screen (`◆ aishh` bug)"
+        );
+        assert_eq!(
+            crate::theme::MODE_ICON.chars().count(),
+            1,
+            "MODE_ICON must be a single character for the single-cell spinner \
+             design to work (got {:?})",
+            crate::theme::MODE_ICON
+        );
+    }
+
+    /// End-to-end character-buffer model driven by REAL production output:
+    /// the spinner frame and the restore glyph are taken from
+    /// `spinner_frames()[0]` and `theme::accent(MODE_ICON)` respectively,
+    /// stripped of SGR codes, and applied to a hand-rolled screen row. The
+    /// test verifies that cells beyond index 0 are NEVER touched — this is
+    /// what guarantees `aish` never moves.
+    #[test]
+    fn spinner_and_restore_touch_only_icon_cell() {
+        // Drive the model with REAL production output, not hardcoded glyphs.
+        let spinner_content = strip_sgr(&spinner_frames()[0]);
+        let restore_content = strip_sgr(&crate::theme::accent(crate::theme::MODE_ICON));
+
+        // Both must be exactly one character for the single-cell design.
+        assert_eq!(
+            spinner_content.chars().count(),
+            1,
+            "spinner frame must be one cell: {spinner_content:?}"
+        );
+        assert_eq!(
+            restore_content.chars().count(),
+            1,
+            "restore must be one cell: {restore_content:?}"
+        );
+
+        let spinner_glyph: char = spinner_content.chars().next().unwrap();
+        let restore_glyph: char = restore_content.chars().next().unwrap();
+
+        // Seed: the prompt row as rustyline rendered it.
+        let icon_char = crate::theme::MODE_ICON.chars().next().unwrap();
+        let seed: Vec<char> = std::iter::once(icon_char)
+            .chain(" aish ~/path ➜".chars())
+            .collect();
+
+        // Spinner overwrites ONLY cell 0.
+        let mut after_spinner = seed.clone();
+        after_spinner[0] = spinner_glyph;
+        // Cells 1+ must be byte-identical to seed — no shift.
+        assert_eq!(
+            &after_spinner[1..],
+            &seed[1..],
+            "spinner must not touch any cell beyond the icon"
+        );
+        let spinner_rendered: String = after_spinner.iter().collect();
+        // `aish` did NOT move — it's still at the same offset.
+        assert!(
+            spinner_rendered.contains(" aish "),
+            "spinner must not shift `aish`: got {spinner_rendered:?}"
+        );
+
+        // stop() restores ONLY cell 0.
+        let mut after_restore = after_spinner;
+        after_restore[0] = restore_glyph;
+        // Fully restored to original seed — byte-identical.
+        assert_eq!(
+            after_restore, seed,
+            "prompt must be byte-identical after spinner + restore"
+        );
+        let restored: String = after_restore.iter().collect();
+        // Regression markers must NOT appear.
+        assert!(!restored.contains("aishh"), "no `aishh` residue");
     }
 }

@@ -1262,41 +1262,13 @@ impl LlmSession {
                 metadata: None,
             });
 
-            // Execute with retry: try once, retry once on failure.
-            // Mirrors Python's normalize_tool_result + error recovery pattern.
-            let result = {
-                let first = tool
-                    .as_ref()
-                    .execute_async_in_session(args.clone(), self)
-                    .await;
-                if first.ok || is_short_circuit_result(&first) {
-                    first
-                } else {
-                    // Retry once — log the retry attempt
-                    tracing::warn!(
-                        "Tool '{}' failed, retrying once: {}",
-                        tool_call.name,
-                        first.output
-                    );
-                    let second = tool
-                        .as_ref()
-                        .execute_async_in_session(args.clone(), self)
-                        .await;
-                    if second.ok {
-                        second
-                    } else {
-                        // Combine both error messages for diagnostic clarity
-                        ToolResult {
-                            ok: false,
-                            output: format!(
-                                "{}\n(retry also failed: {})",
-                                first.output, second.output
-                            ),
-                            meta: second.meta,
-                        }
-                    }
-                }
-            };
+            // Execute once. ToolResult::error is always deterministic in the
+            // current toolset (file-not-found, bad args, policy block, HTTP 4xx),
+            // so a blind retry would just duplicate the call and the error.
+            let result = tool
+                .as_ref()
+                .execute_async_in_session(args.clone(), self)
+                .await;
 
             // Update plan state based on tool result metadata
             if let Some(ref meta) = result.meta {

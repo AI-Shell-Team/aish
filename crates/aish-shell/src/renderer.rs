@@ -2,12 +2,8 @@ use std::io::{self, Write};
 
 use crate::recorder::SharedRecorder;
 use crate::theme;
-use richrs::color::Color;
 use richrs::console::Console;
-use richrs::markdown::Markdown;
-use richrs::style::Style;
 use richrs::syntax::Syntax;
-use richrs::table::{Column, Row, Table};
 
 // ---------------------------------------------------------------------------
 // Content splitting: code blocks → tables → regular markdown
@@ -231,47 +227,13 @@ fn split_tables(text: &str) -> Vec<(bool, String)> {
 // Table rendering via richrs Table
 // ---------------------------------------------------------------------------
 
-/// Render a markdown pipe table using richrs Table.
+/// Render a markdown pipe table to segments.
+///
+/// Delegates to [`crate::md_table::render`] — a self-contained renderer that
+/// wraps cell content to column widths (so long CJK cells no longer break the
+/// right border) and parses inline markdown (`**bold**`, `` `code` ``).
 fn render_table_to_segments(lines: &[&str], width: usize) -> Option<richrs::segment::Segments> {
-    let headers = parse_pipe_row(lines.first()?)?;
-    let sep = lines.get(1)?.trim();
-    if !sep
-        .chars()
-        .all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
-    {
-        return None;
-    }
-
-    let mut table = Table::new()
-        .border_style(Style::new().dim())
-        .header_style(Style::new().bold());
-
-    for h in &headers {
-        table.add_column(Column::new(h.as_str()));
-    }
-
-    for line in lines.iter().skip(2) {
-        if let Some(cells) = parse_pipe_row(line) {
-            if cells.len() == headers.len() {
-                table.add_row(Row::new(cells));
-            }
-        }
-    }
-
-    Some(table.render(width))
-}
-
-fn parse_pipe_row(line: &str) -> Option<Vec<String>> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
-        return None;
-    }
-    let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
-    let cells: Vec<String> = inner.split('|').map(|s| s.trim().to_string()).collect();
-    if cells.is_empty() {
-        return None;
-    }
-    Some(cells)
+    aish_md_table::render(lines, width)
 }
 
 // ---------------------------------------------------------------------------
@@ -373,15 +335,7 @@ impl ShellRenderer {
                     last_was_markdown = false;
                 }
                 ContentSegment::Markdown(content) => {
-                    let inline_style = Style::new()
-                        .with_color(Color::Rgb {
-                            r: crate::theme::ACCENT_RGB.0,
-                            g: crate::theme::ACCENT_RGB.1,
-                            b: crate::theme::ACCENT_RGB.2,
-                        })
-                        .bold();
-                    let md = Markdown::new(&content).inline_code_style(inline_style);
-                    let segs = md.render(self.terminal_width);
+                    let segs = crate::md_render::render(&content, self.terminal_width);
                     {
                         let mut ansi = segs.to_ansi();
                         if ansi.ends_with("\n\n") {
@@ -463,21 +417,7 @@ impl Default for ShellRenderer {
 mod tests {
     use super::*;
 
-    // --- pipe row parsing ---
-
-    #[test]
-    fn test_parse_pipe_row() {
-        assert_eq!(
-            parse_pipe_row("| a | b | c |").unwrap(),
-            vec!["a", "b", "c"]
-        );
-    }
-    #[test]
-    fn test_parse_pipe_row_invalid() {
-        assert!(parse_pipe_row("no pipes").is_none());
-    }
-
-    // --- table rendering (richrs Table) ---
+    // --- table rendering (md_table) ---
 
     #[test]
     fn test_render_table_to_segments() {

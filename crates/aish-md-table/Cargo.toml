@@ -1,0 +1,14 @@
+[package]
+name = "aish-md-table"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Pin to default features only — md_table needs `segment`/`style`, not the
+# `syntax` (syntect) or `markdown` (pulldown-cmark) features that the workspace
+# pulls in for aish-shell. This keeps the test binary under a few MB instead of
+# the 39 MB that drags the OOM killer in when the system swap is full.
+richrs = "0.2"
+unicode-width = { workspace = true }

@@ -75,6 +75,38 @@ pub(crate) fn take_slash_prefill() -> String {
         Err(_) => String::new(),
     }
 }
+/// Flag set by `AtFileHandler` when `@` is typed inside an AI prompt line.
+static AT_FILE_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Snapshot of the readline buffer captured when `@` triggers the file
+/// mention popup: the full line text (without the `@`) and the cursor
+/// offset where `@` was about to be inserted. Consumed by
+/// `run_file_mention_session` to splice the selected path back in.
+#[derive(Clone)]
+struct AtFileContext {
+    line: String,
+    at_pos: usize,
+}
+
+static AT_FILE_CONTEXT: Mutex<Option<AtFileContext>> = Mutex::new(None);
+
+/// Record the readline state at the moment `@` was pressed (called from
+/// `AtFileHandler`). `line` excludes the `@` itself; `at_pos` is the byte
+/// offset where `@` would have been inserted.
+fn set_at_file_context(line: String, at_pos: usize) {
+    if let Ok(mut guard) = AT_FILE_CONTEXT.lock() {
+        *guard = Some(AtFileContext { line, at_pos });
+    }
+}
+
+/// Consume the captured readline state, returning `(line, at_pos)` or
+/// `None` if no `@` trigger is pending.
+pub(crate) fn take_at_file_context() -> Option<(String, usize)> {
+    match AT_FILE_CONTEXT.lock() {
+        Ok(mut guard) => guard.take().map(|c| (c.line, c.at_pos)),
+        Err(_) => None,
+    }
+}
 
 /// Max gap between Tab presses to count as "double Tab" (bash second-tab list).
 const DOUBLE_TAB_MS: u128 = 800;
@@ -259,6 +291,45 @@ impl ConditionalEventHandler for SlashHandler {
                 {
                     SLASH_REQUESTED.store(true, Ordering::SeqCst);
                     return Some(Cmd::Interrupt);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Event handler that sets a flag when `@` is typed inside an AI prompt
+/// line (`;` / `；` prefix), then returns `Cmd::Interrupt` to break out of
+/// `read_line` for the file-mention popup. The `@` must sit at a token
+/// boundary (after whitespace, tab, or the `;` prefix) so prose like
+/// `user@host` never triggers it.
+struct AtFileHandler;
+
+impl ConditionalEventHandler for AtFileHandler {
+    fn handle(
+        &self,
+        evt: &Event,
+        _n_repeat: RepeatCount,
+        _positive: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if let Event::KeySeq(keys) = evt {
+            if let Some(key) = keys.first() {
+                if key.1 == Modifiers::NONE && key.0 == KeyCode::Char('@') {
+                    let line = ctx.line();
+                    if crate::input::is_ai_prompt_line(line) {
+                        let pos = ctx.pos();
+                        let before_ok = pos == 0
+                            || matches!(
+                                line[..pos].chars().next_back(),
+                                Some(' ') | Some('\t') | Some(';') | Some('\u{ff1b}')
+                            );
+                        if before_ok {
+                            set_at_file_context(line.to_string(), pos);
+                            AT_FILE_REQUESTED.store(true, Ordering::SeqCst);
+                            return Some(Cmd::Interrupt);
+                        }
+                    }
                 }
             }
         }
@@ -530,6 +601,12 @@ impl ShellReadline {
             EventHandler::Conditional(Box::new(SlashHandler)),
         );
 
+        // Bind `@` in AI-mode lines for the file-mention popup
+        editor.bind_sequence(
+            KeyEvent(KeyCode::Char('@'), Modifiers::NONE),
+            EventHandler::Conditional(Box::new(AtFileHandler)),
+        );
+
         // Bind Right Arrow and Ctrl+F to accept the inline AI ghost, and
         // bind the line-submit keys to clear it before rustyline repaints.
         // rustyline's `EventHandler` is not `Clone`, so each binding needs
@@ -598,6 +675,12 @@ impl ShellReadline {
     /// The flag is consumed on read.
     pub fn was_slash_requested(&self) -> bool {
         SLASH_REQUESTED.swap(false, Ordering::SeqCst)
+    }
+
+    /// Check whether `@` in an AI prompt triggered the last `Interrupted`
+    /// error. The flag is consumed on read.
+    pub fn was_at_file_requested(&self) -> bool {
+        AT_FILE_REQUESTED.swap(false, Ordering::SeqCst)
     }
 
     /// Read a line with initial text pre-filled, letting the user edit and

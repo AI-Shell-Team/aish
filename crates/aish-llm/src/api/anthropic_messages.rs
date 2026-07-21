@@ -9,7 +9,10 @@ use crate::openai_sse_bridge::translate_anthropic_sse_stream;
 use crate::types::{ChatMessage, ToolSpec};
 use crate::usage::TokenUsage;
 
-use super::{effective_max_tokens, format_http_error, StreamContext};
+use super::{
+    effective_max_tokens, format_http_error, is_retryable_network_err, is_retryable_status,
+    retry_backoff_delay, StreamContext, MAX_HTTP_RETRIES,
+};
 
 pub fn resolve_anthropic_messages_url(base_url: &str) -> String {
     let normalized = base_url.trim().trim_end_matches('/');
@@ -60,34 +63,63 @@ pub async fn stream(
 
     let url = resolve_anthropic_messages_url(&ctx.api_base);
     let http = Client::new();
-    let resp = http
-        .post(&url)
-        .header("x-api-key", &ctx.api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("Content-Type", "application/json")
-        .timeout(std::time::Duration::from_secs(120))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AishError::Llm(e.to_string()))?;
 
-    if !resp.status().is_success() {
+    // Retry transient failures (5xx, 429, connect/timeout errors) with
+    // exponential backoff. Non-retryable status codes surface immediately.
+    let mut last_err: Option<AishError> = None;
+    for attempt in 0..=MAX_HTTP_RETRIES {
+        if attempt > 0 {
+            let delay = retry_backoff_delay(attempt);
+            tracing::warn!(
+                "Retrying Anthropic request (attempt {}/{}) after {:?}",
+                attempt + 1,
+                MAX_HTTP_RETRIES + 1,
+                delay
+            );
+            tokio::time::sleep(delay).await;
+        }
+
+        let resp = match http
+            .post(&url)
+            .header("x-api-key", &ctx.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(120))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if is_retryable_network_err(&e) => {
+                last_err = Some(AishError::Llm(e.to_string()));
+                continue;
+            }
+            Err(e) => return Err(AishError::Llm(e.to_string())),
+        };
+
         let status = resp.status();
+        if status.is_success() {
+            if stream {
+                return Ok(LlmResponse::Stream(translate_anthropic_sse_stream(resp)));
+            }
+            let json_body: Value = resp
+                .json()
+                .await
+                .map_err(|e| AishError::Llm(e.to_string()))?;
+            return Ok(LlmResponse::Json(anthropic_response_to_openai_json(
+                &json_body,
+            )));
+        }
+
         let text = resp.text().await.unwrap_or_default();
+        if is_retryable_status(status) && attempt < MAX_HTTP_RETRIES {
+            last_err = Some(AishError::Llm(format_http_error(status, &text)));
+            continue;
+        }
         return Err(AishError::Llm(format_http_error(status, &text)));
     }
 
-    if stream {
-        Ok(LlmResponse::Stream(translate_anthropic_sse_stream(resp)))
-    } else {
-        let json_body: Value = resp
-            .json()
-            .await
-            .map_err(|e| AishError::Llm(e.to_string()))?;
-        Ok(LlmResponse::Json(anthropic_response_to_openai_json(
-            &json_body,
-        )))
-    }
+    Err(last_err.unwrap_or_else(|| AishError::Llm("Request failed after retries".into())))
 }
 
 pub async fn test_connection(ctx: &StreamContext) -> Result<(), String> {

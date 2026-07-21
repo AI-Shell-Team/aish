@@ -445,10 +445,10 @@ impl SlashInputSession {
     }
 }
 
-struct RawModeGuard;
+pub(crate) struct RawModeGuard;
 
 impl RawModeGuard {
-    fn enter() -> io::Result<Self> {
+    pub(crate) fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         if let Err(err) = execute!(io::stdout(), cursor::Hide) {
             let _ = terminal::disable_raw_mode();
@@ -466,14 +466,16 @@ impl Drop for RawModeGuard {
     }
 }
 
-fn drain_pending_events() -> io::Result<()> {
+pub(crate) fn drain_pending_events() -> io::Result<()> {
     while event::poll(std::time::Duration::from_millis(0))? {
         let _ = event::read()?;
     }
     Ok(())
 }
 
-fn open_inline_terminal(height: u16) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
+pub(crate) fn open_inline_terminal(
+    height: u16,
+) -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Terminal::with_options(
         CrosstermBackend::new(io::stdout()),
         TerminalOptions {
@@ -482,7 +484,7 @@ fn open_inline_terminal(height: u16) -> io::Result<Terminal<CrosstermBackend<io:
     )
 }
 
-fn longest_common_prefix(names: &[&str]) -> String {
+pub(crate) fn longest_common_prefix(names: &[&str]) -> String {
     if names.is_empty() {
         return String::new();
     }
@@ -501,7 +503,7 @@ fn longest_common_prefix(names: &[&str]) -> String {
 }
 
 /// Strip ANSI CSI/OSC escape sequences from a string.
-fn strip_ansi(s: &str) -> String {
+pub(crate) fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {

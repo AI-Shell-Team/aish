@@ -557,6 +557,23 @@ impl AishShell {
         }
     }
 
+    /// Run the `@path` file-mention popup, seeded with the readline state
+    /// captured by `AtFileHandler`. `line` is the buffer without `@`;
+    /// `at_pos` is where `@` was about to be inserted.
+    fn run_file_mention_session(
+        &self,
+        prompt: &str,
+        line: &str,
+        at_pos: usize,
+    ) -> aish_ui::FileMentionOutcome {
+        let prefix = line[..at_pos].to_string();
+        let cwd = std::path::PathBuf::from(&self.state.cwd);
+        let session = aish_ui::FileMentionSession::new(&cwd, prompt.to_string(), prefix);
+        session
+            .run()
+            .unwrap_or(aish_ui::FileMentionOutcome::Cancelled)
+    }
+
     /// Security gate: check AI input for secrets and prompt the user.
     /// Returns `true` to continue, `false` if the user aborted (caller should skip).
     /// When secrets are detected and the user chooses "Redact", `question` is
@@ -2082,6 +2099,30 @@ impl AishShell {
                         }
                         continue;
                     }
+                    // Check if `@` inside an AI prompt triggered the file-mention popup
+                    if matches!(e, rustyline::error::ReadlineError::Interrupted)
+                        && rl.was_at_file_requested()
+                    {
+                        if let Some((line, at_pos)) = crate::readline::take_at_file_context() {
+                            match self.run_file_mention_session(&prompt_str, &line, at_pos) {
+                                aish_ui::FileMentionOutcome::Selected(path) => {
+                                    let before = &line[..at_pos];
+                                    let after = &line[at_pos..];
+                                    let new_line = format!("{before}@{path} {after}");
+                                    if self.read_line_after_at_file(&mut rl, &prompt_str, &new_line)
+                                    {
+                                        break;
+                                    }
+                                }
+                                aish_ui::FileMentionOutcome::Cancelled => {
+                                    if self.read_line_after_at_file(&mut rl, &prompt_str, &line) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // Interrupt (Ctrl-C) — handle double-press exit
                     if matches!(e, rustyline::error::ReadlineError::Interrupted) {
                         // Record newline so cast replay moves cursor to next line
@@ -2826,6 +2867,55 @@ impl AishShell {
         }
     }
 
+    /// After the file-mention popup closes, re-enter readline with the
+    /// spliced text pre-filled. Supports nested `@` and `/` popups.
+    /// Returns `true` when the main shell loop should exit.
+    fn read_line_after_at_file(
+        &mut self,
+        rl: &mut ShellReadline,
+        prompt: &str,
+        initial: &str,
+    ) -> bool {
+        let mut prefill = initial.to_string();
+        loop {
+            match rl.read_line_with_initial(prompt, (&prefill, "")) {
+                Ok(Some(line)) => return self.process_readline_submission(&line),
+                Ok(None) => return false,
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    if rl.was_at_file_requested() {
+                        if let Some((line2, at_pos)) = crate::readline::take_at_file_context() {
+                            match self.run_file_mention_session(prompt, &line2, at_pos) {
+                                aish_ui::FileMentionOutcome::Selected(path) => {
+                                    let before = &line2[..at_pos];
+                                    let after = &line2[at_pos..];
+                                    prefill = format!("{before}@{path} {after}");
+                                }
+                                aish_ui::FileMentionOutcome::Cancelled => {
+                                    prefill = line2;
+                                }
+                            }
+                        }
+                    } else if rl.was_slash_requested() {
+                        match self.run_slash_input_session(prompt) {
+                            aish_ui::SlashInputOutcome::Command(cmd) => {
+                                self.apply_slash_popup_command(rl, prompt, &cmd);
+                                return false;
+                            }
+                            aish_ui::SlashInputOutcome::Dismissed(text) => {
+                                prefill = text;
+                            }
+                            aish_ui::SlashInputOutcome::Cancelled => return false,
+                        }
+                    } else {
+                        crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");
+                        return self.handle_ctrl_c();
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+    }
+
     /// Record last command outcome for `;` quick-fix and `/diagnose`.
     fn track_command_failure_state(&mut self, command: &str, exit_code: i32) {
         use aish_i18n::t;
@@ -2905,6 +2995,83 @@ impl AishShell {
                 let exit_code = self.execute_script(input);
                 self.record_history(input, exit_code);
                 self.track_command_failure_state(input, exit_code);
+                false
+            }
+            crate::types::InputIntent::Ai => {
+                // Popup-recovery AI path: the line was assembled inside a
+                // slash/@ popup and submitted via `read_line_with_initial`,
+                // so it does not flow through the main loop's Ai branch.
+                // Mirror that branch's essentials (InputGuard, security
+                // gate, handle_question, streaming/non-streaming render,
+                // cancellation, history) so `@file` mentions reach the LLM.
+                let mut question = input::extract_ai_question(input);
+                if question.is_empty() {
+                    return false;
+                }
+                if !self.screen_ai_prompt(&question) {
+                    return false;
+                }
+                if !self.check_security_gate(&mut question) {
+                    return false;
+                }
+                let ai_prefix = if input.starts_with('\u{ff1b}') {
+                    "\u{ff1b}"
+                } else {
+                    ";"
+                };
+                crate::recorder::shared_record_input(
+                    &self.shared_recorder,
+                    &format!("{}{}\n", ai_prefix, question),
+                );
+                let old_sigint = self.install_ai_sigint_handler();
+                let mut esc_watcher =
+                    CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
+                let token_ptr = self.ai_handler.cancellation_token() as *const CancellationToken;
+                let runtime = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        esc_watcher.stop();
+                        Self::restore_ai_sigint_handler(old_sigint);
+                        eprintln!("{}", theme::error(&format!("runtime error: {err}")));
+                        return false;
+                    }
+                };
+                let result = runtime.block_on(async {
+                    tokio::select! {
+                        r = self.ai_handler.handle_question(&question) => r,
+                        _ = poll_cancelled(token_ptr) => {
+                            Err(aish_core::AishError::Cancelled)
+                        }
+                    }
+                });
+                esc_watcher.stop();
+                Self::restore_ai_sigint_handler(old_sigint);
+                self.sync_state_from_pty_cwd();
+                let did_stream = self.streamed_content.load(Ordering::SeqCst);
+                match result {
+                    Ok(response) => {
+                        if self.ai_handler.cancellation_token().is_cancelled() {
+                            println!("{}", theme::warning(&t("shell.interrupted")));
+                        } else if !did_stream && !response.trim().is_empty() {
+                            let mut sep = ShellRenderer::new();
+                            sep.set_shared_recorder(self.shared_recorder.clone());
+                            sep.render_separator();
+                            print_md_with_recording(&response, &self.shared_recorder);
+                            sep.render_separator();
+                        }
+                    }
+                    Err(aish_core::AishError::Cancelled) => {
+                        println!("{}", theme::warning(&t("shell.interrupted")));
+                    }
+                    Err(e) => {
+                        if !matches!(e, aish_core::AishError::Llm(_)) {
+                            let msg = t("shell.error.llm_error_message")
+                                .replace("{error}", &e.to_string());
+                            eprintln!("{}", theme::error(&msg));
+                        }
+                    }
+                }
+                self.record_history(input, 0);
                 false
             }
             _ => {

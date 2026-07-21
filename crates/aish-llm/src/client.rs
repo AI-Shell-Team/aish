@@ -1,6 +1,9 @@
 use aish_core::AishError;
 use reqwest::Client;
 
+use crate::api::{
+    is_retryable_network_err, is_retryable_status, retry_backoff_delay, MAX_HTTP_RETRIES,
+};
 use crate::llm_stream::LlmStream;
 use crate::model_id::resolve_model_for_api;
 use crate::types::{ChatMessage, ToolSpec};
@@ -189,34 +192,64 @@ impl LlmClient {
         }
 
         let url = format!("{}/chat/completions", self.api_base);
-        let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(120))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AishError::Llm(e.to_string()))?;
 
-        if !resp.status().is_success() {
+        // Retry transient failures (5xx, 429, connect/timeout errors) with
+        // exponential backoff. Errors that signal a bug or auth issue are
+        // surfaced immediately.
+        let mut last_err: Option<AishError> = None;
+        for attempt in 0..=MAX_HTTP_RETRIES {
+            if attempt > 0 {
+                let delay = retry_backoff_delay(attempt);
+                tracing::warn!(
+                    "Retrying chat completion (attempt {}/{}) after {:?}",
+                    attempt + 1,
+                    MAX_HTTP_RETRIES + 1,
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+            }
+
+            let resp = match self
+                .http
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Content-Type", "application/json")
+                .timeout(std::time::Duration::from_secs(120))
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if is_retryable_network_err(&e) => {
+                    last_err = Some(AishError::Llm(e.to_string()));
+                    continue;
+                }
+                Err(e) => return Err(AishError::Llm(e.to_string())),
+            };
+
             let status = resp.status();
+            if status.is_success() {
+                if stream {
+                    return Ok(LlmResponse::Stream(LlmStream::from_http(resp)));
+                }
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| AishError::Llm(e.to_string()))?;
+                let json: serde_json::Value = serde_json::from_str(&text)
+                    .map_err(|e| AishError::Llm(format!("JSON parse error: {}", e)))?;
+                return Ok(LlmResponse::Json(json));
+            }
+
             let text = resp.text().await.unwrap_or_default();
+            if is_retryable_status(status) && attempt < MAX_HTTP_RETRIES {
+                last_err = Some(AishError::Llm(format_http_error(status, &text)));
+                continue;
+            }
             return Err(AishError::Llm(format_http_error(status, &text)));
         }
 
-        if stream {
-            Ok(LlmResponse::Stream(LlmStream::from_http(resp)))
-        } else {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| AishError::Llm(e.to_string()))?;
-            let json: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| AishError::Llm(format!("JSON parse error: {}", e)))?;
-            Ok(LlmResponse::Json(json))
-        }
+        Err(last_err.unwrap_or_else(|| AishError::Llm("Request failed after retries".into())))
     }
 }
 
