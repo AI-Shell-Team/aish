@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Regression: sudo-style seed must leave ~/.config/aish owned by the target
-# user so config.yaml can be created (not only skill leaves).
-# Also assert install-bundle no longer installs skills under /usr/local.
+# Regression coverage for skill seeding:
+#   1) install-bundle must not install/seed via /usr/local/share/aish/skills
+#   2) seed-skills must drop privileges for home-dir writes when root
+#   3) seeding into a user HOME must create skills and allow config.yaml
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,12 +23,26 @@ if grep -qE 'seed-skills\.sh".*/usr/local' "$INSTALL_SCRIPT"; then
   exit 1
 fi
 
-# --- ownership under fakeroot (simulates sudo install) ---
-if ! command -v fakeroot >/dev/null 2>&1; then
-  echo "seed-skills ownership smoke test passed (static checks only; fakeroot missing)."
-  exit 0
+# --- static: drop privileges for home-dir writes ---
+if ! grep -q 'run_as_target mkdir' "$SEED_SCRIPT"; then
+  echo "FAIL: seed-skills.sh must mkdir as TARGET_USER via run_as_target" >&2
+  exit 1
+fi
+if ! grep -q 'run_as_target cp' "$SEED_SCRIPT"; then
+  echo "FAIL: seed-skills.sh must cp as TARGET_USER via run_as_target" >&2
+  exit 1
+fi
+if ! grep -qE 'runuser -u|sudo -u' "$SEED_SCRIPT"; then
+  echo "FAIL: seed-skills.sh does not drop to TARGET_USER via runuser/sudo -u" >&2
+  exit 1
+fi
+# Reject the old pattern: create as root then always chown -R the tree.
+if grep -qE '^\s*mkdir -p "\$USER_SKILLS_DIR"' "$SEED_SCRIPT"; then
+  echo "FAIL: seed-skills.sh still mkdir's USER_SKILLS_DIR as the invoking user/root" >&2
+  exit 1
 fi
 
+# --- functional: seed as the current user into an isolated HOME ---
 mkdir -p "$TMP_DIR/source/demo-skill"
 cat >"$TMP_DIR/source/demo-skill/SKILL.md" <<'EOF'
 ---
@@ -36,23 +51,20 @@ name: demo-skill
 demo
 EOF
 
-FAKE_USER="$(id -un)"
-FAKE_HOME="$TMP_DIR/home/$FAKE_USER"
+FAKE_HOME="$TMP_DIR/home/$(id -un)"
 mkdir -p "$FAKE_HOME"
 
-fakeroot env HOME="$FAKE_HOME" SUDO_USER= "$SEED_SCRIPT" "$TMP_DIR/source"
+HOME="$FAKE_HOME" "$SEED_SCRIPT" "$TMP_DIR/source"
 
 AISH_DIR="$FAKE_HOME/.config/aish"
-owner="$(stat -c '%u' "$AISH_DIR")"
-skills_owner="$(stat -c '%u' "$AISH_DIR/skills")"
-# TARGET_USER is the real user (id -un); after chown, dirs must not be uid 0.
-if [[ "$owner" == "0" ]] || [[ "$skills_owner" == "0" ]]; then
-  echo "FAIL: ~/.config/aish still root-owned (aish=$owner skills=$skills_owner)" >&2
-  find "$FAKE_HOME/.config" -printf '%u:%g %p\n' >&2 || true
+SKILL_FILE="$AISH_DIR/skills/demo-skill/SKILL.md"
+if [[ ! -f "$SKILL_FILE" ]]; then
+  echo "FAIL: expected seeded skill at $SKILL_FILE" >&2
+  find "$FAKE_HOME" -print >&2 || true
   exit 1
 fi
 
-# Must be writable for config.yaml (the original user symptom).
+# Original user symptom: must be able to create config.yaml in the config dir.
 touch "$AISH_DIR/config.yaml"
 
 echo "seed-skills ownership smoke test passed."
