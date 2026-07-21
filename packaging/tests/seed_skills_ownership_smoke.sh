@@ -11,6 +11,15 @@ INSTALL_SCRIPT="$ROOT_DIR/packaging/scripts/install-bundle.sh"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
+if [[ ! -f "$INSTALL_SCRIPT" ]]; then
+  echo "FAIL: missing install script: $INSTALL_SCRIPT" >&2
+  exit 1
+fi
+if [[ ! -f "$SEED_SCRIPT" ]]; then
+  echo "FAIL: missing seed script: $SEED_SCRIPT" >&2
+  exit 1
+fi
+
 # --- static: no host /usr/local skills install path ---
 if grep -E 'install_tree.*(/usr/local/share/aish/skills)|seed-skills\.sh".*(/usr/local/share/aish/skills)' \
   "$INSTALL_SCRIPT"; then
