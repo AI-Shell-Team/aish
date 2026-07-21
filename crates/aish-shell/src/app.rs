@@ -2389,11 +2389,13 @@ impl AishShell {
                                     } else {
                                         0
                                     };
+                                    let compaction = self.ai_handler.last_turn_compaction();
                                     let footer = theme::response_footer(
                                         &self.config.model,
                                         delta_in,
                                         delta_out,
                                         ctx_percent,
+                                        compaction,
                                         Some(ai_elapsed),
                                     );
                                     crate::recorder::shared_record_output(

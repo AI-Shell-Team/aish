@@ -410,12 +410,20 @@ pub fn context_bar(percent: u8) -> String {
 }
 
 /// Render a one-line response metadata footer:
-/// `◉ model │ 3.2k in 1.1k out │ 3.2s │ ctx [████████░░] 23%`
+/// `◉ model │ 3.2k in 1.1k out │ 3.2s │ req [████████░░] 23%`
+///
+/// `req` is the current request's share of the context window — NOT the
+/// cumulative conversation size. Tool calls from prior turns are not
+/// persisted into the context manager, so a short follow-up after a
+/// tool-heavy turn legitimately shows a much smaller `req`. When
+/// `compaction` is `Some`, a trailing `⟳compacted` / `⟳micro` hint marks
+/// that the bar shrank because history was compacted this turn.
 pub fn response_footer(
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
     ctx_percent: u8,
+    compaction: Option<&str>,
     elapsed_secs: Option<f64>,
 ) -> String {
     let sep = dim("│");
@@ -423,8 +431,13 @@ pub fn response_footer(
         Some(secs) => format!(" {} {} ", dim("·"), muted(&format!("{:.1}s", secs))),
         None => " ".to_string(),
     };
+    let compaction_part = match compaction {
+        Some("full_compact") => format!(" {}", dim("⟳compacted")),
+        Some("microcompact") => format!(" {}", dim("⟳micro")),
+        _ => String::new(),
+    };
     format!(
-        "{} {} {} {} {}{}{} ctx {}",
+        "{} {} {} {} {}{}{} req {}{}",
         gold("◉"),
         gold(model),
         sep,
@@ -432,7 +445,8 @@ pub fn response_footer(
         warning(&format!("{} out", format_tokens(output_tokens))),
         time_part,
         sep,
-        context_bar(ctx_percent)
+        context_bar(ctx_percent),
+        compaction_part,
     )
 }
 
@@ -646,7 +660,7 @@ mod diff_tests {
 
     #[test]
     fn response_footer_without_elapsed_has_space_before_sep() {
-        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, None));
+        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, None, None));
         assert!(
             footer.contains("out │"),
             "separator must have space before it when elapsed is None: {footer:?}"
@@ -655,7 +669,7 @@ mod diff_tests {
 
     #[test]
     fn response_footer_with_elapsed_has_time_segment() {
-        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, Some(1.5)));
+        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, None, Some(1.5)));
         assert!(
             footer.contains("1.5s"),
             "elapsed time must appear in footer: {footer:?}"
