@@ -319,14 +319,19 @@ impl AttachedBackend {
         }
     }
 
-    /// Gracefully detach from the daemon.
+    /// Detach from the daemon, or shut down the socket if the session already exited.
     ///
-    /// Sends a `Detach` frame and shuts the socket down.  The daemon keeps the
-    /// session alive for future re-attach.
+    /// When `running` is true (Ctrl+Q / live detach), sends a `Detach` frame so the
+    /// daemon keeps the session alive for re-attach. When `running` is false
+    /// (`ExitNotice` after `exit`), skips the write — the daemon is already gone.
     pub fn detach(&mut self) -> Result<()> {
-        let encoded = encode_frame(&Frame::detach());
-        if let Err(e) = write_all_nonblocking(&mut self.stream, &encoded, Duration::from_secs(2)) {
-            tracing::warn!(error = %e, "failed to send Detach frame");
+        if self.running {
+            let encoded = encode_frame(&Frame::detach());
+            if let Err(e) =
+                write_all_nonblocking(&mut self.stream, &encoded, Duration::from_secs(2))
+            {
+                tracing::warn!(error = %e, "failed to send Detach frame");
+            }
         }
         let _ = self.stream.shutdown(Shutdown::Both);
         Ok(())
@@ -490,4 +495,64 @@ fn write_all_nonblocking(stream: &mut UnixStream, data: &[u8], timeout: Duration
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon_protocol::{try_decode_frame, TYPE_DETACH};
+
+    fn backend_from_stream(stream: UnixStream, running: bool) -> AttachedBackend {
+        stream.set_nonblocking(true).unwrap();
+        AttachedBackend {
+            stream,
+            reader: FrameReader::new(),
+            rows: 24,
+            cols: 80,
+            running,
+            session_id: "test".into(),
+            child_pid: 0,
+            pending_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn detach_skips_write_when_not_running() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut backend = backend_from_stream(client, false);
+        backend.detach().unwrap();
+
+        let mut buf = [0u8; 64];
+        match server.read(&mut buf) {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+            Ok(0) => {} // peer shutdown only
+            Ok(n) => panic!("expected no Detach frame, got {n} bytes"),
+            Err(e) => panic!("unexpected read error: {e}"),
+        }
+    }
+
+    #[test]
+    fn detach_sends_frame_when_running() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut backend = backend_from_stream(client, true);
+        backend.detach().unwrap();
+
+        let mut buf = [0u8; 64];
+        let n = loop {
+            match server.read(&mut buf) {
+                Ok(0) => panic!("EOF before Detach frame"),
+                Ok(n) => break n,
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(e) => panic!("read error: {e}"),
+            }
+        };
+        let (frame, _) = try_decode_frame(&buf[..n])
+            .unwrap()
+            .expect("complete frame");
+        assert_eq!(frame.frame_type, TYPE_DETACH);
+    }
 }
