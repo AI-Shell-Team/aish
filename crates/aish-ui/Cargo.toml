@@ -8,3 +8,6 @@ crossterm.workspace = true
 ratatui.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

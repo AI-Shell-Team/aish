@@ -31,6 +31,7 @@ pub mod inline_completion;
 pub mod input;
 pub mod keyboard;
 pub mod llm_event_ui;
+pub mod md_render;
 pub mod nl_detect;
 pub mod prompt;
 pub mod readline;

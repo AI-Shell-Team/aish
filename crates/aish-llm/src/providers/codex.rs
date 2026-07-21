@@ -1065,6 +1065,19 @@ pub async fn create_openai_responses_http_response(
                     return Ok(resp);
                 }
                 let text = resp.text().await.unwrap_or_default();
+                if crate::api::is_retryable_status(status)
+                    && attempt + 1 < CODEX_MAX_REQUEST_ATTEMPTS
+                {
+                    let delay = crate::api::retry_backoff_delay(attempt);
+                    warn!(
+                        attempt,
+                        status = status.as_u16(),
+                        delay_ms = delay.as_millis() as u64,
+                        "Retryable HTTP status, backing off"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
                 return Err(CodexError::Http(format!("{status} {text}")));
             }
             Err(e) if e.is_connect() || e.is_timeout() => {
@@ -1180,6 +1193,19 @@ pub async fn create_codex_http_response(
 
                 if !status.is_success() {
                     let text = resp.text().await.unwrap_or_default();
+                    if crate::api::is_retryable_status(status)
+                        && attempt + 1 < CODEX_MAX_REQUEST_ATTEMPTS
+                    {
+                        let delay = crate::api::retry_backoff_delay(attempt);
+                        warn!(
+                            attempt,
+                            status = status.as_u16(),
+                            delay_ms = delay.as_millis() as u64,
+                            "Retryable HTTP status, backing off"
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
                     return Err(CodexError::Http(format!("{status} {text}")));
                 }
 

@@ -144,6 +144,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aish-md-table"
+version = "0.3.7"
+dependencies = [
+ "richrs",
+ "unicode-width",
+]
+
+[[package]]
 name = "aish-memory"
 version = "0.3.7"
 dependencies = [
@@ -243,6 +251,7 @@ dependencies = [
  "aish-hosts",
  "aish-i18n",
  "aish-llm",
+ "aish-md-table",
  "aish-memory",
  "aish-prompts",
  "aish-pty",
@@ -263,6 +272,7 @@ dependencies = [
  "nix 0.29.0",
  "open",
  "parking_lot",
+ "pulldown-cmark",
  "ratatui",
  "regex",
  "reqwest",
@@ -329,6 +339,7 @@ version = "0.3.7"
 dependencies = [
  "crossterm 0.28.1",
  "ratatui",
+ "tempfile",
  "thiserror 2.0.18",
  "unicode-width",
 ]

@@ -188,6 +188,37 @@ pub(crate) fn format_http_error(status: reqwest::StatusCode, body: &str) -> Stri
     }
 }
 
+// ---------------------------------------------------------------------------
+// HTTP retry helpers — shared across all dialect adapters.
+// ---------------------------------------------------------------------------
+
+/// Maximum number of retry attempts for transient HTTP failures.
+/// Total attempts = MAX_HTTP_RETRIES + 1 (initial attempt + retries).
+pub(crate) const MAX_HTTP_RETRIES: u32 = 3;
+
+/// HTTP status codes that indicate a transient failure worth retrying:
+/// rate limiting (429) and common server-side errors (500/502/503/504).
+/// Excludes 501 (Not Implemented) and 5xx codes that signal bugs.
+pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
+/// Network-layer errors (connection, timeout, connection reset) that are
+/// typically transient and safe to retry.
+pub(crate) fn is_retryable_network_err(e: &reqwest::Error) -> bool {
+    e.is_connect() || e.is_timeout()
+}
+
+/// Exponential backoff delay for a retry attempt (0-indexed).
+/// Returns 0 for the first attempt (no delay before initial request).
+/// Sequence: attempt 0 = 0ms, 1 = 500ms, 2 = 1000ms, 3 = 2000ms.
+pub(crate) fn retry_backoff_delay(attempt: u32) -> std::time::Duration {
+    match attempt {
+        0 => std::time::Duration::ZERO,
+        n => std::time::Duration::from_millis(500u64 << (n - 1).min(4)),
+    }
+}
+
 pub(crate) fn effective_max_tokens(max_tokens: Option<u32>) -> u32 {
     match max_tokens {
         None | Some(0) => crate::client::DEFAULT_MAX_TOKENS,

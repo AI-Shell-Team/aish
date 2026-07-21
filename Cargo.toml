@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/aish-core",
+    "crates/aish-md-table",
     "crates/aish-config",
     "crates/aish-hosts",
     "crates/aish-i18n",
@@ -91,6 +92,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Markdown
+pulldown-cmark = "0.10"
 richrs = { version = "0.2", features = ["syntax", "markdown"] }
 
 # System info
@@ -107,6 +109,7 @@ tempfile = "3"
 
 # Internal crates
 aish-core = { path = "crates/aish-core" }
+aish-md-table = { path = "crates/aish-md-table" }
 aish-config = { path = "crates/aish-config" }
 aish-hosts = { path = "crates/aish-hosts" }
 aish-i18n = { path = "crates/aish-i18n" }

@@ -1,5 +1,6 @@
 mod choice;
 mod expand;
+mod file_mention;
 mod history;
 mod runtime;
 mod select;
@@ -8,6 +9,7 @@ mod slash_input;
 
 pub use choice::{ChoiceOutcome, ChoicePanel};
 pub use expand::ExpandPanel;
+pub use file_mention::{FileMentionOutcome, FileMentionSession};
 pub use history::{HistoryOutcome, HistoryPanel, HistoryRecord};
 pub use runtime::{PanelComponent, PanelError, PanelEvent, PanelOutcome, PanelRuntime};
 pub use select::{SearchSelectItem, SearchSelectOutcome, SearchSelectPanel};
