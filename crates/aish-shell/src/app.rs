@@ -152,6 +152,33 @@ fn setting_desc(def: &crate::settings_panel::SettingDef) -> String {
     t(&format!("shell.setting.k.{}.desc", def.key.name()))
 }
 
+/// Mirror the security-relevant fields of `config.yaml` onto `policy`.
+///
+/// `config.yaml` overrides `security_policy.yaml` for the globals the
+/// `/setting` panel exposes (`enable_sandbox`, `default_risk_level`,
+/// `sandbox_off_action`, `sandbox_timeout_seconds`, and the InputGuard
+/// master switch). Centralized here so the startup path and the live
+/// `/setting` update path cannot drift.
+fn apply_config_security_overrides(
+    policy: &mut aish_security::SecurityPolicy,
+    config: &ConfigModel,
+) {
+    use aish_security::decision::{RiskLevel, SandboxOffAction};
+    policy.input_guard.enabled = config.input_guard_enabled;
+    policy.enable_sandbox = config.enable_sandbox;
+    policy.default_risk_level = match config.default_risk_level.to_lowercase().as_str() {
+        "medium" => RiskLevel::Medium,
+        "high" => RiskLevel::High,
+        _ => RiskLevel::Low,
+    };
+    policy.sandbox_off_action = match config.sandbox_off_action.to_lowercase().as_str() {
+        "confirm" => SandboxOffAction::Confirm,
+        "block" => SandboxOffAction::Block,
+        _ => SandboxOffAction::Allow,
+    };
+    policy.sandbox_timeout_seconds = config.sandbox_timeout_seconds;
+}
+
 /// Human-readable current value for the setting-list row.
 fn setting_display_current(cfg: &ConfigModel, def: &crate::settings_panel::SettingDef) -> String {
     use crate::settings_panel::{current_raw, SettingKind};
@@ -780,19 +807,7 @@ impl AishShell {
         // config.yaml mirrors several security_policy.yaml fields and takes
         // precedence, so users can toggle them from the familiar config file
         // (and via /setting) without editing security_policy.yaml.
-        policy.input_guard.enabled = config.input_guard_enabled;
-        policy.enable_sandbox = config.enable_sandbox;
-        policy.default_risk_level = match config.default_risk_level.to_lowercase().as_str() {
-            "medium" => aish_security::decision::RiskLevel::Medium,
-            "high" => aish_security::decision::RiskLevel::High,
-            _ => aish_security::decision::RiskLevel::Low,
-        };
-        policy.sandbox_off_action = match config.sandbox_off_action.to_lowercase().as_str() {
-            "confirm" => aish_security::decision::SandboxOffAction::Confirm,
-            "block" => aish_security::decision::SandboxOffAction::Block,
-            _ => aish_security::decision::SandboxOffAction::Allow,
-        };
-        policy.sandbox_timeout_seconds = config.sandbox_timeout_seconds;
+        apply_config_security_overrides(&mut policy, &config);
         let security_manager = SecurityManager::new(policy);
         let input_guard =
             aish_security::input_guard::InputGuard::from_policy(security_manager.policy());
@@ -4557,6 +4572,22 @@ impl AishShell {
                 self.input_guard
                     .set_enabled(self.config.input_guard_enabled);
             }
+            LiveEffect::SecurityPolicy => {
+                // Re-apply the security globals mirrored from config.yaml to
+                // the running SecurityManager so changes take effect now,
+                // not on next launch. `set_policy` rebuilds the sandbox
+                // runner when `enable_sandbox` flips.
+                let mut policy = self.security_manager.policy().clone();
+                apply_config_security_overrides(&mut policy, &self.config);
+                self.security_manager.set_policy(policy);
+
+                // Also persist to security_policy.yaml (the file users
+                // consider authoritative) so the change is visible there and
+                // survives a restart. Writes to the resolved policy path;
+                // a permission failure is logged but does not revert the
+                // live update.
+                self.sync_security_policy_file();
+            }
             LiveEffect::None => {}
         }
 
@@ -4593,6 +4624,47 @@ impl AishShell {
             *restart_changes += 1;
         }
         Ok(())
+    }
+
+    /// Persist the current security globals to the resolved
+    /// `security_policy.yaml` so `/setting` changes are visible in the file
+    /// users consider authoritative and survive a restart. A write failure
+    /// (e.g. root-owned system policy) is logged but does not revert the
+    /// live update or block the `/setting` flow.
+    fn sync_security_policy_file(&self) {
+        let Some(path) = aish_security::resolve_security_policy_path(None) else {
+            return;
+        };
+        let risk = match self.config.default_risk_level.to_lowercase().as_str() {
+            "medium" => "MEDIUM",
+            "high" => "HIGH",
+            _ => "LOW",
+        };
+        let action = match self.config.sandbox_off_action.to_lowercase().as_str() {
+            "confirm" => "CONFIRM",
+            "block" => "BLOCK",
+            _ => "ALLOW",
+        };
+        let timeout_str = self.config.sandbox_timeout_seconds.to_string();
+        let updates: &[(&str, &str)] = &[
+            (
+                "enable_sandbox",
+                if self.config.enable_sandbox {
+                    "true"
+                } else {
+                    "false"
+                },
+            ),
+            ("default_risk_level", risk),
+            ("sandbox_off_action", action),
+            ("sandbox_timeout_seconds", &timeout_str),
+        ];
+        if let Err(e) = aish_security::save_policy_globals(&path, updates) {
+            eprintln!(
+                "{}",
+                theme::warning(&format!("could not write {}: {e}", path.display()))
+            );
+        }
     }
 
     /// Build the panel data from the live config. Pure function so it stays

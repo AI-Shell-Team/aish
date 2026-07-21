@@ -13,8 +13,8 @@ pub use decision::{RiskLevel, SandboxOffAction, SecurityAnalysis, SecurityDecisi
 pub use fallback::{FallbackRuleAssessment, FallbackRuleEngine};
 pub use manager::{SecurityManager, SecurityRequest};
 pub use policy::{
-    load_policy, resolve_security_policy_path, InvalidFallbackRule, PolicyRule, SecurityPolicy,
-    ValidationIssue,
+    load_policy, resolve_security_policy_path, save_policy_globals, InvalidFallbackRule,
+    PolicyRule, SecurityPolicy, ValidationIssue,
 };
 pub use sandbox::{run_sandbox_daemon, run_sandbox_worker, SandboxClient};
 pub use types::{FsChange, MatchedRuleSummary};

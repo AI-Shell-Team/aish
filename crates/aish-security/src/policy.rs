@@ -532,6 +532,110 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
     }
 }
 
+/// Update one or more `global:` fields in a `security_policy.yaml` file
+/// **in place**, preserving all comments, blank lines, and other sections.
+///
+/// Each entry in `updates` is `(field_name, new_value)`. If a field already
+/// exists under `global:`, its value is replaced (inline comments kept). If
+/// it is absent, it is inserted into the `global:` block. If `global:` itself
+/// is missing, a minimal section is appended.
+///
+/// Used by the `/setting` panel so security toggles are visible in the file
+/// users consider authoritative — not just in `config.yaml`.
+pub fn save_policy_globals(path: &Path, updates: &[(&str, &str)]) -> Result<(), String> {
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let mut updated = text;
+    for (field, value) in updates {
+        updated = update_global_field(&updated, field, value);
+    }
+    fs::write(path, updated).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Replace `field` under the top-level `global:` mapping with `value`, or
+/// insert it if absent. Preserves comments, indentation, and all other content.
+fn update_global_field(text: &str, field: &str, value: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut in_global = false;
+    let mut global_line_idx: Option<usize> = None;
+    let mut last_indent: String = String::from("  ");
+    let mut last_global_child_idx: Option<usize> = None;
+    let mut done = false;
+
+    for (i, raw) in lines.iter().enumerate() {
+        // A top-level key: no leading whitespace, not blank, not a comment,
+        // not a list-item dash.
+        let is_top_level = !raw.is_empty()
+            && !raw.starts_with(' ')
+            && !raw.starts_with('\t')
+            && !raw.starts_with('#')
+            && !raw.starts_with('-');
+        if is_top_level {
+            in_global = raw.trim_start().starts_with("global:");
+            if in_global {
+                global_line_idx = Some(i);
+            }
+        }
+
+        if in_global && !done {
+            let stripped = raw.trim_start();
+            let indent_len = raw.len() - stripped.len();
+            if indent_len > 0 && !stripped.starts_with('#') && !stripped.is_empty() {
+                // Track the indentation used inside global: so an insertion
+                // (if needed) matches the surrounding style.
+                last_indent = raw[..indent_len].to_string();
+                last_global_child_idx = Some(i);
+            }
+            // Match `  field:` exactly (the ':' terminator prevents
+            // `enable_sandbox_extra:` from matching `enable_sandbox`).
+            let needle = format!("{}:", field);
+            if stripped.starts_with(&needle) {
+                let after = &stripped[needle.len()..];
+                // Preserve a trailing inline comment, e.g. `field: VALUE  # note`.
+                let comment = after.find('#').map(|pos| &after[pos..]);
+                out.push(format!(
+                    "{}{}: {}{}",
+                    &raw[..indent_len],
+                    field,
+                    value,
+                    comment.map(|c| format!("  {}", c)).unwrap_or_default()
+                ));
+                done = true;
+                continue;
+            }
+        }
+
+        out.push(raw.to_string());
+    }
+
+    // Field not found under global: — insert it.
+    if !done {
+        if let Some(gidx) = global_line_idx {
+            // Insert after the last existing child of global: (or right
+            // after `global:` if the section is empty).
+            let insert_at = last_global_child_idx.map(|c| c + 1).unwrap_or(gidx + 1);
+            // Find where `out` currently has the corresponding line — since
+            // we pushed every line, indices match `lines`.
+            out.insert(insert_at, format!("{}{}: {}", last_indent, field, value));
+        } else {
+            // No global: section at all — append a minimal one.
+            if !out.is_empty() && out.last().map(|l| !l.is_empty()).unwrap_or(false) {
+                out.push(String::new());
+            }
+            out.push("global:".to_string());
+            out.push(format!("  {}: {}", field, value));
+        }
+    }
+
+    let mut result = out.join("\n");
+    if text.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 pub fn default_rules() -> Vec<PolicyRule> {
     vec![PolicyRule {
         pattern: "/**/security_policy.yaml".to_string(),
@@ -756,5 +860,163 @@ rules: []
         assert!(policy.input_guard.enabled);
         assert!(policy.input_guard.custom_block_rules.is_empty());
         assert!(policy.input_guard.custom_confirm_rules.is_empty());
+    }
+
+    // ---- save_policy_globals / update_global_field ----
+
+    #[test]
+    fn update_global_field_replaces_existing_value() {
+        let yaml = "global:\n  enable_sandbox: true\n  default_risk_level: LOW\n";
+        let out = super::update_global_field(yaml, "enable_sandbox", "false");
+        assert!(out.contains("enable_sandbox: false"));
+        assert!(out.contains("default_risk_level: LOW"));
+        assert!(!out.contains("enable_sandbox: true"));
+    }
+
+    #[test]
+    fn update_global_field_preserves_inline_comment() {
+        let yaml = "global:\n  enable_sandbox: false  # toggle me\n";
+        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        assert!(out.contains("enable_sandbox: true  # toggle me"));
+    }
+
+    #[test]
+    fn update_global_field_preserves_block_comments_and_other_sections() {
+        let yaml = "# header comment\n\
+                    global:\n\
+                    # enable sandbox?\n\
+                    enable_sandbox: false\n\
+                    default_risk_level: LOW\n\
+                    \n\
+                    audit:\n\
+                    enabled: true\n";
+        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        assert!(out.contains("# header comment"));
+        assert!(out.contains("# enable sandbox?"));
+        assert!(out.contains("enable_sandbox: true"));
+        assert!(out.contains("default_risk_level: LOW"));
+        assert!(out.contains("audit:"));
+        assert!(out.contains("enabled: true"));
+    }
+
+    #[test]
+    fn update_global_field_does_not_match_prefix() {
+        // `enable_sandbox` must NOT match `enable_sandbox_extra`.
+        let yaml = "global:\n  enable_sandbox: true\n  enable_sandbox_extra: keep\n";
+        let out = super::update_global_field(yaml, "enable_sandbox", "false");
+        assert!(out.contains("enable_sandbox: false"));
+        assert!(out.contains("enable_sandbox_extra: keep"));
+    }
+
+    #[test]
+    fn update_global_field_inserts_missing_field() {
+        let yaml = "global:\n  default_risk_level: LOW\n";
+        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        assert!(out.contains("enable_sandbox: true"));
+        assert!(out.contains("default_risk_level: LOW"));
+        // Inserted with the same indent as the existing child.
+        assert!(out.contains("  enable_sandbox: true"));
+    }
+
+    #[test]
+    fn update_global_field_creates_global_section_if_absent() {
+        let yaml = "audit:\n  enabled: true\n";
+        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        assert!(out.contains("global:"));
+        assert!(out.contains("enable_sandbox: true"));
+        assert!(out.contains("audit:"));
+    }
+
+    #[test]
+    fn save_policy_globals_round_trips_through_load_policy() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "# comment\nglobal:\n  enable_sandbox: true\n  default_risk_level: LOW\nrules: []\n",
+        )
+        .unwrap();
+        super::save_policy_globals(
+            &policy_path,
+            &[
+                ("enable_sandbox", "false"),
+                ("default_risk_level", "MEDIUM"),
+            ],
+        )
+        .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+        assert!(!policy.enable_sandbox);
+        assert_eq!(policy.default_risk_level, RiskLevel::Medium);
+
+        // Comment preserved.
+        let on_disk = fs::read_to_string(&policy_path).unwrap();
+        assert!(on_disk.contains("# comment"));
+    }
+
+    /// Verifies the real-world `/etc/aish/security_policy.yaml` layout
+    /// (block comments above each field, inline comments on some lines,
+    /// multi-language content) survives a `/setting` sync intact.
+    #[test]
+    fn save_policy_globals_preserves_production_template_comments() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        // Mirrors the installed template with CJK comments and inline notes.
+        let template = concat!(
+            "# AI-Shell Security Policy\n",
+            "# Installed by `make install`.\n",
+            "\n",
+            "# 全局配置\n",
+            "global:\n",
+            "  # 未命中任何规则时的默认风险\n",
+            "  default_risk_level: LOW\n",
+            "\n",
+            "  # 是否开启沙箱预跑\n",
+            "  enable_sandbox: true\n",
+            "\n",
+            "  # 沙箱关闭时的处理动作\n",
+            "  sandbox_off_action: ALLOW      # ALLOW | CONFIRM | BLOCK\n",
+            "  sandbox_timeout_seconds: 10\n",
+            "\n",
+            "audit:\n",
+            "  enabled: false\n",
+            "\n",
+            "rules: []\n",
+        );
+        fs::write(&policy_path, template).unwrap();
+
+        super::save_policy_globals(
+            &policy_path,
+            &[
+                ("enable_sandbox", "false"),
+                ("default_risk_level", "MEDIUM"),
+                ("sandbox_off_action", "BLOCK"),
+                ("sandbox_timeout_seconds", "15"),
+            ],
+        )
+        .unwrap();
+
+        let result = fs::read_to_string(&policy_path).unwrap();
+
+        // Block comments preserved.
+        assert!(result.contains("# AI-Shell Security Policy"));
+        assert!(result.contains("# 全局配置"));
+        assert!(result.contains("# 未命中任何规则时的默认风险"));
+        assert!(result.contains("# 是否开启沙箱预跑"));
+        assert!(result.contains("# 沙箱关闭时的处理动作"));
+
+        // Values updated.
+        assert!(result.contains("enable_sandbox: false"));
+        assert!(!result.contains("enable_sandbox: true"));
+        assert!(result.contains("default_risk_level: MEDIUM"));
+        assert!(result.contains("sandbox_off_action: BLOCK"));
+        assert!(result.contains("sandbox_timeout_seconds: 15"));
+
+        // Inline comment on sandbox_off_action line preserved.
+        assert!(result.contains("# ALLOW | CONFIRM | BLOCK"));
+
+        // Other sections untouched.
+        assert!(result.contains("audit:"));
+        assert!(result.contains("rules: []"));
     }
 }
