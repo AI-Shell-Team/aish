@@ -549,7 +549,16 @@ pub fn save_policy_globals(path: &Path, updates: &[(&str, &str)]) -> Result<(), 
     for (field, value) in updates {
         updated = update_global_field(&updated, field, value);
     }
-    fs::write(path, updated).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    // Write to a temp file in the same directory, then rename for atomicity.
+    // A plain fs::write can leave the file truncated on crash/ENOSPC, which
+    // would make load_policy silently fall back to the fail-open default.
+    let tmp_path = path.with_extension("yaml.tmp");
+    fs::write(&tmp_path, updated)
+        .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
+    if let Err(e) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("failed to replace {}: {e}", path.display()));
+    }
     Ok(())
 }
 
@@ -882,18 +891,24 @@ rules: []
 
     #[test]
     fn update_global_field_preserves_block_comments_and_other_sections() {
-        let yaml = "# header comment\n\
-                    global:\n\
-                    # enable sandbox?\n\
-                    enable_sandbox: false\n\
-                    default_risk_level: LOW\n\
-                    \n\
-                    audit:\n\
-                    enabled: true\n";
+        let yaml = concat!(
+            "# header comment\n",
+            "global:\n",
+            "  # enable sandbox?\n",
+            "  enable_sandbox: false\n",
+            "  default_risk_level: LOW\n",
+            "\n",
+            "audit:\n",
+            "  enabled: true\n",
+        );
         let out = super::update_global_field(yaml, "enable_sandbox", "true");
         assert!(out.contains("# header comment"));
         assert!(out.contains("# enable sandbox?"));
         assert!(out.contains("enable_sandbox: true"));
+        assert!(
+            !out.contains("enable_sandbox: false"),
+            "old value must be replaced, not duplicated"
+        );
         assert!(out.contains("default_risk_level: LOW"));
         assert!(out.contains("audit:"));
         assert!(out.contains("enabled: true"));
