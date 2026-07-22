@@ -12,6 +12,7 @@ tracing.workspace = true
 regex.workspace = true
 notify.workspace = true
 dirs.workspace = true
+include_dir.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

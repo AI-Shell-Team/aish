@@ -289,8 +289,6 @@ Skills はAIのドメイン知識とワークフローを拡張し、ホット�
 - `~/.config/aish/skills/`（または `$AISH_CONFIG_DIR/skills`）
 - `~/.claude/skills/`
 
-パッケージ版は初回起動時にシステムレベルのSkillsをユーザーディレクトリへコピーしようとします（例：`/usr/share/aish/skills`）。
-
 ---
 
 ## データとプライバシー

@@ -13,8 +13,10 @@
     clippy::too_many_arguments
 )]
 
+pub mod builtin;
 pub mod hotreload;
 pub mod manager;
+pub mod migrate_seeded;
 pub mod models;
 pub mod validator;
 

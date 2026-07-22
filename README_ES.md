@@ -289,8 +289,6 @@ Directorios de escaneo predeterminados y prioridad:
 - `~/.config/aish/skills/` (o `$AISH_CONFIG_DIR/skills`)
 - `~/.claude/skills/`
 
-Las versiones empaquetadas intentan copiar las skills a nivel sistema en el directorio del usuario en el primer inicio (p. ej., `/usr/share/aish/skills`).
-
 ---
 
 ## Datos y privacidad

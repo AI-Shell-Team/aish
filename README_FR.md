@@ -289,8 +289,6 @@ Répertoires analysés par défaut et priorité :
 - `~/.config/aish/skills/` (ou `$AISH_CONFIG_DIR/skills`)
 - `~/.claude/skills/`
 
-Les versions packagées tentent de copier les skills système dans le répertoire utilisateur au premier lancement (p. ex. `/usr/share/aish/skills`).
-
 ---
 
 ## Données et confidentialité

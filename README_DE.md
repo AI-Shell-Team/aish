@@ -289,8 +289,6 @@ Standard-Scan-Verzeichnisse und Priorität:
 - `~/.config/aish/skills/` (oder `$AISH_CONFIG_DIR/skills`)
 - `~/.claude/skills/`
 
-Paketierte Versionen versuchen beim ersten Start, systemweite Skills in das Benutzerverzeichnis zu kopieren (z. B. `/usr/share/aish/skills`).
-
 ---
 
 ## Daten & Datenschutz
