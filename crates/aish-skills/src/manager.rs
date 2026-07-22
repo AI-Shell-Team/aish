@@ -14,6 +14,9 @@ pub struct SkillManager {
     skills: HashMap<String, Skill>,
     skill_lists: Vec<SkillList>,
     skills_version: u64,
+    /// Set when this process ran the one-shot legacy seed migration and moved
+    /// at least one skill. Consumed by the interactive shell for a tip.
+    seed_migration_notice: Option<crate::migrate_seeded::SeedMigrationNotice>,
 }
 
 impl Default for SkillManager {
@@ -28,10 +31,19 @@ impl SkillManager {
             skills: HashMap::new(),
             skill_lists: Vec::new(),
             skills_version: 0,
+            seed_migration_notice: None,
         }
     }
 
-    /// Scan and return skill root directories in priority order: USER > CLAUDE.
+    /// Take the one-shot seed-migration notice, if any, for display to the user.
+    pub fn take_seed_migration_notice(
+        &mut self,
+    ) -> Option<crate::migrate_seeded::SeedMigrationNotice> {
+        self.seed_migration_notice.take()
+    }
+
+    /// Scan and return skill root directories in priority order:
+    /// USER > CLAUDE > Builtin (embedded packaged skills, materialized to cache).
     pub fn scan_skill_roots(&self) -> Vec<(SkillSource, PathBuf)> {
         let mut roots = Vec::new();
 
@@ -50,6 +62,12 @@ impl SkillManager {
             roots.push((SkillSource::Claude, home.join(".claude").join("skills")));
         }
 
+        // 3. Builtin: versioned cache of compile-time embedded skills/
+        let builtin_root = crate::builtin::cache_root();
+        if builtin_root.is_dir() {
+            roots.push((SkillSource::Builtin, builtin_root));
+        }
+
         roots.into_iter().filter(|(_, p)| p.is_dir()).collect()
     }
 
@@ -58,6 +76,17 @@ impl SkillManager {
     /// Skills from higher-priority sources (listed first) shadow skills with
     /// the same name from lower-priority sources.
     pub fn load_all_skills(&mut self) -> aish_core::Result<()> {
+        // Deprecated transitional path — remove with `migrate_seeded` (see
+        // CHANGELOG [Unreleased] Deprecated / Notes for releasers).
+        #[allow(deprecated)]
+        {
+            self.seed_migration_notice = crate::migrate_seeded::migrate_legacy_seeded_skills();
+        }
+
+        if let Err(err) = crate::builtin::ensure_materialized() {
+            tracing::warn!("Failed to materialize embedded builtin skills: {}", err);
+        }
+
         let mut loaded_skills: HashMap<String, Skill> = HashMap::new();
         let mut skill_lists: Vec<SkillList> = Vec::new();
 
@@ -395,6 +424,35 @@ mod tests {
                 "glob".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn load_all_skills_includes_embedded_builtins() {
+        let _guard = crate::builtin::test_env_lock();
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = dir.path().join("config");
+        let builtin_dir = dir.path().join("builtin");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::env::set_var("AISH_BUILTIN_SKILLS_CACHE", &builtin_dir);
+        std::env::set_var("AISH_CONFIG_DIR", &config_dir);
+
+        let mut manager = SkillManager::new();
+        manager
+            .load_all_skills()
+            .expect("load skills with embedded builtins");
+
+        let skill = manager
+            .get_skill("diagnose_system_lag")
+            .expect("embedded diagnose_system_lag must load");
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(
+            Path::new(&skill.base_dir).join("SKILL.md").is_file(),
+            "builtin skill base_dir must point at materialized files"
+        );
+
+        std::env::remove_var("AISH_BUILTIN_SKILLS_CACHE");
+        std::env::remove_var("AISH_CONFIG_DIR");
     }
 
     #[test]

@@ -7,6 +7,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed packaged skills so they are compile-time embedded in the `aish` binary and loaded for every user (including bare-root installs), instead of seeding `~/.config/aish/skills` at install time (which skipped root and could leave root-owned config dirs).
+- Hardened the packaging smoke test to assert the installer/bundle no longer ship or invoke skill seeding.
+- Show a one-line terminal tip on the interactive session that performs the temporary legacy seed migration (only when skills were actually moved).
+
+### Removed
+
+- Removed the `seed-skills.sh` installer helper; packaged skills no longer need a post-install copy into user config.
+
+### Deprecated
+
+- The one-shot migration of pre-embed install-seeded skills (`migrate_seeded`, backup dir `~/.config/aish/migrated-seeded-skills/`, marker `.skills-seed-migrated-v1`) is temporary and will be removed in a future release once leftover seeds are uncommon.
+
+### Notes for releasers
+
+- Review whether to remove `crates/aish-skills/src/migrate_seeded.rs` (one-shot legacy install-seed migration). If keeping it another cycle, mention the deprecation again in that release's notes; if removing, list it under Removed and delete the module + call site in `SkillManager::load_all_skills`.
+
 ## [0.3.8] - 2026-07-22
 
 ### Added

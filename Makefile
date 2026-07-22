@@ -75,13 +75,8 @@ install:
 	sed 's|@AISH_BINDIR@|$(BINDIR)|g' packaging/systemd/aish-sandbox.service.in > "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	chmod 0644 "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	install -m 0644 packaging/systemd/aish-sandbox.socket "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.socket"
-	@if [ -n "$(DESTDIR)" ] && [ -d skills ]; then \
-		install -d "$(DESTDIR)$(DATADIR)"; \
-		cp -a skills "$(DESTDIR)$(DATADIR)/"; \
-	fi
-	@if [ -z "$(DESTDIR)" ] && [ -d skills ]; then \
-		packaging/scripts/seed-skills.sh "$(CURDIR)/skills"; \
-	fi
+	@# Packaged skills are compile-time embedded into the aish binary; nothing to
+	@# install under $(DATADIR)/skills or seed into ~/.config/aish/skills.
 
 clean:
 	cargo clean

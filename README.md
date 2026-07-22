@@ -289,8 +289,6 @@ Default scan directories and priority:
 - `~/.config/aish/skills/` (or `$AISH_CONFIG_DIR/skills`)
 - `~/.claude/skills/`
 
-Packaged versions will attempt to copy system-level skills to user directory on first launch (e.g., `/usr/share/aish/skills`).
-
 ---
 
 ## Data & Privacy

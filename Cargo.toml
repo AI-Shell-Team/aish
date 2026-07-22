@@ -101,6 +101,9 @@ sysinfo = "0.33"
 # YAML config
 dirs = "5"
 
+# Compile-time directory embedding (bundled skills)
+include_dir = "0.7"
+
 # Observability
 langfuse-ergonomic = "0.6"
 

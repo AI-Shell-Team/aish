@@ -929,6 +929,7 @@ impl AishShell {
             let _ = skill_manager.load_all_skills();
         }
         let skill_count = skill_manager.list_skills().len();
+        let seed_migration_notice = skill_manager.take_seed_migration_notice();
 
         // Start skill hot-reloader if skill directories exist
         let skill_hot_reloader = {
@@ -1849,6 +1850,12 @@ impl AishShell {
             prompt::render_welcome(&version, &config.model, skill_count, changelog.clone())
         );
         let _ = io::stdout().flush();
+
+        // One-shot tip when this launch moved legacy install-seeded skills.
+        if let Some(notice) = seed_migration_notice {
+            eprintln!("{}", notice.user_message());
+            let _ = io::stderr().flush();
+        }
 
         // Store full changelog in expand_history so Ctrl+O can show all entries
         // when the welcome panel truncates them with "and N more".

@@ -15,8 +15,10 @@ usage() {
 	cat <<'EOF'
 Usage: sudo ./install.sh [--force-config] [--prefix=PATH]
 
-Installs AI Shell binaries and the security policy, and seeds packaged
-skills into the invoking user's ~/.config/aish/skills/.
+Installs AI Shell binaries and the security policy.
+
+Packaged skills are embedded in the aish binary (loaded at runtime); this
+installer does not write skills into any user's ~/.config/aish/skills.
 
 Options:
 	--prefix=PATH       Install into PATH instead of system directories (no sudo needed)
@@ -193,11 +195,7 @@ if [[ -n "$INSTALL_PREFIX" ]]; then
 	exit 0
 fi
 
-# Seed built-in skills directly into the invoking user's ~/.config/aish/skills/.
-# Source is the bundle payload only — skills are not installed under /usr/local.
-# Skipped if seed-skills.sh is missing (older bundle) or run as bare root.
-if [[ -x "$SCRIPT_DIR/seed-skills.sh" ]]; then
-	"$SCRIPT_DIR/seed-skills.sh" "$ROOTFS_DIR/usr/share/aish/skills"
-fi
+# Packaged skills ship inside the aish binary; do not seed user home dirs here
+# (avoids bare-root skips and root-owned ~/.config/aish from sudo installs).
 
 echo "AI Shell installed successfully."

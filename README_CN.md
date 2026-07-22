@@ -284,8 +284,6 @@ Skills 用于扩展 AI 的专用知识与工作流，支持热加载与覆盖优
 - `~/.config/aish/skills/`（或 `$AISH_CONFIG_DIR/skills`）
 - `~/.claude/skills/`
 
-打包版本会在首次启动时尝试把系统级技能复制到用户目录（如 `/usr/share/aish/skills`）。
-
 ---
 
 ## 数据与隐私
