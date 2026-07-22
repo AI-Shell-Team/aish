@@ -15,6 +15,7 @@
 
 pub mod agents;
 pub mod api;
+pub mod approval_memory;
 pub mod client;
 pub mod langfuse;
 pub mod llm_stream;
@@ -43,6 +44,7 @@ pub use api::{
     resolve_anthropic_messages_url, resolve_api_dialect, stream_simple,
     test_connection as test_api_connection, ApiDialect, StreamContext,
 };
+pub use approval_memory::{ApprovalChoice, ApprovalMemory};
 pub use client::{LlmClient, LlmResponse, DEFAULT_MAX_TOKENS};
 pub use langfuse::{LangfuseClient, LangfuseConfig};
 pub use model_id::{normalize_model_for_provider, resolve_model_for_api, trim_model_name};

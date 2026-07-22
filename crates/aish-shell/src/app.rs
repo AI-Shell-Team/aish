@@ -509,6 +509,9 @@ pub struct AishShell {
     /// Inline AI completer (None when disabled). Stored so `/model` can
     /// update its model at runtime without restarting the shell.
     inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
+    /// Session-scoped approval memory shared with the LLM session. Kept on the
+    /// shell so slash commands (e.g. `/forget-approvals`) can reset it.
+    approval_memory: Arc<Mutex<aish_llm::ApprovalMemory>>,
 }
 
 impl AishShell {
@@ -780,10 +783,7 @@ impl AishShell {
         // Honor config.output_language for AI responses (overrides LANG).
         crate::ai_handler::set_output_language_override(config.output_language.clone());
 
-        let mut state = ShellState::new();
-        for cmd in &config.approved_ai_commands {
-            state.approved_ai_commands.insert(cmd.clone());
-        }
+        let state = ShellState::new();
 
         // Initialize LLM session
         let mut llm_session = llm_session_from_config(&config);
@@ -1679,7 +1679,7 @@ impl AishShell {
 
         // Set up confirmation callback for tool approval flow
         let confirmation_callback: Arc<
-            dyn Fn(&aish_llm::PreflightSecurityContext) -> bool + Send + Sync,
+            dyn Fn(&aish_llm::PreflightSecurityContext) -> aish_llm::ApprovalChoice + Send + Sync,
         > = Arc::new(|ctx: &aish_llm::PreflightSecurityContext| {
             let width = std::env::var("COLUMNS")
                 .ok()
@@ -1697,6 +1697,19 @@ impl AishShell {
                 &format!("  {}   {}", tool_label, ctx.tool_name),
                 inner_width,
             );
+            let command = ctx.target.as_deref().unwrap_or("");
+            if !command.is_empty() {
+                let cmd_label = theme::bold(&theme::accent(&t("shell.confirm_dialog_command")));
+                let safe_command = sanitize_for_display(command);
+                let cmd_lines = wrap_text(&safe_command, width.saturating_sub(14));
+                print_panel_line(
+                    &format!("  {} {}", cmd_label, cmd_lines.lines().next().unwrap_or("")),
+                    inner_width,
+                );
+                for line in cmd_lines.lines().skip(1) {
+                    print_panel_line(&format!("         {}", line), inner_width);
+                }
+            }
             let reason_lines = wrap_text(&ctx.message, width.saturating_sub(14));
             let reason_label = theme::bold(&theme::accent("Reason:"));
             print_panel_line(
@@ -1712,17 +1725,49 @@ impl AishShell {
             }
             print_panel_line("", inner_width);
             print_panel_line(
-                &format!("  {}", theme::accent(&t("shell.confirm_dialog_question"))),
+                &format!("  {}", theme::accent(&t("shell.confirm_dialog_options"))),
                 inner_width,
             );
-            println!("{}", theme::warning(&format!("╰{}╯", border)));
-            print!("  ");
+            // Input line lives inside the panel so it stays visually attached
+            // to the question and the pressed key is echoed back to the user.
+            let prompt_text = t("shell.confirm_dialog_question");
+            let prompt_vis = ansi_display_width(&prompt_text);
+            print!(
+                "{}  {} ",
+                theme::warning("│"),
+                theme::bold(&theme::accent(&prompt_text))
+            );
             let _ = std::io::stdout().flush();
-
-            read_raw_confirmation()
+            let (pressed, choice) = read_approval_choice();
+            let echo_ch = match pressed {
+                b'\r' | b'\n' => '↵',
+                0 => '?',
+                c if (c as char).is_ascii_graphic() => c as char,
+                _ => '·',
+            };
+            print!("{}", theme::accent(&echo_ch.to_string()));
+            let used = 2 + prompt_vis + 1 + 1;
+            let pad = inner_width.saturating_sub(used);
+            println!("{}{}", " ".repeat(pad), theme::warning("│"));
+            println!("{}", theme::warning(&format!("╰{}╯", border)));
+            let verdict_key = match choice {
+                aish_llm::ApprovalChoice::Once => "shell.confirm_choice_once",
+                aish_llm::ApprovalChoice::RememberSession => "shell.confirm_choice_remember",
+                aish_llm::ApprovalChoice::ReplyToAi => "shell.confirm_choice_reply",
+                aish_llm::ApprovalChoice::Deny => "shell.confirm_choice_deny",
+            };
+            println!("  {} {}", theme::accent("→"), theme::bold(&t(verdict_key)));
+            choice
         });
 
         llm_session.set_confirmation_callback(confirmation_callback);
+
+        // Session-scoped approval memory: when the user approves a command with
+        // "remember", equivalent commands (same host + normalized text) skip
+        // confirmation — and the sandbox preflight — for the rest of the session.
+        let approval_memory: Arc<Mutex<aish_llm::ApprovalMemory>> =
+            Arc::new(Mutex::new(aish_llm::ApprovalMemory::new()));
+        llm_session.set_approval_memory(approval_memory.clone());
 
         if let Some(ref audit) = audit_store {
             let scanner = security_manager.secret_scanner().clone();
@@ -1880,6 +1925,7 @@ impl AishShell {
             expand_history,
             shared_recorder,
             inline_ai: None,
+            approval_memory,
         })
     }
 
@@ -3209,6 +3255,7 @@ impl AishShell {
             Some("/live_sessions") => self.handle_live_sessions_command(),
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
             Some("/audit") => self.handle_audit_command(&parts),
+            Some("/forget-approvals") => self.handle_forget_approvals(),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3218,6 +3265,23 @@ impl AishShell {
             }
         }
         true
+    }
+
+    /// Handle `/forget-approvals` — clear all session-scoped command approvals
+    /// so previously "remembered" commands prompt for confirmation again.
+    fn handle_forget_approvals(&mut self) {
+        let count = {
+            let mut memory = self.approval_memory.lock().unwrap();
+            let n = memory.len();
+            memory.clear();
+            n
+        };
+        let mut args = std::collections::HashMap::new();
+        args.insert("count".to_string(), count.to_string());
+        println!(
+            "\x1b[36m{}\x1b[0m",
+            t_with_args("shell.forget_approvals_cleared", &args)
+        );
     }
 
     fn handle_audit_command(&self, parts: &[&str]) {
@@ -5192,30 +5256,6 @@ impl AishShell {
     pub fn reset_interruption(&mut self) {
         self.interruption = InterruptionState::Normal;
         self.last_ctrl_c = None;
-    }
-
-    /// Check if a command is pre-approved and should skip confirmation.
-    pub fn is_command_approved(&self, command: &str) -> bool {
-        self.state.approved_ai_commands.contains(command)
-    }
-
-    /// Remember a command as approved for future use.
-    pub fn remember_approved_command(&mut self, command: &str) {
-        if command.is_empty() {
-            return;
-        }
-        self.state.approved_ai_commands.insert(command.to_string());
-
-        // Persist to config if not already tracked
-        if !self
-            .config
-            .approved_ai_commands
-            .contains(&command.to_string())
-        {
-            self.config.approved_ai_commands.push(command.to_string());
-            let config_path = aish_config::ConfigLoader::default_config_path();
-            let _ = aish_config::ConfigLoader::save(&self.config, &config_path);
-        }
     }
 
     /// Execute a .aish script file.
@@ -8112,6 +8152,56 @@ fn format_number(n: u64) -> String {
     result.chars().rev().collect()
 }
 
+/// Strip terminal control sequences (CSI/OSC/SS3 and other C0 control bytes)
+/// from tool-provided text before rendering it, so a command containing
+/// escape sequences cannot alter the terminal (clipboard, hyperlink, title)
+/// before the user approves it. Common whitespace (`\n`, `\r`, `\t`) and all
+/// printable characters are preserved.
+fn sanitize_for_display(s: &str) -> String {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            // OSC: ESC ] ... (BEL | ST)
+            r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)",
+            // CSI: ESC [ params letter
+            r"|\x1b\[[0-9;?]*[A-Za-z]",
+            // Other single-char ESC sequences
+            r"|\x1b[@-Z\\-_]",
+            // Stray C0 control bytes (excluding \t \n \r) and DEL
+            r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]",
+        ))
+        .unwrap()
+    });
+    RE.replace_all(s, "").to_string()
+}
+
+#[cfg(test)]
+mod sanitize_for_display_tests {
+    use super::sanitize_for_display;
+
+    #[test]
+    fn strips_csi_color_sequences() {
+        assert_eq!(sanitize_for_display("\x1b[31mrm\x1b[0m /tmp"), "rm /tmp");
+    }
+
+    #[test]
+    fn strips_osc_clipboard_sequence() {
+        // OSC 52 (clipboard) must not execute on display.
+        assert_eq!(
+            sanitize_for_display("\x1b]52;c;Zm1lbQ==\x07echo hi"),
+            "echo hi"
+        );
+    }
+
+    #[test]
+    fn preserves_common_whitespace_and_plain_text() {
+        assert_eq!(sanitize_for_display("a\tb\nc\rd"), "a\tb\nc\rd");
+        assert_eq!(
+            sanitize_for_display("systemctl restart nginx"),
+            "systemctl restart nginx"
+        );
+    }
+}
+
 /// Read a single-byte confirmation from stdin in raw mode.
 ///
 /// Acquires the interactive input guard (pauses esc_watcher), reads one
@@ -8162,6 +8252,63 @@ fn read_raw_confirmation() -> bool {
     approved
 }
 
+/// Read a single-byte approval choice from stdin in raw mode.
+///
+/// Returns the raw byte the user pressed plus the mapped [`ApprovalChoice`].
+/// The caller owns echo and newline rendering so the choice can be shown
+/// inside the confirmation panel. Reads exactly one byte, then drains any
+/// trailing bytes (e.g. \r after 'y') with a short timeout, like
+/// [`read_raw_confirmation`].
+fn read_approval_choice() -> (u8, aish_llm::ApprovalChoice) {
+    let _ig = aish_tools::bash::acquire_interactive_input_guard();
+
+    let mut byte = [0u8; 1];
+    let (pressed, choice) = match io::stdin().read(&mut byte) {
+        Ok(1) => {
+            let ch = byte[0];
+            let choice = match ch {
+                b'y' | b'Y' => aish_llm::ApprovalChoice::Once,
+                b'a' | b'A' => aish_llm::ApprovalChoice::RememberSession,
+                b'r' | b'R' => aish_llm::ApprovalChoice::ReplyToAi,
+                _ => aish_llm::ApprovalChoice::Deny,
+            };
+            (ch, choice)
+        }
+        _ => (0, aish_llm::ApprovalChoice::Deny),
+    };
+    // Drain trailing bytes with timeout (e.g. \r after 'y').
+    let mut drain_buf = [0u8; 64];
+    let stdin_fd = libc::STDIN_FILENO;
+    loop {
+        let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::FD_ZERO(&mut fds);
+            libc::FD_SET(stdin_fd, &mut fds);
+        }
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 10_000,
+        };
+        let sel = unsafe {
+            libc::select(
+                stdin_fd + 1,
+                &mut fds,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut tv,
+            )
+        };
+        if sel <= 0 {
+            break;
+        }
+        match io::stdin().read(&mut drain_buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => continue,
+        }
+    }
+    (pressed, choice)
+}
+
 /// Render markdown-formatted text to the terminal using richrs.
 /// Print markdown with recording support.
 fn print_md_with_recording(text: &str, shared_recorder: &crate::recorder::SharedRecorder) {
@@ -8186,7 +8333,8 @@ fn extract_remote_host(command: &str) -> Option<String> {
         return None;
     }
     let opts_with_arg: &[&str] = &[
-        "-p", "-l", "-i", "-o", "-L", "-R", "-S", "-W", "-J", "-b", "-c", "-F", "-I", "-K", "-m",
+        "-D", "-E", "-F", "-I", "-J", "-L", "-O", "-Q", "-R", "-S", "-W", "-b", "-c", "-e", "-i",
+        "-l", "-m", "-o", "-p", "-w",
     ];
     let mut iter = parts.iter().skip(1).peekable();
     while let Some(part) = iter.next() {
@@ -8230,6 +8378,25 @@ mod extract_remote_host_tests {
         assert_eq!(
             extract_remote_host("ssh -p 2222 user@host"),
             Some("user@host".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_flags_and_argument_options_parse_host() {
+        // -K (GSSAPI auth) is a flag — host must be found, not consumed.
+        assert_eq!(
+            extract_remote_host("ssh -K root@host uptime"),
+            Some("root@host".to_string())
+        );
+        // -Q takes a query_option argument.
+        assert_eq!(
+            extract_remote_host("ssh -Q cipher root@host"),
+            Some("root@host".to_string())
+        );
+        // -D (dynamic forward) takes a port argument.
+        assert_eq!(
+            extract_remote_host("ssh -D 1080 root@host"),
+            Some("root@host".to_string())
         );
     }
 }

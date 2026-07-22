@@ -128,6 +128,16 @@ status:
   na: "なし"
 
 shell:
+  confirm_dialog_title: "ツール実行"
+  confirm_dialog_tool: "ツール:"
+  confirm_dialog_command: "コマンド:"
+  confirm_dialog_options: "[y] 一回許可   [a] セッション記憶   [r] AIに別案を相談   [n] 拒否"
+  confirm_dialog_question: "選択（デフォルト n）："
+  confirm_choice_once: "一回許可"
+  confirm_choice_remember: "セッション記憶"
+  confirm_choice_reply: "AIに別案を相談"
+  confirm_choice_deny: "拒否"
+  forget_approvals_cleared: "このセッションの記憶された承認 {count} 件を削除しました"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(/model で切り替え)"
@@ -168,6 +178,7 @@ shell:
     live_sessions: "アクティブPTYセッション一覧"
     kill_live_sessions: "IDでPTYセッション終了"
     audit: "監査ログを照会（誰/いつ/何/AI提案/確認）"
+    forget-approvals: "記憶されたコマンド承認を削除（このセッション）"
 
   feedback:
     select_type: "フィードバックの種類を選択"

@@ -367,6 +367,7 @@ shell:
     live_sessions: "列出活跃 PTY 会话"
     kill_live_sessions: "按 ID 终止活跃 PTY 会话"
     audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
+    forget-approvals: "清除本会话记住的命令审批"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -441,7 +442,14 @@ shell:
   # 确认对话框
   confirm_dialog_title: "工具执行"
   confirm_dialog_tool: "工具："
-  confirm_dialog_question: "允许? [y/N]"
+  confirm_dialog_command: "命令："
+  confirm_dialog_options: "[y] 允许一次   [a] 本会话记住   [r] 回复 AI 换方案   [n] 拒绝"
+  confirm_dialog_question: "你的选择（默认 n）："
+  confirm_choice_once: "允许一次"
+  confirm_choice_remember: "本会话记住"
+  confirm_choice_reply: "回复 AI 换方案"
+  confirm_choice_deny: "拒绝"
+  forget_approvals_cleared: "已清除本会话的命令审批记忆（{count} 项）"
 
   # 提示符
   prompt_prefix: "执行"

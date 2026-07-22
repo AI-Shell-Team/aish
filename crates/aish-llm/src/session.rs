@@ -7,6 +7,7 @@ use aish_core::{
 };
 
 use crate::api::{resolve_api_dialect, stream_simple, ApiDialect, StreamContext};
+use crate::approval_memory::{ApprovalChoice, ApprovalMemory};
 use crate::client::LlmResponse;
 use crate::langfuse::LangfuseClient;
 use crate::streaming::{extract_message_text, SseEvent, StreamParser};
@@ -50,8 +51,13 @@ pub struct LlmSession {
     tools: HashMap<String, Arc<dyn Tool>>,
     cancellation_token: Arc<CancellationToken>,
     event_callback: Option<Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync>>,
-    confirmation_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync>>,
+    confirmation_callback:
+        Option<Arc<dyn Fn(&PreflightSecurityContext) -> ApprovalChoice + Send + Sync>>,
     security_notice_callback: Option<Arc<dyn Fn(&PreflightSecurityContext) + Send + Sync>>,
+    /// Session-scoped approval memory. When set, commands the user approved
+    /// with "remember" skip confirmation (and the sandbox preflight) for the
+    /// rest of the session on the same host.
+    approval_memory: Option<Arc<Mutex<ApprovalMemory>>>,
     /// Callback invoked when the tool-call iteration limit is reached.
     /// Receives the current iteration count and returns true to reset and continue.
     iteration_limit_callback: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
@@ -129,6 +135,7 @@ impl LlmSession {
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: None,
             confirmation_callback: None,
+            approval_memory: None,
             security_notice_callback: None,
             iteration_limit_callback: None,
             audit_sink: None,
@@ -202,13 +209,21 @@ impl LlmSession {
         self.event_callback.clone()
     }
 
-    /// Set the confirmation callback invoked when a tool's preflight returns Confirm.
-    /// The callback receives raw security context and returns true to approve.
+    /// Set the confirmation callback invoked when a tool's preflight returns
+    /// Confirm. The callback receives the security context and returns the
+    /// user's approval choice (allow once, allow + remember, reply to AI, deny).
     pub fn set_confirmation_callback(
         &mut self,
-        cb: Arc<dyn Fn(&PreflightSecurityContext) -> bool + Send + Sync>,
+        cb: Arc<dyn Fn(&PreflightSecurityContext) -> ApprovalChoice + Send + Sync>,
     ) {
         self.confirmation_callback = Some(cb);
+    }
+
+    /// Install session-scoped approval memory. When present, commands approved
+    /// with "remember" skip confirmation (and sandbox preflight) for the rest
+    /// of the session.
+    pub fn set_approval_memory(&mut self, memory: Arc<Mutex<ApprovalMemory>>) {
+        self.approval_memory = Some(memory);
     }
 
     /// Set the callback invoked when a tool's preflight returns a display-only security notice.
@@ -1417,6 +1432,7 @@ impl LlmSession {
             cancellation_token: Arc::new(CancellationToken::new()),
             event_callback: self.event_callback.clone(),
             confirmation_callback: self.confirmation_callback.clone(),
+            approval_memory: self.approval_memory.clone(),
             security_notice_callback: self.security_notice_callback.clone(),
             iteration_limit_callback: self.iteration_limit_callback.clone(),
             audit_sink: self.audit_sink.clone(),
@@ -1457,6 +1473,27 @@ impl LlmSession {
             )));
         }
 
+        // Approval memory: if this command was previously approved for the
+        // session, skip the whole preflight (including the sandbox pre-run).
+        let memory_command = args.get("command").and_then(|value| value.as_str());
+        if memory_command.is_some_and(|command| {
+            self.approval_memory
+                .as_ref()
+                .is_some_and(|memory| memory.lock().unwrap().is_allowed(command))
+        }) {
+            self.emit_audit(AuditEvent::security_decision(
+                chrono::Utc::now(),
+                self.audit_session_uuid.clone(),
+                None,
+                None,
+                memory_command.map(|c| self.redact(c)),
+                "allow".to_string(),
+                Some("remembered".to_string()),
+                None,
+                Some("LOW".to_string()),
+            ));
+            return None;
+        }
         let ctx = crate::tool_context::ToolContext::for_session(self);
         match tool.preflight_with_context(args, &ctx) {
             PreflightResult::Allow => {
@@ -1482,12 +1519,25 @@ impl LlmSession {
                         SecurityPanelMode::Confirm,
                     )
                 });
-                let approved = if let Some(ref cb) = self.confirmation_callback {
+                let choice = if let Some(ref cb) = self.confirmation_callback {
                     cb(&security)
                 } else {
-                    true
+                    // No callback = allow once (backward compatible).
+                    ApprovalChoice::Once
                 };
+                if matches!(choice, ApprovalChoice::RememberSession) {
+                    if let Some(memory) = &self.approval_memory {
+                        if let Some(command) = memory_command {
+                            memory.lock().unwrap().remember(command);
+                        }
+                    }
+                }
                 let (matched_rule, risk_level) = audit_security_info(&security);
+                let audit_response = match choice {
+                    ApprovalChoice::Once | ApprovalChoice::RememberSession => "yes",
+                    ApprovalChoice::ReplyToAi => "reply",
+                    ApprovalChoice::Deny => "no",
+                };
                 self.emit_audit(AuditEvent::security_decision(
                     chrono::Utc::now(),
                     self.audit_session_uuid.clone(),
@@ -1495,21 +1545,20 @@ impl LlmSession {
                     None,
                     security.target.as_ref().map(|t| self.redact(t)),
                     "confirm".to_string(),
-                    Some(if approved {
-                        "yes".to_string()
-                    } else {
-                        "no".to_string()
-                    }),
+                    Some(audit_response.to_string()),
                     matched_rule,
                     risk_level,
                 ));
-                if approved {
-                    None
-                } else {
-                    Some(ToolResult::error(format!(
+                match choice {
+                    ApprovalChoice::Once | ApprovalChoice::RememberSession => None,
+                    ApprovalChoice::ReplyToAi => Some(ToolResult::error(format!(
+                        "User declined and asked for a different approach: {}",
+                        message
+                    ))),
+                    ApprovalChoice::Deny => Some(ToolResult::error(format!(
                         "Tool execution denied: {}",
                         message
-                    )))
+                    ))),
                 }
             }
             PreflightResult::Block { message, security } => {
@@ -3041,5 +3090,100 @@ mod tests {
             event.data["tool_args"]["command"].as_str(),
             Some("sudo ls /root")
         );
+    }
+
+    // Tool whose preflight always returns Confirm and counts how many times
+    // preflight runs, so tests can verify the approval-memory short-circuit.
+    struct ConfirmCountingTool {
+        preflight_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl ConfirmCountingTool {
+        fn new(counter: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Self {
+            Self {
+                preflight_calls: counter,
+            }
+        }
+    }
+
+    impl Tool for ConfirmCountingTool {
+        fn name(&self) -> &str {
+            "bash"
+        }
+        fn description(&self) -> &str {
+            "confirm-counting test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn preflight(&self, _args: &serde_json::Value) -> PreflightResult {
+            self.preflight_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            PreflightResult::Confirm {
+                message: "test confirmation".to_string(),
+                security: None,
+            }
+        }
+        fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::success("executed")
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_memory_skips_preflight_on_remembered_command() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingTool::new(counter.clone())));
+        // Callback always chooses "remember for this session".
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
+        ));
+        session.set_approval_memory(std::sync::Arc::new(std::sync::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "systemctl restart nginx" }).to_string(),
+        };
+
+        // First call: preflight runs (Confirm), user remembers, command executes.
+        let result = session.execute_tool_external(&tool_call).await;
+        assert!(result.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call: memory hit, preflight must NOT run again.
+        let result2 = session.execute_tool_external(&tool_call).await;
+        assert!(result2.ok);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "remembered command must skip preflight entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_reply_to_ai_denies_execution() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingTool::new(counter.clone())));
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::ReplyToAi,
+        ));
+        session.set_approval_memory(std::sync::Arc::new(std::sync::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "rm -rf /tmp/x" }).to_string(),
+        };
+        let result = session.execute_tool_external(&tool_call).await;
+        assert!(!result.ok);
+        assert!(result.output.contains("different approach"));
+        // Preflight still ran once (memory miss → confirm → reply).
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
