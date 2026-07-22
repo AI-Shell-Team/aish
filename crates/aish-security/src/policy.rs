@@ -549,15 +549,17 @@ pub fn save_policy_globals(path: &Path, updates: &[(&str, &str)]) -> Result<(), 
     for (field, value) in updates {
         updated = update_global_field(&updated, field, value);
     }
-    // Write to a temp file in the same directory, then rename for atomicity.
-    // A plain fs::write can leave the file truncated on crash/ENOSPC, which
-    // would make load_policy silently fall back to the fail-open default.
+    // Prefer atomic write (temp + rename in the same directory) to avoid
+    // truncation on crash/ENOSPC. Fall back to direct fs::write when the
+    // directory isn't writable (common for /etc/aish/ where the file is
+    // user-owned but the directory is root-owned) — direct write only needs
+    // file-level write permission.
     let tmp_path = path.with_extension("yaml.tmp");
-    fs::write(&tmp_path, updated)
-        .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
-    if let Err(e) = fs::rename(&tmp_path, path) {
+    let atomic_ok = fs::write(&tmp_path, &updated).is_ok() && fs::rename(&tmp_path, path).is_ok();
+    if !atomic_ok {
         let _ = fs::remove_file(&tmp_path);
-        return Err(format!("failed to replace {}: {e}", path.display()));
+        fs::write(path, &updated)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     }
     Ok(())
 }
