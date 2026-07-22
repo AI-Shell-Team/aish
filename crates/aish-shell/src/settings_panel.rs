@@ -28,6 +28,11 @@ pub enum LiveEffect {
     /// `input_guard_enabled` changes, so `screen_input()` honors it without a
     /// restart.
     InputGuard,
+    /// Re-apply the mirrored security globals (`enable_sandbox`,
+    /// `default_risk_level`, `sandbox_off_action`, `sandbox_timeout_seconds`)
+    /// to the live `SecurityManager` via `set_policy`, so sandbox pre-runs and
+    /// risk gating honor the new values without a restart.
+    SecurityPolicy,
     /// Re-initialize the whole LLM session + tools + inline completer — needed
     /// when `model` / `api_base` / `api_key` change.
     ModelSession,
@@ -775,13 +780,16 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
     }
     Ok(())
 }
-
 /// What live side-effect the shell must run after `key` changes.
 pub fn live_effect(key: SettingKey) -> LiveEffect {
     match key {
         SettingKey::Model | SettingKey::ApiBase | SettingKey::ApiKey => LiveEffect::ModelSession,
         SettingKey::Temperature | SettingKey::MaxTokens => LiveEffect::ToolsRefresh,
         SettingKey::InputGuardEnabled => LiveEffect::InputGuard,
+        SettingKey::EnableSandbox
+        | SettingKey::DefaultRiskLevel
+        | SettingKey::SandboxOffAction
+        | SettingKey::SandboxTimeout => LiveEffect::SecurityPolicy,
         _ => LiveEffect::None,
     }
 }
@@ -789,8 +797,9 @@ pub fn live_effect(key: SettingKey) -> LiveEffect {
 /// Whether the running session must be restarted for `key`'s new value to take
 /// effect. The model/credential fields are applied live via `update_model`,
 /// temperature/max_tokens rebuild tools live, `input_guard_enabled` toggles the
-/// cached InputGuard live, and `prompt_style` is read from `self.config` on
-/// each render — everything else is consumed only at startup.
+/// cached InputGuard live, the security globals (`enable_sandbox`, etc.) are
+/// pushed into the running `SecurityManager`, and `prompt_style` is read from
+/// `self.config` on each render — everything else is consumed only at startup.
 pub fn requires_restart(key: SettingKey) -> bool {
     match key {
         SettingKey::Model
@@ -799,6 +808,10 @@ pub fn requires_restart(key: SettingKey) -> bool {
         | SettingKey::Temperature
         | SettingKey::MaxTokens
         | SettingKey::InputGuardEnabled
+        | SettingKey::EnableSandbox
+        | SettingKey::DefaultRiskLevel
+        | SettingKey::SandboxOffAction
+        | SettingKey::SandboxTimeout
         | SettingKey::PromptStyle => false,
         _ => true,
     }
@@ -1017,9 +1030,13 @@ mod tests {
         assert!(!requires_restart(SettingKey::Model));
         assert!(!requires_restart(SettingKey::InputGuardEnabled));
         assert!(!requires_restart(SettingKey::PromptStyle));
+        // Security globals are pushed live into the SecurityManager.
+        assert!(!requires_restart(SettingKey::EnableSandbox));
+        assert!(!requires_restart(SettingKey::DefaultRiskLevel));
+        assert!(!requires_restart(SettingKey::SandboxOffAction));
+        assert!(!requires_restart(SettingKey::SandboxTimeout));
         // Startup-only settings do require a restart.
         assert!(requires_restart(SettingKey::LogLevel));
-        assert!(requires_restart(SettingKey::EnableSandbox));
         assert!(requires_restart(SettingKey::HistorySize));
     }
 
@@ -1054,12 +1071,24 @@ mod tests {
         assert_eq!(live_effect(SettingKey::Model), LiveEffect::ModelSession);
         assert_eq!(live_effect(SettingKey::ApiKey), LiveEffect::ModelSession);
         assert_eq!(
-            live_effect(SettingKey::Temperature),
-            LiveEffect::ToolsRefresh
-        );
-        assert_eq!(
             live_effect(SettingKey::InputGuardEnabled),
             LiveEffect::InputGuard
+        );
+        assert_eq!(
+            live_effect(SettingKey::EnableSandbox),
+            LiveEffect::SecurityPolicy
+        );
+        assert_eq!(
+            live_effect(SettingKey::DefaultRiskLevel),
+            LiveEffect::SecurityPolicy
+        );
+        assert_eq!(
+            live_effect(SettingKey::SandboxOffAction),
+            LiveEffect::SecurityPolicy
+        );
+        assert_eq!(
+            live_effect(SettingKey::SandboxTimeout),
+            LiveEffect::SecurityPolicy
         );
     }
 

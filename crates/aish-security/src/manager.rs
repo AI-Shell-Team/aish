@@ -119,6 +119,24 @@ impl SecurityManager {
         self
     }
 
+    /// Replace the active policy and rebuild derived state (fallback engine,
+    /// sandbox runner). The secret scanner is intentionally **preserved** —
+    /// `/setting` only edits the global fields (`enable_sandbox`,
+    /// `default_risk_level`, `sandbox_off_action`,
+    /// `sandbox_timeout_seconds`, `input_guard.enabled`), never
+    /// `secret_patterns`. Callers that need to swap secret patterns must
+    /// construct a fresh `SecurityManager` instead, or the scanner will miss
+    /// the new patterns.
+    pub fn set_policy(&mut self, policy: SecurityPolicy) {
+        let sandbox_runner = policy.enable_sandbox.then(|| {
+            Arc::new(SandboxClient::new(DEFAULT_SANDBOX_SOCKET_PATH)) as Arc<dyn SandboxRunner>
+        });
+        let fallback_engine = FallbackRuleEngine::new(policy.clone());
+        self.policy = policy;
+        self.fallback_engine = fallback_engine;
+        self.sandbox_runner = sandbox_runner;
+    }
+
     #[cfg(test)]
     fn with_sandbox_runner(mut self, runner: impl SandboxRunner + 'static) -> Self {
         self.sandbox_runner = Some(Arc::new(runner));
@@ -362,6 +380,34 @@ mod tests {
         assert_eq!(decision.level, RiskLevel::Low);
         assert!(decision.allow);
         assert!(!decision.require_confirmation);
+    }
+
+    /// `set_policy` must rebuild the sandbox runner when `enable_sandbox`
+    /// flips on, so a live `/setting` toggle takes effect immediately.
+    #[test]
+    fn set_policy_rebuilds_sandbox_runner_when_enabled() {
+        let mut manager = SecurityManager::new(SecurityPolicy::default());
+        // Starts disabled (no sandbox runner).
+        assert!(!manager.policy().enable_sandbox);
+        assert!(manager.sandbox_runner.is_none());
+
+        manager.set_policy(SecurityPolicy {
+            enable_sandbox: true,
+            default_risk_level: RiskLevel::Medium,
+            ..SecurityPolicy::default()
+        });
+
+        assert!(manager.policy().enable_sandbox);
+        assert_eq!(manager.policy().default_risk_level, RiskLevel::Medium);
+        assert!(
+            manager.sandbox_runner.is_some(),
+            "enabling sandbox must construct a runner"
+        );
+
+        // Flipping back off drops the runner.
+        manager.set_policy(SecurityPolicy::default());
+        assert!(!manager.policy().enable_sandbox);
+        assert!(manager.sandbox_runner.is_none());
     }
 
     #[test]
