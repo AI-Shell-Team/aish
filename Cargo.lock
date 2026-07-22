@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "aish-cli"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-config",
  "aish-core",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "aish-config"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "aish-context"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "serde",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "aish-core"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -97,7 +97,7 @@ dependencies = [
 
 [[package]]
 name = "aish-hosts"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "aish-i18n"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "aish-llm"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-context",
  "aish-core",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "aish-md-table"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "richrs",
  "unicode-width",
@@ -153,7 +153,7 @@ dependencies = [
 
 [[package]]
 name = "aish-memory"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "chrono",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "aish-prompts"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "aish-pty"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-config",
  "aish-core",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "aish-scripts"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "aish-security"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "libc",
  "regex",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "aish-session"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "chrono",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "aish-shell"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-config",
  "aish-context",
@@ -295,7 +295,7 @@ dependencies = [
 
 [[package]]
 name = "aish-skills"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "aish-tools"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "aish-core",
  "aish-i18n",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "aish-ui"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "crossterm 0.28.1",
  "ratatui",
