@@ -7,6 +7,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-07-22
+
+### Added
+
+- Added `@path` file-mention popup in AI mode with fuzzy search, Tab longest-common-prefix completion, and directory drill-down.
+- Added a CJK-aware Markdown rendering pipeline (`aish-md-table` + `md_render`) for width-aware tables, inline styles, nested lists, and terminal wrapping.
+- Added response-footer compaction markers (`⟳compacted` / `⟳micro`) when automatic context compaction runs during a turn.
+
+### Changed
+
+- Renamed the response-footer token label from `ctx` to `req` to reflect per-request window usage rather than cumulative conversation history.
+- Added shared HTTP retry with exponential backoff for transient 429/5xx and network errors across OpenAI, Anthropic, and Codex providers.
+
+### Fixed
+
+- Fixed the inline completion spinner so CJK terminals no longer shift the `aish` mode icon.
+- Fixed PTY detach after session exit to skip the Detach write and avoid Broken-pipe WARN noise (Ctrl+Q still sends Detach).
+- Fixed packaged skills seeding to write into `~/.config/aish/skills` as the target user (no `/usr/local` install + leaf-only chown), including a one-shot repair for leftover root-owned config trees from older installers.
+- Hardened the packaging ownership smoke test to require seed/install scripts and assert privilege drop instead of fakeroot ownership checks.
+
 ## [0.3.7] - 2026-07-20
 
 ### Added
