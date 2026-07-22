@@ -367,6 +367,7 @@ shell:
     live_sessions: "List live PTY sessions"
     kill_live_sessions: "Kill live PTY session(s) by ID"
     audit: "Query audit log (who/when/what/AI suggestion/confirm)"
+    forget-approvals: "Clear remembered command approvals (this session)"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -441,7 +442,14 @@ shell:
   # Confirm dialog
   confirm_dialog_title: "Tool Execution"
   confirm_dialog_tool: "Tool:"
-  confirm_dialog_question: "Allow? [y/N]"
+  confirm_dialog_command: "Command:"
+  confirm_dialog_options: "[y] Allow once   [a] Remember this session   [r] Reply to AI (try another way)   [n] Deny"
+  confirm_dialog_question: "Your choice (default n):"
+  confirm_choice_once: "Allow once"
+  confirm_choice_remember: "Remember this session"
+  confirm_choice_reply: "Reply to AI (try another way)"
+  confirm_choice_deny: "Deny"
+  forget_approvals_cleared: "Cleared {count} remembered approval(s) for this session"
 
   # Prompt
   prompt_prefix: "Execute"

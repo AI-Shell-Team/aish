@@ -128,6 +128,16 @@ status:
   na: "k.A."
 
 shell:
+  confirm_dialog_title: "Tool-Ausführung"
+  confirm_dialog_tool: "Tool:"
+  confirm_dialog_command: "Befehl:"
+  confirm_dialog_options: "[y] Einmal erlauben   [a] Diese Sitzung merken   [r] KI um anderen Weg bitten   [n] Ablehnen"
+  confirm_dialog_question: "Deine Wahl (Standard n):"
+  confirm_choice_once: "Einmal erlauben"
+  confirm_choice_remember: "Diese Sitzung merken"
+  confirm_choice_reply: "KI um anderen Weg bitten"
+  confirm_choice_deny: "Ablehnen"
+  forget_approvals_cleared: "{count} gespeicherte Genehmigung(en) für diese Sitzung gelöscht"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(mit /model wechseln)"
@@ -168,6 +178,7 @@ shell:
     live_sessions: "Aktive PTY-Sitzungen auflisten"
     kill_live_sessions: "PTY-Sitzung(en) nach ID beenden"
     audit: "Audit-Protokoll abfragen (wer/wann/was/KI-Vorschlag/Bestaetigung)"
+    forget-approvals: "Gemerkte Befehlsgenehmigungen löschen (diese Sitzung)"
 
   feedback:
     select_type: "Feedback-Typ auswählen"

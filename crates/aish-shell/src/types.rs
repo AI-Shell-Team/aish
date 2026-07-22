@@ -51,8 +51,6 @@ pub struct ShellState {
     pub can_correct_error: bool,
     /// Captured output (stdout+stderr combined) from last executed command.
     pub last_output: String,
-    /// Pre-approved AI commands that skip future confirmation dialogs.
-    pub approved_ai_commands: std::collections::HashSet<String>,
 }
 
 impl ShellState {
@@ -72,7 +70,6 @@ impl ShellState {
             last_exit_code: 0,
             can_correct_error: false,
             last_output: String::new(),
-            approved_ai_commands: std::collections::HashSet::new(),
         }
     }
 }

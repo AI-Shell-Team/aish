@@ -128,6 +128,16 @@ status:
   na: "N/A"
 
 shell:
+  confirm_dialog_title: "Exécution d'outil"
+  confirm_dialog_tool: "Outil :"
+  confirm_dialog_command: "Commande :"
+  confirm_dialog_options: "[y] Autoriser une fois   [a] Mémoriser cette session   [r] Demander à l'IA une autre approche   [n] Refuser"
+  confirm_dialog_question: "Votre choix (défaut n) :"
+  confirm_choice_once: "Autoriser une fois"
+  confirm_choice_remember: "Mémoriser cette session"
+  confirm_choice_reply: "Demander à l'IA une autre approche"
+  confirm_choice_deny: "Refuser"
+  forget_approvals_cleared: "{count} autorisation(s) mémorisée(s) effacée(s) pour cette session"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(tapez /model pour changer)"
@@ -168,6 +178,7 @@ shell:
     live_sessions: "Lister les sessions PTY actives"
     kill_live_sessions: "Terminer session(s) PTY par ID"
     audit: "Consulter le journal d'audit (qui/quand/quoi/suggestion IA/confirmation)"
+    forget-approvals: "Effacer les approbations mémorisées (cette session)"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"

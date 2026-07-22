@@ -41,6 +41,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/audit",
         "Query audit log (who/when/what/AI suggestion/confirm)",
     ),
+    (
+        "/forget-approvals",
+        "Clear remembered command approvals (this session)",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -819,6 +823,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 16);
+        assert_eq!(SLASH_COMMANDS.len(), 17);
     }
 }
