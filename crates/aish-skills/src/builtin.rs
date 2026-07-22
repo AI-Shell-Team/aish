@@ -8,9 +8,14 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use include_dir::{include_dir, Dir};
+
+/// Distinguishes concurrent `ensure_materialized_at` calls in one process
+/// (threads share `process::id()`).
+static STAGING_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Packaged skills from the repository `skills/` directory.
 static BUILTIN_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../skills");
@@ -67,24 +72,30 @@ pub fn ensure_materialized() -> aish_core::Result<PathBuf> {
 /// Ensure embedded skills exist on disk under `root`.
 ///
 /// Idempotent: if a completion marker is present, returns the existing root.
-/// On failure, returns an error and leaves no marker so a later run can retry.
+/// Uses a per-process staging directory so concurrent launches do not clobber
+/// each other's extract; the completion marker is written into staging before
+/// `rename`, so a successful publish is atomic. On `rename` loss, this process
+/// drops its staging and treats an existing marker as success.
 pub fn ensure_materialized_at(root: &Path) -> aish_core::Result<PathBuf> {
     let marker = root.join(".complete");
     if marker.is_file() {
         return Ok(root.to_path_buf());
     }
 
-    if root.exists() {
-        fs::remove_dir_all(root).map_err(|e| {
-            aish_core::AishError::Skill(format!(
-                "Failed to clear incomplete builtin skills cache {}: {}",
-                root.display(),
-                e
-            ))
-        })?;
+    // Leftover incomplete tree from a crashed older attempt (no marker). Best
+    // effort only — if another process wins the publish race, rename handling
+    // below recovers via the marker.
+    if root.exists() && !marker.is_file() {
+        let _ = fs::remove_dir_all(root);
     }
 
-    // Avoid Path::with_extension — version dirs like "0.3.8" would become "0.3.staging".
+    // Unique staging per attempt (pid alone is shared by threads in one process).
+    // Avoid Path::with_extension — version dirs like "0.3.8" become "0.3.staging".
+    let staging_suffix = format!(
+        "staging.{}.{}",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
     let staging = root
         .parent()
         .map(|parent| {
@@ -92,18 +103,9 @@ pub fn ensure_materialized_at(root: &Path) -> aish_core::Result<PathBuf> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "skills".to_string());
-            parent.join(format!("{name}.staging"))
+            parent.join(format!("{name}.{staging_suffix}"))
         })
-        .unwrap_or_else(|| PathBuf::from(format!("{}.staging", root.display())));
-    if staging.exists() {
-        fs::remove_dir_all(&staging).map_err(|e| {
-            aish_core::AishError::Skill(format!(
-                "Failed to clear builtin skills staging {}: {}",
-                staging.display(),
-                e
-            ))
-        })?;
-    }
+        .unwrap_or_else(|| PathBuf::from(format!("{}.{staging_suffix}", root.display())));
 
     fs::create_dir_all(&staging).map_err(|e| {
         aish_core::AishError::Skill(format!(
@@ -114,6 +116,7 @@ pub fn ensure_materialized_at(root: &Path) -> aish_core::Result<PathBuf> {
     })?;
 
     BUILTIN_SKILLS.extract(&staging).map_err(|e| {
+        let _ = fs::remove_dir_all(&staging);
         aish_core::AishError::Skill(format!(
             "Failed to extract embedded skills to {}: {}",
             staging.display(),
@@ -123,22 +126,30 @@ pub fn ensure_materialized_at(root: &Path) -> aish_core::Result<PathBuf> {
 
     ensure_scripts_executable(&staging);
 
-    fs::rename(&staging, root).map_err(|e| {
-        aish_core::AishError::Skill(format!(
+    // Marker inside staging → rename publishes tree + completion atomically.
+    let staging_marker = staging.join(".complete");
+    if let Err(e) = fs::write(&staging_marker, env!("CARGO_PKG_VERSION").as_bytes()) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(aish_core::AishError::Skill(format!(
+            "Failed to write builtin skills marker {}: {}",
+            staging_marker.display(),
+            e
+        )));
+    }
+
+    if let Err(e) = fs::rename(&staging, root) {
+        let _ = fs::remove_dir_all(&staging);
+        // Another process already published (or is finishing) — prefer their tree.
+        if marker.is_file() {
+            return Ok(root.to_path_buf());
+        }
+        return Err(aish_core::AishError::Skill(format!(
             "Failed to publish builtin skills cache {} -> {}: {}",
             staging.display(),
             root.display(),
             e
-        ))
-    })?;
-
-    fs::write(&marker, env!("CARGO_PKG_VERSION").as_bytes()).map_err(|e| {
-        aish_core::AishError::Skill(format!(
-            "Failed to write builtin skills marker {}: {}",
-            marker.display(),
-            e
-        ))
-    })?;
+        )));
+    }
 
     tracing::debug!(
         path = %root.display(),
@@ -215,5 +226,29 @@ mod tests {
         assert!(root.join(".complete").is_file());
         let root2 = ensure_materialized_at(&cache).expect("rematerialize");
         assert_eq!(root, root2);
+    }
+
+    #[test]
+    fn concurrent_materialize_shares_one_complete_cache() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = dir.path().join("cache");
+        let cache1 = cache.clone();
+        let cache2 = cache.clone();
+        let t1 = std::thread::spawn(move || ensure_materialized_at(&cache1));
+        let t2 = std::thread::spawn(move || ensure_materialized_at(&cache2));
+        let r1 = t1.join().expect("thread1").expect("materialize1");
+        let r2 = t2.join().expect("thread2").expect("materialize2");
+        assert_eq!(r1, r2);
+        assert!(r1.join(".complete").is_file());
+        assert!(r1.join("diagnose_system_lag").join("SKILL.md").is_file());
+        // Only the published cache dir should remain — no leaked shared staging.
+        let parent = cache.parent().expect("parent");
+        let leftovers: Vec<_> = fs::read_dir(parent)
+            .expect("read parent")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("staging"))
+            .collect();
+        assert!(leftovers.is_empty(), "leaked staging dirs: {leftovers:?}");
     }
 }
