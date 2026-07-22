@@ -25,13 +25,17 @@ if grep -qE 'seed-skills\.sh' "$INSTALL_SCRIPT"; then
   exit 1
 fi
 
-if [[ -f "$BUILD_BUNDLE" ]] && grep -qE 'seed-skills\.sh' "$BUILD_BUNDLE"; then
+if [[ ! -f "$BUILD_BUNDLE" ]]; then
+  echo "FAIL: missing build bundle script: $BUILD_BUNDLE" >&2
+  exit 1
+fi
+if grep -qE 'seed-skills\.sh' "$BUILD_BUNDLE"; then
   echo "FAIL: build_bundle must not ship seed-skills.sh" >&2
   exit 1
 fi
 
-if grep -E 'install_tree.*(/usr/(local/)?share/aish/skills)|cp -a.*skills.*/usr/' \
-  "$INSTALL_SCRIPT"; then
+# Match forbidden destinations (not one exact install command form).
+if grep -E '/usr/(local/)?share/aish/skills' "$INSTALL_SCRIPT"; then
   echo "FAIL: install-bundle still installs skills under /usr/share or /usr/local/share" >&2
   exit 1
 fi
