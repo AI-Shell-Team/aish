@@ -326,6 +326,19 @@ impl AiHandler {
         self.llm_session.update_model(model, api_base, api_key);
     }
 
+    /// Snapshot of the multi-account rotation state for UI display (`/usage`).
+    pub fn rotation_snapshot(&self) -> Option<aish_llm::RotationSnapshot> {
+        self.llm_session.rotation_snapshot()
+    }
+
+    /// Install, replace, or clear the rotation state. `None` disables rotation.
+    pub fn apply_rotation_state(&mut self, state: Option<aish_llm::RotationState>) {
+        match state {
+            Some(s) => self.llm_session.set_rotation(s),
+            None => self.llm_session.clear_rotation(),
+        }
+    }
+
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.llm_session.register_tool(tool);
     }

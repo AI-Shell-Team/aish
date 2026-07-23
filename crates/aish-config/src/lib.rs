@@ -18,6 +18,6 @@ pub mod model;
 
 pub use loader::ConfigLoader;
 pub use model::{
-    compile_remote_danger_patterns, ConfigModel, InlineCompletionConfig, MemoryConfig,
-    OutputOffloadConfig, ToolArgPreviewConfig,
+    compile_remote_danger_patterns, ApiAccountConfig, ConfigModel, InlineCompletionConfig,
+    MemoryConfig, OutputOffloadConfig, ToolArgPreviewConfig,
 };

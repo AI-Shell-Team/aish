@@ -268,11 +268,52 @@ fn prompt_edit_value(label: &str, desc: &str, current: &str, secret: bool) -> Op
 }
 
 fn llm_session_from_config(config: &ConfigModel) -> LlmSession {
-    LlmSession::with_context(
+    let mut session = LlmSession::with_context(
         stream_context_from_config(config),
         Some(config.temperature),
         config.max_tokens,
-    )
+    );
+
+    // Multi-account quota rotation + model fallback. The top-level api_key is
+    // account #0 (the primary); configured api_accounts extend the pool.
+    let accounts = rotation_accounts_from_config(config);
+    if !config.fallback_models.is_empty() || accounts.len() > 1 {
+        let mut policy = aish_llm::RetryPolicy::default();
+        policy.revert_on_cooldown = config.fallback_revert_on_cooldown;
+        let state = aish_llm::RotationState::new(
+            config.model.clone(),
+            accounts,
+            config.fallback_models.clone(),
+            policy,
+        );
+        if state.is_active() {
+            session.set_rotation(state);
+        }
+    }
+    session
+}
+
+/// Build the rotation account pool from config. The primary `api_key` is always
+/// index 0; each entry in `config.api_accounts` follows. Disabled when the key
+/// is empty so rotation skips it instead of wasting an attempt.
+fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccount> {
+    let mut accounts = vec![aish_llm::ApiAccount {
+        name: "primary".to_string(),
+        api_key: config.api_key.clone(),
+        api_base: None,
+        weight: 1,
+        disabled: config.api_key.trim().is_empty(),
+    }];
+    for acct in &config.api_accounts {
+        accounts.push(aish_llm::ApiAccount {
+            name: acct.name.clone(),
+            api_key: acct.api_key.clone(),
+            api_base: acct.api_base.clone(),
+            weight: acct.weight.max(1),
+            disabled: acct.disabled,
+        });
+    }
+    accounts
 }
 
 fn stream_context_from_parts(
@@ -843,6 +884,7 @@ impl AishShell {
         )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
+        tool_registry.register(Box::new(aish_tools::ServiceSupervisorTool::new()));
         // AgentTool is registered after skill loading so the parent session already
         // has SkillTool when general-purpose / troubleshoot inherit the tool pool.
 
@@ -3263,6 +3305,12 @@ impl AishShell {
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
+            Some("/usage") => self.handle_usage_command(),
+            Some("/accounts") => self.handle_accounts_command(&parts),
+            Some("/fallback") => self.handle_fallback_command(&parts),
+            Some("/fork") => self.handle_fork_command(),
+            Some("/sessions") => self.handle_sessions_command(),
+            Some("/export") => self.handle_export_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3289,6 +3337,471 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
+    }
+
+    /// `/fallback` — manage the ordered model fallback chain tried when the
+    /// primary model hits a rate/usage limit or a hard error.
+    fn handle_fallback_command(&mut self, parts: &[&str]) {
+        let sub = parts.get(1).copied().unwrap_or("list");
+        match sub {
+            "list" => {
+                println!();
+                println!("\x1b[1mFallback model chain\x1b[0m");
+                println!("  primary : {}", self.config.model);
+                if self.config.fallback_models.is_empty() {
+                    println!("  fallback: (none configured)");
+                } else {
+                    for (i, m) in self.config.fallback_models.iter().enumerate() {
+                        println!("  [{}]     {}", i + 1, m);
+                    }
+                }
+                let pol = if self.config.fallback_revert_on_cooldown {
+                    "auto-revert to primary on cooldown"
+                } else {
+                    "stay on fallback until manual switch"
+                };
+                println!("  policy  : {}", pol);
+                println!();
+            }
+            "add" => {
+                let model = match parts.get(2) {
+                    Some(m) if !m.is_empty() => m.to_string(),
+                    _ => {
+                        eprintln!("usage: /fallback add <model>");
+                        return;
+                    }
+                };
+                if self.config.api_base.is_empty() && model.contains('/') {
+                    eprintln!("tip: fallback models usually omit the provider prefix");
+                }
+                if self.config.fallback_models.iter().any(|m| m == &model) {
+                    eprintln!("'{}' is already in the fallback chain", model);
+                    return;
+                }
+                self.config.fallback_models.push(model.clone());
+                self.persist_config_and_rebuild_rotation();
+                println!("\x1b[32madded fallback '{}'\x1b[0m", model);
+            }
+            "remove" | "rm" => {
+                let model = match parts.get(2) {
+                    Some(m) => m.to_string(),
+                    None => {
+                        eprintln!("usage: /fallback remove <model>");
+                        return;
+                    }
+                };
+                let before = self.config.fallback_models.len();
+                self.config.fallback_models.retain(|m| m != &model);
+                if self.config.fallback_models.len() == before {
+                    eprintln!("'{}' not in the fallback chain", model);
+                    return;
+                }
+                self.persist_config_and_rebuild_rotation();
+                println!("\x1b[32mremoved fallback '{}'\x1b[0m", model);
+            }
+            "clear" => {
+                self.config.fallback_models.clear();
+                self.persist_config_and_rebuild_rotation();
+                println!("\x1b[32mcleared fallback chain\x1b[0m");
+            }
+            "revert" => {
+                let val = match parts.get(2).copied().unwrap_or("") {
+                    "on" => true,
+                    "off" => false,
+                    _ => {
+                        eprintln!("usage: /fallback revert on|off");
+                        return;
+                    }
+                };
+                self.config.fallback_revert_on_cooldown = val;
+                self.persist_config_and_rebuild_rotation();
+                println!(
+                    "\x1b[32mrevert policy: {}\x1b[0m",
+                    if val { "on (auto-revert)" } else { "off (stay)" }
+                );
+            }
+            "help" | "-h" | "--help" => {
+                println!("/fallback                  list the fallback model chain");
+                println!("/fallback add <model>      append a fallback model");
+                println!("/fallback remove <model>   remove a fallback model");
+                println!("/fallback clear            empty the chain");
+                println!("/fallback revert on|off    auto-revert to primary on cooldown");
+            }
+            other => eprintln!("unknown subcommand '{}'. try /fallback help", other),
+        }
+    }
+
+    /// `/fork` — branch the current session into a new one (copied context),
+    /// then switch into the fork so the original is preserved at its branch point.
+    fn handle_fork_command(&mut self) {
+        // Persist the current context first so the fork copies the latest state.
+        self.persist_session_snapshot();
+        let parent_uuid = self.session_uuid.clone();
+        let new_uuid = uuid::Uuid::new_v4().to_string();
+
+        // fork_session borrows the store immutably; keep that borrow in a block so
+        // the later `&mut self` resume call is not blocked by the live reference.
+        let fork_result = {
+            let Some(store) = self.session_store.as_ref() else {
+                eprintln!("session store unavailable; cannot fork");
+                return;
+            };
+            store.fork_session(&parent_uuid, None, &new_uuid)
+        };
+
+        let new_short = &new_uuid[..8.min(new_uuid.len())];
+        let parent_short = &parent_uuid[..8.min(parent_uuid.len())];
+        match fork_result {
+            Ok(_) => {
+                println!(
+                    "\x1b[32mforked session\x1b[0m {} (from {})",
+                    new_short, parent_short
+                );
+                if let Err(e) = self.resume_session_with_options(&new_uuid, false, true) {
+                    eprintln!("fork created but switch failed: {e}");
+                    eprintln!("use `/resume {}` to switch manually", new_short);
+                }
+            }
+            Err(e) => eprintln!("fork failed: {e}"),
+        }
+    }
+
+    /// `/sessions` — show the session tree (roots + forked branches).
+    fn handle_sessions_command(&self) {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("session store unavailable");
+            return;
+        };
+        let roots = match store.session_roots() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("failed to list sessions: {e}");
+                return;
+            }
+        };
+        if roots.is_empty() {
+            println!("(no saved sessions)");
+            return;
+        }
+        println!();
+        println!("\x1b[1mSession tree\x1b[0m");
+        for root in &roots {
+            self.print_session_node(root, 0);
+            if let Ok(children) = store.list_children(&root.session_uuid) {
+                for child in &children {
+                    self.print_session_node(child, 1);
+                }
+            }
+        }
+        println!();
+    }
+
+    fn print_session_node(&self, session: &aish_session::SessionRecord, depth: usize) {
+        let indent = "  ".repeat(depth);
+        let prefix = if depth > 0 { "└─ " } else { "" };
+        let mark = if session.session_uuid == self.session_uuid {
+            "  \x1b[32m(current)\x1b[0m"
+        } else {
+            ""
+        };
+        let short = &session.session_uuid[..8.min(session.session_uuid.len())];
+        let when = session.created_at.format("%Y-%m-%d %H:%M");
+        let preview: String = session
+            .state_snapshot()
+            .summary_preview
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(48)
+            .collect();
+        let prev = if preview.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", preview)
+        };
+        println!(
+            "{}{}{} {:<20} {}{}{}",
+            indent, prefix, short, session.model, when, prev, mark
+        );
+    }
+
+    /// `/export [md]` — export the current session (AI conversation + command
+    /// history) to a Markdown file for postmortem or sharing.
+    fn handle_export_command(&self, parts: &[&str]) {
+        let format = parts.get(1).copied().unwrap_or("md");
+        if format != "md" && format != "markdown" {
+            eprintln!("usage: /export [md]  (only markdown is supported)");
+            return;
+        }
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("session store unavailable; cannot export");
+            return;
+        };
+        let uuid = &self.session_uuid;
+        let record = match store.get_session(uuid) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                eprintln!("current session not found in store");
+                return;
+            }
+            Err(e) => {
+                eprintln!("failed to load session: {e}");
+                return;
+            }
+        };
+        let history = store.get_history(uuid, 10000).unwrap_or_default();
+        let snap = record.state_snapshot();
+
+        let mut md = String::new();
+        md.push_str("# aish session export\n\n");
+        md.push_str(&format!("- **session**: `{}`\n", uuid));
+        md.push_str(&format!("- **model**: {}\n", record.model));
+        if let Some(base) = &record.api_base {
+            md.push_str(&format!("- **api_base**: {}\n", base));
+        }
+        if let Some(parent) = &record.parent_session_uuid {
+            md.push_str(&format!("- **forked from**: `{}`\n", parent));
+        }
+        md.push_str(&format!(
+            "- **created**: {}\n",
+            record.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+        if let Some(cwd) = &snap.cwd {
+            md.push_str(&format!("\n**working dir**: `{}`\n", cwd));
+        }
+
+        md.push_str("\n## Conversation\n\n");
+        for msg in &snap.context_messages_snapshot {
+            let role = match msg.role.as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                "system" => "System",
+                other => other,
+            };
+            md.push_str(&format!("**{}**\n\n{}\n\n", role, msg.content));
+        }
+
+        md.push_str("\n## Command history\n\n");
+        md.push_str("| # | source | rc | command |\n|---|---|---|---|\n");
+        for (i, entry) in history.iter().enumerate() {
+            let cmd = entry.command.replace('|', "\\|").replace('\n', " ");
+            let rc = entry
+                .returncode
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into());
+            md.push_str(&format!("| {} | {} | {} | `{}` |\n", i + 1, entry.source, rc, cmd));
+        }
+
+        let fname = format!("aish-session-{}.md", &uuid[..8.min(uuid.len())]);
+        match std::fs::write(&fname, &md) {
+            Ok(_) => println!(
+                "\x1b[32mexported\x1b[0m {} ({} messages, {} commands)",
+                fname,
+                snap.context_messages_snapshot.len(),
+                history.len()
+            ),
+            Err(e) => eprintln!("failed to write {}: {e}", fname),
+        }
+    }
+
+    /// `/usage` — show multi-account quota rotation + model fallback status.
+    fn handle_usage_command(&self) {
+        match self.ai_handler.rotation_snapshot() {
+            Some(snap) => {
+                println!();
+                println!("\x1b[1mAPI Quota Rotation & Fallback\x1b[0m");
+                println!();
+                println!("  primary model : {}", snap.primary_model);
+                let fb = if snap.on_fallback {
+                    "  \x1b[33m(fallback active)\x1b[0m"
+                } else {
+                    ""
+                };
+                println!("  active model  : {}{}", snap.active_model, fb);
+                if !snap.fallback_models.is_empty() {
+                    println!("  fallback chain: {}", snap.fallback_models.join(" -> "));
+                }
+                println!();
+                println!(
+                    "  accounts ({} total, {} available):",
+                    snap.account_names.len(),
+                    snap.available_accounts
+                );
+                for name in &snap.account_names {
+                    let is_cur = snap.current_account.as_deref() == Some(name.as_str());
+                    let is_cool = snap.cooled_accounts.iter().any(|c| c == name);
+                    let (mark, state) = if is_cur {
+                        ("\x1b[32m*\x1b[0m", "active")
+                    } else if is_cool {
+                        ("\x1b[31mx\x1b[0m", "cooling down")
+                    } else {
+                        ("o", "ready")
+                    };
+                    println!("    {} {:<16} {}", mark, name, state);
+                }
+                println!();
+                println!("  rotations this session: {}", snap.total_rotations);
+                println!();
+            }
+            None => {
+                println!();
+                println!("\x1b[33mMulti-account rotation is not active.\x1b[0m");
+                println!("Add extra API keys with /accounts, or set fallback_models in config.yaml.");
+                println!();
+            }
+        }
+    }
+
+    /// `/accounts` — manage multi-key quota rotation accounts at runtime.
+    fn handle_accounts_command(&mut self, parts: &[&str]) {
+        let sub = parts.get(1).copied().unwrap_or("list");
+        match sub {
+            "list" => self.accounts_list(),
+            "add" => {
+                let name = match parts.get(2) {
+                    Some(n) if !n.is_empty() => n.to_string(),
+                    _ => {
+                        eprintln!("usage: /accounts add <name> <api_key> [api_base]");
+                        return;
+                    }
+                };
+                let key = match parts.get(3) {
+                    Some(k) if !k.is_empty() => k.to_string(),
+                    _ => {
+                        eprintln!("usage: /accounts add <name> <api_key> [api_base]");
+                        return;
+                    }
+                };
+                let base = parts.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string());
+                if self.config.api_accounts.iter().any(|a| a.name == name) {
+                    eprintln!("account '{}' already exists", name);
+                    return;
+                }
+                self.config.api_accounts.push(aish_config::ApiAccountConfig {
+                    name: name.clone(),
+                    api_key: key,
+                    api_base: base,
+                    weight: 1,
+                    disabled: false,
+                });
+                self.persist_config_and_rebuild_rotation();
+                println!(
+                    "\x1b[32madded account '{}'\x1b[0m ({} extra account{})",
+                    name,
+                    self.config.api_accounts.len(),
+                    if self.config.api_accounts.len() == 1 { "" } else { "s" }
+                );
+            }
+            "remove" | "rm" | "delete" => {
+                let name = match parts.get(2) {
+                    Some(n) => n.to_string(),
+                    None => {
+                        eprintln!("usage: /accounts remove <name>");
+                        return;
+                    }
+                };
+                let before = self.config.api_accounts.len();
+                self.config.api_accounts.retain(|a| a.name != name);
+                if self.config.api_accounts.len() == before {
+                    eprintln!("no account named '{}'", name);
+                    return;
+                }
+                self.persist_config_and_rebuild_rotation();
+                println!("\x1b[32mremoved account '{}'\x1b[0m", name);
+            }
+            "enable" | "disable" => {
+                let disabled = sub == "disable";
+                let name = match parts.get(2) {
+                    Some(n) => n.to_string(),
+                    None => {
+                        eprintln!("usage: /accounts {} <name>", sub);
+                        return;
+                    }
+                };
+                match self.config.api_accounts.iter_mut().find(|a| a.name == name) {
+                    Some(a) => {
+                        a.disabled = disabled;
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{} account '{}'\x1b[0m",
+                            if disabled { "disabled" } else { "enabled" },
+                            name
+                        );
+                    }
+                    None => eprintln!("no account named '{}'", name),
+                }
+            }
+            "help" | "-h" | "--help" => {
+                println!("/accounts                       list rotation accounts");
+                println!("/accounts add <name> <key> [base]");
+                println!("/accounts remove <name>");
+                println!("/accounts enable|disable <name>");
+            }
+            other => eprintln!("unknown subcommand '{}'. try /accounts help", other),
+        }
+    }
+
+    fn accounts_list(&self) {
+        println!();
+        println!("\x1b[1mRotation accounts\x1b[0m");
+        let primary_preview: String = self.config.api_key.chars().take(6).collect();
+        println!(
+            "  [0] primary   key={}...  {}",
+            primary_preview,
+            if self.config.api_key.trim().is_empty() {
+                "(unset)"
+            } else {
+                ""
+            }
+        );
+        for (i, a) in self.config.api_accounts.iter().enumerate() {
+            let preview: String = a.api_key.chars().take(6).collect();
+            let state = if a.disabled { "disabled" } else { "enabled" };
+            println!(
+                "  [{}] {:<10} key={}...  {}  {}",
+                i + 1,
+                a.name,
+                preview,
+                a.api_base.as_deref().unwrap_or(""),
+                state
+            );
+        }
+        if self.config.api_accounts.is_empty() {
+            println!("  (no extra accounts; add one with /accounts add <name> <key>)");
+        }
+        println!();
+    }
+
+    /// Persist the current config to disk, then rebuild the live rotation state.
+    fn persist_config_and_rebuild_rotation(&mut self) {
+        let config_path = aish_config::ConfigLoader::default_config_path();
+        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
+            eprintln!("warning: failed to save config: {e}");
+        }
+        self.rebuild_rotation();
+    }
+
+    /// Rebuild the LLM session rotation state from the current config.
+    fn rebuild_rotation(&mut self) {
+        let accounts = rotation_accounts_from_config(&self.config);
+        let state = if !self.config.fallback_models.is_empty() || accounts.len() > 1 {
+            let mut policy = aish_llm::RetryPolicy::default();
+            policy.revert_on_cooldown = self.config.fallback_revert_on_cooldown;
+            let s = aish_llm::RotationState::new(
+                self.config.model.clone(),
+                accounts,
+                self.config.fallback_models.clone(),
+                policy,
+            );
+            if s.is_active() {
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.ai_handler.apply_rotation_state(state);
     }
 
     fn handle_audit_command(&self, parts: &[&str]) {

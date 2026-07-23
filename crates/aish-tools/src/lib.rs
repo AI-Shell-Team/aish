@@ -125,6 +125,13 @@ pub mod secure_bash {
     pub use self::secure_bash::*;
 }
 
+pub mod service_supervisor {
+    mod prompt;
+    mod service_supervisor;
+
+    pub use self::service_supervisor::*;
+}
+
 pub mod skill_tool {
     mod prompt;
     mod skill_tool;
@@ -161,5 +168,6 @@ pub use plan_tool::{EnterPlanModeTool, ExitPlanModeTool, ListTemplatesTool};
 pub use python::PythonTool;
 pub use registry::ToolRegistry;
 pub use secure_bash::SecureBashTool;
+pub use service_supervisor::ServiceSupervisorTool;
 pub use skill_tool::{SkillInfo, SkillSpawnFn, SkillSpawnRequest, SkillTool};
 pub use web_fetch::WebFetchTool;

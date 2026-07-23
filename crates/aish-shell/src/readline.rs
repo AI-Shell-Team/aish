@@ -45,6 +45,30 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/forget-approvals",
         "Clear remembered command approvals (this session)",
     ),
+    (
+        "/usage",
+        "Show API quota rotation + fallback status",
+    ),
+    (
+        "/accounts",
+        "Manage multi-key rotation accounts (add/remove/enable)",
+    ),
+    (
+        "/fallback",
+        "Manage the model fallback chain (add/remove/clear)",
+    ),
+    (
+        "/fork",
+        "Branch the current session into a new one (copied context)",
+    ),
+    (
+        "/sessions",
+        "Show the session tree (roots + forks)",
+    ),
+    (
+        "/export",
+        "Export current session to Markdown",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -823,6 +847,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 17);
+        assert_eq!(SLASH_COMMANDS.len(), 23);
     }
 }
