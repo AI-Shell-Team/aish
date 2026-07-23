@@ -145,6 +145,23 @@ fn abbreviate_path(path: &str, home: &str) -> String {
 /// Calculate the visible display width of a string, ignoring ANSI escape sequences.
 /// Accounts for CJK double-width characters.
 pub fn strip_ansi_len(s: &str) -> usize {
+    strip_ansi_len_with(s, term_char_width)
+}
+
+/// Visible width for fixed box layouts (welcome panel).
+///
+/// Always treats East-Asian *Ambiguous* characters (box-drawing, `·`, `—`, …)
+/// as 1 column. The panel's `╭─` / `│` / `╰─` math assumes that, and modern
+/// terminals — including WeTTY and most GUI emulators under `zh_CN` — render
+/// Ambiguous as narrow. Using `term_char_width` (CJK locale → Ambiguous=2)
+/// here makes the right border drift by the number of Ambiguous glyphs.
+fn panel_strip_ansi_len(s: &str) -> usize {
+    strip_ansi_len_with(s, |ch| {
+        unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0)
+    })
+}
+
+fn strip_ansi_len_with(s: &str, char_width: impl Fn(char) -> usize) -> usize {
     let mut len = 0;
     let mut in_escape = false;
     for ch in s.chars() {
@@ -155,7 +172,7 @@ pub fn strip_ansi_len(s: &str) -> usize {
                 in_escape = false;
             }
         } else {
-            len += term_char_width(ch);
+            len += char_width(ch);
         }
     }
     len
@@ -195,9 +212,7 @@ fn truncate_ansi(s: &str, max_visible: usize) -> String {
         }
         let ch = s[i..].chars().next().unwrap();
         let ch_len = ch.len_utf8();
-        // Use display width (CJK = 2 columns) so the result matches what
-        // strip_ansi_len measured — otherwise wide glyphs would still push
-        // the line past inner_width after truncation.
+        // Ambiguous=1, same as panel_strip_ansi_len — welcome-panel only.
         let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
         if visible + ch_width > max_visible {
             break;
@@ -329,18 +344,14 @@ pub fn render_welcome(
         String::new(),
         format!(
             "  {}: {} {}",
-            theme::bold(&format!("{}:", model_label)),
+            theme::bold(&model_label),
             model,
             theme::faint(&model_hint)
         ),
-        format!(
-            "  {}: {}",
-            theme::bold(&format!("{}:", config_label)),
-            config_path
-        ),
+        format!("  {}: {}", theme::bold(&config_label), config_path),
         format!(
             "  {}: {} {}",
-            theme::bold(&format!("{}:", skills_label)),
+            theme::bold(&skills_label),
             theme::success(&format!("#{}", skill_count)),
             skills_suffix
         ),
@@ -368,7 +379,7 @@ pub fn render_welcome(
             format!(
                 "  {} {} {} {}",
                 theme::accent(&theme::bold(&title)),
-                theme::faint("·"),
+                theme::faint("-"),
                 theme::faint(&format!(
                     "{} {} {}",
                     hint_prefix,
@@ -391,7 +402,7 @@ pub fn render_welcome(
                 _ => theme::dim("[-]"),
             };
             let mut line = format!("  {} {}", badge_styled, entry.text);
-            let visible = strip_ansi_len(&line);
+            let visible = panel_strip_ansi_len(&line);
             if visible > inner_width {
                 let truncated = truncate_ansi(&line, inner_width - 3);
                 // Re-append reset: truncate_ansi may have stopped before the
@@ -405,7 +416,7 @@ pub fn render_welcome(
 
     // Render rounded box top with the same title as the Python panel.
     let title = format!(" {} ", header);
-    let title_len = strip_ansi_len(&title);
+    let title_len = panel_strip_ansi_len(&title);
     let top_fill = inner_width.saturating_sub(title_len + 1);
     out.push_str(&theme::dim(&format!(
         "╭─{}{}╮",
@@ -416,7 +427,7 @@ pub fn render_welcome(
 
     // Render content lines
     for line in &content_lines {
-        let visible_len = strip_ansi_len(line);
+        let visible_len = panel_strip_ansi_len(line);
         let padding = inner_width.saturating_sub(visible_len);
         out.push_str(&theme::dim("│"));
         out.push_str(line);
@@ -860,6 +871,46 @@ mod tests {
         .unwrap();
         let cwd = tmp.path().to_string_lossy().to_string();
         assert_eq!(read_git_branch(&cwd), Some("a1b2c3d4".to_string()));
+    }
+
+    #[test]
+    fn test_render_welcome_panel_right_border_aligns() {
+        // Every panel row (top / content / bottom) must share the same
+        // Ambiguous=1 display width so the right │ / ╮ / ╯ form a straight edge
+        // under zh_CN and in WeTTY — where Ambiguous glyphs are still 1 col.
+        let mk = |text: &str| aish_i18n::changelog::ChangelogEntry {
+            category: "Added".to_string(),
+            text: text.to_string(),
+        };
+        let result = render_welcome(
+            "0.3.8",
+            "deepseek-v4-flash",
+            8,
+            vec![mk("short change"), mk("another"), mk("third")],
+        );
+        let panel_lines: Vec<&str> = result
+            .lines()
+            .filter(|l| {
+                // theme::dim may wrap the border; match on the box glyphs.
+                panel_strip_ansi_len(l) > 0
+                    && (l.contains('╭') || l.contains('╰') || l.contains('│'))
+            })
+            .collect();
+        assert!(
+            panel_lines.len() >= 4,
+            "expected panel rows, got {}",
+            panel_lines.len()
+        );
+        let widths: Vec<usize> = panel_lines
+            .iter()
+            .map(|l| panel_strip_ansi_len(l))
+            .collect();
+        let first = widths[0];
+        assert!(
+            widths.iter().all(|&w| w == first),
+            "panel row widths must match: {:?}",
+            widths
+        );
     }
 
     #[test]
