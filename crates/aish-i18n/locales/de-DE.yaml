@@ -512,6 +512,10 @@ shell:
     switch_same: "Modell unverändert: {model}"
     switch_success: "Zu Modell gewechselt: {model}"
     verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
+    picker_title: "Modell / Konto wechseln"
+    picker_search: "Modelle oder Konten suchen..."
+    picker_footer: "↑↓ Auswaehlen  Enter Wechseln  Esc Abbrechen"
+    switched_account: "Zu '{name}' gewechselt (Modell: {model})"
   token:
     title: "Token-Nutzung (letzte 7 Tage)"
     input_tokens: "Eingabe-Tokens"

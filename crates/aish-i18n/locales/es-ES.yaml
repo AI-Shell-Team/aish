@@ -512,6 +512,10 @@ shell:
     switch_same: "El modelo no ha cambiado: {model}"
     switch_success: "Se cambió al modelo: {model}"
     verify_failed: "Falló la validación del modelo: {reason}"
+    picker_title: "Cambiar modelo / cuenta"
+    picker_search: "Buscar modelos o cuentas..."
+    picker_footer: "↑↓ seleccionar  Enter cambiar  Esc cancelar"
+    switched_account: "Cambiado a '{name}' (modelo: {model})"
   token:
     title: "Uso de tokens (últimos 7 días)"
     input_tokens: "Tokens de entrada"

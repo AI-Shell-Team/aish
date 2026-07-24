@@ -5720,10 +5720,7 @@ impl AishShell {
 
     fn handle_model_command(&mut self, parts: &[&str]) {
         if parts.len() == 1 {
-            let mut args = std::collections::HashMap::new();
-            args.insert("model".to_string(), self.config.model.clone());
-            println!("{}", t_with_args("shell.model.current", &args));
-            return;
+            return self.model_picker_panel();
         }
 
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
@@ -5778,6 +5775,90 @@ impl AishShell {
         let mut args = std::collections::HashMap::new();
         args.insert("model".to_string(), new_model);
         println!("{}", t_with_args("shell.model.switch_success", &args));
+    }
+
+    /// `/model` with no argument opens a searchable picker listing every
+    /// model configuration available to switch to: the primary model plus
+    /// each API account carrying its own model. Selecting an entry switches
+    /// the active account/model at once — this unifies "switch model" and
+    /// "switch account" into one surface (cf. oh-my-pi's ModelPicker).
+    fn model_picker_panel(&mut self) {
+        use aish_ui::{
+            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        };
+
+        let current = self
+            .ai_handler
+            .current_rotation_account()
+            .unwrap_or_else(|| "primary".to_string());
+
+        let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
+            "primary",
+            self.config.model.clone(),
+        )
+        .with_highlight("primary")
+        .with_detail(self.config.api_base.as_str())];
+
+        for a in &self.config.api_accounts {
+            let model = a
+                .model
+                .clone()
+                .unwrap_or_else(|| self.config.model.clone());
+            let base = a
+                .api_base
+                .clone()
+                .unwrap_or_else(|| self.config.api_base.clone());
+            items.push(
+                SearchSelectItem::new(a.name.clone(), model)
+                    .with_highlight(a.name.clone())
+                    .with_detail(base),
+            );
+        }
+
+        let panel = SearchSelectPanel::new(
+            t("shell.model.picker_title"),
+            t("shell.model.picker_search"),
+            items,
+        )
+        .with_shimmer(Some(&current))
+        .with_footer(t("shell.model.picker_footer"));
+
+        let outcome = {
+            let _guard = aish_tools::bash::acquire_interactive_input_guard();
+            PanelRuntime::new().run(panel)
+        };
+
+        if let Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(name))) = outcome {
+            if self.ai_handler.use_rotation_account(&name) {
+                let model = self
+                    .ai_handler
+                    .rotation_snapshot()
+                    .map(|s| s.active_model)
+                    .unwrap_or_default();
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.model.switched_account", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("name".to_string(), name);
+                        args.insert("model".to_string(), model);
+                        args
+                    })
+                );
+            } else if name == "primary" {
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), self.config.model.clone());
+                println!("{}", t_with_args("shell.model.current", &args));
+            } else {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.accounts.no_account_named", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("name".to_string(), name);
+                        args
+                    })
+                );
+            }
+        }
     }
 
     /// Handle `/setting` — single-screen settings panel.

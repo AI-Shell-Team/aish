@@ -512,6 +512,10 @@ shell:
     switch_same: "モデルは変更されていません: {model}"
     switch_success: "モデルを切り替えました: {model}"
     verify_failed: "モデル検証に失敗しました: {reason}"
+    picker_title: "モデル / アカウント切替"
+    picker_search: "モデルやアカウントを検索..."
+    picker_footer: "↑↓ 選択  Enter 切替  Esc キャンセル"
+    switched_account: "'{name}' に切り替えました（モデル: {model}）"
   token:
     title: "Token 使用量 (過去7日間)"
     input_tokens: "入力 tokens"

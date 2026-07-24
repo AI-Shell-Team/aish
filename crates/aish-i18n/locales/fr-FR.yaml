@@ -512,6 +512,10 @@ shell:
     switch_same: "Modele inchange : {model}"
     switch_success: "Modele active : {model}"
     verify_failed: "La validation du modele a echoue : {reason}"
+    picker_title: "Changer modele / compte"
+    picker_search: "Rechercher modeles ou comptes..."
+    picker_footer: "↑↓ selectionner  Enter basculer  Esc annuler"
+    switched_account: "Bascule vers '{name}' (modele : {model})"
   token:
     title: "Utilisation de tokens (7 derniers jours)"
     input_tokens: "Tokens d'entrée"

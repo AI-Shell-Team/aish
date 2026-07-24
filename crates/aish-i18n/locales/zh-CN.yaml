@@ -871,6 +871,10 @@ shell:
     switch_same: "模型未变更，仍为: {model}"
     switch_success: "已切换模型: {model}"
     verify_failed: "模型验证失败: {reason}"
+    picker_title: "切换模型 / 账户"
+    picker_search: "搜索模型或账户..."
+    picker_footer: "↑↓ 选择  Enter 切换  Esc 取消"
+    switched_account: "已切换到 '{name}'（模型：{model}）"
 
   token:
     title: "Token 统计 (近 7 天)"

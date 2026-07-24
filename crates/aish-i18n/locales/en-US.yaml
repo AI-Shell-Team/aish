@@ -871,6 +871,10 @@ shell:
     switch_same: "Model unchanged: {model}"
     switch_success: "Switched to model: {model}"
     verify_failed: "Model validation failed: {reason}"
+    picker_title: "Switch model / account"
+    picker_search: "Search models or accounts..."
+    picker_footer: "Up/Dn select  Enter switch  Esc cancel"
+    switched_account: "Switched to '{name}' (model: {model})"
 
   token:
     title: "Token Usage (last 7 days)"
