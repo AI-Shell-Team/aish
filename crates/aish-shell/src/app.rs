@@ -267,6 +267,26 @@ fn prompt_edit_value(label: &str, desc: &str, current: &str, secret: bool) -> Op
     }
 }
 
+/// Interactive menu picker built on the inline selection panel. Each option is
+/// `(value, label, description)`. Returns the chosen value, or `None` on cancel.
+/// REPL-safe (the underlying panel acquires the interactive input guard).
+fn pick_menu(title: &str, options: &[(&str, &str, &str)]) -> Option<String> {
+    let opts: Vec<crate::tui::DialogOption> = options
+        .iter()
+        .map(|(v, l, d)| {
+            let mut o = crate::tui::DialogOption::new(*v, *l);
+            if !d.is_empty() {
+                o = o.with_description(*d);
+            }
+            o
+        })
+        .collect();
+    match crate::tui::show_selection_dialog(title, "", &opts, false, true) {
+        crate::tui::DialogResult::Selected(v) => Some(v),
+        _ => None,
+    }
+}
+
 fn llm_session_from_config(config: &ConfigModel) -> LlmSession {
     let mut session = LlmSession::with_context(
         stream_context_from_config(config),
@@ -3342,6 +3362,36 @@ impl AishShell {
     /// `/fallback` — manage the ordered model fallback chain tried when the
     /// primary model hits a rate/usage limit or a hard error.
     fn handle_fallback_command(&mut self, parts: &[&str]) {
+        // Direct subcommand (power-user) → dispatch.
+        if parts.len() > 1 {
+            return self.fallback_dispatch(parts);
+        }
+        // No args → interactive menu.
+        let action = match pick_menu(
+            "Fallback model chain",
+            &[
+                ("list", "List chain", "show primary + fallback models and policy"),
+                ("add", "Add model", "append a fallback model"),
+                ("remove", "Remove model", "drop a model from the chain"),
+                ("clear", "Clear chain", "empty the fallback chain"),
+                ("revert", "Toggle revert", "auto-revert to primary on/off"),
+            ],
+        ) {
+            Some(a) => a,
+            None => return,
+        };
+        match action.as_str() {
+            "list" => self.fallback_dispatch(&["/fallback", "list"]),
+            "add" => self.fallback_add_interactive(),
+            "remove" => self.fallback_remove_interactive(),
+            "clear" => self.fallback_dispatch(&["/fallback", "clear"]),
+            "revert" => self.fallback_revert_interactive(),
+            _ => {}
+        }
+    }
+
+    /// Direct subcommand dispatch for `/fallback` (power-user path).
+    fn fallback_dispatch(&mut self, parts: &[&str]) {
         let sub = parts.get(1).copied().unwrap_or("list");
         match sub {
             "list" => {
@@ -3371,9 +3421,6 @@ impl AishShell {
                         return;
                     }
                 };
-                if self.config.api_base.is_empty() && model.contains('/') {
-                    eprintln!("tip: fallback models usually omit the provider prefix");
-                }
                 if self.config.fallback_models.iter().any(|m| m == &model) {
                     eprintln!("'{}' is already in the fallback chain", model);
                     return;
@@ -3426,9 +3473,71 @@ impl AishShell {
                 println!("/fallback remove <model>   remove a fallback model");
                 println!("/fallback clear            empty the chain");
                 println!("/fallback revert on|off    auto-revert to primary on cooldown");
+                println!("(no args opens an interactive menu)");
             }
             other => eprintln!("unknown subcommand '{}'. try /fallback help", other),
         }
+    }
+
+    fn fallback_add_interactive(&mut self) {
+        let model = match prompt_edit_value(
+            "Fallback model",
+            "model name tried when the primary fails (e.g. gpt-4o-mini)",
+            "",
+            false,
+        ) {
+            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+            _ => {
+                println!("cancelled");
+                return;
+            }
+        };
+        if self.config.fallback_models.iter().any(|m| m == &model) {
+            eprintln!("'{}' is already in the fallback chain", model);
+            return;
+        }
+        self.config.fallback_models.push(model.clone());
+        self.persist_config_and_rebuild_rotation();
+        println!("\x1b[32madded fallback '{}'\x1b[0m", model);
+    }
+
+    fn fallback_remove_interactive(&mut self) {
+        if self.config.fallback_models.is_empty() {
+            eprintln!("fallback chain is empty");
+            return;
+        }
+        let models: Vec<String> = self.config.fallback_models.clone();
+        let opts: Vec<(&str, &str, &str)> =
+            models.iter().map(|m| (m.as_str(), m.as_str(), "")).collect();
+        let model = match pick_menu("Remove fallback model", &opts) {
+            Some(m) => m,
+            None => return,
+        };
+        self.config.fallback_models.retain(|m| m != &model);
+        self.persist_config_and_rebuild_rotation();
+        println!("\x1b[32mremoved fallback '{}'\x1b[0m", model);
+    }
+
+    fn fallback_revert_interactive(&mut self) {
+        let cur = self.config.fallback_revert_on_cooldown;
+        let action = match pick_menu(
+            "Revert policy",
+            &[
+                ("on", "Auto-revert", "return to primary after cooldown (recommended)"),
+                ("off", "Stay on fallback", "keep fallback until manual switch"),
+            ],
+        ) {
+            Some(a) => a,
+            None => return,
+        };
+        let val = action == "on";
+        if val == cur {
+            println!("revert policy already '{}'", action);
+            return;
+        }
+        self.config.fallback_revert_on_cooldown = val;
+        self.persist_config_and_rebuild_rotation();
+        println!("\x1b[32mrevert policy: {}\x1b[0m", action);
     }
 
     /// `/fork` — branch the current session into a new one (copied context),
@@ -3654,6 +3763,34 @@ impl AishShell {
 
     /// `/accounts` — manage multi-key quota rotation accounts at runtime.
     fn handle_accounts_command(&mut self, parts: &[&str]) {
+        // Direct subcommand (power-user) → dispatch.
+        if parts.len() > 1 {
+            return self.accounts_dispatch(parts);
+        }
+        // No args → interactive menu.
+        let action = match pick_menu(
+            "Rotation accounts",
+            &[
+                ("list", "List accounts", "show all rotation accounts + status"),
+                ("add", "Add account", "register a new API key"),
+                ("remove", "Remove account", "delete an account"),
+                ("toggle", "Enable / disable", "pause or resume an account"),
+            ],
+        ) {
+            Some(a) => a,
+            None => return,
+        };
+        match action.as_str() {
+            "list" => self.accounts_list(),
+            "add" => self.accounts_add_interactive(),
+            "remove" => self.accounts_remove_interactive(),
+            "toggle" => self.accounts_toggle_interactive(),
+            _ => {}
+        }
+    }
+
+    /// Direct subcommand dispatch for `/accounts` (power-user path).
+    fn accounts_dispatch(&mut self, parts: &[&str]) {
         let sub = parts.get(1).copied().unwrap_or("list");
         match sub {
             "list" => self.accounts_list(),
@@ -3736,8 +3873,97 @@ impl AishShell {
                 println!("/accounts add <name> <key> [base]");
                 println!("/accounts remove <name>");
                 println!("/accounts enable|disable <name>");
+                println!("(no args opens an interactive menu)");
             }
             other => eprintln!("unknown subcommand '{}'. try /accounts help", other),
+        }
+    }
+
+    fn accounts_add_interactive(&mut self) {
+        let name = match prompt_edit_value(
+            "Account name",
+            "short label, e.g. 'team-b'",
+            "",
+            false,
+        ) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                println!("cancelled");
+                return;
+            }
+        };
+        let key = match prompt_edit_value("API key", "the key for this account", "", true) {
+            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+            _ => {
+                println!("cancelled");
+                return;
+            }
+        };
+        let base = prompt_edit_value(
+            "API base (optional)",
+            "override endpoint; blank = same as primary",
+            "",
+            false,
+        )
+        .filter(|s| !s.trim().is_empty());
+        if self.config.api_accounts.iter().any(|a| a.name == name) {
+            eprintln!("account '{}' already exists", name);
+            return;
+        }
+        self.config.api_accounts.push(aish_config::ApiAccountConfig {
+            name: name.clone(),
+            api_key: key,
+            api_base: base,
+            weight: 1,
+            disabled: false,
+        });
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32madded account '{}'\x1b[0m ({} extra account{})",
+            name,
+            self.config.api_accounts.len(),
+            if self.config.api_accounts.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    fn accounts_remove_interactive(&mut self) {
+        if self.config.api_accounts.is_empty() {
+            eprintln!("no extra accounts to remove");
+            return;
+        }
+        let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
+        let opts: Vec<(&str, &str, &str)> =
+            names.iter().map(|n| (n.as_str(), n.as_str(), "")).collect();
+        let name = match pick_menu("Remove account", &opts) {
+            Some(n) => n,
+            None => return,
+        };
+        self.config.api_accounts.retain(|a| a.name != name);
+        self.persist_config_and_rebuild_rotation();
+        println!("\x1b[32mremoved account '{}'\x1b[0m", name);
+    }
+
+    fn accounts_toggle_interactive(&mut self) {
+        if self.config.api_accounts.is_empty() {
+            eprintln!("no extra accounts to toggle");
+            return;
+        }
+        let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
+        let opts: Vec<(&str, &str, &str)> =
+            names.iter().map(|n| (n.as_str(), n.as_str(), "")).collect();
+        let name = match pick_menu("Enable / disable account", &opts) {
+            Some(n) => n,
+            None => return,
+        };
+        if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
+            a.disabled = !a.disabled;
+            let now = a.disabled;
+            self.persist_config_and_rebuild_rotation();
+            println!(
+                "\x1b[32m{} account '{}'\x1b[0m",
+                if now { "disabled" } else { "enabled" },
+                name
+            );
         }
     }
 
