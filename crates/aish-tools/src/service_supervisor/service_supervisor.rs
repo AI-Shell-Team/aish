@@ -223,24 +223,24 @@ fn pid_alive(pid: u32) -> bool {
     if r == -1 {
         let err = io::Error::last_os_error().raw_os_error().unwrap_or(0);
         if err == libc::ECHILD {
-            // Not our child; fall through to the signal-0 probe.
-            let rc = unsafe { libc::kill(raw, 0) };
-            if rc == 0 {
-                return true;
-            }
-            let e = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            // ESRCH = no such process; EPERM = exists but no permission -> alive.
-            return e != libc::ESRCH;
+            // Not our child (reaped earlier, or reparented). Treat as exited
+            // rather than probing with kill(0): a signal-0 probe on a reused
+            // pid would misreport an unrelated process as alive and could route
+            // SIGTERM/SIGKILL onto it.
+            return false;
         }
     }
     // r == 0 => child still running (no state change).
     true
 }
 
-fn send_signal(pid: u32, sig: libc::c_int) {
-    // SAFETY: best-effort signal delivery to a known pid.
+/// Signal an entire process group. Children are spawned with `process_group(0)`
+/// so the group id equals the leader pid; signalling `-(pid)` reaches the
+/// leader and any grandchildren, preventing orphans on stop/restart.
+fn send_signal_group(pgid: u32, sig: libc::c_int) {
+    // SAFETY: best-effort group signal delivery to a known process group.
     unsafe {
-        libc::kill(pid as libc::pid_t, sig);
+        libc::kill(-(pgid as libc::pid_t), sig);
     }
 }
 
@@ -302,7 +302,20 @@ fn wait_until_ready(
     ready_port: Option<u16>,
     deadline: Instant,
 ) -> bool {
-    let log_re = ready_log.and_then(|p| Regex::new(p).ok());
+    let log_re = match ready_log {
+        None => None,
+        Some(p) => match Regex::new(p) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                tracing::warn!(
+                    pattern = %p,
+                    error = %e,
+                    "invalid ready_log regex; treating service as not ready"
+                );
+                return false;
+            }
+        },
+    };
     loop {
         let log_content = if log_re.is_some() {
             read_log_tail(log_file, READY_LOG_TAIL_BYTES)
@@ -469,7 +482,7 @@ fn stop_service(dir: &Path, name: &str) -> ToolResult {
     };
     let stopped = match state.pid {
         Some(pid) if pid_alive(pid) => {
-            send_signal(pid, libc::SIGTERM);
+            send_signal_group(pid, libc::SIGTERM);
             let deadline = Instant::now() + Duration::from_secs(STOP_GRACE_SECS);
             while Instant::now() < deadline {
                 if !pid_alive(pid) {
@@ -478,7 +491,7 @@ fn stop_service(dir: &Path, name: &str) -> ToolResult {
                 std::thread::sleep(Duration::from_millis(100));
             }
             if pid_alive(pid) {
-                send_signal(pid, libc::SIGKILL);
+                send_signal_group(pid, libc::SIGKILL);
                 std::thread::sleep(Duration::from_millis(100));
             }
             !pid_alive(pid)
@@ -511,14 +524,18 @@ fn stop_service(dir: &Path, name: &str) -> ToolResult {
 
 fn logs_service(dir: &Path, name: &str, lines: usize) -> ToolResult {
     let path = log_path(dir, name);
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return ToolResult::error(format!("No log file for `{}`", name));
-        }
-        Err(e) => return ToolResult::error(format!("Failed to read log: {e}")),
+    let content = match read_log_tail(&path, 64 * 1024) {
+        Some(c) => c,
+        None => return ToolResult::error(format!("No log file for `{}`", name)),
     };
-    let tail: Vec<&str> = content.lines().rev().take(lines).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: Vec<&str> = content
+        .lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     let body = tail.join("\n");
     ok_meta(
         format!("Last {} log line(s) for `{}`", tail.len(), name),
@@ -792,7 +809,7 @@ mod tests {
         impl Drop for Reaper {
             fn drop(&mut self) {
                 if pid_alive(self.0) {
-                    send_signal(self.0, libc::SIGKILL);
+                    send_signal_group(self.0, libc::SIGKILL);
                 }
             }
         }

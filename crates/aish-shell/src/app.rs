@@ -5142,6 +5142,10 @@ impl AishShell {
             );
         }
 
+        // Rebuild rotation so the new primary model takes effect at once;
+        // otherwise the rotation loop keeps the model captured at setup.
+        self.rebuild_rotation();
+
         let mut args = std::collections::HashMap::new();
         args.insert("model".to_string(), new_model);
         println!("{}", t_with_args("shell.model.switch_success", &args));

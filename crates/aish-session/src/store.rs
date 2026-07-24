@@ -591,35 +591,29 @@ fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRec
 /// `branch_point_message_id`) to databases created by older builds. Idempotent:
 /// each column is added only when missing, detected via `PRAGMA table_info`.
 fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
-    let columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(sessions)")
-        .map_err(|e| AishError::Session(format!("failed to inspect sessions schema: {e}")))?
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| AishError::Session(format!("failed to read sessions schema: {e}")))?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(|e| AishError::Session(format!("failed to collect column names: {e}")))?;
-
-    if !columns.iter().any(|c| c == "parent_session_uuid") {
-        conn.execute_batch(
-            "ALTER TABLE sessions ADD COLUMN parent_session_uuid TEXT DEFAULT NULL;",
-        )
-        .map_err(|e| {
-            AishError::Session(format!("failed to add parent_session_uuid column: {e}"))
-        })?;
-    }
-
-    if !columns.iter().any(|c| c == "branch_point_message_id") {
-        conn.execute_batch(
-            "ALTER TABLE sessions ADD COLUMN branch_point_message_id INTEGER DEFAULT NULL;",
-        )
-        .map_err(|e| {
-            AishError::Session(format!(
-                "failed to add branch_point_message_id column: {e}"
-            ))
-        })?;
-    }
-
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE sessions ADD COLUMN parent_session_uuid TEXT DEFAULT NULL;",
+    )?;
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE sessions ADD COLUMN branch_point_message_id INTEGER DEFAULT NULL;",
+    )?;
     Ok(())
+}
+
+/// Apply an `ALTER TABLE ... ADD COLUMN` idempotently. SQLite errors with
+/// "duplicate column name" if the column already exists (e.g. a concurrent
+/// `SessionStore::open` ran the migration first); treat that as success so the
+/// check-then-alter window cannot break concurrent startup.
+fn add_column_if_missing(conn: &rusqlite::Connection, sql: &str) -> Result<()> {
+    match conn.execute_batch(sql) {
+        Ok(()) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column") => Ok(()),
+        Err(e) => Err(AishError::Session(format!(
+            "failed to apply session schema migration: {e}"
+        ))),
+    }
 }
 
 /// Parse an RFC 3339 datetime string, falling back to UTC now on failure.

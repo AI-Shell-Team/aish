@@ -169,10 +169,10 @@ impl FailureKind {
 
     /// Whether this failure should trigger account rotation (vs model fallback).
     pub fn is_account_recoverable(self) -> bool {
-        matches!(
-            self,
-            Self::RateLimit | Self::UsageLimit | Self::ServerError | Self::Network
-        )
+        // Network failures are environment-wide (not account-specific), so
+        // rotating keys only burns otherwise-good credentials. They fall
+        // through to model fallback instead of exhausting every account.
+        matches!(self, Self::RateLimit | Self::UsageLimit | Self::ServerError)
     }
 }
 
