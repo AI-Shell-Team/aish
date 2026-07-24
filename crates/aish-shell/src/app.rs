@@ -5152,6 +5152,12 @@ impl AishShell {
                         .with_detail(base),
                 );
             }
+            for m in &self.config.fallback_models {
+                items.push(
+                    SearchSelectItem::new(format!("fallback:{m}"), m.clone())
+                        .with_badge(t("shell.model.fallback_badge")),
+                );
+            }
 
             let panel = SearchSelectPanel::new(
                 t("shell.model.picker_title"),
@@ -5161,7 +5167,8 @@ impl AishShell {
             .with_shimmer(Some(&current))
             .with_footer(t("shell.model.picker_footer"))
             .with_action('a', t("shell.model.action_add"))
-            .with_action('d', t("shell.model.action_del"));
+            .with_action('d', t("shell.model.action_del"))
+            .with_action('f', t("shell.model.action_fallback"));
 
             let outcome = {
                 let _guard = aish_tools::bash::acquire_interactive_input_guard();
@@ -5178,6 +5185,9 @@ impl AishShell {
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', name))) => {
                     self.model_panel_remove(&name);
                 }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('f', _))) => {
+                    self.add_fallback_interactive();
+                }
                 _ => break,
             }
         }
@@ -5185,6 +5195,17 @@ impl AishShell {
 
     /// Switch the active account/model from the model panel.
     fn model_panel_switch(&mut self, name: &str) {
+        if let Some(model) = name.strip_prefix("fallback:") {
+            eprintln!(
+                "{}",
+                t_with_args("shell.model.fallback_not_switchable", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model.to_string());
+                    args
+                })
+            );
+            return;
+        }
         if self.ai_handler.use_rotation_account(name) {
             let model = self
                 .ai_handler
@@ -5219,6 +5240,22 @@ impl AishShell {
     /// Remove an account from the model panel. The primary entry cannot be
     /// deleted (it is the baseline config).
     fn model_panel_remove(&mut self, name: &str) {
+        if let Some(model) = name.strip_prefix("fallback:") {
+            let before = self.config.fallback_models.len();
+            self.config.fallback_models.retain(|m| m != model);
+            if self.config.fallback_models.len() < before {
+                self.persist_config_and_rebuild_rotation();
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.model.fallback_removed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), model.to_string());
+                        args
+                    })
+                );
+            }
+            return;
+        }
         if name == "primary" {
             eprintln!("{}", t("shell.model.cannot_remove_primary"));
             return;
@@ -5236,6 +5273,43 @@ impl AishShell {
                 })
             );
         }
+    }
+
+    /// Add a fallback model from the model panel (prompt for the name).
+    fn add_fallback_interactive(&mut self) {
+        let model = match prompt_edit_value(
+            &t("shell.model.fallback_add_label"),
+            &t("shell.model.fallback_add_desc"),
+            "",
+            false,
+        ) {
+            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        if self.config.fallback_models.iter().any(|m| m == &model) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.model.fallback_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
+            return;
+        }
+        self.config.fallback_models.push(model.clone());
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.fallback_added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model);
+                args
+            })
+        );
     }
 
     /// Handle `/setting` — single-screen settings panel.
