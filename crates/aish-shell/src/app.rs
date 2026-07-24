@@ -4200,17 +4200,27 @@ impl AishShell {
             return;
         }
 
-        // Pick a model to verify against: try listing the endpoint's models,
-        // otherwise fall back to the primary model.
-        let model = match fetch_models_from_api(&base, &key, 10) {
+        // Pick a model to verify against (same strategy as /setup):
+        //   - if the endpoint lists models, show them with a "custom" option;
+        //   - otherwise (or when the user picks custom), prompt for a name.
+        let chosen: Option<String> = match fetch_models_from_api(&base, &key, 10) {
             Ok(models) if !models.is_empty() => {
-                let opts: Vec<(String, String, String)> = models
+                let mut opts: Vec<(String, String, String)> = models
                     .iter()
                     .map(|m| (m.clone(), m.clone(), String::new()))
                     .collect();
+                opts.push((
+                    "__custom__".to_string(),
+                    t("shell.accounts.custom_model"),
+                    String::new(),
+                ));
                 match pick_menu(&t("shell.accounts.select_model"), &opts) {
+                    Some(m) if m == "__custom__" => None,
                     Some(m) => Some(m),
-                    None => return,
+                    None => {
+                        println!("{}", t("shell.common.cancelled"));
+                        return;
+                    }
                 }
             }
             Ok(_) => {
@@ -4222,7 +4232,7 @@ impl AishShell {
                         args
                     })
                 );
-                Some(self.config.model.clone())
+                None
             }
             Err(e) => {
                 println!(
@@ -4233,57 +4243,71 @@ impl AishShell {
                         args
                     })
                 );
-                Some(self.config.model.clone())
+                None
             }
+        };
+        // Fetch failed/empty or the user picked "custom" -> enter a model name.
+        let model = match chosen {
+            Some(m) => m,
+            None => match prompt_edit_value(
+                &t("shell.accounts.model_label"),
+                &t("shell.accounts.model_desc"),
+                &self.config.model,
+                false,
+            ) {
+                Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+                _ => {
+                    println!("{}", t("shell.common.cancelled"));
+                    return;
+                }
+            },
         };
 
         // Verify connectivity + tool support (same probes as /setup).
-        if let Some(model) = model {
-            println!("{}", t("shell.accounts.verifying"));
-            let conn = check_connectivity(&base, &key, &model, 15);
-            if conn.ok {
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.accounts.connected", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert(
-                            "latency".to_string(),
-                            conn.latency_ms.unwrap_or(0).to_string(),
-                        );
-                        args.insert("model".to_string(), model.clone());
-                        args
-                    })
-                );
-                let tools = check_tool_support(&base, &key, &model, 30);
-                let state = t(if tools.supports {
-                    "shell.accounts.tool_yes"
-                } else {
-                    "shell.accounts.tool_no"
-                });
-                println!("  {}", state);
+        println!("{}", t("shell.accounts.verifying"));
+        let conn = check_connectivity(&base, &key, &model, 15);
+        if conn.ok {
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.connected", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert(
+                        "latency".to_string(),
+                        conn.latency_ms.unwrap_or(0).to_string(),
+                    );
+                    args.insert("model".to_string(), model.clone());
+                    args
+                })
+            );
+            let tools = check_tool_support(&base, &key, &model, 30);
+            let state = t(if tools.supports {
+                "shell.accounts.tool_yes"
             } else {
-                let err = conn.error.unwrap_or_default();
-                eprintln!(
-                    "{}",
-                    t_with_args("shell.accounts.verify_failed", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("error".to_string(), err);
-                        args
-                    })
-                );
-                let save = pick_menu(
-                    &t("shell.accounts.verify_failed_title"),
-                    &[
-                        ("save".to_string(), t("shell.accounts.save_anyway"), String::new()),
-                        ("cancel".to_string(), t("shell.accounts.cancel_add"), String::new()),
-                    ],
-                );
-                match save.as_deref() {
-                    Some("save") => {}
-                    _ => {
-                        println!("{}", t("shell.common.cancelled"));
-                        return;
-                    }
+                "shell.accounts.tool_no"
+            });
+            println!("  {}", state);
+        } else {
+            let err = conn.error.unwrap_or_default();
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.verify_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), err);
+                    args
+                })
+            );
+            let save = pick_menu(
+                &t("shell.accounts.verify_failed_title"),
+                &[
+                    ("save".to_string(), t("shell.accounts.save_anyway"), String::new()),
+                    ("cancel".to_string(), t("shell.accounts.cancel_add"), String::new()),
+                ],
+            );
+            match save.as_deref() {
+                Some("save") => {}
+                _ => {
+                    println!("{}", t("shell.common.cancelled"));
+                    return;
                 }
             }
         }
