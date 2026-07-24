@@ -197,7 +197,10 @@ fn build_update_info(
     let latest = tag_name.strip_prefix('v').unwrap_or(tag_name);
     let current = current_version.strip_prefix('v').unwrap_or(current_version);
 
-    if compare_versions(latest, current) != std::cmp::Ordering::Greater {
+    // Stable channel must not offer a prerelease even if CDN /latest is mis-tagged.
+    if (!include_pre_release && is_prerelease_version(latest))
+        || compare_versions(latest, current) != std::cmp::Ordering::Greater
+    {
         return None;
     }
 
@@ -849,6 +852,12 @@ mod tests {
     #[test]
     fn test_build_update_info_already_latest() {
         assert!(build_update_info("v0.3.8", "0.3.8", false).is_none());
+    }
+
+    #[test]
+    fn test_build_update_info_rejects_prerelease_for_stable_channel() {
+        assert!(build_update_info("v0.3.0-beta.1", "0.2.0", false).is_none());
+        assert!(build_update_info("v0.3.0-beta.1", "0.2.0", true).is_some());
     }
 
     #[test]
