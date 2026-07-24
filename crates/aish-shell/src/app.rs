@@ -4036,6 +4036,50 @@ impl AishShell {
             return;
         };
 
+        // No args → interactive menu (power-user keeps `/audit --user x ...`).
+        if parts.len() == 1 {
+            let action = match pick_menu(
+                "Audit log",
+                &[
+                    ("recent", "Recent events", "last 20 across all"),
+                    ("user", "Filter by user", "show events for one user"),
+                    ("host", "Filter by host", "show events on one host"),
+                    ("type", "Filter by event type", "show one event type"),
+                ],
+            ) {
+                Some(a) => a,
+                None => return,
+            };
+            // Build owned args so the borrowed `&[&str]` outlives the match
+            // arms; recurse into the same handler for the filter cases. For
+            // "recent" (single element) fall through to the default query
+            // below instead of recursing — otherwise the len()==1 menu would
+            // re-trigger on itself.
+            let owned: Vec<String> = match action.as_str() {
+                "recent" => vec!["/audit".to_string()],
+                "user" => match prompt_edit_value("Username", "filter by user", "", false) {
+                    Some(u) if !u.is_empty() => vec!["/audit".into(), "--user".into(), u],
+                    _ => return,
+                },
+                "host" => match prompt_edit_value("Host", "filter by host", "", false) {
+                    Some(h) if !h.is_empty() => vec!["/audit".into(), "--host".into(), h],
+                    _ => return,
+                },
+                "type" => match prompt_edit_value("Event type", "e.g. command_executed", "", false) {
+                    Some(ty) if !ty.is_empty() => {
+                        vec!["/audit".into(), "--event-type".into(), ty]
+                    }
+                    _ => return,
+                },
+                _ => return,
+            };
+            if owned.len() > 1 {
+                let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+                return self.handle_audit_command(&refs);
+            }
+            // action == "recent": fall through to the default query.
+        }
+
         let mut query = aish_session::AuditQuery::new();
         query.limit = 20;
 
@@ -4446,20 +4490,32 @@ impl AishShell {
             }
         };
 
-        // No args: list sessions so the user can pick an ID.
+        // No args: interactive menu of killable sessions.
         if parts.len() < 2 {
-            println!(
-                "{}",
-                theme::bold(&t("shell.kill_live_sessions.list_header"))
-            );
+            let mut rows: Vec<(String, String)> = Vec::new();
             for s in &sessions {
-                println!("{}", format_session_line(s));
+                let current = current_id
+                    .as_ref()
+                    .map(|c| s.session_id == *c || s.session_id.starts_with(c))
+                    .unwrap_or(false);
+                if current {
+                    continue;
+                }
+                rows.push((s.session_id.clone(), format_session_line(s)));
             }
-            println!(
-                "\n{}",
-                theme::faint(&t("shell.kill_live_sessions.usage_hint"))
-            );
-            return;
+            let mut menu: Vec<(&str, &str, &str)> = rows
+                .iter()
+                .map(|(v, l)| (v.as_str(), l.as_str(), ""))
+                .collect();
+            menu.push(("all", "Kill all others", "every session except current"));
+            let choice = match pick_menu("Kill live sessions", &menu) {
+                Some(c) => c,
+                None => return,
+            };
+            return self.handle_kill_live_sessions_command(&[
+                "/kill_live_sessions",
+                choice.as_str(),
+            ]);
         }
 
         // `/kill_live_sessions all`
@@ -4598,8 +4654,22 @@ impl AishShell {
     }
 
     fn handle_doctor_command(&mut self, parts: &[&str]) {
+        // No args → interactive menu (power-user keeps `/doctor [--fix]`).
+        let fix = if parts.len() == 1 {
+            match pick_menu(
+                "System doctor",
+                &[
+                    ("run", "Run diagnostics", "check system health"),
+                    ("fix", "Run with auto-fix", "attempt automatic fixes"),
+                ],
+            ) {
+                Some(action) => action == "fix",
+                None => return,
+            }
+        } else {
+            parts.iter().skip(1).any(|arg| *arg == "--fix")
+        };
         let doctor = crate::doctor::Doctor::new();
-        let fix = parts.iter().skip(1).any(|arg| *arg == "--fix");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             doctor.run(fix).await;
@@ -5003,6 +5073,24 @@ impl AishShell {
     }
 
     fn handle_record_command(&mut self, parts: &[&str]) {
+        // No args → interactive menu (power-user keeps `/record start|stop`).
+        if parts.len() == 1 {
+            let recording = self
+                .shared_recorder
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            let opts: &[(&str, &str, &str)] = if recording {
+                &[("stop", "Stop recording", "finish and save the terminal cast")]
+            } else {
+                &[("start", "Start recording", "begin a new terminal cast")]
+            };
+            let action = match pick_menu("Terminal recording", opts) {
+                Some(a) => a,
+                None => return,
+            };
+            return self.handle_record_command(&["/record", action.as_str()]);
+        }
         let subcmd = parts.get(1).copied().unwrap_or("");
         let mut guard = self
             .shared_recorder
@@ -5547,6 +5635,25 @@ impl AishShell {
     /// Handle `/plan [start|status|exit]` — plan mode lifecycle.
     fn handle_plan_command(&mut self, parts: &[&str]) {
         use aish_core::PlanPhase;
+
+        // No args → interactive menu (power-user keeps `/plan start|status|exit`).
+        if parts.len() == 1 {
+            let opts: &[(&str, &str, &str)] = match self.ai_handler.plan_phase() {
+                PlanPhase::Normal => &[
+                    ("start", "Start planning", "enter read-only plan mode"),
+                    ("status", "Show status", "current plan state"),
+                ],
+                PlanPhase::Planning => &[
+                    ("status", "Show status", "current plan state"),
+                    ("exit", "Exit plan mode", "leave planning"),
+                ],
+            };
+            let action = match pick_menu("Plan mode", opts) {
+                Some(a) => a,
+                None => return,
+            };
+            return self.handle_plan_command(&["/plan", action.as_str()]);
+        }
 
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
             println!("{}", theme::accent("Usage: /plan [start|status|exit]"));
