@@ -5717,10 +5717,7 @@ impl AishShell {
                         // Not currently planning — report that instead of
                         // silently entering plan mode (the catch-all below
                         // would otherwise treat `status` as `start`).
-                        println!(
-                            "{}",
-                            theme::faint("Not in plan mode. Use `/plan start` (or `; <request>`) to begin planning.")
-                        );
+                        println!("{}", theme::faint(&t("shell.menu.plan.not_in_plan")));
                     }
                     _ => {
                         // `/plan` or `/plan start` from shell mode → enter planning

@@ -436,6 +436,7 @@ shell:
       status_desc: "当前计划状态"
       exit: "退出计划模式"
       exit_desc: "退出规划"
+      not_in_plan: "当前不在计划模式。使用 `/plan start`（或 `; <请求>`）开始规划。"
     kill:
       title: "终止活跃会话"
       all: "终止其他全部"

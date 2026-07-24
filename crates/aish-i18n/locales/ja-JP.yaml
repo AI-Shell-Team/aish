@@ -247,6 +247,7 @@ shell:
       status_desc: "現在のプラン状態"
       exit: "プランモード終了"
       exit_desc: "プランを終了"
+      not_in_plan: "プランモードではありません。`/plan start`（または `; <リクエスト>`）で計画を開始してください。"
     kill:
       title: "アクティブセッションを終了"
       all: "他をすべて終了"

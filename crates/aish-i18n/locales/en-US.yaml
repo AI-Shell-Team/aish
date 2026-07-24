@@ -436,6 +436,7 @@ shell:
       status_desc: "current plan state"
       exit: "Exit plan mode"
       exit_desc: "leave planning"
+      not_in_plan: "Not in plan mode. Use `/plan start` (or `; <request>`) to begin planning."
     kill:
       title: "Kill live sessions"
       all: "Kill all others"

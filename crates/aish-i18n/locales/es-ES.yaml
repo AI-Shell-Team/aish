@@ -247,6 +247,7 @@ shell:
       status_desc: "estado actual del plan"
       exit: "Salir del modo plan"
       exit_desc: "abandonar la planificación"
+      not_in_plan: "No estás en modo plan. Usa `/plan start` (o `; <petición>`) para comenzar a planificar."
     kill:
       title: "Terminar sesiones activas"
       all: "Terminar todas las demás"
