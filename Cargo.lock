@@ -46,7 +46,6 @@ dependencies = [
  "libc",
  "reqwest",
  "semver",
- "serde",
  "serde_json",
  "sha2",
  "tokio",
@@ -63,10 +62,8 @@ dependencies = [
  "dirs 5.0.1",
  "regex",
  "serde",
- "serde_json",
  "serde_yaml",
  "tempfile",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -87,7 +84,6 @@ version = "0.3.8"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
- "hex",
  "serde",
  "serde_json",
  "sha2",
@@ -112,9 +108,7 @@ version = "0.3.8"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
- "serde",
  "serde_yaml",
- "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -158,23 +152,14 @@ dependencies = [
  "aish-core",
  "chrono",
  "dirs 5.0.1",
- "regex",
  "serde",
- "serde_json",
- "tracing",
- "uuid",
 ]
 
 [[package]]
 name = "aish-prompts"
 version = "0.3.8"
 dependencies = [
- "anyhow",
  "dirs 5.0.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -186,7 +171,6 @@ dependencies = [
  "aish-hosts",
  "aish-i18n",
  "aish-security",
- "base64 0.22.1",
  "chrono",
  "dirs 5.0.1",
  "libc",
@@ -195,7 +179,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tokio",
  "tracing",
  "uuid",
 ]
@@ -204,7 +187,6 @@ dependencies = [
 name = "aish-scripts"
 version = "0.3.8"
 dependencies = [
- "aish-core",
  "dirs 5.0.1",
  "regex",
  "serde",
@@ -285,7 +267,6 @@ dependencies = [
  "shellexpand",
  "sysinfo",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "unicode-width",
@@ -319,10 +300,8 @@ dependencies = [
  "aish-pty",
  "aish-security",
  "aish-skills",
- "aish-ui",
  "futures",
  "glob",
- "inquire",
  "regex",
  "reqwest",
  "serde",
@@ -340,7 +319,6 @@ version = "0.3.8"
 dependencies = [
  "crossterm 0.28.1",
  "ratatui",
- "tempfile",
  "thiserror 2.0.18",
  "unicode-width",
 ]

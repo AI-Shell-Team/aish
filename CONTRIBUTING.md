@@ -32,6 +32,7 @@ Welcome to make Shell smarter!
 - Run Rust tests: `cargo test --workspace`
 - Run packaging script smoke tests: `./packaging/tests/release_scripts_smoke.sh`
 - Use the pinned repo toolchain from `rust-toolchain.toml` for local validation
+- Minimum supported Rust version (MSRV) is **1.89** (`rust-version` in the workspace `Cargo.toml`)
 - Run formatting: `make format`
 - Run linting: `make lint`
 - Run the full local CI baseline: `make ci-check`
