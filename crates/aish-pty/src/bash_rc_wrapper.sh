@@ -190,33 +190,20 @@ __aish_on_debug() {
             ;;
     esac
 
-    # Re-enable echo for interactive session commands (ssh, telnet, etc.)
-    # so that the remote PTY inherits normal terminal settings.  The
-    # local PTY has -echo set by this wrapper, and SSH propagates these
-    # settings to the remote server, which can confuse the remote shell's
-    # readline.
+    # Re-enable echo for the duration of the user command.
     #
-    # Also re-enable echo for interactive sub-shells (bash, sh, zsh, ...)
-    # started by the user.  When the user runs e.g. `bash`, the child
-    # shell inherits the PTY termios with ECHO off.  Bash's readline
-    # normally renders input itself, but when the child is launched in a
-    # context where readline is disabled (e.g. inheriting `set +o emacs`
-    # via the rcfile, or non-readline shells like dash), the user's
-    # keystrokes never appear on screen — commands execute "blind".
-    # Restoring ECHO before the child takes the foreground makes
-    # keystrokes visible again.  __aish_prompt_command re-disables ECHO
-    # when the child exits and the aish prompt returns.
-    local __aish_cmd_name="$BASH_COMMAND"
-    while [[ "$__aish_cmd_name" =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; do
-        __aish_cmd_name="${__aish_cmd_name#* }"
-    done
-    __aish_cmd_name="${__aish_cmd_name%% *}"
-    __aish_cmd_name="${__aish_cmd_name##*/}"
-    case "$__aish_cmd_name" in
-        ssh|telnet|mosh|nc|netcat|ftp|sftp|bash|sh|zsh|ksh|mksh|dash|rbash|fish|csh|tcsh)
-            stty echo 2>/dev/null || true
-            ;;
-    esac
+    # The local PTY keeps -echo at the aish prompt so the frontend owns
+    # display (injected command lines must not bounce back via master_fd).
+    # Once a real command starts, cooked-mode children need kernel ECHO:
+    # `aish update`'s read_line confirm, bash `read`, python input(), ssh
+    # remote readline inheritance, nested shells without their own
+    # echo, etc.  Without this, keystrokes are accepted but invisible —
+    # users report "无法输入".
+    #
+    # Programs that need silent input (sudo/passwd) turn ECHO off
+    # themselves.  __aish_prompt_command re-disables ECHO when the
+    # command finishes and the aish prompt returns.
+    stty echo 2>/dev/null || true
 
     __AISH_AT_PROMPT=0
     __aish_emit_command_started "$BASH_COMMAND"
@@ -233,8 +220,8 @@ __aish_prompt_command() {
     fi
     # Keep PS1 empty — prompt rendering is handled by the Python frontend.
     PS1=''
-    # Re-disable echo in case a session command (ssh, telnet) re-enabled
-    # it via the DEBUG trap.  The frontend handles all display itself.
+    # Re-disable echo after the user command (DEBUG trap re-enabled it).
+    # The frontend handles all display at the aish prompt itself.
     stty -echo -echonl 2>/dev/null || true
     __AISH_AT_PROMPT=1
     __aish_emit_prompt_ready "$exit_code"
