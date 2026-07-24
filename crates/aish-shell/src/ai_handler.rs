@@ -339,6 +339,16 @@ impl AiHandler {
         }
     }
 
+    /// Manually switch the active rotation account by name (`/accounts use`).
+    pub fn use_rotation_account(&self, name: &str) -> bool {
+        self.llm_session.use_rotation_account(name)
+    }
+
+    /// Name of the account currently in use, for restoring across rebuilds.
+    pub fn current_rotation_account(&self) -> Option<String> {
+        self.llm_session.current_rotation_account()
+    }
+
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.llm_session.register_tool(tool);
     }

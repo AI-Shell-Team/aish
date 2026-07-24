@@ -35,6 +35,9 @@ pub struct ApiAccount {
     pub api_key: String,
     /// Optional override of the provider base URL for this account.
     pub api_base: Option<String>,
+    /// Optional per-account model override. Falls back to the active model
+    /// (primary or fallback chain) when `None`.
+    pub model: Option<String>,
     /// Relative selection weight (higher = preferred). Currently advisory.
     pub weight: u32,
     /// When true the account is skipped entirely.
@@ -47,6 +50,7 @@ impl ApiAccount {
             name: name.into(),
             api_key: api_key.into(),
             api_base: None,
+            model: None,
             weight: 1,
             disabled: false,
         }
@@ -275,10 +279,11 @@ impl RotationState {
                 name: "default".into(),
                 api_key: String::new(),
                 api_base: None,
+                model: None,
                 weight: 1,
                 disabled: false,
             });
-        let model = self.active_model_name();
+        let model = acct.model.clone().unwrap_or_else(|| self.active_model_name());
         ResolvedCredential {
             api_base: acct
                 .api_base
@@ -381,6 +386,32 @@ impl RotationState {
         self.current_account = 0;
         self.model_cooldown_until = None;
         self.account_cooldowns.clear();
+    }
+
+    /// Manually switch to the named account, resetting any model fallback so
+    /// the account's own model (or the global model) is used. Returns `false`
+    /// when no enabled account matches `name`. This is the `/accounts use`
+    /// path; it does not touch the rotation counter (manual switch != failover).
+    pub fn use_account(&mut self, name: &str) -> bool {
+        if let Some(idx) = self
+            .accounts
+            .iter()
+            .position(|a| a.name == name && !a.disabled)
+        {
+            self.current_account = idx;
+            self.current_model_index = 0;
+            self.model_cooldown_until = None;
+            self.account_cooldowns.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Name of the account currently in use, for restoring the selection
+    /// across a rotation rebuild (e.g. after `/accounts add`).
+    pub fn current_account_name(&self) -> Option<&str> {
+        self.accounts.get(self.current_account).map(|a| a.name.as_str())
     }
 
     pub fn is_on_fallback(&self) -> bool {
@@ -499,6 +530,37 @@ mod tests {
         let msg = s.model_exhaustion_error();
         assert!(msg.contains("gl"), "primary model missing: {msg}");
         assert!(msg.contains("glm-4.7"), "fallback model missing: {msg}");
+    }
+
+    #[test]
+    fn use_account_switches_and_uses_its_model() {
+        let mut deepseek = ApiAccount::new("deepseek", "key-d");
+        deepseek.model = Some("deepseek-chat".into());
+        let primary = ApiAccount::new("primary", "key-p");
+        let mut s = RotationState::new(
+            "gpt-4".into(),
+            vec![primary, deepseek],
+            Vec::new(),
+            RetryPolicy::default(),
+        );
+        // primary uses the global model
+        assert_eq!(s.current("https://x").model, "gpt-4");
+        assert!(s.use_account("deepseek"));
+        // switched account uses its own model
+        assert_eq!(s.current("https://x").model, "deepseek-chat");
+        assert_eq!(s.current_account_name(), Some("deepseek"));
+    }
+
+    #[test]
+    fn use_account_unknown_returns_false() {
+        let mut s = RotationState::new(
+            "gpt-4".into(),
+            accounts(2),
+            Vec::new(),
+            RetryPolicy::default(),
+        );
+        assert!(!s.use_account("nonexistent"));
+        assert_eq!(s.current_account_name(), Some("acct-0"));
     }
 
     #[test]

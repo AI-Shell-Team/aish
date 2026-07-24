@@ -386,6 +386,8 @@ shell:
       remove_desc: "删除一个账户"
       toggle: "启用 / 停用"
       toggle_desc: "暂停或恢复一个账户"
+      use: "切换账户"
+      use_desc: "切换当前使用的账户"
       remove_title: "删除账户"
       toggle_title: "启用 / 停用账户"
     fallback:
@@ -503,6 +505,11 @@ shell:
     verify_failed_title: "验证失败"
     save_anyway: "仍然保存"
     cancel_add: "取消"
+    usage_use: "用法：/accounts use <名称>"
+    switched: "已切换到账户 '{name}'（模型：{model}）"
+    no_extra_use: "没有可切换的额外账户。用 /accounts add 添加。"
+    primary_choice: "主账号 ({model})"
+    select_use: "选择要使用的账户"
 
   fallback:
     chain_title: "回退模型链"

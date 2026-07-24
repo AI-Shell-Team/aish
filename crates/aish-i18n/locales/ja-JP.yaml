@@ -197,6 +197,8 @@ shell:
       remove_desc: "アカウントを 1 件削除"
       toggle: "有効 / 無効"
       toggle_desc: "アカウントを一時停止または再開"
+      use: "アカウント切替"
+      use_desc: "使用するアカウントを切り替え"
       remove_title: "アカウント削除"
       toggle_title: "アカウントの有効 / 無効"
     fallback:
@@ -314,6 +316,11 @@ shell:
     verify_failed_title: "検証に失敗しました"
     save_anyway: "それでも保存"
     cancel_add: "キャンセル"
+    usage_use: "使い方: /accounts use <名前>"
+    switched: "'{name}' に切り替えました（モデル: {model}）"
+    no_extra_use: "切り替え可能なアカウントがありません。/accounts add で追加してください。"
+    primary_choice: "プライマリ ({model})"
+    select_use: "使用するアカウントを選択"
 
   fallback:
     chain_title: "フォールバックモデルチェーン"

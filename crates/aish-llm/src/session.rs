@@ -418,6 +418,23 @@ impl LlmSession {
         self.rotation = None;
     }
 
+    /// Manually switch the active rotation account by name (the `/accounts use`
+    /// path). Returns `false` when rotation is disabled or no account matches.
+    pub fn use_rotation_account(&self, name: &str) -> bool {
+        self.rotation
+            .as_ref()
+            .map(|m| m.lock().unwrap().use_account(name))
+            .unwrap_or(false)
+    }
+
+    /// Name of the account currently in use, for restoring the selection
+    /// across a rotation rebuild.
+    pub fn current_rotation_account(&self) -> Option<String> {
+        self.rotation
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().current_account_name().map(String::from))
+    }
+
     /// Return the current model name.
     pub fn model_name(&self) -> &str {
         &self.stream_ctx.model

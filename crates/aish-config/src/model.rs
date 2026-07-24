@@ -495,6 +495,10 @@ pub struct ApiAccountConfig {
     /// Optional override of the provider base URL for this account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base: Option<String>,
+    /// Optional per-account model override. When set, this account uses its
+    /// own model regardless of the global `model` / fallback chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Relative selection weight (advisory; higher = preferred).
     #[serde(default = "default_one")]
     pub weight: u32,

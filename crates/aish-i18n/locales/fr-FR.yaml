@@ -197,6 +197,8 @@ shell:
       remove_desc: "supprimer un compte"
       toggle: "Activer / désactiver"
       toggle_desc: "mettre en pause ou reprendre un compte"
+      use: "Changer de compte"
+      use_desc: "Changer le compte actif"
       remove_title: "Supprimer le compte"
       toggle_title: "Activer / désactiver le compte"
     fallback:
@@ -314,6 +316,11 @@ shell:
     verify_failed_title: "Échec de la vérification"
     save_anyway: "Enregistrer quand même"
     cancel_add: "Annuler"
+    usage_use: "usage : /accounts use <nom>"
+    switched: "Basculé vers '{name}' (modèle : {model})"
+    no_extra_use: "Aucun compte supplémentaire à activer. Ajoutez-en un avec /accounts add."
+    primary_choice: "Principal ({model})"
+    select_use: "Sélectionner le compte à utiliser"
 
   fallback:
     chain_title: "Chaîne de modèles de repli"

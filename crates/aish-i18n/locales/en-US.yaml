@@ -386,6 +386,8 @@ shell:
       remove_desc: "delete an account"
       toggle: "Enable / disable"
       toggle_desc: "pause or resume an account"
+      use: "Switch account"
+      use_desc: "Switch the active account"
       remove_title: "Remove account"
       toggle_title: "Enable / disable account"
     fallback:
@@ -503,6 +505,11 @@ shell:
     verify_failed_title: "Verification failed"
     save_anyway: "Save anyway"
     cancel_add: "Cancel"
+    usage_use: "usage: /accounts use <name>"
+    switched: "Switched to '{name}' (model: {model})"
+    no_extra_use: "No extra accounts to switch to. Add one with /accounts add."
+    primary_choice: "primary ({model})"
+    select_use: "Select account to use"
 
   fallback:
     chain_title: "Fallback model chain"

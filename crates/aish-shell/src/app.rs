@@ -321,6 +321,7 @@ fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccou
         name: "primary".to_string(),
         api_key: config.api_key.clone(),
         api_base: None,
+        model: None,
         weight: 1,
         disabled: config.api_key.trim().is_empty(),
     }];
@@ -329,6 +330,7 @@ fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccou
             name: acct.name.clone(),
             api_key: acct.api_key.clone(),
             api_base: acct.api_base.clone(),
+            model: acct.model.clone(),
             weight: acct.weight.max(1),
             disabled: acct.disabled,
         });
@@ -3996,6 +3998,7 @@ impl AishShell {
             ("add".to_string(), t("shell.menu.accounts.add"), t("shell.menu.accounts.add_desc")),
             ("remove".to_string(), t("shell.menu.accounts.remove"), t("shell.menu.accounts.remove_desc")),
             ("toggle".to_string(), t("shell.menu.accounts.toggle"), t("shell.menu.accounts.toggle_desc")),
+            ("use".to_string(), t("shell.menu.accounts.use"), t("shell.menu.accounts.use_desc")),
         ];
         let action = match pick_menu(&t("shell.menu.accounts.title"), &opts) {
             Some(a) => a,
@@ -4006,6 +4009,7 @@ impl AishShell {
             "add" => self.accounts_add_interactive(),
             "remove" => self.accounts_remove_interactive(),
             "toggle" => self.accounts_toggle_interactive(),
+            "use" => self.accounts_use_interactive(),
             _ => {}
         }
     }
@@ -4042,10 +4046,12 @@ impl AishShell {
                     );
                     return;
                 }
+                let model = parts.get(5).filter(|s| !s.is_empty()).map(|s| s.to_string());
                 self.config.api_accounts.push(aish_config::ApiAccountConfig {
                     name: name.clone(),
                     api_key: key,
                     api_base: base,
+                    model,
                     weight: 1,
                     disabled: false,
                 });
@@ -4059,6 +4065,40 @@ impl AishShell {
                         args
                     })
                 );
+            }
+            "use" | "switch" => {
+                let name = match parts.get(2) {
+                    Some(n) if !n.is_empty() => n.to_string(),
+                    _ => {
+                        eprintln!("{}", t("shell.accounts.usage_use"));
+                        return;
+                    }
+                };
+                if self.ai_handler.use_rotation_account(&name) {
+                    let model = self
+                        .ai_handler
+                        .rotation_snapshot()
+                        .map(|s| s.active_model)
+                        .unwrap_or_default();
+                    println!(
+                        "\x1b[32m{}\x1b[0m",
+                        t_with_args("shell.accounts.switched", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("name".to_string(), name);
+                            args.insert("model".to_string(), model);
+                            args
+                        })
+                    );
+                } else {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.accounts.no_account_named", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("name".to_string(), name);
+                            args
+                        })
+                    );
+                }
             }
             "remove" | "rm" | "delete" => {
                 let name = match parts.get(2) {
@@ -4146,6 +4186,60 @@ impl AishShell {
                     args
                 })
             ),
+        }
+    }
+
+    fn accounts_use_interactive(&mut self) {
+        if self.config.api_accounts.is_empty() {
+            eprintln!("{}", t("shell.accounts.no_extra_use"));
+            return;
+        }
+        let primary_label = t_with_args("shell.accounts.primary_choice", &{
+            let mut args = std::collections::HashMap::new();
+            args.insert("model".to_string(), self.config.model.clone());
+            args
+        });
+        let opts: Vec<(String, String, String)> = std::iter::once((
+            "primary".to_string(),
+            primary_label,
+            String::new(),
+        ))
+        .chain(self.config.api_accounts.iter().map(|a| {
+            (
+                a.name.clone(),
+                a.name.clone(),
+                a.model.clone().unwrap_or_default(),
+            )
+        }))
+        .collect();
+        let name = match pick_menu(&t("shell.accounts.select_use"), &opts) {
+            Some(n) => n,
+            None => return,
+        };
+        if self.ai_handler.use_rotation_account(&name) {
+            let model = self
+                .ai_handler
+                .rotation_snapshot()
+                .map(|s| s.active_model)
+                .unwrap_or_default();
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.switched", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name);
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
+        } else {
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.no_account_named", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name);
+                    args
+                })
+            );
         }
     }
 
@@ -4322,6 +4416,7 @@ impl AishShell {
             name: name.clone(),
             api_key: key,
             api_base: api_base_opt,
+            model: Some(model.clone()),
             weight: 1,
             disabled: false,
         });
@@ -4425,11 +4520,12 @@ impl AishShell {
                 args
             });
             println!(
-                "  [{}] {:<10} {}  {}  {}",
+                "  [{}] {:<10} {}  {}  {}  {}",
                 i + 1,
                 a.name,
                 key_preview,
                 a.api_base.as_deref().unwrap_or(""),
+                a.model.as_deref().unwrap_or("(global)"),
                 state
             );
         }
@@ -4454,17 +4550,21 @@ impl AishShell {
 
     /// Rebuild the LLM session rotation state from the current config.
     fn rebuild_rotation(&mut self) {
+        let prev = self.ai_handler.current_rotation_account();
         let accounts = rotation_accounts_from_config(&self.config);
         let state = if !self.config.fallback_models.is_empty() || accounts.len() > 1 {
             let mut policy = aish_llm::RetryPolicy::default();
             policy.revert_on_cooldown = self.config.fallback_revert_on_cooldown;
-            let s = aish_llm::RotationState::new(
+            let mut s = aish_llm::RotationState::new(
                 self.config.model.clone(),
                 accounts,
                 self.config.fallback_models.clone(),
                 policy,
             );
             if s.is_active() {
+                if let Some(ref name) = prev {
+                    s.use_account(name);
+                }
                 Some(s)
             } else {
                 None
