@@ -3394,114 +3394,176 @@ impl AishShell {
         match sub {
             "list" => {
                 println!();
-                println!("\x1b[1mFallback model chain\x1b[0m");
-                println!("  primary : {}", self.config.model);
+                println!("\x1b[1m{}\x1b[0m", t("shell.fallback.chain_title"));
+                println!(
+                    "{}",
+                    t_with_args("shell.fallback.primary", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), self.config.model.clone());
+                        args
+                    })
+                );
                 if self.config.fallback_models.is_empty() {
-                    println!("  fallback: (none configured)");
+                    println!("{}", t("shell.fallback.none"));
                 } else {
                     for (i, m) in self.config.fallback_models.iter().enumerate() {
                         println!("  [{}]     {}", i + 1, m);
                     }
                 }
-                let pol = if self.config.fallback_revert_on_cooldown {
-                    "auto-revert to primary on cooldown"
-                } else {
-                    "stay on fallback until manual switch"
-                };
-                println!("  policy  : {}", pol);
+                println!(
+                    "{}",
+                    t(if self.config.fallback_revert_on_cooldown {
+                        "shell.fallback.policy_auto"
+                    } else {
+                        "shell.fallback.policy_stay"
+                    })
+                );
                 println!();
             }
             "add" => {
                 let model = match parts.get(2) {
                     Some(m) if !m.is_empty() => m.to_string(),
                     _ => {
-                        eprintln!("usage: /fallback add <model>");
+                        eprintln!("{}", t("shell.fallback.usage_add"));
                         return;
                     }
                 };
                 if self.config.fallback_models.iter().any(|m| m == &model) {
-                    eprintln!("'{}' is already in the fallback chain", model);
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fallback.already_in_chain", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("model".to_string(), model);
+                            args
+                        })
+                    );
                     return;
                 }
                 self.config.fallback_models.push(model.clone());
                 self.persist_config_and_rebuild_rotation();
-                println!("\x1b[32madded fallback '{}'\x1b[0m", model);
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.fallback.added", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), model);
+                        args
+                    })
+                );
             }
             "remove" | "rm" => {
                 let model = match parts.get(2) {
                     Some(m) => m.to_string(),
                     None => {
-                        eprintln!("usage: /fallback remove <model>");
+                        eprintln!("{}", t("shell.fallback.usage_remove"));
                         return;
                     }
                 };
                 let before = self.config.fallback_models.len();
                 self.config.fallback_models.retain(|m| m != &model);
                 if self.config.fallback_models.len() == before {
-                    eprintln!("'{}' not in the fallback chain", model);
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fallback.not_in_chain", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("model".to_string(), model);
+                            args
+                        })
+                    );
                     return;
                 }
                 self.persist_config_and_rebuild_rotation();
-                println!("\x1b[32mremoved fallback '{}'\x1b[0m", model);
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.fallback.removed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), model);
+                        args
+                    })
+                );
             }
             "clear" => {
                 self.config.fallback_models.clear();
                 self.persist_config_and_rebuild_rotation();
-                println!("\x1b[32mcleared fallback chain\x1b[0m");
+                println!("\x1b[32m{}\x1b[0m", t("shell.fallback.cleared"));
             }
             "revert" => {
                 let val = match parts.get(2).copied().unwrap_or("") {
                     "on" => true,
                     "off" => false,
                     _ => {
-                        eprintln!("usage: /fallback revert on|off");
+                        eprintln!("{}", t("shell.fallback.usage_revert"));
                         return;
                     }
                 };
                 self.config.fallback_revert_on_cooldown = val;
                 self.persist_config_and_rebuild_rotation();
                 println!(
-                    "\x1b[32mrevert policy: {}\x1b[0m",
-                    if val { "on (auto-revert)" } else { "off (stay)" }
+                    "\x1b[32m{}\x1b[0m",
+                    t(if val {
+                        "shell.fallback.revert_set_on"
+                    } else {
+                        "shell.fallback.revert_set_off"
+                    })
                 );
             }
             "help" | "-h" | "--help" => {
-                println!("/fallback                  list the fallback model chain");
-                println!("/fallback add <model>      append a fallback model");
-                println!("/fallback remove <model>   remove a fallback model");
-                println!("/fallback clear            empty the chain");
-                println!("/fallback revert on|off    auto-revert to primary on cooldown");
-                println!("(no args opens an interactive menu)");
+                println!("{}", t("shell.fallback.help_1"));
+                println!("{}", t("shell.fallback.help_2"));
+                println!("{}", t("shell.fallback.help_3"));
+                println!("{}", t("shell.fallback.help_4"));
+                println!("{}", t("shell.fallback.help_5"));
+                println!("{}", t("shell.fallback.help_6"));
             }
-            other => eprintln!("unknown subcommand '{}'. try /fallback help", other),
+            other => eprintln!(
+                "{}",
+                t_with_args("shell.fallback.unknown_sub", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("sub".to_string(), other.to_string());
+                    args
+                })
+            ),
         }
     }
 
     fn fallback_add_interactive(&mut self) {
         let model = match prompt_edit_value(
-            "Fallback model",
-            "model name tried when the primary fails (e.g. gpt-4o-mini)",
+            &t("shell.fallback.model_label"),
+            &t("shell.fallback.model_desc"),
             "",
             false,
         ) {
             Some(m) if !m.trim().is_empty() => m.trim().to_string(),
             _ => {
-                println!("cancelled");
+                println!("{}", t("shell.common.cancelled"));
                 return;
             }
         };
         if self.config.fallback_models.iter().any(|m| m == &model) {
-            eprintln!("'{}' is already in the fallback chain", model);
+            eprintln!(
+                "{}",
+                t_with_args("shell.fallback.already_in_chain", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
             return;
         }
         self.config.fallback_models.push(model.clone());
         self.persist_config_and_rebuild_rotation();
-        println!("\x1b[32madded fallback '{}'\x1b[0m", model);
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.fallback.added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model);
+                args
+            })
+        );
     }
 
     fn fallback_remove_interactive(&mut self) {
         if self.config.fallback_models.is_empty() {
-            eprintln!("fallback chain is empty");
+            eprintln!("{}", t("shell.fallback.empty"));
             return;
         }
         let models: Vec<String> = self.config.fallback_models.clone();
@@ -3513,7 +3575,14 @@ impl AishShell {
         };
         self.config.fallback_models.retain(|m| m != &model);
         self.persist_config_and_rebuild_rotation();
-        println!("\x1b[32mremoved fallback '{}'\x1b[0m", model);
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.fallback.removed", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model);
+                args
+            })
+        );
     }
 
     fn fallback_revert_interactive(&mut self) {
@@ -3528,12 +3597,26 @@ impl AishShell {
         };
         let val = action == "on";
         if val == cur {
-            println!("revert policy already '{}'", action);
+            println!(
+                "{}",
+                t_with_args("shell.fallback.revert_already", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("policy".to_string(), action);
+                    args
+                })
+            );
             return;
         }
         self.config.fallback_revert_on_cooldown = val;
         self.persist_config_and_rebuild_rotation();
-        println!("\x1b[32mrevert policy: {}\x1b[0m", action);
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t(if val {
+                "shell.fallback.revert_set_on"
+            } else {
+                "shell.fallback.revert_set_off"
+            })
+        );
     }
 
     /// `/fork` — branch the current session into a new one (copied context),
@@ -3548,7 +3631,7 @@ impl AishShell {
         // the later `&mut self` resume call is not blocked by the live reference.
         let fork_result = {
             let Some(store) = self.session_store.as_ref() else {
-                eprintln!("session store unavailable; cannot fork");
+                eprintln!("{}", t("shell.fork.store_unavailable"));
                 return;
             };
             store.fork_session(&parent_uuid, None, &new_uuid)
@@ -3559,15 +3642,41 @@ impl AishShell {
         match fork_result {
             Ok(_) => {
                 println!(
-                    "\x1b[32mforked session\x1b[0m {} (from {})",
-                    new_short, parent_short
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.fork.forked", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("short".to_string(), new_short.to_string());
+                        args.insert("parent".to_string(), parent_short.to_string());
+                        args
+                    })
                 );
                 if let Err(e) = self.resume_session_with_options(&new_uuid, false, true) {
-                    eprintln!("fork created but switch failed: {e}");
-                    eprintln!("use `/resume {}` to switch manually", new_short);
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fork.switch_failed", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            args
+                        })
+                    );
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fork.switch_manual", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("short".to_string(), new_short.to_string());
+                            args
+                        })
+                    );
                 }
             }
-            Err(e) => eprintln!("fork failed: {e}"),
+            Err(e) => eprintln!(
+                "{}",
+                t_with_args("shell.fork.failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            ),
         }
     }
 
@@ -3575,18 +3684,25 @@ impl AishShell {
     /// flooding the screen) and switch to the chosen session on submit.
     fn handle_sessions_command(&mut self) {
         let Some(store) = self.session_store.as_ref() else {
-            eprintln!("session store unavailable");
+            eprintln!("{}", t("shell.common.session_store_unavailable"));
             return;
         };
         let roots = match store.session_roots() {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("failed to list sessions: {e}");
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.sessions.list_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
                 return;
             }
         };
         if roots.is_empty() {
-            println!("(no saved sessions)");
+            println!("{}", t("shell.sessions.none"));
             return;
         }
 
@@ -3613,7 +3729,14 @@ impl AishShell {
         {
             if id != self.session_uuid {
                 if let Err(e) = self.resume_session_with_options(&id, false, true) {
-                    eprintln!("failed to switch session: {e}");
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.sessions.switch_failed", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            args
+                        })
+                    );
                 }
             }
         }
@@ -3660,22 +3783,29 @@ impl AishShell {
     fn handle_export_command(&self, parts: &[&str]) {
         let format = parts.get(1).copied().unwrap_or("md");
         if format != "md" && format != "markdown" {
-            eprintln!("usage: /export [md]  (only markdown is supported)");
+            eprintln!("{}", t("shell.export.usage"));
             return;
         }
         let Some(store) = self.session_store.as_ref() else {
-            eprintln!("session store unavailable; cannot export");
+            eprintln!("{}", t("shell.export.store_unavailable"));
             return;
         };
         let uuid = &self.session_uuid;
         let record = match store.get_session(uuid) {
             Ok(Some(r)) => r,
             Ok(None) => {
-                eprintln!("current session not found in store");
+                eprintln!("{}", t("shell.export.not_found"));
                 return;
             }
             Err(e) => {
-                eprintln!("failed to load session: {e}");
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
                 return;
             }
         };
@@ -3683,24 +3813,51 @@ impl AishShell {
         let snap = record.state_snapshot();
 
         let mut md = String::new();
-        md.push_str("# aish session export\n\n");
-        md.push_str(&format!("- **session**: `{}`\n", uuid));
-        md.push_str(&format!("- **model**: {}\n", record.model));
+        md.push_str(&format!("{}\n\n", t("shell.export.md_header")));
+        md.push_str(&format!("{}\n", t_with_args("shell.export.session_label", &{
+            let mut args = std::collections::HashMap::new();
+            args.insert("uuid".to_string(), uuid.to_string());
+            args
+        })));
+        md.push_str(&format!("{}\n", t_with_args("shell.export.model_label", &{
+            let mut args = std::collections::HashMap::new();
+            args.insert("model".to_string(), record.model.clone());
+            args
+        })));
         if let Some(base) = &record.api_base {
-            md.push_str(&format!("- **api_base**: {}\n", base));
+            md.push_str(&format!("{}\n", t_with_args("shell.export.api_base_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("base".to_string(), base.clone());
+                args
+            })));
         }
         if let Some(parent) = &record.parent_session_uuid {
-            md.push_str(&format!("- **forked from**: `{}`\n", parent));
+            md.push_str(&format!("{}\n", t_with_args("shell.export.forked_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("parent".to_string(), parent.clone());
+                args
+            })));
         }
         md.push_str(&format!(
-            "- **created**: {}\n",
-            record.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            "{}\n",
+            t_with_args("shell.export.created_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert(
+                    "created".to_string(),
+                    record.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                );
+                args
+            })
         ));
         if let Some(cwd) = &snap.cwd {
-            md.push_str(&format!("\n**working dir**: `{}`\n", cwd));
+            md.push_str(&format!("\n{}\n", t_with_args("shell.export.working_dir", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("cwd".to_string(), cwd.clone());
+                args
+            })));
         }
 
-        md.push_str("\n## Conversation\n\n");
+        md.push_str(&format!("\n{}\n\n", t("shell.export.conversation_header")));
         for msg in &snap.context_messages_snapshot {
             let role = match msg.role.as_str() {
                 "user" => "User",
@@ -3711,7 +3868,7 @@ impl AishShell {
             md.push_str(&format!("**{}**\n\n{}\n\n", role, msg.content));
         }
 
-        md.push_str("\n## Command history\n\n");
+        md.push_str(&format!("\n{}\n\n", t("shell.export.history_header")));
         md.push_str("| # | source | rc | command |\n|---|---|---|---|\n");
         for (i, entry) in history.iter().enumerate() {
             let cmd = entry.command.replace('|', "\\|").replace('\n', " ");
@@ -3725,12 +3882,24 @@ impl AishShell {
         let fname = format!("aish-session-{}.md", &uuid[..8.min(uuid.len())]);
         match std::fs::write(&fname, &md) {
             Ok(_) => println!(
-                "\x1b[32mexported\x1b[0m {} ({} messages, {} commands)",
-                fname,
-                snap.context_messages_snapshot.len(),
-                history.len()
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.export.exported", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), fname);
+                    args.insert("msgs".to_string(), snap.context_messages_snapshot.len().to_string());
+                    args.insert("cmds".to_string(), history.len().to_string());
+                    args
+                })
             ),
-            Err(e) => eprintln!("failed to write {}: {e}", fname),
+            Err(e) => eprintln!(
+                "{}",
+                t_with_args("shell.export.write_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), fname);
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            ),
         }
     }
 
@@ -3739,44 +3908,77 @@ impl AishShell {
         match self.ai_handler.rotation_snapshot() {
             Some(snap) => {
                 println!();
-                println!("\x1b[1mAPI Quota Rotation & Fallback\x1b[0m");
+                println!("\x1b[1m{}\x1b[0m", t("shell.usage.title"));
                 println!();
-                println!("  primary model : {}", snap.primary_model);
+                println!(
+                    "{}",
+                    t_with_args("shell.usage.primary_model", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), snap.primary_model.clone());
+                        args
+                    })
+                );
                 let fb = if snap.on_fallback {
-                    "  \x1b[33m(fallback active)\x1b[0m"
+                    format!("  \x1b[33m({})\x1b[0m", t("shell.usage.fallback_active"))
                 } else {
-                    ""
+                    String::new()
                 };
-                println!("  active model  : {}{}", snap.active_model, fb);
+                println!(
+                    "{}{}",
+                    t_with_args("shell.usage.active_model", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), snap.active_model.clone());
+                        args
+                    }),
+                    fb
+                );
                 if !snap.fallback_models.is_empty() {
-                    println!("  fallback chain: {}", snap.fallback_models.join(" -> "));
+                    println!(
+                        "{}",
+                        t_with_args("shell.usage.fallback_chain", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("chain".to_string(), snap.fallback_models.join(" -> "));
+                            args
+                        })
+                    );
                 }
                 println!();
                 println!(
-                    "  accounts ({} total, {} available):",
-                    snap.account_names.len(),
-                    snap.available_accounts
+                    "{}",
+                    t_with_args("shell.usage.accounts_line", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("total".to_string(), snap.account_names.len().to_string());
+                        args.insert("available".to_string(), snap.available_accounts.to_string());
+                        args
+                    })
                 );
                 for name in &snap.account_names {
                     let is_cur = snap.current_account.as_deref() == Some(name.as_str());
                     let is_cool = snap.cooled_accounts.iter().any(|c| c == name);
                     let (mark, state) = if is_cur {
-                        ("\x1b[32m*\x1b[0m", "active")
+                        ("\x1b[32m*\x1b[0m", t("shell.usage.state_active"))
                     } else if is_cool {
-                        ("\x1b[31mx\x1b[0m", "cooling down")
+                        ("\x1b[31mx\x1b[0m", t("shell.usage.state_cooling"))
                     } else {
-                        ("o", "ready")
+                        ("o", t("shell.usage.state_ready"))
                     };
                     println!("    {} {:<16} {}", mark, name, state);
                 }
                 println!();
-                println!("  rotations this session: {}", snap.total_rotations);
+                println!(
+                    "{}",
+                    t_with_args("shell.usage.rotations", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("count".to_string(), snap.total_rotations.to_string());
+                        args
+                    })
+                );
                 println!();
             }
             None => {
                 println!();
-                println!("\x1b[33mMulti-account rotation is not active.\x1b[0m");
-                println!("Add extra API keys with /accounts, or set fallback_models in config.yaml.");
+                println!("\x1b[33m{}\x1b[0m", t("shell.usage.not_active"));
+                println!("{}", t("shell.usage.not_active_hint"));
                 println!();
             }
         }
@@ -3817,20 +4019,27 @@ impl AishShell {
                 let name = match parts.get(2) {
                     Some(n) if !n.is_empty() => n.to_string(),
                     _ => {
-                        eprintln!("usage: /accounts add <name> <api_key> [api_base]");
+                        eprintln!("{}", t("shell.accounts.usage_add"));
                         return;
                     }
                 };
                 let key = match parts.get(3) {
                     Some(k) if !k.is_empty() => k.to_string(),
                     _ => {
-                        eprintln!("usage: /accounts add <name> <api_key> [api_base]");
+                        eprintln!("{}", t("shell.accounts.usage_add"));
                         return;
                     }
                 };
                 let base = parts.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string());
                 if self.config.api_accounts.iter().any(|a| a.name == name) {
-                    eprintln!("account '{}' already exists", name);
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.accounts.already_exists", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("name".to_string(), name);
+                            args
+                        })
+                    );
                     return;
                 }
                 self.config.api_accounts.push(aish_config::ApiAccountConfig {
@@ -3842,35 +4051,52 @@ impl AishShell {
                 });
                 self.persist_config_and_rebuild_rotation();
                 println!(
-                    "\x1b[32madded account '{}'\x1b[0m ({} extra account{})",
-                    name,
-                    self.config.api_accounts.len(),
-                    if self.config.api_accounts.len() == 1 { "" } else { "s" }
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.accounts.added", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("name".to_string(), name);
+                        args.insert("count".to_string(), self.config.api_accounts.len().to_string());
+                        args
+                    })
                 );
             }
             "remove" | "rm" | "delete" => {
                 let name = match parts.get(2) {
                     Some(n) => n.to_string(),
                     None => {
-                        eprintln!("usage: /accounts remove <name>");
+                        eprintln!("{}", t("shell.accounts.usage_remove"));
                         return;
                     }
                 };
                 let before = self.config.api_accounts.len();
                 self.config.api_accounts.retain(|a| a.name != name);
                 if self.config.api_accounts.len() == before {
-                    eprintln!("no account named '{}'", name);
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.accounts.no_account_named", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("name".to_string(), name);
+                            args
+                        })
+                    );
                     return;
                 }
                 self.persist_config_and_rebuild_rotation();
-                println!("\x1b[32mremoved account '{}'\x1b[0m", name);
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.accounts.removed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("name".to_string(), name);
+                        args
+                    })
+                );
             }
             "enable" | "disable" => {
                 let disabled = sub == "disable";
                 let name = match parts.get(2) {
                     Some(n) => n.to_string(),
                     None => {
-                        eprintln!("usage: /accounts {} <name>", sub);
+                        eprintln!("{}", t("shell.accounts.usage_enable"));
                         return;
                     }
                 };
@@ -3879,54 +4105,86 @@ impl AishShell {
                         a.disabled = disabled;
                         self.persist_config_and_rebuild_rotation();
                         println!(
-                            "\x1b[32m{} account '{}'\x1b[0m",
-                            if disabled { "disabled" } else { "enabled" },
-                            name
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.accounts.toggled", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert(
+                                    "action".to_string(),
+                                    if disabled {
+                                        t("shell.accounts.disabled")
+                                    } else {
+                                        t("shell.accounts.enabled")
+                                    },
+                                );
+                                args.insert("name".to_string(), name);
+                                args
+                            })
                         );
                     }
-                    None => eprintln!("no account named '{}'", name),
+                    None => eprintln!(
+                        "{}",
+                        t_with_args("shell.accounts.no_account_named", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("name".to_string(), name);
+                            args
+                        })
+                    ),
                 }
             }
             "help" | "-h" | "--help" => {
-                println!("/accounts                       list rotation accounts");
-                println!("/accounts add <name> <key> [base]");
-                println!("/accounts remove <name>");
-                println!("/accounts enable|disable <name>");
-                println!("(no args opens an interactive menu)");
+                println!("{}", t("shell.accounts.help_1"));
+                println!("{}", t("shell.accounts.help_2"));
+                println!("{}", t("shell.accounts.help_3"));
+                println!("{}", t("shell.accounts.help_4"));
+                println!("{}", t("shell.accounts.help_5"));
             }
-            other => eprintln!("unknown subcommand '{}'. try /accounts help", other),
+            other => eprintln!(
+                "{}",
+                t_with_args("shell.accounts.unknown_sub", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("sub".to_string(), other.to_string());
+                    args
+                })
+            ),
         }
     }
 
     fn accounts_add_interactive(&mut self) {
         let name = match prompt_edit_value(
-            "Account name",
-            "short label, e.g. 'team-b'",
+            &t("shell.accounts.name_label"),
+            &t("shell.accounts.name_desc"),
             "",
             false,
         ) {
             Some(n) if !n.trim().is_empty() => n.trim().to_string(),
             _ => {
-                println!("cancelled");
+                println!("{}", t("shell.common.cancelled"));
                 return;
             }
         };
-        let key = match prompt_edit_value("API key", "the key for this account", "", true) {
+        let key = match prompt_edit_value(&t("shell.accounts.key_label"), &t("shell.accounts.key_desc"), "", true) {
             Some(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => {
-                println!("cancelled");
+                println!("{}", t("shell.common.cancelled"));
                 return;
             }
         };
         let base = prompt_edit_value(
-            "API base (optional)",
-            "override endpoint; blank = same as primary",
+            &t("shell.accounts.base_label"),
+            &t("shell.accounts.base_desc"),
             "",
             false,
         )
         .filter(|s| !s.trim().is_empty());
         if self.config.api_accounts.iter().any(|a| a.name == name) {
-            eprintln!("account '{}' already exists", name);
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.already_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name);
+                    args
+                })
+            );
             return;
         }
         self.config.api_accounts.push(aish_config::ApiAccountConfig {
@@ -3938,16 +4196,19 @@ impl AishShell {
         });
         self.persist_config_and_rebuild_rotation();
         println!(
-            "\x1b[32madded account '{}'\x1b[0m ({} extra account{})",
-            name,
-            self.config.api_accounts.len(),
-            if self.config.api_accounts.len() == 1 { "" } else { "s" }
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.accounts.added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("name".to_string(), name);
+                args.insert("count".to_string(), self.config.api_accounts.len().to_string());
+                args
+            })
         );
     }
 
     fn accounts_remove_interactive(&mut self) {
         if self.config.api_accounts.is_empty() {
-            eprintln!("no extra accounts to remove");
+            eprintln!("{}", t("shell.accounts.no_extra_remove"));
             return;
         }
         let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
@@ -3959,12 +4220,19 @@ impl AishShell {
         };
         self.config.api_accounts.retain(|a| a.name != name);
         self.persist_config_and_rebuild_rotation();
-        println!("\x1b[32mremoved account '{}'\x1b[0m", name);
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.accounts.removed", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("name".to_string(), name);
+                args
+            })
+        );
     }
 
     fn accounts_toggle_interactive(&mut self) {
         if self.config.api_accounts.is_empty() {
-            eprintln!("no extra accounts to toggle");
+            eprintln!("{}", t("shell.accounts.no_extra_toggle"));
             return;
         }
         let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
@@ -3979,40 +4247,63 @@ impl AishShell {
             let now = a.disabled;
             self.persist_config_and_rebuild_rotation();
             println!(
-                "\x1b[32m{} account '{}'\x1b[0m",
-                if now { "disabled" } else { "enabled" },
-                name
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.toggled", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert(
+                        "action".to_string(),
+                        if now {
+                            t("shell.accounts.disabled")
+                        } else {
+                            t("shell.accounts.enabled")
+                        },
+                    );
+                    args.insert("name".to_string(), name);
+                    args
+                })
             );
         }
     }
 
     fn accounts_list(&self) {
         println!();
-        println!("\x1b[1mRotation accounts\x1b[0m");
+        println!("\x1b[1m{}\x1b[0m", t("shell.accounts.list_title"));
         let primary_preview: String = self.config.api_key.chars().take(6).collect();
         println!(
-            "  [0] primary   key={}...  {}",
-            primary_preview,
-            if self.config.api_key.trim().is_empty() {
-                "(unset)"
-            } else {
-                ""
-            }
+            "{}",
+            t_with_args("shell.accounts.primary", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("key".to_string(), primary_preview);
+                args.insert(
+                    "state".to_string(),
+                    if self.config.api_key.trim().is_empty() {
+                        t("shell.accounts.unset")
+                    } else {
+                        String::new()
+                    },
+                );
+                args
+            })
         );
         for (i, a) in self.config.api_accounts.iter().enumerate() {
             let preview: String = a.api_key.chars().take(6).collect();
-            let state = if a.disabled { "disabled" } else { "enabled" };
+            let state = if a.disabled { t("shell.accounts.disabled") } else { t("shell.accounts.enabled") };
+            let key_preview = t_with_args("shell.accounts.key_preview", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("key".to_string(), preview);
+                args
+            });
             println!(
-                "  [{}] {:<10} key={}...  {}  {}",
+                "  [{}] {:<10} {}  {}  {}",
                 i + 1,
                 a.name,
-                preview,
+                key_preview,
                 a.api_base.as_deref().unwrap_or(""),
                 state
             );
         }
         if self.config.api_accounts.is_empty() {
-            println!("  (no extra accounts; add one with /accounts add <name> <key>)");
+            println!("{}", t("shell.accounts.no_extra_hint"));
         }
         println!();
     }
@@ -4021,7 +4312,11 @@ impl AishShell {
     fn persist_config_and_rebuild_rotation(&mut self) {
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-            eprintln!("warning: failed to save config: {e}");
+            eprintln!("{}", t_with_args("shell.common.config_save_warning", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                args
+            }));
         }
         self.rebuild_rotation();
     }
@@ -4074,15 +4369,15 @@ impl AishShell {
             // re-trigger on itself.
             let owned: Vec<String> = match action.as_str() {
                 "recent" => vec!["/audit".to_string()],
-                "user" => match prompt_edit_value("Username", "filter by user", "", false) {
+                "user" => match prompt_edit_value(&t("shell.menu.audit.user_label"), &t("shell.menu.audit.user_desc"), "", false) {
                     Some(u) if !u.is_empty() => vec!["/audit".into(), "--user".into(), u],
                     _ => return,
                 },
-                "host" => match prompt_edit_value("Host", "filter by host", "", false) {
+                "host" => match prompt_edit_value(&t("shell.menu.audit.host_label"), &t("shell.menu.audit.host_desc"), "", false) {
                     Some(h) if !h.is_empty() => vec!["/audit".into(), "--host".into(), h],
                     _ => return,
                 },
-                "type" => match prompt_edit_value("Event type", "e.g. command_executed", "", false) {
+                "type" => match prompt_edit_value(&t("shell.menu.audit.type_label"), &t("shell.menu.audit.type_desc"), "", false) {
                     Some(ty) if !ty.is_empty() => {
                         vec!["/audit".into(), "--event-type".into(), ty]
                     }
