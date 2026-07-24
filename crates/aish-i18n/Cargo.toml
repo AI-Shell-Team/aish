@@ -5,8 +5,6 @@ edition.workspace = true
 
 [dependencies]
 aish-core.workspace = true
-serde.workspace = true
 serde_yaml.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
 dirs.workspace = true

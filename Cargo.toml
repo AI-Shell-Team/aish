@@ -25,12 +25,11 @@ members = [
 version = "0.3.8"
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.80"
+rust-version = "1.89"
 
 [workspace.dependencies]
 # Error handling
 thiserror = "2"
-anyhow = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -81,6 +80,15 @@ base64 = "0.22"
 
 # Random
 rand = "0.9"
+
+# Misc utilities
+bytes = "1"
+glob = "0.3"
+shellexpand = "2.1"
+inquire = "0.9.4"
+which = "8"
+open = "5"
+cliclack = "0.5.4"
 
 # Readline
 rustyline = { version = "18", features = ["derive", "with-dirs"] }

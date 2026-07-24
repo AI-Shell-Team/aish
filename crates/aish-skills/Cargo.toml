@@ -15,4 +15,4 @@ dirs.workspace = true
 include_dir.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

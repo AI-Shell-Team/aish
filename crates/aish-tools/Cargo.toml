@@ -10,7 +10,6 @@ aish-llm.workspace = true
 aish-pty.workspace = true
 aish-security.workspace = true
 aish-skills.workspace = true
-aish-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -19,9 +18,8 @@ uuid.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 futures.workspace = true
-glob = "0.3"
-shellexpand = "2.1"
-inquire = "0.9.4"
+glob.workspace = true
+shellexpand.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

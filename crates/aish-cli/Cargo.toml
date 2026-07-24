@@ -18,7 +18,6 @@ aish-i18n.workspace = true
 aish-ui.workspace = true
 clap.workspace = true
 tokio.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
