@@ -3571,8 +3571,9 @@ impl AishShell {
         }
     }
 
-    /// `/sessions` — show the session tree (roots + forked branches).
-    fn handle_sessions_command(&self) {
+    /// `/sessions` — browse the session tree in an interactive panel (instead of
+    /// flooding the screen) and switch to the chosen session on submit.
+    fn handle_sessions_command(&mut self) {
         let Some(store) = self.session_store.as_ref() else {
             eprintln!("session store unavailable");
             return;
@@ -3588,46 +3589,70 @@ impl AishShell {
             println!("(no saved sessions)");
             return;
         }
-        println!();
-        println!("\x1b[1mSession tree\x1b[0m");
+
+        // Flatten roots + direct children into panel rows with depth indentation
+        // so the hierarchy stays visible without dumping every node to stdout.
+        let mut items: Vec<aish_ui::SearchSelectItem> = Vec::new();
         for root in &roots {
-            self.print_session_node(root, 0);
+            items.push(self.session_tree_item(root, 0));
             if let Ok(children) = store.list_children(&root.session_uuid) {
                 for child in &children {
-                    self.print_session_node(child, 1);
+                    items.push(self.session_tree_item(child, 1));
                 }
             }
         }
-        println!();
+
+        let panel = aish_ui::SearchSelectPanel::new(
+            aish_i18n::t("shell.resume.selector_title"),
+            aish_i18n::t("shell.resume.search_placeholder"),
+            items,
+        );
+        if let Ok(aish_ui::PanelOutcome::Submitted(
+            aish_ui::SearchSelectOutcome::Selected(id),
+        )) = aish_ui::PanelRuntime::new().run(panel)
+        {
+            if id != self.session_uuid {
+                if let Err(e) = self.resume_session_with_options(&id, false, true) {
+                    eprintln!("failed to switch session: {e}");
+                }
+            }
+        }
     }
 
-    fn print_session_node(&self, session: &aish_session::SessionRecord, depth: usize) {
-        let indent = "  ".repeat(depth);
-        let prefix = if depth > 0 { "└─ " } else { "" };
-        let mark = if session.session_uuid == self.session_uuid {
-            "  \x1b[32m(current)\x1b[0m"
+    /// Build one panel row for a session node, indenting forks beneath roots.
+    fn session_tree_item(
+        &self,
+        session: &aish_session::SessionRecord,
+        depth: usize,
+    ) -> aish_ui::SearchSelectItem {
+        let indent = if depth > 0 {
+            format!("{}└ ", "  ".repeat(depth))
+        } else {
+            String::new()
+        };
+        let short = &session.session_uuid[..8.min(session.session_uuid.len())];
+        let when = session.created_at.format("%m-%d %H:%M");
+        let cur = if session.session_uuid == self.session_uuid {
+            " *"
         } else {
             ""
         };
-        let short = &session.session_uuid[..8.min(session.session_uuid.len())];
-        let when = session.created_at.format("%Y-%m-%d %H:%M");
-        let preview: String = session
-            .state_snapshot()
+        let label = format!("{}{} {} {}{}", indent, short, session.model, when, cur);
+        let snap = session.state_snapshot();
+        let preview: String = snap
             .summary_preview
             .as_deref()
             .unwrap_or("")
             .chars()
-            .take(48)
+            .take(60)
             .collect();
-        let prev = if preview.is_empty() {
-            String::new()
-        } else {
-            format!("  {}", preview)
-        };
-        println!(
-            "{}{}{} {:<20} {}{}{}",
-            indent, prefix, short, session.model, when, prev, mark
-        );
+        let search = format!("{} {} {}", short, session.model, preview);
+        let mut item =
+            aish_ui::SearchSelectItem::new(session.session_uuid.clone(), label).with_search_text(search);
+        if !preview.is_empty() {
+            item = item.with_detail(preview);
+        }
+        item
     }
 
     /// `/export [md]` — export the current session (AI conversation + command
