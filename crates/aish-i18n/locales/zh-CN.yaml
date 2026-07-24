@@ -62,7 +62,6 @@ cli:
     install_script_failed: "运行安装脚本失败: {error}"
     unsupported_platform: "不支持的平台: {platform}"
     unsupported_arch: "不支持的架构: {arch}"
-    github_api_error: "GitHub API 返回状态码 {status}"
     extraction_failed: "解压失败: {error}"
     installation_failed: "安装失败: {error}"
     checking: "正在检查更新..."

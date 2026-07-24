@@ -8203,6 +8203,37 @@ mod tests {
         pty.stop();
     }
 
+    /// Regression: user commands must run with PTY ECHO on.
+    ///
+    /// The bash rc wrapper keeps `-echo` at the aish prompt (frontend
+    /// owns display), but `__aish_on_debug` must restore ECHO before a
+    /// foreground child starts.  Without that, cooked-mode prompts
+    /// (`aish update` confirm, `read`, `input()`) accept keys with no
+    /// visible feedback — reported as "无法输入".
+    #[test]
+    fn test_user_command_re_enables_pty_echo() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                r#"python3 -c "import termios,sys; f=termios.tcgetattr(0); print('ECHO', int(bool(f[3]&termios.ECHO)))""#,
+                Duration::from_secs(10),
+                None,
+                false,
+            )
+            .expect("execute should succeed");
+        assert_eq!(exit_code, 0, "output was: {output}");
+        assert!(
+            output.contains("ECHO 1"),
+            "expected PTY ECHO on during user command, got: {output}"
+        );
+
+        pty.stop();
+    }
+
     #[test]
     fn test_execute_multiple_commands() {
         let cwd = std::env::current_dir()

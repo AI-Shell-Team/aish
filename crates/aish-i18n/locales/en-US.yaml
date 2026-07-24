@@ -62,7 +62,6 @@ cli:
     install_script_failed: "Failed to run install script: {error}"
     unsupported_platform: "Unsupported platform: {platform}"
     unsupported_arch: "Unsupported architecture: {arch}"
-    github_api_error: "GitHub API returned status {status}"
     extraction_failed: "Extraction failed: {error}"
     installation_failed: "Installation failed: {error}"
     checking: "Checking for updates..."
