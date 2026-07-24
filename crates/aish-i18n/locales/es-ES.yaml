@@ -179,6 +179,12 @@ shell:
     kill_live_sessions: "Terminar sesion(es) PTY por ID"
     audit: "Consultar el registro de auditoría (quién/cuándo/qué/sugerencia de IA/confirmación)"
     forget-approvals: "Borrar aprobaciones de comandos recordadas (esta sesión)"
+    usage: "Mostrar la rotación de cuota de API y el estado de respaldo"
+    accounts: "Gestionar cuentas de rotación multi-clave"
+    fallback: "Gestionar la cadena de modelos de respaldo"
+    fork: "Bifurcar la sesión actual"
+    sessions: "Mostrar el árbol de sesiones"
+    export: "Exportar la sesión actual a Markdown"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"

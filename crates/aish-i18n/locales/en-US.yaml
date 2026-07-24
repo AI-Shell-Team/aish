@@ -368,6 +368,12 @@ shell:
     kill_live_sessions: "Kill live PTY session(s) by ID"
     audit: "Query audit log (who/when/what/AI suggestion/confirm)"
     forget-approvals: "Clear remembered command approvals (this session)"
+    usage: "Show API quota rotation + fallback status"
+    accounts: "Manage multi-key rotation accounts"
+    fallback: "Manage the model fallback chain"
+    fork: "Branch the current session"
+    sessions: "Show the session tree"
+    export: "Export the current session to Markdown"
 
   record:
     started: "⏺ Recording started: {path}"

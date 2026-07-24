@@ -368,6 +368,12 @@ shell:
     kill_live_sessions: "按 ID 终止活跃 PTY 会话"
     audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
     forget-approvals: "清除本会话记住的命令审批"
+    usage: "显示 API 配额轮换与备用模型状态"
+    accounts: "管理多密钥轮换账户"
+    fallback: "管理模型备用链"
+    fork: "分支当前会话"
+    sessions: "显示会话树"
+    export: "导出当前会话为 Markdown"
 
   record:
     started: "⏺ 录制已开始: {path}"

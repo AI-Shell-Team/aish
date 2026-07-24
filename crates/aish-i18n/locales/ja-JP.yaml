@@ -179,6 +179,12 @@ shell:
     kill_live_sessions: "IDでPTYセッション終了"
     audit: "監査ログを照会（誰/いつ/何/AI提案/確認）"
     forget-approvals: "記憶されたコマンド承認を削除（このセッション）"
+    usage: "API クォータのローテーションとフォールバック状態を表示"
+    accounts: "複数キーのローテーションアカウントを管理"
+    fallback: "モデルのフォールバックチェーンを管理"
+    fork: "現在のセッションを分岐"
+    sessions: "セッションツリーを表示"
+    export: "現在のセッションを Markdown にエクスポート"
 
   feedback:
     select_type: "フィードバックの種類を選択"

@@ -179,6 +179,12 @@ shell:
     kill_live_sessions: "PTY-Sitzung(en) nach ID beenden"
     audit: "Audit-Protokoll abfragen (wer/wann/was/KI-Vorschlag/Bestaetigung)"
     forget-approvals: "Gemerkte Befehlsgenehmigungen löschen (diese Sitzung)"
+    usage: "API-Kontingent-Rotation und Fallback-Status anzeigen"
+    accounts: "Multi-Key-Rotationskonten verwalten"
+    fallback: "Die Modell-Fallback-Kette verwalten"
+    fork: "Aktuelle Sitzung abzweigen"
+    sessions: "Sitzungsbaum anzeigen"
+    export: "Aktuelle Sitzung als Markdown exportieren"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
