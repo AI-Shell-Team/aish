@@ -300,6 +300,17 @@ shell:
     key_desc: "der Schlüssel für dieses Konto"
     base_label: "API-Base (optional)"
     base_desc: "Endpunkt überschreiben; leer = wie primär"
+    select_model: "Modell zur Überprüfung wählen"
+    no_models: "Keine Modelle aufgelistet; verwende primäres Modell '{model}'"
+    fetch_failed: "Modelle konnten nicht abgerufen werden: {error}"
+    verifying: "Verbindung wird überprüft..."
+    connected: "Verbunden ({latency}ms) - Modell: {model}"
+    tool_yes: "Tool-Aufrufe: unterstützt"
+    tool_no: "Tool-Aufrufe: nicht unterstützt"
+    verify_failed: "Verbindungsprüfung fehlgeschlagen: {error}"
+    verify_failed_title: "Überprüfung fehlgeschlagen"
+    save_anyway: "Trotzdem speichern"
+    cancel_add: "Abbrechen"
 
   fallback:
     chain_title: "Fallback-Modell-Kette"

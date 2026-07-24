@@ -4150,6 +4150,9 @@ impl AishShell {
     }
 
     fn accounts_add_interactive(&mut self) {
+        use crate::wizard::model_fetch::fetch_models_from_api;
+        use crate::wizard::verification::{check_connectivity, check_tool_support};
+
         let name = match prompt_edit_value(
             &t("shell.accounts.name_label"),
             &t("shell.accounts.name_desc"),
@@ -4162,35 +4165,139 @@ impl AishShell {
                 return;
             }
         };
-        let key = match prompt_edit_value(&t("shell.accounts.key_label"), &t("shell.accounts.key_desc"), "", true) {
+        let key = match prompt_edit_value(
+            &t("shell.accounts.key_label"),
+            &t("shell.accounts.key_desc"),
+            "",
+            true,
+        ) {
             Some(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => {
                 println!("{}", t("shell.common.cancelled"));
                 return;
             }
         };
-        let base = prompt_edit_value(
+        // api_base defaults to the primary endpoint; the user may override it.
+        let base = match prompt_edit_value(
             &t("shell.accounts.base_label"),
             &t("shell.accounts.base_desc"),
-            "",
+            &self.config.api_base,
             false,
-        )
-        .filter(|s| !s.trim().is_empty());
+        ) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => self.config.api_base.clone(),
+        };
+
         if self.config.api_accounts.iter().any(|a| a.name == name) {
             eprintln!(
                 "{}",
                 t_with_args("shell.accounts.already_exists", &{
                     let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name);
+                    args.insert("name".to_string(), name.clone());
                     args
                 })
             );
             return;
         }
+
+        // Pick a model to verify against: try listing the endpoint's models,
+        // otherwise fall back to the primary model.
+        let model = match fetch_models_from_api(&base, &key, 10) {
+            Ok(models) if !models.is_empty() => {
+                let opts: Vec<(String, String, String)> = models
+                    .iter()
+                    .map(|m| (m.clone(), m.clone(), String::new()))
+                    .collect();
+                match pick_menu(&t("shell.accounts.select_model"), &opts) {
+                    Some(m) => Some(m),
+                    None => return,
+                }
+            }
+            Ok(_) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.accounts.no_models", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), self.config.model.clone());
+                        args
+                    })
+                );
+                Some(self.config.model.clone())
+            }
+            Err(e) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.accounts.fetch_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e);
+                        args
+                    })
+                );
+                Some(self.config.model.clone())
+            }
+        };
+
+        // Verify connectivity + tool support (same probes as /setup).
+        if let Some(model) = model {
+            println!("{}", t("shell.accounts.verifying"));
+            let conn = check_connectivity(&base, &key, &model, 15);
+            if conn.ok {
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.accounts.connected", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert(
+                            "latency".to_string(),
+                            conn.latency_ms.unwrap_or(0).to_string(),
+                        );
+                        args.insert("model".to_string(), model.clone());
+                        args
+                    })
+                );
+                let tools = check_tool_support(&base, &key, &model, 30);
+                let state = t(if tools.supports {
+                    "shell.accounts.tool_yes"
+                } else {
+                    "shell.accounts.tool_no"
+                });
+                println!("  {}", state);
+            } else {
+                let err = conn.error.unwrap_or_default();
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.accounts.verify_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), err);
+                        args
+                    })
+                );
+                let save = pick_menu(
+                    &t("shell.accounts.verify_failed_title"),
+                    &[
+                        ("save".to_string(), t("shell.accounts.save_anyway"), String::new()),
+                        ("cancel".to_string(), t("shell.accounts.cancel_add"), String::new()),
+                    ],
+                );
+                match save.as_deref() {
+                    Some("save") => {}
+                    _ => {
+                        println!("{}", t("shell.common.cancelled"));
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Persist. api_base is stored only when it differs from the primary.
+        let api_base_opt = if base == self.config.api_base {
+            None
+        } else {
+            Some(base)
+        };
         self.config.api_accounts.push(aish_config::ApiAccountConfig {
             name: name.clone(),
             api_key: key,
-            api_base: base,
+            api_base: api_base_opt,
             weight: 1,
             disabled: false,
         });

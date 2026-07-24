@@ -489,6 +489,17 @@ shell:
     key_desc: "该账号的密钥"
     base_label: "API base（可选）"
     base_desc: "覆盖端点；留空 = 与主账号相同"
+    select_model: "选择要验证的模型"
+    no_models: "未列出模型；使用主模型 '{model}'"
+    fetch_failed: "获取模型失败：{error}"
+    verifying: "正在验证连通性..."
+    connected: "已连接（{latency}ms）— 模型：{model}"
+    tool_yes: "工具调用：支持"
+    tool_no: "工具调用：不支持"
+    verify_failed: "连通性检测失败：{error}"
+    verify_failed_title: "验证失败"
+    save_anyway: "仍然保存"
+    cancel_add: "取消"
 
   fallback:
     chain_title: "回退模型链"

@@ -300,6 +300,17 @@ shell:
     key_desc: "la clé pour ce compte"
     base_label: "API base (optionnel)"
     base_desc: "remplacer le point de terminaison ; vide = comme le primaire"
+    select_model: "Sélectionnez un modèle à vérifier"
+    no_models: "Aucun modèle listé ; utilisation du modèle principal '{model}'"
+    fetch_failed: "Échec de la récupération des modèles : {error}"
+    verifying: "Vérification de la connectivité..."
+    connected: "Connecté ({latency}ms) - modèle : {model}"
+    tool_yes: "Appel d'outils : pris en charge"
+    tool_no: "Appel d'outils : non pris en charge"
+    verify_failed: "Échec de la vérification de la connexion : {error}"
+    verify_failed_title: "Échec de la vérification"
+    save_anyway: "Enregistrer quand même"
+    cancel_add: "Annuler"
 
   fallback:
     chain_title: "Chaîne de modèles de repli"

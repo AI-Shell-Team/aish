@@ -300,6 +300,17 @@ shell:
     key_desc: "la clave para esta cuenta"
     base_label: "API base (opcional)"
     base_desc: "sobrescribir endpoint; vacío = igual que primaria"
+    select_model: "Selecciona un modelo para verificar"
+    no_models: "No hay modelos listados; usando el modelo principal '{model}'"
+    fetch_failed: "Error al obtener modelos: {error}"
+    verifying: "Verificando conectividad..."
+    connected: "Conectado ({latency}ms) - modelo: {model}"
+    tool_yes: "Llamada a herramientas: soportada"
+    tool_no: "Llamada a herramientas: no soportada"
+    verify_failed: "Comprobación de conexión fallida: {error}"
+    verify_failed_title: "Verificación fallida"
+    save_anyway: "Guardar de todos modos"
+    cancel_add: "Cancelar"
 
   fallback:
     chain_title: "Cadena de modelos de respaldo"

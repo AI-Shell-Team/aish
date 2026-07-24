@@ -300,6 +300,17 @@ shell:
     key_desc: "このアカウントのキー"
     base_label: "API ベース（任意）"
     base_desc: "エンドポイントを上書き；空欄 = プライマリと同じ"
+    select_model: "検証するモデルを選択してください"
+    no_models: "モデルがリストされていません；プライマリモデル '{model}' を使用します"
+    fetch_failed: "モデルの取得に失敗しました：{error}"
+    verifying: "接続を検証しています..."
+    connected: "接続済み（{latency}ms）— モデル：{model}"
+    tool_yes: "ツール呼び出し：対応"
+    tool_no: "ツール呼び出し：非対応"
+    verify_failed: "接続確認に失敗しました：{error}"
+    verify_failed_title: "検証に失敗しました"
+    save_anyway: "それでも保存"
+    cancel_add: "キャンセル"
 
   fallback:
     chain_title: "フォールバックモデルチェーン"

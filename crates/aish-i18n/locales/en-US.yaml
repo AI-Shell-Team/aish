@@ -489,6 +489,17 @@ shell:
     key_desc: "the key for this account"
     base_label: "API base (optional)"
     base_desc: "override endpoint; blank = same as primary"
+    select_model: "Select a model to verify"
+    no_models: "No models listed; using primary model '{model}'"
+    fetch_failed: "Failed to fetch models: {error}"
+    verifying: "Verifying connectivity..."
+    connected: "Connected ({latency}ms) - model: {model}"
+    tool_yes: "Tool calling: supported"
+    tool_no: "Tool calling: not supported"
+    verify_failed: "Connection check failed: {error}"
+    verify_failed_title: "Verification failed"
+    save_anyway: "Save anyway"
+    cancel_add: "Cancel"
 
   fallback:
     chain_title: "Fallback model chain"
