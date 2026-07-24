@@ -421,6 +421,22 @@ impl RotationState {
             total_rotations: self.total_rotations,
         }
     }
+
+    /// Human-readable error shown when every model was rejected by the provider
+    /// as invalid. Aggregates the primary + fallback names so the user sees the
+    /// full configured set, not only the last fallback attempted.
+    pub fn model_exhaustion_error(&self) -> String {
+        let tried = std::iter::once(self.primary_model.as_str())
+            .chain(self.fallback_models.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "all configured models were rejected by the provider as invalid \
+             (tried: {tried}). Verify the `model` / `fallback_models` names in \
+             the aish config — they may be misspelled or not offered by this \
+             endpoint."
+        )
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +486,19 @@ mod tests {
             FailureKind::from_message("connection reset by peer"),
             Some(FailureKind::Network)
         );
+    }
+
+    #[test]
+    fn exhaustion_error_lists_primary_and_fallbacks() {
+        let s = RotationState::new(
+            "gl".into(),
+            Vec::new(),
+            vec!["glm-4.7".into()],
+            RetryPolicy::default(),
+        );
+        let msg = s.model_exhaustion_error();
+        assert!(msg.contains("gl"), "primary model missing: {msg}");
+        assert!(msg.contains("glm-4.7"), "fallback model missing: {msg}");
     }
 
     #[test]

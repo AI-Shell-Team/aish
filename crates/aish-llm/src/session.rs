@@ -501,6 +501,13 @@ impl LlmSession {
                     );
                     let advanced = rotation.lock().unwrap().advance_on_error(kind);
                     if !advanced {
+                        if kind == FailureKind::ModelError {
+                            let msg = rotation
+                                .lock()
+                                .unwrap()
+                                .model_exhaustion_error();
+                            return Err(AishError::Llm(msg));
+                        }
                         return Err(err);
                     }
                     let next = rotation.lock().unwrap().current(&self.stream_ctx.api_base);
