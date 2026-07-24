@@ -270,13 +270,13 @@ fn prompt_edit_value(label: &str, desc: &str, current: &str, secret: bool) -> Op
 /// Interactive menu picker built on the inline selection panel. Each option is
 /// `(value, label, description)`. Returns the chosen value, or `None` on cancel.
 /// REPL-safe (the underlying panel acquires the interactive input guard).
-fn pick_menu(title: &str, options: &[(&str, &str, &str)]) -> Option<String> {
+fn pick_menu(title: &str, options: &[(String, String, String)]) -> Option<String> {
     let opts: Vec<crate::tui::DialogOption> = options
         .iter()
         .map(|(v, l, d)| {
-            let mut o = crate::tui::DialogOption::new(*v, *l);
+            let mut o = crate::tui::DialogOption::new(v.as_str(), l.as_str());
             if !d.is_empty() {
-                o = o.with_description(*d);
+                o = o.with_description(d.as_str());
             }
             o
         })
@@ -3367,16 +3367,14 @@ impl AishShell {
             return self.fallback_dispatch(parts);
         }
         // No args → interactive menu.
-        let action = match pick_menu(
-            "Fallback model chain",
-            &[
-                ("list", "List chain", "show primary + fallback models and policy"),
-                ("add", "Add model", "append a fallback model"),
-                ("remove", "Remove model", "drop a model from the chain"),
-                ("clear", "Clear chain", "empty the fallback chain"),
-                ("revert", "Toggle revert", "auto-revert to primary on/off"),
-            ],
-        ) {
+        let opts: Vec<(String, String, String)> = vec![
+            ("list".to_string(), t("shell.menu.fallback.list"), t("shell.menu.fallback.list_desc")),
+            ("add".to_string(), t("shell.menu.fallback.add"), t("shell.menu.fallback.add_desc")),
+            ("remove".to_string(), t("shell.menu.fallback.remove"), t("shell.menu.fallback.remove_desc")),
+            ("clear".to_string(), t("shell.menu.fallback.clear"), t("shell.menu.fallback.clear_desc")),
+            ("revert".to_string(), t("shell.menu.fallback.revert"), t("shell.menu.fallback.revert_desc")),
+        ];
+        let action = match pick_menu(&t("shell.menu.fallback.title"), &opts) {
             Some(a) => a,
             None => return,
         };
@@ -3507,9 +3505,9 @@ impl AishShell {
             return;
         }
         let models: Vec<String> = self.config.fallback_models.clone();
-        let opts: Vec<(&str, &str, &str)> =
-            models.iter().map(|m| (m.as_str(), m.as_str(), "")).collect();
-        let model = match pick_menu("Remove fallback model", &opts) {
+        let opts: Vec<(String, String, String)> =
+            models.iter().map(|m| (m.clone(), m.clone(), String::new())).collect();
+        let model = match pick_menu(&t("shell.menu.fallback.remove_title"), &opts) {
             Some(m) => m,
             None => return,
         };
@@ -3520,13 +3518,11 @@ impl AishShell {
 
     fn fallback_revert_interactive(&mut self) {
         let cur = self.config.fallback_revert_on_cooldown;
-        let action = match pick_menu(
-            "Revert policy",
-            &[
-                ("on", "Auto-revert", "return to primary after cooldown (recommended)"),
-                ("off", "Stay on fallback", "keep fallback until manual switch"),
-            ],
-        ) {
+        let opts: Vec<(String, String, String)> = vec![
+            ("on".to_string(), t("shell.menu.fallback.on"), t("shell.menu.fallback.on_desc")),
+            ("off".to_string(), t("shell.menu.fallback.off"), t("shell.menu.fallback.off_desc")),
+        ];
+        let action = match pick_menu(&t("shell.menu.fallback.revert_title"), &opts) {
             Some(a) => a,
             None => return,
         };
@@ -3768,15 +3764,13 @@ impl AishShell {
             return self.accounts_dispatch(parts);
         }
         // No args → interactive menu.
-        let action = match pick_menu(
-            "Rotation accounts",
-            &[
-                ("list", "List accounts", "show all rotation accounts + status"),
-                ("add", "Add account", "register a new API key"),
-                ("remove", "Remove account", "delete an account"),
-                ("toggle", "Enable / disable", "pause or resume an account"),
-            ],
-        ) {
+        let opts: Vec<(String, String, String)> = vec![
+            ("list".to_string(), t("shell.menu.accounts.list"), t("shell.menu.accounts.list_desc")),
+            ("add".to_string(), t("shell.menu.accounts.add"), t("shell.menu.accounts.add_desc")),
+            ("remove".to_string(), t("shell.menu.accounts.remove"), t("shell.menu.accounts.remove_desc")),
+            ("toggle".to_string(), t("shell.menu.accounts.toggle"), t("shell.menu.accounts.toggle_desc")),
+        ];
+        let action = match pick_menu(&t("shell.menu.accounts.title"), &opts) {
             Some(a) => a,
             None => return,
         };
@@ -3932,9 +3926,9 @@ impl AishShell {
             return;
         }
         let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
-        let opts: Vec<(&str, &str, &str)> =
-            names.iter().map(|n| (n.as_str(), n.as_str(), "")).collect();
-        let name = match pick_menu("Remove account", &opts) {
+        let opts: Vec<(String, String, String)> =
+            names.iter().map(|n| (n.clone(), n.clone(), String::new())).collect();
+        let name = match pick_menu(&t("shell.menu.accounts.remove_title"), &opts) {
             Some(n) => n,
             None => return,
         };
@@ -3949,9 +3943,9 @@ impl AishShell {
             return;
         }
         let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
-        let opts: Vec<(&str, &str, &str)> =
-            names.iter().map(|n| (n.as_str(), n.as_str(), "")).collect();
-        let name = match pick_menu("Enable / disable account", &opts) {
+        let opts: Vec<(String, String, String)> =
+            names.iter().map(|n| (n.clone(), n.clone(), String::new())).collect();
+        let name = match pick_menu(&t("shell.menu.accounts.toggle_title"), &opts) {
             Some(n) => n,
             None => return,
         };
@@ -4038,15 +4032,13 @@ impl AishShell {
 
         // No args → interactive menu (power-user keeps `/audit --user x ...`).
         if parts.len() == 1 {
-            let action = match pick_menu(
-                "Audit log",
-                &[
-                    ("recent", "Recent events", "last 20 across all"),
-                    ("user", "Filter by user", "show events for one user"),
-                    ("host", "Filter by host", "show events on one host"),
-                    ("type", "Filter by event type", "show one event type"),
-                ],
-            ) {
+            let opts: Vec<(String, String, String)> = vec![
+                ("recent".to_string(), t("shell.menu.audit.recent"), t("shell.menu.audit.recent_desc")),
+                ("user".to_string(), t("shell.menu.audit.user"), t("shell.menu.audit.user_desc")),
+                ("host".to_string(), t("shell.menu.audit.host"), t("shell.menu.audit.host_desc")),
+                ("type".to_string(), t("shell.menu.audit.type"), t("shell.menu.audit.type_desc")),
+            ];
+            let action = match pick_menu(&t("shell.menu.audit.title"), &opts) {
                 Some(a) => a,
                 None => return,
             };
@@ -4503,12 +4495,12 @@ impl AishShell {
                 }
                 rows.push((s.session_id.clone(), format_session_line(s)));
             }
-            let mut menu: Vec<(&str, &str, &str)> = rows
+            let mut menu: Vec<(String, String, String)> = rows
                 .iter()
-                .map(|(v, l)| (v.as_str(), l.as_str(), ""))
+                .map(|(v, l)| (v.clone(), l.clone(), String::new()))
                 .collect();
-            menu.push(("all", "Kill all others", "every session except current"));
-            let choice = match pick_menu("Kill live sessions", &menu) {
+            menu.push(("all".to_string(), t("shell.menu.kill.all"), t("shell.menu.kill.all_desc")));
+            let choice = match pick_menu(&t("shell.menu.kill.title"), &menu) {
                 Some(c) => c,
                 None => return,
             };
@@ -4656,13 +4648,11 @@ impl AishShell {
     fn handle_doctor_command(&mut self, parts: &[&str]) {
         // No args → interactive menu (power-user keeps `/doctor [--fix]`).
         let fix = if parts.len() == 1 {
-            match pick_menu(
-                "System doctor",
-                &[
-                    ("run", "Run diagnostics", "check system health"),
-                    ("fix", "Run with auto-fix", "attempt automatic fixes"),
-                ],
-            ) {
+            let opts: Vec<(String, String, String)> = vec![
+                ("run".to_string(), t("shell.menu.doctor.run"), t("shell.menu.doctor.run_desc")),
+                ("fix".to_string(), t("shell.menu.doctor.fix"), t("shell.menu.doctor.fix_desc")),
+            ];
+            match pick_menu(&t("shell.menu.doctor.title"), &opts) {
                 Some(action) => action == "fix",
                 None => return,
             }
@@ -5080,12 +5070,12 @@ impl AishShell {
                 .lock()
                 .map(|g| g.is_some())
                 .unwrap_or(false);
-            let opts: &[(&str, &str, &str)] = if recording {
-                &[("stop", "Stop recording", "finish and save the terminal cast")]
+            let opts: Vec<(String, String, String)> = if recording {
+                vec![("stop".to_string(), t("shell.menu.record.stop"), t("shell.menu.record.stop_desc"))]
             } else {
-                &[("start", "Start recording", "begin a new terminal cast")]
+                vec![("start".to_string(), t("shell.menu.record.start"), t("shell.menu.record.start_desc"))]
             };
-            let action = match pick_menu("Terminal recording", opts) {
+            let action = match pick_menu(&t("shell.menu.record.title"), &opts) {
                 Some(a) => a,
                 None => return,
             };
@@ -5638,17 +5628,17 @@ impl AishShell {
 
         // No args → interactive menu (power-user keeps `/plan start|status|exit`).
         if parts.len() == 1 {
-            let opts: &[(&str, &str, &str)] = match self.ai_handler.plan_phase() {
-                PlanPhase::Normal => &[
-                    ("start", "Start planning", "enter read-only plan mode"),
-                    ("status", "Show status", "current plan state"),
+            let opts: Vec<(String, String, String)> = match self.ai_handler.plan_phase() {
+                PlanPhase::Normal => vec![
+                    ("start".to_string(), t("shell.menu.plan.start"), t("shell.menu.plan.start_desc")),
+                    ("status".to_string(), t("shell.menu.plan.status"), t("shell.menu.plan.status_desc")),
                 ],
-                PlanPhase::Planning => &[
-                    ("status", "Show status", "current plan state"),
-                    ("exit", "Exit plan mode", "leave planning"),
+                PlanPhase::Planning => vec![
+                    ("status".to_string(), t("shell.menu.plan.status"), t("shell.menu.plan.status_desc")),
+                    ("exit".to_string(), t("shell.menu.plan.exit"), t("shell.menu.plan.exit_desc")),
                 ],
             };
-            let action = match pick_menu("Plan mode", opts) {
+            let action = match pick_menu(&t("shell.menu.plan.title"), &opts) {
                 Some(a) => a,
                 None => return,
             };
