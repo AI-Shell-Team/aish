@@ -5713,6 +5713,15 @@ impl AishShell {
                     "exit" => {
                         println!("mode=shell, approval_status=draft, artifact=-");
                     }
+                    "status" => {
+                        // Not currently planning — report that instead of
+                        // silently entering plan mode (the catch-all below
+                        // would otherwise treat `status` as `start`).
+                        println!(
+                            "{}",
+                            theme::faint("Not in plan mode. Use `/plan start` (or `; <request>`) to begin planning.")
+                        );
+                    }
                     _ => {
                         // `/plan` or `/plan start` from shell mode → enter planning
                         self.ai_handler.enter_plan_mode(&self.session_uuid);
