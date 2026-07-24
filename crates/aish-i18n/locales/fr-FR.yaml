@@ -520,6 +520,7 @@ shell:
     cannot_remove_primary: "Le modele principal ne peut pas etre supprime"
     switched_account: "Bascule vers '{name}' (modele : {model})"
     fallback_badge: "secours"
+    primary_badge: "Principal"
     action_fallback: "secours"
     fallback_not_switchable: "Le modele de secours '{model}' n'est pas directement commutable; essaye seulement quand le principal echoue"
     fallback_add_label: "Nom du modele de secours"

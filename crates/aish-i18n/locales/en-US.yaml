@@ -879,6 +879,7 @@ shell:
     cannot_remove_primary: "The primary model cannot be removed"
     switched_account: "Switched to '{name}' (model: {model})"
     fallback_badge: "fallback"
+    primary_badge: "primary"
     action_fallback: "fallback"
     fallback_not_switchable: "Fallback model '{model}' is not directly switchable; it is tried only when the primary fails"
     fallback_add_label: "Fallback model name"

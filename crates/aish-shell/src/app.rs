@@ -5136,7 +5136,8 @@ impl AishShell {
                 self.config.model.clone(),
             )
             .with_highlight("primary")
-            .with_detail(self.config.api_base.as_str())];
+            .with_detail(self.config.api_base.as_str())
+            .with_badge(t("shell.model.primary_badge"))];
             for a in &self.config.api_accounts {
                 let model = a
                     .model
@@ -5146,11 +5147,13 @@ impl AishShell {
                     .api_base
                     .clone()
                     .unwrap_or_else(|| self.config.api_base.clone());
-                items.push(
-                    SearchSelectItem::new(a.name.clone(), model)
-                        .with_highlight(a.name.clone())
-                        .with_detail(base),
-                );
+                let mut item = SearchSelectItem::new(a.name.clone(), model)
+                    .with_highlight(a.name.clone())
+                    .with_detail(base);
+                if a.disabled {
+                    item = item.with_badge(t("shell.accounts.disabled"));
+                }
+                items.push(item);
             }
             for m in &self.config.fallback_models {
                 items.push(

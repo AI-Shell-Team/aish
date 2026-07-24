@@ -520,6 +520,7 @@ shell:
     cannot_remove_primary: "プライマリモデルは削除できません"
     switched_account: "'{name}' に切り替えました（モデル: {model}）"
     fallback_badge: "フォールバック"
+    primary_badge: "プライマリ"
     action_fallback: "フォールバック"
     fallback_not_switchable: "フォールバックモデル '{model}' は直接切替不可。主モデル失敗時のみ試行されます"
     fallback_add_label: "フォールバックモデル名"

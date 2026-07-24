@@ -520,6 +520,7 @@ shell:
     cannot_remove_primary: "Das primaere Modell kann nicht entfernt werden"
     switched_account: "Zu '{name}' gewechselt (Modell: {model})"
     fallback_badge: "Fallback"
+    primary_badge: "Primär"
     action_fallback: "Fallback"
     fallback_not_switchable: "Fallback-Modell '{model}' ist nicht direkt umschaltbar; wird nur versucht, wenn das primaere versagt"
     fallback_add_label: "Fallback-Modellname"

@@ -879,6 +879,7 @@ shell:
     cannot_remove_primary: "主模型不可删除"
     switched_account: "已切换到 '{name}'（模型：{model}）"
     fallback_badge: "回退"
+    primary_badge: "主"
     action_fallback: "回退"
     fallback_not_switchable: "回退模型 '{model}' 不可直接切换，仅作主模型失败时的备选"
     fallback_add_label: "回退模型名"

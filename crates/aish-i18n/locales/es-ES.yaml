@@ -520,6 +520,7 @@ shell:
     cannot_remove_primary: "El modelo principal no se puede eliminar"
     switched_account: "Cambiado a '{name}' (modelo: {model})"
     fallback_badge: "respaldo"
+    primary_badge: "Principal"
     action_fallback: "respaldo"
     fallback_not_switchable: "El modelo de respaldo '{model}' no se puede cambiar directamente; se prueba solo cuando el principal falla"
     fallback_add_label: "Nombre del modelo de respaldo"
