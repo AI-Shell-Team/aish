@@ -5171,7 +5171,9 @@ impl AishShell {
             .with_footer(t("shell.model.picker_footer"))
             .with_action('a', t("shell.model.action_add"))
             .with_action('d', t("shell.model.action_del"))
-            .with_action('f', t("shell.model.action_fallback"));
+            .with_action('f', t("shell.model.action_fallback"))
+            .with_action('t', t("shell.model.action_toggle"))
+            .with_action('e', t("shell.model.action_edit"));
 
             let outcome = {
                 let _guard = aish_tools::bash::acquire_interactive_input_guard();
@@ -5191,8 +5193,75 @@ impl AishShell {
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('f', _))) => {
                     self.add_fallback_interactive();
                 }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('t', name))) => {
+                    self.model_panel_toggle(&name);
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('e', name))) => {
+                    self.model_panel_edit(&name);
+                }
                 _ => break,
             }
+        }
+    }
+
+    /// Toggle an account enabled/disabled from the model panel.
+    fn model_panel_toggle(&mut self, name: &str) {
+        if name == "primary" || name.starts_with("fallback:") {
+            return;
+        }
+        if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
+            a.disabled = !a.disabled;
+            let state = if a.disabled {
+                t("shell.accounts.disabled")
+            } else {
+                t("shell.accounts.enabled")
+            };
+            self.persist_config_and_rebuild_rotation();
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.toggled", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("action".to_string(), state);
+                    args.insert("name".to_string(), name.to_string());
+                    args
+                })
+            );
+        }
+    }
+
+    /// Edit an account's model name from the model panel.
+    fn model_panel_edit(&mut self, name: &str) {
+        if name == "primary" || name.starts_with("fallback:") {
+            return;
+        }
+        let current = self
+            .config
+            .api_accounts
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.model.clone())
+            .unwrap_or_else(|| self.config.model.clone());
+        let new_model = match prompt_edit_value(
+            &t("shell.model.edit_label"),
+            &t("shell.model.edit_desc"),
+            &current,
+            false,
+        ) {
+            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+            _ => return,
+        };
+        if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
+            a.model = Some(new_model.clone());
+            self.persist_config_and_rebuild_rotation();
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.model.edited", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.to_string());
+                    args.insert("model".to_string(), new_model);
+                    args
+                })
+            );
         }
     }
 
