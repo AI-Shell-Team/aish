@@ -3363,262 +3363,8 @@ impl AishShell {
 
     /// `/fallback` — manage the ordered model fallback chain tried when the
     /// primary model hits a rate/usage limit or a hard error.
-    fn handle_fallback_command(&mut self, parts: &[&str]) {
-        // Direct subcommand (power-user) → dispatch.
-        if parts.len() > 1 {
-            return self.fallback_dispatch(parts);
-        }
-        // No args → interactive menu.
-        let opts: Vec<(String, String, String)> = vec![
-            ("list".to_string(), t("shell.menu.fallback.list"), t("shell.menu.fallback.list_desc")),
-            ("add".to_string(), t("shell.menu.fallback.add"), t("shell.menu.fallback.add_desc")),
-            ("remove".to_string(), t("shell.menu.fallback.remove"), t("shell.menu.fallback.remove_desc")),
-            ("clear".to_string(), t("shell.menu.fallback.clear"), t("shell.menu.fallback.clear_desc")),
-            ("revert".to_string(), t("shell.menu.fallback.revert"), t("shell.menu.fallback.revert_desc")),
-        ];
-        let action = match pick_menu(&t("shell.menu.fallback.title"), &opts) {
-            Some(a) => a,
-            None => return,
-        };
-        match action.as_str() {
-            "list" => self.fallback_dispatch(&["/fallback", "list"]),
-            "add" => self.fallback_add_interactive(),
-            "remove" => self.fallback_remove_interactive(),
-            "clear" => self.fallback_dispatch(&["/fallback", "clear"]),
-            "revert" => self.fallback_revert_interactive(),
-            _ => {}
-        }
-    }
-
-    /// Direct subcommand dispatch for `/fallback` (power-user path).
-    fn fallback_dispatch(&mut self, parts: &[&str]) {
-        let sub = parts.get(1).copied().unwrap_or("list");
-        match sub {
-            "list" => {
-                println!();
-                println!("\x1b[1m{}\x1b[0m", t("shell.fallback.chain_title"));
-                println!(
-                    "{}",
-                    t_with_args("shell.fallback.primary", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("model".to_string(), self.config.model.clone());
-                        args
-                    })
-                );
-                if self.config.fallback_models.is_empty() {
-                    println!("{}", t("shell.fallback.none"));
-                } else {
-                    for (i, m) in self.config.fallback_models.iter().enumerate() {
-                        println!("  [{}]     {}", i + 1, m);
-                    }
-                }
-                println!(
-                    "{}",
-                    t(if self.config.fallback_revert_on_cooldown {
-                        "shell.fallback.policy_auto"
-                    } else {
-                        "shell.fallback.policy_stay"
-                    })
-                );
-                println!();
-            }
-            "add" => {
-                let model = match parts.get(2) {
-                    Some(m) if !m.is_empty() => m.to_string(),
-                    _ => {
-                        eprintln!("{}", t("shell.fallback.usage_add"));
-                        return;
-                    }
-                };
-                if self.config.fallback_models.iter().any(|m| m == &model) {
-                    eprintln!(
-                        "{}",
-                        t_with_args("shell.fallback.already_in_chain", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("model".to_string(), model);
-                            args
-                        })
-                    );
-                    return;
-                }
-                self.config.fallback_models.push(model.clone());
-                self.persist_config_and_rebuild_rotation();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.fallback.added", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("model".to_string(), model);
-                        args
-                    })
-                );
-            }
-            "remove" | "rm" => {
-                let model = match parts.get(2) {
-                    Some(m) => m.to_string(),
-                    None => {
-                        eprintln!("{}", t("shell.fallback.usage_remove"));
-                        return;
-                    }
-                };
-                let before = self.config.fallback_models.len();
-                self.config.fallback_models.retain(|m| m != &model);
-                if self.config.fallback_models.len() == before {
-                    eprintln!(
-                        "{}",
-                        t_with_args("shell.fallback.not_in_chain", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("model".to_string(), model);
-                            args
-                        })
-                    );
-                    return;
-                }
-                self.persist_config_and_rebuild_rotation();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.fallback.removed", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("model".to_string(), model);
-                        args
-                    })
-                );
-            }
-            "clear" => {
-                self.config.fallback_models.clear();
-                self.persist_config_and_rebuild_rotation();
-                println!("\x1b[32m{}\x1b[0m", t("shell.fallback.cleared"));
-            }
-            "revert" => {
-                let val = match parts.get(2).copied().unwrap_or("") {
-                    "on" => true,
-                    "off" => false,
-                    _ => {
-                        eprintln!("{}", t("shell.fallback.usage_revert"));
-                        return;
-                    }
-                };
-                self.config.fallback_revert_on_cooldown = val;
-                self.persist_config_and_rebuild_rotation();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t(if val {
-                        "shell.fallback.revert_set_on"
-                    } else {
-                        "shell.fallback.revert_set_off"
-                    })
-                );
-            }
-            "help" | "-h" | "--help" => {
-                println!("{}", t("shell.fallback.help_1"));
-                println!("{}", t("shell.fallback.help_2"));
-                println!("{}", t("shell.fallback.help_3"));
-                println!("{}", t("shell.fallback.help_4"));
-                println!("{}", t("shell.fallback.help_5"));
-                println!("{}", t("shell.fallback.help_6"));
-            }
-            other => eprintln!(
-                "{}",
-                t_with_args("shell.fallback.unknown_sub", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("sub".to_string(), other.to_string());
-                    args
-                })
-            ),
-        }
-    }
-
-    fn fallback_add_interactive(&mut self) {
-        let model = match prompt_edit_value(
-            &t("shell.fallback.model_label"),
-            &t("shell.fallback.model_desc"),
-            "",
-            false,
-        ) {
-            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
-            _ => {
-                println!("{}", t("shell.common.cancelled"));
-                return;
-            }
-        };
-        if self.config.fallback_models.iter().any(|m| m == &model) {
-            eprintln!(
-                "{}",
-                t_with_args("shell.fallback.already_in_chain", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("model".to_string(), model);
-                    args
-                })
-            );
-            return;
-        }
-        self.config.fallback_models.push(model.clone());
-        self.persist_config_and_rebuild_rotation();
-        println!(
-            "\x1b[32m{}\x1b[0m",
-            t_with_args("shell.fallback.added", &{
-                let mut args = std::collections::HashMap::new();
-                args.insert("model".to_string(), model);
-                args
-            })
-        );
-    }
-
-    fn fallback_remove_interactive(&mut self) {
-        if self.config.fallback_models.is_empty() {
-            eprintln!("{}", t("shell.fallback.empty"));
-            return;
-        }
-        let models: Vec<String> = self.config.fallback_models.clone();
-        let opts: Vec<(String, String, String)> =
-            models.iter().map(|m| (m.clone(), m.clone(), String::new())).collect();
-        let model = match pick_menu(&t("shell.menu.fallback.remove_title"), &opts) {
-            Some(m) => m,
-            None => return,
-        };
-        self.config.fallback_models.retain(|m| m != &model);
-        self.persist_config_and_rebuild_rotation();
-        println!(
-            "\x1b[32m{}\x1b[0m",
-            t_with_args("shell.fallback.removed", &{
-                let mut args = std::collections::HashMap::new();
-                args.insert("model".to_string(), model);
-                args
-            })
-        );
-    }
-
-    fn fallback_revert_interactive(&mut self) {
-        let cur = self.config.fallback_revert_on_cooldown;
-        let opts: Vec<(String, String, String)> = vec![
-            ("on".to_string(), t("shell.menu.fallback.on"), t("shell.menu.fallback.on_desc")),
-            ("off".to_string(), t("shell.menu.fallback.off"), t("shell.menu.fallback.off_desc")),
-        ];
-        let action = match pick_menu(&t("shell.menu.fallback.revert_title"), &opts) {
-            Some(a) => a,
-            None => return,
-        };
-        let val = action == "on";
-        if val == cur {
-            println!(
-                "{}",
-                t_with_args("shell.fallback.revert_already", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("policy".to_string(), action);
-                    args
-                })
-            );
-            return;
-        }
-        self.config.fallback_revert_on_cooldown = val;
-        self.persist_config_and_rebuild_rotation();
-        println!(
-            "\x1b[32m{}\x1b[0m",
-            t(if val {
-                "shell.fallback.revert_set_on"
-            } else {
-                "shell.fallback.revert_set_off"
-            })
-        );
+    fn handle_fallback_command(&mut self, _parts: &[&str]) {
+        self.model_picker_panel();
     }
 
     /// `/fork` — branch the current session into a new one (copied context),
@@ -3987,260 +3733,8 @@ impl AishShell {
     }
 
     /// `/accounts` — manage multi-key quota rotation accounts at runtime.
-    fn handle_accounts_command(&mut self, parts: &[&str]) {
-        // Direct subcommand (power-user) → dispatch.
-        if parts.len() > 1 {
-            return self.accounts_dispatch(parts);
-        }
-        // No args → interactive menu.
-        let opts: Vec<(String, String, String)> = vec![
-            ("list".to_string(), t("shell.menu.accounts.list"), t("shell.menu.accounts.list_desc")),
-            ("add".to_string(), t("shell.menu.accounts.add"), t("shell.menu.accounts.add_desc")),
-            ("remove".to_string(), t("shell.menu.accounts.remove"), t("shell.menu.accounts.remove_desc")),
-            ("toggle".to_string(), t("shell.menu.accounts.toggle"), t("shell.menu.accounts.toggle_desc")),
-            ("use".to_string(), t("shell.menu.accounts.use"), t("shell.menu.accounts.use_desc")),
-        ];
-        let action = match pick_menu(&t("shell.menu.accounts.title"), &opts) {
-            Some(a) => a,
-            None => return,
-        };
-        match action.as_str() {
-            "list" => self.accounts_list(),
-            "add" => self.accounts_add_interactive(),
-            "remove" => self.accounts_remove_interactive(),
-            "toggle" => self.accounts_toggle_interactive(),
-            "use" => self.accounts_use_interactive(),
-            _ => {}
-        }
-    }
-
-    /// Direct subcommand dispatch for `/accounts` (power-user path).
-    fn accounts_dispatch(&mut self, parts: &[&str]) {
-        let sub = parts.get(1).copied().unwrap_or("list");
-        match sub {
-            "list" => self.accounts_list(),
-            "add" => {
-                let name = match parts.get(2) {
-                    Some(n) if !n.is_empty() => n.to_string(),
-                    _ => {
-                        eprintln!("{}", t("shell.accounts.usage_add"));
-                        return;
-                    }
-                };
-                let key = match parts.get(3) {
-                    Some(k) if !k.is_empty() => k.to_string(),
-                    _ => {
-                        eprintln!("{}", t("shell.accounts.usage_add"));
-                        return;
-                    }
-                };
-                let base = parts.get(4).filter(|s| !s.is_empty()).map(|s| s.to_string());
-                if self.config.api_accounts.iter().any(|a| a.name == name) {
-                    eprintln!(
-                        "{}",
-                        t_with_args("shell.accounts.already_exists", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("name".to_string(), name);
-                            args
-                        })
-                    );
-                    return;
-                }
-                let model = parts.get(5).filter(|s| !s.is_empty()).map(|s| s.to_string());
-                self.config.api_accounts.push(aish_config::ApiAccountConfig {
-                    name: name.clone(),
-                    api_key: key,
-                    api_base: base,
-                    model,
-                    weight: 1,
-                    disabled: false,
-                });
-                self.persist_config_and_rebuild_rotation();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.accounts.added", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("name".to_string(), name);
-                        args.insert("count".to_string(), self.config.api_accounts.len().to_string());
-                        args
-                    })
-                );
-            }
-            "use" | "switch" => {
-                let name = match parts.get(2) {
-                    Some(n) if !n.is_empty() => n.to_string(),
-                    _ => {
-                        eprintln!("{}", t("shell.accounts.usage_use"));
-                        return;
-                    }
-                };
-                if self.ai_handler.use_rotation_account(&name) {
-                    let model = self
-                        .ai_handler
-                        .rotation_snapshot()
-                        .map(|s| s.active_model)
-                        .unwrap_or_default();
-                    println!(
-                        "\x1b[32m{}\x1b[0m",
-                        t_with_args("shell.accounts.switched", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("name".to_string(), name);
-                            args.insert("model".to_string(), model);
-                            args
-                        })
-                    );
-                } else {
-                    eprintln!(
-                        "{}",
-                        t_with_args("shell.accounts.no_account_named", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("name".to_string(), name);
-                            args
-                        })
-                    );
-                }
-            }
-            "remove" | "rm" | "delete" => {
-                let name = match parts.get(2) {
-                    Some(n) => n.to_string(),
-                    None => {
-                        eprintln!("{}", t("shell.accounts.usage_remove"));
-                        return;
-                    }
-                };
-                let before = self.config.api_accounts.len();
-                self.config.api_accounts.retain(|a| a.name != name);
-                if self.config.api_accounts.len() == before {
-                    eprintln!(
-                        "{}",
-                        t_with_args("shell.accounts.no_account_named", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("name".to_string(), name);
-                            args
-                        })
-                    );
-                    return;
-                }
-                self.persist_config_and_rebuild_rotation();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.accounts.removed", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("name".to_string(), name);
-                        args
-                    })
-                );
-            }
-            "enable" | "disable" => {
-                let disabled = sub == "disable";
-                let name = match parts.get(2) {
-                    Some(n) => n.to_string(),
-                    None => {
-                        eprintln!("{}", t("shell.accounts.usage_enable"));
-                        return;
-                    }
-                };
-                match self.config.api_accounts.iter_mut().find(|a| a.name == name) {
-                    Some(a) => {
-                        a.disabled = disabled;
-                        self.persist_config_and_rebuild_rotation();
-                        println!(
-                            "\x1b[32m{}\x1b[0m",
-                            t_with_args("shell.accounts.toggled", &{
-                                let mut args = std::collections::HashMap::new();
-                                args.insert(
-                                    "action".to_string(),
-                                    if disabled {
-                                        t("shell.accounts.disabled")
-                                    } else {
-                                        t("shell.accounts.enabled")
-                                    },
-                                );
-                                args.insert("name".to_string(), name);
-                                args
-                            })
-                        );
-                    }
-                    None => eprintln!(
-                        "{}",
-                        t_with_args("shell.accounts.no_account_named", &{
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("name".to_string(), name);
-                            args
-                        })
-                    ),
-                }
-            }
-            "help" | "-h" | "--help" => {
-                println!("{}", t("shell.accounts.help_1"));
-                println!("{}", t("shell.accounts.help_2"));
-                println!("{}", t("shell.accounts.help_3"));
-                println!("{}", t("shell.accounts.help_4"));
-                println!("{}", t("shell.accounts.help_5"));
-            }
-            other => eprintln!(
-                "{}",
-                t_with_args("shell.accounts.unknown_sub", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("sub".to_string(), other.to_string());
-                    args
-                })
-            ),
-        }
-    }
-
-    fn accounts_use_interactive(&mut self) {
-        if self.config.api_accounts.is_empty() {
-            eprintln!("{}", t("shell.accounts.no_extra_use"));
-            return;
-        }
-        let primary_label = t_with_args("shell.accounts.primary_choice", &{
-            let mut args = std::collections::HashMap::new();
-            args.insert("model".to_string(), self.config.model.clone());
-            args
-        });
-        let opts: Vec<(String, String, String)> = std::iter::once((
-            "primary".to_string(),
-            primary_label,
-            String::new(),
-        ))
-        .chain(self.config.api_accounts.iter().map(|a| {
-            (
-                a.name.clone(),
-                a.name.clone(),
-                a.model.clone().unwrap_or_default(),
-            )
-        }))
-        .collect();
-        let name = match pick_menu(&t("shell.accounts.select_use"), &opts) {
-            Some(n) => n,
-            None => return,
-        };
-        if self.ai_handler.use_rotation_account(&name) {
-            let model = self
-                .ai_handler
-                .rotation_snapshot()
-                .map(|s| s.active_model)
-                .unwrap_or_default();
-            println!(
-                "\x1b[32m{}\x1b[0m",
-                t_with_args("shell.accounts.switched", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name);
-                    args.insert("model".to_string(), model);
-                    args
-                })
-            );
-        } else {
-            eprintln!(
-                "{}",
-                t_with_args("shell.accounts.no_account_named", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name);
-                    args
-                })
-            );
-        }
+    fn handle_accounts_command(&mut self, _parts: &[&str]) {
+        self.model_picker_panel();
     }
 
     fn accounts_add_interactive(&mut self) {
@@ -4432,108 +3926,8 @@ impl AishShell {
         );
     }
 
-    fn accounts_remove_interactive(&mut self) {
-        if self.config.api_accounts.is_empty() {
-            eprintln!("{}", t("shell.accounts.no_extra_remove"));
-            return;
-        }
-        let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
-        let opts: Vec<(String, String, String)> =
-            names.iter().map(|n| (n.clone(), n.clone(), String::new())).collect();
-        let name = match pick_menu(&t("shell.menu.accounts.remove_title"), &opts) {
-            Some(n) => n,
-            None => return,
-        };
-        self.config.api_accounts.retain(|a| a.name != name);
-        self.persist_config_and_rebuild_rotation();
-        println!(
-            "\x1b[32m{}\x1b[0m",
-            t_with_args("shell.accounts.removed", &{
-                let mut args = std::collections::HashMap::new();
-                args.insert("name".to_string(), name);
-                args
-            })
-        );
-    }
 
-    fn accounts_toggle_interactive(&mut self) {
-        if self.config.api_accounts.is_empty() {
-            eprintln!("{}", t("shell.accounts.no_extra_toggle"));
-            return;
-        }
-        let names: Vec<String> = self.config.api_accounts.iter().map(|a| a.name.clone()).collect();
-        let opts: Vec<(String, String, String)> =
-            names.iter().map(|n| (n.clone(), n.clone(), String::new())).collect();
-        let name = match pick_menu(&t("shell.menu.accounts.toggle_title"), &opts) {
-            Some(n) => n,
-            None => return,
-        };
-        if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
-            a.disabled = !a.disabled;
-            let now = a.disabled;
-            self.persist_config_and_rebuild_rotation();
-            println!(
-                "\x1b[32m{}\x1b[0m",
-                t_with_args("shell.accounts.toggled", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert(
-                        "action".to_string(),
-                        if now {
-                            t("shell.accounts.disabled")
-                        } else {
-                            t("shell.accounts.enabled")
-                        },
-                    );
-                    args.insert("name".to_string(), name);
-                    args
-                })
-            );
-        }
-    }
 
-    fn accounts_list(&self) {
-        println!();
-        println!("\x1b[1m{}\x1b[0m", t("shell.accounts.list_title"));
-        let primary_preview: String = self.config.api_key.chars().take(6).collect();
-        println!(
-            "{}",
-            t_with_args("shell.accounts.primary", &{
-                let mut args = std::collections::HashMap::new();
-                args.insert("key".to_string(), primary_preview);
-                args.insert(
-                    "state".to_string(),
-                    if self.config.api_key.trim().is_empty() {
-                        t("shell.accounts.unset")
-                    } else {
-                        String::new()
-                    },
-                );
-                args
-            })
-        );
-        for (i, a) in self.config.api_accounts.iter().enumerate() {
-            let preview: String = a.api_key.chars().take(6).collect();
-            let state = if a.disabled { t("shell.accounts.disabled") } else { t("shell.accounts.enabled") };
-            let key_preview = t_with_args("shell.accounts.key_preview", &{
-                let mut args = std::collections::HashMap::new();
-                args.insert("key".to_string(), preview);
-                args
-            });
-            println!(
-                "  [{}] {:<10} {}  {}  {}  {}",
-                i + 1,
-                a.name,
-                key_preview,
-                a.api_base.as_deref().unwrap_or(""),
-                a.model.as_deref().unwrap_or("(global)"),
-                state
-            );
-        }
-        if self.config.api_accounts.is_empty() {
-            println!("{}", t("shell.accounts.no_extra_hint"));
-        }
-        println!();
-    }
 
     /// Persist the current config to disk, then rebuild the live rotation state.
     fn persist_config_and_rebuild_rotation(&mut self) {
@@ -5718,146 +5112,129 @@ impl AishShell {
         }
     }
 
-    fn handle_model_command(&mut self, parts: &[&str]) {
-        if parts.len() == 1 {
-            return self.model_picker_panel();
-        }
-
-        if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
-            println!("{}", theme::accent(&t("shell.model_usage")));
-            return;
-        }
-
-        let new_model = parts[1..].join(" ");
-        if new_model == self.config.model {
-            let mut args = std::collections::HashMap::new();
-            args.insert("model".to_string(), new_model);
-            println!("{}", t_with_args("shell.model.switch_same", &args));
-            return;
-        }
-
-        // Detect provider for the new model
-        let _provider = aish_llm::detect_provider(&new_model, &self.config.api_base);
-
-        // Update LLM session
-        self.ai_handler.update_model(
-            &new_model,
-            Some(&self.config.api_base),
-            Some(&self.config.api_key),
-        );
-
-        // Update inline completion model so it follows `/model` switches
-        if let Some(ai) = &self.inline_ai {
-            ai.update_model(&new_model);
-        }
-
-        // Update config
-        self.config.model = new_model.clone();
-        self.refresh_config_dependent_tools();
-
-        // Persist to config file
-        let config_path = aish_config::ConfigLoader::default_config_path();
-        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-            eprintln!(
-                "{}",
-                theme::warning(&{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("error".to_string(), e.to_string());
-                    t_with_args("shell.config_save_warning", &args)
-                })
-            );
-        }
-
-        // Rebuild rotation so the new primary model takes effect at once;
-        // otherwise the rotation loop keeps the model captured at setup.
-        self.rebuild_rotation();
-
-        let mut args = std::collections::HashMap::new();
-        args.insert("model".to_string(), new_model);
-        println!("{}", t_with_args("shell.model.switch_success", &args));
+    fn handle_model_command(&mut self, _parts: &[&str]) {
+        self.model_picker_panel();
     }
 
-    /// `/model` with no argument opens a searchable picker listing every
-    /// model configuration available to switch to: the primary model plus
-    /// each API account carrying its own model. Selecting an entry switches
-    /// the active account/model at once — this unifies "switch model" and
-    /// "switch account" into one surface (cf. oh-my-pi's ModelPicker).
+    /// `/model` opens a unified panel listing every model configuration
+    /// (primary and each account). Enter switches, `a` adds an account,
+    /// `d` deletes the highlighted one. The panel re-opens after each
+    /// action so the user can keep managing without re-typing `/model`.
     fn model_picker_panel(&mut self) {
         use aish_ui::{
             PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
         };
 
-        let current = self
-            .ai_handler
-            .current_rotation_account()
-            .unwrap_or_else(|| "primary".to_string());
+        loop {
+            let current = self
+                .ai_handler
+                .current_rotation_account()
+                .unwrap_or_else(|| "primary".to_string());
 
-        let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
-            "primary",
-            self.config.model.clone(),
-        )
-        .with_highlight("primary")
-        .with_detail(self.config.api_base.as_str())];
-
-        for a in &self.config.api_accounts {
-            let model = a
-                .model
-                .clone()
-                .unwrap_or_else(|| self.config.model.clone());
-            let base = a
-                .api_base
-                .clone()
-                .unwrap_or_else(|| self.config.api_base.clone());
-            items.push(
-                SearchSelectItem::new(a.name.clone(), model)
-                    .with_highlight(a.name.clone())
-                    .with_detail(base),
-            );
-        }
-
-        let panel = SearchSelectPanel::new(
-            t("shell.model.picker_title"),
-            t("shell.model.picker_search"),
-            items,
-        )
-        .with_shimmer(Some(&current))
-        .with_footer(t("shell.model.picker_footer"));
-
-        let outcome = {
-            let _guard = aish_tools::bash::acquire_interactive_input_guard();
-            PanelRuntime::new().run(panel)
-        };
-
-        if let Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(name))) = outcome {
-            if self.ai_handler.use_rotation_account(&name) {
-                let model = self
-                    .ai_handler
-                    .rotation_snapshot()
-                    .map(|s| s.active_model)
-                    .unwrap_or_default();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.model.switched_account", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("name".to_string(), name);
-                        args.insert("model".to_string(), model);
-                        args
-                    })
-                );
-            } else if name == "primary" {
-                let mut args = std::collections::HashMap::new();
-                args.insert("model".to_string(), self.config.model.clone());
-                println!("{}", t_with_args("shell.model.current", &args));
-            } else {
-                eprintln!(
-                    "{}",
-                    t_with_args("shell.accounts.no_account_named", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("name".to_string(), name);
-                        args
-                    })
+            let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
+                "primary",
+                self.config.model.clone(),
+            )
+            .with_highlight("primary")
+            .with_detail(self.config.api_base.as_str())];
+            for a in &self.config.api_accounts {
+                let model = a
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.config.model.clone());
+                let base = a
+                    .api_base
+                    .clone()
+                    .unwrap_or_else(|| self.config.api_base.clone());
+                items.push(
+                    SearchSelectItem::new(a.name.clone(), model)
+                        .with_highlight(a.name.clone())
+                        .with_detail(base),
                 );
             }
+
+            let panel = SearchSelectPanel::new(
+                t("shell.model.picker_title"),
+                t("shell.model.picker_search"),
+                items,
+            )
+            .with_shimmer(Some(&current))
+            .with_footer(t("shell.model.picker_footer"))
+            .with_action('a', t("shell.model.action_add"))
+            .with_action('d', t("shell.model.action_del"));
+
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
+            };
+
+            match outcome {
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(name))) => {
+                    self.model_panel_switch(&name);
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
+                    self.accounts_add_interactive();
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', name))) => {
+                    self.model_panel_remove(&name);
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Switch the active account/model from the model panel.
+    fn model_panel_switch(&mut self, name: &str) {
+        if self.ai_handler.use_rotation_account(name) {
+            let model = self
+                .ai_handler
+                .rotation_snapshot()
+                .map(|s| s.active_model)
+                .unwrap_or_default();
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.model.switched_account", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.to_string());
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
+        } else if name == "primary" {
+            let mut args = std::collections::HashMap::new();
+            args.insert("model".to_string(), self.config.model.clone());
+            println!("{}", t_with_args("shell.model.current", &args));
+        } else {
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.no_account_named", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.to_string());
+                    args
+                })
+            );
+        }
+    }
+
+    /// Remove an account from the model panel. The primary entry cannot be
+    /// deleted (it is the baseline config).
+    fn model_panel_remove(&mut self, name: &str) {
+        if name == "primary" {
+            eprintln!("{}", t("shell.model.cannot_remove_primary"));
+            return;
+        }
+        let before = self.config.api_accounts.len();
+        self.config.api_accounts.retain(|a| a.name != name);
+        if self.config.api_accounts.len() < before {
+            self.persist_config_and_rebuild_rotation();
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.removed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.to_string());
+                    args
+                })
+            );
         }
     }
 

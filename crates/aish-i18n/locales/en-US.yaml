@@ -873,7 +873,10 @@ shell:
     verify_failed: "Model validation failed: {reason}"
     picker_title: "Switch model / account"
     picker_search: "Search models or accounts..."
-    picker_footer: "Up/Dn select  Enter switch  Esc cancel"
+    picker_footer: "Up/Dn select  Enter switch  a add  d delete  Esc cancel"
+    action_add: "add"
+    action_del: "delete"
+    cannot_remove_primary: "The primary model cannot be removed"
     switched_account: "Switched to '{name}' (model: {model})"
 
   token:

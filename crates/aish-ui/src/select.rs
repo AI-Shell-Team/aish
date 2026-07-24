@@ -91,6 +91,9 @@ pub enum SearchSelectOutcome {
     Rename(String),
     /// Exit the panel (triggered by Ctrl+Q). Callers decide exit semantics.
     Quit,
+    /// A configured single-key action was pressed (e.g. 'a' add, 'd' delete).
+    /// Action keys are intercepted before the search buffer.
+    Action(char, String),
 }
 
 /// Match when every whitespace-separated token in `query` is a substring of `search_text`.
@@ -121,6 +124,9 @@ pub struct SearchSelectPanel {
     shimmer_value: Option<String>,
     /// Animation clock in milliseconds, advanced one tick per redraw.
     anim_ms: u64,
+    /// Configured single-key actions (key, label). These keys are intercepted
+    /// before the search buffer so they trigger `Action(char)`, not typing.
+    actions: Vec<(char, String)>,
 }
 
 impl SearchSelectPanel {
@@ -141,8 +147,16 @@ impl SearchSelectPanel {
             selected: 0,
             max_visible_items: DEFAULT_VISIBLE_ITEMS,
             shimmer_value: None,
+            actions: Vec::new(),
             anim_ms: 0,
         }
+    }
+
+    /// Register a single-key action. The key is intercepted before the search
+    /// buffer and emitted as `SearchSelectOutcome::Action(char)`.
+    pub fn with_action(mut self, key: char, label: impl Into<String>) -> Self {
+        self.actions.push((key, label.into()));
+        self
     }
 
     pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
@@ -431,6 +445,16 @@ impl PanelComponent for SearchSelectPanel {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
+                if self.actions.iter().any(|(k, _)| *k == ch) {
+                    let value = self
+                        .filtered_entries()
+                        .get(self.selected)
+                        .and_then(|e| match e {
+                            SelectEntry::Item(i) => self.items.get(*i).map(|it| it.value.clone()),
+                        })
+                        .unwrap_or_default();
+                    return PanelEvent::Submit(SearchSelectOutcome::Action(ch, value));
+                }
                 self.query.push(ch);
                 self.selected = 0;
                 self.clamp_selection();

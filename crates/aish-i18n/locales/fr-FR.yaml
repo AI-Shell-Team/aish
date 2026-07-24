@@ -514,7 +514,10 @@ shell:
     verify_failed: "La validation du modele a echoue : {reason}"
     picker_title: "Changer modele / compte"
     picker_search: "Rechercher modeles ou comptes..."
-    picker_footer: "↑↓ selectionner  Enter basculer  Esc annuler"
+    picker_footer: "↑↓ selectionner  Enter basculer  a ajouter  d supprimer  Esc annuler"
+    action_add: "ajouter"
+    action_del: "supprimer"
+    cannot_remove_primary: "Le modele principal ne peut pas etre supprime"
     switched_account: "Bascule vers '{name}' (modele : {model})"
   token:
     title: "Utilisation de tokens (7 derniers jours)"

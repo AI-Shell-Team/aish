@@ -514,7 +514,10 @@ shell:
     verify_failed: "Falló la validación del modelo: {reason}"
     picker_title: "Cambiar modelo / cuenta"
     picker_search: "Buscar modelos o cuentas..."
-    picker_footer: "↑↓ seleccionar  Enter cambiar  Esc cancelar"
+    picker_footer: "↑↓ seleccionar  Enter cambiar  a anadir  d borrar  Esc cancelar"
+    action_add: "anadir"
+    action_del: "borrar"
+    cannot_remove_primary: "El modelo principal no se puede eliminar"
     switched_account: "Cambiado a '{name}' (modelo: {model})"
   token:
     title: "Uso de tokens (últimos 7 días)"

@@ -873,7 +873,10 @@ shell:
     verify_failed: "模型验证失败: {reason}"
     picker_title: "切换模型 / 账户"
     picker_search: "搜索模型或账户..."
-    picker_footer: "↑↓ 选择  Enter 切换  Esc 取消"
+    picker_footer: "↑↓ 选择  Enter 切换  a 添加  d 删除  Esc 取消"
+    action_add: "添加"
+    action_del: "删除"
+    cannot_remove_primary: "主模型不可删除"
     switched_account: "已切换到 '{name}'（模型：{model}）"
 
   token:

@@ -514,7 +514,10 @@ shell:
     verify_failed: "モデル検証に失敗しました: {reason}"
     picker_title: "モデル / アカウント切替"
     picker_search: "モデルやアカウントを検索..."
-    picker_footer: "↑↓ 選択  Enter 切替  Esc キャンセル"
+    picker_footer: "↑↓ 選択  Enter 切替  a 追加  d 削除  Esc キャンセル"
+    action_add: "追加"
+    action_del: "削除"
+    cannot_remove_primary: "プライマリモデルは削除できません"
     switched_account: "'{name}' に切り替えました（モデル: {model}）"
   token:
     title: "Token 使用量 (過去7日間)"

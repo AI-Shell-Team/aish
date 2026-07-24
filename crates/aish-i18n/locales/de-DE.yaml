@@ -514,7 +514,10 @@ shell:
     verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
     picker_title: "Modell / Konto wechseln"
     picker_search: "Modelle oder Konten suchen..."
-    picker_footer: "↑↓ Auswaehlen  Enter Wechseln  Esc Abbrechen"
+    picker_footer: "↑↓ Auswaehlen  Enter Wechseln  a neu  d loeschen  Esc Abbrechen"
+    action_add: "neu"
+    action_del: "loeschen"
+    cannot_remove_primary: "Das primaere Modell kann nicht entfernt werden"
     switched_account: "Zu '{name}' gewechselt (Modell: {model})"
   token:
     title: "Token-Nutzung (letzte 7 Tage)"
