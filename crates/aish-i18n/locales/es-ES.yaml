@@ -9,6 +9,9 @@ cli:
   detach_hint: "Sesión desconectada. Ejecuta `aish -c` para reconectar."
   resume_failed: "No se pudo reanudar la sesión: {error}"
 
+  uninstall:
+    cancelled: "Cancelado."
+
   option:
     model: "Modelo LLM que se va a usar; también puede definirse mediante AISH_MODEL o el archivo de configuración."
     api_key: "Clave API del proveedor LLM; también puede definirse mediante AISH_API_KEY o variables de entorno del proveedor."
