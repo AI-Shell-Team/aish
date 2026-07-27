@@ -1888,9 +1888,12 @@ impl PersistentPty {
 
                         // Non-session: original passthrough behavior
                         if !is_session {
-                            if data.contains(&0x03) {
-                                let _ = kill_pg(self.child_pid, Signal::SIGINT);
-                            }
+                            // Ctrl+C: only forward 0x03 so the PTY line discipline
+                            // delivers SIGINT to the *foreground* job. Do not
+                            // `kill_pg(self.child_pid)` — that signals bash's own
+                            // process group and makes bash emit a blank line before
+                            // the next aish prompt (see force_cancel_pty_foreground
+                            // / execute_command which intentionally never signal bash).
                             write_buf.extend_from_slice(data);
                             continue;
                         }

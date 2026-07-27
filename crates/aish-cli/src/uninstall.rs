@@ -4,7 +4,9 @@
 //! and runs the appropriate uninstall procedure. With `--purge`, also
 //! removes user config/data/cache and system-level config files.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use aish_core::AishError;
 use aish_i18n::{t, t_with_args};
@@ -128,6 +130,83 @@ fn which_exists(cmd: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Uninstall by method
 // ---------------------------------------------------------------------------
+
+fn method_needs_sudo(method: InstallMethod) -> bool {
+    matches!(method, InstallMethod::Archive | InstallMethod::System)
+}
+
+/// Outcome of pre-uninstall `sudo -v`.
+enum EnsureSudoOutcome {
+    Ready,
+    /// User cancelled / no password entered — show only "Cancelled."
+    Cancelled,
+    /// Real sudo failure (sudoers, retries exhausted, etc.) — surface stderr.
+    Failed(String),
+}
+
+/// True when stderr is empty or only sudo's cancel / "password required" noise.
+fn is_sudo_cancel_noise(stderr: &str) -> bool {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    trimmed.lines().all(|line| {
+        let line = line.trim();
+        line.is_empty()
+            || line == "sudo: 需要密码"
+            || line == "sudo: no password was provided"
+            || line == "sudo: a password is required"
+            || line.starts_with("sudo: a terminal is required")
+    })
+}
+
+/// Cache sudo credentials (`sudo -v`) so the password prompt happens before we
+/// announce uninstall progress.
+///
+/// Ignores SIGINT in the parent while waiting so Ctrl+C only stops `sudo`.
+/// Stdin is inherited so PAM shows the normal TTY password prompt (piped stdin
+/// yields the bare "请输入密码" form). Stderr is piped so cancel noise can be
+/// filtered while real diagnostics are kept. Do not use `Command::output()`:
+/// it forces piped stdin.
+fn ensure_sudo() -> EnsureSudoOutcome {
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+    }
+    let mut child = match std::process::Command::new("sudo")
+        .arg("-v")
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            unsafe {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+            }
+            return EnsureSudoOutcome::Failed(format!("Failed to run sudo: {e}"));
+        }
+    };
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let status = child.wait();
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+    }
+    let status = match status {
+        Ok(status) => status,
+        Err(e) => return EnsureSudoOutcome::Failed(format!("Failed to wait for sudo: {e}")),
+    };
+    let mut stderr = String::new();
+    let _ = stderr_pipe.read_to_string(&mut stderr);
+    if status.success() {
+        return EnsureSudoOutcome::Ready;
+    }
+    if is_sudo_cancel_noise(&stderr) {
+        EnsureSudoOutcome::Cancelled
+    } else {
+        EnsureSudoOutcome::Failed(stderr.trim().to_string())
+    }
+}
 
 fn run_sudo(args: &[&str]) -> Result<(), AishError> {
     let output = std::process::Command::new("sudo")
@@ -484,6 +563,26 @@ pub fn run_uninstall(purge: bool) {
         }
     }
 
+    // Authenticate before announcing progress so we never print "Uninstalling..."
+    // while still waiting for a password.
+    if method_needs_sudo(method) {
+        match ensure_sudo() {
+            EnsureSudoOutcome::Ready => {}
+            EnsureSudoOutcome::Cancelled => {
+                println!("{}", t("cli.uninstall.cancelled"));
+                return;
+            }
+            EnsureSudoOutcome::Failed(error) => {
+                eprintln!("\x1b[31m{}\x1b[0m", {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), error);
+                    t_with_args("cli.uninstall.uninstall_failed", &args)
+                });
+                return;
+            }
+        }
+    }
+
     println!("{}", t("cli.uninstall.uninstalling"));
 
     let result = match method {
@@ -550,6 +649,30 @@ fn remove_current_binary() -> Result<(), AishError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_method_needs_sudo_for_privileged_installs() {
+        assert!(method_needs_sudo(InstallMethod::Archive));
+        assert!(method_needs_sudo(InstallMethod::System));
+        assert!(!method_needs_sudo(InstallMethod::Cargo));
+        assert!(!method_needs_sudo(InstallMethod::Pip));
+        assert!(!method_needs_sudo(InstallMethod::Unknown));
+    }
+
+    #[test]
+    fn test_is_sudo_cancel_noise() {
+        assert!(is_sudo_cancel_noise(""));
+        assert!(is_sudo_cancel_noise("sudo: 需要密码\n"));
+        assert!(is_sudo_cancel_noise(
+            "sudo: no password was provided\nsudo: 需要密码\n"
+        ));
+        assert!(!is_sudo_cancel_noise(
+            "lixin is not in the sudoers file.  This incident will be reported.\n"
+        ));
+        assert!(!is_sudo_cancel_noise(
+            "sudo: 3 incorrect password attempts\n"
+        ));
+    }
 
     #[test]
     fn test_is_elf_binary_nonexistent() {
