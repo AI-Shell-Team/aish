@@ -209,27 +209,6 @@ impl SkillInstallTool {
             .unwrap_or_else(|| PathBuf::from("aish").join("skills"))
     }
 
-    /// Try to construct a [`RegistrySkill`] directly from a full skill ID.
-    ///
-    /// Accepts `owner/repo/skill-name` (3+ segments).
-    /// Returns `("owner/repo", "skill-name")`.
-    fn try_parse_rest(rest: &str) -> Option<(String, String)> {
-        let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() >= 3 {
-            let source = format!("{}/{}", parts[0], parts[1]);
-            let slug = parts.last().unwrap().to_string();
-            // Reject empty (trailing slash) and traversal slugs. The skill_id
-            // is LLM-provided (an injection surface); the registry manager
-            // re-validates, but failing here returns a clean error before any
-            // filesystem operation.
-            if slug.is_empty() || slug == "." || slug == ".." || slug.contains('\\') {
-                return None;
-            }
-            return Some((source, slug));
-        }
-        None
-    }
-
     /// Match a skill from search results by multiple criteria.
     fn search_and_match(
         results: &[RegistrySkill],
@@ -294,7 +273,7 @@ impl SkillInstallTool {
 
         // ── Strategy 1: Direct ID parse (no search needed) ──────────────
         // For "owner/repo/skill-name" format, install directly.
-        if let Some((source, slug)) = Self::try_parse_rest(rest) {
+        if let Some((source, slug)) = aish_skills::registry::parse_skill_id_rest(rest) {
             let reg = match registry_filter {
                 Some(r) => r.to_string(),
                 None => {
@@ -536,9 +515,14 @@ Do NOT guess or construct IDs. Always ask the user for confirmation before insta
                     "skill_install",
                     Some(installed.skill_name.clone()),
                     format!(
+                        // Keep the reason free of option letters and newlines:
+                        // the confirmation panel renders its own standardized
+                        // option bar + prompt, so embedding [y]/[n] here would
+                        // duplicate and contradict it. Just state the
+                        // consequences of approve vs decline.
                         "Security review required: skill '{}' was installed from an external \
-                         registry and is quarantined (untrusted, not loaded). Review it now?\n\
-                         [y] review & vet   [a] vet all this session   [r] reply   [n] delete",
+                         registry and is quarantined (untrusted, not loaded). Approving runs the \
+                         skill-vetter review; declining deletes the quarantined skill.",
                         installed.skill_name
                     ),
                     SecurityPanelMode::Confirm,
@@ -643,13 +627,7 @@ determining its risk is Low or Medium. Never trust a High/Extreme skill."
         let name = &trust_args.skill_name;
 
         // Reject traversal: the name becomes a path component under skills/.
-        if name.is_empty()
-            || name.contains('/')
-            || name.contains('\\')
-            || name.contains('\0')
-            || name == "."
-            || name == ".."
-        {
+        if aish_skills::registry::is_unsafe_skill_name(name) {
             return ToolResult::error(format!("Unsafe skill name: {:?}", name));
         }
 
