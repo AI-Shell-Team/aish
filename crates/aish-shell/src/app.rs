@@ -9301,6 +9301,14 @@ fn read_raw_confirmation() -> bool {
 /// [`read_raw_confirmation`].
 fn read_approval_choice() -> (u8, aish_llm::ApprovalChoice) {
     let _ig = aish_tools::bash::acquire_interactive_input_guard();
+    // Actually enter input-raw mode for the read. Without this the terminal
+    // may be in cooked mode (echo on, line-buffered): it echoes the pressed
+    // key itself and waits for Enter, which duplicates our manual echo below
+    // and moves the cursor to column 0 — so the echoed char lands on its own
+    // line instead of after the prompt. Disabling ECHO/ICANON/ISIG makes the
+    // manual echo the only echo and returns the byte immediately. Falls back
+    // to the inherited mode when stdin isn't a tty (e.g. piped input).
+    let _raw = crate::keyboard::InputRawGuard::enter().ok();
 
     let mut byte = [0u8; 1];
     let (pressed, choice) = match io::stdin().read(&mut byte) {
