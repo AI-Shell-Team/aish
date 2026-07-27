@@ -254,13 +254,19 @@ impl RegistryManager {
         let adapter = self.find_adapter(&skill.registry).ok_or_else(|| {
             aish_core::AishError::Skill(format!("No adapter for registry '{}'", skill.registry))
         })?;
+        // Remember whether this is a fresh install or a reinstall over an
+        // existing skill, so a failed reinstall does not delete the previously
+        // installed (possibly trusted / locally modified) skill.
+        let pre_existed = target_dir.join(&skill.slug).exists();
         pre_quarantine(target_dir, &skill.slug)?;
         match adapter.install(skill, target_dir) {
             Ok(result) => Ok(result),
             Err(e) => {
-                // Mirror install_with_cancel: remove the pre-quarantined dir so
-                // a retry starts clean (it was empty/partial and never loaded).
-                let _ = std::fs::remove_dir_all(target_dir.join(&skill.slug));
+                // Only remove on a failed FRESH install; a failed reinstall
+                // must leave the previous skill intact rather than destroy it.
+                if !pre_existed {
+                    let _ = std::fs::remove_dir_all(target_dir.join(&skill.slug));
+                }
                 Err(e)
             }
         }
@@ -279,13 +285,16 @@ impl RegistryManager {
         let adapter = self.find_adapter(&skill.registry).ok_or_else(|| {
             aish_core::AishError::Skill(format!("No adapter for registry '{}'", skill.registry))
         })?;
+        let pre_existed = target_dir.join(&skill.slug).exists();
         pre_quarantine(target_dir, &skill.slug)?;
         match adapter.install_with_cancel(skill, target_dir, cancel) {
             Ok(result) => Ok(result),
             Err(e) => {
-                // Failed install: remove the pre-quarantined dir so a retry
-                // starts clean (it was empty/partial and never loaded).
-                let _ = std::fs::remove_dir_all(target_dir.join(&skill.slug));
+                // Only remove on a failed FRESH install; a failed reinstall
+                // must leave the previous skill intact rather than destroy it.
+                if !pre_existed {
+                    let _ = std::fs::remove_dir_all(target_dir.join(&skill.slug));
+                }
                 Err(e)
             }
         }

@@ -210,6 +210,23 @@ fn apply_config_security_overrides(
     policy.sandbox_timeout_seconds = config.sandbox_timeout_seconds;
 }
 
+/// Strip ANSI/VT escape sequences and stray C0 control characters from
+/// attacker-controlled text before printing it during the security review.
+/// Without this, a malicious SKILL.md could embed ANSI escapes to repaint the
+/// screen, hide lines, or forge a "no issues found" verdict at exactly the
+/// moment the user decides whether to trust it.
+fn strip_ansi_escapes(s: &str) -> String {
+    let re = regex::Regex::new(
+        // OSC (ESC ] ... BEL or ST), CSI (ESC [ ... final byte), other ESC + char.
+        r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]",
+    )
+    .expect("valid ansi-strip regex");
+    re.replace_all(s, "")
+        .chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
 /// Human-readable current value for the setting-list row.
 fn setting_display_current(cfg: &ConfigModel, def: &crate::settings_panel::SettingDef) -> String {
     use crate::settings_panel::{current_raw, SettingKey, SettingKind};
@@ -3760,7 +3777,7 @@ impl AishShell {
         let skill_md = dir.join("SKILL.md");
         println!("\n--- {} ---", skill_md.display());
         match std::fs::read_to_string(&skill_md) {
-            Ok(content) => println!("{}", content),
+            Ok(content) => println!("{}", strip_ansi_escapes(&content)),
             Err(e) => println!("(could not read SKILL.md: {})", e),
         }
         println!("\n--- files in {} ---", dir.display());

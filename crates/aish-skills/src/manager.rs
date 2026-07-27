@@ -198,10 +198,16 @@ impl SkillManager {
         // skill was loaded from.
         let skill_content = rewrite_skill_paths(skill_content, &metadata.name, &base_dir);
 
-        // Registry-installed skills carry a `.untrusted` sentinel until reviewed.
-        let quarantined = skill_path
-            .parent()
-            .is_some_and(|d| d.join(UNTRUSTED_MARKER).exists());
+        // Registry-installed skills carry a `.untrusted` sentinel at the
+        // skill's top-level dir until reviewed. `load_skills` walks the tree
+        // recursively, so a skill may ship nested SKILL.md files in
+        // subdirectories; those inherit the top-level quarantine. Walk up the
+        // ancestors so a nested `my-skill/sub/SKILL.md` is also quarantined
+        // when `my-skill/.untrusted` exists (otherwise it would load as
+        // trusted and bypass the review gate). Markers can only ever exist
+        // inside a skill dir (validate_install_slug rejects empty/traversal
+        // slugs), so this never over-quarantines unrelated skills.
+        let quarantined = Self::is_quarantined_under(skill_path);
 
         Ok(Skill {
             metadata,
@@ -211,6 +217,26 @@ impl SkillManager {
             base_dir,
             quarantined,
         })
+    }
+
+    /// True if the skill at `skill_path` lives under a directory carrying the
+    /// `.untrusted` quarantine marker. Walks up from the file's parent so
+    /// nested SKILL.md files (under an untrusted skill's top-level dir) are
+    /// caught too.
+    fn is_quarantined_under(skill_path: &Path) -> bool {
+        let mut dir = match skill_path.parent() {
+            Some(d) => d,
+            None => return false,
+        };
+        loop {
+            if dir.join(UNTRUSTED_MARKER).exists() {
+                return true;
+            }
+            dir = match dir.parent() {
+                Some(p) => p,
+                None => return false,
+            };
+        }
     }
 
     /// Look up a skill by name.
@@ -571,5 +597,36 @@ mod tests {
         // Re-quarantine writes the marker back.
         assert!(set_skill_trusted(&skill_dir, false).unwrap());
         assert!(skill_dir.join(UNTRUSTED_MARKER).exists());
+    }
+
+    #[test]
+    fn nested_skill_md_inherits_top_level_quarantine() {
+        // A registry skill ships a nested SKILL.md in a subdir. The marker
+        // lives at the skill's top-level dir, so the nested file must also be
+        // treated as quarantined — otherwise it loads as trusted and bypasses
+        // the review gate.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skill_dir = dir.path().join("my-skill");
+        let nested_dir = skill_dir.join("sub");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(
+            skill_dir.join(UNTRUSTED_MARKER),
+            b"untrusted: pending review",
+        )
+        .unwrap();
+        std::fs::write(
+            nested_dir.join("SKILL.md"),
+            "---\nname: nested\ndescription: test\n---\nbody",
+        )
+        .unwrap();
+
+        let manager = SkillManager::new();
+        let skill = manager
+            .parse_skill_file(SkillSource::User, &nested_dir.join("SKILL.md"))
+            .expect("nested skill should parse");
+        assert!(
+            skill.quarantined,
+            "nested SKILL.md under an untrusted skill must be quarantined"
+        );
     }
 }

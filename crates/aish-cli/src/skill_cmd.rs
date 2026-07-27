@@ -8,16 +8,10 @@ use std::path::PathBuf;
 use aish_config::{ConfigLoader, ConfigModel, RegistrySource};
 use aish_skills::registry::{RegistryConfig, RegistryManager, RegistrySkill};
 
-/// Resolve the user skill directory (`~/.config/aish/skills`).
+/// Resolve the user skill directory via the shared loader resolver.
 fn user_skills_dir() -> PathBuf {
-    if let Ok(config_dir) = std::env::var("AISH_CONFIG_DIR") {
-        PathBuf::from(config_dir).join("skills")
-    } else {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("aish")
-            .join("skills")
-    }
+    aish_skills::SkillManager::user_skills_root()
+        .unwrap_or_else(|| PathBuf::from("aish").join("skills"))
 }
 
 /// Build a RegistryManager from the config's registry list.
@@ -487,6 +481,28 @@ pub fn cmd_registry_remove(name: &str) -> Result<(), String> {
 
     if config.skills.registries.len() == before {
         return Err(format!("Registry '{}' not found.", name));
+    }
+
+    // If we removed the default registry, repoint default_registry at the next
+    // available one (or clear it) so the config never references a deleted source.
+    if config.skills.default_registry == name {
+        config.skills.default_registry = config
+            .skills
+            .registries
+            .first()
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        if config.skills.default_registry.is_empty() {
+            println!(
+                "Note: '{}' was the default registry; no registries remain, default cleared.",
+                name
+            );
+        } else {
+            println!(
+                "Note: '{}' was the default registry; default is now '{}'.",
+                name, config.skills.default_registry
+            );
+        }
     }
 
     match save_config(&config) {

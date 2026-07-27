@@ -604,14 +604,10 @@ struct TrustArgs {
 
 impl SkillTrustTool {
     fn user_skills_dir() -> PathBuf {
-        if let Ok(config_dir) = std::env::var("AISH_CONFIG_DIR") {
-            PathBuf::from(config_dir).join("skills")
-        } else {
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("aish")
-                .join("skills")
-        }
+        // Shared with the loader (SkillManager::scan_skill_roots) so trust
+        // resolves the same directory as install/scan.
+        aish_skills::SkillManager::user_skills_root()
+            .unwrap_or_else(|| PathBuf::from("aish").join("skills"))
     }
 }
 
