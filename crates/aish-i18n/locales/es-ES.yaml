@@ -536,6 +536,12 @@ shell:
     fallback_added: "Anadido respaldo '{model}'"
     fallback_removed: "Eliminado respaldo '{model}'"
     fallback_exists: "El respaldo '{model}' ya existe"
+    action_manage: "gestionar"
+    manage_title: "Cuentas y respaldo"
+    manage_search: "Buscar..."
+    manage_subtitle: "d para borrar la entrada seleccionada"
+    manage_footer: "d borrar  f anadir respaldo  Esc volver"
+    manage_empty: "No hay cuentas ni respaldos que gestionar"
   token:
     title: "Uso de tokens (últimos 7 días)"
     input_tokens: "Tokens de entrada"

@@ -895,6 +895,12 @@ shell:
     fallback_added: "已添加回退 '{model}'"
     fallback_removed: "已移除回退 '{model}'"
     fallback_exists: "回退 '{model}' 已存在"
+    action_manage: "管理"
+    manage_title: "账户与回退管理"
+    manage_search: "搜索..."
+    manage_subtitle: "d 删除选中项"
+    manage_footer: "d 删除  f 加回退  Esc 返回"
+    manage_empty: "暂无账户或回退可管理"
 
   token:
     title: "Token 统计 (近 7 天)"

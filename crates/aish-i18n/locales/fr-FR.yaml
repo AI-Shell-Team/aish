@@ -536,6 +536,12 @@ shell:
     fallback_added: "Ajoute secours '{model}'"
     fallback_removed: "Supprime secours '{model}'"
     fallback_exists: "Le secours '{model}' existe deja"
+    action_manage: "gerer"
+    manage_title: "Comptes et secours"
+    manage_search: "Rechercher..."
+    manage_subtitle: "d pour supprimer l'entree selectionnee"
+    manage_footer: "d supprimer  f ajouter secours  Esc retour"
+    manage_empty: "Aucun compte ni secours a gerer"
   token:
     title: "Utilisation de tokens (7 derniers jours)"
     input_tokens: "Tokens d'entrée"

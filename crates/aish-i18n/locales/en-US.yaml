@@ -895,6 +895,12 @@ shell:
     fallback_added: "Added fallback '{model}'"
     fallback_removed: "Removed fallback '{model}'"
     fallback_exists: "Fallback '{model}' already exists"
+    action_manage: "manage"
+    manage_title: "Accounts & fallback"
+    manage_search: "Search..."
+    manage_subtitle: "d to delete the highlighted entry"
+    manage_footer: "d delete  f add fallback  Esc back"
+    manage_empty: "No accounts or fallbacks to manage"
 
   token:
     title: "Token Usage (last 7 days)"

@@ -536,6 +536,12 @@ shell:
     fallback_added: "フォールバック '{model}' を追加しました"
     fallback_removed: "フォールバック '{model}' を削除しました"
     fallback_exists: "フォールバック '{model}' は既に存在します"
+    action_manage: "管理"
+    manage_title: "アカウントとフォールバック管理"
+    manage_search: "検索..."
+    manage_subtitle: "d 選択項目を削除"
+    manage_footer: "d 削除  f フォールバック追加  Esc 戻る"
+    manage_empty: "管理するアカウントやフォールバックがありません"
   token:
     title: "Token 使用量 (過去7日間)"
     input_tokens: "入力 tokens"

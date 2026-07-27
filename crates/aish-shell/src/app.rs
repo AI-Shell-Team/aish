@@ -5184,7 +5184,8 @@ impl AishShell {
                 t("shell.model.picker_subtitle")
             })
             .with_footer(t("shell.model.picker_footer"))
-            .with_action('a', t("shell.model.action_add"));
+            .with_action('a', t("shell.model.action_add"))
+            .with_action('m', t("shell.model.action_manage"));
 
             let outcome = {
                 let _guard = aish_tools::bash::acquire_interactive_input_guard();
@@ -5227,6 +5228,9 @@ impl AishShell {
                         }
                     }
                 }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('m', _))) => {
+                    self.manage_accounts_fallback();
+                }
                 _ => break,
             }
         }
@@ -5255,6 +5259,119 @@ impl AishShell {
             t_with_args("shell.model.switch_success", &{
                 let mut args = std::collections::HashMap::new();
                 args.insert("model".to_string(), model.to_string());
+                args
+            })
+        );
+    }
+
+    /// Manage accounts + fallback chain in a sub-panel: list each, 'd' deletes
+    /// the highlighted entry, 'f' adds a fallback model. Esc returns to /model.
+    fn manage_accounts_fallback(&mut self) {
+        use aish_ui::{
+            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        };
+        loop {
+            let mut items: Vec<SearchSelectItem> = Vec::new();
+            for a in &self.config.api_accounts {
+                let mut item = SearchSelectItem::new(
+                    format!("acct:{}", a.name),
+                    a.name.clone(),
+                )
+                .with_detail(a.api_key.chars().take(6).collect::<String>());
+                if a.disabled {
+                    item = item.with_badge(t("shell.accounts.disabled"));
+                }
+                items.push(item);
+            }
+            for m in &self.config.fallback_models {
+                items.push(
+                    SearchSelectItem::new(format!("fb:{}", m), m.clone())
+                        .with_badge(t("shell.model.fallback_badge")),
+                );
+            }
+            if items.is_empty() {
+                println!("{}", t("shell.model.manage_empty"));
+                return;
+            }
+            let panel = SearchSelectPanel::new(
+                t("shell.model.manage_title"),
+                t("shell.model.manage_search"),
+                items,
+            )
+            .with_subtitle(t("shell.model.manage_subtitle"))
+            .with_footer(t("shell.model.manage_footer"))
+            .with_action('d', t("shell.model.action_del"))
+            .with_action('f', t("shell.model.action_fallback"));
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
+            };
+            match outcome {
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', val))) => {
+                    if let Some(name) = val.strip_prefix("acct:") {
+                        self.config.api_accounts.retain(|a| a.name != name);
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.accounts.removed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("name".to_string(), name.to_string());
+                                args
+                            })
+                        );
+                    } else if let Some(m) = val.strip_prefix("fb:") {
+                        self.config.fallback_models.retain(|x| x != m);
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.model.fallback_removed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("model".to_string(), m.to_string());
+                                args
+                            })
+                        );
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('f', _))) => {
+                    self.add_fallback_interactive();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Prompt for a fallback model name and add it to the chain.
+    fn add_fallback_interactive(&mut self) {
+        let model = match prompt_edit_value(
+            &t("shell.model.fallback_add_label"),
+            &t("shell.model.fallback_add_desc"),
+            "",
+            false,
+        ) {
+            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        if self.config.fallback_models.iter().any(|m| m == &model) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.model.fallback_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
+            return;
+        }
+        self.config.fallback_models.push(model.clone());
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.fallback_added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model);
                 args
             })
         );

@@ -536,6 +536,12 @@ shell:
     fallback_added: "Fallback '{model}' hinzugefuegt"
     fallback_removed: "Fallback '{model}' entfernt"
     fallback_exists: "Fallback '{model}' existiert bereits"
+    action_manage: "verwalten"
+    manage_title: "Konten & Fallback"
+    manage_search: "Suchen..."
+    manage_subtitle: "d markierten Eintrag loeschen"
+    manage_footer: "d loeschen  f Fallback hinzufuegen  Esc zurueck"
+    manage_empty: "Keine Konten oder Fallbacks zu verwalten"
   token:
     title: "Token-Nutzung (letzte 7 Tage)"
     input_tokens: "Eingabe-Tokens"
