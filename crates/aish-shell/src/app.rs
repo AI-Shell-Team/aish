@@ -5171,6 +5171,22 @@ impl AishShell {
                     );
                 }
             }
+            // Also surface each account's configured model, in case its endpoint
+            // didn't respond to the /models fetch — the user explicitly set it,
+            // so it must always be reachable in the list.
+            for a in &self.config.api_accounts {
+                if let Some(m) = &a.model {
+                    let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
+                    let val = format!("{}\u{0}{}", m, base);
+                    if seen.insert(val.clone()) {
+                        items.push(
+                            SearchSelectItem::new(val, m.clone())
+                                .with_detail(&base)
+                                .with_search_text(format!("{} {}", m, base)),
+                        );
+                    }
+                }
+            }
 
             let panel = SearchSelectPanel::new(
                 t("shell.model.picker_title"),
