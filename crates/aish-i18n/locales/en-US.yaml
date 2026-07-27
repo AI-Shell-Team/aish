@@ -874,7 +874,7 @@ shell:
     picker_title: "Switch model / account"
     picker_subtitle: "Up/Dn to select, Enter to switch"
     picker_search: "Search models or accounts..."
-    picker_footer: "Up/Dn select  Enter switch  a add  d del  f fallback  t toggle  e edit  Esc cancel"
+    picker_footer: "a add  d del  e edit  t toggle  f fallback  Esc cancel"
     action_add: "add"
     action_del: "delete"
     action_toggle: "toggle"

@@ -515,7 +515,7 @@ shell:
     picker_title: "Modell / Konto wechseln"
     picker_subtitle: "↑↓ Auswaehlen, Enter wechseln"
     picker_search: "Modelle oder Konten suchen..."
-    picker_footer: "↑↓ Auswaehlen  Enter Wechseln  a neu  d loesch.  f Fallback  t an/aus  e bearb.  Esc Abbrechen"
+    picker_footer: "a neu  d loesch.  e bearb.  t an/aus  f Fallback  Esc Abbrechen"
     action_add: "neu"
     action_del: "loeschen"
     action_toggle: "an/aus"

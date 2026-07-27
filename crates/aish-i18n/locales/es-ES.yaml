@@ -515,7 +515,7 @@ shell:
     picker_title: "Cambiar modelo / cuenta"
     picker_subtitle: "↑↓ seleccionar, Enter cambiar"
     picker_search: "Buscar modelos o cuentas..."
-    picker_footer: "↑↓ seleccionar  Enter cambiar  a anadir  d borr.  f respaldo  t act/des  e editar  Esc cancelar"
+    picker_footer: "a anadir  d borr.  e editar  t act/des  f respaldo  Esc cancelar"
     action_add: "anadir"
     action_del: "borrar"
     action_toggle: "act/des"

@@ -515,7 +515,7 @@ shell:
     picker_title: "Changer modele / compte"
     picker_subtitle: "↑↓ selectionner, Enter basculer"
     picker_search: "Rechercher modeles ou comptes..."
-    picker_footer: "↑↓ selectionner  Enter basculer  a ajout.  d suppr.  f secours  t act/des  e editer  Esc annuler"
+    picker_footer: "a ajout.  d suppr.  e editer  t act/des  f secours  Esc annuler"
     action_add: "ajouter"
     action_del: "supprimer"
     action_toggle: "act/des"

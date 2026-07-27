@@ -515,7 +515,7 @@ shell:
     picker_title: "モデル / アカウント切替"
     picker_subtitle: "↑↓ 選択、Enter で切替"
     picker_search: "モデルやアカウントを検索..."
-    picker_footer: "↑↓ 選択  Enter 切替  a 追加  d 削除  f フォールバック  t 切替  e 編集  Esc キャンセル"
+    picker_footer: "a 追加  d 削除  e 編集  t 切替  f フォールバック  Esc キャンセル"
     action_add: "追加"
     action_del: "削除"
     action_toggle: "切替"
