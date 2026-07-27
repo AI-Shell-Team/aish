@@ -182,6 +182,7 @@ shell:
     kill_live_sessions: "Terminer session(s) PTY par ID"
     audit: "Consulter le journal d'audit (qui/quand/quoi/suggestion IA/confirmation)"
     forget-approvals: "Effacer les approbations mémorisées (cette session)"
+    skill: "Rechercher, installer, vérifier des skills; gérer les registres"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -343,6 +344,28 @@ shell:
     applied_clear: "{label} effacé"
     invalid: "Valeur invalide : {error}"
     restart_hint: "(prend effet après le redémarrage)"
+    install_installing: "Installation de '{name}' (source : {source})..."
+    install_cancel_hint: "  Appuyez sur Ctrl+C pour annuler"
+    install_downloading: "Téléchargement depuis {source} [{secs}s]"
+    install_continue: "Installation toujours en cours ({secs}s). Continuer ? [Y/n]"
+    install_canceled: "Annulé par l'utilisateur (Ctrl+C)"
+    install_canceled_msg: "Installation annulée"
+    install_timeout: "Délai dépassé après {secs}s"
+    install_crashed: "Le thread d'installation a planté"
+    registry_title: "Sources du registre de skills"
+    registry_question: "Sélectionnez un registre à gérer, ou ajoutez une nouvelle source"
+    registry_test_all: "Tester toutes les connexions"
+    registry_add_new: "Ajouter un nouveau registre..."
+    registry_not_tested: "[-] non testé"
+    registry_manage_test: "Tester la connexion"
+    registry_manage_enable: "Activer"
+    registry_manage_disable: "Désactiver"
+    registry_manage_edit_url: "Modifier l'URL"
+    registry_manage_remove: "Supprimer"
+    registry_manage_remove_desc: "Supprimer cette source de registre"
+    registry_manage_back: "Retour à la liste"
+    registry_manage_status_on: "activé"
+    registry_manage_status_off: "désactivé"
     cat:
       model: "Modèle & Fournisseur"
       appearance: "Apparence"
@@ -513,6 +536,12 @@ shell:
       session_db_path:
         label: "Chemin de la base de sessions"
         desc: "Emplacement personnalisé de la base de données des sessions (vide = valeur par défaut)"
+      skill_auto_search:
+        label: "Recherche auto de compétences"
+        desc: "L'IA cherche automatiquement dans les registres et suggère des installations sans skill correspondant"
+      skill_registries:
+        label: "Sources de registres de compétences"
+        desc: "Gérer les sources de recherche (skills.sh, skillhub.cn). Entrée pour gestionnaire interactif"
 
   session:
     iteration_limit_reached: "{count} iterations d'appels d'outils terminees."

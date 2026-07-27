@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 mod install_channel;
 mod models_auth;
+mod skill_cmd;
 mod uninstall;
 mod update;
 
@@ -182,6 +183,73 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+    /// Search, install, and manage skills
+    Skill {
+        #[command(subcommand)]
+        action: SkillSubcommand,
+    },
+}
+
+/// Subcommands for `aish skill`.
+#[derive(Subcommand)]
+enum SkillSubcommand {
+    /// Search for skills in registries
+    Search {
+        /// Search keywords
+        query: Vec<String>,
+        /// Max results
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+    /// Install a skill from a registry
+    Install {
+        /// Skill ID (e.g. "skills_sh/my-skill")
+        skill_id: String,
+    },
+    /// Verify an installed skill
+    Verify {
+        /// Skill name
+        name: String,
+    },
+    /// List installed skills
+    List,
+    /// Remove an installed skill
+    Remove {
+        /// Skill name
+        name: String,
+    },
+    /// Mark a reviewed skill as trusted (remove quarantine)
+    Trust {
+        /// Skill name
+        name: String,
+    },
+    /// Print a skill's files for manual review
+    Vet {
+        /// Skill name
+        name: String,
+    },
+    /// Manage registry sources
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
+}
+
+/// Subcommands for `aish skill registry`.
+#[derive(Subcommand)]
+enum RegistryAction {
+    /// List configured registries
+    List,
+    /// Add a new registry source
+    Add {
+        name: String,
+        #[arg(long)]
+        r#type: String,
+        #[arg(long)]
+        url: String,
+    },
+    /// Remove a registry source
+    Remove { name: String },
 }
 
 fn main() {
@@ -364,6 +432,30 @@ fn main() {
                 open_browser,
                 callback_port,
             );
+        }
+        Some(Commands::Skill { action }) => {
+            let outcome: Result<(), String> = match action {
+                SkillSubcommand::Search { query, limit } => {
+                    skill_cmd::cmd_search(&query.join(" "), limit)
+                }
+                SkillSubcommand::Install { skill_id } => skill_cmd::cmd_install(&skill_id),
+                SkillSubcommand::Verify { name } => skill_cmd::cmd_verify(&name),
+                SkillSubcommand::List => skill_cmd::cmd_list(),
+                SkillSubcommand::Remove { name } => skill_cmd::cmd_remove(&name),
+                SkillSubcommand::Trust { name } => skill_cmd::cmd_trust(&name),
+                SkillSubcommand::Vet { name } => skill_cmd::cmd_vet(&name),
+                SkillSubcommand::Registry { action } => match action {
+                    RegistryAction::List => skill_cmd::cmd_registry_list(),
+                    RegistryAction::Add { name, r#type, url } => {
+                        skill_cmd::cmd_registry_add(&name, &r#type, &url)
+                    }
+                    RegistryAction::Remove { name } => skill_cmd::cmd_registry_remove(&name),
+                },
+            };
+            if let Err(msg) = outcome {
+                eprintln!("{msg}");
+                std::process::exit(1);
+            }
         }
     }
 }

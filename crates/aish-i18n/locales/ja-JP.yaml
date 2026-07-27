@@ -182,6 +182,7 @@ shell:
     kill_live_sessions: "IDでPTYセッション終了"
     audit: "監査ログを照会（誰/いつ/何/AI提案/確認）"
     forget-approvals: "記憶されたコマンド承認を削除（このセッション）"
+    skill: "スキルの検索・インストール・検証;レジストリ管理"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -343,6 +344,28 @@ shell:
     applied_clear: "クリアしました {label}"
     invalid: "無効な値: {error}"
     restart_hint: "（再起動後に反映されます）"
+    install_installing: "「{name}」をインストールしています（ソース: {source}）..."
+    install_cancel_hint: "  Ctrl+C でキャンセル"
+    install_downloading: "{source} からダウンロード中 [{secs}秒]"
+    install_continue: "インストール継続中（{secs}秒）。続行しますか？ [Y/n]"
+    install_canceled: "ユーザーによってキャンセルされました（Ctrl+C）"
+    install_canceled_msg: "インストールはキャンセルされました"
+    install_timeout: "{secs}秒後にタイムアウトしました"
+    install_crashed: "インストールスレッドがクラッシュしました"
+    registry_title: "スキルレジストリソース"
+    registry_question: "管理するレジストリを選択するか、新しいソースを追加してください"
+    registry_test_all: "すべての接続をテスト"
+    registry_add_new: "新しいレジストリを追加..."
+    registry_not_tested: "[-] 未テスト"
+    registry_manage_test: "接続をテスト"
+    registry_manage_enable: "有効化"
+    registry_manage_disable: "無効化"
+    registry_manage_edit_url: "URL を編集"
+    registry_manage_remove: "削除"
+    registry_manage_remove_desc: "このレジストリソースを削除します"
+    registry_manage_back: "リストに戻る"
+    registry_manage_status_on: "有効"
+    registry_manage_status_off: "無効"
     cat:
       model: "モデルとプロバイダー"
       appearance: "外観"
@@ -513,6 +536,12 @@ shell:
       session_db_path:
         label: "セッション DB パス"
         desc: "セッションデータベースのカスタム位置（空欄 = 既定値）"
+      skill_auto_search:
+        label: "スキル自動検索"
+        desc: "一致するスキルがない時、AI が自動的にレジストリを検索してインストールを提案"
+      skill_registries:
+        label: "スキルレジストリソース"
+        desc: "検索ソースを管理（skills.sh、skillhub.cn）。Enter で対話式管理を開く"
 
   session:
     iteration_limit_reached: "{count} 回のツール呼び出しが完了しました。"

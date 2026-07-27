@@ -367,6 +367,7 @@ shell:
     kill_live_sessions: "Kill live PTY session(s) by ID"
     audit: "Query audit log (who/when/what/AI suggestion/confirm)"
     forget-approvals: "Clear remembered command approvals (this session)"
+    skill: "Search, install, verify skills; manage registries"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -700,6 +701,30 @@ shell:
     applied_clear: "Cleared {label}"
     invalid: "Invalid value: {error}"
     restart_hint: "(takes effect after restart)"
+    # Skill install progress
+    install_installing: "Installing '{name}' (source: {source})..."
+    install_cancel_hint: "  Press Ctrl+C to cancel"
+    install_downloading: "Downloading from {source} [{secs}s]"
+    install_continue: "Still installing ({secs}s). Continue? [Y/n]"
+    install_canceled: "Cancelled by user (Ctrl+C)"
+    install_canceled_msg: "Installation canceled"
+    install_timeout: "Timed out after {secs}s"
+    install_crashed: "The install thread crashed"
+    # Skill registry management dialog
+    registry_title: "Skill Registry Sources"
+    registry_question: "Select a registry to manage, or add a new source"
+    registry_test_all: "Test all connections"
+    registry_add_new: "Add new registry..."
+    registry_not_tested: "[-] not tested"
+    registry_manage_test: "Test connection"
+    registry_manage_enable: "Enable"
+    registry_manage_disable: "Disable"
+    registry_manage_edit_url: "Edit URL"
+    registry_manage_remove: "Remove"
+    registry_manage_remove_desc: "Delete this registry source"
+    registry_manage_back: "Back to list"
+    registry_manage_status_on: "enabled"
+    registry_manage_status_off: "disabled"
     cat:
       model: "Model & Provider"
       appearance: "Appearance"
@@ -870,6 +895,12 @@ shell:
       session_db_path:
         label: "Session DB Path"
         desc: "Custom session database location (blank = default)"
+      skill_auto_search:
+        label: "Skill Auto-Search"
+        desc: "AI auto-searches skill registries and suggests installs when no skill matches"
+      skill_registries:
+        label: "Skill Registry Sources"
+        desc: "Manage skill search sources (skills.sh, skillhub.cn). Press Enter for interactive manager"
 
   ask_user:
     default_title: "User input required"

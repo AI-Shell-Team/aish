@@ -219,6 +219,19 @@ impl LlmSession {
         self.confirmation_callback = Some(cb);
     }
 
+    /// Show a confirmation panel to the user via the installed callback and
+    /// return their choice. Lets a tool raise an interactive yes/no gate
+    /// mid-flight (e.g. a post-install "review this skill?" prompt) without
+    /// going through preflight. If no callback is set, returns
+    /// [`ApprovalChoice::Once`] (backward-compatible default allow).
+    pub fn confirm(&self, ctx: &PreflightSecurityContext) -> ApprovalChoice {
+        if let Some(cb) = &self.confirmation_callback {
+            cb(ctx)
+        } else {
+            ApprovalChoice::Once
+        }
+    }
+
     /// Install session-scoped approval memory. When present, commands approved
     /// with "remember" skip confirmation (and sandbox preflight) for the rest
     /// of the session.

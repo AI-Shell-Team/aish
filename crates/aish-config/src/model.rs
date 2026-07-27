@@ -259,6 +259,89 @@ impl Default for InlineCompletionConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Skill registry sub-config
+// ---------------------------------------------------------------------------
+
+/// A single skill registry source entry.
+///
+/// Users can configure multiple registries; each maps to an adapter type
+/// that knows how to search and install skills from that source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RegistrySource {
+    /// Human-readable name used in UI and as reference key
+    /// (e.g. "skills_sh", "skillhub_cn", "uniontech").
+    pub name: String,
+
+    /// Adapter type: "skills_sh", "skillhub", or "clawhub".
+    /// Determines which search API format and install mechanism is used.
+    #[serde(rename = "type")]
+    pub registry_type: String,
+
+    /// Whether this registry is queried during search.
+    pub enabled: bool,
+
+    /// Base URL of the registry API.
+    /// skills.sh: "https://skills.sh"
+    /// skillhub:  "https://api.skillhub.cn"
+    /// clawhub:   "https://clawhub.ai"
+    pub url: String,
+}
+
+impl Default for RegistrySource {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            registry_type: String::new(),
+            enabled: true,
+            url: String::new(),
+        }
+    }
+}
+
+/// Skill marketplace configuration.
+///
+/// Controls auto-search behavior and the list of registry sources.
+/// Pre-configured with skills.sh and skillhub.cn as defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillsConfig {
+    /// When true, the AI automatically searches registries if no loaded
+    /// skill matches the user's request.
+    pub auto_search: bool,
+
+    /// Name of the default registry (must match an entry in `registries`).
+    /// Used as the primary source for CLI and AI-driven searches.
+    pub default_registry: String,
+
+    /// Ordered list of registry sources. Higher entries take priority.
+    pub registries: Vec<RegistrySource>,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            auto_search: true,
+            default_registry: "skills_sh".into(),
+            registries: vec![
+                RegistrySource {
+                    name: "skills_sh".into(),
+                    registry_type: "skills_sh".into(),
+                    enabled: true,
+                    url: "https://skills.sh".into(),
+                },
+                RegistrySource {
+                    name: "skillhub_cn".into(),
+                    registry_type: "skillhub".into(),
+                    enabled: true,
+                    url: "https://api.skillhub.cn".into(),
+                },
+            ],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level config model
 // ---------------------------------------------------------------------------
 
@@ -415,6 +498,9 @@ pub struct ConfigModel {
     /// When false, aish runs standalone (old behavior: exit = close).
     #[serde(default = "default_true")]
     pub pty_daemon_enabled: bool,
+    /// Skill marketplace: auto-search + registry sources.
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 impl Default for ConfigModel {
@@ -466,6 +552,7 @@ impl Default for ConfigModel {
             terminal_resize_mode: default_terminal_resize_mode(),
             inline_completion: InlineCompletionConfig::default(),
             pty_daemon_enabled: default_true(),
+            skills: SkillsConfig::default(),
         }
     }
 }

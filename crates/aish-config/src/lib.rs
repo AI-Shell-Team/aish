@@ -19,5 +19,5 @@ pub mod model;
 pub use loader::ConfigLoader;
 pub use model::{
     compile_remote_danger_patterns, ConfigModel, InlineCompletionConfig, MemoryConfig,
-    OutputOffloadConfig, ToolArgPreviewConfig,
+    OutputOffloadConfig, RegistrySource, SkillsConfig, ToolArgPreviewConfig,
 };

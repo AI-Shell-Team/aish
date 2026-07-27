@@ -367,6 +367,7 @@ shell:
     kill_live_sessions: "按 ID 终止活跃 PTY 会话"
     audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
     forget-approvals: "清除本会话记住的命令审批"
+    skill: "搜索、安装、校验技能；管理 registry 源"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -700,6 +701,30 @@ shell:
     applied_clear: "已清除 {label}"
     invalid: "无效的值：{error}"
     restart_hint: "（重启后生效）"
+    # Skill install progress
+    install_installing: "正在安装 '{name}'（源：{source}）..."
+    install_cancel_hint: "  按 Ctrl+C 取消"
+    install_downloading: "正在从 {source} 下载 [{secs}s]"
+    install_continue: "仍在安装（{secs}s）。继续吗？[Y/n]"
+    install_canceled: "用户取消（Ctrl+C）"
+    install_canceled_msg: "安装已取消"
+    install_timeout: "{secs}s 后超时"
+    install_crashed: "安装线程崩溃"
+    # Skill registry management dialog
+    registry_title: "Skill Registry 源"
+    registry_question: "选择要管理的源，或添加新源"
+    registry_test_all: "测试所有连接"
+    registry_add_new: "添加新源..."
+    registry_not_tested: "[-] 未测试"
+    registry_manage_test: "测试连接"
+    registry_manage_enable: "启用"
+    registry_manage_disable: "禁用"
+    registry_manage_edit_url: "编辑 URL"
+    registry_manage_remove: "删除"
+    registry_manage_remove_desc: "删除此 registry 源"
+    registry_manage_back: "返回列表"
+    registry_manage_status_on: "已启用"
+    registry_manage_status_off: "已禁用"
     cat:
       model: "模型与接入"
       appearance: "外观"
@@ -870,6 +895,12 @@ shell:
       session_db_path:
         label: "会话数据库路径"
         desc: "自定义会话数据库位置（留空=默认）"
+      skill_auto_search:
+        label: "Skill 自动搜索"
+        desc: "无匹配技能时，AI 自动搜索 skill registry 并建议安装"
+      skill_registries:
+        label: "Skill Registry 源"
+        desc: "管理 skill 搜索源（skills.sh、skillhub.cn）。按 Enter 打开交互式管理面板"
 
   ask_user:
     default_title: "需要用户输入"

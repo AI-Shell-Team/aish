@@ -836,6 +836,7 @@ impl PersistentPty {
         // interactive forwarding loop may linger there and corrupt the
         // next command.
         let mut payload = b"\x15".to_vec();
+        let is_backend = seq.is_some();
         if let Some(s) = seq {
             let quoted = shell_quote_escape(command);
             payload.extend_from_slice(
@@ -843,7 +844,18 @@ impl PersistentPty {
                     .as_bytes(),
             );
         }
-        payload.extend_from_slice(command.as_bytes());
+        if is_backend {
+            // Backend commands capture output programmatically, so never let
+            // them block on an interactive pager (e.g. `systemctl status` or
+            // `git log` invoking `less`). Temporarily force the pager env to
+            // `cat` around the command, restoring the originals afterward.
+            let (pg_prefix, pg_suffix) = backend_pager_override();
+            payload.extend_from_slice(pg_prefix.as_bytes());
+            payload.extend_from_slice(command.as_bytes());
+            payload.extend_from_slice(pg_suffix.as_bytes());
+        } else {
+            payload.extend_from_slice(command.as_bytes());
+        }
         payload.push(b'\n');
 
         self.write_master(&payload)
@@ -5698,6 +5710,56 @@ pub fn shell_quote_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Pager-related environment variables neutralized for backend (tool/AI)
+/// command execution. Commands such as `systemctl status`, `git log`, or
+/// `man` launch an interactive pager (`less`) when their stdout is a TTY —
+/// and the persistent PTY always is one — blocking until a key is pressed.
+/// Forcing these to `cat` streams the output straight through without ever
+/// blocking, the only sane behavior for captured output.
+const BACKEND_PAGER_VARS: &[&str] = &["PAGER", "SYSTEMD_PAGER", "GIT_PAGER"];
+
+/// Build `(prefix, suffix)` shell snippets that temporarily force the
+/// variables in [`BACKEND_PAGER_VARS`] to `cat` around a backend command,
+/// then restore their original values.
+///
+/// The snippets run in the *current* shell (no subshell) so that `cd` and
+/// other side effects still propagate to the persistent session. The restore
+/// executes as the next sequential list item, so even when the command is
+/// killed (e.g. SIGINT/SIGKILL on a stuck pager) bash still runs it — the
+/// override never leaks into a subsequent user command.
+///
+/// `${VAR-__AISH_UNSET__}` yields the `__AISH_UNSET__` sentinel when `VAR` is
+/// unset, otherwise its current value (possibly empty), so the original
+/// unset-vs-empty state is preserved exactly.
+fn backend_pager_override() -> (String, String) {
+    let mut save = String::new();
+    let mut export = String::new();
+    let mut restore = String::new();
+    let mut unsets = String::new();
+    for (i, var) in BACKEND_PAGER_VARS.iter().enumerate() {
+        // Every assignment uses `export` (not a bare `VAR=...`) on purpose:
+        // the backend shell's DEBUG trap classifies a command as an
+        // assignment by matching `^[A-Za-z_][A-Za-z_0-9]*=` and then strips
+        // the `VAR=value ` prefix up to the first space. A bare assignment
+        // with no trailing space (e.g. `__AISH_PV0=${PAGER-...}`) makes that
+        // strip a no-op, looping forever and hanging the shell. `export VAR=`
+        // has a space after `export` so it is never mis-classified.
+        save.push_str(&format!(" export __AISH_PV{i}=${{{var}-__AISH_UNSET__}};"));
+        export.push_str(&format!(" export {var}=cat;"));
+        restore.push_str(&format!(
+            " if [ \"$__AISH_PV{i}\" = __AISH_UNSET__ ]; then unset {var}; else export {var}=\"$__AISH_PV{i}\"; fi;"
+        ));
+        unsets.push_str(&format!(" __AISH_PV{i}"));
+    }
+    // Prefix ends with `;` (from the exports) and suffix begins with `;`, so
+    // `prefix + command + suffix` stays three separate statements — without
+    // the leading `;` the command and the `if` restore would merge into one
+    // command (e.g. `echo ... if [...]`), a syntax error.
+    let prefix = format!(" {save}{export}");
+    let suffix = format!(";{restore} unset{unsets};");
+    (prefix, suffix)
+}
+
 /// Check if a command needs a full interactive terminal.
 pub fn is_interactive_command(command: &str) -> bool {
     let first = command.split_whitespace().next().unwrap_or("");
@@ -6932,6 +6994,25 @@ fn scan_output_for_ssh_failure(output: &str) -> Option<()> {
 mod tests {
     use super::*;
 
+    /// Start a PersistentPty for tests, retrying transient allocation
+    /// failures. `cargo test --workspace` runs hundreds of tests in parallel;
+    /// under that load /dev/pts slots and shell startup can intermittently
+    /// fail on CI. Retrying keeps the suite green without masking real
+    /// regressions (a persistent failure still panics after the retries).
+    fn start_test_pty(cwd: &str) -> PersistentPty {
+        let mut last_err: Option<aish_core::AishError> = None;
+        for _ in 0..5 {
+            match PersistentPty::start(cwd, 24, 80) {
+                Ok(pty) => return pty,
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+            }
+        }
+        panic!("PersistentPty::start failed after retries: {:?}", last_err);
+    }
+
     #[test]
     fn test_danger_level_max() {
         assert!(matches!(
@@ -8089,7 +8170,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
         let child_pid = pty.child_pid;
         assert!(pty.is_running());
         pty.stop();
@@ -8109,7 +8190,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
         let child_pid = pty.child_pid.as_raw();
 
         let fds_dir = format!("/proc/{child_pid}/fd");
@@ -8144,7 +8225,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
         let child_pid = pty.child_pid;
 
         pty.running.store(false, Ordering::SeqCst);
@@ -8163,7 +8244,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
 
         let tempdir = std::env::temp_dir().join(format!(
             "aish-pty-stop-graceful-exit-test-{}",
@@ -8194,7 +8275,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
 
         let (output, exit_code, result_cwd) = pty
             .execute_command("echo hello_world_123", Duration::from_secs(5), None, false)
@@ -8218,7 +8299,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
 
         let (output, exit_code, _) = pty
             .execute_command(
@@ -8238,11 +8319,77 @@ mod tests {
     }
 
     #[test]
+    fn test_backend_pager_override_forces_cat_then_restores() {
+        let (prefix, suffix) = backend_pager_override();
+
+        // Case A: pager vars set beforehand -> `cat` during the command,
+        // originals restored afterward.
+        let script_a = format!(
+            "export PAGER=mypager SYSTEMD_PAGER=mysys GIT_PAGER=mygit;\
+{prefix} echo \"DURING:$PAGER:$SYSTEMD_PAGER:$GIT_PAGER\"\
+{suffix} echo \"AFTER:$PAGER:$SYSTEMD_PAGER:${{GIT_PAGER+x}}\""
+        );
+        let out_a = std::process::Command::new("bash")
+            .args(["-c", &script_a])
+            .output()
+            .expect("bash should run");
+        assert!(
+            out_a.status.success(),
+            "snippet: {script_a}\nstderr: {}",
+            String::from_utf8_lossy(&out_a.stderr)
+        );
+        let stdout_a = String::from_utf8_lossy(&out_a.stdout).into_owned();
+        let lines_a: Vec<&str> = stdout_a.trim().lines().collect();
+        assert_eq!(lines_a[0], "DURING:cat:cat:cat", "snippet: {script_a}");
+        // PAGER/SYSTEMD_PAGER values restored; GIT_PAGER still set (marker `x`).
+        assert_eq!(lines_a[1], "AFTER:mypager:mysys:x", "snippet: {script_a}");
+
+        // Case B: pager vars unset beforehand -> `cat` during, unset after.
+        let script_b = format!(
+            "unset PAGER SYSTEMD_PAGER GIT_PAGER;\
+{prefix} echo \"DURING:$PAGER:$SYSTEMD_PAGER:$GIT_PAGER\"\
+{suffix} echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
+        );
+        let out_b = std::process::Command::new("bash")
+            .args(["-c", &script_b])
+            .output()
+            .expect("bash should run");
+        assert!(
+            out_b.status.success(),
+            "snippet: {script_b}\nstderr: {}",
+            String::from_utf8_lossy(&out_b.stderr)
+        );
+        let stdout_b = String::from_utf8_lossy(&out_b.stdout).into_owned();
+        let lines_b: Vec<&str> = stdout_b.trim().lines().collect();
+        assert_eq!(lines_b[0], "DURING:cat:cat:cat", "snippet: {script_b}");
+        // All unset after restore -> empty markers.
+        assert_eq!(lines_b[1], "AFTER:::", "snippet: {script_b}");
+    }
+
+    #[test]
+    fn test_backend_command_overrides_pager() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = start_test_pty(&cwd);
+        let (output, exit_code, _) = pty
+            .execute_command("echo \"PAGER=$PAGER\"", Duration::from_secs(5), None, false)
+            .expect("execute should succeed");
+        assert_eq!(exit_code, 0, "got: {output:?}");
+        assert!(
+            output.contains("PAGER=cat"),
+            "backend command should see PAGER=cat, got: {output:?}"
+        );
+
+        pty.stop();
+    }
+
+    #[test]
     fn test_execute_multiple_commands() {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
 
         let (out1, code1, cwd1) = pty
             .execute_command("echo first", Duration::from_secs(5), None, false)
@@ -8266,7 +8413,7 @@ mod tests {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
-        let mut pty = PersistentPty::start(&cwd, 24, 80).expect("start should succeed");
+        let mut pty = start_test_pty(&cwd);
 
         let tempdir = std::env::temp_dir().join(format!(
             "aish-pty-cwd-persist-test-{}",
