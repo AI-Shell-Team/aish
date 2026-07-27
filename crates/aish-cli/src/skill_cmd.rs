@@ -113,25 +113,25 @@ pub fn cmd_install(skill_id: &str) -> Result<(), String> {
     };
 
     // Strategy 1: Direct parse (owner/repo/skill-name).
-    let parts: Vec<&str> = rest.split('/').collect();
-    if parts.len() >= 3 {
-        let source = format!("{}/{}", parts[0], parts[1]);
-        let slug = parts.last().unwrap().to_string();
-        // Reject unsafe slugs (empty from trailing slash, or traversal like
-        // "..") before constructing a RegistrySkill. Other skill subcommands
-        // already gate on is_unsafe_skill_name; install must too.
-        if is_unsafe_skill_name(&slug) {
-            return Err(format!(
-                "Invalid skill ID '{}': unsafe or empty skill name.",
-                skill_id
-            ));
-        }
-        let reg = reg_filter.unwrap_or(&config.skills.default_registry);
+    if let Some((source, slug)) = aish_skills::registry::parse_skill_id_rest(rest) {
+        // When no registry prefix was given, honor the configured default and
+        // fall back to skills_sh only when it is empty/unset — otherwise a bare
+        // owner/repo/skill ID fails with "No adapter for registry ''".
+        let reg = match reg_filter {
+            Some(r) => r.to_string(),
+            None => {
+                if config.skills.default_registry.is_empty() {
+                    "skills_sh".to_string()
+                } else {
+                    config.skills.default_registry.clone()
+                }
+            }
+        };
         let skill = RegistrySkill {
             id: skill_id.to_string(),
             name: slug.clone(),
             description: String::new(),
-            registry: reg.to_string(),
+            registry: reg,
             source,
             slug,
             installs: 0,
@@ -236,7 +236,7 @@ fn print_install_success(result: &aish_skills::registry::InstallResult) {
 // ----- Verify -----
 
 pub fn cmd_verify(name: &str) -> Result<(), String> {
-    if is_unsafe_skill_name(name) {
+    if aish_skills::registry::is_unsafe_skill_name(name) {
         return Err(format!("Unsafe skill name: {:?}", name));
     }
     let dir = user_skills_dir().join(name);
@@ -261,22 +261,11 @@ pub fn cmd_verify(name: &str) -> Result<(), String> {
 
 // ----- Trust & vet (quarantine) -----
 
-/// Reject names that could escape the skills directory: empty, path
-/// separators, NUL, or the special `.` / `..` entries.
-fn is_unsafe_skill_name(name: &str) -> bool {
-    name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0')
-}
-
 /// `aish skill trust <name>`: remove the `.untrusted` marker so the skill
 /// loads on the next aish start. CLI companion to the interactive
 /// `/skill vet` flow for users who reviewed a skill out of band.
 pub fn cmd_trust(name: &str) -> Result<(), String> {
-    if is_unsafe_skill_name(name) {
+    if aish_skills::registry::is_unsafe_skill_name(name) {
         return Err(format!("Invalid skill name '{}'.", name));
     }
     let dir = user_skills_dir().join(name);
@@ -301,7 +290,7 @@ pub fn cmd_trust(name: &str) -> Result<(), String> {
 /// directory. Full automated vetting (with an AI session) runs via the
 /// interactive `/skill vet <name>` command inside aish.
 pub fn cmd_vet(name: &str) -> Result<(), String> {
-    if is_unsafe_skill_name(name) {
+    if aish_skills::registry::is_unsafe_skill_name(name) {
         return Err(format!("Invalid skill name '{}'.", name));
     }
     let dir = user_skills_dir().join(name);
@@ -315,7 +304,7 @@ pub fn cmd_vet(name: &str) -> Result<(), String> {
     match std::fs::read_to_string(&skill_md) {
         Ok(content) => {
             println!("\n--- SKILL.md ---");
-            println!("{}", content);
+            println!("{}", aish_ui::strip_ansi_escapes(&content));
         }
         Err(e) => println!("\nCould not read SKILL.md: {}", e),
     }
@@ -388,7 +377,7 @@ pub fn cmd_list() -> Result<(), String> {
 // ----- Remove -----
 
 pub fn cmd_remove(name: &str) -> Result<(), String> {
-    if is_unsafe_skill_name(name) {
+    if aish_skills::registry::is_unsafe_skill_name(name) {
         return Err(format!("Unsafe skill name: {:?}", name));
     }
     let dir = user_skills_dir().join(name);

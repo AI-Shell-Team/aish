@@ -333,6 +333,40 @@ impl RegistryManager {
     }
 }
 
+/// True if a skill name or slug could escape the skills directory when used as
+/// a path component: empty, a path separator (`/` or `\`), NUL, or the `.`
+/// / `..` special entries. This is the single source of truth for the
+/// predicate — the registry installer, the shell, the CLI, and the AI install
+/// tool all route through it so the rule cannot drift between entry points.
+pub fn is_unsafe_skill_name(name: &str) -> bool {
+    name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+}
+
+/// Parse a bare `owner/repo/skill-name` skill ID (3+ `/`-separated segments)
+/// into `(source = "owner/repo", slug = "skill-name")`. Returns `None` when
+/// there are fewer than 3 segments or the trailing slug is unsafe. Shared by
+/// the shell, CLI, and AI install tool so the parse + slug check cannot drift.
+/// The `source` half is re-validated by the installer (exactly one `/`, no
+/// traversal/NUL); the slug is the install directory name.
+pub fn parse_skill_id_rest(rest: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() >= 3 {
+        let source = format!("{}/{}", parts[0], parts[1]);
+        let slug = parts.last()?.to_string();
+        if is_unsafe_skill_name(&slug) {
+            return None;
+        }
+        Some((source, slug))
+    } else {
+        None
+    }
+}
+
 /// Pre-create the skill directory with its `.untrusted` quarantine marker
 /// BEFORE the adapter downloads any files. Writing the marker first (a) closes
 /// the race where a hot-reload observes files without the marker and (b) makes

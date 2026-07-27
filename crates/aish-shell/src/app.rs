@@ -164,25 +164,6 @@ fn setting_desc(def: &crate::settings_panel::SettingDef) -> String {
     t(&format!("shell.setting.k.{}.desc", def.key.name()))
 }
 
-/// Parse `owner/repo/skill-name` into `("owner/repo", "skill-name")`.
-/// Returns `None` if fewer than 3 path segments.
-fn parse_skill_rest(rest: &str) -> Option<(String, String)> {
-    let parts: Vec<&str> = rest.split('/').collect();
-    if parts.len() >= 3 {
-        let source = format!("{}/{}", parts[0], parts[1]);
-        let slug = parts.last().unwrap().to_string();
-        // Reject empty (trailing slash) and traversal slugs up front. The
-        // registry manager re-validates at install time, but failing here
-        // avoids constructing a RegistrySkill that could never install.
-        if slug.is_empty() || slug == "." || slug == ".." || slug.contains('\\') {
-            return None;
-        }
-        Some((source, slug))
-    } else {
-        None
-    }
-}
-
 /// Mirror the security-relevant fields of `config.yaml` onto `policy`.
 ///
 /// `config.yaml` overrides `security_policy.yaml` for the globals the
@@ -208,23 +189,6 @@ fn apply_config_security_overrides(
         _ => SandboxOffAction::Allow,
     };
     policy.sandbox_timeout_seconds = config.sandbox_timeout_seconds;
-}
-
-/// Strip ANSI/VT escape sequences and stray C0 control characters from
-/// attacker-controlled text before printing it during the security review.
-/// Without this, a malicious SKILL.md could embed ANSI escapes to repaint the
-/// screen, hide lines, or forge a "no issues found" verdict at exactly the
-/// moment the user decides whether to trust it.
-fn strip_ansi_escapes(s: &str) -> String {
-    let re = regex::Regex::new(
-        // OSC (ESC ] ... BEL or ST), CSI (ESC [ ... final byte), other ESC + char.
-        r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]",
-    )
-    .expect("valid ansi-strip regex");
-    re.replace_all(s, "")
-        .chars()
-        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
-        .collect()
 }
 
 /// Human-readable current value for the setting-list row.
@@ -3537,7 +3501,7 @@ impl AishShell {
                 // Resolve skill via direct parse or search.
                 let skill = {
                     // Try direct parse: owner/repo/skill-name.
-                    if let Some((source, slug)) = parse_skill_rest(rest) {
+                    if let Some((source, slug)) = aish_skills::registry::parse_skill_id_rest(rest) {
                         let reg = reg_filter.unwrap_or(&self.config.skills.default_registry);
                         Some(aish_skills::registry::RegistrySkill {
                             id: skill_id.to_string(),
@@ -3627,13 +3591,7 @@ impl AishShell {
                         return;
                     }
                 };
-                if name.is_empty()
-                    || name.contains('/')
-                    || name.contains('\\')
-                    || name.contains('\0')
-                    || name == "."
-                    || name == ".."
-                {
+                if aish_skills::registry::is_unsafe_skill_name(name) {
                     eprintln!("Unsafe skill name: {:?}", name);
                     return;
                 }
@@ -3655,13 +3613,7 @@ impl AishShell {
                         return;
                     }
                 };
-                if name.is_empty()
-                    || name.contains('/')
-                    || name.contains('\\')
-                    || name.contains('\0')
-                    || name == "."
-                    || name == ".."
-                {
+                if aish_skills::registry::is_unsafe_skill_name(name) {
                     eprintln!("Unsafe skill name: {:?}", name);
                     return;
                 }
@@ -3685,13 +3637,7 @@ impl AishShell {
                         return;
                     }
                 };
-                if name.is_empty()
-                    || name.contains('/')
-                    || name.contains('\\')
-                    || name.contains('\0')
-                    || name == "."
-                    || name == ".."
-                {
+                if aish_skills::registry::is_unsafe_skill_name(name) {
                     eprintln!("Unsafe skill name: {:?}", name);
                     return;
                 }
@@ -3721,13 +3667,7 @@ impl AishShell {
                         return;
                     }
                 };
-                if name.is_empty()
-                    || name.contains('/')
-                    || name.contains('\\')
-                    || name.contains('\0')
-                    || name == "."
-                    || name == ".."
-                {
+                if aish_skills::registry::is_unsafe_skill_name(name) {
                     eprintln!("Unsafe skill name: {:?}", name);
                     return;
                 }
@@ -3777,7 +3717,7 @@ impl AishShell {
         let skill_md = dir.join("SKILL.md");
         println!("\n--- {} ---", skill_md.display());
         match std::fs::read_to_string(&skill_md) {
-            Ok(content) => println!("{}", strip_ansi_escapes(&content)),
+            Ok(content) => println!("{}", aish_ui::strip_ansi_escapes(&content)),
             Err(e) => println!("(could not read SKILL.md: {})", e),
         }
         println!("\n--- files in {} ---", dir.display());

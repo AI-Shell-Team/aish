@@ -80,13 +80,7 @@ macro_rules! gh_header {
 /// `..` or `a/../../etc` writes outside the skills directory (zip/tar-slip).
 /// Rejects path separators, NUL, and the `.`/`..` components outright.
 pub(crate) fn validate_install_slug(slug: &str) -> Result<()> {
-    if slug.is_empty()
-        || slug.contains('/')
-        || slug.contains('\\')
-        || slug.contains('\0')
-        || slug == "."
-        || slug == ".."
-    {
+    if super::is_unsafe_skill_name(slug) {
         return Err(AishError::Skill(format!(
             "Unsafe skill slug rejected (path traversal): {:?}",
             slug
