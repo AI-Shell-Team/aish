@@ -424,6 +424,10 @@ pub struct ConfigModel {
     /// (rate-limit / usage-limit / exhausted 5xx). Each runs with the active account.
     #[serde(default)]
     pub fallback_models: Vec<String>,
+    /// Models the user has switched to via /model, most-recent-first. Surfaced
+    /// at the top of the picker so switching back is one keystroke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_models: Vec<String>,
     /// Restore the primary model after its cooldown window expires following
     /// a fallback. Default: true.
     #[serde(default = "default_true")]
@@ -481,6 +485,7 @@ impl Default for ConfigModel {
             pty_daemon_enabled: default_true(),
             api_accounts: vec![],
             fallback_models: vec![],
+            recent_models: vec![],
             fallback_revert_on_cooldown: default_true(),
         }
     }

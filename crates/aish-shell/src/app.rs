@@ -5116,50 +5116,43 @@ impl AishShell {
         self.model_picker_panel();
     }
 
-    /// `/model` opens a unified panel listing every model configuration
-    /// (primary and each account). Enter switches, `a` adds an account,
-    /// `d` deletes the highlighted one. The panel re-opens after each
-    /// action so the user can keep managing without re-typing `/model`.
+    /// `/model` opens a model switcher: it lists every model the current
+    /// endpoint offers (fetched live) plus the ones you have used before
+    /// (recent history), with the active model highlighted. Enter switches
+    /// the primary model in place; `a` adds a multi-key account.
     fn model_picker_panel(&mut self) {
+        use crate::wizard::model_fetch::fetch_models_from_api;
         use aish_ui::{
             PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
         };
 
         loop {
-            let current = self
-                .ai_handler
-                .current_rotation_account()
-                .unwrap_or_else(|| "primary".to_string());
+            let current = self.config.model.clone();
 
+            // Best-effort: fetch the model list from the current endpoint.
+            let available = fetch_models_from_api(&self.config.api_base, &self.config.api_key, 6)
+                .unwrap_or_default();
+
+            // Build the list: current first (shimmer), then recents, then the
+            // rest of the endpoint's models — all deduped.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            seen.insert(current.clone());
             let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
-                "primary",
-                self.config.model.clone(),
-            )
-            .with_highlight("primary")
-            .with_detail(self.config.api_base.as_str())
-            .with_badge(t("shell.model.primary_badge"))];
-            for a in &self.config.api_accounts {
-                let model = a
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| self.config.model.clone());
-                let base = a
-                    .api_base
-                    .clone()
-                    .unwrap_or_else(|| self.config.api_base.clone());
-                let mut item = SearchSelectItem::new(a.name.clone(), model)
-                    .with_highlight(a.name.clone())
-                    .with_detail(base);
-                if a.disabled {
-                    item = item.with_badge(t("shell.accounts.disabled"));
+                current.clone(),
+                current.clone(),
+            )];
+            for m in &self.config.recent_models {
+                if seen.insert(m.clone()) {
+                    items.push(
+                        SearchSelectItem::new(m.clone(), m.clone())
+                            .with_badge(t("shell.model.recent_badge")),
+                    );
                 }
-                items.push(item);
             }
-            for m in &self.config.fallback_models {
-                items.push(
-                    SearchSelectItem::new(format!("fallback:{m}"), m.clone())
-                        .with_badge(t("shell.model.fallback_badge")),
-                );
+            for m in &available {
+                if seen.insert(m.clone()) {
+                    items.push(SearchSelectItem::new(m.clone(), m.clone()));
+                }
             }
 
             let panel = SearchSelectPanel::new(
@@ -5170,11 +5163,7 @@ impl AishShell {
             .with_shimmer(Some(&current))
             .with_subtitle(t("shell.model.picker_subtitle"))
             .with_footer(t("shell.model.picker_footer"))
-            .with_action('a', t("shell.model.action_add"))
-            .with_action('d', t("shell.model.action_del"))
-            .with_action('f', t("shell.model.action_fallback"))
-            .with_action('t', t("shell.model.action_toggle"))
-            .with_action('e', t("shell.model.action_edit"));
+            .with_action('a', t("shell.model.action_add"));
 
             let outcome = {
                 let _guard = aish_tools::bash::acquire_interactive_input_guard();
@@ -5182,228 +5171,43 @@ impl AishShell {
             };
 
             match outcome {
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(name))) => {
-                    self.model_panel_switch(&name);
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(model))) => {
+                    if model != self.config.model {
+                        self.switch_primary_model(&model);
+                    }
                 }
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
                     self.accounts_add_interactive();
-                }
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', name))) => {
-                    self.model_panel_remove(&name);
-                }
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('f', _))) => {
-                    self.add_fallback_interactive();
-                }
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('t', name))) => {
-                    self.model_panel_toggle(&name);
-                }
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('e', name))) => {
-                    self.model_panel_edit(&name);
                 }
                 _ => break,
             }
         }
     }
 
-    /// Toggle an account enabled/disabled from the model panel.
-    fn model_panel_toggle(&mut self, name: &str) {
-        if name == "primary" || name.starts_with("fallback:") {
-            return;
-        }
-        if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
-            a.disabled = !a.disabled;
-            let state = if a.disabled {
-                t("shell.accounts.disabled")
-            } else {
-                t("shell.accounts.enabled")
-            };
-            self.persist_config_and_rebuild_rotation();
-            println!(
-                "\x1b[32m{}\x1b[0m",
-                t_with_args("shell.accounts.toggled", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("action".to_string(), state);
-                    args.insert("name".to_string(), name.to_string());
-                    args
-                })
-            );
-        }
-    }
-
-    /// Edit an entry's model name from the model panel. Works for the primary
-    /// model, any account, and fallback models alike.
-    fn model_panel_edit(&mut self, name: &str) {
-        let (current, label) = if let Some(model) = name.strip_prefix("fallback:") {
-            (model.to_string(), name.to_string())
-        } else if name == "primary" {
-            (self.config.model.clone(), "primary".to_string())
-        } else {
-            let m = self
-                .config
-                .api_accounts
-                .iter()
-                .find(|a| a.name == name)
-                .and_then(|a| a.model.clone())
-                .unwrap_or_else(|| self.config.model.clone());
-            (m, name.to_string())
-        };
-        let new_model = match prompt_edit_value(
-            &t("shell.model.edit_label"),
-            &t("shell.model.edit_desc"),
-            &current,
-            false,
-        ) {
-            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
-            _ => return,
-        };
-        if let Some(old) = name.strip_prefix("fallback:") {
-            if let Some(f) = self.config.fallback_models.iter_mut().find(|m| *m == old) {
-                *f = new_model.clone();
-            }
-            self.persist_config_and_rebuild_rotation();
-        } else if name == "primary" {
-            self.ai_handler.update_model(
-                &new_model,
-                Some(&self.config.api_base),
-                Some(&self.config.api_key),
-            );
-            if let Some(ai) = &self.inline_ai {
-                ai.update_model(&new_model);
-            }
-            self.config.model = new_model.clone();
-            self.refresh_config_dependent_tools();
-            let path = aish_config::ConfigLoader::default_config_path();
-            let _ = aish_config::ConfigLoader::save(&self.config, &path);
-            self.rebuild_rotation();
-        } else if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
-            a.model = Some(new_model.clone());
-            self.persist_config_and_rebuild_rotation();
-        }
-        println!(
-            "\x1b[32m{}\x1b[0m",
-            t_with_args("shell.model.edited", &{
-                let mut args = std::collections::HashMap::new();
-                args.insert("name".to_string(), label);
-                args.insert("model".to_string(), new_model);
-                args
-            })
+    /// Switch the primary model (same endpoint/key, new model name) and record
+    /// it in recent history so switching back is one keystroke.
+    fn switch_primary_model(&mut self, model: &str) {
+        self.ai_handler.update_model(
+            model,
+            Some(&self.config.api_base),
+            Some(&self.config.api_key),
         );
-    }
-
-    /// Switch the active account/model from the model panel.
-    fn model_panel_switch(&mut self, name: &str) {
-        if let Some(model) = name.strip_prefix("fallback:") {
-            eprintln!(
-                "{}",
-                t_with_args("shell.model.fallback_not_switchable", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("model".to_string(), model.to_string());
-                    args
-                })
-            );
-            return;
+        if let Some(ai) = &self.inline_ai {
+            ai.update_model(model);
         }
-        if self.ai_handler.use_rotation_account(name) {
-            let model = self
-                .ai_handler
-                .rotation_snapshot()
-                .map(|s| s.active_model)
-                .unwrap_or_default();
-            println!(
-                "\x1b[32m{}\x1b[0m",
-                t_with_args("shell.model.switched_account", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name.to_string());
-                    args.insert("model".to_string(), model);
-                    args
-                })
-            );
-        } else if name == "primary" {
-            let mut args = std::collections::HashMap::new();
-            args.insert("model".to_string(), self.config.model.clone());
-            println!("{}", t_with_args("shell.model.current", &args));
-        } else {
-            eprintln!(
-                "{}",
-                t_with_args("shell.accounts.no_account_named", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name.to_string());
-                    args
-                })
-            );
-        }
-    }
-
-    /// Remove an account from the model panel. The primary entry cannot be
-    /// deleted (it is the baseline config).
-    fn model_panel_remove(&mut self, name: &str) {
-        if let Some(model) = name.strip_prefix("fallback:") {
-            let before = self.config.fallback_models.len();
-            self.config.fallback_models.retain(|m| m != model);
-            if self.config.fallback_models.len() < before {
-                self.persist_config_and_rebuild_rotation();
-                println!(
-                    "\x1b[32m{}\x1b[0m",
-                    t_with_args("shell.model.fallback_removed", &{
-                        let mut args = std::collections::HashMap::new();
-                        args.insert("model".to_string(), model.to_string());
-                        args
-                    })
-                );
-            }
-            return;
-        }
-        if name == "primary" {
-            eprintln!("{}", t("shell.model.cannot_remove_primary"));
-            return;
-        }
-        let before = self.config.api_accounts.len();
-        self.config.api_accounts.retain(|a| a.name != name);
-        if self.config.api_accounts.len() < before {
-            self.persist_config_and_rebuild_rotation();
-            println!(
-                "\x1b[32m{}\x1b[0m",
-                t_with_args("shell.accounts.removed", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name.to_string());
-                    args
-                })
-            );
-        }
-    }
-
-    /// Add a fallback model from the model panel (prompt for the name).
-    fn add_fallback_interactive(&mut self) {
-        let model = match prompt_edit_value(
-            &t("shell.model.fallback_add_label"),
-            &t("shell.model.fallback_add_desc"),
-            "",
-            false,
-        ) {
-            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
-            _ => {
-                println!("{}", t("shell.common.cancelled"));
-                return;
-            }
-        };
-        if self.config.fallback_models.iter().any(|m| m == &model) {
-            eprintln!(
-                "{}",
-                t_with_args("shell.model.fallback_exists", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("model".to_string(), model);
-                    args
-                })
-            );
-            return;
-        }
-        self.config.fallback_models.push(model.clone());
-        self.persist_config_and_rebuild_rotation();
+        self.config.model = model.to_string();
+        self.refresh_config_dependent_tools();
+        self.config.recent_models.retain(|m| m != model);
+        self.config.recent_models.insert(0, model.to_string());
+        self.config.recent_models.truncate(20);
+        let path = aish_config::ConfigLoader::default_config_path();
+        let _ = aish_config::ConfigLoader::save(&self.config, &path);
+        self.rebuild_rotation();
         println!(
             "\x1b[32m{}\x1b[0m",
-            t_with_args("shell.model.fallback_added", &{
+            t_with_args("shell.model.switch_success", &{
                 let mut args = std::collections::HashMap::new();
-                args.insert("model".to_string(), model);
+                args.insert("model".to_string(), model.to_string());
                 args
             })
         );
