@@ -7,13 +7,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.9] - 2026-07-27
+
+### Added
+
+- Added session-scoped command approval memory when the sandbox is enabled: choosing "allow and don't ask again" remembers the same host + command for the rest of the session (`[a]`), with `/forget-approvals` to clear. Path-bearing commands hide the remember option; denials are never persisted, and `sudo` is not stripped during normalization so a non-root approval cannot auto-authorize the root variant.
+
+### Changed
+
+- Dropped unused crate dependencies, centralized local version pins under `workspace.dependencies`, and set MSRV to `1.89`.
+- `aish update` now relies on CDN `/latest` instead of hard-depending on the GitHub Releases API after the CDN check, so rate-limit `403` responses no longer fail updates.
 
 ### Fixed
 
 - Fixed packaged skills so they are compile-time embedded in the `aish` binary and loaded for every user (including bare-root installs), instead of seeding `~/.config/aish/skills` at install time (which skipped root and could leave root-owned config dirs).
-- Hardened the packaging smoke test to assert the installer/bundle no longer ship or invoke skill seeding.
+- Made builtin skill materialization race-safe with unique staging directories and a `.complete` marker before rename.
+- Hardened packaging smoke tests to assert the installer/bundle no longer ship or invoke skill seeding, and to fail closed when `build_bundle.sh` is missing.
 - Show a one-line terminal tip on the interactive session that performs the temporary legacy seed migration (only when skills were actually moved).
+- Fixed `/setting` sandbox and security toggles so they take effect immediately and sync to `security_policy.yaml` (atomic write with fallback when the policy directory is not writable).
+- Fixed welcome panel label formatting (no duplicated colon) and right-border alignment under CJK locales / WeTTY.
+- Restored PTY echo for cooked-mode user prompts so typed input is visible for confirms such as `aish update [y/N]`.
+- Reject prerelease tags on the stable CDN channel so a mis-tagged stable `/latest` cannot offer beta builds when `include_pre_release` is false.
+- Improved `aish uninstall` sudo authentication UX: authenticate before printing progress, suppress cancel-only sudo noise while surfacing real failures, avoid blank-line side effects on Ctrl+C, and localize the cancelled message (including French `Annulé`).
 
 ### Removed
 
@@ -22,10 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 
 - The one-shot migration of pre-embed install-seeded skills (`migrate_seeded`, backup dir `~/.config/aish/migrated-seeded-skills/`, marker `.skills-seed-migrated-v1`) is temporary and will be removed in a future release once leftover seeds are uncommon.
-
-### Notes for releasers
-
-- Review whether to remove `crates/aish-skills/src/migrate_seeded.rs` (one-shot legacy install-seed migration). If keeping it another cycle, mention the deprecation again in that release's notes; if removing, list it under Removed and delete the module + call site in `SkillManager::load_all_skills`.
 
 ## [0.3.8] - 2026-07-22
 
