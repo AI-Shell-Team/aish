@@ -1822,10 +1822,22 @@ impl AishShell {
                 c if (c as char).is_ascii_graphic() => c as char,
                 _ => '·',
             };
-            print!("{}", theme::accent(&echo_ch.to_string()));
             let used = 2 + prompt_vis + 1 + 1;
             let pad = inner_width.saturating_sub(used);
-            println!("{}{}", " ".repeat(pad), theme::warning("│"));
+            // Reprint the entire input line from column 0 (`\r`) so the echoed
+            // key always sits right after the prompt with both borders intact,
+            // regardless of any terminal-side echo or cursor drift during the
+            // blocking read. The prompt prefix was already printed above; this
+            // overwrites it (and any stray echo) with the clean final line.
+            print!(
+                "\r{}  {} {}{}{}",
+                theme::warning("│"),
+                theme::bold(&theme::accent(&prompt_text)),
+                theme::accent(&echo_ch.to_string()),
+                " ".repeat(pad),
+                theme::warning("│"),
+            );
+            println!();
             println!("{}", theme::warning(&format!("╰{}╯", border)));
             let verdict_key = match choice {
                 aish_llm::ApprovalChoice::Once => "shell.confirm_choice_once",
