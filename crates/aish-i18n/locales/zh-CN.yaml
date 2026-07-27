@@ -873,6 +873,7 @@ shell:
     verify_failed: "模型验证失败: {reason}"
     picker_title: "切换模型 / 账户"
     picker_subtitle: "↑↓ 选择，Enter 切换到该模型/账户"
+    fetch_failed_subtitle: "无法获取模型列表（endpoint 不可达）—— 仅显示当前和历史"
     picker_search: "搜索模型或 URL..."
     picker_footer: "a 添加账户  Esc 取消"
     action_add: "添加"

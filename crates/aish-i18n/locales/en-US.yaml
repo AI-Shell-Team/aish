@@ -873,6 +873,7 @@ shell:
     verify_failed: "Model validation failed: {reason}"
     picker_title: "Switch model / account"
     picker_subtitle: "Up/Dn to select, Enter to switch"
+    fetch_failed_subtitle: "Could not fetch model list (endpoint unreachable) — showing current + history only"
     picker_search: "Search models or URLs..."
     picker_footer: "a add account  Esc cancel"
     action_add: "add"

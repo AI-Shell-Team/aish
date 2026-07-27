@@ -5178,7 +5178,11 @@ impl AishShell {
                 items,
             )
             .with_shimmer(Some(&current_val))
-            .with_subtitle(t("shell.model.picker_subtitle"))
+            .with_subtitle(if fetched.is_empty() {
+                t("shell.model.fetch_failed_subtitle")
+            } else {
+                t("shell.model.picker_subtitle")
+            })
             .with_footer(t("shell.model.picker_footer"))
             .with_action('a', t("shell.model.action_add"));
 

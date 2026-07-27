@@ -514,6 +514,7 @@ shell:
     verify_failed: "Falló la validación del modelo: {reason}"
     picker_title: "Cambiar modelo / cuenta"
     picker_subtitle: "↑↓ seleccionar, Enter cambiar"
+    fetch_failed_subtitle: "No se pudo obtener la lista de modelos (endpoint inalcanzable) — solo actual e historial"
     picker_search: "Buscar modelos o URLs..."
     picker_footer: "a anadir cuenta  Esc cancelar"
     action_add: "anadir"
