@@ -3328,8 +3328,6 @@ impl AishShell {
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
             Some("/usage") => self.handle_usage_command(),
-            Some("/accounts") => self.handle_accounts_command(&parts),
-            Some("/fallback") => self.handle_fallback_command(&parts),
             Some("/fork") => self.handle_fork_command(),
             Some("/sessions") => self.handle_sessions_command(),
             Some("/export") => self.handle_export_command(&parts),
@@ -3359,12 +3357,6 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
-    }
-
-    /// `/fallback` — manage the ordered model fallback chain tried when the
-    /// primary model hits a rate/usage limit or a hard error.
-    fn handle_fallback_command(&mut self, _parts: &[&str]) {
-        self.model_picker_panel();
     }
 
     /// `/fork` — branch the current session into a new one (copied context),
@@ -3730,11 +3722,6 @@ impl AishShell {
                 println!();
             }
         }
-    }
-
-    /// `/accounts` — manage multi-key quota rotation accounts at runtime.
-    fn handle_accounts_command(&mut self, _parts: &[&str]) {
-        self.model_picker_panel();
     }
 
     fn accounts_add_interactive(&mut self) {

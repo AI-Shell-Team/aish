@@ -50,14 +50,6 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Show API quota rotation + fallback status",
     ),
     (
-        "/accounts",
-        "Manage multi-key rotation accounts (add/remove/enable)",
-    ),
-    (
-        "/fallback",
-        "Manage the model fallback chain (add/remove/clear)",
-    ),
-    (
         "/fork",
         "Branch the current session into a new one (copied context)",
     ),
