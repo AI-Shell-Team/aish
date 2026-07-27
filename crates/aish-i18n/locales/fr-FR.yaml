@@ -10,7 +10,7 @@ cli:
   resume_failed: "Echec de la reprise de session : {error}"
 
   uninstall:
-    cancelled: "Annule."
+    cancelled: "Annulé."
 
   option:
     model: "Modele LLM a utiliser ; peut aussi etre defini via AISH_MODEL ou le fichier de configuration."
