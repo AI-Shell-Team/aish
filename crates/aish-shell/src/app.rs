@@ -5168,6 +5168,7 @@ impl AishShell {
                 items,
             )
             .with_shimmer(Some(&current))
+            .with_subtitle(t("shell.model.picker_subtitle"))
             .with_footer(t("shell.model.picker_footer"))
             .with_action('a', t("shell.model.action_add"))
             .with_action('d', t("shell.model.action_del"))
@@ -5229,18 +5230,23 @@ impl AishShell {
         }
     }
 
-    /// Edit an account's model name from the model panel.
+    /// Edit an entry's model name from the model panel. Works for the primary
+    /// model, any account, and fallback models alike.
     fn model_panel_edit(&mut self, name: &str) {
-        if name == "primary" || name.starts_with("fallback:") {
-            return;
-        }
-        let current = self
-            .config
-            .api_accounts
-            .iter()
-            .find(|a| a.name == name)
-            .and_then(|a| a.model.clone())
-            .unwrap_or_else(|| self.config.model.clone());
+        let (current, label) = if let Some(model) = name.strip_prefix("fallback:") {
+            (model.to_string(), name.to_string())
+        } else if name == "primary" {
+            (self.config.model.clone(), "primary".to_string())
+        } else {
+            let m = self
+                .config
+                .api_accounts
+                .iter()
+                .find(|a| a.name == name)
+                .and_then(|a| a.model.clone())
+                .unwrap_or_else(|| self.config.model.clone());
+            (m, name.to_string())
+        };
         let new_model = match prompt_edit_value(
             &t("shell.model.edit_label"),
             &t("shell.model.edit_desc"),
@@ -5250,19 +5256,38 @@ impl AishShell {
             Some(m) if !m.trim().is_empty() => m.trim().to_string(),
             _ => return,
         };
-        if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
+        if let Some(old) = name.strip_prefix("fallback:") {
+            if let Some(f) = self.config.fallback_models.iter_mut().find(|m| *m == old) {
+                *f = new_model.clone();
+            }
+            self.persist_config_and_rebuild_rotation();
+        } else if name == "primary" {
+            self.ai_handler.update_model(
+                &new_model,
+                Some(&self.config.api_base),
+                Some(&self.config.api_key),
+            );
+            if let Some(ai) = &self.inline_ai {
+                ai.update_model(&new_model);
+            }
+            self.config.model = new_model.clone();
+            self.refresh_config_dependent_tools();
+            let path = aish_config::ConfigLoader::default_config_path();
+            let _ = aish_config::ConfigLoader::save(&self.config, &path);
+            self.rebuild_rotation();
+        } else if let Some(a) = self.config.api_accounts.iter_mut().find(|a| a.name == name) {
             a.model = Some(new_model.clone());
             self.persist_config_and_rebuild_rotation();
-            println!(
-                "\x1b[32m{}\x1b[0m",
-                t_with_args("shell.model.edited", &{
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("name".to_string(), name.to_string());
-                    args.insert("model".to_string(), new_model);
-                    args
-                })
-            );
         }
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.edited", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("name".to_string(), label);
+                args.insert("model".to_string(), new_model);
+                args
+            })
+        );
     }
 
     /// Switch the active account/model from the model panel.

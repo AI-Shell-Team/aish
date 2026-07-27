@@ -513,6 +513,7 @@ shell:
     switch_success: "Zu Modell gewechselt: {model}"
     verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
     picker_title: "Modell / Konto wechseln"
+    picker_subtitle: "↑↓ Auswaehlen, Enter wechseln"
     picker_search: "Modelle oder Konten suchen..."
     picker_footer: "↑↓ Auswaehlen  Enter Wechseln  a neu  d loesch.  f Fallback  t an/aus  e bearb.  Esc Abbrechen"
     action_add: "neu"

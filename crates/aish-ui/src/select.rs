@@ -445,15 +445,16 @@ impl PanelComponent for SearchSelectPanel {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
-                if self.actions.iter().any(|(k, _)| *k == ch) {
+                let lower = ch.to_ascii_lowercase();
+                if let Some((action_key, _)) = self.actions.iter().find(|(k, _)| *k == lower) {
                     let value = self
                         .filtered_entries()
                         .get(self.selected)
-                        .and_then(|e| match e {
+                                               .and_then(|e| match e {
                             SelectEntry::Item(i) => self.items.get(*i).map(|it| it.value.clone()),
                         })
                         .unwrap_or_default();
-                    return PanelEvent::Submit(SearchSelectOutcome::Action(ch, value));
+                    return PanelEvent::Submit(SearchSelectOutcome::Action(*action_key, value));
                 }
                 self.query.push(ch);
                 self.selected = 0;

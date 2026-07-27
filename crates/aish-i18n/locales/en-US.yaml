@@ -872,6 +872,7 @@ shell:
     switch_success: "Switched to model: {model}"
     verify_failed: "Model validation failed: {reason}"
     picker_title: "Switch model / account"
+    picker_subtitle: "Up/Dn to select, Enter to switch"
     picker_search: "Search models or accounts..."
     picker_footer: "Up/Dn select  Enter switch  a add  d del  f fallback  t toggle  e edit  Esc cancel"
     action_add: "add"

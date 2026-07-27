@@ -872,6 +872,7 @@ shell:
     switch_success: "已切换模型: {model}"
     verify_failed: "模型验证失败: {reason}"
     picker_title: "切换模型 / 账户"
+    picker_subtitle: "↑↓ 选择，Enter 切换到该模型/账户"
     picker_search: "搜索模型或账户..."
     picker_footer: "↑↓ 选择  Enter 切换  a 添加  d 删除  f 回退  t 启停  e 编辑  Esc 取消"
     action_add: "添加"

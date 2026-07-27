@@ -513,6 +513,7 @@ shell:
     switch_success: "Se cambió al modelo: {model}"
     verify_failed: "Falló la validación del modelo: {reason}"
     picker_title: "Cambiar modelo / cuenta"
+    picker_subtitle: "↑↓ seleccionar, Enter cambiar"
     picker_search: "Buscar modelos o cuentas..."
     picker_footer: "↑↓ seleccionar  Enter cambiar  a anadir  d borr.  f respaldo  t act/des  e editar  Esc cancelar"
     action_add: "anadir"

@@ -513,6 +513,7 @@ shell:
     switch_success: "Modele active : {model}"
     verify_failed: "La validation du modele a echoue : {reason}"
     picker_title: "Changer modele / compte"
+    picker_subtitle: "↑↓ selectionner, Enter basculer"
     picker_search: "Rechercher modeles ou comptes..."
     picker_footer: "↑↓ selectionner  Enter basculer  a ajout.  d suppr.  f secours  t act/des  e editer  Esc annuler"
     action_add: "ajouter"
