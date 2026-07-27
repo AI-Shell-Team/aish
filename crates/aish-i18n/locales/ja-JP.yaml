@@ -9,6 +9,9 @@ cli:
   detach_hint: "セッションを切り離しました。`aish -c` で再接続できます。"
   resume_failed: "セッションの復元に失敗しました: {error}"
 
+  uninstall:
+    cancelled: "キャンセルしました。"
+
   option:
     model: "使用する LLM モデル。AISH_MODEL または設定ファイルでも指定できます。"
     api_key: "LLM プロバイダーの API キー。AISH_API_KEY または各プロバイダーの環境変数でも指定できます。"

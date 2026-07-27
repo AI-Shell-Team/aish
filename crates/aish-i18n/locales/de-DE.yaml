@@ -9,6 +9,9 @@ cli:
   detach_hint: "Getrennt. `aish -c` ausfuehren, um wieder zu verbinden."
   resume_failed: "Sitzung konnte nicht fortgesetzt werden: {error}"
 
+  uninstall:
+    cancelled: "Abgebrochen."
+
   option:
     model: "Zu verwendendes LLM-Modell; kann auch über AISH_MODEL oder die Konfigurationsdatei gesetzt werden."
     api_key: "API-Schlüssel für den LLM-Anbieter; kann auch über AISH_API_KEY oder Anbieter-Umgebungsvariablen gesetzt werden."
