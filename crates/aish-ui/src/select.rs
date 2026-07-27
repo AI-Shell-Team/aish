@@ -96,16 +96,31 @@ pub enum SearchSelectOutcome {
     Action(char, String),
 }
 
-/// Match when every whitespace-separated token in `query` is a substring of `search_text`.
-fn matches_tokenized_query(search_text: &str, query: &str) -> bool {
+/// Relevance score for `query` against `search_text`: every whitespace-separated
+/// token must be a substring (AND), but exact matches beat prefix matches beat
+/// substring matches, so the most relevant entry floats to the top. Returns
+/// `None` when any token is absent.
+fn match_score(search_text: &str, query: &str) -> Option<usize> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
-        return true;
+        return Some(0);
     }
-    query
-        .split_whitespace()
-        .all(|token| search_text.contains(token))
+    let st = search_text.to_lowercase();
+    let mut total = 0;
+    for token in query.split_whitespace() {
+        if st == token {
+            total += 100;
+        } else if st.starts_with(token) {
+            total += 50;
+        } else if st.contains(token) {
+            total += 10;
+        } else {
+            return None;
+        }
+    }
+    Some(total)
 }
+
 
 #[derive(Debug, Clone)]
 pub struct SearchSelectPanel {
@@ -210,14 +225,17 @@ impl SearchSelectPanel {
         if query.is_empty() {
             (0..self.items.len()).map(SelectEntry::Item).collect()
         } else {
-            self.items
+            let mut scored: Vec<(usize, usize)> = self
+                .items
                 .iter()
                 .enumerate()
                 .filter_map(|(index, item)| {
-                    matches_tokenized_query(&item.search_text, query)
-                        .then_some(SelectEntry::Item(index))
+                    match_score(&item.search_text, query).map(|s| (index, s))
                 })
-                .collect()
+                .collect();
+            // Highest score first; ties keep original order for stability.
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            scored.into_iter().map(|(i, _)| SelectEntry::Item(i)).collect()
         }
     }
 
