@@ -514,7 +514,7 @@ shell:
     verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
     picker_title: "Modell / Konto wechseln"
     picker_subtitle: "↑↓ Auswaehlen, Enter wechseln"
-    picker_search: "Modelle oder Konten suchen..."
+    picker_search: "Modelle oder URLs suchen..."
     picker_footer: "a Konto hinzufuegen  Esc Abbrechen"
     action_add: "neu"
     action_del: "loeschen"

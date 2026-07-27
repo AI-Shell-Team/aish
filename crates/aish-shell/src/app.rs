@@ -5116,10 +5116,11 @@ impl AishShell {
         self.model_picker_panel();
     }
 
-    /// `/model` opens a model switcher: it lists every model the current
-    /// endpoint offers (fetched live) plus the ones you have used before
-    /// (recent history), with the active model highlighted. Enter switches
-    /// the primary model in place; `a` adds a multi-key account.
+    /// `/model` opens a model switcher spanning every configured endpoint:
+    /// it fetches each endpoint's model list, shows the URL next to each
+    /// model, and lets you search by model name or URL. Enter switches the
+    /// primary endpoint+model in place; recently-used entries float to the
+    /// top. `a` adds a multi-key account.
     fn model_picker_panel(&mut self) {
         use crate::wizard::model_fetch::fetch_models_from_api;
         use aish_ui::{
@@ -5127,31 +5128,65 @@ impl AishShell {
         };
 
         loop {
-            let current = self.config.model.clone();
+            let cur_model = self.config.model.clone();
+            let cur_base = self.config.api_base.clone();
+            // value encodes model + endpoint so the same model name on two
+            // different URLs stays distinguishable.
+            let current_val = format!("{}\u{0}{}", cur_model, cur_base);
 
-            // Best-effort: fetch the model list from the current endpoint.
-            let available = fetch_models_from_api(&self.config.api_base, &self.config.api_key, 6)
-                .unwrap_or_default();
-
-            // Build the list: current first (shimmer), then recents, then the
-            // rest of the endpoint's models — all deduped.
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            seen.insert(current.clone());
-            let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
-                current.clone(),
-                current.clone(),
-            )];
-            for m in &self.config.recent_models {
-                if seen.insert(m.clone()) {
-                    items.push(
-                        SearchSelectItem::new(m.clone(), m.clone())
-                            .with_badge(t("shell.model.recent_badge")),
-                    );
+            // Collect unique endpoints (base, key) from primary + accounts.
+            let mut endpoints: Vec<(String, String)> =
+                vec![(cur_base.clone(), self.config.api_key.clone())];
+            for a in &self.config.api_accounts {
+                if a.disabled {
+                    continue;
+                }
+                let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
+                if !endpoints.iter().any(|(b, _)| b == &base) {
+                    endpoints.push((base, a.api_key.clone()));
                 }
             }
-            for m in &available {
-                if seen.insert(m.clone()) {
-                    items.push(SearchSelectItem::new(m.clone(), m.clone()));
+
+            // Fetch models from each endpoint (best-effort, short timeout).
+            let mut fetched: Vec<(String, String)> = Vec::new(); // (model, base)
+            for (base, key) in &endpoints {
+                if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                    for m in models {
+                        fetched.push((m, base.clone()));
+                    }
+                }
+            }
+
+            // Build the list: current first (shimmer), then recents, then the
+            // rest — each showing its endpoint URL. Deduped by model+base.
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            seen.insert(current_val.clone());
+            let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
+                current_val.clone(),
+                cur_model.clone(),
+            )
+            .with_detail(&cur_base)
+            .with_search_text(format!("{} {}", cur_model, cur_base))];
+            for r in &self.config.recent_models {
+                if let Some((m, b)) = r.split_once('\u{0}') {
+                    if seen.insert(r.clone()) {
+                        items.push(
+                            SearchSelectItem::new(r.clone(), m.to_string())
+                                .with_detail(b)
+                                .with_search_text(format!("{} {}", m, b))
+                                .with_badge(t("shell.model.recent_badge")),
+                        );
+                    }
+                }
+            }
+            for (m, b) in &fetched {
+                let val = format!("{}\u{0}{}", m, b);
+                if seen.insert(val.clone()) {
+                    items.push(
+                        SearchSelectItem::new(val, m.clone())
+                            .with_detail(b)
+                            .with_search_text(format!("{} {}", m, b)),
+                    );
                 }
             }
 
@@ -5160,7 +5195,7 @@ impl AishShell {
                 t("shell.model.picker_search"),
                 items,
             )
-            .with_shimmer(Some(&current))
+            .with_shimmer(Some(&current_val))
             .with_subtitle(t("shell.model.picker_subtitle"))
             .with_footer(t("shell.model.picker_footer"))
             .with_action('a', t("shell.model.action_add"));
@@ -5171,9 +5206,16 @@ impl AishShell {
             };
 
             match outcome {
-                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(model))) => {
-                    if model != self.config.model {
-                        self.switch_primary_model(&model);
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(val))) => {
+                    if let Some((model, base)) = val.split_once('\u{0}') {
+                        if model != self.config.model || base != self.config.api_base {
+                            let key = endpoints
+                                .iter()
+                                .find(|(b, _)| b == base)
+                                .map(|(_, k)| k.clone())
+                                .unwrap_or_else(|| self.config.api_key.clone());
+                            self.switch_endpoint_model(base, &key, model);
+                        }
                     }
                 }
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
@@ -5184,21 +5226,20 @@ impl AishShell {
         }
     }
 
-    /// Switch the primary model (same endpoint/key, new model name) and record
-    /// it in recent history so switching back is one keystroke.
-    fn switch_primary_model(&mut self, model: &str) {
-        self.ai_handler.update_model(
-            model,
-            Some(&self.config.api_base),
-            Some(&self.config.api_key),
-        );
+    /// Switch the primary endpoint + model and record it in recent history.
+    fn switch_endpoint_model(&mut self, base: &str, key: &str, model: &str) {
+        self.config.api_base = base.to_string();
+        self.config.api_key = key.to_string();
+        self.config.model = model.to_string();
+        self.ai_handler
+            .update_model(model, Some(base), Some(key));
         if let Some(ai) = &self.inline_ai {
             ai.update_model(model);
         }
-        self.config.model = model.to_string();
         self.refresh_config_dependent_tools();
-        self.config.recent_models.retain(|m| m != model);
-        self.config.recent_models.insert(0, model.to_string());
+        let rec = format!("{}\u{0}{}", model, base);
+        self.config.recent_models.retain(|r| r != &rec);
+        self.config.recent_models.insert(0, rec);
         self.config.recent_models.truncate(20);
         let path = aish_config::ConfigLoader::default_config_path();
         let _ = aish_config::ConfigLoader::save(&self.config, &path);

@@ -514,7 +514,7 @@ shell:
     verify_failed: "La validation du modele a echoue : {reason}"
     picker_title: "Changer modele / compte"
     picker_subtitle: "↑↓ selectionner, Enter basculer"
-    picker_search: "Rechercher modeles ou comptes..."
+    picker_search: "Rechercher modeles ou URLs..."
     picker_footer: "a ajouter compte  Esc annuler"
     action_add: "ajouter"
     action_del: "supprimer"

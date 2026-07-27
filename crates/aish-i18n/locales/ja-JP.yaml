@@ -514,7 +514,7 @@ shell:
     verify_failed: "モデル検証に失敗しました: {reason}"
     picker_title: "モデル / アカウント切替"
     picker_subtitle: "↑↓ 選択、Enter で切替"
-    picker_search: "モデルやアカウントを検索..."
+    picker_search: "モデルや URL を検索..."
     picker_footer: "a アカウント追加  Esc キャンセル"
     action_add: "追加"
     action_del: "削除"

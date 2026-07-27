@@ -514,7 +514,7 @@ shell:
     verify_failed: "Falló la validación del modelo: {reason}"
     picker_title: "Cambiar modelo / cuenta"
     picker_subtitle: "↑↓ seleccionar, Enter cambiar"
-    picker_search: "Buscar modelos o cuentas..."
+    picker_search: "Buscar modelos o URLs..."
     picker_footer: "a anadir cuenta  Esc cancelar"
     action_add: "anadir"
     action_del: "borrar"
