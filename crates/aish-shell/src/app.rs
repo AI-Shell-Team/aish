@@ -5114,38 +5114,33 @@ impl AishShell {
             PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
         };
 
+        // Collect endpoints + fetch model lists once on entry. Re-fetched only
+        // after an account is added; switching models reuses the cache.
+        let mut endpoints: Vec<(String, String)> =
+            vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+        for a in &self.config.api_accounts {
+            if a.disabled {
+                continue;
+            }
+            let base = a.api_base.clone().unwrap_or_else(|| self.config.api_base.clone());
+            if !endpoints.iter().any(|(b, _)| b == &base) {
+                endpoints.push((base, a.api_key.clone()));
+            }
+        }
+        let mut fetched: Vec<(String, String)> = Vec::new();
+        for (base, key) in &endpoints {
+            if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                for m in models {
+                    fetched.push((m, base.clone()));
+                }
+            }
+        }
+
         loop {
             let cur_model = self.config.model.clone();
             let cur_base = self.config.api_base.clone();
-            // value encodes model + endpoint so the same model name on two
-            // different URLs stays distinguishable.
             let current_val = format!("{}\u{0}{}", cur_model, cur_base);
 
-            // Collect unique endpoints (base, key) from primary + accounts.
-            let mut endpoints: Vec<(String, String)> =
-                vec![(cur_base.clone(), self.config.api_key.clone())];
-            for a in &self.config.api_accounts {
-                if a.disabled {
-                    continue;
-                }
-                let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
-                if !endpoints.iter().any(|(b, _)| b == &base) {
-                    endpoints.push((base, a.api_key.clone()));
-                }
-            }
-
-            // Fetch models from each endpoint (best-effort, short timeout).
-            let mut fetched: Vec<(String, String)> = Vec::new(); // (model, base)
-            for (base, key) in &endpoints {
-                if let Ok(models) = fetch_models_from_api(base, key, 4) {
-                    for m in models {
-                        fetched.push((m, base.clone()));
-                    }
-                }
-            }
-
-            // Build the list: current first (shimmer), then recents, then the
-            // rest — each showing its endpoint URL. Deduped by model+base.
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             seen.insert(current_val.clone());
             let mut items: Vec<SearchSelectItem> = vec![SearchSelectItem::new(
@@ -5207,6 +5202,26 @@ impl AishShell {
                 }
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
                     self.accounts_add_interactive();
+                    // A new account may have added an endpoint: re-collect + re-fetch.
+                    endpoints = vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+                    for a in &self.config.api_accounts {
+                        if a.disabled {
+                            continue;
+                        }
+                        let base =
+                            a.api_base.clone().unwrap_or_else(|| self.config.api_base.clone());
+                        if !endpoints.iter().any(|(b, _)| b == &base) {
+                            endpoints.push((base, a.api_key.clone()));
+                        }
+                    }
+                    fetched.clear();
+                    for (base, key) in &endpoints {
+                        if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                            for m in models {
+                                fetched.push((m, base.clone()));
+                            }
+                        }
+                    }
                 }
                 _ => break,
             }
