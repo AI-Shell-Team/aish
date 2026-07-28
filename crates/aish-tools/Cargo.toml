@@ -15,13 +15,13 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 regex.workspace = true
+dirs.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 futures.workspace = true
 glob.workspace = true
 shellexpand.workspace = true
-dirs.workspace = true
 inquire.workspace = true
 
 [dev-dependencies]

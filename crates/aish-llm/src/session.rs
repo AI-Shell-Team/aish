@@ -10,6 +10,7 @@ use crate::api::{resolve_api_dialect, stream_simple, ApiDialect, StreamContext};
 use crate::approval_memory::{ApprovalChoice, ApprovalMemory};
 use crate::client::LlmResponse;
 use crate::langfuse::LangfuseClient;
+use crate::rotation::{FailureKind, RotationState};
 use crate::streaming::{extract_message_text, SseEvent, StreamParser};
 use crate::types::*;
 
@@ -98,6 +99,8 @@ pub struct LlmSession {
     tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
     /// True for sessions created via [`Self::create_subsession`].
     is_sub_agent: bool,
+    /// Multi-account rotation + model fallback state. `None` when disabled.
+    rotation: Option<std::sync::Mutex<RotationState>>,
     /// Scripted chat completion responses for unit/integration tests (pop in order).
     #[cfg(test)]
     test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
@@ -157,6 +160,7 @@ impl LlmSession {
             last_turn_compaction: std::sync::Mutex::new(None),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
+            rotation: None,
             #[cfg(test)]
             test_chat_responses: None,
         }
@@ -410,6 +414,40 @@ impl LlmSession {
         );
     }
 
+    /// Install a multi-account rotation + fallback state. When set, every
+    /// chat completion routes through the rotation loop, advancing to the next
+    /// API account or fallback model on recoverable failures.
+    pub fn set_rotation(&mut self, state: RotationState) {
+        self.rotation = Some(std::sync::Mutex::new(state));
+    }
+
+    /// Snapshot of the rotation state for UI display (`/token`), if active.
+    pub fn rotation_snapshot(&self) -> Option<crate::rotation::RotationSnapshot> {
+        self.rotation.as_ref().map(|m| m.lock().unwrap().snapshot())
+    }
+
+    /// Disable rotation (e.g. after the user removes all extra accounts).
+    pub fn clear_rotation(&mut self) {
+        self.rotation = None;
+    }
+
+    /// Manually switch the active rotation account by name (the `/accounts use`
+    /// path). Returns `false` when rotation is disabled or no account matches.
+    pub fn use_rotation_account(&self, name: &str) -> bool {
+        self.rotation
+            .as_ref()
+            .map(|m| m.lock().unwrap().use_account(name))
+            .unwrap_or(false)
+    }
+
+    /// Name of the account currently in use, for restoring the selection
+    /// across a rotation rebuild.
+    pub fn current_rotation_account(&self) -> Option<String> {
+        self.rotation
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().current_account_name().map(String::from))
+    }
+
     /// Return the current model name.
     pub fn model_name(&self) -> &str {
         &self.stream_ctx.model
@@ -440,16 +478,70 @@ impl LlmSession {
             }
         }
 
-        stream_simple(
-            self.api_dialect,
-            &self.stream_ctx,
-            messages,
-            tools,
-            stream,
-            temperature,
-            max_tokens,
-        )
-        .await
+        // Fast path: no rotation configured — issue the request directly.
+        let Some(rotation) = &self.rotation else {
+            return stream_simple(
+                self.api_dialect,
+                &self.stream_ctx,
+                messages,
+                tools,
+                stream,
+                temperature,
+                max_tokens,
+            )
+            .await;
+        };
+
+        // Rotation path: try the current credential/model, and on a recoverable
+        // failure (429 / usage-limit / 5xx / network / model error) advance to
+        // the next account or fallback model until recovery is exhausted.
+        loop {
+            let cred = {
+                let guard = rotation.lock().unwrap();
+                guard.current(&self.stream_ctx.api_base)
+            };
+            let dialect = resolve_api_dialect(&cred.model, &cred.api_base, &cred.api_key);
+            let mut ctx = self.stream_ctx.clone();
+            ctx.refresh_dialect(&cred.model, Some(&cred.api_base), Some(&cred.api_key));
+
+            match stream_simple(
+                dialect,
+                &ctx,
+                messages,
+                tools,
+                stream,
+                temperature,
+                max_tokens,
+            )
+            .await
+            {
+                Ok(resp) => {
+                    rotation.lock().unwrap().on_success();
+                    return Ok(resp);
+                }
+                Err(err) => {
+                    let Some(kind) = FailureKind::from_error(&err) else {
+                        return Err(err);
+                    };
+                    tracing::warn!(
+                        error = %err,
+                        kind = ?kind,
+                        credential = %cred.label,
+                        "LLM request failed; attempting credential/model rotation"
+                    );
+                    let advanced = rotation.lock().unwrap().advance_on_error(kind);
+                    if !advanced {
+                        if kind == FailureKind::ModelError {
+                            let msg = rotation.lock().unwrap().model_exhaustion_error();
+                            return Err(AishError::Llm(msg));
+                        }
+                        return Err(err);
+                    }
+                    let next = rotation.lock().unwrap().current(&self.stream_ctx.api_base);
+                    tracing::info!(credential = %next.label, "rotated to next credential/model");
+                }
+            }
+        }
     }
 
     /// Low-level chat completion returning the raw API response.
@@ -1463,6 +1555,7 @@ impl LlmSession {
             max_context_tokens: self.max_context_tokens,
             context_budget_policy: self.context_budget_policy.clone(),
             compact_consecutive_failures: std::sync::Mutex::new(0),
+            rotation: None,
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
@@ -1486,20 +1579,22 @@ impl LlmSession {
             )));
         }
 
-        // Approval memory: if this command was previously approved for the
+        // Approval memory: if this operation was previously approved for the
         // session, skip the whole preflight (including the sandbox pre-run).
-        let memory_command = args.get("command").and_then(|value| value.as_str());
-        if memory_command.is_some_and(|command| {
+        // The key is tool-defined (`Tool::approval_key`) so non-command tools
+        // such as web_fetch (keyed by host) are remembered too.
+        let memory_key = tool.approval_key(args);
+        if memory_key.as_ref().is_some_and(|key| {
             self.approval_memory
                 .as_ref()
-                .is_some_and(|memory| memory.lock().unwrap().is_allowed(command))
+                .is_some_and(|memory| memory.lock().unwrap().is_allowed(tool_name, key))
         }) {
             self.emit_audit(AuditEvent::security_decision(
                 chrono::Utc::now(),
                 self.audit_session_uuid.clone(),
                 None,
                 None,
-                memory_command.map(|c| self.redact(c)),
+                memory_key.as_deref().map(|c| self.redact(c)),
                 "allow".to_string(),
                 Some("remembered".to_string()),
                 None,
@@ -1540,8 +1635,8 @@ impl LlmSession {
                 };
                 if matches!(choice, ApprovalChoice::RememberSession) {
                     if let Some(memory) = &self.approval_memory {
-                        if let Some(command) = memory_command {
-                            memory.lock().unwrap().remember(command);
+                        if let Some(key) = memory_key.as_deref() {
+                            memory.lock().unwrap().remember(tool_name, key);
                         }
                     }
                 }
@@ -3173,6 +3268,95 @@ mod tests {
             counter.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "remembered command must skip preflight entirely"
+        );
+    }
+
+    // Tool that simulates web_fetch: it has NO `command` arg and derives its
+    // approval key from `url`, exercising the non-command remember path.
+    struct HostConfirmTool {
+        preflight_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+    impl HostConfirmTool {
+        fn new(counter: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Self {
+            Self {
+                preflight_calls: counter,
+            }
+        }
+    }
+    impl Tool for HostConfirmTool {
+        fn name(&self) -> &str {
+            "web_fetch"
+        }
+        fn description(&self) -> &str {
+            "host-keyed confirm-counting test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn approval_key(&self, args: &serde_json::Value) -> Option<String> {
+            // Mirror WebFetchTool: key on the URL/host, not a command.
+            args.get("url").and_then(|v| v.as_str()).map(String::from)
+        }
+        fn preflight(&self, _args: &serde_json::Value) -> PreflightResult {
+            self.preflight_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            PreflightResult::Confirm {
+                message: "test confirmation".to_string(),
+                security: None,
+            }
+        }
+        fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::success("fetched")
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_memory_remembers_non_command_tool() {
+        // Regression for the bug where pressing [a] on a non-command tool
+        // (e.g. web_fetch) reported "remembered" but stored nothing: the old
+        // code keyed memory on args["command"], which such tools lack.
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(HostConfirmTool::new(counter.clone())));
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
+        ));
+        session.set_approval_memory(std::sync::Arc::new(std::sync::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "web_fetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.com/a" }).to_string(),
+        };
+
+        // First call: preflight runs, user remembers (keyed by the URL).
+        let result = session.execute_tool_external(&tool_call).await;
+        assert!(result.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Second call to the SAME url: memory hit, preflight skipped.
+        let result2 = session.execute_tool_external(&tool_call).await;
+        assert!(result2.ok);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "remembered non-command tool must skip preflight"
+        );
+
+        // A different target is NOT covered by the remembered approval.
+        let other = ToolCall {
+            id: "call_2".into(),
+            name: "web_fetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.org/b" }).to_string(),
+        };
+        let result3 = session.execute_tool_external(&other).await;
+        assert!(result3.ok);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a different target must re-run preflight"
         );
     }
 

@@ -27,6 +27,7 @@ pub mod probe;
 pub mod prompt;
 pub mod provider;
 pub mod providers;
+pub mod rotation;
 pub mod session;
 pub mod streaming;
 pub mod subsession;
@@ -63,6 +64,9 @@ pub use provider::{
 };
 pub use providers::{
     OpenAiCompatProvider, ProviderCapabilities, ProviderMetadata, ProviderRegistry,
+};
+pub use rotation::{
+    ApiAccount, FailureKind, ResolvedCredential, RetryPolicy, RotationSnapshot, RotationState,
 };
 pub use session::LlmSession;
 pub use streaming::{SseEvent, StreamParser};

@@ -49,6 +49,12 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/skill",
         "Search, install, verify skills; manage registries",
     ),
+    (
+        "/fork",
+        "Branch the current session into a new one (copied context)",
+    ),
+    ("/sessions", "Show the session tree (roots + forks)"),
+    ("/export", "Export current session to Markdown"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -827,6 +833,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 18);
+        assert_eq!(SLASH_COMMANDS.len(), 21);
     }
 }

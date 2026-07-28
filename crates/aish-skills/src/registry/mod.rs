@@ -254,22 +254,7 @@ impl RegistryManager {
         let adapter = self.find_adapter(&skill.registry).ok_or_else(|| {
             aish_core::AishError::Skill(format!("No adapter for registry '{}'", skill.registry))
         })?;
-        // Remember whether this is a fresh install or a reinstall over an
-        // existing skill, so a failed reinstall does not delete the previously
-        // installed (possibly trusted / locally modified) skill.
-        let pre_existed = target_dir.join(&skill.slug).exists();
-        pre_quarantine(target_dir, &skill.slug)?;
-        match adapter.install(skill, target_dir) {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                // Only remove on a failed FRESH install; a failed reinstall
-                // must leave the previous skill intact rather than destroy it.
-                if !pre_existed {
-                    let _ = std::fs::remove_dir_all(target_dir.join(&skill.slug));
-                }
-                Err(e)
-            }
-        }
+        Self::install_transactional(adapter, skill, target_dir, None)
     }
 
     /// Install a skill, respecting a cooperative cancel flag checked between
@@ -285,15 +270,61 @@ impl RegistryManager {
         let adapter = self.find_adapter(&skill.registry).ok_or_else(|| {
             aish_core::AishError::Skill(format!("No adapter for registry '{}'", skill.registry))
         })?;
-        let pre_existed = target_dir.join(&skill.slug).exists();
-        pre_quarantine(target_dir, &skill.slug)?;
-        match adapter.install_with_cancel(skill, target_dir, cancel) {
-            Ok(result) => Ok(result),
+        Self::install_transactional(adapter, skill, target_dir, Some(cancel))
+    }
+
+    /// Transactional install core shared by [`install`](Self::install) and
+    /// [`install_with_cancel`](Self::install_with_cancel).
+    ///
+    /// For a reinstall the existing skill dir is moved aside first (same
+    /// filesystem, so the rename is atomic), then the replacement is downloaded
+    /// into a fresh dir and validated. On failure the failed replacement is
+    /// removed and the original restored in place — a bad replacement can never
+    /// overwrite/quarantine a previously trusted or locally modified skill.
+    fn install_transactional(
+        adapter: &dyn RegistryAdapter,
+        skill: &RegistrySkill,
+        target_dir: &Path,
+        cancel: Option<&AtomicBool>,
+    ) -> Result<InstallResult> {
+        // Reject path-escaping slugs BEFORE constructing the stash path —
+        // reinstall_stash_path joins the slug into target_dir, so an unsafe
+        // slug must not reach it. (pre_quarantine re-validates downstream.)
+        installer::validate_install_slug(&skill.slug)?;
+        let live = target_dir.join(&skill.slug);
+        let stash = if live.exists() {
+            let stash = reinstall_stash_path(target_dir, &skill.slug);
+            if stash.exists() {
+                let _ = std::fs::remove_dir_all(&stash);
+            }
+            std::fs::rename(&live, &stash).map_err(|e| {
+                aish_core::AishError::Skill(format!(
+                    "failed to stash existing skill for reinstall: {e}"
+                ))
+            })?;
+            Some(stash)
+        } else {
+            None
+        };
+        let result = pre_quarantine(target_dir, &skill.slug)
+            .and_then(|_| match cancel {
+                None => adapter.install(skill, target_dir),
+                Some(flag) => adapter.install_with_cancel(skill, target_dir, flag),
+            })
+            .and_then(|r| validate_installed_skill(&r.dir).map(|_| r));
+        match result {
+            Ok(result) => {
+                // Success: the validated replacement supersedes the original.
+                if let Some(s) = stash {
+                    let _ = std::fs::remove_dir_all(s);
+                }
+                Ok(result)
+            }
             Err(e) => {
-                // Only remove on a failed FRESH install; a failed reinstall
-                // must leave the previous skill intact rather than destroy it.
-                if !pre_existed {
-                    let _ = std::fs::remove_dir_all(target_dir.join(&skill.slug));
+                // Failure: drop the failed replacement and restore the original.
+                let _ = std::fs::remove_dir_all(&live);
+                if let Some(s) = stash {
+                    let _ = std::fs::rename(s, &live);
                 }
                 Err(e)
             }
@@ -365,6 +396,29 @@ pub fn parse_skill_id_rest(rest: &str) -> Option<(String, String)> {
     } else {
         None
     }
+}
+
+/// Build a unique sibling path (same `target_dir` filesystem) for stashing an
+/// existing skill dir during a transactional reinstall. A same-filesystem
+/// rename is atomic; stashing under `/tmp` could cross mounts and fail with
+/// EXDEV. The nanos+pid suffix avoids collisions between concurrent installs.
+fn reinstall_stash_path(target_dir: &Path, slug: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    target_dir.join(format!(".{slug}.reinstall-{nanos}-{}", std::process::id()))
+}
+
+/// Confirm an installed skill's SKILL.md is loadable by running the exact
+/// parse the loader uses. A skill the loader rejects is unusable — it lands on
+/// disk only to be rejected on every hot-reload — so this turns a silent
+/// post-install failure (warning spam) into an actionable install-time error.
+fn validate_installed_skill(dir: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(dir.join("SKILL.md")).map_err(|e| {
+        aish_core::AishError::Skill(format!("Installed skill has no readable SKILL.md: {}", e))
+    })?;
+    crate::manager::parse_skill_metadata(&content).map(|_| ())
 }
 
 /// Pre-create the skill directory with its `.untrusted` quarantine marker
@@ -445,6 +499,124 @@ mod tests {
         assert!(
             parent.join("sibling").exists(),
             "parent contents must be intact"
+        );
+    }
+    /// Test adapter that writes a fixed SKILL.md into the install dir, so we
+    /// can drive `RegistryManager::install` end-to-end without any HTTP.
+    struct FakeAdapter {
+        name: &'static str,
+        skill_md: &'static str,
+    }
+
+    impl RegistryAdapter for FakeAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn search(&self, _query: &str, _limit: usize) -> Result<Vec<RegistrySkill>> {
+            Ok(vec![])
+        }
+        fn install(&self, skill: &RegistrySkill, target_dir: &Path) -> Result<InstallResult> {
+            let dir = target_dir.join(&skill.slug);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), self.skill_md).unwrap();
+            Ok(InstallResult {
+                dir,
+                skill_name: skill.slug.clone(),
+            })
+        }
+    }
+
+    fn fake_registry_skill(slug: &str, registry: &str) -> RegistrySkill {
+        RegistrySkill {
+            id: format!("{registry}/{slug}"),
+            name: slug.to_string(),
+            description: "test".into(),
+            registry: registry.to_string(),
+            source: "owner/repo".into(),
+            slug: slug.to_string(),
+            installs: 0,
+            homepage: None,
+        }
+    }
+
+    #[test]
+    fn install_rejects_unloadable_skill_and_rolls_back_fresh_install() {
+        // Regression for "installed skill spams hot-reload warnings forever":
+        // a skill the loader rejects (context=fork, no agent) must be refused
+        // at install time and the fresh install dir removed.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut manager = RegistryManager { adapters: vec![] };
+        manager.register(Box::new(FakeAdapter {
+            name: "fake",
+            skill_md: "---\nname: bad\ndescription: d\ncontext: fork\n---\nbody\n",
+        }));
+        let skill = fake_registry_skill("bad-skill", "fake");
+
+        let err = manager
+            .install(&skill, tmp.path())
+            .expect_err("unloadable skill must be rejected at install time");
+        assert!(err.to_string().contains("agent"), "got: {err}");
+        assert!(
+            !tmp.path().join("bad-skill").exists(),
+            "fresh install must be rolled back"
+        );
+    }
+
+    #[test]
+    fn install_accepts_loadable_skill() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut manager = RegistryManager { adapters: vec![] };
+        manager.register(Box::new(FakeAdapter {
+            name: "fake",
+            skill_md: "---\nname: good\ndescription: d\n---\nbody\n",
+        }));
+        let skill = fake_registry_skill("good-skill", "fake");
+
+        let result = manager
+            .install(&skill, tmp.path())
+            .expect("loadable skill installs");
+        assert!(result.dir.join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn install_failed_reinstall_keeps_previous_skill_dir() {
+        // A failed RE-install must not delete the previously installed skill
+        // dir, even when the newly written SKILL.md fails validation.
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("exists");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: old\ndescription: d\n---\nold body\n",
+        )
+        .unwrap();
+
+        let mut manager = RegistryManager { adapters: vec![] };
+        manager.register(Box::new(FakeAdapter {
+            name: "fake",
+            skill_md: "---\nname: bad\ndescription: d\ncontext: fork\n---\nbody\n",
+        }));
+        let skill = fake_registry_skill("exists", "fake");
+
+        let err = manager
+            .install(&skill, tmp.path())
+            .expect_err("unloadable reinstall must still fail");
+        assert!(err.to_string().contains("agent"));
+        assert!(
+            dir.exists(),
+            "previous skill dir must survive a failed reinstall"
+        );
+        // The original content must be byte-for-byte intact (not overwritten by
+        // the failed replacement) and the original trusted state preserved.
+        let preserved = std::fs::read_to_string(dir.join("SKILL.md"))
+            .expect("original SKILL.md must survive a failed reinstall");
+        assert_eq!(
+            preserved, "---\nname: old\ndescription: d\n---\nold body\n",
+            "failed reinstall must not overwrite the previous skill content"
+        );
+        assert!(
+            !dir.join(crate::models::UNTRUSTED_MARKER).exists(),
+            "original trust state must be restored (no quarantine marker)"
         );
     }
 }

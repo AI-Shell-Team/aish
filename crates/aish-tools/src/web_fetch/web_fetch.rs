@@ -148,6 +148,16 @@ impl Tool for WebFetchTool {
         }
     }
 
+    fn approval_key(&self, args: &serde_json::Value) -> Option<String> {
+        // web_fetch confirms per host (see `preflight`), so remember per host
+        // too — approving one URL auto-approves the rest of that host for the
+        // session. Invalid/missing URLs are not rememberable.
+        let url = args.get("url")?.as_str()?;
+        validate_and_normalize_url(url)
+            .ok()
+            .and_then(|normalized| normalized.host_str().map(|h| h.to_string()))
+    }
+
     fn execute(&self, _args: serde_json::Value) -> ToolResult {
         ToolResult::error("WebFetch requires async execution; use execute_async")
     }

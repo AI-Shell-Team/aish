@@ -93,6 +93,13 @@ impl TokenUsageStore {
         }
         stats
     }
+    /// Return today's persisted usage bucket (input, output, requests).
+    pub fn today(&self) -> (u64, u64, u64) {
+        self.records
+            .get(&Self::today_string())
+            .map(|r| (r.input, r.output, r.requests))
+            .unwrap_or((0, 0, 0))
+    }
 
     fn today_string() -> String {
         chrono::Local::now().format("%Y-%m-%d").to_string()

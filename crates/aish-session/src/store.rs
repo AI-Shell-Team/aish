@@ -13,12 +13,14 @@ use crate::models::{
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
-    session_uuid TEXT PRIMARY KEY,
-    created_at   TEXT NOT NULL,
-    model        TEXT NOT NULL,
-    api_base     TEXT,
-    run_user     TEXT,
-    state        TEXT DEFAULT '{}'
+    session_uuid         TEXT PRIMARY KEY,
+    created_at           TEXT NOT NULL,
+    model                TEXT NOT NULL,
+    api_base             TEXT,
+    run_user             TEXT,
+    state                TEXT DEFAULT '{}',
+    parent_session_uuid  TEXT,
+    branch_point_message_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS history (
@@ -105,6 +107,8 @@ impl SessionStore {
         // Create tables.
         conn.execute_batch(SCHEMA)
             .map_err(|e| AishError::Session(format!("failed to create schema: {e}")))?;
+        // Apply additive migrations for databases created by older builds.
+        migrate_schema(&conn)?;
 
         debug!(path = ?db_path, "opened session store");
 
@@ -138,6 +142,8 @@ impl SessionStore {
             api_base: api_base.map(|s| s.to_string()),
             run_user: user,
             state,
+            parent_session_uuid: None,
+            branch_point_message_id: None,
         })
     }
 
@@ -170,6 +176,17 @@ impl SessionStore {
 
         tx.execute("DELETE FROM history WHERE session_uuid = ?1", params![uuid])
             .map_err(|e| AishError::Session(format!("failed to delete session history: {e}")))?;
+        // Reparent any children so deleting a forked parent does not orphan
+        // them out of session_roots()/list_children(); they resurface as roots.
+        // Clear branch_point_message_id too — it references the parent's now-
+        // deleted history, so a promoted root must not carry a dangling branch.
+        tx.execute(
+            "UPDATE sessions
+                SET parent_session_uuid = NULL, branch_point_message_id = NULL
+              WHERE parent_session_uuid = ?1",
+            params![uuid],
+        )
+        .map_err(|e| AishError::Session(format!("failed to reparent child sessions: {e}")))?;
         tx.execute(
             "DELETE FROM sessions WHERE session_uuid = ?1",
             params![uuid],
@@ -185,22 +202,13 @@ impl SessionStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT session_uuid, created_at, model, api_base, run_user, state
+                "SELECT session_uuid, created_at, model, api_base, run_user, state,
+                        parent_session_uuid, branch_point_message_id
              FROM sessions WHERE session_uuid = ?1",
             )
             .map_err(|e| AishError::Session(format!("failed to prepare get_session: {e}")))?;
 
-        let result = stmt.query_row(params![uuid], |row| {
-            Ok(SessionRecord {
-                session_uuid: row.get(0)?,
-                created_at: parse_datetime(&row.get::<_, String>(1)?),
-                model: row.get(2)?,
-                api_base: row.get(3)?,
-                run_user: row.get(4)?,
-                state: serde_json::from_str(&row.get::<_, String>(5)?)
-                    .unwrap_or(serde_json::Value::Object(Default::default())),
-            })
-        });
+        let result = stmt.query_row(params![uuid], row_to_session_record);
 
         match result {
             Ok(record) => Ok(Some(record)),
@@ -214,23 +222,14 @@ impl SessionStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT session_uuid, created_at, model, api_base, run_user, state
+                "SELECT session_uuid, created_at, model, api_base, run_user, state,
+                        parent_session_uuid, branch_point_message_id
              FROM sessions",
             )
             .map_err(|e| AishError::Session(format!("failed to prepare list_sessions: {e}")))?;
 
         let rows = stmt
-            .query_map([], |row| {
-                Ok(SessionRecord {
-                    session_uuid: row.get(0)?,
-                    created_at: parse_datetime(&row.get::<_, String>(1)?),
-                    model: row.get(2)?,
-                    api_base: row.get(3)?,
-                    run_user: row.get(4)?,
-                    state: serde_json::from_str(&row.get::<_, String>(5)?)
-                        .unwrap_or(serde_json::Value::Object(Default::default())),
-                })
-            })
+            .query_map([], row_to_session_record)
             .map_err(|e| AishError::Session(format!("failed to query sessions: {e}")))?;
 
         let mut sessions = Vec::new();
@@ -248,6 +247,106 @@ impl SessionStore {
         sessions.truncate(limit);
 
         Ok(sessions)
+    }
+    /// Fork a new session from an existing one.
+    ///
+    /// The new session copies the parent's persisted `state` snapshot plus its
+    /// `model`/`api_base`/`run_user` metadata, and records `parent_uuid` plus
+    /// the optional `branch_point_message_id` (the history row at which the
+    /// branch diverges). The fork's `created_at` is the current time.
+    pub fn fork_session(
+        &self,
+        parent_uuid: &str,
+        branch_point_message_id: Option<i64>,
+        new_uuid: &str,
+    ) -> Result<SessionRecord> {
+        let parent = self.get_session(parent_uuid)?.ok_or_else(|| {
+            AishError::Session(format!("parent session not found: {parent_uuid}"))
+        })?;
+
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let state_str = serde_json::to_string(&parent.state)?;
+
+        self.conn
+            .execute(
+                "INSERT INTO sessions
+                    (session_uuid, created_at, model, api_base, run_user, state,
+                     parent_session_uuid, branch_point_message_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    new_uuid,
+                    now_str,
+                    parent.model,
+                    parent.api_base,
+                    parent.run_user,
+                    state_str,
+                    parent_uuid,
+                    branch_point_message_id,
+                ],
+            )
+            .map_err(|e| AishError::Session(format!("failed to fork session: {e}")))?;
+
+        Ok(SessionRecord {
+            session_uuid: new_uuid.to_string(),
+            created_at: now,
+            model: parent.model,
+            api_base: parent.api_base,
+            run_user: parent.run_user,
+            state: parent.state,
+            parent_session_uuid: Some(parent_uuid.to_string()),
+            branch_point_message_id,
+        })
+    }
+
+    /// List the direct child sessions forked from `parent_uuid`, oldest first.
+    pub fn list_children(&self, parent_uuid: &str) -> Result<Vec<SessionRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_uuid, created_at, model, api_base, run_user, state,
+                        parent_session_uuid, branch_point_message_id
+                 FROM sessions WHERE parent_session_uuid = ?1
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|e| AishError::Session(format!("failed to prepare list_children: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![parent_uuid], row_to_session_record)
+            .map_err(|e| AishError::Session(format!("failed to query children: {e}")))?;
+
+        let mut children = Vec::new();
+        for row in rows {
+            children.push(
+                row.map_err(|e| AishError::Session(format!("failed to read child row: {e}")))?,
+            );
+        }
+        Ok(children)
+    }
+
+    /// List all root sessions (those without a parent), newest first.
+    pub fn session_roots(&self) -> Result<Vec<SessionRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT session_uuid, created_at, model, api_base, run_user, state,
+                        parent_session_uuid, branch_point_message_id
+                 FROM sessions WHERE parent_session_uuid IS NULL
+                 ORDER BY created_at DESC",
+            )
+            .map_err(|e| AishError::Session(format!("failed to prepare session_roots: {e}")))?;
+
+        let rows = stmt
+            .query_map([], row_to_session_record)
+            .map_err(|e| AishError::Session(format!("failed to query session roots: {e}")))?;
+
+        let mut roots = Vec::new();
+        for row in rows {
+            roots.push(
+                row.map_err(|e| AishError::Session(format!("failed to read root row: {e}")))?,
+            );
+        }
+        Ok(roots)
     }
 
     /// Add a command history entry and return its row id.
@@ -479,6 +578,52 @@ impl AuditSink for AuditStore {
     }
 }
 
+/// Build a [`SessionRecord`] from a query row in the canonical column order:
+/// `session_uuid, created_at, model, api_base, run_user, state,
+/// parent_session_uuid, branch_point_message_id`.
+fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
+    Ok(SessionRecord {
+        session_uuid: row.get(0)?,
+        created_at: parse_datetime(&row.get::<_, String>(1)?),
+        model: row.get(2)?,
+        api_base: row.get(3)?,
+        run_user: row.get(4)?,
+        state: serde_json::from_str(&row.get::<_, String>(5)?)
+            .unwrap_or(serde_json::Value::Object(Default::default())),
+        parent_session_uuid: row.get(6)?,
+        branch_point_message_id: row.get(7)?,
+    })
+}
+
+/// Add columns introduced after the initial schema (`parent_session_uuid`,
+/// `branch_point_message_id`) to databases created by older builds. Idempotent:
+/// each column is added only when missing, detected via `PRAGMA table_info`.
+fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE sessions ADD COLUMN parent_session_uuid TEXT DEFAULT NULL;",
+    )?;
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE sessions ADD COLUMN branch_point_message_id INTEGER DEFAULT NULL;",
+    )?;
+    Ok(())
+}
+
+/// Apply an `ALTER TABLE ... ADD COLUMN` idempotently. SQLite errors with
+/// "duplicate column name" if the column already exists (e.g. a concurrent
+/// `SessionStore::open` ran the migration first); treat that error as success
+/// so a concurrent migration cannot break startup.
+fn add_column_if_missing(conn: &rusqlite::Connection, sql: &str) -> Result<()> {
+    match conn.execute_batch(sql) {
+        Ok(()) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column") => Ok(()),
+        Err(e) => Err(AishError::Session(format!(
+            "failed to apply session schema migration: {e}"
+        ))),
+    }
+}
+
 /// Parse an RFC 3339 datetime string, falling back to UTC now on failure.
 fn parse_datetime(s: &str) -> chrono::DateTime<chrono::Utc> {
     let normalized = if let Some(prefix) = s.strip_suffix('Z') {
@@ -646,5 +791,191 @@ mod tests {
             })
             .unwrap();
         assert!(other_user.is_empty());
+    }
+    fn temp_store() -> (tempfile::TempDir, SessionStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        (temp, store)
+    }
+
+    #[test]
+    fn fork_session_copies_state_and_links_parent() {
+        let (_temp, store) = temp_store();
+        let parent = store
+            .create_session("gpt-4o", Some("http://localhost:11434"))
+            .unwrap();
+        let snapshot = SessionStateSnapshot {
+            cwd: Some("/srv".to_string()),
+            summary_preview: Some("parent summary".to_string()),
+            context_messages_snapshot: vec![SessionContextMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+            }],
+            updated_at: Some(Utc::now()),
+        };
+        store
+            .update_session_state(&parent.session_uuid, &snapshot)
+            .unwrap();
+
+        let child_uuid = "forked-uuid-1234";
+        let forked = store
+            .fork_session(&parent.session_uuid, Some(42), child_uuid)
+            .unwrap();
+
+        // Metadata is copied from the parent.
+        assert_eq!(forked.model, "gpt-4o");
+        assert_eq!(forked.api_base.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(forked.run_user, parent.run_user);
+        assert_eq!(forked.session_uuid, child_uuid);
+
+        // Branch linkage is recorded on the returned record.
+        assert_eq!(
+            forked.parent_session_uuid.as_deref(),
+            Some(parent.session_uuid.as_str())
+        );
+        assert_eq!(forked.branch_point_message_id, Some(42));
+
+        // The persisted child must carry the parent's state and linkage.
+        let reloaded = store.get_session(child_uuid).unwrap().unwrap();
+        let reloaded_parent = store.get_session(&parent.session_uuid).unwrap().unwrap();
+        assert_eq!(reloaded.state, reloaded_parent.state);
+        let child_snapshot = reloaded.state_snapshot();
+        assert_eq!(child_snapshot.cwd.as_deref(), Some("/srv"));
+        assert_eq!(
+            child_snapshot.summary_preview.as_deref(),
+            Some("parent summary")
+        );
+        assert_eq!(child_snapshot.context_messages_snapshot.len(), 1);
+        assert_eq!(
+            reloaded.parent_session_uuid.as_deref(),
+            Some(parent.session_uuid.as_str())
+        );
+        assert_eq!(reloaded.branch_point_message_id, Some(42));
+
+        // The parent is the only root; the child is not a root.
+        let roots = store.session_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].session_uuid, parent.session_uuid);
+    }
+
+    #[test]
+    fn list_children_returns_only_direct_descendants() {
+        let (_temp, store) = temp_store();
+        let parent = store.create_session("m", None).unwrap();
+
+        let first = store
+            .fork_session(&parent.session_uuid, None, "child-1")
+            .unwrap();
+        let second = store
+            .fork_session(&parent.session_uuid, Some(7), "child-2")
+            .unwrap();
+        // A grandchild belongs to a child, not the parent.
+        let _grand = store.fork_session("child-1", None, "grand-1").unwrap();
+
+        let children = store.list_children(&parent.session_uuid).unwrap();
+        assert_eq!(children.len(), 2);
+        // Ordered oldest-first by created_at.
+        assert_eq!(children[0].session_uuid, first.session_uuid);
+        assert_eq!(children[1].session_uuid, second.session_uuid);
+        for child in &children {
+            assert_eq!(
+                child.parent_session_uuid.as_deref(),
+                Some(parent.session_uuid.as_str())
+            );
+        }
+
+        // The grandchild shows up only under its own parent.
+        let grandchildren = store.list_children("child-1").unwrap();
+        assert_eq!(grandchildren.len(), 1);
+        assert_eq!(grandchildren[0].session_uuid, "grand-1");
+    }
+
+    #[test]
+    fn delete_session_reparents_children_to_root() {
+        let (_temp, store) = temp_store();
+        let parent = store.create_session("m", None).unwrap();
+        let _child = store
+            .fork_session(&parent.session_uuid, Some(42), "child-1")
+            .unwrap();
+        let _grand = store.fork_session("child-1", None, "grand-1").unwrap();
+
+        // Sanity: parent is the only root before deletion.
+        assert_eq!(store.session_roots().unwrap().len(), 1);
+
+        store.delete_session(&parent.session_uuid).unwrap();
+
+        // The deleted parent is gone...
+        assert!(store.get_session(&parent.session_uuid).unwrap().is_none());
+        // ...and its child was reparented to root instead of being orphaned.
+        let roots = store.session_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].session_uuid, "child-1");
+        assert!(roots[0].parent_session_uuid.is_none());
+        // The dangling branch point (into the deleted parent's history) is cleared.
+        assert!(roots[0].branch_point_message_id.is_none());
+        // The grandchild is still nested under the reparented child.
+        assert_eq!(store.list_children("child-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fork_session_missing_parent_errors() {
+        let (_temp, store) = temp_store();
+        let err = store.fork_session("does-not-exist", None, "x").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parent session not found"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn migrate_schema_is_backward_compatible_with_legacy_db() {
+        // Create a database that predates the branch columns, then re-open it
+        // through SessionStore which must transparently add them.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    session_uuid TEXT PRIMARY KEY,
+                    created_at   TEXT NOT NULL,
+                    model        TEXT NOT NULL,
+                    api_base     TEXT,
+                    run_user     TEXT,
+                    state        TEXT DEFAULT '{}'
+                );
+                INSERT INTO sessions (session_uuid, created_at, model, api_base, run_user, state)
+                VALUES ('legacy-1',
+                        '2026-01-01T00:00:00+00:00',
+                        'old-model', '', '', '{}');",
+            )
+            .unwrap();
+        }
+
+        // Re-opening triggers migrate_schema; the legacy row round-trips and
+        // the new columns default to NULL.
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        let record = store.get_session("legacy-1").unwrap().unwrap();
+        assert_eq!(record.model, "old-model");
+        assert!(record.parent_session_uuid.is_none());
+        assert!(record.branch_point_message_id.is_none());
+
+        // Forking off the migrated legacy row must now work.
+        let forked = store
+            .fork_session("legacy-1", Some(3), "legacy-fork")
+            .unwrap();
+        assert_eq!(forked.parent_session_uuid.as_deref(), Some("legacy-1"));
+        assert_eq!(forked.branch_point_message_id, Some(3));
+        assert_eq!(store.list_children("legacy-1").unwrap().len(), 1);
+
+        // The legacy row is a root; the fork is not.
+        let roots = store.session_roots().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].session_uuid, "legacy-1");
     }
 }

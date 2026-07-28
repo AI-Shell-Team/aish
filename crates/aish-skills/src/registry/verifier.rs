@@ -57,37 +57,25 @@ pub fn verify_skill_dir(dir: &Path) -> VerifyReport {
         }
     };
 
-    // 2. Frontmatter parses.
-    let frontmatter_ok = match parse_frontmatter(&content) {
-        Ok(fm) => {
-            if let Some(name) = fm.get("name").and_then(|v| v.as_str()) {
-                skill_name = name.to_string();
-            }
-            let has_name = fm.get("name").and_then(|v| v.as_str()).is_some();
-            let has_desc = fm.get("description").and_then(|v| v.as_str()).is_some();
+    // 2. Frontmatter parses and satisfies the loader's invariants. Reuses the
+    //    exact parse the loader + installer use, so `verify` cannot report a
+    //    skill as valid that the loader would reject (e.g. context=fork with
+    //    no agent).
+    let frontmatter_ok = match crate::manager::parse_skill_metadata(&content) {
+        Ok((metadata, _)) => {
+            skill_name = metadata.name.clone();
             checks.push(VerifyCheck {
                 label: "Frontmatter valid".into(),
-                passed: has_name && has_desc,
-                detail: if has_name && has_desc {
-                    format!("name=\"{}\", has description", skill_name)
-                } else {
-                    let mut missing = Vec::new();
-                    if !has_name {
-                        missing.push("name");
-                    }
-                    if !has_desc {
-                        missing.push("description");
-                    }
-                    format!("Missing fields: {}", missing.join(", "))
-                },
+                passed: true,
+                detail: format!("name=\"{}\"", skill_name),
             });
-            has_name && has_desc
+            true
         }
         Err(e) => {
             checks.push(VerifyCheck {
                 label: "Frontmatter valid".into(),
                 passed: false,
-                detail: e,
+                detail: e.to_string(),
             });
             false
         }
@@ -107,23 +95,6 @@ pub fn verify_skill_dir(dir: &Path) -> VerifyReport {
         skill_name,
         checks,
     }
-}
-
-/// Parse YAML frontmatter from SKILL.md content.
-/// Returns a map of key → JSON value.
-fn parse_frontmatter(content: &str) -> Result<serde_json::Value, String> {
-    let re = regex::Regex::new(r"(?s)^---\s*\n(.*?)\n---\s*\n")
-        .map_err(|e| format!("Regex error: {}", e))?;
-
-    let caps = re
-        .captures(content)
-        .ok_or_else(|| "Missing YAML frontmatter (--- delimiters)".to_string())?;
-
-    let yaml_str = caps.get(1).unwrap().as_str();
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str(yaml_str).map_err(|e| format!("YAML parse error: {}", e))?;
-
-    serde_json::to_value(&yaml).map_err(|e| format!("Conversion error: {}", e))
 }
 
 /// Check that scripts in a directory exist and have executable permissions.

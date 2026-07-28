@@ -551,6 +551,17 @@ pub trait Tool: Send + Sync {
         self.preflight(args)
     }
 
+    /// The string that identifies this invocation for session-scoped approval
+    /// memory (the `[a] Remember this session` choice). Defaults to the
+    /// `command` argument; tools without one (e.g. `web_fetch`, keyed by
+    /// host) override this. Returning `None` means the tool is not
+    /// rememberable — `[a]` then has no persistent effect.
+    fn approval_key(&self, args: &serde_json::Value) -> Option<String> {
+        args.get("command")
+            .and_then(|value| value.as_str())
+            .map(|s| s.to_string())
+    }
+
     fn execute(&self, args: serde_json::Value) -> ToolResult;
 
     /// Async variant of `execute`. The default implementation delegates to the

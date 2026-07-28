@@ -30,14 +30,16 @@ pub enum ApprovalChoice {
     Deny,
 }
 
-/// Session-scoped memory of approved commands.
+/// Session-scoped memory of approved operations.
 ///
-/// The key is `(host_key, normalized_command)`. Looking up or recording a
-/// command always re-derives its key from the raw text, so callers never need
-/// to normalize themselves.
+/// The key is `(tool_name, host_key, normalized_target)`. Scoping by tool
+/// name keeps a remembered web-fetch host from ever auto-approving a shell
+/// command of the same text. Looking up or recording an entry always
+/// re-derives its key from the raw text, so callers never normalize
+/// themselves.
 #[derive(Debug, Default)]
 pub struct ApprovalMemory {
-    allowed: HashSet<(String, String)>,
+    allowed: HashSet<(String, String, String)>,
 }
 
 impl ApprovalMemory {
@@ -49,27 +51,31 @@ impl ApprovalMemory {
     /// compute the host from the *normalized* text so a leading wrapper such
     /// as `nohup` does not fragment remote commands between localhost and
     /// their real host.
-    fn key(command: &str) -> Option<(String, String)> {
+    fn key(tool_name: &str, command: &str) -> Option<(String, String, String)> {
         let normalized = normalize_command(command);
         if normalized.is_empty() {
             return None;
         }
-        Some((command_host_key(&normalized), normalized))
+        Some((
+            tool_name.to_string(),
+            command_host_key(&normalized),
+            normalized,
+        ))
     }
 
-    /// Returns true if this command was previously approved for the session
-    /// on its target host.
-    pub fn is_allowed(&self, command: &str) -> bool {
-        match Self::key(command) {
+    /// Returns true if this `(tool, command)` was previously approved for the
+    /// session on its target host.
+    pub fn is_allowed(&self, tool_name: &str, command: &str) -> bool {
+        match Self::key(tool_name, command) {
             Some(key) => self.allowed.contains(&key),
             None => false,
         }
     }
 
-    /// Record an approval so subsequent equivalent commands skip the prompt.
+    /// Record an approval so subsequent equivalent operations skip the prompt.
     /// Empty commands are ignored.
-    pub fn remember(&mut self, command: &str) {
-        if let Some(key) = Self::key(command) {
+    pub fn remember(&mut self, tool_name: &str, command: &str) {
+        if let Some(key) = Self::key(tool_name, command) {
             self.allowed.insert(key);
         }
     }
@@ -166,44 +172,44 @@ mod tests {
     fn empty_memory_allows_nothing() {
         let mem = ApprovalMemory::new();
         assert!(mem.is_empty());
-        assert!(!mem.is_allowed("systemctl restart nginx"));
+        assert!(!mem.is_allowed("bash", "systemctl restart nginx"));
     }
 
     #[test]
     fn remembers_equivalent_commands() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("systemctl restart nginx");
+        mem.remember("bash", "systemctl restart nginx");
         // Identical text matches.
-        assert!(mem.is_allowed("systemctl restart nginx"));
+        assert!(mem.is_allowed("bash", "systemctl restart nginx"));
         // nohup wrapper is stripped, so it matches the bare command.
-        assert!(mem.is_allowed("nohup systemctl restart nginx"));
+        assert!(mem.is_allowed("bash", "nohup systemctl restart nginx"));
         // Decorative whitespace is NOT collapsed (preserves quoted paths),
         // so a multi-space variant stays distinct.
-        assert!(!mem.is_allowed("systemctl  restart nginx"));
+        assert!(!mem.is_allowed("bash", "systemctl  restart nginx"));
         assert_eq!(mem.len(), 1);
     }
 
     #[test]
     fn sudo_variant_is_not_authorized_by_non_root_approval() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("systemctl restart nginx");
+        mem.remember("bash", "systemctl restart nginx");
         // A non-root approval must NOT silently authorize the sudo (root)
         // variant — that would escalate privileges and skip the sandbox.
-        assert!(!mem.is_allowed("sudo systemctl restart nginx"));
+        assert!(!mem.is_allowed("bash", "sudo systemctl restart nginx"));
         // Reverse direction must also hold.
         let mut mem2 = ApprovalMemory::new();
-        mem2.remember("sudo systemctl restart nginx");
-        assert!(!mem2.is_allowed("systemctl restart nginx"));
-        assert!(mem2.is_allowed("sudo systemctl restart nginx"));
+        mem2.remember("bash", "sudo systemctl restart nginx");
+        assert!(!mem2.is_allowed("bash", "systemctl restart nginx"));
+        assert!(mem2.is_allowed("bash", "sudo systemctl restart nginx"));
     }
 
     #[test]
     fn distinguishes_hosts() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("ssh root@host-a systemctl restart nginx");
-        assert!(mem.is_allowed("ssh root@host-a systemctl restart nginx"));
+        mem.remember("bash", "ssh root@host-a systemctl restart nginx");
+        assert!(mem.is_allowed("bash", "ssh root@host-a systemctl restart nginx"));
         // Same command text but a different host must not be auto-approved.
-        assert!(!mem.is_allowed("ssh root@host-b systemctl restart nginx"));
+        assert!(!mem.is_allowed("bash", "ssh root@host-b systemctl restart nginx"));
     }
 
     #[test]
@@ -212,33 +218,33 @@ mod tests {
         // command. Otherwise `nohup ssh root@host ...` would store localhost
         // and never match the bare `ssh root@host ...` (real host).
         let mut mem = ApprovalMemory::new();
-        mem.remember("nohup ssh root@host uptime");
-        assert!(mem.is_allowed("ssh root@host uptime"));
-        assert!(mem.is_allowed("nohup ssh root@host uptime"));
-        assert!(!mem.is_allowed("ssh root@other uptime"));
+        mem.remember("bash", "nohup ssh root@host uptime");
+        assert!(mem.is_allowed("bash", "ssh root@host uptime"));
+        assert!(mem.is_allowed("bash", "nohup ssh root@host uptime"));
+        assert!(!mem.is_allowed("bash", "ssh root@other uptime"));
         // Normalizes-to-empty inputs (nohup-only / whitespace) record nothing.
         let mut mem2 = ApprovalMemory::new();
-        mem2.remember("nohup");
+        mem2.remember("bash", "nohup");
         assert!(mem2.is_empty());
-        mem2.remember("   ");
+        mem2.remember("bash", "   ");
         assert!(mem2.is_empty());
     }
 
     #[test]
     fn local_commands_share_localhost_key() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("systemctl restart nginx");
+        mem.remember("bash", "systemctl restart nginx");
         // Same command text (no sudo) matches on localhost.
-        assert!(mem.is_allowed("systemctl restart nginx"));
-        assert!(mem.is_allowed("nohup systemctl restart nginx"));
+        assert!(mem.is_allowed("bash", "systemctl restart nginx"));
+        assert!(mem.is_allowed("bash", "nohup systemctl restart nginx"));
     }
 
     #[test]
     fn distinct_commands_are_not_implicitly_approved() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("systemctl restart nginx");
-        assert!(!mem.is_allowed("systemctl restart mysql"));
-        assert!(!mem.is_allowed("systemctl stop nginx"));
+        mem.remember("bash", "systemctl restart nginx");
+        assert!(!mem.is_allowed("bash", "systemctl restart mysql"));
+        assert!(!mem.is_allowed("bash", "systemctl stop nginx"));
     }
     #[test]
     fn path_distinct_commands_are_not_cross_authorized() {
@@ -247,13 +253,13 @@ mod tests {
         // command text. Different paths must stay distinct so a remembered
         // approval never replays against a different path.
         let mut mem = ApprovalMemory::new();
-        mem.remember("rm /tmp/a");
-        assert!(mem.is_allowed("rm /tmp/a"));
-        assert!(!mem.is_allowed("rm /tmp/b"));
-        assert!(!mem.is_allowed("rm /tmp/a/x"));
+        mem.remember("bash", "rm /tmp/a");
+        assert!(mem.is_allowed("bash", "rm /tmp/a"));
+        assert!(!mem.is_allowed("bash", "rm /tmp/b"));
+        assert!(!mem.is_allowed("bash", "rm /tmp/a/x"));
         // A path prefix must not authorize a longer path either.
-        mem.remember("rm /var/log");
-        assert!(!mem.is_allowed("rm /var/log/app.log"));
+        mem.remember("bash", "rm /var/log");
+        assert!(!mem.is_allowed("bash", "rm /var/log/app.log"));
     }
 
     #[test]
@@ -262,31 +268,46 @@ mod tests {
         // path). normalize_command preserves it verbatim, so two paths that
         // differ only in internal spacing must NOT share an approval key.
         let mut mem = ApprovalMemory::new();
-        mem.remember("rm '/tmp/a  b'");
-        assert!(mem.is_allowed("rm '/tmp/a  b'"));
-        assert!(!mem.is_allowed("rm '/tmp/a b'"));
+        mem.remember("bash", "rm '/tmp/a  b'");
+        assert!(mem.is_allowed("bash", "rm '/tmp/a  b'"));
+        assert!(!mem.is_allowed("bash", "rm '/tmp/a b'"));
         // Reverse direction.
         let mut mem2 = ApprovalMemory::new();
-        mem2.remember("rm '/tmp/a b'");
-        assert!(!mem2.is_allowed("rm '/tmp/a  b'"));
+        mem2.remember("bash", "rm '/tmp/a b'");
+        assert!(!mem2.is_allowed("bash", "rm '/tmp/a  b'"));
     }
 
     #[test]
     fn clear_wipes_memory() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("systemctl restart nginx");
-        assert!(mem.is_allowed("systemctl restart nginx"));
+        mem.remember("bash", "systemctl restart nginx");
+        assert!(mem.is_allowed("bash", "systemctl restart nginx"));
         mem.clear();
         assert!(mem.is_empty());
-        assert!(!mem.is_allowed("systemctl restart nginx"));
+        assert!(!mem.is_allowed("bash", "systemctl restart nginx"));
     }
 
     #[test]
     fn empty_command_is_ignored() {
         let mut mem = ApprovalMemory::new();
-        mem.remember("");
+        mem.remember("bash", "");
         assert!(mem.is_empty());
-        assert!(!mem.is_allowed(""));
+        assert!(!mem.is_allowed("bash", ""));
+    }
+
+    #[test]
+    fn tool_name_scopes_approvals() {
+        // The tool_name dimension keeps a remembered operation from leaking
+        // across tools: approving a web_fetch host must not also auto-approve
+        // a shell command of the same text, and vice versa.
+        let mut mem = ApprovalMemory::new();
+        mem.remember("web_fetch", "example.com");
+        assert!(mem.is_allowed("web_fetch", "example.com"));
+        assert!(!mem.is_allowed("bash", "example.com"));
+        assert_eq!(mem.len(), 1);
+        // Distinct tool names each take a slot.
+        mem.remember("bash", "example.com");
+        assert_eq!(mem.len(), 2);
     }
 
     #[test]

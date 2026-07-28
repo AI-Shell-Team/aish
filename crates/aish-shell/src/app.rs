@@ -322,12 +322,144 @@ fn prompt_edit_value(label: &str, desc: &str, current: &str, secret: bool) -> Op
     }
 }
 
+/// Interactive menu picker built on the inline selection panel. Each option is
+/// `(value, label, description)`. Returns the chosen value, or `None` on cancel.
+/// REPL-safe (the underlying panel acquires the interactive input guard).
+fn pick_menu(title: &str, options: &[(String, String, String)]) -> Option<String> {
+    let opts: Vec<crate::tui::DialogOption> = options
+        .iter()
+        .map(|(v, l, d)| {
+            let mut o = crate::tui::DialogOption::new(v.as_str(), l.as_str());
+            if !d.is_empty() {
+                o = o.with_description(d.as_str());
+            }
+            o
+        })
+        .collect();
+    match crate::tui::show_selection_dialog(title, "", &opts, false, true) {
+        crate::tui::DialogResult::Selected(v) => Some(v),
+        _ => None,
+    }
+}
+
 fn llm_session_from_config(config: &ConfigModel) -> LlmSession {
-    LlmSession::with_context(
+    let mut session = LlmSession::with_context(
         stream_context_from_config(config),
         Some(config.temperature),
         config.max_tokens,
-    )
+    );
+
+    // Multi-account quota rotation + model fallback. The top-level api_key is
+    // account #0 (the primary); configured api_accounts extend the pool.
+    let accounts = rotation_accounts_from_config(config);
+    if !config.fallback_models.is_empty() || accounts.len() > 1 {
+        let mut policy = aish_llm::RetryPolicy::default();
+        policy.revert_on_cooldown = config.fallback_revert_on_cooldown;
+        let state = aish_llm::RotationState::new(
+            config.model.clone(),
+            accounts,
+            config.fallback_models.clone(),
+            policy,
+        );
+        if state.is_active() {
+            session.set_rotation(state);
+        }
+    }
+    session
+}
+
+/// Build the rotation account pool from config. The primary `api_key` is always
+/// index 0; each entry in `config.api_accounts` follows. Disabled when the key
+/// is empty so rotation skips it instead of wasting an attempt.
+fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccount> {
+    let mut accounts = vec![aish_llm::ApiAccount {
+        name: "primary".to_string(),
+        api_key: config.api_key.clone(),
+        api_base: None,
+        model: None,
+        weight: 1,
+        disabled: config.api_key.trim().is_empty(),
+    }];
+    for acct in &config.api_accounts {
+        accounts.push(aish_llm::ApiAccount {
+            name: acct.name.clone(),
+            api_key: acct.api_key.clone(),
+            api_base: acct.api_base.clone(),
+            model: acct.model.clone(),
+            weight: acct.weight.max(1),
+            disabled: acct.disabled,
+        });
+    }
+    accounts
+}
+
+/// Derive a readable account label from an endpoint URL (its host) or, failing
+/// a parseable host, the model name. Used when an outgoing primary account is
+/// auto-preserved on an endpoint switch.
+fn account_label(base: &str, model: &str) -> String {
+    let host = base
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', ':']).next())
+        .filter(|h| !h.is_empty() && h.contains('.'));
+    host.map(str::to_string)
+        .unwrap_or_else(|| model.to_string())
+}
+
+/// Append a numeric suffix so `label` does not collide with an existing
+/// account name — the manage panel and delete-by-name path key on `name`.
+fn unique_account_name(accounts: &[aish_config::ApiAccountConfig], label: &str) -> String {
+    if !accounts.iter().any(|a| a.name == label) {
+        return label.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{label}-{n}");
+        if !accounts.iter().any(|a| a.name == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+#[cfg(test)]
+mod account_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn account_label_extracts_dotted_host() {
+        assert_eq!(
+            account_label("https://api.openai.com/v1", "gpt-4"),
+            "api.openai.com"
+        );
+    }
+
+    #[test]
+    fn account_label_falls_back_to_model_for_non_fqdn_or_garbage() {
+        // No dot in host → not a usable label.
+        assert_eq!(account_label("http://localhost:8080", "llama"), "llama");
+        // No scheme/host → model fallback.
+        assert_eq!(account_label("not-a-url", "my-model"), "my-model");
+        assert_eq!(account_label("", "my-model"), "my-model");
+    }
+
+    #[test]
+    fn unique_account_name_appends_suffix_only_on_collision() {
+        let existing = aish_config::ApiAccountConfig {
+            name: "api.openai.com".into(),
+            api_key: "k".into(),
+            api_base: None,
+            model: None,
+            weight: 1,
+            disabled: false,
+        };
+        let accts = vec![existing];
+        assert_eq!(unique_account_name(&accts, "free"), "free");
+        assert_eq!(
+            unique_account_name(&accts, "api.openai.com"),
+            "api.openai.com-2"
+        );
+    }
 }
 
 fn stream_context_from_parts(
@@ -567,6 +699,10 @@ pub struct AishShell {
     /// Session-scoped approval memory shared with the LLM session. Kept on the
     /// shell so slash commands (e.g. `/forget-approvals`) can reset it.
     approval_memory: Arc<Mutex<aish_llm::ApprovalMemory>>,
+    /// Session-scoped "auto-vet" flag shared with `SkillInstallTool`. Kept on
+    /// the shell so `/forget-approvals` can reset the remembered decision
+    /// alongside the command approval memory.
+    skill_auto_vet: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AishShell {
@@ -1027,6 +1163,9 @@ impl AishShell {
         tool_registry.register(Box::new(skill_tool));
         tool_registry.register(Box::new(aish_tools::AgentTool::new()));
         // Register skill registry tools (search + install) from config.
+        // Session-scoped "auto-vet" flag shared with SkillInstallTool so
+        // `/forget-approvals` can reset the remembered review decision.
+        let skill_auto_vet: Arc<std::sync::atomic::AtomicBool>;
         {
             let registry_configs: Vec<aish_skills::registry::RegistryConfig> = config
                 .skills
@@ -1042,9 +1181,9 @@ impl AishShell {
             tool_registry.register(Box::new(aish_tools::SkillSearchTool::new(
                 registry_configs.clone(),
             )));
-            tool_registry.register(Box::new(aish_tools::SkillInstallTool::new(
-                registry_configs,
-            )));
+            let skill_install_tool = aish_tools::SkillInstallTool::new(registry_configs);
+            skill_auto_vet = skill_install_tool.auto_vet_handle();
+            tool_registry.register(Box::new(skill_install_tool));
             tool_registry.register(Box::new(aish_tools::SkillTrustTool));
         }
 
@@ -2022,6 +2161,7 @@ impl AishShell {
             shared_recorder,
             inline_ai: None,
             approval_memory,
+            skill_auto_vet,
         })
     }
 
@@ -3353,6 +3493,9 @@ impl AishShell {
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
             Some("/skill") => self.handle_skill_command(&parts),
+            Some("/fork") => self.handle_fork_command(),
+            Some("/sessions") => self.handle_sessions_command(),
+            Some("/export") => self.handle_export_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3364,15 +3507,25 @@ impl AishShell {
         true
     }
 
-    /// Handle `/forget-approvals` — clear all session-scoped command approvals
-    /// so previously "remembered" commands prompt for confirmation again.
+    /// Handle `/forget-approvals` — clear all session-scoped approvals so
+    /// previously "remembered" decisions prompt again. The `[a] Remember this
+    /// session` choice reaches two stores, both of which must clear together:
+    /// the command approval memory (bash/secure_bash) and
+    /// the skill-install "auto-vet this session" toggle.
     fn handle_forget_approvals(&mut self) {
-        let count = {
+        let command_count = {
             let mut memory = self.approval_memory.lock().unwrap();
             let n = memory.len();
             memory.clear();
             n
         };
+        // Reset the skill-install auto-vet toggle (set when the user picked
+        // "remember this session" on the post-install review dialog). `swap`
+        // returns the previous value so it counts toward the total cleared.
+        let skill_vet_cleared = self
+            .skill_auto_vet
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let count = command_count + usize::from(skill_vet_cleared);
         let mut args = std::collections::HashMap::new();
         args.insert("count".to_string(), count.to_string());
         println!(
@@ -3923,12 +4076,669 @@ impl AishShell {
             None => None,
         }
     }
+    /// `/fork` — branch the current session into a new one (copied context),
+    /// then switch into the fork so the original is preserved at its branch point.
+    fn handle_fork_command(&mut self) {
+        // Persist the current context first so the fork copies the latest state.
+        self.persist_session_snapshot();
+        let parent_uuid = self.session_uuid.clone();
+        let new_uuid = uuid::Uuid::new_v4().to_string();
+
+        // fork_session borrows the store immutably; keep that borrow in a block so
+        // the later `&mut self` resume call is not blocked by the live reference.
+        let fork_result = {
+            let Some(store) = self.session_store.as_ref() else {
+                eprintln!("{}", t("shell.fork.store_unavailable"));
+                return;
+            };
+            store.fork_session(&parent_uuid, None, &new_uuid)
+        };
+
+        let new_short = &new_uuid[..8.min(new_uuid.len())];
+        let parent_short = &parent_uuid[..8.min(parent_uuid.len())];
+        match fork_result {
+            Ok(_) => {
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.fork.forked", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("short".to_string(), new_short.to_string());
+                        args.insert("parent".to_string(), parent_short.to_string());
+                        args
+                    })
+                );
+                if let Err(e) = self.resume_session_with_options(&new_uuid, false, true) {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fork.switch_failed", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            args
+                        })
+                    );
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fork.switch_manual", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("short".to_string(), new_short.to_string());
+                            args
+                        })
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "{}",
+                t_with_args("shell.fork.failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            ),
+        }
+    }
+
+    /// `/sessions` — browse the session tree in an interactive panel (instead of
+    /// flooding the screen) and switch to the chosen session on submit.
+    fn handle_sessions_command(&mut self) {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.common.session_store_unavailable"));
+            return;
+        };
+        let roots = match store.session_roots() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.sessions.list_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        if roots.is_empty() {
+            println!("{}", t("shell.sessions.none"));
+            return;
+        }
+
+        // Walk the full session forest depth-first so nested forks stay visible
+        // without dumping every node to stdout.
+        let mut items: Vec<aish_ui::SearchSelectItem> = Vec::new();
+        for root in &roots {
+            self.collect_session_tree(store, root, 0, &mut items);
+        }
+
+        let panel = aish_ui::SearchSelectPanel::new(
+            aish_i18n::t("shell.resume.selector_title"),
+            aish_i18n::t("shell.resume.search_placeholder"),
+            items,
+        );
+        if let Ok(aish_ui::PanelOutcome::Submitted(aish_ui::SearchSelectOutcome::Selected(id))) =
+            aish_ui::PanelRuntime::new().run(panel)
+        {
+            if id != self.session_uuid {
+                if let Err(e) = self.resume_session_with_options(&id, true, true) {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.sessions.switch_failed", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            args
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    /// Build one panel row for a session node, indenting forks beneath roots.
+    fn session_tree_item(
+        &self,
+        session: &aish_session::SessionRecord,
+        depth: usize,
+    ) -> aish_ui::SearchSelectItem {
+        let indent = if depth > 0 {
+            format!("{}└ ", "  ".repeat(depth))
+        } else {
+            String::new()
+        };
+        let short = &session.session_uuid[..8.min(session.session_uuid.len())];
+        let when = session.created_at.format("%m-%d %H:%M");
+        let cur = if session.session_uuid == self.session_uuid {
+            " *"
+        } else {
+            ""
+        };
+        let label = format!("{}{} {} {}{}", indent, short, session.model, when, cur);
+        let snap = session.state_snapshot();
+        let preview: String = snap
+            .summary_preview
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        let search = format!("{} {} {}", short, session.model, preview);
+        let mut item = aish_ui::SearchSelectItem::new(session.session_uuid.clone(), label)
+            .with_search_text(search);
+        if !preview.is_empty() {
+            item = item.with_detail(preview);
+        }
+        item
+    }
+
+    /// Depth-first walk of the session tree: push `node` then recurse into its
+    /// children. The fork model guarantees acyclic parent links (a parent always
+    /// exists before its fork), so recursion terminates without a visited set.
+    fn collect_session_tree(
+        &self,
+        store: &aish_session::SessionStore,
+        node: &aish_session::SessionRecord,
+        depth: usize,
+        items: &mut Vec<aish_ui::SearchSelectItem>,
+    ) {
+        items.push(self.session_tree_item(node, depth));
+        if let Ok(children) = store.list_children(&node.session_uuid) {
+            for child in &children {
+                self.collect_session_tree(store, child, depth + 1, items);
+            }
+        }
+    }
+
+    /// `/export [md]` — export the current session (AI conversation + command
+    /// history) to a Markdown file for postmortem or sharing.
+    fn handle_export_command(&self, parts: &[&str]) {
+        let format = parts.get(1).copied().unwrap_or("md");
+        if format != "md" && format != "markdown" {
+            eprintln!("{}", t("shell.export.usage"));
+            return;
+        }
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.export.store_unavailable"));
+            return;
+        };
+        let uuid = &self.session_uuid;
+        let record = match store.get_session(uuid) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                eprintln!("{}", t("shell.export.not_found"));
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        let history = match store.get_history(uuid, 10000) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        let snap = record.state_snapshot();
+
+        let mut md = String::new();
+        md.push_str(&format!("{}\n\n", t("shell.export.md_header")));
+        md.push_str(&format!(
+            "{}\n",
+            t_with_args("shell.export.session_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("uuid".to_string(), uuid.to_string());
+                args
+            })
+        ));
+        md.push_str(&format!(
+            "{}\n",
+            t_with_args("shell.export.model_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), record.model.clone());
+                args
+            })
+        ));
+        if let Some(base) = &record.api_base {
+            md.push_str(&format!(
+                "{}\n",
+                t_with_args("shell.export.api_base_label", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("base".to_string(), base.clone());
+                    args
+                })
+            ));
+        }
+        if let Some(parent) = &record.parent_session_uuid {
+            md.push_str(&format!(
+                "{}\n",
+                t_with_args("shell.export.forked_label", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("parent".to_string(), parent.clone());
+                    args
+                })
+            ));
+        }
+        md.push_str(&format!(
+            "{}\n",
+            t_with_args("shell.export.created_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert(
+                    "created".to_string(),
+                    record
+                        .created_at
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string(),
+                );
+                args
+            })
+        ));
+        if let Some(cwd) = &snap.cwd {
+            md.push_str(&format!(
+                "\n{}\n",
+                t_with_args("shell.export.working_dir", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("cwd".to_string(), cwd.clone());
+                    args
+                })
+            ));
+        }
+
+        md.push_str(&format!("\n{}\n\n", t("shell.export.conversation_header")));
+        for msg in &snap.context_messages_snapshot {
+            let role = match msg.role.as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                "system" => "System",
+                other => other,
+            };
+            md.push_str(&format!("**{}**\n\n{}\n\n", role, msg.content));
+        }
+
+        md.push_str(&format!("\n{}\n\n", t("shell.export.history_header")));
+        md.push_str("| # | source | rc | command |\n|---|---|---|---|\n");
+        for (i, entry) in history.iter().enumerate() {
+            let cmd = entry
+                .command
+                .replace('|', "\\|")
+                .replace('\n', " ")
+                .replace('`', "\\`");
+            let rc = entry
+                .returncode
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into());
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                i + 1,
+                entry.source,
+                rc,
+                cmd
+            ));
+        }
+
+        let fname = format!("aish-session-{}.md", &uuid[..8.min(uuid.len())]);
+        match std::fs::write(&fname, &md) {
+            Ok(_) => println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.export.exported", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), fname);
+                    args.insert(
+                        "msgs".to_string(),
+                        snap.context_messages_snapshot.len().to_string(),
+                    );
+                    args.insert("cmds".to_string(), history.len().to_string());
+                    args
+                })
+            ),
+            Err(e) => eprintln!(
+                "{}",
+                t_with_args("shell.export.write_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), fname);
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            ),
+        }
+    }
+
+    fn accounts_add_interactive(&mut self) {
+        use crate::wizard::model_fetch::fetch_models_from_api;
+        use crate::wizard::verification::{check_connectivity, check_tool_support};
+
+        let name = match prompt_edit_value(
+            &t("shell.accounts.name_label"),
+            &t("shell.accounts.name_desc"),
+            "",
+            false,
+        ) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        let key = match prompt_edit_value(
+            &t("shell.accounts.key_label"),
+            &t("shell.accounts.key_desc"),
+            "",
+            true,
+        ) {
+            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        // api_base defaults to the primary endpoint; the user may override it.
+        let base = match prompt_edit_value(
+            &t("shell.accounts.base_label"),
+            &t("shell.accounts.base_desc"),
+            &self.config.api_base,
+            false,
+        ) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => self.config.api_base.clone(),
+        };
+
+        if self.config.api_accounts.iter().any(|a| a.name == name) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.already_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.clone());
+                    args
+                })
+            );
+            return;
+        }
+
+        // Pick a model to verify against (same strategy as /setup):
+        //   - if the endpoint lists models, show them with a "custom" option;
+        //   - otherwise (or when the user picks custom), prompt for a name.
+        let chosen: Option<String> = match fetch_models_from_api(&base, &key, 10) {
+            Ok(models) if !models.is_empty() => {
+                let mut opts: Vec<(String, String, String)> = models
+                    .iter()
+                    .map(|m| (m.clone(), m.clone(), String::new()))
+                    .collect();
+                opts.push((
+                    "__custom__".to_string(),
+                    t("shell.accounts.custom_model"),
+                    String::new(),
+                ));
+                match pick_menu(&t("shell.accounts.select_model"), &opts) {
+                    Some(m) if m == "__custom__" => None,
+                    Some(m) => Some(m),
+                    None => {
+                        println!("{}", t("shell.common.cancelled"));
+                        return;
+                    }
+                }
+            }
+            Ok(_) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.accounts.no_models", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), self.config.model.clone());
+                        args
+                    })
+                );
+                None
+            }
+            Err(e) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.accounts.fetch_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e);
+                        args
+                    })
+                );
+                None
+            }
+        };
+        // Fetch failed/empty or the user picked "custom" -> enter a model name.
+        let model = match chosen {
+            Some(m) => m,
+            None => match prompt_edit_value(
+                &t("shell.accounts.model_label"),
+                &t("shell.accounts.model_desc"),
+                &self.config.model,
+                false,
+            ) {
+                Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+                _ => {
+                    println!("{}", t("shell.common.cancelled"));
+                    return;
+                }
+            },
+        };
+
+        // Verify connectivity + tool support (same probes as /setup).
+        println!("{}", t("shell.accounts.verifying"));
+        let conn = check_connectivity(&base, &key, &model, 15);
+        if conn.ok {
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.connected", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert(
+                        "latency".to_string(),
+                        conn.latency_ms.unwrap_or(0).to_string(),
+                    );
+                    args.insert("model".to_string(), model.clone());
+                    args
+                })
+            );
+            let tools = check_tool_support(&base, &key, &model, 30);
+            let state = t(if tools.supports {
+                "shell.accounts.tool_yes"
+            } else {
+                "shell.accounts.tool_no"
+            });
+            println!("  {}", state);
+        } else {
+            let err = conn.error.unwrap_or_default();
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.verify_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), err);
+                    args
+                })
+            );
+            let save = pick_menu(
+                &t("shell.accounts.verify_failed_title"),
+                &[
+                    (
+                        "save".to_string(),
+                        t("shell.accounts.save_anyway"),
+                        String::new(),
+                    ),
+                    (
+                        "cancel".to_string(),
+                        t("shell.accounts.cancel_add"),
+                        String::new(),
+                    ),
+                ],
+            );
+            match save.as_deref() {
+                Some("save") => {}
+                _ => {
+                    println!("{}", t("shell.common.cancelled"));
+                    return;
+                }
+            }
+        }
+
+        // Persist. api_base is stored only when it differs from the primary.
+        let api_base_opt = if base == self.config.api_base {
+            None
+        } else {
+            Some(base)
+        };
+        self.config
+            .api_accounts
+            .push(aish_config::ApiAccountConfig {
+                name: name.clone(),
+                api_key: key,
+                api_base: api_base_opt,
+                model: Some(model.clone()),
+                weight: 1,
+                disabled: false,
+            });
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.accounts.added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("name".to_string(), name);
+                args.insert(
+                    "count".to_string(),
+                    self.config.api_accounts.len().to_string(),
+                );
+                args
+            })
+        );
+    }
+
+    /// Persist the current config to disk, then rebuild the live rotation state.
+    fn persist_config_and_rebuild_rotation(&mut self) {
+        let config_path = aish_config::ConfigLoader::default_config_path();
+        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.common.config_save_warning", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            );
+        }
+        self.rebuild_rotation();
+    }
+
+    /// Rebuild the LLM session rotation state from the current config.
+    fn rebuild_rotation(&mut self) {
+        let prev = self.ai_handler.current_rotation_account();
+        let accounts = rotation_accounts_from_config(&self.config);
+        let state = if !self.config.fallback_models.is_empty() || accounts.len() > 1 {
+            let mut policy = aish_llm::RetryPolicy::default();
+            policy.revert_on_cooldown = self.config.fallback_revert_on_cooldown;
+            let mut s = aish_llm::RotationState::new(
+                self.config.model.clone(),
+                accounts,
+                self.config.fallback_models.clone(),
+                policy,
+            );
+            if s.is_active() {
+                if let Some(ref name) = prev {
+                    s.use_account(name);
+                }
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.ai_handler.apply_rotation_state(state);
+    }
 
     fn handle_audit_command(&self, parts: &[&str]) {
         let Some(ref audit) = self.audit_store else {
             eprintln!("audit is not enabled. Set 'audit.enabled: true' in security_policy.yaml.");
             return;
         };
+
+        // No args → interactive menu (power-user keeps `/audit --user x ...`).
+        if parts.len() == 1 {
+            let opts: Vec<(String, String, String)> = vec![
+                (
+                    "recent".to_string(),
+                    t("shell.menu.audit.recent"),
+                    t("shell.menu.audit.recent_desc"),
+                ),
+                (
+                    "user".to_string(),
+                    t("shell.menu.audit.user"),
+                    t("shell.menu.audit.user_desc"),
+                ),
+                (
+                    "host".to_string(),
+                    t("shell.menu.audit.host"),
+                    t("shell.menu.audit.host_desc"),
+                ),
+                (
+                    "type".to_string(),
+                    t("shell.menu.audit.type"),
+                    t("shell.menu.audit.type_desc"),
+                ),
+            ];
+            let action = match pick_menu(&t("shell.menu.audit.title"), &opts) {
+                Some(a) => a,
+                None => return,
+            };
+            // Build owned args so the borrowed `&[&str]` outlives the match
+            // arms; recurse into the same handler for the filter cases. For
+            // "recent" (single element) fall through to the default query
+            // below instead of recursing — otherwise the len()==1 menu would
+            // re-trigger on itself.
+            let owned: Vec<String> = match action.as_str() {
+                "recent" => vec!["/audit".to_string()],
+                "user" => match prompt_edit_value(
+                    &t("shell.menu.audit.user_label"),
+                    &t("shell.menu.audit.user_desc"),
+                    "",
+                    false,
+                ) {
+                    Some(u) if !u.is_empty() => vec!["/audit".into(), "--user".into(), u],
+                    _ => return,
+                },
+                "host" => match prompt_edit_value(
+                    &t("shell.menu.audit.host_label"),
+                    &t("shell.menu.audit.host_desc"),
+                    "",
+                    false,
+                ) {
+                    Some(h) if !h.is_empty() => vec!["/audit".into(), "--host".into(), h],
+                    _ => return,
+                },
+                "type" => match prompt_edit_value(
+                    &t("shell.menu.audit.type_label"),
+                    &t("shell.menu.audit.type_desc"),
+                    "",
+                    false,
+                ) {
+                    Some(ty) if !ty.is_empty() => {
+                        vec!["/audit".into(), "--event-type".into(), ty]
+                    }
+                    _ => return,
+                },
+                _ => return,
+            };
+            if owned.len() > 1 {
+                let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+                return self.handle_audit_command(&refs);
+            }
+            // action == "recent": fall through to the default query.
+        }
 
         let mut query = aish_session::AuditQuery::new();
         query.limit = 20;
@@ -4340,20 +5150,34 @@ impl AishShell {
             }
         };
 
-        // No args: list sessions so the user can pick an ID.
+        // No args: interactive menu of killable sessions.
         if parts.len() < 2 {
-            println!(
-                "{}",
-                theme::bold(&t("shell.kill_live_sessions.list_header"))
-            );
+            let mut rows: Vec<(String, String)> = Vec::new();
             for s in &sessions {
-                println!("{}", format_session_line(s));
+                let current = current_id
+                    .as_ref()
+                    .map(|c| s.session_id == *c || s.session_id.starts_with(c))
+                    .unwrap_or(false);
+                if current {
+                    continue;
+                }
+                rows.push((s.session_id.clone(), format_session_line(s)));
             }
-            println!(
-                "\n{}",
-                theme::faint(&t("shell.kill_live_sessions.usage_hint"))
-            );
-            return;
+            let mut menu: Vec<(String, String, String)> = rows
+                .iter()
+                .map(|(v, l)| (v.clone(), l.clone(), String::new()))
+                .collect();
+            menu.push((
+                "all".to_string(),
+                t("shell.menu.kill.all"),
+                t("shell.menu.kill.all_desc"),
+            ));
+            let choice = match pick_menu(&t("shell.menu.kill.title"), &menu) {
+                Some(c) => c,
+                None => return,
+            };
+            return self
+                .handle_kill_live_sessions_command(&["/kill_live_sessions", choice.as_str()]);
         }
 
         // `/kill_live_sessions all`
@@ -4492,8 +5316,28 @@ impl AishShell {
     }
 
     fn handle_doctor_command(&mut self, parts: &[&str]) {
+        // No args → interactive menu (power-user keeps `/doctor [--fix]`).
+        let fix = if parts.len() == 1 {
+            let opts: Vec<(String, String, String)> = vec![
+                (
+                    "run".to_string(),
+                    t("shell.menu.doctor.run"),
+                    t("shell.menu.doctor.run_desc"),
+                ),
+                (
+                    "fix".to_string(),
+                    t("shell.menu.doctor.fix"),
+                    t("shell.menu.doctor.fix_desc"),
+                ),
+            ];
+            match pick_menu(&t("shell.menu.doctor.title"), &opts) {
+                Some(action) => action == "fix",
+                None => return,
+            }
+        } else {
+            parts.iter().skip(1).any(|arg| *arg == "--fix")
+        };
         let doctor = crate::doctor::Doctor::new();
-        let fix = parts.iter().skip(1).any(|arg| *arg == "--fix");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             doctor.run(fix).await;
@@ -4897,6 +5741,32 @@ impl AishShell {
     }
 
     fn handle_record_command(&mut self, parts: &[&str]) {
+        // No args → interactive menu (power-user keeps `/record start|stop`).
+        if parts.len() == 1 {
+            let recording = self
+                .shared_recorder
+                .lock()
+                .map(|g| g.is_some())
+                .unwrap_or(false);
+            let opts: Vec<(String, String, String)> = if recording {
+                vec![(
+                    "stop".to_string(),
+                    t("shell.menu.record.stop"),
+                    t("shell.menu.record.stop_desc"),
+                )]
+            } else {
+                vec![(
+                    "start".to_string(),
+                    t("shell.menu.record.start"),
+                    t("shell.menu.record.start_desc"),
+                )]
+            };
+            let action = match pick_menu(&t("shell.menu.record.title"), &opts) {
+                Some(a) => a,
+                None => return,
+            };
+            return self.handle_record_command(&["/record", action.as_str()]);
+        }
         let subcmd = parts.get(1).copied().unwrap_or("");
         let mut guard = self
             .shared_recorder
@@ -4984,18 +5854,16 @@ impl AishShell {
     }
 
     fn handle_model_command(&mut self, parts: &[&str]) {
+        // `/model <name>` switches directly (preserving the pre-panel
+        // shortcut); `/model` with no argument opens the picker panel.
         if parts.len() == 1 {
-            let mut args = std::collections::HashMap::new();
-            args.insert("model".to_string(), self.config.model.clone());
-            println!("{}", t_with_args("shell.model.current", &args));
+            self.model_picker_panel();
             return;
         }
-
-        if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
+        if parts[1] == "--help" || parts[1] == "-h" {
             println!("{}", theme::accent(&t("shell.model_usage")));
             return;
         }
-
         let new_model = parts[1..].join(" ");
         if new_model == self.config.model {
             let mut args = std::collections::HashMap::new();
@@ -5003,26 +5871,19 @@ impl AishShell {
             println!("{}", t_with_args("shell.model.switch_same", &args));
             return;
         }
-
-        // Detect provider for the new model
-        let _provider = aish_llm::detect_provider(&new_model, &self.config.api_base);
-
         // Update LLM session
         self.ai_handler.update_model(
             &new_model,
             Some(&self.config.api_base),
             Some(&self.config.api_key),
         );
-
         // Update inline completion model so it follows `/model` switches
         if let Some(ai) = &self.inline_ai {
             ai.update_model(&new_model);
         }
-
         // Update config
         self.config.model = new_model.clone();
         self.refresh_config_dependent_tools();
-
         // Persist to config file
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
@@ -5035,10 +5896,340 @@ impl AishShell {
                 })
             );
         }
-
         let mut args = std::collections::HashMap::new();
         args.insert("model".to_string(), new_model);
         println!("{}", t_with_args("shell.model.switch_success", &args));
+    }
+
+    /// `/model` opens a model switcher spanning every configured endpoint:
+    /// it fetches each endpoint's model list, shows the URL next to each
+    /// model, and lets you search by model name or URL. Enter switches the
+    /// primary endpoint+model in place; recently-used entries float to the
+    /// top. `a` adds a multi-key account.
+    fn model_picker_panel(&mut self) {
+        use crate::wizard::model_fetch::fetch_models_from_api;
+        use aish_ui::{
+            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        };
+
+        // Collect endpoints + fetch model lists once on entry. Re-fetched only
+        // after an account is added; switching models reuses the cache.
+        let mut endpoints: Vec<(String, String)> =
+            vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+        for a in &self.config.api_accounts {
+            if a.disabled {
+                continue;
+            }
+            let base = a
+                .api_base
+                .clone()
+                .unwrap_or_else(|| self.config.api_base.clone());
+            if !endpoints.iter().any(|(b, _)| b == &base) {
+                endpoints.push((base, a.api_key.clone()));
+            }
+        }
+        let mut fetched: Vec<(String, String)> = Vec::new();
+        for (base, key) in &endpoints {
+            if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                for m in models {
+                    fetched.push((m, base.clone()));
+                }
+            }
+        }
+
+        loop {
+            let cur_model = self.config.model.clone();
+            let cur_base = self.config.api_base.clone();
+            let current_val = format!("{}\u{0}{}", cur_model, cur_base);
+
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            seen.insert(current_val.clone());
+            let mut items: Vec<SearchSelectItem> =
+                vec![
+                    SearchSelectItem::new(current_val.clone(), cur_model.clone())
+                        .with_detail(&cur_base)
+                        .with_search_text(format!("{} {}", cur_model, cur_base)),
+                ];
+            for r in &self.config.recent_models {
+                if let Some((m, b)) = r.split_once('\u{0}') {
+                    if seen.insert(r.clone()) {
+                        items.push(
+                            SearchSelectItem::new(r.clone(), m.to_string())
+                                .with_detail(b)
+                                .with_search_text(format!("{} {}", m, b))
+                                .with_badge(t("shell.model.recent_badge")),
+                        );
+                    }
+                }
+            }
+            for (m, b) in &fetched {
+                let val = format!("{}\u{0}{}", m, b);
+                if seen.insert(val.clone()) {
+                    items.push(
+                        SearchSelectItem::new(val, m.clone())
+                            .with_detail(b)
+                            .with_search_text(format!("{} {}", m, b)),
+                    );
+                }
+            }
+            // Also surface each account's configured model, in case its endpoint
+            // didn't respond to the /models fetch — the user explicitly set it,
+            // so it must always be reachable in the list.
+            for a in &self.config.api_accounts {
+                if let Some(m) = &a.model {
+                    let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
+                    let val = format!("{}\u{0}{}", m, base);
+                    if seen.insert(val.clone()) {
+                        items.push(
+                            SearchSelectItem::new(val, m.clone())
+                                .with_detail(&base)
+                                .with_search_text(format!("{} {}", m, base)),
+                        );
+                    }
+                }
+            }
+
+            let panel = SearchSelectPanel::new(
+                t("shell.model.picker_title"),
+                t("shell.model.picker_search"),
+                items,
+            )
+            .with_shimmer(Some(&current_val))
+            .with_subtitle(if fetched.is_empty() {
+                t("shell.model.fetch_failed_subtitle")
+            } else {
+                t("shell.model.picker_subtitle")
+            })
+            .with_footer(t("shell.model.picker_footer"))
+            .with_action('a', t("shell.model.action_add"))
+            .with_action('m', t("shell.model.action_manage"));
+
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
+            };
+
+            match outcome {
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(val))) => {
+                    if let Some((model, base)) = val.split_once('\u{0}') {
+                        if model != self.config.model || base != self.config.api_base {
+                            let key = endpoints
+                                .iter()
+                                .find(|(b, _)| b == base)
+                                .map(|(_, k)| k.clone())
+                                .unwrap_or_else(|| self.config.api_key.clone());
+                            self.switch_endpoint_model(base, &key, model);
+                        }
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
+                    self.accounts_add_interactive();
+                    // A new account may have added an endpoint: re-collect + re-fetch.
+                    endpoints = vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+                    for a in &self.config.api_accounts {
+                        if a.disabled {
+                            continue;
+                        }
+                        let base = a
+                            .api_base
+                            .clone()
+                            .unwrap_or_else(|| self.config.api_base.clone());
+                        if !endpoints.iter().any(|(b, _)| b == &base) {
+                            endpoints.push((base, a.api_key.clone()));
+                        }
+                    }
+                    fetched.clear();
+                    for (base, key) in &endpoints {
+                        if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                            for m in models {
+                                fetched.push((m, base.clone()));
+                            }
+                        }
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('m', _))) => {
+                    self.manage_accounts_fallback();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Switch the active endpoint + model. Switching to a *different* endpoint
+    /// demotes the outgoing primary into `api_accounts` (so it stays listed
+    /// and switchable instead of being silently overwritten and lost) and, if
+    /// the target is itself an existing account, promotes it out of the pool to
+    /// avoid a duplicate. Switching only the model on the same endpoint leaves
+    /// the accounts untouched. The choice is recorded in recent history.
+    fn switch_endpoint_model(&mut self, base: &str, key: &str, model: &str) {
+        let prev_base = self.config.api_base.clone();
+        let prev_key = self.config.api_key.clone();
+        let prev_model = self.config.model.clone();
+        let endpoint_changed = base != prev_base || key != prev_key;
+
+        if endpoint_changed {
+            // Preserve the outgoing primary as a named account so a switch to a
+            // different endpoint never loses it.
+            if !prev_key.is_empty()
+                && !self
+                    .config
+                    .api_accounts
+                    .iter()
+                    .any(|a| a.api_key == prev_key)
+            {
+                let label = account_label(&prev_base, &prev_model);
+                self.config
+                    .api_accounts
+                    .push(aish_config::ApiAccountConfig {
+                        name: unique_account_name(&self.config.api_accounts, &label),
+                        api_key: prev_key,
+                        api_base: Some(prev_base.clone()),
+                        model: Some(prev_model.clone()),
+                        weight: 1,
+                        disabled: false,
+                    });
+            }
+            // Promote the target if it is an existing account: drop it from the
+            // pool so the same credential isn't both primary and a pool entry
+            // (which would double it in the rotation pool).
+            self.config
+                .api_accounts
+                .retain(|a| a.api_key.is_empty() || a.api_key != key);
+        }
+
+        self.config.api_base = base.to_string();
+        self.config.api_key = key.to_string();
+        self.config.model = model.to_string();
+        self.ai_handler.update_model(model, Some(base), Some(key));
+        if let Some(ai) = &self.inline_ai {
+            ai.update_model(model);
+        }
+        self.refresh_config_dependent_tools();
+        let rec = format!("{}\u{0}{}", model, base);
+        self.config.recent_models.retain(|r| r != &rec);
+        self.config.recent_models.insert(0, rec);
+        self.config.recent_models.truncate(20);
+        let path = aish_config::ConfigLoader::default_config_path();
+        let _ = aish_config::ConfigLoader::save(&self.config, &path);
+        self.rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.switch_success", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model.to_string());
+                args
+            })
+        );
+    }
+
+    /// Manage accounts + fallback chain in a sub-panel: list each, 'd' deletes
+    /// the highlighted entry, 'f' adds a fallback model. Esc returns to /model.
+    fn manage_accounts_fallback(&mut self) {
+        use aish_ui::{
+            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        };
+        loop {
+            let mut items: Vec<SearchSelectItem> = Vec::new();
+            for a in &self.config.api_accounts {
+                let mut item = SearchSelectItem::new(format!("acct:{}", a.name), a.name.clone())
+                    .with_detail(a.api_key.chars().take(6).collect::<String>());
+                if a.disabled {
+                    item = item.with_badge(t("shell.accounts.disabled"));
+                }
+                items.push(item);
+            }
+            for m in &self.config.fallback_models {
+                items.push(
+                    SearchSelectItem::new(format!("fb:{}", m), m.clone())
+                        .with_badge(t("shell.model.fallback_badge")),
+                );
+            }
+            if items.is_empty() {
+                println!("{}", t("shell.model.manage_empty"));
+                return;
+            }
+            let panel = SearchSelectPanel::new(
+                t("shell.model.manage_title"),
+                t("shell.model.manage_search"),
+                items,
+            )
+            .with_subtitle(t("shell.model.manage_subtitle"))
+            .with_footer(t("shell.model.manage_footer"))
+            .with_action('d', t("shell.model.action_del"))
+            .with_action('f', t("shell.model.action_fallback"));
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
+            };
+            match outcome {
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', val))) => {
+                    if let Some(name) = val.strip_prefix("acct:") {
+                        self.config.api_accounts.retain(|a| a.name != name);
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.accounts.removed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("name".to_string(), name.to_string());
+                                args
+                            })
+                        );
+                    } else if let Some(m) = val.strip_prefix("fb:") {
+                        self.config.fallback_models.retain(|x| x != m);
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.model.fallback_removed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("model".to_string(), m.to_string());
+                                args
+                            })
+                        );
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('f', _))) => {
+                    self.add_fallback_interactive();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Prompt for a fallback model name and add it to the chain.
+    fn add_fallback_interactive(&mut self) {
+        let model = match prompt_edit_value(
+            &t("shell.model.fallback_add_label"),
+            &t("shell.model.fallback_add_desc"),
+            "",
+            false,
+        ) {
+            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        if self.config.fallback_models.iter().any(|m| m == &model) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.model.fallback_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
+            return;
+        }
+        self.config.fallback_models.push(model.clone());
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.fallback_added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model);
+                args
+            })
+        );
     }
 
     /// Handle `/setting` — single-screen settings panel.
@@ -5848,6 +7039,41 @@ impl AishShell {
     fn handle_plan_command(&mut self, parts: &[&str]) {
         use aish_core::PlanPhase;
 
+        // No args → interactive menu (power-user keeps `/plan start|status|exit`).
+        if parts.len() == 1 {
+            let opts: Vec<(String, String, String)> = match self.ai_handler.plan_phase() {
+                PlanPhase::Normal => vec![
+                    (
+                        "start".to_string(),
+                        t("shell.menu.plan.start"),
+                        t("shell.menu.plan.start_desc"),
+                    ),
+                    (
+                        "status".to_string(),
+                        t("shell.menu.plan.status"),
+                        t("shell.menu.plan.status_desc"),
+                    ),
+                ],
+                PlanPhase::Planning => vec![
+                    (
+                        "status".to_string(),
+                        t("shell.menu.plan.status"),
+                        t("shell.menu.plan.status_desc"),
+                    ),
+                    (
+                        "exit".to_string(),
+                        t("shell.menu.plan.exit"),
+                        t("shell.menu.plan.exit_desc"),
+                    ),
+                ],
+            };
+            let action = match pick_menu(&t("shell.menu.plan.title"), &opts) {
+                Some(a) => a,
+                None => return,
+            };
+            return self.handle_plan_command(&["/plan", action.as_str()]);
+        }
+
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
             println!("{}", theme::accent("Usage: /plan [start|status|exit]"));
             return;
@@ -5891,6 +7117,12 @@ impl AishShell {
                     "exit" => {
                         println!("mode=shell, approval_status=draft, artifact=-");
                     }
+                    "status" => {
+                        // Not currently planning — report that instead of
+                        // silently entering plan mode (the catch-all below
+                        // would otherwise treat `status` as `start`).
+                        println!("{}", theme::faint(&t("shell.menu.plan.not_in_plan")));
+                    }
                     _ => {
                         // `/plan` or `/plan start` from shell mode → enter planning
                         self.ai_handler.enter_plan_mode(&self.session_uuid);
@@ -5909,32 +7141,96 @@ impl AishShell {
         }
     }
 
-    /// Handle `/token` — show cumulative token usage statistics (last 7 days).
+    /// Handle `/token` — show token usage (7-day totals, today, this session),
+    /// and (when active) the multi-account rotation status that previously
+    /// lived under `/usage`.
     fn handle_token_command(&self) {
         let stats = self.ai_handler.token_stats();
         let total = stats.total_input + stats.total_output;
         println!();
-        println!("{}", aish_i18n::t("shell.token.title"));
+        println!("\x1b[1m{}\x1b[0m", t("shell.token.title"));
         println!(
             "  {}  {}",
-            aish_i18n::t("shell.token.input_tokens"),
+            t("shell.token.input_tokens"),
             format_number(stats.total_input)
         );
         println!(
             "  {} {}",
-            aish_i18n::t("shell.token.output_tokens"),
+            t("shell.token.output_tokens"),
             format_number(stats.total_output)
         );
-        println!(
-            "  {}     {}",
-            aish_i18n::t("shell.token.total"),
-            format_number(total)
-        );
+        println!("  {}     {}", t("shell.token.total"), format_number(total));
         println!(
             "  {}  {}",
-            aish_i18n::t("shell.token.api_calls"),
+            t("shell.token.api_calls"),
             format_number(stats.request_count)
         );
+        let (today_in, today_out, _) = self.ai_handler.token_today();
+        let sess = self.ai_handler.session_token_stats();
+        println!(
+            "  {}     {}   {} {}",
+            t("shell.token.today"),
+            format_number(today_in + today_out),
+            t("shell.token.session"),
+            format_number(sess.total_input + sess.total_output),
+        );
+
+        // Rotation fold-in — only surfaced when multi-account/model rotation
+        // is actually active (no nag for single-account users).
+        if let Some(snap) = self.ai_handler.rotation_snapshot() {
+            println!();
+            println!(
+                "  {}  {}   {}",
+                t("shell.token.rotation"),
+                t_with_args("shell.token.rotation_avail", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("total".to_string(), snap.account_names.len().to_string());
+                    a.insert("available".to_string(), snap.available_accounts.to_string());
+                    a
+                }),
+                t_with_args("shell.token.rotation_count", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("count".to_string(), snap.total_rotations.to_string());
+                    a
+                }),
+            );
+            for name in &snap.account_names {
+                let is_cur = snap.current_account.as_deref() == Some(name.as_str());
+                let is_cool = snap.cooled_accounts.iter().any(|c| c == name);
+                let (mark, skey) = if is_cur {
+                    ("\x1b[32m*\x1b[0m", "shell.token.state_active")
+                } else if is_cool {
+                    ("\x1b[31mx\x1b[0m", "shell.token.state_cooling")
+                } else {
+                    ("o", "shell.token.state_ready")
+                };
+                println!("    {} {:<16} {}", mark, name, t(skey));
+            }
+            let fb = if snap.on_fallback {
+                format!("  \x1b[33m({})\x1b[0m", t("shell.token.fallback_active"))
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}{}",
+                t_with_args("shell.token.active_model", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("model".to_string(), snap.active_model.clone());
+                    a
+                }),
+                fb
+            );
+            if !snap.fallback_models.is_empty() {
+                println!(
+                    "  {}",
+                    t_with_args("shell.token.fallback_chain", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("chain".to_string(), snap.fallback_models.join(" -> "));
+                        a
+                    })
+                );
+            }
+        }
         println!();
     }
 
