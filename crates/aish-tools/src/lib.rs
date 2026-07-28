@@ -132,6 +132,12 @@ pub mod skill_tool {
     pub use self::skill_tool::*;
 }
 
+pub mod skill_registry {
+    mod skill_registry;
+
+    pub use self::skill_registry::*;
+}
+
 pub mod web_fetch {
     mod preapproved;
     mod prompt;
@@ -161,5 +167,6 @@ pub use plan_tool::{EnterPlanModeTool, ExitPlanModeTool, ListTemplatesTool};
 pub use python::PythonTool;
 pub use registry::ToolRegistry;
 pub use secure_bash::SecureBashTool;
+pub use skill_registry::{SkillInstallTool, SkillSearchTool, SkillTrustTool};
 pub use skill_tool::{SkillInfo, SkillSpawnFn, SkillSpawnRequest, SkillTool};
 pub use web_fetch::WebFetchTool;

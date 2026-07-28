@@ -182,6 +182,7 @@ shell:
     kill_live_sessions: "PTY-Sitzung(en) nach ID beenden"
     audit: "Audit-Protokoll abfragen (wer/wann/was/KI-Vorschlag/Bestaetigung)"
     forget-approvals: "Gemerkte Befehlsgenehmigungen löschen (diese Sitzung)"
+    skill: "Skills suchen, installieren, prüfen; Registries verwalten"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -343,6 +344,28 @@ shell:
     applied_clear: "Gelöscht {label}"
     invalid: "Ungültiger Wert: {error}"
     restart_hint: "(wirksam nach Neustart)"
+    install_installing: "'{name}' wird installiert (Quelle: {source})..."
+    install_cancel_hint: "  Strg+C zum Abbrechen drücken"
+    install_downloading: "Download von {source} [{secs}s]"
+    install_continue: "Installation läuft ({secs}s). Fortfahren? [Y/n]"
+    install_canceled: "Vom Benutzer abgebrochen (Strg+C)"
+    install_canceled_msg: "Installation abgebrochen"
+    install_timeout: "Zeitüberschreitung nach {secs}s"
+    install_crashed: "Der Installations-Thread ist abgestürzt"
+    registry_title: "Skill-Registry-Quellen"
+    registry_question: "Eine Registry zur Verwaltung auswählen oder neue Quelle hinzufügen"
+    registry_test_all: "Alle Verbindungen testen"
+    registry_add_new: "Neue Registry hinzufügen..."
+    registry_not_tested: "[-] nicht getestet"
+    registry_manage_test: "Verbindung testen"
+    registry_manage_enable: "Aktivieren"
+    registry_manage_disable: "Deaktivieren"
+    registry_manage_edit_url: "URL bearbeiten"
+    registry_manage_remove: "Entfernen"
+    registry_manage_remove_desc: "Diese Registry-Quelle löschen"
+    registry_manage_back: "Zurück zur Liste"
+    registry_manage_status_on: "aktiviert"
+    registry_manage_status_off: "deaktiviert"
     cat:
       model: "Modell & Anbieter"
       appearance: "Erscheinungsbild"
@@ -513,6 +536,12 @@ shell:
       session_db_path:
         label: "Session-DB-Pfad"
         desc: "Benutzerdefinierter Sitzungs-Datenbankort (leer = Standard)"
+      skill_auto_search:
+        label: "Skill-Auto-Suche"
+        desc: "KI durchsucht automatisch Skill-Registries und schlägt Installationen vor, wenn kein Skill passt"
+      skill_registries:
+        label: "Skill-Registry-Quellen"
+        desc: "Skill-Suchquellen verwalten (skills.sh, skillhub.cn). Enter für interaktive Verwaltung"
 
   session:
     iteration_limit_reached: "{count} Tool-Aufruf-Iterationen abgeschlossen."

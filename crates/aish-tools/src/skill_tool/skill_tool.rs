@@ -26,6 +26,10 @@ pub struct SkillInfo {
     pub context: SkillExecutionContext,
     pub agent: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
+    /// True if the skill is quarantined (unreviewed registry install). The
+    /// skill tool refuses to load quarantined skills so the quarantine does
+    /// not depend solely on callers filtering them out of the lookup.
+    pub quarantined: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +196,12 @@ impl Tool for SkillTool {
 
         match (self.lookup)(skill_name) {
             Some(skill) => {
+                if skill.quarantined {
+                    return ToolResult::error(format!(
+                        "Skill '{}' is quarantined (untrusted, not reviewed). Trust it first.",
+                        skill.name
+                    ));
+                }
                 if skill.context == SkillExecutionContext::SubAgent {
                     return ToolResult::error(format!(
                         "Skill '{}' uses context=subagent and must run via session async spawn; \
@@ -242,6 +252,13 @@ synchronous skill.execute cannot expand it inline",
             let Some(skill) = (self.lookup)(skill_name) else {
                 return self.execute(args);
             };
+
+            if skill.quarantined {
+                return ToolResult::error(format!(
+                    "Skill '{}' is quarantined (untrusted, not reviewed). Trust it first.",
+                    skill.name
+                ));
+            }
 
             if skill.context == SkillExecutionContext::Inline || session.is_sub_agent() {
                 return ToolResult {
@@ -310,6 +327,7 @@ mod tests {
             context: SkillExecutionContext::Inline,
             agent: None,
             allowed_tools: None,
+            quarantined: false,
         }
     }
 

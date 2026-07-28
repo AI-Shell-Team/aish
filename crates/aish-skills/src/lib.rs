@@ -18,7 +18,10 @@ pub mod hotreload;
 pub mod manager;
 pub mod migrate_seeded;
 pub mod models;
+pub mod registry;
 pub mod validator;
 
+pub use manager::set_skill_trusted;
 pub use manager::SkillManager;
+pub use models::UNTRUSTED_MARKER;
 pub use models::{Skill, SkillExecutionContext, SkillList, SkillMetadata};

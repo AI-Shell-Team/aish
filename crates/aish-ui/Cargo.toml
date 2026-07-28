@@ -8,3 +8,4 @@ crossterm.workspace = true
 ratatui.workspace = true
 thiserror.workspace = true
 unicode-width.workspace = true
+regex.workspace = true

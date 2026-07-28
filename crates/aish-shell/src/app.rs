@@ -56,6 +56,18 @@ extern "C" fn ai_sigint_handler(_: std::ffi::c_int) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SIGINT handler for skill install cancellation
+// ---------------------------------------------------------------------------
+
+/// Flag set by SIGINT during skill install. Checked by the install progress
+/// loop to cancel gracefully without killing aish.
+static INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn install_sigint_handler(_: std::ffi::c_int) {
+    INSTALL_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// Poll a CancellationToken until it is cancelled. Used inside `tokio::select!`
 /// to race against the AI operation — when the token fires the AI future is
 /// dropped, which aborts the in-flight HTTP stream.
@@ -181,15 +193,30 @@ fn apply_config_security_overrides(
 
 /// Human-readable current value for the setting-list row.
 fn setting_display_current(cfg: &ConfigModel, def: &crate::settings_panel::SettingDef) -> String {
-    use crate::settings_panel::{current_raw, SettingKind};
+    use crate::settings_panel::{current_raw, SettingKey, SettingKind};
     let raw = current_raw(cfg, def.key);
     match def.kind {
         SettingKind::Bool => {
-            if raw == "true" {
+            let label = if raw == "true" {
                 t("shell.setting.on")
             } else {
                 t("shell.setting.off")
+            };
+            // For skill_auto_search, append the configured registry names
+            // so the user can see which sources are active at a glance.
+            if def.key == SettingKey::SkillAutoSearch {
+                let names: Vec<&str> = cfg
+                    .skills
+                    .registries
+                    .iter()
+                    .filter(|r| r.enabled)
+                    .map(|r| r.name.as_str())
+                    .collect();
+                if !names.is_empty() {
+                    return format!("{} · [{}]", label, names.join(", "));
+                }
             }
+            label
         }
         SettingKind::Secret => {
             if raw.is_empty() {
@@ -199,6 +226,34 @@ fn setting_display_current(cfg: &ConfigModel, def: &crate::settings_panel::Setti
             }
         }
         _ => {
+            // SkillRegistries: show count and names as a summary.
+            if def.key == SettingKey::SkillRegistries {
+                let enabled: Vec<&str> = cfg
+                    .skills
+                    .registries
+                    .iter()
+                    .filter(|r| r.enabled)
+                    .map(|r| r.name.as_str())
+                    .collect();
+                let disabled: Vec<&str> = cfg
+                    .skills
+                    .registries
+                    .iter()
+                    .filter(|r| !r.enabled)
+                    .map(|r| r.name.as_str())
+                    .collect();
+                let mut parts = Vec::new();
+                if !enabled.is_empty() {
+                    parts.push(format!("[ON]  {}", enabled.join(", ")));
+                }
+                if !disabled.is_empty() {
+                    parts.push(format!("[OFF] {}", disabled.join(", ")));
+                }
+                if parts.is_empty() {
+                    return "(none)".to_string();
+                }
+                return parts.join(" · ");
+            }
             if raw.is_empty() {
                 t("shell.setting.not_set")
             } else {
@@ -921,13 +976,11 @@ impl AishShell {
             }),
         );
         tool_registry.register(Box::new(memory_tool));
-        // Load skills (best-effort, before tool registration so SkillTool can use real data)
+        // Load skills (passive SKILL.md content, not executable scripts).
+        // Skills always load regardless of `enable_scripts` — that flag only
+        // gates lifecycle hooks and .aish script execution.
         let mut skill_manager = SkillManager::new();
-        // Skill/hook loading is gated by `enable_scripts`; when false the
-        // directories are still known but nothing is loaded or hot-reloaded.
-        if config.enable_scripts {
-            let _ = skill_manager.load_all_skills();
-        }
+        let _ = skill_manager.load_all_skills();
         let skill_count = skill_manager.list_skills().len();
         let seed_migration_notice = skill_manager.take_seed_migration_notice();
 
@@ -949,6 +1002,7 @@ impl AishShell {
                 skill_manager
                     .list_skills()
                     .iter()
+                    .filter(|s| !s.quarantined)
                     .map(|s| {
                         (
                             s.metadata.name.clone(),
@@ -960,6 +1014,7 @@ impl AishShell {
                                 context: s.metadata.context,
                                 agent: s.metadata.agent.clone(),
                                 allowed_tools: s.metadata.allowed_tools.clone(),
+                                quarantined: s.quarantined,
                             },
                         )
                     })
@@ -971,6 +1026,27 @@ impl AishShell {
         };
         tool_registry.register(Box::new(skill_tool));
         tool_registry.register(Box::new(aish_tools::AgentTool::new()));
+        // Register skill registry tools (search + install) from config.
+        {
+            let registry_configs: Vec<aish_skills::registry::RegistryConfig> = config
+                .skills
+                .registries
+                .iter()
+                .map(|r| aish_skills::registry::RegistryConfig {
+                    name: r.name.clone(),
+                    registry_type: r.registry_type.clone(),
+                    enabled: r.enabled,
+                    url: r.url.clone(),
+                })
+                .collect();
+            tool_registry.register(Box::new(aish_tools::SkillSearchTool::new(
+                registry_configs.clone(),
+            )));
+            tool_registry.register(Box::new(aish_tools::SkillInstallTool::new(
+                registry_configs,
+            )));
+            tool_registry.register(Box::new(aish_tools::SkillTrustTool));
+        }
 
         let tools: Vec<(String, Box<dyn aish_llm::Tool>)> = tool_registry.drain_tools();
         for (_name, tool) in tools {
@@ -1746,10 +1822,22 @@ impl AishShell {
                 c if (c as char).is_ascii_graphic() => c as char,
                 _ => '·',
             };
-            print!("{}", theme::accent(&echo_ch.to_string()));
             let used = 2 + prompt_vis + 1 + 1;
             let pad = inner_width.saturating_sub(used);
-            println!("{}{}", " ".repeat(pad), theme::warning("│"));
+            // Reprint the entire input line from column 0 (`\r`) so the echoed
+            // key always sits right after the prompt with both borders intact,
+            // regardless of any terminal-side echo or cursor drift during the
+            // blocking read. The prompt prefix was already printed above; this
+            // overwrites it (and any stray echo) with the clean final line.
+            print!(
+                "\r{}  {} {}{}{}",
+                theme::warning("│"),
+                theme::bold(&theme::accent(&prompt_text)),
+                theme::accent(&echo_ch.to_string()),
+                " ".repeat(pad),
+                theme::warning("│"),
+            );
+            println!();
             println!("{}", theme::warning(&format!("╰{}╯", border)));
             let verdict_key = match choice {
                 aish_llm::ApprovalChoice::Once => "shell.confirm_choice_once",
@@ -1837,6 +1925,7 @@ impl AishShell {
             config.max_shell_messages,
             config.context_token_budget,
             context_budget_policy,
+            config.skills.auto_search,
         );
 
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
@@ -3263,6 +3352,7 @@ impl AishShell {
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
+            Some("/skill") => self.handle_skill_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3289,6 +3379,549 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
+    }
+
+    /// Handle `/skill` command — search, list, install, remove, verify.
+    fn handle_skill_command(&mut self, parts: &[&str]) {
+        let subcmd = parts.get(1).copied().unwrap_or("list");
+
+        // Build RegistryManager from config.
+        let registry_configs: Vec<aish_skills::registry::RegistryConfig> = self
+            .config
+            .skills
+            .registries
+            .iter()
+            .map(|r| aish_skills::registry::RegistryConfig {
+                name: r.name.clone(),
+                registry_type: r.registry_type.clone(),
+                enabled: r.enabled,
+                url: r.url.clone(),
+            })
+            .collect();
+
+        let user_skills_dir = aish_skills::SkillManager::user_skills_root()
+            .unwrap_or_else(|| std::path::PathBuf::from("aish").join("skills"));
+
+        match subcmd {
+            "search" => {
+                // Parse an optional `--limit N` (default 20); the rest is the query.
+                let mut limit = 20usize;
+                let mut query_parts: Vec<&str> = Vec::new();
+                let mut iter = parts[2..].iter().copied();
+                while let Some(arg) = iter.next() {
+                    if arg == "--limit" || arg == "-l" {
+                        if let Some(n) = iter.next().and_then(|v| v.parse::<usize>().ok()) {
+                            limit = n.max(1);
+                        }
+                    } else {
+                        query_parts.push(arg);
+                    }
+                }
+                let query = query_parts.join(" ");
+                if query.is_empty() {
+                    eprintln!("Usage: /skill search <query> [--limit N]");
+                    return;
+                }
+                let manager =
+                    aish_skills::registry::RegistryManager::from_config(&registry_configs);
+                if manager.adapter_names().is_empty() {
+                    eprintln!("No enabled skill registries.");
+                    return;
+                }
+                println!("Searching for: \"{}\" (limit {}) ...\n", query, limit);
+                let outcome = manager.search_all_with_errors(&query, limit);
+                if outcome.results.is_empty() {
+                    println!("No skills found.");
+                } else {
+                    for (i, skill) in outcome.results.iter().enumerate() {
+                        println!(
+                            "  {}. [{}] {} ({} installs)",
+                            i + 1,
+                            skill.registry,
+                            skill.name,
+                            skill.installs
+                        );
+                        if !skill.description.is_empty() {
+                            let desc: String = skill.description.chars().take(100).collect();
+                            println!("     {}...", desc);
+                        }
+                        println!("     ID: {}", skill.id);
+                    }
+                    println!("\nInstall with: /skill install <ID>");
+                }
+                if !outcome.errors.is_empty() {
+                    eprintln!("\nRegistry errors (results may be incomplete):");
+                    for e in &outcome.errors {
+                        eprintln!("  - {}: {}", e.registry, e.error);
+                    }
+                }
+            }
+            "list" => {
+                if !user_skills_dir.exists() {
+                    println!("No skills installed.");
+                    return;
+                }
+                let entries: Vec<_> = std::fs::read_dir(&user_skills_dir)
+                    .map(|d| d.filter_map(|e| e.ok()).collect())
+                    .unwrap_or_default();
+                let count = entries.iter().filter(|e| e.path().is_dir()).count();
+                if count == 0 {
+                    println!("No skills installed.");
+                    return;
+                }
+                println!("Installed skills ({}):\n", count);
+                for entry in &entries {
+                    if !entry.path().is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let marker = if entry.path().join("SKILL.md").exists() {
+                        "[OK]"
+                    } else {
+                        "(no SKILL.md)"
+                    };
+                    println!("  {} {}", name, marker);
+                }
+            }
+            "install" => {
+                let skill_id = match parts.get(2) {
+                    Some(id) => *id,
+                    None => {
+                        eprintln!("Usage: /skill install <ID>");
+                        eprintln!("  ID format: skills_sh/owner/repo/skill-name");
+                        eprintln!("  Or use /skill search to find the ID first.");
+                        return;
+                    }
+                };
+                let manager =
+                    aish_skills::registry::RegistryManager::from_config(&registry_configs);
+                let adapter_names = manager.adapter_names();
+
+                // Determine registry prefix and rest.
+                let (reg_filter, rest) = {
+                    if let Some((first, r)) = skill_id.split_once('/') {
+                        if adapter_names.contains(&first) {
+                            (Some(first), r)
+                        } else {
+                            (None, skill_id)
+                        }
+                    } else {
+                        (None, skill_id)
+                    }
+                };
+
+                // Resolve skill via direct parse or search.
+                let skill = {
+                    // Try direct parse: owner/repo/skill-name.
+                    if let Some((source, slug)) = aish_skills::registry::parse_skill_id_rest(rest) {
+                        let reg = reg_filter.unwrap_or(&self.config.skills.default_registry);
+                        Some(aish_skills::registry::RegistrySkill {
+                            id: skill_id.to_string(),
+                            name: slug.clone(),
+                            description: String::new(),
+                            registry: reg.to_string(),
+                            source,
+                            slug,
+                            installs: 0,
+                            homepage: None,
+                        })
+                    } else {
+                        // Search + fuzzy match.
+                        let search_query = rest.rsplit('/').next().unwrap_or(rest);
+                        println!(
+                            "Searching for '{}' across {}...",
+                            search_query,
+                            adapter_names.join(", ")
+                        );
+                        let results = manager.search_all(search_query, 20);
+                        results
+                            .iter()
+                            .find(|s| {
+                                if let Some(reg) = reg_filter {
+                                    if s.registry != reg {
+                                        return false;
+                                    }
+                                }
+                                s.id == skill_id
+                                    || s.slug == rest
+                                    || s.slug == search_query
+                                    || s.name.to_lowercase() == search_query.to_lowercase()
+                            })
+                            .cloned()
+                    }
+                };
+
+                let skill = match skill {
+                    Some(s) => s,
+                    None => {
+                        eprintln!(
+                            "Skill '{}' not found. Use /skill search to find the correct ID.",
+                            skill_id
+                        );
+                        return;
+                    }
+                };
+
+                std::fs::create_dir_all(&user_skills_dir).ok();
+                let installed =
+                    self.run_install_with_progress(&registry_configs, skill, &user_skills_dir);
+                if let Some(install_result) = installed {
+                    // Installed + quarantined. Offer an immediate review gate.
+                    print!(
+                        "\nSecurity review required: skill '{}' is quarantined (untrusted).\n  [y] review now   [n] delete   (other) keep quarantined: ",
+                        install_result.skill_name
+                    );
+                    let _ = std::io::stdout().flush();
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_line(&mut input);
+                    match input.trim().to_lowercase().as_str() {
+                        "y" | "yes" => {
+                            Self::print_skill_for_review(&install_result.dir);
+                            println!(
+                                "\nTrust after review:  /skill trust {}\nRemove:               /skill remove {}",
+                                install_result.skill_name, install_result.skill_name
+                            );
+                        }
+                        "n" | "no" => {
+                            let _ = std::fs::remove_dir_all(&install_result.dir);
+                            println!("Removed quarantined skill '{}'.", install_result.skill_name);
+                        }
+                        _ => {
+                            println!(
+                                "Kept quarantined. Review with /skill vet {}, trust with /skill trust {}.",
+                                install_result.skill_name, install_result.skill_name
+                            );
+                        }
+                    }
+                }
+            }
+            "remove" => {
+                let name = match parts.get(2) {
+                    Some(n) => *n,
+                    None => {
+                        eprintln!("Usage: /skill remove <name>");
+                        return;
+                    }
+                };
+                if aish_skills::registry::is_unsafe_skill_name(name) {
+                    eprintln!("Unsafe skill name: {:?}", name);
+                    return;
+                }
+                let dir = user_skills_dir.join(name);
+                if !dir.exists() {
+                    eprintln!("Skill '{}' not found.", name);
+                    return;
+                }
+                match std::fs::remove_dir_all(&dir) {
+                    Ok(()) => println!("Removed skill '{}'.", name),
+                    Err(e) => eprintln!("Failed: {}", e),
+                }
+            }
+            "verify" => {
+                let name = match parts.get(2) {
+                    Some(n) => *n,
+                    None => {
+                        eprintln!("Usage: /skill verify <name>");
+                        return;
+                    }
+                };
+                if aish_skills::registry::is_unsafe_skill_name(name) {
+                    eprintln!("Unsafe skill name: {:?}", name);
+                    return;
+                }
+                let dir = user_skills_dir.join(name);
+                if !dir.exists() {
+                    eprintln!("Skill '{}' not found.", name);
+                    return;
+                }
+                let report = aish_skills::registry::RegistryManager::verify(&dir);
+                println!("Skill: {} | Valid: {}", report.skill_name, report.valid);
+                for check in &report.checks {
+                    let status = if check.passed { "PASS" } else { "FAIL" };
+                    println!("  [{}] {}", status, check.label);
+                }
+            }
+            "trust" => {
+                let name = match parts.get(2) {
+                    Some(n) => *n,
+                    None => {
+                        eprintln!("Usage: /skill trust <name>");
+                        return;
+                    }
+                };
+                if aish_skills::registry::is_unsafe_skill_name(name) {
+                    eprintln!("Unsafe skill name: {:?}", name);
+                    return;
+                }
+                let dir = user_skills_dir.join(name);
+                if !dir.is_dir() {
+                    eprintln!("Skill '{}' is not installed.", name);
+                    return;
+                }
+                if !dir.join(aish_skills::UNTRUSTED_MARKER).exists() {
+                    println!("Skill '{}' is already trusted.", name);
+                    return;
+                }
+                match aish_skills::set_skill_trusted(&dir, true) {
+                    Ok(true) => println!(
+                        "Trusted skill '{}'. It will load on the next skills refresh.",
+                        name
+                    ),
+                    Ok(false) => println!("Skill '{}' was already trusted.", name),
+                    Err(e) => eprintln!("Failed to trust '{}': {}", name, e),
+                }
+            }
+            "vet" => {
+                let name = match parts.get(2) {
+                    Some(n) => *n,
+                    None => {
+                        eprintln!("Usage: /skill vet <name>");
+                        return;
+                    }
+                };
+                if aish_skills::registry::is_unsafe_skill_name(name) {
+                    eprintln!("Unsafe skill name: {:?}", name);
+                    return;
+                }
+                let dir = user_skills_dir.join(name);
+                if !dir.is_dir() {
+                    eprintln!("Skill '{}' is not installed.", name);
+                    return;
+                }
+                Self::print_skill_for_review(&dir);
+                if dir.join(aish_skills::UNTRUSTED_MARKER).exists() {
+                    println!(
+                        "\nThis skill is QUARANTINED. After review: /skill trust {} (or /skill remove {}).",
+                        name, name
+                    );
+                }
+            }
+            "registry" => {
+                // Open the interactive registry management panel (the same one
+                // /setting uses). Registry list/enable/disable/add/remove/test
+                // are all driven from the panel now, not positional args.
+                let mut restart = 0usize;
+                self.handle_skill_registry_panel(&mut restart);
+                if restart > 0 {
+                    println!(
+                        "{}",
+                        t_with_args("shell.setting.restart_summary", &{
+                            let mut a = std::collections::HashMap::new();
+                            a.insert("count".to_string(), restart.to_string());
+                            a
+                        })
+                    );
+                }
+            }
+            other => {
+                eprintln!(
+                    "Unknown subcommand '{}'. Use: search, list, install, remove, verify, trust, vet, registry",
+                    other
+                );
+            }
+        }
+    }
+
+    /// Print a skill's files for manual security review: the full SKILL.md
+    /// content, a file listing, and the vetting checklist. Used by the
+    /// interactive install review prompt and the vet subcommand.
+    fn print_skill_for_review(dir: &std::path::Path) {
+        let skill_md = dir.join("SKILL.md");
+        println!("\n--- {} ---", skill_md.display());
+        match std::fs::read_to_string(&skill_md) {
+            Ok(content) => println!("{}", aish_ui::strip_ansi_escapes(&content)),
+            Err(e) => println!("(could not read SKILL.md: {})", e),
+        }
+        println!("\n--- files in {} ---", dir.display());
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name == aish_skills::UNTRUSTED_MARKER {
+                    continue;
+                }
+                let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+                println!("  {}{}", name, if is_dir { "/" } else { "" });
+            }
+        }
+        println!(
+            "\nVetting checklist: provenance · credential access · network exfiltration · \
+             eval/exec · base64 obfuscation · sudo · hidden downloads · destructive ops · \
+             prompt-injection."
+        );
+    }
+
+    /// Run a skill install in a background thread with progress output,
+    /// timeout, and Ctrl+C cancellation support.
+    fn run_install_with_progress(
+        &self,
+        configs: &[aish_skills::registry::RegistryConfig],
+        skill: aish_skills::registry::RegistrySkill,
+        target_dir: &std::path::Path,
+    ) -> Option<aish_skills::registry::InstallResult> {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let display_name = skill.name.clone();
+        let display_source = skill.source.clone();
+        println!(
+            "{}",
+            t_with_args("shell.setting.install_installing", &{
+                let mut a = std::collections::HashMap::new();
+                a.insert("name".to_string(), display_name.clone());
+                a.insert("source".to_string(), display_source.clone());
+                a
+            })
+        );
+        println!("{}\n", t("shell.setting.install_cancel_hint"));
+
+        // Spawn the install in a background thread so the main thread
+        // can poll for progress and handle cancellation.
+        let (tx, rx) = mpsc::channel();
+        let configs_owned: Vec<_> = configs.to_vec();
+        let target_owned = target_dir.to_path_buf();
+
+        // Private cancel flag for THIS install (not the process-global one).
+        // The worker polls it between file downloads. A per-install flag means
+        // cancelling install A then starting install B can no longer un-cancel
+        // A — the old code reset a single global flag, so B's reset resumed an
+        // install the user had explicitly aborted.
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_worker = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            let mgr = aish_skills::registry::RegistryManager::from_config(&configs_owned);
+            let _ = tx.send(mgr.install_with_cancel(&skill, &target_owned, &cancel_worker));
+        });
+
+        // Install a SIGINT handler so Ctrl+C cancels instead of killing aish.
+        // Clear any leftover request from a previous install first.
+        INSTALL_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let old_sigint = {
+            use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
+            let action = SigAction::new(
+                SigHandler::Handler(install_sigint_handler),
+                SaFlags::empty(),
+                SigSet::empty(),
+            );
+            unsafe { signal::sigaction(Signal::SIGINT, &action) }.ok()
+        };
+
+        let start = Instant::now();
+        let mut last_dot = Instant::now();
+        let poll = Duration::from_secs(1);
+        let hard_timeout = Duration::from_secs(120);
+        let prompt_interval = Duration::from_secs(30);
+        let mut last_prompt = Instant::now();
+
+        let result: Option<aish_core::Result<aish_skills::registry::InstallResult>> = loop {
+            // Check for Ctrl+C. The global flag is set by the SIGINT handler
+            // (signal-safe); forward it onto this install's private cancel
+            // flag so the worker stops at its next download boundary.
+            if INSTALL_CANCELLED.load(std::sync::atomic::Ordering::SeqCst) {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                eprintln!("\r\x1b[2K  {}", t("shell.setting.install_canceled"));
+                break None;
+            }
+
+            match rx.recv_timeout(poll) {
+                Ok(result) => break Some(result),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let elapsed = start.elapsed();
+
+                    // Hard timeout.
+                    if elapsed >= hard_timeout {
+                        eprintln!(
+                            "\r\x1b[2K  {}",
+                            t_with_args("shell.setting.install_timeout", &{
+                                let mut a = std::collections::HashMap::new();
+                                a.insert("secs".to_string(), elapsed.as_secs().to_string());
+                                a
+                            })
+                        );
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        break None;
+                    }
+
+                    // Progress update every 2 seconds.
+                    if last_dot.elapsed() >= Duration::from_secs(2) {
+                        print!(
+                            "\r  {}",
+                            t_with_args("shell.setting.install_downloading", &{
+                                let mut a = std::collections::HashMap::new();
+                                a.insert("source".to_string(), display_source.clone());
+                                a.insert("secs".to_string(), elapsed.as_secs().to_string());
+                                a
+                            })
+                        );
+                        let _ = std::io::stdout().flush();
+                        last_dot = Instant::now();
+                    }
+
+                    // Every 30 seconds, ask to continue.
+                    if last_prompt.elapsed() >= prompt_interval {
+                        print!(
+                            "\r\x1b[2K  {} ",
+                            t_with_args("shell.setting.install_continue", &{
+                                let mut a = std::collections::HashMap::new();
+                                a.insert("secs".to_string(), elapsed.as_secs().to_string());
+                                a
+                            })
+                        );
+                        let _ = std::io::stdout().flush();
+                        let mut input = String::new();
+                        let _ = std::io::stdin().read_line(&mut input);
+                        let input = input.trim().to_lowercase();
+                        if input == "n" || input == "no" {
+                            eprintln!("  {}", t("shell.setting.install_canceled_msg"));
+                            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                            break None;
+                        }
+                        last_prompt = Instant::now();
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    eprintln!("\r\x1b[2K  {}", t("shell.setting.install_crashed"));
+                    cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                    break None;
+                }
+            }
+        };
+
+        // Restore SIGINT handler.
+        if let Some(old) = old_sigint {
+            use nix::sys::signal::{self, Signal};
+            let _ = unsafe { signal::sigaction(Signal::SIGINT, &old) };
+        }
+
+        // Signal the worker to stop (if it hasn't already) and reap it so a
+        // timed-out/cancelled install cannot leak a background thread that
+        // keeps writing quarantined files after we told the user it failed.
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = worker.join();
+
+        // Clear progress line.
+        print!("\r\x1b[2K");
+        let _ = std::io::stdout().flush();
+
+        match result {
+            Some(Ok(install_result)) => {
+                println!(
+                    "Installed: {} (QUARANTINED — untrusted, not loaded)",
+                    install_result.skill_name
+                );
+                println!("  Path: {}", install_result.dir.display());
+                let report = aish_skills::registry::RegistryManager::verify(&install_result.dir);
+                println!(
+                    "  Verify: {}",
+                    if report.valid { "PASSED" } else { "WARNINGS" }
+                );
+                Some(install_result)
+            }
+            Some(Err(e)) => {
+                eprintln!("Install failed: {}", e);
+                None
+            }
+            None => None,
+        }
     }
 
     fn handle_audit_command(&self, parts: &[&str]) {
@@ -4482,15 +5115,19 @@ impl AishShell {
                         continue;
                     };
                     last_key = Some(key.clone());
+
+                    // SkillRegistries gets a custom interactive dialog
+                    // instead of the plain text editor.
+                    if k == crate::settings_panel::SettingKey::SkillRegistries {
+                        self.handle_skill_registry_panel(&mut restart_changes);
+                        continue;
+                    }
+
                     let def = settings_panel::find(k);
                     let label = setting_label(def);
                     let desc = setting_desc(def);
                     let cur_raw = settings_panel::current_raw(&self.config, k);
                     let secret = matches!(def.kind, SettingKind::Secret);
-                    // Pop a single external input; we return to the panel
-                    // afterwards regardless of outcome. Empty submission on
-                    // a Secret prompt is a no-op (skip), not a wipe — mirrors
-                    // the legacy edit_setting_value guard.
                     let submitted = prompt_edit_value(&label, &desc, &cur_raw, secret);
                     let skip = secret && submitted.as_deref().is_some_and(|v| v.is_empty());
                     if let Some(v) = submitted {
@@ -4529,6 +5166,412 @@ impl AishShell {
                     a
                 }))
             );
+        }
+    }
+
+    /// Interactive skill registry management dialog, opened from `/setting`.
+    ///
+    /// Shows a selection list of configured registries with add/remove/
+    /// enable/disable/edit actions. Changes are persisted to config.yaml.
+    fn handle_skill_registry_panel(&mut self, restart_changes: &mut usize) {
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+        use std::collections::HashMap;
+
+        // Cache connection test results: registry name → (ok, detail).
+        let mut test_cache: HashMap<String, (bool, String)> = HashMap::new();
+
+        loop {
+            // Build the main selection list.
+            let mut options: Vec<DialogOption> = Vec::new();
+            options.push(DialogOption::new(
+                "__test_all__",
+                t("shell.setting.registry_test_all"),
+            ));
+            options.push(DialogOption::new(
+                "__add__",
+                t("shell.setting.registry_add_new"),
+            ));
+
+            for r in &self.config.skills.registries {
+                let status_icon = match test_cache.get(&r.name) {
+                    Some((true, detail)) => format!("[OK] {}", detail),
+                    Some((false, detail)) => format!("[FAIL] {}", detail),
+                    None => t("shell.setting.registry_not_tested").to_string(),
+                };
+                let enabled_tag = if r.enabled {
+                    ""
+                } else {
+                    &format!(" ({})", t("shell.setting.registry_manage_status_off"))
+                };
+                let default_tag = if r.name == "skills_sh" || r.name == "skillhub_cn" {
+                    " default"
+                } else {
+                    ""
+                };
+                options.push(
+                    DialogOption::new(
+                        &r.name,
+                        format!(
+                            "{} [{}]{}{}",
+                            r.name, r.registry_type, default_tag, enabled_tag
+                        ),
+                    )
+                    .with_description(format!("{} — {}", status_icon, r.url)),
+                );
+            }
+
+            let title = t("shell.setting.registry_title");
+            let question = t("shell.setting.registry_question");
+            let result = show_selection_dialog(&title, &question, &options, false, true);
+
+            match result {
+                DialogResult::Selected(ref v) if v == "__test_all__" => {
+                    let names: Vec<String> = self
+                        .config
+                        .skills
+                        .registries
+                        .iter()
+                        .map(|r| r.name.clone())
+                        .collect();
+                    println!("\n  Testing {} registries...", names.len());
+                    for name in &names {
+                        let configs: Vec<_> = self
+                            .config
+                            .skills
+                            .registries
+                            .iter()
+                            .filter(|r| &r.name == name)
+                            .map(|r| aish_skills::registry::RegistryConfig {
+                                name: r.name.clone(),
+                                registry_type: r.registry_type.clone(),
+                                enabled: true,
+                                url: r.url.clone(),
+                            })
+                            .collect();
+                        let mgr = aish_skills::registry::RegistryManager::from_config(&configs);
+                        match mgr.test_connection(name) {
+                            Ok((count, ms)) => {
+                                println!("  [OK] {} -- {} skills, {}ms", name, count, ms);
+                                test_cache.insert(
+                                    name.clone(),
+                                    (true, format!("{} skills, {}ms", count, ms)),
+                                );
+                            }
+                            Err(e) => {
+                                let msg = e.to_string();
+                                let short: String = msg.chars().take(60).collect();
+                                println!("  [FAIL] {} -- {}", name, short);
+                                test_cache.insert(name.clone(), (false, short));
+                            }
+                        }
+                    }
+                    println!();
+                }
+                DialogResult::Selected(ref v) if v == "__add__" => {
+                    if self.prompt_add_registry() {
+                        *restart_changes += 1;
+                    }
+                }
+                DialogResult::Selected(ref name) => {
+                    // Manage dialog loops internally until user cancels.
+                    self.prompt_manage_registry(name, restart_changes);
+                }
+                _ => break, // Esc / Cancel — return to settings panel
+            }
+        }
+    }
+
+    /// Prompt the user to add a new registry source with connection validation.
+    /// Returns `true` if a registry was added.
+    fn prompt_add_registry(&mut self) -> bool {
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+
+        // Step 1: Name
+        let name = match prompt_edit_value(
+            "New Registry",
+            "Enter a name for this registry (e.g. my-skillhub)",
+            "",
+            false,
+        ) {
+            Some(n) if !n.is_empty() => n,
+            _ => return false,
+        };
+
+        // Check for duplicate.
+        if self.config.skills.registries.iter().any(|r| r.name == name) {
+            eprintln!("Registry '{}' already exists.", name);
+            return false;
+        }
+
+        // Step 2: Type
+        let type_options = vec![
+            DialogOption::new("skills_sh", "skills.sh")
+                .with_description("GitHub-based skill registry"),
+            DialogOption::new("skillhub", "skillhub.cn")
+                .with_description("Chinese skill marketplace"),
+            DialogOption::new("clawhub", "clawhub.ai")
+                .with_description("Claude-compatible registry"),
+        ];
+        let reg_type = match show_selection_dialog(
+            "Registry Type",
+            "Select the registry type",
+            &type_options,
+            false,
+            true,
+        ) {
+            DialogResult::Selected(t) => t,
+            _ => return false,
+        };
+
+        // Step 3: URL
+        let default_url = match reg_type.as_str() {
+            "skills_sh" => "https://skills.sh",
+            "skillhub" => "https://api.skillhub.cn",
+            "clawhub" => "https://api.clawhub.ai",
+            _ => "",
+        };
+        let url = match prompt_edit_value(
+            "Registry URL",
+            "Enter the base URL for this registry",
+            default_url,
+            false,
+        ) {
+            Some(u) if !u.is_empty() => u,
+            _ => return false,
+        };
+
+        // Step 4: Connection test — mandatory, must pass to save.
+        println!("\n  Testing connection to {}...", url);
+        let configs = vec![aish_skills::registry::RegistryConfig {
+            name: name.clone(),
+            registry_type: reg_type.clone(),
+            enabled: true,
+            url: url.clone(),
+        }];
+        let mgr = aish_skills::registry::RegistryManager::from_config(&configs);
+
+        match mgr.test_connection(&name) {
+            Ok((count, latency)) => {
+                println!(
+                    "  [OK] Connection OK -- {} skills found, {}ms latency",
+                    count, latency
+                );
+            }
+            Err(e) => {
+                eprintln!("  [FAIL] Connection failed: {}", e);
+                // Ask whether to retry or cancel.
+                let retry_opts = vec![
+                    DialogOption::new("retry", "Retry with different URL"),
+                    DialogOption::new("save_anyway", "Save anyway"),
+                    DialogOption::new("cancel", "Cancel"),
+                ];
+                match show_selection_dialog(
+                    "Connection Failed",
+                    &format!("Error: {}", e),
+                    &retry_opts,
+                    false,
+                    true,
+                ) {
+                    DialogResult::Selected(ref v) if v == "save_anyway" => {}
+                    DialogResult::Selected(ref v) if v == "retry" => {
+                        // Re-enter URL and retest.
+                        let new_url = match prompt_edit_value(
+                            "Registry URL",
+                            "Enter a different URL",
+                            &url,
+                            false,
+                        ) {
+                            Some(u) if !u.is_empty() => u,
+                            _ => return false,
+                        };
+                        // Quick retest.
+                        let configs2 = vec![aish_skills::registry::RegistryConfig {
+                            name: name.clone(),
+                            registry_type: reg_type.clone(),
+                            enabled: true,
+                            url: new_url.clone(),
+                        }];
+                        let mgr2 = aish_skills::registry::RegistryManager::from_config(&configs2);
+                        match mgr2.test_connection(&name) {
+                            Ok((c, l)) => println!("  [OK] Connection OK -- {} skills, {}ms", c, l),
+                            Err(e2) => {
+                                eprintln!("  [FAIL] Still failing: {}", e2);
+                                eprintln!("  Saving with current URL.");
+                            }
+                        };
+                        // Use the new URL.
+                        self.config
+                            .skills
+                            .registries
+                            .push(aish_config::RegistrySource {
+                                name: name.clone(),
+                                registry_type: reg_type,
+                                enabled: true,
+                                url: new_url,
+                            });
+                        self.save_config_and_print();
+                        return true;
+                    }
+                    _ => return false,
+                }
+            }
+        }
+
+        // All checks passed (or user chose to save anyway) — add and save.
+        self.config
+            .skills
+            .registries
+            .push(aish_config::RegistrySource {
+                name: name.clone(),
+                registry_type: reg_type,
+                enabled: true,
+                url,
+            });
+        self.save_config_and_print();
+        true
+    }
+
+    /// Show the management dialog for an existing registry.
+    /// Loops internally so the user can perform multiple actions (test →
+    /// enable → edit) before returning to the main list.
+    fn prompt_manage_registry(&mut self, name: &str, restart_changes: &mut usize) {
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+
+        loop {
+            // Re-read registry state each iteration (may have changed).
+            let idx = match self
+                .config
+                .skills
+                .registries
+                .iter()
+                .position(|r| r.name == name)
+            {
+                Some(i) => i,
+                None => return, // Registry was removed.
+            };
+            let reg = &self.config.skills.registries[idx];
+            let is_enabled = reg.enabled;
+            let current_url = reg.url.clone();
+            let reg_type = reg.registry_type.clone();
+
+            let toggle_label = if is_enabled {
+                t("shell.setting.registry_manage_disable").to_string()
+            } else {
+                t("shell.setting.registry_manage_enable").to_string()
+            };
+            let toggle_val = if is_enabled { "disable" } else { "enable" };
+            let status_str = if is_enabled {
+                t("shell.setting.registry_manage_status_on")
+            } else {
+                t("shell.setting.registry_manage_status_off")
+            };
+
+            let options = vec![
+                DialogOption::new("test", t("shell.setting.registry_manage_test")),
+                DialogOption::new(toggle_val, toggle_label),
+                DialogOption::new("edit_url", t("shell.setting.registry_manage_edit_url")),
+                DialogOption::new("remove", t("shell.setting.registry_manage_remove"))
+                    .with_description(t("shell.setting.registry_manage_remove_desc")),
+                DialogOption::new("__back__", t("shell.setting.registry_manage_back")),
+            ];
+
+            let result = show_selection_dialog(
+                &format!("{} [{}] — {}", name, reg_type, status_str),
+                &format!("URL: {}", current_url),
+                &options,
+                false,
+                true,
+            );
+
+            let action = match result {
+                DialogResult::Selected(a) => a,
+                _ => return, // Esc / Cancel
+            };
+
+            if action == "__back__" {
+                return;
+            }
+
+            let mut changed = false;
+            match action.as_str() {
+                "test" => {
+                    let configs = vec![aish_skills::registry::RegistryConfig {
+                        name: name.to_string(),
+                        registry_type: reg_type.clone(),
+                        enabled: true,
+                        url: current_url.clone(),
+                    }];
+                    let mgr = aish_skills::registry::RegistryManager::from_config(&configs);
+                    println!("\n  Testing connection to {}...", current_url);
+                    match mgr.test_connection(name) {
+                        Ok((count, latency)) => {
+                            println!(
+                                "  [OK] {} is reachable -- {} skills, {}ms\n",
+                                name, count, latency
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("  [FAIL] {} connection failed: {}\n", name, e);
+                        }
+                    }
+                }
+                "enable" | "disable" => {
+                    self.config.skills.registries[idx].enabled = !is_enabled;
+                    changed = true;
+                }
+                "edit_url" => {
+                    if let Some(new_url) = prompt_edit_value(
+                        "Edit URL",
+                        &format!("Current: {}", current_url),
+                        &current_url,
+                        false,
+                    ) {
+                        if !new_url.is_empty() && new_url != current_url {
+                            println!("\n  Testing new URL...");
+                            let configs = vec![aish_skills::registry::RegistryConfig {
+                                name: name.to_string(),
+                                registry_type: reg_type.clone(),
+                                enabled: true,
+                                url: new_url.clone(),
+                            }];
+                            let mgr = aish_skills::registry::RegistryManager::from_config(&configs);
+                            match mgr.test_connection(name) {
+                                Ok((c, l)) => {
+                                    println!("  [OK] OK -- {} skills, {}ms\n", c, l);
+                                    self.config.skills.registries[idx].url = new_url;
+                                    changed = true;
+                                }
+                                Err(e) => {
+                                    eprintln!("  [FAIL] Test failed: {}\n", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                "remove" => {
+                    self.config.skills.registries.retain(|r| r.name != name);
+                    changed = true;
+                    if changed {
+                        self.save_config_and_print();
+                        *restart_changes += 1;
+                    }
+                    return; // Registry gone — exit loop.
+                }
+                _ => {}
+            }
+            if changed {
+                self.save_config_and_print();
+                *restart_changes += 1;
+            }
+        }
+    }
+
+    /// Save config to disk and print a confirmation.
+    fn save_config_and_print(&self) {
+        let path = aish_config::ConfigLoader::default_config_path();
+        match aish_config::ConfigLoader::save(&self.config, &path) {
+            Ok(()) => {}
+            Err(e) => eprintln!("Failed to save config: {}", e),
         }
     }
 
@@ -6340,6 +7383,7 @@ impl AishShell {
             std::sync::Arc::new(
                 sm.list_skills()
                     .iter()
+                    .filter(|s| !s.quarantined)
                     .map(|s| {
                         (
                             s.metadata.name.clone(),
@@ -6351,6 +7395,7 @@ impl AishShell {
                                 context: s.metadata.context,
                                 agent: s.metadata.agent.clone(),
                                 allowed_tools: s.metadata.allowed_tools.clone(),
+                                quarantined: s.quarantined,
                             },
                         )
                     })
@@ -8268,6 +9313,14 @@ fn read_raw_confirmation() -> bool {
 /// [`read_raw_confirmation`].
 fn read_approval_choice() -> (u8, aish_llm::ApprovalChoice) {
     let _ig = aish_tools::bash::acquire_interactive_input_guard();
+    // Actually enter input-raw mode for the read. Without this the terminal
+    // may be in cooked mode (echo on, line-buffered): it echoes the pressed
+    // key itself and waits for Enter, which duplicates our manual echo below
+    // and moves the cursor to column 0 — so the echoed char lands on its own
+    // line instead of after the prompt. Disabling ECHO/ICANON/ISIG makes the
+    // manual echo the only echo and returns the byte immediately. Falls back
+    // to the inherited mode when stdin isn't a tty (e.g. piped input).
+    let _raw = crate::keyboard::InputRawGuard::enter().ok();
 
     let mut byte = [0u8; 1];
     let (pressed, choice) = match io::stdin().read(&mut byte) {

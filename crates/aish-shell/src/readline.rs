@@ -45,6 +45,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/forget-approvals",
         "Clear remembered command approvals (this session)",
     ),
+    (
+        "/skill",
+        "Search, install, verify skills; manage registries",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -823,6 +827,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 17);
+        assert_eq!(SLASH_COMMANDS.len(), 18);
     }
 }

@@ -13,6 +13,9 @@ regex.workspace = true
 notify.workspace = true
 dirs.workspace = true
 include_dir.workspace = true
+reqwest = { workspace = true }
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

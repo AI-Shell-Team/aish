@@ -42,19 +42,34 @@ impl SkillManager {
         self.seed_migration_notice.take()
     }
 
+    /// Resolve the user skills directory, mirroring the config loader's
+    /// config-dir resolution so installed skills land where the loader reads
+    /// them. Checked in order: `$AISH_CONFIG_DIR/skills`, then
+    /// `$XDG_CONFIG_HOME/aish/skills` (via `dirs::config_dir()`), then
+    /// `~/.config/aish/skills`. Shared by the loader (`scan_skill_roots`) and
+    /// the install paths (shell `/skill`, AI `skill_install`, `aish skill`
+    /// CLI) so they can never disagree.
+    pub fn user_skills_root() -> Option<PathBuf> {
+        if let Ok(dir) = std::env::var("AISH_CONFIG_DIR") {
+            return Some(PathBuf::from(dir).join("skills"));
+        }
+        if let Some(config_dir) = dirs::config_dir() {
+            return Some(config_dir.join("aish").join("skills"));
+        }
+        dirs::home_dir().map(|h| h.join(".config").join("aish").join("skills"))
+    }
+
     /// Scan and return skill root directories in priority order:
     /// USER > CLAUDE > Builtin (embedded packaged skills, materialized to cache).
     pub fn scan_skill_roots(&self) -> Vec<(SkillSource, PathBuf)> {
         let mut roots = Vec::new();
 
-        // 1. USER: $AISH_CONFIG_DIR/skills or ~/.config/aish/skills
-        if let Ok(config_dir) = std::env::var("AISH_CONFIG_DIR") {
-            roots.push((SkillSource::User, PathBuf::from(config_dir).join("skills")));
-        } else if let Some(home) = dirs::home_dir() {
-            roots.push((
-                SkillSource::User,
-                home.join(".config").join("aish").join("skills"),
-            ));
+        // 1. USER: resolved via user_skills_root() so installs land exactly
+        // where the loader reads them (respects $XDG_CONFIG_HOME, matching
+        // aish_config::ConfigLoader::default_config_path). Previously this
+        // hardcoded ~/.config and diverged from the install paths.
+        if let Some(user_root) = Self::user_skills_root() {
+            roots.push((SkillSource::User, user_root));
         }
 
         // 2. CLAUDE: $HOME/.claude/skills
@@ -183,13 +198,45 @@ impl SkillManager {
         // skill was loaded from.
         let skill_content = rewrite_skill_paths(skill_content, &metadata.name, &base_dir);
 
+        // Registry-installed skills carry a `.untrusted` sentinel at the
+        // skill's top-level dir until reviewed. `load_skills` walks the tree
+        // recursively, so a skill may ship nested SKILL.md files in
+        // subdirectories; those inherit the top-level quarantine. Walk up the
+        // ancestors so a nested `my-skill/sub/SKILL.md` is also quarantined
+        // when `my-skill/.untrusted` exists (otherwise it would load as
+        // trusted and bypass the review gate). Markers can only ever exist
+        // inside a skill dir (validate_install_slug rejects empty/traversal
+        // slugs), so this never over-quarantines unrelated skills.
+        let quarantined = Self::is_quarantined_under(skill_path);
+
         Ok(Skill {
             metadata,
             content: skill_content,
             source,
             file_path: skill_path.to_string_lossy().to_string(),
             base_dir,
+            quarantined,
         })
+    }
+
+    /// True if the skill at `skill_path` lives under a directory carrying the
+    /// `.untrusted` quarantine marker. Walks up from the file's parent so
+    /// nested SKILL.md files (under an untrusted skill's top-level dir) are
+    /// caught too.
+    fn is_quarantined_under(skill_path: &Path) -> bool {
+        let mut dir = match skill_path.parent() {
+            Some(d) => d,
+            None => return false,
+        };
+        loop {
+            if dir.join(UNTRUSTED_MARKER).exists() {
+                return true;
+            }
+            dir = match dir.parent() {
+                Some(p) => p,
+                None => return false,
+            };
+        }
     }
 
     /// Look up a skill by name.
@@ -377,6 +424,24 @@ fn replace_path_prefix(haystack: &str, needle: &str, replacement: &str) -> Strin
     out
 }
 
+/// Mark a skill directory trusted (`trusted = true` removes the `.untrusted`
+/// sentinel so the loader injects it into AI context) or untrusted
+/// (`trusted = false` writes the sentinel). Returns whether the marker state
+/// actually changed. Removing/adding the sentinel is picked up by hot-reload.
+pub fn set_skill_trusted(skill_dir: &Path, trusted: bool) -> std::io::Result<bool> {
+    let marker = skill_dir.join(UNTRUSTED_MARKER);
+    let exists = marker.exists();
+    if trusted && exists {
+        std::fs::remove_file(&marker)?;
+        Ok(true)
+    } else if !trusted && !exists {
+        std::fs::write(&marker, b"untrusted: pending security review\n")?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +561,72 @@ mod tests {
         let content = "Installed at ~/.claude/skills/my-skill";
         let rewritten = rewrite_skill_paths(content, "my-skill", "/abs/path");
         assert_eq!(rewritten, "Installed at /abs/path");
+    }
+
+    #[test]
+    fn quarantined_skill_detected_via_untrusted_marker() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\ndescription: test\n---\nbody",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join(UNTRUSTED_MARKER), b"untrusted").unwrap();
+
+        let manager = SkillManager::new();
+        let skill = manager
+            .parse_skill_file(SkillSource::User, &skill_dir.join("SKILL.md"))
+            .expect("skill should parse");
+        assert!(
+            skill.quarantined,
+            "skill with .untrusted marker must be quarantined"
+        );
+
+        // Trusting removes the marker -> no longer quarantined.
+        assert!(set_skill_trusted(&skill_dir, true).unwrap());
+        let trusted = manager
+            .parse_skill_file(SkillSource::User, &skill_dir.join("SKILL.md"))
+            .unwrap();
+        assert!(
+            !trusted.quarantined,
+            "after trust, skill is not quarantined"
+        );
+
+        // Re-quarantine writes the marker back.
+        assert!(set_skill_trusted(&skill_dir, false).unwrap());
+        assert!(skill_dir.join(UNTRUSTED_MARKER).exists());
+    }
+
+    #[test]
+    fn nested_skill_md_inherits_top_level_quarantine() {
+        // A registry skill ships a nested SKILL.md in a subdir. The marker
+        // lives at the skill's top-level dir, so the nested file must also be
+        // treated as quarantined — otherwise it loads as trusted and bypasses
+        // the review gate.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let skill_dir = dir.path().join("my-skill");
+        let nested_dir = skill_dir.join("sub");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        std::fs::write(
+            skill_dir.join(UNTRUSTED_MARKER),
+            b"untrusted: pending review",
+        )
+        .unwrap();
+        std::fs::write(
+            nested_dir.join("SKILL.md"),
+            "---\nname: nested\ndescription: test\n---\nbody",
+        )
+        .unwrap();
+
+        let manager = SkillManager::new();
+        let skill = manager
+            .parse_skill_file(SkillSource::User, &nested_dir.join("SKILL.md"))
+            .expect("nested skill should parse");
+        assert!(
+            skill.quarantined,
+            "nested SKILL.md under an untrusted skill must be quarantined"
+        );
     }
 }

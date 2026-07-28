@@ -182,6 +182,7 @@ shell:
     kill_live_sessions: "Terminar sesion(es) PTY por ID"
     audit: "Consultar el registro de auditoría (quién/cuándo/qué/sugerencia de IA/confirmación)"
     forget-approvals: "Borrar aprobaciones de comandos recordadas (esta sesión)"
+    skill: "Buscar, instalar, verificar skills; gestionar registros"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -343,6 +344,28 @@ shell:
     applied_clear: "Borrado {label}"
     invalid: "Valor no válido: {error}"
     restart_hint: "(se aplica tras reiniciar)"
+    install_installing: "Instalando '{name}' (origen: {source})..."
+    install_cancel_hint: "  Pulsa Ctrl+C para cancelar"
+    install_downloading: "Descargando desde {source} [{secs}s]"
+    install_continue: "Aún instalando ({secs}s). ¿Continuar? [Y/n]"
+    install_canceled: "Cancelado por el usuario (Ctrl+C)"
+    install_canceled_msg: "Instalación cancelada"
+    install_timeout: "Tiempo agotado tras {secs}s"
+    install_crashed: "El hilo de instalación falló"
+    registry_title: "Orígenes del registro de skills"
+    registry_question: "Selecciona un registro para gestionar, o añade un nuevo origen"
+    registry_test_all: "Probar todas las conexiones"
+    registry_add_new: "Añadir nuevo registro..."
+    registry_not_tested: "[-] sin probar"
+    registry_manage_test: "Probar conexión"
+    registry_manage_enable: "Activar"
+    registry_manage_disable: "Desactivar"
+    registry_manage_edit_url: "Editar URL"
+    registry_manage_remove: "Eliminar"
+    registry_manage_remove_desc: "Eliminar este origen de registro"
+    registry_manage_back: "Volver a la lista"
+    registry_manage_status_on: "activado"
+    registry_manage_status_off: "desactivado"
     cat:
       model: "Modelo y proveedor"
       appearance: "Apariencia"
@@ -513,6 +536,12 @@ shell:
       session_db_path:
         label: "Ruta de BD de sesión"
         desc: "Ubicación personalizada de la base de datos de sesiones (vacío = predeterminado)"
+      skill_auto_search:
+        label: "Búsqueda automática de skills"
+        desc: "La IA busca automáticamente en registros y sugiere instalaciones cuando no hay skill coincidente"
+      skill_registries:
+        label: "Fuentes de registro de skills"
+        desc: "Gestionar fuentes de búsqueda (skills.sh, skillhub.cn). Enter para gestor interactivo"
 
   session:
     iteration_limit_reached: "Se han completado {count} iteraciones de llamadas a herramientas."

@@ -20,6 +20,7 @@ fn skill(
         agent: agent.map(str::to_string),
         allowed_tools: allowed_tools
             .map(|tools| tools.into_iter().map(str::to_string).collect::<Vec<_>>()),
+        quarantined: false,
     }
 }
 

@@ -182,6 +182,8 @@ pub enum SettingKey {
     PtyDaemonEnabled,
     CodexAuthPath,
     SessionDbPath,
+    SkillAutoSearch,
+    SkillRegistries,
 }
 impl SettingKey {
     /// Stable string used for i18n keys (`shell.setting.k.{name}.label|desc`).
@@ -238,6 +240,8 @@ impl SettingKey {
             SettingKey::PtyDaemonEnabled => "pty_daemon_enabled",
             SettingKey::CodexAuthPath => "codex_auth_path",
             SettingKey::SessionDbPath => "session_db_path",
+            SettingKey::SkillAutoSearch => "skill_auto_search",
+            SettingKey::SkillRegistries => "skill_registries",
         }
     }
 }
@@ -521,6 +525,16 @@ pub const SETTINGS: &[SettingDef] = &[
         category: SettingCategory::Advanced,
         kind: SettingKind::Text,
     },
+    SettingDef {
+        key: SettingKey::SkillAutoSearch,
+        category: SettingCategory::Advanced,
+        kind: SettingKind::Bool,
+    },
+    SettingDef {
+        key: SettingKey::SkillRegistries,
+        category: SettingCategory::Advanced,
+        kind: SettingKind::StringList,
+    },
 ];
 
 /// All entries belonging to `category`, in catalog order.
@@ -638,9 +652,17 @@ pub fn current_raw(cfg: &ConfigModel, key: SettingKey) -> String {
         SettingKey::LangfuseSecretKey => cfg.langfuse_secret_key.clone().unwrap_or_default(),
         SettingKey::LangfuseHost => cfg.langfuse_host.clone().unwrap_or_default(),
         SettingKey::EnableScripts => bool_str(cfg.enable_scripts),
+        SettingKey::SkillRegistries => cfg
+            .skills
+            .registries
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
         SettingKey::CodexAuthPath => cfg.codex_auth_path.clone().unwrap_or_default(),
         SettingKey::SessionDbPath => cfg.session_db_path.clone().unwrap_or_default(),
         SettingKey::PtyDaemonEnabled => bool_str(cfg.pty_daemon_enabled),
+        SettingKey::SkillAutoSearch => bool_str(cfg.skills.auto_search),
     };
     // Normalize Choice values to their canonical option so the display and
     // "current" marker line up even if the stored value differs by case
@@ -777,6 +799,9 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
         SettingKey::PtyDaemonEnabled => cfg.pty_daemon_enabled = parse_bool(value)?,
         SettingKey::CodexAuthPath => cfg.codex_auth_path = opt_string(value),
         SettingKey::SessionDbPath => cfg.session_db_path = opt_string(value),
+        SettingKey::SkillAutoSearch => cfg.skills.auto_search = parse_bool(value)?,
+        // SkillRegistries is managed via interactive dialog, not text edit.
+        SettingKey::SkillRegistries => {}
     }
     Ok(())
 }
@@ -813,6 +838,10 @@ pub fn requires_restart(key: SettingKey) -> bool {
         | SettingKey::SandboxOffAction
         | SettingKey::SandboxTimeout
         | SettingKey::PromptStyle => false,
+        // SkillAutoSearch is read once at AiHandler construction, so a change
+        // only takes effect after restart (live toggling silently failed
+        // before). SkillRegistries likewise (AI tools capture a config
+        // snapshot at registration time).
         _ => true,
     }
 }
@@ -971,6 +1000,8 @@ mod tests {
             SettingKey::PtyDaemonEnabled,
             SettingKey::CodexAuthPath,
             SettingKey::SessionDbPath,
+            SettingKey::SkillAutoSearch,
+            SettingKey::SkillRegistries,
         ];
         assert_eq!(all_keys.len(), SETTINGS.len());
         for k in all_keys {
@@ -1038,6 +1069,7 @@ mod tests {
         // Startup-only settings do require a restart.
         assert!(requires_restart(SettingKey::LogLevel));
         assert!(requires_restart(SettingKey::HistorySize));
+        assert!(requires_restart(SettingKey::SkillAutoSearch));
     }
 
     #[test]

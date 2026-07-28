@@ -507,7 +507,12 @@ impl BashTool {
             });
         }
 
-        let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let mut env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        // Never let an interactive pager (less) block programmatic output
+        // capture. `cat` streams straight through and exits immediately.
+        for var in ["PAGER", "SYSTEMD_PAGER", "GIT_PAGER"] {
+            env_vars.insert(var.to_string(), "cat".to_string());
+        }
         let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result = executor.execute_blocking(command, env_vars, &cancel_token);
         done.store(true, Ordering::SeqCst);

@@ -40,6 +40,7 @@ dependencies = [
  "aish-pty",
  "aish-security",
  "aish-shell",
+ "aish-skills",
  "aish-ui",
  "clap",
  "dirs 5.0.1",
@@ -280,12 +281,15 @@ version = "0.3.9"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
+ "flate2",
  "include_dir",
  "notify",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tar",
  "tempfile",
  "tracing",
 ]
@@ -294,14 +298,17 @@ dependencies = [
 name = "aish-tools"
 version = "0.3.9"
 dependencies = [
+ "aish-config",
  "aish-core",
  "aish-i18n",
  "aish-llm",
  "aish-pty",
  "aish-security",
  "aish-skills",
+ "dirs 5.0.1",
  "futures",
  "glob",
+ "inquire",
  "regex",
  "reqwest",
  "serde",
@@ -319,6 +326,7 @@ version = "0.3.9"
 dependencies = [
  "crossterm 0.28.1",
  "ratatui",
+ "regex",
  "thiserror 2.0.18",
  "unicode-width",
 ]
@@ -3386,6 +3394,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4627,6 +4646,16 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.4",
+]
 
 [[package]]
 name = "yaml-rust"

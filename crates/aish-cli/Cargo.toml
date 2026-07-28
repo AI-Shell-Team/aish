@@ -12,6 +12,7 @@ aish-core.workspace = true
 aish-config.workspace = true
 aish-security.workspace = true
 aish-shell.workspace = true
+aish-skills.workspace = true
 aish-pty.workspace = true
 aish-llm.workspace = true
 aish-i18n.workspace = true

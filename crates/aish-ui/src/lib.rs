@@ -6,6 +6,7 @@ mod runtime;
 mod select;
 mod settings_ui;
 mod slash_input;
+mod text;
 
 pub use choice::{ChoiceOutcome, ChoicePanel};
 pub use expand::ExpandPanel;
@@ -17,3 +18,4 @@ pub use settings_ui::{
     SettingsCategoryInfo, SettingsItem, SettingsOutcome, SettingsPanel, SettingsValueKind,
 };
 pub use slash_input::{SlashInputOutcome, SlashInputSession};
+pub use text::strip_ansi_escapes;
