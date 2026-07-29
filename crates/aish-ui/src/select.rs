@@ -169,7 +169,7 @@ impl SearchSelectPanel {
     /// Register a single-key action. The key is intercepted before the search
     /// buffer and emitted as `SearchSelectOutcome::Action(char)`.
     pub fn with_action(mut self, key: char, label: impl Into<String>) -> Self {
-        self.actions.push((key, label.into()));
+        self.actions.push((key.to_ascii_lowercase(), label.into()));
         self
     }
 
@@ -472,15 +472,17 @@ impl PanelComponent for SearchSelectPanel {
                 // manage action).
                 if self.query.is_empty() {
                     if let Some((action_key, _)) = self.actions.iter().find(|(k, _)| *k == lower) {
-                        let value = self
-                            .filtered_entries()
-                            .get(self.selected)
-                            .and_then(|e| match e {
-                                SelectEntry::Item(i) => {
-                                    self.items.get(*i).map(|it| it.value.clone())
-                                }
-                            })
-                            .unwrap_or_default();
+                        let Some(value) =
+                            self.filtered_entries()
+                                .get(self.selected)
+                                .and_then(|e| match e {
+                                    SelectEntry::Item(i) => {
+                                        self.items.get(*i).map(|it| it.value.clone())
+                                    }
+                                })
+                        else {
+                            return PanelEvent::Continue;
+                        };
                         return PanelEvent::Submit(SearchSelectOutcome::Action(*action_key, value));
                     }
                 }

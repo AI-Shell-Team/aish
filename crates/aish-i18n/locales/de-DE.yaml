@@ -284,6 +284,13 @@ shell:
     verify_blocked: "Blockiert (nicht schreibgeschützt): {command} ({reason})"
     verify_passed: "Bestanden: {command} (Exit {exit_code})"
     verify_failed: "Nicht bestanden: {command} (Exit {exit_code})"
+    conclusion_fixed: "Fazit: Problem behoben"
+    conclusion_partial: "Fazit: einige Prüfungen fehlgeschlagen; Problem möglicherweise nicht vollständig behoben"
+    conclusion_unknown: "Fazit: nicht bestimmbar"
+    error: "Diagnose fehlgeschlagen: {error}"
+    parse_format_error: "Diagnosebericht konnte nicht aus der Modellausgabe gelesen werden. Bitte /diagnose erneut versuchen."
+    parse_prose_fallback: "Hinweis: Das Modell lieferte Klartext statt eines strukturierten Berichts."
+    no_evidence: "(nicht angegeben)"
   nl_detection:
     confirm_ask_ai: "Das sieht nach einer natürlichen Sprachfrage aus. KI fragen? (Y/n)"
   error:
@@ -389,14 +396,6 @@ shell:
   common:
     cancelled: "abgebrochen"
     session_store_unavailable: "Sitzungsspeicher nicht verfügbar"
-    config_save_warning: "Warnung: Konfiguration konnte nicht gespeichert werden: {error}"
-    conclusion_fixed: "Fazit: Problem behoben"
-    conclusion_partial: "Fazit: einige Prüfungen fehlgeschlagen; Problem möglicherweise nicht vollständig behoben"
-    conclusion_unknown: "Fazit: nicht bestimmbar"
-    error: "Diagnose fehlgeschlagen: {error}"
-    parse_format_error: "Diagnosebericht konnte nicht aus der Modellausgabe gelesen werden. Bitte /diagnose erneut versuchen."
-    parse_prose_fallback: "Hinweis: Das Modell lieferte Klartext statt eines strukturierten Berichts."
-    no_evidence: "(nicht angegeben)"
   token:
     title: "Token-Nutzung (letzte 7 Tage)"
     input_tokens: "Eingabe-Tokens"

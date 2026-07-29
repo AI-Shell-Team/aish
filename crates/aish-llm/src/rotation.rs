@@ -435,6 +435,8 @@ impl RotationState {
     pub fn current_account_name(&self) -> Option<&str> {
         self.accounts
             .get(self.current_account)
+            .filter(|a| !a.disabled)
+            .or_else(|| self.enabled_accounts().next().map(|(_, a)| a))
             .map(|a| a.name.as_str())
     }
 
@@ -462,6 +464,7 @@ impl RotationState {
             .accounts
             .get(self.current_account)
             .filter(|a| !a.disabled)
+            .or_else(|| self.enabled_accounts().next().map(|(_, a)| a))
             .map(|a| a.name.clone());
         RotationSnapshot {
             current_account: current,

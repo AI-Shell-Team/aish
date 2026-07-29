@@ -320,6 +320,10 @@ shell:
                 "shell.model.manage_title",
                 "shell.accounts.name_label",
                 "shell.common.cancelled",
+                // Regression guard: the failure_diagnose tail must stay under
+                // shell.failure_diagnose (a prior i18n splice stranded it).
+                "shell.failure_diagnose.conclusion_fixed",
+                "shell.failure_diagnose.no_evidence",
             ] {
                 let val = mgr.t(key);
                 assert_ne!(

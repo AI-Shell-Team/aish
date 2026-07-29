@@ -290,7 +290,7 @@ impl RegistryManager {
         // Hold the per-slug lock for the whole transaction: two concurrent
         // installs of the same slug would race the live→stash rename / swap.
         let install_lock = install_lock_for(&skill.slug);
-        let _install_guard = install_lock.lock().unwrap();
+        let _install_guard = install_lock.lock().unwrap_or_else(|e| e.into_inner());
         // Reject path-escaping slugs BEFORE constructing the stash path —
         // reinstall_stash_path joins the slug into target_dir, so an unsafe
         // slug must not reach it. (pre_quarantine re-validates downstream.)

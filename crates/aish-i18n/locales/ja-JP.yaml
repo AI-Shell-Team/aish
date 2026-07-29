@@ -284,6 +284,13 @@ shell:
     verify_blocked: "ブロック（非読み取り専用）: {command} ({reason})"
     verify_passed: "合格: {command} (exit {exit_code})"
     verify_failed: "不合格: {command} (exit {exit_code})"
+    conclusion_fixed: "結論: 問題は修正されました"
+    conclusion_partial: "結論: 一部の検証が失敗しました"
+    conclusion_unknown: "結論: 判断できません"
+    error: "診断失敗: {error}"
+    parse_format_error: "モデル出力から診断レポートを解析できませんでした。/diagnose を再試行してください。"
+    parse_prose_fallback: "注意: モデルは構造化レポートではなくプレーンテキストを返しました。"
+    no_evidence: "（未提供）"
   nl_detection:
     confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
   error:
@@ -389,14 +396,6 @@ shell:
   common:
     cancelled: "キャンセルしました"
     session_store_unavailable: "セッションストアが利用できません"
-    config_save_warning: "警告: 設定の保存に失敗しました: {error}"
-    conclusion_fixed: "結論: 問題は修正されました"
-    conclusion_partial: "結論: 一部の検証が失敗しました"
-    conclusion_unknown: "結論: 判断できません"
-    error: "診断失敗: {error}"
-    parse_format_error: "モデル出力から診断レポートを解析できませんでした。/diagnose を再試行してください。"
-    parse_prose_fallback: "注意: モデルは構造化レポートではなくプレーンテキストを返しました。"
-    no_evidence: "（未提供）"
   token:
     title: "Token 使用量 (過去7日間)"
     input_tokens: "入力 tokens"

@@ -5132,7 +5132,12 @@ impl AishShell {
             _ => self.config.api_base.clone(),
         };
 
-        if self.config.api_accounts.iter().any(|a| a.name == name) {
+        // "primary" is reserved for the synthetic top-level account (index 0);
+        // reject it case-insensitively so a user account can't collide and make
+        // use_account / delete-by-name ambiguous.
+        let name_taken = name.eq_ignore_ascii_case("primary")
+            || self.config.api_accounts.iter().any(|a| a.name == name);
+        if name_taken {
             eprintln!(
                 "{}",
                 t_with_args("shell.accounts.already_exists", &{
@@ -5264,18 +5269,16 @@ impl AishShell {
             }
         }
 
-        // Persist. api_base is stored only when it differs from the primary.
-        let api_base_opt = if base == self.config.api_base {
-            None
-        } else {
-            Some(base)
-        };
+        // Persist the endpoint the key was verified against. Storing it
+        // unconditionally (instead of None when it matches the current primary)
+        // means a later primary-endpoint switch can never redirect this
+        // credential to a different host.
         self.config
             .api_accounts
             .push(aish_config::ApiAccountConfig {
                 name: name.clone(),
                 api_key: key,
-                api_base: api_base_opt,
+                api_base: Some(base),
                 model: Some(model.clone()),
                 weight: 1,
                 disabled: false,
@@ -5301,7 +5304,7 @@ impl AishShell {
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
             eprintln!(
                 "{}",
-                t_with_args("shell.common.config_save_warning", &{
+                t_with_args("shell.config_save_warning", &{
                     let mut args = std::collections::HashMap::new();
                     args.insert("error".to_string(), e.to_string());
                     args
@@ -5361,7 +5364,9 @@ impl AishShell {
                 .api_base
                 .clone()
                 .unwrap_or_else(|| self.config.api_base.clone());
-            if !endpoints.iter().any(|(b, _)| b == &base) {
+            // De-duplicate by (base, key): two accounts on the same host with
+            // different keys are distinct endpoints and must both be fetched.
+            if !endpoints.iter().any(|(b, k)| *b == base && *k == a.api_key) {
                 endpoints.push((base, a.api_key.clone()));
             }
         }
@@ -5413,6 +5418,9 @@ impl AishShell {
             // didn't respond to the /models fetch — the user explicitly set it,
             // so it must always be reachable in the list.
             for a in &self.config.api_accounts {
+                if a.disabled {
+                    continue;
+                }
                 if let Some(m) = &a.model {
                     let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
                     let val = format!("{}\u{0}{}", m, base);
@@ -5506,14 +5514,13 @@ impl AishShell {
 
         if endpoint_changed {
             // Preserve the outgoing primary as a named account so a switch to a
-            // different endpoint never loses it.
-            if !prev_key.is_empty()
-                && !self
-                    .config
-                    .api_accounts
-                    .iter()
-                    .any(|a| a.api_key == prev_key)
-            {
+            // different endpoint never loses it. Key the existence check on both
+            // key AND base so a same-key/different-base switch doesn't treat the
+            // outgoing endpoint as already preserved.
+            let outgoing_kept = self.config.api_accounts.iter().any(|a| {
+                a.api_key == prev_key && a.api_base.as_deref() == Some(prev_base.as_str())
+            });
+            if !prev_key.is_empty() && !outgoing_kept {
                 let label = account_label(&prev_base, &prev_model);
                 self.config
                     .api_accounts
@@ -5526,12 +5533,13 @@ impl AishShell {
                         disabled: false,
                     });
             }
-            // Promote the target if it is an existing account: drop it from the
-            // pool so the same credential isn't both primary and a pool entry
-            // (which would double it in the rotation pool).
-            self.config
-                .api_accounts
-                .retain(|a| a.api_key.is_empty() || a.api_key != key);
+            // Promote the target: drop the pool entry matching the target's key
+            // AND base so it isn't both primary and a pool entry. Matching on
+            // both prevents removing the just-preserved outgoing endpoint when
+            // the switch reuses the same key on a different base.
+            self.config.api_accounts.retain(|a| {
+                a.api_key.is_empty() || !(a.api_key == key && a.api_base.as_deref() == Some(base))
+            });
         }
 
         self.config.api_base = base.to_string();
@@ -5546,9 +5554,7 @@ impl AishShell {
         self.config.recent_models.retain(|r| r != &rec);
         self.config.recent_models.insert(0, rec);
         self.config.recent_models.truncate(20);
-        let path = aish_config::ConfigLoader::default_config_path();
-        let _ = aish_config::ConfigLoader::save(&self.config, &path);
-        self.rebuild_rotation();
+        self.persist_config_and_rebuild_rotation();
         println!(
             "\x1b[32m{}\x1b[0m",
             t_with_args("shell.model.switch_success", &{
@@ -5601,6 +5607,12 @@ impl AishShell {
             match outcome {
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', val))) => {
                     if let Some(name) = val.strip_prefix("acct:") {
+                        // An API key is irreversible to recover once the
+                        // account row is dropped, so confirm before deleting.
+                        let reason = format!("{}: {}", t("shell.model.action_del"), name);
+                        if !Self::confirm_action(&reason, &t("shell.model.action_del")) {
+                            continue;
+                        }
                         self.config.api_accounts.retain(|a| a.name != name);
                         self.persist_config_and_rebuild_rotation();
                         println!(

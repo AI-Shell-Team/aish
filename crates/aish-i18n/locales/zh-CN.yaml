@@ -629,6 +629,13 @@ shell:
     verify_blocked: "已拦截（非只读）: {command} ({reason})"
     verify_passed: "通过: {command} (exit {exit_code})"
     verify_failed: "未通过: {command} (exit {exit_code})"
+    conclusion_fixed: "结论: 问题已修复"
+    conclusion_partial: "结论: 部分验证未通过，问题可能未完全修复"
+    conclusion_unknown: "结论: 无法判断"
+    error: "诊断失败: {error}"
+    parse_format_error: "无法解析模型返回的诊断报告，请重试 /diagnose。"
+    parse_prose_fallback: "提示：模型返回了纯文本而非结构化报告。"
+    no_evidence: "（未提供）"
 
   nl_detection:
     confirm_ask_ai: "这看起来像自然语言问题，是否让 AI 解答？(Y/n)"
@@ -744,14 +751,6 @@ shell:
   common:
     cancelled: "已取消"
     session_store_unavailable: "会话存储不可用"
-    config_save_warning: "警告：保存配置失败：{error}"
-    conclusion_fixed: "结论: 问题已修复"
-    conclusion_partial: "结论: 部分验证未通过，问题可能未完全修复"
-    conclusion_unknown: "结论: 无法判断"
-    error: "诊断失败: {error}"
-    parse_format_error: "无法解析模型返回的诊断报告，请重试 /diagnose。"
-    parse_prose_fallback: "提示：模型返回了纯文本而非结构化报告。"
-    no_evidence: "（未提供）"
 
   token:
     title: "Token 统计 (近 7 天)"

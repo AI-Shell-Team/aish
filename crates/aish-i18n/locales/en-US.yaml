@@ -751,7 +751,6 @@ shell:
   common:
     cancelled: "cancelled"
     session_store_unavailable: "session store unavailable"
-    config_save_warning: "warning: failed to save config: {error}"
 
   token:
     title: "Token Usage (last 7 days)"

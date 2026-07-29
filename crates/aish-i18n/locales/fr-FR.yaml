@@ -284,6 +284,13 @@ shell:
     verify_blocked: "Bloque (non lecture seule): {command} ({reason})"
     verify_passed: "Reussi: {command} (exit {exit_code})"
     verify_failed: "Echec: {command} (exit {exit_code})"
+    conclusion_fixed: "Conclusion: probleme corrige"
+    conclusion_partial: "Conclusion: certaines verifications ont echoue"
+    conclusion_unknown: "Conclusion: impossible a determiner"
+    error: "Echec du diagnostic: {error}"
+    parse_format_error: "Impossible d'interpreter le rapport de diagnostic. Reessayez /diagnose."
+    parse_prose_fallback: "Note : le modele a renvoye du texte brut au lieu d'un rapport structure."
+    no_evidence: "(non fournie)"
   nl_detection:
     confirm_ask_ai: "Cela ressemble à une question en langage naturel. Demander à l'IA ? (Y/n)"
   error:
@@ -389,14 +396,6 @@ shell:
   common:
     cancelled: "annulé"
     session_store_unavailable: "stockage de session indisponible"
-    config_save_warning: "avertissement : échec de l'enregistrement de la configuration : {error}"
-    conclusion_fixed: "Conclusion: probleme corrige"
-    conclusion_partial: "Conclusion: certaines verifications ont echoue"
-    conclusion_unknown: "Conclusion: impossible a determiner"
-    error: "Echec du diagnostic: {error}"
-    parse_format_error: "Impossible d'interpreter le rapport de diagnostic. Reessayez /diagnose."
-    parse_prose_fallback: "Note : le modele a renvoye du texte brut au lieu d'un rapport structure."
-    no_evidence: "(non fournie)"
   token:
     title: "Utilisation de tokens (7 derniers jours)"
     input_tokens: "Tokens d'entrée"
