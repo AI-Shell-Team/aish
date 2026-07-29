@@ -364,7 +364,6 @@ pub struct ConfigModel {
     pub pty_output_keep_bytes: usize,
     pub memory: Option<MemoryConfig>,
     pub session_db_path: Option<String>,
-    pub enable_sandbox: bool,
 
     /// Inject git branch awareness into remote bash prompts during SSH/telnet
     /// sessions. When true, aish prepends a `|branch` marker (magenta, matching
@@ -406,16 +405,6 @@ pub struct ConfigModel {
     #[serde(default = "default_true")]
     pub remote_show_kube: bool,
 
-    pub sandbox_off_action: String,
-    pub sandbox_timeout_seconds: f64,
-    pub default_risk_level: String,
-
-    /// Master switch for InputGuard (BLOCKED / Confirm prompts).
-    /// When false, all input passes through unchecked. Mirrors the
-    /// `input_guard.enabled` field in security_policy.yaml so users
-    /// can toggle it from the more familiar config.yaml.
-    #[serde(default = "default_true")]
-    pub input_guard_enabled: bool,
     pub langfuse_public_key: Option<String>,
     pub langfuse_secret_key: Option<String>,
     pub langfuse_host: Option<String>,
@@ -518,17 +507,12 @@ impl Default for ConfigModel {
             pty_output_keep_bytes: 4096,
             memory: None,
             session_db_path: None,
-            enable_sandbox: false,
             enable_remote_git_prompt: true,
             remote_rich_prompt: default_true(),
             remote_danger_patterns: default_remote_danger_patterns(),
             remote_show_venv: default_true(),
             remote_show_container: default_true(),
             remote_show_kube: default_true(),
-            sandbox_off_action: "allow".to_string(),
-            sandbox_timeout_seconds: 10.0,
-            default_risk_level: "low".to_string(),
-            input_guard_enabled: default_true(),
             langfuse_public_key: None,
             langfuse_secret_key: None,
             langfuse_host: None,

@@ -17,9 +17,10 @@ impl ConfigLoader {
     /// If the file exists, any fields missing relative to the current
     /// `ConfigModel` schema are auto-inserted with their default values
     /// and the file is rewritten in place. This lets new config options
-    /// (e.g. `input_guard_enabled`) show up in existing users' yaml
+    /// (e.g. `enable_token_estimation`) show up in existing users' yaml
     /// without manual editing. User-set values and field ordering are
-    /// preserved; only missing keys are appended.
+    /// preserved; only missing keys are appended. Legacy security keys
+    /// that now live in `security_policy.yaml` are stripped on load.
     pub fn load(config_path: Option<&Path>) -> Result<ConfigModel> {
         let path = match config_path {
             Some(p) => p.to_path_buf(),
@@ -46,7 +47,16 @@ impl ConfigLoader {
                 serde_yaml::to_value(ConfigModel::default())
                     .expect("ConfigModel::default() must serialize")
             });
-            let changed = Self::merge_missing(&mut value, default_value);
+            let mut changed = Self::merge_missing(&mut value, default_value);
+            let stripped = Self::strip_legacy_security_keys(&mut value);
+            if !stripped.is_empty() {
+                changed = true;
+                eprintln!(
+                    "warning: removed legacy security keys from {}: [{}]. These settings now live in ~/.config/aish/security_policy.yaml — use /setting or edit that file.",
+                    path.display(),
+                    stripped.join(", ")
+                );
+            }
             // Deserialize BEFORE writing — if the merged Value still
             // fails to deserialize (e.g. user has a field with an
             // invalid type that migration didn't touch), surface the
@@ -118,6 +128,34 @@ impl ConfigLoader {
             }
         }
         changed
+    }
+
+    /// Remove security fields that used to live in `config.yaml` but are now
+    /// owned exclusively by `security_policy.yaml` (issue #407).
+    ///
+    /// Returns the names of keys that were actually present and removed so
+    /// callers can warn the user once.
+    fn strip_legacy_security_keys(value: &mut serde_yaml::Value) -> Vec<String> {
+        const LEGACY_KEYS: &[&str] = &[
+            "enable_sandbox",
+            "sandbox_off_action",
+            "sandbox_timeout_seconds",
+            "default_risk_level",
+            "input_guard_enabled",
+        ];
+        let Some(map) = value.as_mapping_mut() else {
+            return Vec::new();
+        };
+        let mut removed = Vec::new();
+        for key in LEGACY_KEYS {
+            if map
+                .remove(serde_yaml::Value::String((*key).to_string()))
+                .is_some()
+            {
+                removed.push((*key).to_string());
+            }
+        }
+        removed
     }
 
     /// Return the default config path following XDG conventions.
@@ -195,14 +233,14 @@ mod tests {
         let config = ConfigLoader::load(Some(&path)).unwrap();
         assert_eq!(config.model, "glm-4.7");
         assert_eq!(config.api_key, "secret");
-        // input_guard_enabled wasn't in the yaml; default true should
+        // enable_token_estimation wasn't in the yaml; default true should
         // have been both applied AND persisted.
-        assert!(config.input_guard_enabled);
+        assert!(config.enable_token_estimation);
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(on_disk.contains("model: glm-4.7"));
         assert!(on_disk.contains("api_key: secret"));
-        assert!(on_disk.contains("input_guard_enabled: true"));
+        assert!(on_disk.contains("enable_token_estimation: true"));
     }
 
     #[test]
@@ -223,25 +261,55 @@ mod tests {
             "unknown user-extension keys must survive migration; got:\n{on_disk}"
         );
         // New schema key also added.
-        assert!(on_disk.contains("input_guard_enabled:"));
+        assert!(on_disk.contains("enable_token_estimation:"));
     }
 
     #[test]
     fn load_preserves_user_overrides_during_migration() {
-        // User explicitly set input_guard_enabled: false. Migration
-        // must NOT overwrite it with the default true.
+        // User explicitly set auto_suggest: true (default is false).
+        // Migration must NOT overwrite it with the default.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "model: glm-4.7\ninput_guard_enabled: false\n").unwrap();
+        std::fs::write(&path, "model: glm-4.7\nauto_suggest: true\n").unwrap();
 
         let config = ConfigLoader::load(Some(&path)).unwrap();
-        assert!(!config.input_guard_enabled);
+        assert!(config.auto_suggest);
 
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        // Should still be false, not overwritten with true.
-        assert!(on_disk.contains("input_guard_enabled: false"));
+        // Should still be true, not overwritten with false.
+        assert!(on_disk.contains("auto_suggest: true"));
         // Other missing fields should have been added.
         assert!(on_disk.contains("api_key:"));
+    }
+
+    #[test]
+    fn load_strips_legacy_security_keys() {
+        // Security settings moved to security_policy.yaml (#407). Old keys
+        // left in config.yaml must be removed on load so they stop confusing
+        // users / docs.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "model: glm-4.7\nenable_sandbox: true\ninput_guard_enabled: false\nsandbox_off_action: block\n",
+        )
+        .unwrap();
+
+        let _config = ConfigLoader::load(Some(&path)).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("model: glm-4.7"));
+        assert!(
+            !on_disk.contains("enable_sandbox:"),
+            "legacy enable_sandbox must be stripped; got:\n{on_disk}"
+        );
+        assert!(
+            !on_disk.contains("input_guard_enabled:"),
+            "legacy input_guard_enabled must be stripped; got:\n{on_disk}"
+        );
+        assert!(
+            !on_disk.contains("sandbox_off_action:"),
+            "legacy sandbox_off_action must be stripped; got:\n{on_disk}"
+        );
     }
 
     #[test]
@@ -272,7 +340,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.yaml");
         let config = ConfigLoader::load(Some(&path)).unwrap();
-        assert!(config.input_guard_enabled);
+        assert!(config.enable_token_estimation);
         assert!(!path.exists());
     }
 
