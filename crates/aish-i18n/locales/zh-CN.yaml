@@ -369,6 +369,7 @@ shell:
     forget-approvals: "清除本会话记住的命令审批"
     skill: "搜索、安装、校验技能；管理 registry 源"
     export: "导出当前会话为 Markdown"
+    fork: "分支当前会话"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -564,6 +565,12 @@ shell:
     store_unavailable: "会话存储不可用；无法导出"
     not_found: "在存储中找不到当前会话"
     load_failed: "加载会话失败：{error}"
+  fork:
+    forked: "已分叉会话 {short}（来自 {parent}）"
+    switch_failed: "分叉已创建但切换失败：{error}"
+    switch_manual: "使用 `/resume {session_id}` 手动切换"
+    failed: "分叉失败：{error}"
+    store_unavailable: "会话存储不可用；无法分叉"
 
   live_sessions:
     daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："

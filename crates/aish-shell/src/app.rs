@@ -3464,6 +3464,7 @@ impl AishShell {
             Some("/forget-approvals") => self.handle_forget_approvals(),
             Some("/skill") => self.handle_skill_command(&parts),
             Some("/export") => self.handle_export_command(&parts),
+            Some("/fork") => self.handle_fork_command(),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3656,6 +3657,67 @@ impl AishShell {
                 t_with_args("shell.export.write_failed", &{
                     let mut args = std::collections::HashMap::new();
                     args.insert("file".to_string(), fname);
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            ),
+        }
+    }
+
+    /// `/fork` — branch the current session into a new one (copied context),
+    /// then switch into the fork so the original is preserved at its branch point.
+    fn handle_fork_command(&mut self) {
+        // Persist the current context first so the fork copies the latest state.
+        self.persist_session_snapshot();
+        let parent_uuid = self.session_uuid.clone();
+        let new_uuid = uuid::Uuid::new_v4().to_string();
+
+        // fork_session borrows the store immutably; keep that borrow in a block so
+        // the later `&mut self` resume call is not blocked by the live reference.
+        let fork_result = {
+            let Some(store) = self.session_store.as_ref() else {
+                eprintln!("{}", t("shell.fork.store_unavailable"));
+                return;
+            };
+            store.fork_session(&parent_uuid, None, &new_uuid)
+        };
+
+        let new_short = &new_uuid[..8.min(new_uuid.len())];
+        let parent_short = &parent_uuid[..8.min(parent_uuid.len())];
+        match fork_result {
+            Ok(_) => {
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.fork.forked", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("short".to_string(), new_short.to_string());
+                        args.insert("parent".to_string(), parent_short.to_string());
+                        args
+                    })
+                );
+                if let Err(e) = self.resume_session_with_options(&new_uuid, false, true) {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fork.switch_failed", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            args
+                        })
+                    );
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.fork.switch_manual", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("session_id".to_string(), new_uuid.clone());
+                            args
+                        })
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "{}",
+                t_with_args("shell.fork.failed", &{
+                    let mut args = std::collections::HashMap::new();
                     args.insert("error".to_string(), e.to_string());
                     args
                 })
