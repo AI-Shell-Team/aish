@@ -5603,9 +5603,6 @@ impl AishShell {
             .map(|d| d.key)
     }
 
-    /// Current raw value for a setting. Security keys read from the live
-    /// policy SSOT; everything else from `config.yaml`.
-
     /// Apply `new_val` to `key` and either clear `pending_error` (on success)
     /// or replace it with the localized validation message (on failure).
     /// Centralizing this here guarantees the error shown always reflects the
