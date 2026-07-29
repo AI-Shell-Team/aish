@@ -51,17 +51,31 @@ impl ConfigChecker {
         }
 
         // Sandbox globals live in security_policy.yaml (not config.yaml).
-        let policy = aish_security::load_policy(None);
-        if !policy.enable_sandbox
-            && policy.sandbox_off_action != aish_security::SandboxOffAction::Allow
-        {
-            items.push(CheckItem::warn(
-                "sandbox_config",
-                format!(
-                    "Sandbox disabled but sandbox_off_action is '{}' (expected 'ALLOW')",
-                    policy.sandbox_off_action
-                ),
-            ));
+        // Use the fallible loader so a missing/broken policy is visible instead
+        // of silently evaluating SecurityPolicy::default().
+        match aish_security::try_load_policy(None) {
+            Ok(policy) => {
+                items.push(CheckItem::pass(
+                    "security_policy",
+                    "security_policy.yaml loaded",
+                ));
+                if !policy.enable_sandbox
+                    && policy.sandbox_off_action != aish_security::SandboxOffAction::Allow
+                {
+                    items.push(CheckItem::warn(
+                        "sandbox_config",
+                        format!(
+                            "Sandbox disabled but sandbox_off_action is '{}' (expected 'ALLOW')",
+                            policy.sandbox_off_action
+                        ),
+                    ));
+                }
+            }
+            Err(e) => {
+                items.push(CheckItem::fail("security_policy", e.to_string()).hint(
+                    "Fix or recreate ~/.config/aish/security_policy.yaml (or delete it to reseed)",
+                ));
+            }
         }
 
         items

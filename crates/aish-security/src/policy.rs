@@ -412,18 +412,80 @@ fn parse_invalid_fallback_rules(
     (invalid_rules, issues)
 }
 
+/// Errors from an authoritative security policy load (no silent defaults).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyLoadError {
+    /// Policy path could not be resolved / seeded.
+    Missing { path: PathBuf },
+    /// Policy file exists but could not be read.
+    Read { path: PathBuf, message: String },
+    /// Policy file is not valid YAML.
+    Parse { path: PathBuf, message: String },
+}
+
+impl std::fmt::Display for PolicyLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { path } => write!(
+                f,
+                "security policy missing or could not be seeded: {}",
+                path.display()
+            ),
+            Self::Read { path, message } => {
+                write!(
+                    f,
+                    "cannot read security policy {}: {message}",
+                    path.display()
+                )
+            }
+            Self::Parse { path, message } => {
+                write!(
+                    f,
+                    "invalid security policy YAML {}: {message}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyLoadError {}
+
+/// Load the security policy, reporting missing/unreadable/invalid files.
+///
+/// Unlike [`load_policy`], this does **not** fall back to
+/// [`SecurityPolicy::default`] on I/O or parse failure — callers that need to
+/// surface diagnostics (e.g. `aish doctor`) should use this entry point.
+pub fn try_load_policy(config_path: Option<&Path>) -> Result<SecurityPolicy, PolicyLoadError> {
+    let effective_path = match resolve_security_policy_path(config_path) {
+        Some(path) => path,
+        None => {
+            return Err(PolicyLoadError::Missing {
+                path: config_path
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(user_security_policy_path),
+            });
+        }
+    };
+
+    let text = fs::read_to_string(&effective_path).map_err(|e| PolicyLoadError::Read {
+        path: effective_path.clone(),
+        message: e.to_string(),
+    })?;
+    let data = serde_yaml::from_str::<Value>(&text).map_err(|e| PolicyLoadError::Parse {
+        path: effective_path,
+        message: e.to_string(),
+    })?;
+    Ok(policy_from_value(data))
+}
+
+/// Load security policy for runtime use. On missing/unreadable/invalid files,
+/// falls back to [`SecurityPolicy::default`] (same historical behavior).
 pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
-    let Some(effective_path) = resolve_security_policy_path(config_path) else {
-        return SecurityPolicy::default();
-    };
+    try_load_policy(config_path).unwrap_or_else(|_| SecurityPolicy::default())
+}
 
-    let Ok(text) = fs::read_to_string(&effective_path) else {
-        return SecurityPolicy::default();
-    };
-    let Ok(data) = serde_yaml::from_str::<Value>(&text) else {
-        return SecurityPolicy::default();
-    };
-
+fn policy_from_value(data: Value) -> SecurityPolicy {
     let root = data.as_mapping();
     let global_cfg = root.and_then(|m| as_mapping(mapping_get(m, "global")));
     let audit_cfg = root.and_then(|m| as_mapping(mapping_get(m, "audit")));
@@ -820,6 +882,23 @@ mod tests {
             .chars()
             .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
         assert!(!has_cjk, "seeded policy must not contain CJK comments");
+    }
+
+    #[test]
+    fn try_load_policy_reports_parse_errors() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(&policy_path, "global: [\n").unwrap();
+        let err = super::try_load_policy(Some(&policy_path)).expect_err("parse");
+        match err {
+            super::PolicyLoadError::Parse { path, message } => {
+                assert_eq!(path, policy_path);
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+        // Runtime loader still falls back instead of panicking.
+        let _ = load_policy(Some(&policy_path));
     }
 
     #[test]
