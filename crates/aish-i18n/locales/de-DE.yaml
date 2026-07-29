@@ -284,6 +284,27 @@ shell:
     verify_blocked: "Blockiert (nicht schreibgeschützt): {command} ({reason})"
     verify_passed: "Bestanden: {command} (Exit {exit_code})"
     verify_failed: "Nicht bestanden: {command} (Exit {exit_code})"
+  nl_detection:
+    confirm_ask_ai: "Das sieht nach einer natürlichen Sprachfrage aus. KI fragen? (Y/n)"
+  error:
+    execution_error: "❌ Fehler während der Ausführung: {error}"
+    pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"
+    potential_error: "🚀 Mögliches Problem erkannt: {reason}, Lösung wird versucht..."
+    llm_error_title: "❌ LLM-Anfrage fehlgeschlagen"
+    llm_error_message: "Fehler: {error}"
+    llm_error_details_title: "Debug-Details"
+    tool_args_json_invalid_hint: "❌ Anfrage fehlgeschlagen, bitte erneut versuchen."
+  prompt:
+    confirm_execute: "?Diesen Befehl ausführen? [y/n]:"
+    ai_hint: "; verwenden, um die KI zu fragen"
+  model:
+    current: "Aktuelles Modell: {model}"
+    unset: "nicht gesetzt"
+    invalid: "Der Modellname darf nicht leer sein"
+    switching: "Modell wird validiert: {model}"
+    switch_same: "Modell unverändert: {model}"
+    switch_success: "Zu Modell gewechselt: {model}"
+    verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
     picker_title: "Modell / Konto wechseln"
     picker_subtitle: "↑↓ Auswaehlen, Enter wechseln"
     fetch_failed_subtitle: "Modellliste konnte nicht abgerufen werden (Endpoint unerreichbar) — nur aktuell + Verlauf"
@@ -376,27 +397,6 @@ shell:
     parse_format_error: "Diagnosebericht konnte nicht aus der Modellausgabe gelesen werden. Bitte /diagnose erneut versuchen."
     parse_prose_fallback: "Hinweis: Das Modell lieferte Klartext statt eines strukturierten Berichts."
     no_evidence: "(nicht angegeben)"
-  nl_detection:
-    confirm_ask_ai: "Das sieht nach einer natürlichen Sprachfrage aus. KI fragen? (Y/n)"
-  error:
-    execution_error: "❌ Fehler während der Ausführung: {error}"
-    pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"
-    potential_error: "🚀 Mögliches Problem erkannt: {reason}, Lösung wird versucht..."
-    llm_error_title: "❌ LLM-Anfrage fehlgeschlagen"
-    llm_error_message: "Fehler: {error}"
-    llm_error_details_title: "Debug-Details"
-    tool_args_json_invalid_hint: "❌ Anfrage fehlgeschlagen, bitte erneut versuchen."
-  prompt:
-    confirm_execute: "?Diesen Befehl ausführen? [y/n]:"
-    ai_hint: "; verwenden, um die KI zu fragen"
-  model:
-    current: "Aktuelles Modell: {model}"
-    unset: "nicht gesetzt"
-    invalid: "Der Modellname darf nicht leer sein"
-    switching: "Modell wird validiert: {model}"
-    switch_same: "Modell unverändert: {model}"
-    switch_success: "Zu Modell gewechselt: {model}"
-    verify_failed: "Modellvalidierung fehlgeschlagen: {reason}"
   token:
     title: "Token-Nutzung (letzte 7 Tage)"
     input_tokens: "Eingabe-Tokens"

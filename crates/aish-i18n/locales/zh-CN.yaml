@@ -629,6 +629,37 @@ shell:
     verify_blocked: "已拦截（非只读）: {command} ({reason})"
     verify_passed: "通过: {command} (exit {exit_code})"
     verify_failed: "未通过: {command} (exit {exit_code})"
+
+  nl_detection:
+    confirm_ask_ai: "这看起来像自然语言问题，是否让 AI 解答？(Y/n)"
+
+  error:
+    execution_error: "❌ 执行过程中出错: {error}"
+    pty_decode_error: "捕获 pty 输出解码错误: {error}"
+    potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
+    llm_error_title: "❌ 大模型请求失败"
+    llm_error_message: "错误: {error}"
+    llm_error_details_title: "调试详情"
+    tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
+    pty_error: "PTY 错误：{error}"
+    restart_bash_failed: "重启 bash 失败：{error}"
+    load_script_failed: "加载脚本 '{script}' 失败：{error}"
+
+  hint:
+    run_setup: "输入 /setup 重新配置 API Key"
+
+  prompt:
+    confirm_execute: "?是否执行此命令? [y/n]: "
+    ai_hint: "';' Ask AI ..."
+
+  model:
+    current: "当前模型: {model}"
+    unset: "未设置"
+    invalid: "模型名称不能为空"
+    switching: "正在验证模型: {model}"
+    switch_same: "模型未变更，仍为: {model}"
+    switch_success: "已切换模型: {model}"
+    verify_failed: "模型验证失败: {reason}"
     picker_title: "切换模型 / 账户"
     picker_subtitle: "↑↓ 选择，Enter 切换到该模型/账户"
     fetch_failed_subtitle: "无法获取模型列表（endpoint 不可达）—— 仅显示当前和历史"
@@ -721,37 +752,6 @@ shell:
     parse_format_error: "无法解析模型返回的诊断报告，请重试 /diagnose。"
     parse_prose_fallback: "提示：模型返回了纯文本而非结构化报告。"
     no_evidence: "（未提供）"
-
-  nl_detection:
-    confirm_ask_ai: "这看起来像自然语言问题，是否让 AI 解答？(Y/n)"
-
-  error:
-    execution_error: "❌ 执行过程中出错: {error}"
-    pty_decode_error: "捕获 pty 输出解码错误: {error}"
-    potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
-    llm_error_title: "❌ 大模型请求失败"
-    llm_error_message: "错误: {error}"
-    llm_error_details_title: "调试详情"
-    tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
-    pty_error: "PTY 错误：{error}"
-    restart_bash_failed: "重启 bash 失败：{error}"
-    load_script_failed: "加载脚本 '{script}' 失败：{error}"
-
-  hint:
-    run_setup: "输入 /setup 重新配置 API Key"
-
-  prompt:
-    confirm_execute: "?是否执行此命令? [y/n]: "
-    ai_hint: "';' Ask AI ..."
-
-  model:
-    current: "当前模型: {model}"
-    unset: "未设置"
-    invalid: "模型名称不能为空"
-    switching: "正在验证模型: {model}"
-    switch_same: "模型未变更，仍为: {model}"
-    switch_success: "已切换模型: {model}"
-    verify_failed: "模型验证失败: {reason}"
 
   token:
     title: "Token 统计 (近 7 天)"

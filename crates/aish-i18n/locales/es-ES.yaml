@@ -284,6 +284,27 @@ shell:
     verify_blocked: "Bloqueado (no solo lectura): {command} ({reason})"
     verify_passed: "Aprobado: {command} (exit {exit_code})"
     verify_failed: "Falló: {command} (exit {exit_code})"
+  nl_detection:
+    confirm_ask_ai: "Esto parece una pregunta en lenguaje natural. ¿Preguntar a IA? (Y/n)"
+  error:
+    execution_error: "❌ Error durante la ejecución: {error}"
+    pty_decode_error: "Error al decodificar la salida PTY: {error}"
+    potential_error: "🚀 Posible problema detectado: {reason}; intentando resolverlo..."
+    llm_error_title: "❌ Falló la solicitud al LLM"
+    llm_error_message: "Error: {error}"
+    llm_error_details_title: "Detalles de depuración"
+    tool_args_json_invalid_hint: "❌ La solicitud falló; inténtalo de nuevo."
+  prompt:
+    confirm_execute: "?¿Ejecutar este comando? [y/n]:"
+    ai_hint: "Usa ; para preguntar a la IA"
+  model:
+    current: "Modelo actual: {model}"
+    unset: "sin definir"
+    invalid: "El nombre del modelo no puede estar vacío"
+    switching: "Validando el modelo: {model}"
+    switch_same: "El modelo no ha cambiado: {model}"
+    switch_success: "Se cambió al modelo: {model}"
+    verify_failed: "Falló la validación del modelo: {reason}"
     picker_title: "Cambiar modelo / cuenta"
     picker_subtitle: "↑↓ seleccionar, Enter cambiar"
     fetch_failed_subtitle: "No se pudo obtener la lista de modelos (endpoint inalcanzable) — solo actual e historial"
@@ -376,27 +397,6 @@ shell:
     parse_format_error: "No se pudo interpretar el informe de diagnóstico. Intente /diagnose de nuevo."
     parse_prose_fallback: "Nota: el modelo devolvió texto plano en lugar de un informe estructurado."
     no_evidence: "(no proporcionada)"
-  nl_detection:
-    confirm_ask_ai: "Esto parece una pregunta en lenguaje natural. ¿Preguntar a IA? (Y/n)"
-  error:
-    execution_error: "❌ Error durante la ejecución: {error}"
-    pty_decode_error: "Error al decodificar la salida PTY: {error}"
-    potential_error: "🚀 Posible problema detectado: {reason}; intentando resolverlo..."
-    llm_error_title: "❌ Falló la solicitud al LLM"
-    llm_error_message: "Error: {error}"
-    llm_error_details_title: "Detalles de depuración"
-    tool_args_json_invalid_hint: "❌ La solicitud falló; inténtalo de nuevo."
-  prompt:
-    confirm_execute: "?¿Ejecutar este comando? [y/n]:"
-    ai_hint: "Usa ; para preguntar a la IA"
-  model:
-    current: "Modelo actual: {model}"
-    unset: "sin definir"
-    invalid: "El nombre del modelo no puede estar vacío"
-    switching: "Validando el modelo: {model}"
-    switch_same: "El modelo no ha cambiado: {model}"
-    switch_success: "Se cambió al modelo: {model}"
-    verify_failed: "Falló la validación del modelo: {reason}"
   token:
     title: "Uso de tokens (últimos 7 días)"
     input_tokens: "Tokens de entrada"

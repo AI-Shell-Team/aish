@@ -303,4 +303,31 @@ shell:
             assert_ne!(val, "cli.app_help", "Locale {} failed to load", tag);
         }
     }
+
+    #[test]
+    fn picker_keys_present_in_all_embedded_locales() {
+        // Regression guard: the /model picker + accounts i18n keys must exist
+        // in every embedded locale, else the panel renders raw key strings.
+        for &(tag, _) in EMBEDDED_LOCALES {
+            let mgr = I18nManager::new_with_locale(tag);
+            for key in [
+                "shell.model.picker_title",
+                "shell.model.picker_subtitle",
+                "shell.model.picker_search",
+                "shell.model.picker_footer",
+                "shell.model.action_add",
+                "shell.model.action_manage",
+                "shell.model.manage_title",
+                "shell.accounts.name_label",
+                "shell.common.cancelled",
+            ] {
+                let val = mgr.t(key);
+                assert_ne!(
+                    val, key,
+                    "embedded locale {:?} is missing key {:?} (returned the key itself)",
+                    tag, key
+                );
+            }
+        }
+    }
 }

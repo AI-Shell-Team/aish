@@ -284,6 +284,27 @@ shell:
     verify_blocked: "Bloque (non lecture seule): {command} ({reason})"
     verify_passed: "Reussi: {command} (exit {exit_code})"
     verify_failed: "Echec: {command} (exit {exit_code})"
+  nl_detection:
+    confirm_ask_ai: "Cela ressemble à une question en langage naturel. Demander à l'IA ? (Y/n)"
+  error:
+    execution_error: "❌ Erreur pendant l'execution : {error}"
+    pty_decode_error: "Erreur de decodage de sortie PTY detectee : {error}"
+    potential_error: "🚀 Probleme potentiel detecte : {reason}, tentative de resolution..."
+    llm_error_title: "❌ Echec de la requete LLM"
+    llm_error_message: "Erreur : {error}"
+    llm_error_details_title: "Details de debogage"
+    tool_args_json_invalid_hint: "❌ La requete a echoue, veuillez reessayer."
+  prompt:
+    confirm_execute: "?Executer cette commande ? [y/n]:"
+    ai_hint: "Utilisez ; pour interroger l'IA"
+  model:
+    current: "Modele actuel : {model}"
+    unset: "non defini"
+    invalid: "Le nom du modele ne peut pas etre vide"
+    switching: "Validation du modele : {model}"
+    switch_same: "Modele inchange : {model}"
+    switch_success: "Modele active : {model}"
+    verify_failed: "La validation du modele a echoue : {reason}"
     picker_title: "Changer modele / compte"
     picker_subtitle: "↑↓ selectionner, Enter basculer"
     fetch_failed_subtitle: "Impossible de recuperer la liste des modeles (endpoint injoignable) — actuel + historique seulement"
@@ -376,27 +397,6 @@ shell:
     parse_format_error: "Impossible d'interpreter le rapport de diagnostic. Reessayez /diagnose."
     parse_prose_fallback: "Note : le modele a renvoye du texte brut au lieu d'un rapport structure."
     no_evidence: "(non fournie)"
-  nl_detection:
-    confirm_ask_ai: "Cela ressemble à une question en langage naturel. Demander à l'IA ? (Y/n)"
-  error:
-    execution_error: "❌ Erreur pendant l'execution : {error}"
-    pty_decode_error: "Erreur de decodage de sortie PTY detectee : {error}"
-    potential_error: "🚀 Probleme potentiel detecte : {reason}, tentative de resolution..."
-    llm_error_title: "❌ Echec de la requete LLM"
-    llm_error_message: "Erreur : {error}"
-    llm_error_details_title: "Details de debogage"
-    tool_args_json_invalid_hint: "❌ La requete a echoue, veuillez reessayer."
-  prompt:
-    confirm_execute: "?Executer cette commande ? [y/n]:"
-    ai_hint: "Utilisez ; pour interroger l'IA"
-  model:
-    current: "Modele actuel : {model}"
-    unset: "non defini"
-    invalid: "Le nom du modele ne peut pas etre vide"
-    switching: "Validation du modele : {model}"
-    switch_same: "Modele inchange : {model}"
-    switch_success: "Modele active : {model}"
-    verify_failed: "La validation du modele a echoue : {reason}"
   token:
     title: "Utilisation de tokens (7 derniers jours)"
     input_tokens: "Tokens d'entrée"

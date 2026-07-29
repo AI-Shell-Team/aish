@@ -284,6 +284,27 @@ shell:
     verify_blocked: "ブロック（非読み取り専用）: {command} ({reason})"
     verify_passed: "合格: {command} (exit {exit_code})"
     verify_failed: "不合格: {command} (exit {exit_code})"
+  nl_detection:
+    confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
+  error:
+    execution_error: "❌ 実行中にエラーが発生しました: {error}"
+    pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
+    potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
+    llm_error_title: "❌ LLM リクエストに失敗しました"
+    llm_error_message: "エラー: {error}"
+    llm_error_details_title: "デバッグ詳細"
+    tool_args_json_invalid_hint: "❌ リクエストに失敗しました。再試行してください。"
+  prompt:
+    confirm_execute: "?このコマンドを実行しますか? [y/n]:"
+    ai_hint: "; で AI に質問"
+  model:
+    current: "現在のモデル: {model}"
+    unset: "未設定"
+    invalid: "モデル名は空にできません"
+    switching: "モデルを検証しています: {model}"
+    switch_same: "モデルは変更されていません: {model}"
+    switch_success: "モデルを切り替えました: {model}"
+    verify_failed: "モデル検証に失敗しました: {reason}"
     picker_title: "モデル / アカウント切替"
     picker_subtitle: "↑↓ 選択、Enter で切替"
     fetch_failed_subtitle: "モデルリストを取得できません（endpointに到達不能）— 現在と履歴のみ表示"
@@ -376,27 +397,6 @@ shell:
     parse_format_error: "モデル出力から診断レポートを解析できませんでした。/diagnose を再試行してください。"
     parse_prose_fallback: "注意: モデルは構造化レポートではなくプレーンテキストを返しました。"
     no_evidence: "（未提供）"
-  nl_detection:
-    confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
-  error:
-    execution_error: "❌ 実行中にエラーが発生しました: {error}"
-    pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
-    potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
-    llm_error_title: "❌ LLM リクエストに失敗しました"
-    llm_error_message: "エラー: {error}"
-    llm_error_details_title: "デバッグ詳細"
-    tool_args_json_invalid_hint: "❌ リクエストに失敗しました。再試行してください。"
-  prompt:
-    confirm_execute: "?このコマンドを実行しますか? [y/n]:"
-    ai_hint: "; で AI に質問"
-  model:
-    current: "現在のモデル: {model}"
-    unset: "未設定"
-    invalid: "モデル名は空にできません"
-    switching: "モデルを検証しています: {model}"
-    switch_same: "モデルは変更されていません: {model}"
-    switch_success: "モデルを切り替えました: {model}"
-    verify_failed: "モデル検証に失敗しました: {reason}"
   token:
     title: "Token 使用量 (過去7日間)"
     input_tokens: "入力 tokens"
