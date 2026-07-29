@@ -164,37 +164,13 @@ fn setting_desc(def: &crate::settings_panel::SettingDef) -> String {
     t(&format!("shell.setting.k.{}.desc", def.key.name()))
 }
 
-/// Mirror the security-relevant fields of `config.yaml` onto `policy`.
-///
-/// `config.yaml` overrides `security_policy.yaml` for the globals the
-/// `/setting` panel exposes (`enable_sandbox`, `default_risk_level`,
-/// `sandbox_off_action`, `sandbox_timeout_seconds`, and the InputGuard
-/// master switch). Centralized here so the startup path and the live
-/// `/setting` update path cannot drift.
-fn apply_config_security_overrides(
-    policy: &mut aish_security::SecurityPolicy,
-    config: &ConfigModel,
-) {
-    use aish_security::decision::{RiskLevel, SandboxOffAction};
-    policy.input_guard.enabled = config.input_guard_enabled;
-    policy.enable_sandbox = config.enable_sandbox;
-    policy.default_risk_level = match config.default_risk_level.to_lowercase().as_str() {
-        "medium" => RiskLevel::Medium,
-        "high" => RiskLevel::High,
-        _ => RiskLevel::Low,
-    };
-    policy.sandbox_off_action = match config.sandbox_off_action.to_lowercase().as_str() {
-        "confirm" => SandboxOffAction::Confirm,
-        "block" => SandboxOffAction::Block,
-        _ => SandboxOffAction::Allow,
-    };
-    policy.sandbox_timeout_seconds = config.sandbox_timeout_seconds;
-}
-
 /// Human-readable current value for the setting-list row.
-fn setting_display_current(cfg: &ConfigModel, def: &crate::settings_panel::SettingDef) -> String {
-    use crate::settings_panel::{current_raw, SettingKey, SettingKind};
-    let raw = current_raw(cfg, def.key);
+fn setting_display_current(
+    cfg: &ConfigModel,
+    def: &crate::settings_panel::SettingDef,
+    raw: &str,
+) -> String {
+    use crate::settings_panel::{SettingKey, SettingKind};
     match def.kind {
         SettingKind::Bool => {
             let label = if raw == "true" {
@@ -257,7 +233,7 @@ fn setting_display_current(cfg: &ConfigModel, def: &crate::settings_panel::Setti
             if raw.is_empty() {
                 t("shell.setting.not_set")
             } else {
-                raw
+                raw.to_string()
             }
         }
     }
@@ -527,6 +503,8 @@ pub struct AishShell {
     pub config: ConfigModel,
     pub ai_handler: AiHandler,
     pub security_manager: SecurityManager,
+    /// Shared with BashTool so preflight sees `/setting` live policy updates.
+    policy_slot: aish_tools::bash::PolicySlot,
     input_guard: aish_security::input_guard::InputGuard,
     secret_check_closure:
         std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync>,
@@ -857,15 +835,16 @@ impl AishShell {
             }
         }
 
-        // Initialize security manager (before tool registration)
-        let mut policy = load_policy(None);
-        // config.yaml mirrors several security_policy.yaml fields and takes
-        // precedence, so users can toggle them from the familiar config file
-        // (and via /setting) without editing security_policy.yaml.
-        apply_config_security_overrides(&mut policy, &config);
-        let security_manager = SecurityManager::new(policy);
+        // Initialize security manager (before tool registration).
+        // security_policy.yaml is the sole authority for security globals.
+        let policy = load_policy(None);
+        let security_manager = SecurityManager::new(policy.clone());
         let input_guard =
             aish_security::input_guard::InputGuard::from_policy(security_manager.policy());
+        // Live policy slot shared with BashTool preflight (same effective values
+        // as SecurityManager; updated again on `/setting` Security edits).
+        let policy_slot: aish_tools::bash::PolicySlot =
+            std::sync::Arc::new(std::sync::Mutex::new(Some(policy)));
 
         // Register tools
         let mut tool_registry = ToolRegistry::new();
@@ -874,6 +853,7 @@ impl AishShell {
         let mut bash_tool = aish_tools::bash::BashTool::new();
         bash_tool.set_cancellation_token(llm_session.cancellation_token_arc());
         bash_tool.set_pty_slot(pty_slot.clone());
+        bash_tool.set_policy_slot(policy_slot.clone());
 
         // Shared secret vault slot — populated after AishShell construction.
         let vault_slot: aish_tools::bash::VaultSlot =
@@ -1998,6 +1978,7 @@ impl AishShell {
             config,
             ai_handler,
             security_manager,
+            policy_slot,
             input_guard,
             secret_check_closure,
             secret_vault,
@@ -5062,7 +5043,8 @@ impl AishShell {
             // Rebuild items every iteration so values refresh after each edit.
             // `last_key` restores the cursor; `last_category` keeps the user on
             // the same chip instead of bouncing back to "All" after each edit.
-            let (cats, items) = Self::build_settings_items(&self.config);
+            let (cats, items) =
+                Self::build_settings_items(&self.config, self.security_manager.policy());
             let panel = SettingsPanel::new(t("shell.setting.title").to_string(), cats, items)
                 .with_search_placeholder(t("shell.setting.search_placeholder"))
                 .with_footer_idle(t("shell.setting.footer_idle"))
@@ -5126,7 +5108,11 @@ impl AishShell {
                     let def = settings_panel::find(k);
                     let label = setting_label(def);
                     let desc = setting_desc(def);
-                    let cur_raw = settings_panel::current_raw(&self.config, k);
+                    let cur_raw = crate::settings_panel::raw_value(
+                        &self.config,
+                        self.security_manager.policy(),
+                        k,
+                    );
                     let secret = matches!(def.kind, SettingKind::Secret);
                     let submitted = prompt_edit_value(&label, &desc, &cur_raw, secret);
                     let skip = secret && submitted.as_deref().is_some_and(|v| v.is_empty());
@@ -5587,7 +5573,8 @@ impl AishShell {
             SettingKind::Choice(o) => o,
             _ => return None,
         };
-        let cur = settings_panel::current_raw(&self.config, key);
+        let cur =
+            crate::settings_panel::raw_value(&self.config, self.security_manager.policy(), key);
         let label = setting_label(def);
         let desc = setting_desc(def);
         let options: Vec<DialogOption> = opts
@@ -5649,60 +5636,52 @@ impl AishShell {
     ) -> Result<(), String> {
         use crate::settings_panel::{self, LiveEffect, SettingKind};
 
-        // Validate against a clone so a bad value can't partially mutate
-        // the live config; only commit on success.
-        let mut trial = self.config.clone();
-        settings_panel::apply(&mut trial, key, new_val)?;
-        self.config = trial;
+        if settings_panel::is_security_setting(key) {
+            // Security SSOT is security_policy.yaml — never write these to
+            // config.yaml. Validate on a policy clone, then commit live.
+            let mut trial = self.security_manager.policy().clone();
+            settings_panel::apply_security(&mut trial, key, new_val)?;
+            self.security_manager.set_policy(trial.clone());
+            aish_tools::bash::BashTool::publish_live_policy(&self.policy_slot, trial);
+            self.input_guard
+                .set_enabled(self.security_manager.policy().input_guard.enabled);
+            self.sync_security_policy_file();
+        } else {
+            // Validate against a clone so a bad value can't partially mutate
+            // the live config; only commit on success.
+            let mut trial = self.config.clone();
+            settings_panel::apply(&mut trial, key, new_val)?;
+            self.config = trial;
 
-        // Persist to disk.
-        let config_path = aish_config::ConfigLoader::default_config_path();
-        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-            eprintln!(
-                "{}",
-                theme::warning(&{
-                    let mut a = std::collections::HashMap::new();
-                    a.insert("error".to_string(), e.to_string());
-                    t_with_args("shell.config_save_warning", &a)
-                })
-            );
-        }
-
-        // Live side-effects so the change is felt without restart.
-        match settings_panel::live_effect(key) {
-            LiveEffect::ModelSession => {
-                self.ai_handler.update_model(
-                    &self.config.model,
-                    Some(&self.config.api_base),
-                    Some(&self.config.api_key),
+            // Persist to disk.
+            let config_path = aish_config::ConfigLoader::default_config_path();
+            if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
+                eprintln!(
+                    "{}",
+                    theme::warning(&{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("error".to_string(), e.to_string());
+                        t_with_args("shell.config_save_warning", &a)
+                    })
                 );
-                if let Some(ai) = &self.inline_ai {
-                    ai.update_model(&self.config.model);
-                }
-                self.refresh_config_dependent_tools();
             }
-            LiveEffect::ToolsRefresh => self.refresh_config_dependent_tools(),
-            LiveEffect::InputGuard => {
-                self.input_guard
-                    .set_enabled(self.config.input_guard_enabled);
-            }
-            LiveEffect::SecurityPolicy => {
-                // Re-apply the security globals mirrored from config.yaml to
-                // the running SecurityManager so changes take effect now,
-                // not on next launch. `set_policy` rebuilds the sandbox
-                // runner when `enable_sandbox` flips.
-                let mut policy = self.security_manager.policy().clone();
-                apply_config_security_overrides(&mut policy, &self.config);
-                self.security_manager.set_policy(policy);
 
-                // Also persist to security_policy.yaml (the file users
-                // consider authoritative) so the change is visible there and
-                // survives a restart. Writes to the resolved policy path;
-                // a permission failure is logged but does not revert the
-                // live update.
-                self.sync_security_policy_file();
+            // Live side-effects so the change is felt without restart.
+            match settings_panel::live_effect(key) {
+                LiveEffect::ModelSession => {
+                    self.ai_handler.update_model(
+                        &self.config.model,
+                        Some(&self.config.api_base),
+                        Some(&self.config.api_key),
+                    );
+                    if let Some(ai) = &self.inline_ai {
+                        ai.update_model(&self.config.model);
+                    }
+                    self.refresh_config_dependent_tools();
+                }
+                LiveEffect::ToolsRefresh => self.refresh_config_dependent_tools(),
+                LiveEffect::None => {}
             }
-            LiveEffect::None => {}
         }
 
         // Confirmation line below the panel.
@@ -5740,40 +5719,32 @@ impl AishShell {
         Ok(())
     }
 
-    /// Persist the current security globals to the resolved
-    /// `security_policy.yaml` so `/setting` changes are visible in the file
-    /// users consider authoritative and survive a restart. A write failure
-    /// (e.g. root-owned system policy) is logged but does not revert the
-    /// live update or block the `/setting` flow.
+    /// Persist the live SecurityManager globals to
+    /// `~/.config/aish/security_policy.yaml` (SSOT for `/setting`). Missing
+    /// files are seeded from the shipped template. A write failure is logged
+    /// but does not revert the live update.
     fn sync_security_policy_file(&self) {
-        let Some(path) = aish_security::resolve_security_policy_path(None) else {
+        let Some(path) = aish_security::writable_security_policy_path() else {
             return;
         };
-        let risk = match self.config.default_risk_level.to_lowercase().as_str() {
-            "medium" => "MEDIUM",
-            "high" => "HIGH",
-            _ => "LOW",
-        };
-        let action = match self.config.sandbox_off_action.to_lowercase().as_str() {
-            "confirm" => "CONFIRM",
-            "block" => "BLOCK",
-            _ => "ALLOW",
-        };
-        let timeout_str = self.config.sandbox_timeout_seconds.to_string();
+        let policy = self.security_manager.policy();
+        let timeout_str = policy.sandbox_timeout_seconds.to_string();
         let updates: &[(&str, &str)] = &[
             (
                 "enable_sandbox",
-                if self.config.enable_sandbox {
+                if policy.enable_sandbox {
                     "true"
                 } else {
                     "false"
                 },
             ),
-            ("default_risk_level", risk),
-            ("sandbox_off_action", action),
+            ("default_risk_level", policy.default_risk_level.as_str()),
+            ("sandbox_off_action", policy.sandbox_off_action.as_str()),
             ("sandbox_timeout_seconds", &timeout_str),
         ];
-        if let Err(e) = aish_security::save_policy_globals(&path, updates) {
+        if let Err(e) =
+            aish_security::save_policy_ui_fields(&path, updates, Some(policy.input_guard.enabled))
+        {
             eprintln!(
                 "{}",
                 theme::warning(&format!("could not write {}: {e}", path.display()))
@@ -5785,6 +5756,7 @@ impl AishShell {
     /// easy to test and avoids borrow conflicts against `self`.
     fn build_settings_items(
         config: &ConfigModel,
+        policy: &aish_security::SecurityPolicy,
     ) -> (
         Vec<aish_ui::SettingsCategoryInfo>,
         Vec<aish_ui::SettingsItem>,
@@ -5811,8 +5783,8 @@ impl AishShell {
         let items: Vec<SettingsItem> = SETTINGS
             .iter()
             .map(|def| {
-                let cur_raw = settings_panel::current_raw(config, def.key);
-                let display = setting_display_current(config, def);
+                let cur_raw = settings_panel::raw_value(config, policy, def.key);
+                let display = setting_display_current(config, def, &cur_raw);
                 let (kind, options) = match def.kind {
                     SettingKind::Bool => (SettingsValueKind::Bool, Vec::new()),
                     SettingKind::Choice(opts) => (
@@ -6081,7 +6053,7 @@ impl AishShell {
                 Some(self.secret_check_closure.clone()),
                 Some(self.secret_vault.clone()),
                 on_output,
-                self.config.input_guard_enabled,
+                self.input_guard.enabled(),
                 self.config.enable_remote_git_prompt,
                 self.config.remote_rich_prompt,
                 self.config.remote_danger_patterns.clone(),
@@ -6469,7 +6441,7 @@ impl AishShell {
                 None,
                 None,
                 None,
-                self.config.input_guard_enabled,
+                self.input_guard.enabled(),
                 false, // not an SSH session, no git prompt injection
                 self.config.remote_rich_prompt,
                 self.config.remote_danger_patterns.clone(),

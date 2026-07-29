@@ -982,10 +982,11 @@ help:
 
         ## Speicherort
 
-        Priorität:
+        Pfad:
         1. Explizit angegebener Pfad
-        2. `/etc/aish/security_policy.yaml`
-        3. `~/.config/aish/security_policy.yaml`
+        2. `~/.config/aish/security_policy.yaml` (fehlt sie, wird die mitgelieferte Vorlage erzeugt)
+
+        `/etc/aish` wird zur Laufzeit nicht gelesen.
 
         ## Risikostufen
 

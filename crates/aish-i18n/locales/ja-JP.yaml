@@ -982,10 +982,11 @@ help:
 
         ## 設定場所
 
-        優先順位：
+        パス：
         1. 明示的に指定されたパス
-        2. `/etc/aish/security_policy.yaml`
-        3. `~/.config/aish/security_policy.yaml`
+        2. `~/.config/aish/security_policy.yaml`（無い場合は同梱テンプレートから生成）
+
+        実行時に `/etc/aish` は読みません。
 
         ## リスクレベル
 

@@ -10,7 +10,8 @@ use aish_llm::{
 };
 use aish_pty::{BashOffloadSettings, BashOutputOffload, CancelToken, PtyExecutor};
 use aish_security::{
-    load_policy, secret::SecretVault, SecurityDecision, SecurityManager, SecurityRequest,
+    load_policy, secret::SecretVault, SecurityDecision, SecurityManager, SecurityPolicy,
+    SecurityRequest,
 };
 
 use super::prompt;
@@ -99,6 +100,10 @@ impl Drop for InteractiveInputGuard {
 /// Shared vault slot for secret placeholder restoration.
 pub type VaultSlot = Arc<Mutex<Option<Arc<Mutex<SecretVault>>>>>;
 
+/// Live security policy shared with the shell's SecurityManager (`/setting`).
+/// When set, bash preflight uses this snapshot instead of reloading from disk.
+pub type PolicySlot = Arc<Mutex<Option<SecurityPolicy>>>;
+
 /// Tool for executing bash commands via PTY.
 pub struct BashTool {
     /// Shared cancellation token from the AI handler.
@@ -109,6 +114,8 @@ pub struct BashTool {
     pty_slot: PtySlot,
     /// Shared vault for restoring $SECRET_* placeholders before command execution.
     secret_vault: VaultSlot,
+    /// Live policy from the shell; falls back to `load_policy` when empty.
+    policy_slot: PolicySlot,
 }
 
 fn timeout_secs(args: &serde_json::Value) -> Result<Option<u64>, ToolResult> {
@@ -137,7 +144,15 @@ fn security_preflight_with_socket(
     config_path: Option<&Path>,
     sandbox_socket_path: Option<&Path>,
 ) -> PreflightResult {
-    let policy = load_policy(config_path);
+    security_preflight_with_policy(command, cwd, load_policy(config_path), sandbox_socket_path)
+}
+
+fn security_preflight_with_policy(
+    command: &str,
+    cwd: Option<&Path>,
+    policy: SecurityPolicy,
+    sandbox_socket_path: Option<&Path>,
+) -> PreflightResult {
     let manager = SecurityManager::new(policy.clone());
     let mut request = SecurityRequest::ai_command()
         .with_repo_root("/")
@@ -192,7 +207,12 @@ fn bash_preflight(
     }
 
     let cwd = std::env::current_dir().ok();
-    security_preflight(&command, cwd.as_deref(), None)
+    if let Some(policy) = tool.live_policy() {
+        security_preflight_with_policy(&command, cwd.as_deref(), policy, None)
+    } else {
+        // No live slot (standalone/tests) — load from disk SSOT.
+        security_preflight(&command, cwd.as_deref(), None)
+    }
 }
 
 fn format_security_message(decision: &SecurityDecision) -> String {
@@ -265,6 +285,7 @@ impl BashTool {
             cancellation_token: None,
             pty_slot: Arc::new(Mutex::new(None)),
             secret_vault: Arc::new(Mutex::new(None)),
+            policy_slot: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -290,6 +311,7 @@ impl BashTool {
         bash.set_cancellation_token(token);
         bash.set_pty_slot(Arc::clone(&self.pty_slot));
         bash.set_secret_vault(Arc::clone(&self.secret_vault));
+        bash.set_policy_slot(Arc::clone(&self.policy_slot));
         bash
     }
 
@@ -339,6 +361,20 @@ impl BashTool {
     /// Set the shared secret vault for placeholder restoration.
     pub fn set_secret_vault(&mut self, vault: VaultSlot) {
         self.secret_vault = vault;
+    }
+
+    /// Share the shell's live security policy with bash preflight.
+    pub fn set_policy_slot(&mut self, slot: PolicySlot) {
+        self.policy_slot = slot;
+    }
+
+    /// Publish an updated live policy (used after `/setting` Security edits).
+    pub fn publish_live_policy(slot: &PolicySlot, policy: SecurityPolicy) {
+        *slot.lock().unwrap() = Some(policy);
+    }
+
+    fn live_policy(&self) -> Option<SecurityPolicy> {
+        self.policy_slot.lock().unwrap().clone()
     }
 
     /// Restore `$SECRET_*` placeholders in the command to their actual values.
@@ -651,6 +687,79 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    fn xdg_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Restore `XDG_CONFIG_HOME` on drop (including panic/assert unwind).
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&std::path::Path>) -> Self {
+            let prev = std::env::var_os(key);
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn bash_preflight_uses_live_policy_slot_over_disk() {
+        // Isolate load_policy(None) to an ALLOW-only user policy, then prove
+        // the live slot (HIGH rm-/etc rule) wins for bash_preflight.
+        let dir = tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        fs::create_dir_all(xdg.join("aish")).unwrap();
+        let user_policy = xdg.join("aish").join("security_policy.yaml");
+        fs::write(
+            &user_policy,
+            "global:\n  enable_sandbox: false\n  sandbox_off_action: ALLOW\n  default_risk_level: LOW\nrules: []\n",
+        )
+        .unwrap();
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.as_path()));
+
+        let mut tool = BashTool::new();
+        let args = serde_json::json!({"command": "rm -rf /etc"});
+        assert_eq!(
+            bash_preflight(&tool, &args, false),
+            PreflightResult::Allow,
+            "disk policy alone should allow"
+        );
+
+        let slot: PolicySlot = Arc::new(Mutex::new(None));
+        tool.set_policy_slot(Arc::clone(&slot));
+        let live_path = dir.path().join("live_policy.yaml");
+        fs::write(
+            &live_path,
+            "global:\n  enable_sandbox: false\n  sandbox_off_action: ALLOW\n  default_risk_level: LOW\nrules:\n  - id: H-001\n    path: [/etc/**]\n    operations: [DELETE]\n    command_list: [rm]\n    risk: HIGH\n    reason: live policy blocks etc\n",
+        )
+        .unwrap();
+        BashTool::publish_live_policy(&slot, load_policy(Some(live_path.as_path())));
+
+        match bash_preflight(&tool, &args, false) {
+            PreflightResult::Block { message, .. } => {
+                assert!(message.contains("live policy blocks etc"), "{message}");
+            }
+            other => panic!("expected Block from live policy slot, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_for_sub_session_token_binds_child_not_parent() {

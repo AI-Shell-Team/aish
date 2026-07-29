@@ -127,9 +127,9 @@ impl InputGuard {
         self.enabled
     }
 
-    /// Override the enabled flag. Used when the caller wants to mirror an
-    /// external toggle (e.g. `config.yaml`'s `input_guard_enabled`) onto a
-    /// cached `InputGuard` instance without rebuilding the rule set.
+    /// Override the enabled flag. Used when the caller wants to apply a
+    /// live `/setting` toggle onto a cached `InputGuard` instance without
+    /// rebuilding the rule set.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }

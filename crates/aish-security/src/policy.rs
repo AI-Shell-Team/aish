@@ -92,41 +92,10 @@ impl Default for SecurityPolicy {
     }
 }
 
-const EMPTY_POLICY_TEMPLATE: &str = "# AI-Shell Security Policy\n\
-\n\
-# Lines below ship aish defaults. Edit to tighten or relax; removing a\n\
-# key restores its default value. System location: /etc/aish/security_policy.yaml.\n\
-# User fallback (~/.config/aish/security_policy.yaml) is auto-seeded from this\n\
-# template on first launch.\n\
-\n\
-global:\n\
-  default_risk_level: LOW        # LOW | MEDIUM | HIGH\n\
-  enable_sandbox: false\n\
-  sandbox_off_action: ALLOW      # ALLOW | CONFIRM | BLOCK\n\
-  sandbox_timeout_seconds: 10\n\
-\n\
-audit:\n\
-  enabled: false\n\
-  # include_commands: false   # set true to also audit regular shell commands\n\
-  # log_path: /var/log/aish/audit.log\n\
-\n\
-# InputGuard pre-screens shell commands and AI prompts before execution.\n\
-# Built-in rules: crates/aish-security/src/input_guard/patterns.rs.\n\
-# Custom rules below are merged on top of built-ins; a custom rule with\n\
-# the same `name` as a built-in overrides it.\n\
-input_guard:\n\
-  enabled: true\n\
-  # max_analyzable_bytes: 4096    # inputs longer than this force-confirm\n\
-  # custom_block_rules:\n\
-  #   - name: no_rm_data\n\
-  #     pattern: \"rm\\s+-rf\\s+/data\"\n\
-  #     message: deleting /data is forbidden\n\
-  # custom_confirm_rules:\n\
-  #   - name: confirm_docker_push\n\
-  #     pattern: \"docker\\s+push\"\n\
-  #     message: pushing image — confirm tag\n\
-\n\
-rules: []\n";
+/// Default policy content shipped with aish. Seeded into
+/// `~/.config/aish/security_policy.yaml` on first use — runtime never reads
+/// `/etc/aish`.
+const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../config/security_policy.yaml");
 
 fn user_security_policy_path() -> PathBuf {
     let base_dir = env::var_os("XDG_CONFIG_HOME")
@@ -140,28 +109,63 @@ fn user_security_policy_path() -> PathBuf {
     base_dir.join("aish").join("security_policy.yaml")
 }
 
+/// Seed `~/.config/aish/security_policy.yaml` if missing from the compile-time
+/// default template. Writes the full template to a temp file first, then
+/// installs with `create_new` so concurrent races cannot clobber a user file
+/// and a failed seed cannot leave an empty destination.
 fn ensure_user_policy_template(path: &Path) {
+    if path.exists() {
+        return;
+    }
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
 
-    let _ = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .and_then(|_| fs::write(path, EMPTY_POLICY_TEMPLATE));
+    // Write the complete template to a temp file first, then publish it with a
+    // no-clobber install so concurrent readers never observe a partial dest and
+    // an existing user file is never overwritten.
+    let tmp_path = path.with_extension("yaml.seed.tmp");
+    if fs::write(&tmp_path, DEFAULT_POLICY_TEMPLATE).is_err() {
+        let _ = fs::remove_file(&tmp_path);
+        return;
+    }
+
+    match fs::hard_link(&tmp_path, path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            // Fallback when hard links are unavailable: create_new + full write,
+            // removing the destination if that write fails.
+            use std::io::Write;
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                if file.write_all(DEFAULT_POLICY_TEMPLATE.as_bytes()).is_err() {
+                    drop(file);
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
+    let _ = fs::remove_file(&tmp_path);
 }
 
+/// Resolve the policy file used for **reads**.
+///
+/// Priority:
+/// 1. Explicit `config_path` (tests / overrides)
+/// 2. `~/.config/aish/security_policy.yaml` (auto-seeded from the shipped
+///    template when missing)
+///
+/// `/etc/aish` is never consulted — all runtime policy I/O is under the user
+/// config directory.
 pub fn resolve_security_policy_path(config_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = config_path {
         if path.exists() {
             return Some(path.to_path_buf());
         }
-    }
-
-    let system_path = PathBuf::from("/etc/aish/security_policy.yaml");
-    if system_path.exists() {
-        return Some(system_path);
     }
 
     let user_path = user_security_policy_path();
@@ -175,12 +179,21 @@ pub fn resolve_security_policy_path(config_path: Option<&Path>) -> Option<PathBu
     None
 }
 
-fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
-    mapping.get(Value::String(key.to_string()))
+/// Path `/setting` (and other UI writers) must use — always
+/// `~/.config/aish/security_policy.yaml`. Seeds the shipped template when
+/// missing.
+pub fn writable_security_policy_path() -> Option<PathBuf> {
+    let user_path = user_security_policy_path();
+    ensure_user_policy_template(&user_path);
+    if user_path.exists() {
+        Some(user_path)
+    } else {
+        None
+    }
 }
 
-fn as_mapping(value: Option<&Value>) -> Option<&Mapping> {
-    value.and_then(Value::as_mapping)
+fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+    mapping.get(Value::String(key.to_string()))
 }
 
 fn ensure_list(value: Option<&Value>) -> Vec<&Value> {
@@ -398,21 +411,110 @@ fn parse_invalid_fallback_rules(
     (invalid_rules, issues)
 }
 
+/// Errors from an authoritative security policy load (no silent defaults).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyLoadError {
+    /// Policy path could not be resolved / seeded.
+    Missing { path: PathBuf },
+    /// Policy file exists but could not be read.
+    Read { path: PathBuf, message: String },
+    /// Policy file is not valid YAML.
+    Parse { path: PathBuf, message: String },
+    /// YAML parsed, but required sections have the wrong shape.
+    Invalid { path: PathBuf, message: String },
+}
+
+impl std::fmt::Display for PolicyLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing { path } => write!(
+                f,
+                "security policy missing or could not be seeded: {}",
+                path.display()
+            ),
+            Self::Read { path, message } => {
+                write!(
+                    f,
+                    "cannot read security policy {}: {message}",
+                    path.display()
+                )
+            }
+            Self::Parse { path, message } => {
+                write!(
+                    f,
+                    "invalid security policy YAML {}: {message}",
+                    path.display()
+                )
+            }
+            Self::Invalid { path, message } => {
+                write!(
+                    f,
+                    "invalid security policy structure {}: {message}",
+                    path.display()
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyLoadError {}
+
+/// Load the security policy, reporting missing/unreadable/invalid files.
+///
+/// Unlike [`load_policy`], this does **not** fall back to
+/// [`SecurityPolicy::default`] on I/O or parse failure — callers that need to
+/// surface diagnostics (e.g. `aish doctor`) should use this entry point.
+pub fn try_load_policy(config_path: Option<&Path>) -> Result<SecurityPolicy, PolicyLoadError> {
+    let effective_path = match resolve_security_policy_path(config_path) {
+        Some(path) => path,
+        None => {
+            return Err(PolicyLoadError::Missing {
+                path: config_path
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(user_security_policy_path),
+            });
+        }
+    };
+
+    let text = fs::read_to_string(&effective_path).map_err(|e| PolicyLoadError::Read {
+        path: effective_path.clone(),
+        message: e.to_string(),
+    })?;
+    let data = serde_yaml::from_str::<Value>(&text).map_err(|e| PolicyLoadError::Parse {
+        path: effective_path.clone(),
+        message: e.to_string(),
+    })?;
+    policy_from_value(data).map_err(|message| PolicyLoadError::Invalid {
+        path: effective_path,
+        message,
+    })
+}
+
+/// Load security policy for runtime use. On missing/unreadable/invalid files,
+/// falls back to [`SecurityPolicy::default`] (same historical behavior).
 pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
-    let Some(effective_path) = resolve_security_policy_path(config_path) else {
-        return SecurityPolicy::default();
-    };
+    try_load_policy(config_path).unwrap_or_else(|_| SecurityPolicy::default())
+}
 
-    let Ok(text) = fs::read_to_string(&effective_path) else {
-        return SecurityPolicy::default();
-    };
-    let Ok(data) = serde_yaml::from_str::<Value>(&text) else {
-        return SecurityPolicy::default();
-    };
+fn optional_section_mapping<'a>(
+    root: &'a Mapping,
+    key: &str,
+) -> Result<Option<&'a Mapping>, String> {
+    match mapping_get(root, key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_mapping()
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be a mapping")),
+    }
+}
 
-    let root = data.as_mapping();
-    let global_cfg = root.and_then(|m| as_mapping(mapping_get(m, "global")));
-    let audit_cfg = root.and_then(|m| as_mapping(mapping_get(m, "audit")));
+fn policy_from_value(data: Value) -> Result<SecurityPolicy, String> {
+    let root = data
+        .as_mapping()
+        .ok_or_else(|| "root document must be a mapping".to_string())?;
+    let global_cfg = optional_section_mapping(root, "global")?;
+    let audit_cfg = optional_section_mapping(root, "audit")?;
 
     let default_risk_level = parse_risk(
         global_cfg.and_then(|m| mapping_get(m, "default_risk_level")),
@@ -456,11 +558,15 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         false,
     );
 
-    let rule_mappings: Vec<&Mapping> = root
-        .and_then(|m| mapping_get(m, "rules"))
-        .and_then(Value::as_sequence)
-        .map(|seq| seq.iter().filter_map(Value::as_mapping).collect())
-        .unwrap_or_default();
+    let rule_mappings: Vec<&Mapping> = match mapping_get(root, "rules") {
+        None => Vec::new(),
+        Some(value) => {
+            let seq = value
+                .as_sequence()
+                .ok_or_else(|| "`rules` must be a sequence".to_string())?;
+            seq.iter().filter_map(Value::as_mapping).collect()
+        }
+    };
 
     let v2_items: Vec<&Mapping> = rule_mappings
         .into_iter()
@@ -487,36 +593,41 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
     let mut rules = default_rules();
     rules.extend(parse_v2_rules(&valid_items));
 
-    let secret_patterns: Vec<crate::secret::CustomPattern> = root
-        .and_then(|m| mapping_get(m, "secret_patterns"))
-        .and_then(Value::as_sequence)
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| {
-                    let yaml_str = serde_yaml::to_string(v).unwrap_or_default();
-                    match serde_yaml::from_value(v.clone()) {
-                        Ok(pattern) => Some(pattern),
-                        Err(e) => {
-                            validation_issues.push(ValidationIssue {
-                                rule_id: None,
-                                field: "secret_patterns".to_string(),
-                                value: Some(yaml_str.trim().to_string()),
-                                message: Some(format!("Invalid custom pattern: {e}")),
-                            });
-                            None
+    let secret_patterns: Vec<crate::secret::CustomPattern> =
+        match mapping_get(root, "secret_patterns") {
+            None => Vec::new(),
+            Some(value) => {
+                let seq = value
+                    .as_sequence()
+                    .ok_or_else(|| "`secret_patterns` must be a sequence".to_string())?;
+                seq.iter()
+                    .filter_map(|v| {
+                        let yaml_str = serde_yaml::to_string(v).unwrap_or_default();
+                        match serde_yaml::from_value(v.clone()) {
+                            Ok(pattern) => Some(pattern),
+                            Err(e) => {
+                                validation_issues.push(ValidationIssue {
+                                    rule_id: None,
+                                    field: "secret_patterns".to_string(),
+                                    value: Some(yaml_str.trim().to_string()),
+                                    message: Some(format!("Invalid custom pattern: {e}")),
+                                });
+                                None
+                            }
                         }
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    })
+                    .collect()
+            }
+        };
 
-    let input_guard: crate::input_guard::config::InputGuardConfig = root
-        .and_then(|m| mapping_get(m, "input_guard"))
-        .and_then(|v| serde_yaml::from_value(v.clone()).ok())
-        .unwrap_or_default();
+    let input_guard: crate::input_guard::config::InputGuardConfig =
+        match mapping_get(root, "input_guard") {
+            None => crate::input_guard::config::InputGuardConfig::default(),
+            Some(value) => serde_yaml::from_value(value.clone())
+                .map_err(|e| format!("invalid `input_guard`: {e}"))?,
+        };
 
-    SecurityPolicy {
+    Ok(SecurityPolicy {
         enable_sandbox,
         sandbox_off_action,
         sandbox_timeout_seconds,
@@ -529,31 +640,34 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
         validation_issues,
         secret_patterns,
         input_guard,
-    }
+    })
 }
 
-/// Update one or more `global:` fields in a `security_policy.yaml` file
-/// **in place**, preserving all comments, blank lines, and other sections.
-///
-/// Each entry in `updates` is `(field_name, new_value)`. If a field already
-/// exists under `global:`, its value is replaced (inline comments kept). If
-/// it is absent, it is inserted into the `global:` block. If `global:` itself
-/// is missing, a minimal section is appended.
-///
-/// Used by the `/setting` panel so security toggles are visible in the file
-/// users consider authoritative — not just in `config.yaml`.
-pub fn save_policy_globals(path: &Path, updates: &[(&str, &str)]) -> Result<(), String> {
+/// Persist `/setting` Security fields in one read/modify/write: `global:`
+/// updates plus optional `input_guard.enabled`. Preserves comments.
+pub fn save_policy_ui_fields(
+    path: &Path,
+    global_updates: &[(&str, &str)],
+    input_guard_enabled: Option<bool>,
+) -> Result<(), String> {
     let text =
         fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     let mut updated = text;
-    for (field, value) in updates {
-        updated = update_global_field(&updated, field, value);
+    for (field, value) in global_updates {
+        updated = update_section_field(&updated, "global", field, value);
+    }
+    if let Some(enabled) = input_guard_enabled {
+        updated = update_section_field(
+            &updated,
+            "input_guard",
+            "enabled",
+            if enabled { "true" } else { "false" },
+        );
     }
     // Prefer atomic write (temp + rename in the same directory) to avoid
     // truncation on crash/ENOSPC. Fall back to direct fs::write when the
-    // directory isn't writable (common for /etc/aish/ where the file is
-    // user-owned but the directory is root-owned) — direct write only needs
-    // file-level write permission.
+    // directory isn't writable — uncommon for ~/.config, but kept for
+    // callers that still pass an explicit path.
     let tmp_path = path.with_extension("yaml.tmp");
     let atomic_ok = fs::write(&tmp_path, &updated).is_ok() && fs::rename(&tmp_path, path).is_ok();
     if !atomic_ok {
@@ -564,15 +678,20 @@ pub fn save_policy_globals(path: &Path, updates: &[(&str, &str)]) -> Result<(), 
     Ok(())
 }
 
-/// Replace `field` under the top-level `global:` mapping with `value`, or
+/// Replace `field` under a top-level YAML `section:` mapping with `value`, or
 /// insert it if absent. Preserves comments, indentation, and all other content.
-fn update_global_field(text: &str, field: &str, value: &str) -> String {
+fn update_section_field(text: &str, section: &str, field: &str, value: &str) -> String {
+    let section_key = format!("{}:", section);
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    let mut in_global = false;
-    let mut global_line_idx: Option<usize> = None;
-    let mut last_indent: String = String::from("  ");
-    let mut last_global_child_idx: Option<usize> = None;
+    let mut in_section = false;
+    let mut section_line_idx: Option<usize> = None;
+    // Indentation of direct children under `section:` (min indent seen).
+    // Nested list/map lines must not overwrite this, or a missing-field
+    // insert lands inside the nested block.
+    let mut child_indent: String = String::from("  ");
+    let mut saw_child_indent = false;
+    let mut last_section_child_idx: Option<usize> = None;
     let mut done = false;
 
     for (i, raw) in lines.iter().enumerate() {
@@ -584,20 +703,23 @@ fn update_global_field(text: &str, field: &str, value: &str) -> String {
             && !raw.starts_with('#')
             && !raw.starts_with('-');
         if is_top_level {
-            in_global = raw.trim_start().starts_with("global:");
-            if in_global {
-                global_line_idx = Some(i);
+            in_section = raw.trim_start().starts_with(&section_key);
+            if in_section {
+                section_line_idx = Some(i);
             }
         }
 
-        if in_global && !done {
+        if in_section && !done {
             let stripped = raw.trim_start();
             let indent_len = raw.len() - stripped.len();
             if indent_len > 0 && !stripped.starts_with('#') && !stripped.is_empty() {
-                // Track the indentation used inside global: so an insertion
-                // (if needed) matches the surrounding style.
-                last_indent = raw[..indent_len].to_string();
-                last_global_child_idx = Some(i);
+                // Always advance the insert cursor past every descendant line,
+                // but only learn direct-child indent from the shallowest level.
+                last_section_child_idx = Some(i);
+                if !saw_child_indent || indent_len < child_indent.len() {
+                    child_indent = raw[..indent_len].to_string();
+                    saw_child_indent = true;
+                }
             }
             // Match `  field:` exactly (the ':' terminator prevents
             // `enable_sandbox_extra:` from matching `enable_sandbox`).
@@ -621,21 +743,21 @@ fn update_global_field(text: &str, field: &str, value: &str) -> String {
         out.push(raw.to_string());
     }
 
-    // Field not found under global: — insert it.
+    // Field not found under section: — insert it.
     if !done {
-        if let Some(gidx) = global_line_idx {
-            // Insert after the last existing child of global: (or right
-            // after `global:` if the section is empty).
-            let insert_at = last_global_child_idx.map(|c| c + 1).unwrap_or(gidx + 1);
+        if let Some(sidx) = section_line_idx {
+            // Insert after the last existing child of the section (or right
+            // after `section:` if the section is empty).
+            let insert_at = last_section_child_idx.map(|c| c + 1).unwrap_or(sidx + 1);
             // Find where `out` currently has the corresponding line — since
             // we pushed every line, indices match `lines`.
-            out.insert(insert_at, format!("{}{}: {}", last_indent, field, value));
+            out.insert(insert_at, format!("{}{}: {}", child_indent, field, value));
         } else {
-            // No global: section at all — append a minimal one.
+            // No section at all — append a minimal one.
             if !out.is_empty() && out.last().map(|l| !l.is_empty()).unwrap_or(false) {
                 out.push(String::new());
             }
-            out.push("global:".to_string());
+            out.push(format!("{}:", section));
             out.push(format!("  {}: {}", field, value));
         }
     }
@@ -672,6 +794,38 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{load_policy, resolve_security_policy_path, SecurityPolicy};
+
+    /// Serialize tests that mutate process-global env vars (cargo runs them
+    /// in parallel threads of one process).
+    fn xdg_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// RAII env var restore for path-resolution tests.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let prev = std::env::var_os(key);
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     use crate::decision::{RiskLevel, SandboxOffAction};
 
     #[test]
@@ -698,6 +852,120 @@ mod tests {
         let resolved = resolve_security_policy_path(Some(&policy_path));
 
         assert_eq!(resolved.as_deref(), Some(policy_path.as_path()));
+    }
+
+    #[test]
+    fn resolve_security_policy_path_uses_user_config() {
+        let dir = tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        fs::create_dir_all(xdg.join("aish")).unwrap();
+        let user_path = xdg.join("aish").join("security_policy.yaml");
+        fs::write(&user_path, "global:\n  enable_sandbox: true\nrules: []\n").unwrap();
+
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+        let resolved = resolve_security_policy_path(None);
+        assert_eq!(resolved.as_deref(), Some(user_path.as_path()));
+        let policy = load_policy(None);
+        assert!(policy.enable_sandbox);
+    }
+
+    #[test]
+    fn resolve_security_policy_path_seeds_user_and_ignores_etc() {
+        let dir = tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        fs::create_dir_all(&xdg).unwrap();
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+
+        let resolved = resolve_security_policy_path(None).expect("user policy");
+        assert!(resolved.starts_with(&xdg));
+        assert!(!resolved.starts_with("/etc"));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    fn writable_security_policy_path_seeds_user_file() {
+        let dir = tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        fs::create_dir_all(&xdg).unwrap();
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+
+        let path = super::writable_security_policy_path().expect("user path");
+        assert!(path.exists());
+        assert!(path.starts_with(&xdg));
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("security_policy.yaml")
+        );
+
+        let seeded = fs::read_to_string(&path).unwrap();
+        assert!(seeded.contains("# AI-Shell Security Policy"));
+        assert!(seeded.contains("Protect /etc"));
+        assert!(seeded.contains("id: H-001"));
+        assert!(seeded.contains("id: M-001"));
+        assert!(seeded.contains("id: L-001"));
+        // Shipped seed is English-only (no CJK comments).
+        let has_cjk = seeded
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        assert!(!has_cjk, "seeded policy must not contain CJK comments");
+    }
+
+    #[test]
+    fn try_load_policy_reports_parse_errors() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(&policy_path, "global: [\n").unwrap();
+        let err = super::try_load_policy(Some(&policy_path)).expect_err("parse");
+        match err {
+            super::PolicyLoadError::Parse { path, message } => {
+                assert_eq!(path, policy_path);
+                assert!(!message.is_empty());
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+        // Runtime loader still falls back instead of panicking.
+        let _ = load_policy(Some(&policy_path));
+    }
+
+    #[test]
+    fn try_load_policy_rejects_invalid_global_shape() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        // Valid YAML, invalid policy structure: global must be a mapping.
+        fs::write(&policy_path, "global: []\nrules: []\n").unwrap();
+        let err = super::try_load_policy(Some(&policy_path)).expect_err("invalid");
+        match err {
+            super::PolicyLoadError::Invalid { path, message } => {
+                assert_eq!(path, policy_path);
+                assert!(message.contains("`global`"), "{message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        let _ = load_policy(Some(&policy_path));
+    }
+
+    #[test]
+    fn try_load_policy_rejects_invalid_input_guard_shape() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(&policy_path, "global: {}\ninput_guard: []\nrules: []\n").unwrap();
+        let err = super::try_load_policy(Some(&policy_path)).expect_err("invalid");
+        match err {
+            super::PolicyLoadError::Invalid { path, message } => {
+                assert_eq!(path, policy_path);
+                assert!(message.contains("`input_guard`"), "{message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]
@@ -873,26 +1141,26 @@ rules: []
         assert!(policy.input_guard.custom_confirm_rules.is_empty());
     }
 
-    // ---- save_policy_globals / update_global_field ----
+    // ---- save_policy_ui_fields / update_section_field ----
 
     #[test]
-    fn update_global_field_replaces_existing_value() {
+    fn update_section_field_global_replaces_existing_value() {
         let yaml = "global:\n  enable_sandbox: true\n  default_risk_level: LOW\n";
-        let out = super::update_global_field(yaml, "enable_sandbox", "false");
+        let out = super::update_section_field(yaml, "global", "enable_sandbox", "false");
         assert!(out.contains("enable_sandbox: false"));
         assert!(out.contains("default_risk_level: LOW"));
         assert!(!out.contains("enable_sandbox: true"));
     }
 
     #[test]
-    fn update_global_field_preserves_inline_comment() {
+    fn update_section_field_global_preserves_inline_comment() {
         let yaml = "global:\n  enable_sandbox: false  # toggle me\n";
-        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        let out = super::update_section_field(yaml, "global", "enable_sandbox", "true");
         assert!(out.contains("enable_sandbox: true  # toggle me"));
     }
 
     #[test]
-    fn update_global_field_preserves_block_comments_and_other_sections() {
+    fn update_section_field_global_preserves_block_comments_and_other_sections() {
         let yaml = concat!(
             "# header comment\n",
             "global:\n",
@@ -903,7 +1171,7 @@ rules: []
             "audit:\n",
             "  enabled: true\n",
         );
-        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        let out = super::update_section_field(yaml, "global", "enable_sandbox", "true");
         assert!(out.contains("# header comment"));
         assert!(out.contains("# enable sandbox?"));
         assert!(out.contains("enable_sandbox: true"));
@@ -917,18 +1185,18 @@ rules: []
     }
 
     #[test]
-    fn update_global_field_does_not_match_prefix() {
+    fn update_section_field_global_does_not_match_prefix() {
         // `enable_sandbox` must NOT match `enable_sandbox_extra`.
         let yaml = "global:\n  enable_sandbox: true\n  enable_sandbox_extra: keep\n";
-        let out = super::update_global_field(yaml, "enable_sandbox", "false");
+        let out = super::update_section_field(yaml, "global", "enable_sandbox", "false");
         assert!(out.contains("enable_sandbox: false"));
         assert!(out.contains("enable_sandbox_extra: keep"));
     }
 
     #[test]
-    fn update_global_field_inserts_missing_field() {
+    fn update_section_field_global_inserts_missing_field() {
         let yaml = "global:\n  default_risk_level: LOW\n";
-        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        let out = super::update_section_field(yaml, "global", "enable_sandbox", "true");
         assert!(out.contains("enable_sandbox: true"));
         assert!(out.contains("default_risk_level: LOW"));
         // Inserted with the same indent as the existing child.
@@ -936,16 +1204,39 @@ rules: []
     }
 
     #[test]
-    fn update_global_field_creates_global_section_if_absent() {
+    fn update_section_field_inserts_at_direct_child_indent_with_nested() {
+        // Nested custom rules must not steal the indent used for a missing
+        // top-level field under the same section.
+        let yaml = concat!(
+            "input_guard:\n",
+            "  custom_block_rules:\n",
+            "    - name: no_rm_data\n",
+            "      pattern: \"rm\"\n",
+            "      message: nope\n",
+        );
+        let out = super::update_section_field(yaml, "input_guard", "enabled", "false");
+        let enabled_line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("enabled:"))
+            .expect("enabled field missing");
+        assert_eq!(
+            enabled_line, "  enabled: false",
+            "enabled must be a direct child of input_guard; got:\n{out}"
+        );
+        assert!(out.contains("custom_block_rules:"));
+    }
+
+    #[test]
+    fn update_section_field_global_creates_global_section_if_absent() {
         let yaml = "audit:\n  enabled: true\n";
-        let out = super::update_global_field(yaml, "enable_sandbox", "true");
+        let out = super::update_section_field(yaml, "global", "enable_sandbox", "true");
         assert!(out.contains("global:"));
         assert!(out.contains("enable_sandbox: true"));
         assert!(out.contains("audit:"));
     }
 
     #[test]
-    fn save_policy_globals_round_trips_through_load_policy() {
+    fn save_policy_ui_fields_round_trips_through_load_policy() {
         let dir = tempdir().unwrap();
         let policy_path = dir.path().join("security_policy.yaml");
         fs::write(
@@ -953,12 +1244,13 @@ rules: []
             "# comment\nglobal:\n  enable_sandbox: true\n  default_risk_level: LOW\nrules: []\n",
         )
         .unwrap();
-        super::save_policy_globals(
+        super::save_policy_ui_fields(
             &policy_path,
             &[
                 ("enable_sandbox", "false"),
                 ("default_risk_level", "MEDIUM"),
             ],
+            None,
         )
         .unwrap();
 
@@ -971,27 +1263,27 @@ rules: []
         assert!(on_disk.contains("# comment"));
     }
 
-    /// Verifies the real-world `/etc/aish/security_policy.yaml` layout
+    /// Verifies the shipped `config/security_policy.yaml` layout
     /// (block comments above each field, inline comments on some lines,
     /// multi-language content) survives a `/setting` sync intact.
     #[test]
-    fn save_policy_globals_preserves_production_template_comments() {
+    fn save_policy_ui_fields_preserves_production_template_comments() {
         let dir = tempdir().unwrap();
         let policy_path = dir.path().join("security_policy.yaml");
-        // Mirrors the installed template with CJK comments and inline notes.
+        // Mirrors the shipped English template shape with block + inline comments.
         let template = concat!(
             "# AI-Shell Security Policy\n",
-            "# Installed by `make install`.\n",
+            "# Seeded to ~/.config/aish/security_policy.yaml on first use.\n",
             "\n",
-            "# 全局配置\n",
+            "# Global defaults\n",
             "global:\n",
-            "  # 未命中任何规则时的默认风险\n",
+            "  # Default risk when no rules match\n",
             "  default_risk_level: LOW\n",
             "\n",
-            "  # 是否开启沙箱预跑\n",
+            "  # Sandbox pre-run toggle\n",
             "  enable_sandbox: true\n",
             "\n",
-            "  # 沙箱关闭时的处理动作\n",
+            "  # Action when sandbox is off/unavailable\n",
             "  sandbox_off_action: ALLOW      # ALLOW | CONFIRM | BLOCK\n",
             "  sandbox_timeout_seconds: 10\n",
             "\n",
@@ -1002,7 +1294,7 @@ rules: []
         );
         fs::write(&policy_path, template).unwrap();
 
-        super::save_policy_globals(
+        super::save_policy_ui_fields(
             &policy_path,
             &[
                 ("enable_sandbox", "false"),
@@ -1010,6 +1302,7 @@ rules: []
                 ("sandbox_off_action", "BLOCK"),
                 ("sandbox_timeout_seconds", "15"),
             ],
+            None,
         )
         .unwrap();
 
@@ -1017,10 +1310,10 @@ rules: []
 
         // Block comments preserved.
         assert!(result.contains("# AI-Shell Security Policy"));
-        assert!(result.contains("# 全局配置"));
-        assert!(result.contains("# 未命中任何规则时的默认风险"));
-        assert!(result.contains("# 是否开启沙箱预跑"));
-        assert!(result.contains("# 沙箱关闭时的处理动作"));
+        assert!(result.contains("# Global defaults"));
+        assert!(result.contains("# Default risk when no rules match"));
+        assert!(result.contains("# Sandbox pre-run toggle"));
+        assert!(result.contains("# Action when sandbox is off/unavailable"));
 
         // Values updated.
         assert!(result.contains("enable_sandbox: false"));
@@ -1035,5 +1328,27 @@ rules: []
         // Other sections untouched.
         assert!(result.contains("audit:"));
         assert!(result.contains("rules: []"));
+    }
+
+    #[test]
+    fn save_policy_ui_fields_updates_input_guard_enabled() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: false\n\ninput_guard:\n  enabled: true\nrules: []\n",
+        )
+        .unwrap();
+
+        super::save_policy_ui_fields(&policy_path, &[("enable_sandbox", "true")], Some(false))
+            .unwrap();
+
+        let policy = load_policy(Some(&policy_path));
+        assert!(policy.enable_sandbox);
+        assert!(!policy.input_guard.enabled);
+
+        let on_disk = fs::read_to_string(&policy_path).unwrap();
+        assert!(on_disk.contains("enable_sandbox: true"));
+        assert!(on_disk.contains("enabled: false"));
     }
 }

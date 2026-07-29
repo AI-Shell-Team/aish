@@ -17,6 +17,7 @@ use crate::install_channel::{current_install_channel, InstallChannel, PipChannel
 const ARCHIVE_BIN_DIR: &str = "/usr/local/bin";
 const ARCHIVE_BINARY_NAMES: &[&str] = &["aish", "aish-uninstall"];
 const ARCHIVE_SHARE_DIR: &str = "/usr/local/share/aish";
+// Legacy path from older installers; current releases seed policy under ~/.config/aish.
 const SYSTEM_CONFIG_DIR: &str = "/etc/aish";
 const SYSTEMD_UNIT_DIR: &str = "/etc/systemd/system";
 const PIP_PACKAGE_NAMES: &[&str] = &["aish-rust", "aish"];
@@ -438,6 +439,8 @@ fn uninstall_system(purge: bool) -> Result<(), AishError> {
     ))
 }
 
+/// Remove leftover `/etc/aish` from older installers. Current releases no
+/// longer place files there; runtime policy lives under `~/.config/aish`.
 fn purge_system_config() {
     let etc_aish = Path::new(SYSTEM_CONFIG_DIR);
     if etc_aish.exists() {

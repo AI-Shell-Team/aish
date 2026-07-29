@@ -1386,10 +1386,11 @@ help:
 
         ## Config Location
 
-        Priority:
+        Path:
         1. Explicit path (if configured)
-        2. `/etc/aish/security_policy.yaml`
-        3. `~/.config/aish/security_policy.yaml`
+        2. `~/.config/aish/security_policy.yaml` (seeded from the shipped template if missing)
+
+        `/etc/aish` is not read at runtime.
 
         ## Risk Levels
 
