@@ -1,129 +1,57 @@
-# -AI-Shell Security Policy
-# Installed by `make install` to /etc/aish/security_policy.yaml (system-level).
-# User-level fallback at ~/.config/aish/security_policy.yaml is auto-seeded on
-# first launch from EMPTY_POLICY_TEMPLATE in crates/aish-security/src/policy.rs.
+# AI-Shell Security Policy
+# Seeded to ~/.config/aish/security_policy.yaml on first use.
+# First matching rule wins. Paths are absolute; * = one level, ** = recursive.
 
-# - global: 全局默认行为配置
-#   - default_risk_level: 未命中任何 rules 时的默认风险等级。
-#     可选值通常为：LOW | MEDIUM | HIGH（具体以实现侧枚举为准）。
-#   - enable_sandbox: 是否启用沙箱预跑/受控执行（如实现侧支持，可映射到对应开关）。
-#   - sandbox_off_action: 当沙箱关闭、不可用或执行失败时，系统无法根据 rules 评估命令实际的文件变更，
-#     将采用该配置指定的动作进行处理：BLOCK=阻断，CONFIRM=需确认，ALLOW=直接放行。
-#   - sandbox_timeout_seconds: 沙箱预执行/预评估的超时时间（秒）。超时后不会阻止真实命令，
-#     但会降级为”无法可靠评估风险，请确认后执行”。
-#
-# - audit: 审计日志开关。enabled: false 时不记录；启用后建议同步配置 log_path。
-#          include_commands: true 时同时记录用户输入的 shell 命令（默认仅记录
-#          AI 工具调用和安全决策）。
-#
-# - input_guard: 在命令/提示送入 shell 执行前进行正则预筛查。
-#   - enabled: 总开关。
-#   - max_analyzable_bytes: 超过该长度的输入强制确认（防止粘贴海量内容绕过筛查）。
-#   - custom_block_rules / custom_confirm_rules: 自定义正则规则，覆盖或追加到内置规则。
-#     内置规则见 crates/aish-security/src/input_guard/patterns.rs。
-#   每条自定义规则字段：
-#   - name: 规则唯一标识；与内置规则同名会覆盖之。
-#   - pattern: 正则表达式（字符串）。
-#   - message: 命中时展示给用户的说明文案。
-#
-# - rules: 资源规则列表（自上而下匹配，命中第一条即生效）
-#   每条规则字段：
-#   - id: 规则唯一标识（建议稳定且可追踪，如 H-001）。
-#   - name: 规则名称（用于展示/日志）。
-#   - path: 资源路径模式列表。
-#     - 支持绝对路径；支持通配符 “*”（单级）与 “**”（递归）。
-#     - 目录语义示例：”/boot”、”/boot/*”、”/boot/**”。
-#   - exclude:（可选）排除路径模式列表；命中 exclude 的路径不适用该规则。
-#   - operations: 允许该规则匹配的操作类型列表。
-#     典型值：WRITE | DELETE（具体以实现侧枚举为准）。
-#   - risk: 该规则对应的风险等级：LOW | MEDIUM | HIGH。
-#   - reason: 风险原因说明（用于提示用户）。
-#   - confirm_message:（可选）当该规则命中且需要二次确认时展示的提示文案。
-#   - suggestion:（可选）建议/替代方案（可使用多行文本 “|”）。
-
-# 资源对象（path）规范：
-# 1) 路径格式：仅支持绝对路径；支持通配符 “*” 和 “**”。
-# 2) 目录区分：
-#    - “/boot”   ：目录本身
-#    - “/boot/*” ：目录下一级内容
-#    - “/boot/**”:目录下递归所有内容
-# 3) 变量：支持在路径中使用环境/命令变量（由实现侧在加载或匹配时展开）。例如：
-#    - “$PWD”、”$HOME”、”$(uname -r)”
-# 4) 排除规则：通过 exclude 字段排除特定路径（同样支持通配符与变量）。
-
-# 全局配置
 global:
-  # 未命中任何规则时的默认风险
-  default_risk_level: LOW
-
-  # 是否开启沙箱预跑（若当前实现已支持，可映射到现有 enable_sandbox 逻辑）
+  default_risk_level: LOW        # LOW | MEDIUM | HIGH
   enable_sandbox: false
-
-  # 沙箱关闭、不可用或执行失败时的处理动作（BLOCK=阻断，CONFIRM=需确认，ALLOW=直接放行）
-  sandbox_off_action: ALLOW
-
-  # 沙箱预执行超时时间（秒）
+  sandbox_off_action: ALLOW      # ALLOW | CONFIRM | BLOCK
   sandbox_timeout_seconds: 10
 
-# 审计日志（默认关闭；启用时建议同步设置 log_path）
 audit:
   enabled: false
-  # include_commands: false   # 设为 true 同时记录用户输入的 shell 命令
+  # include_commands: false
   # log_path: /var/log/aish/audit.log
 
-# InputGuard 预执行筛查（在命令送入 shell 之前按正则阻断或要求确认）
+# Pre-screen commands before execution.
+# Built-ins: crates/aish-security/src/input_guard/patterns.rs
 input_guard:
   enabled: true
-  # max_analyzable_bytes: 4096    # 超过该长度的输入强制确认
-  # 自定义规则示例（被注释；按需放开）：
+  # max_analyzable_bytes: 4096
   # custom_block_rules:
   #   - name: no_rm_data
   #     pattern: "rm\\s+-rf\\s+/data"
-  #     message: 禁止删除 /data
-  # custom_confirm_rules:
-  #   - name: confirm_docker_push
-  #     pattern: "docker\\s+push"
-  #     message: 推送镜像 — 请确认 tag
+  #     message: deleting /data is forbidden
 
-# 规则列表：从上到下匹配，第一条命中生效
 rules:
-  # ===== 高风险：系统核心目录，禁止 AI 修改 =====
   - id: H-001
-    name: "系统配置目录保护"
-    command_list: ["rm"] # 仅在沙箱关闭时生效
+    name: Protect /etc
+    command_list: ["rm"]  # sandbox-off fallback only
     path: ["/etc/**"]
     operations: [WRITE, DELETE]
     risk: HIGH
-    reason: "系统配置目录，误修改会导致严重故障"
-    suggestion: |
-      如确需修改 /etc 下文件，建议由人工完成变更并使用变更管理/备份策略。
+    reason: System config changes can break the host
+    suggestion: Edit /etc manually with a backup/change process.
 
-  # ===== 中风险： /home目录 =====
   - id: M-001
-    name: "家目录保护"
-    command_list: ["rm"] # 仅在沙箱关闭时生效
+    name: Protect /home
+    command_list: ["rm"]
     path: ["/home/**"]
     operations: [WRITE, DELETE]
     risk: MEDIUM
-    reason: "家目录文件，误删可能造成数据丢失"
-    confirm_message: "将对 /home/ 下文件执行写入/删除操作，是否继续？"
+    reason: Home-directory writes/deletes can lose user data
+    confirm_message: Write/delete under /home — continue?
 
-  # ===== 低风险：工作区 =====
   - id: L-001
-    name: "临时区可写"
-    command_list: ["rm"] # 仅在沙箱关闭时生效
+    name: Allow /tmp
+    command_list: ["rm"]
     path: ["/tmp/**"]
     operations: [WRITE, DELETE]
     risk: LOW
-    reason: "临时区代码和项目文件，允许 AI 修改"
+    reason: Temporary files are generally safe for AI edits
 
-# Secret detection patterns (optional).
-# Uncomment and customize to add your own patterns.
-# Built-in patterns cover: OpenAI, Anthropic, AWS, Google, GitHub, Stripe,
-# Slack, Fireworks API keys; JWT tokens; URL-embedded passwords.
-#
+# Optional custom secret patterns (built-ins already cover common API keys).
 # secret_patterns:
-#   - name: "My Internal Token"
+#   - name: My Internal Token
 #     pattern: "int_[a-zA-Z0-9]{32}"
 #     secret_type: api_key
-
