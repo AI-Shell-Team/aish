@@ -10,6 +10,7 @@ use crate::api::{resolve_api_dialect, stream_simple, ApiDialect, StreamContext};
 use crate::approval_memory::{ApprovalChoice, ApprovalMemory};
 use crate::client::LlmResponse;
 use crate::langfuse::LangfuseClient;
+use crate::rotation::{FailureKind, RotationState};
 use crate::streaming::{extract_message_text, SseEvent, StreamParser};
 use crate::types::*;
 
@@ -98,6 +99,8 @@ pub struct LlmSession {
     tool_execution_policy: crate::tool_context::ToolExecutionPolicy,
     /// True for sessions created via [`Self::create_subsession`].
     is_sub_agent: bool,
+    /// Multi-account rotation + model fallback state. `None` when disabled.
+    rotation: Option<std::sync::Mutex<RotationState>>,
     /// Scripted chat completion responses for unit/integration tests (pop in order).
     #[cfg(test)]
     test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
@@ -157,6 +160,7 @@ impl LlmSession {
             last_turn_compaction: std::sync::Mutex::new(None),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
+            rotation: None,
             #[cfg(test)]
             test_chat_responses: None,
         }
@@ -410,6 +414,40 @@ impl LlmSession {
         );
     }
 
+    /// Install a multi-account rotation + fallback state. When set, every
+    /// chat completion routes through the rotation loop, advancing to the next
+    /// API account or fallback model on recoverable failures.
+    pub fn set_rotation(&mut self, state: RotationState) {
+        self.rotation = Some(std::sync::Mutex::new(state));
+    }
+
+    /// Snapshot of the rotation state for UI display (`/token`), if active.
+    pub fn rotation_snapshot(&self) -> Option<crate::rotation::RotationSnapshot> {
+        self.rotation.as_ref().map(|m| m.lock().unwrap().snapshot())
+    }
+
+    /// Disable rotation (e.g. after the user removes all extra accounts).
+    pub fn clear_rotation(&mut self) {
+        self.rotation = None;
+    }
+
+    /// Manually switch the active rotation account by name (the `/accounts use`
+    /// path). Returns `false` when rotation is disabled or no account matches.
+    pub fn use_rotation_account(&self, name: &str) -> bool {
+        self.rotation
+            .as_ref()
+            .map(|m| m.lock().unwrap().use_account(name))
+            .unwrap_or(false)
+    }
+
+    /// Name of the account currently in use, for restoring the selection
+    /// across a rotation rebuild.
+    pub fn current_rotation_account(&self) -> Option<String> {
+        self.rotation
+            .as_ref()
+            .and_then(|m| m.lock().unwrap().current_account_name().map(String::from))
+    }
+
     /// Return the current model name.
     pub fn model_name(&self) -> &str {
         &self.stream_ctx.model
@@ -440,16 +478,70 @@ impl LlmSession {
             }
         }
 
-        stream_simple(
-            self.api_dialect,
-            &self.stream_ctx,
-            messages,
-            tools,
-            stream,
-            temperature,
-            max_tokens,
-        )
-        .await
+        // Fast path: no rotation configured — issue the request directly.
+        let Some(rotation) = &self.rotation else {
+            return stream_simple(
+                self.api_dialect,
+                &self.stream_ctx,
+                messages,
+                tools,
+                stream,
+                temperature,
+                max_tokens,
+            )
+            .await;
+        };
+
+        // Rotation path: try the current credential/model, and on a recoverable
+        // failure (429 / usage-limit / 5xx / network / model error) advance to
+        // the next account or fallback model until recovery is exhausted.
+        loop {
+            let cred = {
+                let guard = rotation.lock().unwrap();
+                guard.current(&self.stream_ctx.api_base)
+            };
+            let dialect = resolve_api_dialect(&cred.model, &cred.api_base, &cred.api_key);
+            let mut ctx = self.stream_ctx.clone();
+            ctx.refresh_dialect(&cred.model, Some(&cred.api_base), Some(&cred.api_key));
+
+            match stream_simple(
+                dialect,
+                &ctx,
+                messages,
+                tools,
+                stream,
+                temperature,
+                max_tokens,
+            )
+            .await
+            {
+                Ok(resp) => {
+                    rotation.lock().unwrap().on_success();
+                    return Ok(resp);
+                }
+                Err(err) => {
+                    let Some(kind) = FailureKind::from_error(&err) else {
+                        return Err(err);
+                    };
+                    tracing::warn!(
+                        error = %err,
+                        kind = ?kind,
+                        credential = %cred.label,
+                        "LLM request failed; attempting credential/model rotation"
+                    );
+                    let advanced = rotation.lock().unwrap().advance_on_error(kind);
+                    if !advanced {
+                        if kind == FailureKind::ModelError {
+                            let msg = rotation.lock().unwrap().model_exhaustion_error();
+                            return Err(AishError::Llm(msg));
+                        }
+                        return Err(err);
+                    }
+                    let next = rotation.lock().unwrap().current(&self.stream_ctx.api_base);
+                    tracing::info!(credential = %next.label, "rotated to next credential/model");
+                }
+            }
+        }
     }
 
     /// Low-level chat completion returning the raw API response.
@@ -1463,6 +1555,7 @@ impl LlmSession {
             max_context_tokens: self.max_context_tokens,
             context_budget_policy: self.context_budget_policy.clone(),
             compact_consecutive_failures: std::sync::Mutex::new(0),
+            rotation: None,
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),

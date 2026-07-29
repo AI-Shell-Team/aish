@@ -490,6 +490,23 @@ pub struct ConfigModel {
     /// Skill marketplace: auto-search + registry sources.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// Additional API accounts for multi-key quota rotation under the same
+    /// provider. The top-level `api_key` is always the primary (account #0);
+    /// entries here are tried in order when the primary hits a rate/usage limit.
+    #[serde(default)]
+    pub api_accounts: Vec<ApiAccountConfig>,
+    /// Ordered fallback model names tried when the primary model fails
+    /// (rate-limit / usage-limit / exhausted 5xx). Each runs with the active account.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+    /// Models the user has switched to via /model, most-recent-first. Surfaced
+    /// at the top of the picker so switching back is one keystroke.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_models: Vec<String>,
+    /// Restore the primary model after its cooldown window expires following
+    /// a fallback. Default: true.
+    #[serde(default = "default_true")]
+    pub fallback_revert_on_cooldown: bool,
 }
 
 impl Default for ConfigModel {
@@ -537,8 +554,37 @@ impl Default for ConfigModel {
             inline_completion: InlineCompletionConfig::default(),
             pty_daemon_enabled: default_true(),
             skills: SkillsConfig::default(),
+            api_accounts: vec![],
+            fallback_models: vec![],
+            recent_models: vec![],
+            fallback_revert_on_cooldown: default_true(),
         }
     }
+}
+
+/// One additional API credential for multi-key quota rotation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApiAccountConfig {
+    /// Human-readable label shown in the rotation UI.
+    pub name: String,
+    pub api_key: String,
+    /// Optional override of the provider base URL for this account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_base: Option<String>,
+    /// Optional per-account model override. When set, this account uses its
+    /// own model regardless of the global `model` / fallback chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Relative selection weight (advisory; higher = preferred).
+    #[serde(default = "default_one")]
+    pub weight: u32,
+    /// Skip this account entirely when true.
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+fn default_one() -> u32 {
+    1
 }
 
 /// Compile the `remote_danger_patterns` into `Regex` objects, logging each
