@@ -774,10 +774,7 @@ mod tests {
         let has_cjk = seeded
             .chars()
             .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-        assert_eq!(
-            has_cjk, false,
-            "seeded policy must not contain CJK comments"
-        );
+        assert!(!has_cjk, "seeded policy must not contain CJK comments");
     }
 
     #[test]
