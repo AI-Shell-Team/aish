@@ -50,12 +50,16 @@ impl ConfigChecker {
             );
         }
 
-        if !config.enable_sandbox && config.sandbox_off_action != "allow" {
+        // Sandbox globals live in security_policy.yaml (not config.yaml).
+        let policy = aish_security::load_policy(None);
+        if !policy.enable_sandbox
+            && policy.sandbox_off_action != aish_security::SandboxOffAction::Allow
+        {
             items.push(CheckItem::warn(
                 "sandbox_config",
                 format!(
-                    "Sandbox disabled but sandbox_off_action is '{}' (expected 'allow')",
-                    config.sandbox_off_action
+                    "Sandbox disabled but sandbox_off_action is '{}' (expected 'ALLOW')",
+                    policy.sandbox_off_action
                 ),
             ));
         }

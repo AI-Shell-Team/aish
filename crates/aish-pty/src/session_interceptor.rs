@@ -208,9 +208,9 @@ impl SessionInterceptor {
     /// `ai_callback` is None -> interceptor is disabled (pure passthrough).
     /// `ai_callback` is Some -> interceptor will intercept `;` input.
     /// `status_callback` is Some -> interceptor will intercept `/status` input.
-    /// `input_guard_enabled` mirrors `config.yaml`'s `input_guard_enabled`
-    /// and overrides the same-named field in security_policy.yaml so the
-    /// user-facing toggle applies uniformly to local and PTY screening.
+    /// `input_guard_enabled` comes from the live security policy
+    /// (`security_policy.yaml` / `/setting`) so local and PTY screening
+    /// share the same toggle without rebuilding the rule set.
     pub fn new(
         ai_callback: Option<Box<AiCallback>>,
         status_callback: Option<Box<StatusCallback>>,

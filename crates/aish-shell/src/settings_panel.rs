@@ -10,6 +10,7 @@
 //! this module is intentionally free of terminal I/O so it stays unit-testable.
 
 use aish_config::ConfigModel;
+use aish_security::{RiskLevel, SandboxOffAction, SecurityPolicy};
 
 // ---------------------------------------------------------------------------
 // Live-effect signal
@@ -20,19 +21,12 @@ use aish_config::ConfigModel;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveEffect {
     /// No live action needed; the field is read on demand from `self.config`.
+    /// Security keys also map here — they are applied via the dedicated
+    /// `is_security_setting` path in `app.rs`, not through this enum.
     None,
     /// Rebuild the model-dependent tools (WebFetch) — e.g. after temperature or
     /// `max_tokens` changes.
     ToolsRefresh,
-    /// Toggle the cached InputGuard's enabled flag — after
-    /// `input_guard_enabled` changes, so `screen_input()` honors it without a
-    /// restart.
-    InputGuard,
-    /// Re-apply the mirrored security globals (`enable_sandbox`,
-    /// `default_risk_level`, `sandbox_off_action`, `sandbox_timeout_seconds`)
-    /// to the live `SecurityManager` via `set_policy`, so sandbox pre-runs and
-    /// risk gating honor the new values without a restart.
-    SecurityPolicy,
     /// Re-initialize the whole LLM session + tools + inline completer — needed
     /// when `model` / `api_base` / `api_key` change.
     ModelSession,
@@ -550,20 +544,131 @@ pub fn find(key: SettingKey) -> &'static SettingDef {
         .expect("SettingKey is exhaustive over SETTINGS")
 }
 
-/// The factory-default raw value for `key`, derived from `ConfigModel::default()`.
+/// The factory-default raw value for `key`.
 ///
-/// Deriving (rather than hand-mirroring the defaults) eliminates drift: if a
-/// default changes in `aish-config`, this function tracks it automatically.
-/// Used to mark a row as "changed" (current != default) and to power the
-/// reset-to-default action.
+/// Security keys derive from `SecurityPolicy::default()` (policy SSOT);
+/// everything else from `ConfigModel::default()`.
 pub fn default_raw_of(key: SettingKey) -> String {
-    let cfg = ConfigModel::default();
-    current_raw(&cfg, key)
+    raw_value(&ConfigModel::default(), &SecurityPolicy::default(), key)
 }
 
 /// Whether the current raw value differs from the factory default.
 pub fn is_changed(key: SettingKey, current_raw: &str) -> bool {
     current_raw != default_raw_of(key)
+}
+
+// ---------------------------------------------------------------------------
+// Security settings (security_policy.yaml SSOT)
+// ---------------------------------------------------------------------------
+
+/// Security category keys live in `security_policy.yaml`, not `config.yaml`.
+pub fn is_security_setting(key: SettingKey) -> bool {
+    matches!(
+        key,
+        SettingKey::InputGuardEnabled
+            | SettingKey::EnableSandbox
+            | SettingKey::DefaultRiskLevel
+            | SettingKey::SandboxOffAction
+            | SettingKey::SandboxTimeout
+    )
+}
+
+/// Read the current raw value from the correct SSOT (`SecurityPolicy` or
+/// `ConfigModel`).
+pub fn raw_value(cfg: &ConfigModel, policy: &SecurityPolicy, key: SettingKey) -> String {
+    if is_security_setting(key) {
+        security_current_raw(policy, key)
+    } else {
+        current_raw(cfg, key)
+    }
+}
+
+/// Read a Security setting from the live policy.
+fn risk_level_raw(level: RiskLevel) -> &'static str {
+    match level {
+        RiskLevel::Low => "low",
+        RiskLevel::Medium => "medium",
+        RiskLevel::High => "high",
+    }
+}
+
+fn sandbox_off_action_raw(action: SandboxOffAction) -> &'static str {
+    match action {
+        SandboxOffAction::Allow => "allow",
+        SandboxOffAction::Confirm => "confirm",
+        SandboxOffAction::Block => "block",
+    }
+}
+
+fn parse_risk_level(value: &str) -> RiskLevel {
+    match value {
+        "medium" => RiskLevel::Medium,
+        "high" => RiskLevel::High,
+        _ => RiskLevel::Low,
+    }
+}
+
+fn parse_sandbox_off_action(value: &str) -> SandboxOffAction {
+    match value {
+        "confirm" => SandboxOffAction::Confirm,
+        "block" => SandboxOffAction::Block,
+        _ => SandboxOffAction::Allow,
+    }
+}
+
+pub fn security_current_raw(policy: &SecurityPolicy, key: SettingKey) -> String {
+    if !is_security_setting(key) {
+        panic!("security_current_raw called with non-security key {key:?}");
+    }
+    let raw = match key {
+        SettingKey::InputGuardEnabled => bool_str(policy.input_guard.enabled),
+        SettingKey::EnableSandbox => bool_str(policy.enable_sandbox),
+        SettingKey::DefaultRiskLevel => risk_level_raw(policy.default_risk_level).to_string(),
+        SettingKey::SandboxOffAction => sandbox_off_action_raw(policy.sandbox_off_action).to_string(),
+        SettingKey::SandboxTimeout => format!("{}", policy.sandbox_timeout_seconds),
+        _ => unreachable!("non-security key rejected above"),
+    };
+    if let SettingKind::Choice(options) = find(key).kind {
+        if let Some(canonical) = options.iter().find(|o| o.eq_ignore_ascii_case(&raw)) {
+            return (*canonical).to_string();
+        }
+    }
+    raw
+}
+
+/// Apply a validated Security setting onto a policy in memory.
+pub fn apply_security(
+    policy: &mut SecurityPolicy,
+    key: SettingKey,
+    value: &str,
+) -> Result<(), String> {
+    if !is_security_setting(key) {
+        return Err(format!("not a security setting: {key:?}"));
+    }
+    if let SettingKind::Choice(options) = find(key).kind {
+        if !options.contains(&value) {
+            return Err(format!("expected one of {:?}, got `{value}`", options));
+        }
+    }
+    match key {
+        SettingKey::InputGuardEnabled => {
+            policy.input_guard.enabled = parse_bool(value)?;
+        }
+        SettingKey::EnableSandbox => {
+            policy.enable_sandbox = parse_bool(value)?;
+        }
+        SettingKey::DefaultRiskLevel => {
+            policy.default_risk_level = parse_risk_level(value);
+        }
+        SettingKey::SandboxOffAction => {
+            policy.sandbox_off_action = parse_sandbox_off_action(value);
+        }
+        SettingKey::SandboxTimeout => {
+            policy.sandbox_timeout_seconds = parse_f64(value, 1.0..=300.0)?;
+        }
+        _ => unreachable!("non-security key rejected above"),
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -592,11 +697,13 @@ pub fn current_raw(cfg: &ConfigModel, key: SettingKey) -> String {
         SettingKey::InlineEnforceJson => bool_str(cfg.inline_completion.enforce_json),
         SettingKey::MaxLlmMessages => cfg.max_llm_messages.to_string(),
         SettingKey::EnableTokenEstimation => bool_str(cfg.enable_token_estimation),
-        SettingKey::InputGuardEnabled => bool_str(cfg.input_guard_enabled),
-        SettingKey::EnableSandbox => bool_str(cfg.enable_sandbox),
-        SettingKey::DefaultRiskLevel => cfg.default_risk_level.clone(),
-        SettingKey::SandboxOffAction => cfg.sandbox_off_action.clone(),
-        SettingKey::SandboxTimeout => format!("{}", cfg.sandbox_timeout_seconds),
+        SettingKey::InputGuardEnabled
+        | SettingKey::EnableSandbox
+        | SettingKey::DefaultRiskLevel
+        | SettingKey::SandboxOffAction
+        | SettingKey::SandboxTimeout => {
+            panic!("security setting {key:?} must use security_current_raw")
+        }
         SettingKey::MemoryAutoRecall => cfg
             .memory
             .as_ref()
@@ -728,11 +835,13 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
         }
         SettingKey::MaxLlmMessages => cfg.max_llm_messages = parse_usize(value)?,
         SettingKey::EnableTokenEstimation => cfg.enable_token_estimation = parse_bool(value)?,
-        SettingKey::InputGuardEnabled => cfg.input_guard_enabled = parse_bool(value)?,
-        SettingKey::EnableSandbox => cfg.enable_sandbox = parse_bool(value)?,
-        SettingKey::DefaultRiskLevel => cfg.default_risk_level = value.to_string(),
-        SettingKey::SandboxOffAction => cfg.sandbox_off_action = value.to_string(),
-        SettingKey::SandboxTimeout => cfg.sandbox_timeout_seconds = parse_f64(value, 1.0..=300.0)?,
+        SettingKey::InputGuardEnabled
+        | SettingKey::EnableSandbox
+        | SettingKey::DefaultRiskLevel
+        | SettingKey::SandboxOffAction
+        | SettingKey::SandboxTimeout => {
+            panic!("security setting {key:?} must use apply_security")
+        }
         SettingKey::MemoryAutoRecall => {
             ensure_memory(cfg).auto_recall = parse_bool(value)?;
         }
@@ -810,33 +919,26 @@ pub fn live_effect(key: SettingKey) -> LiveEffect {
     match key {
         SettingKey::Model | SettingKey::ApiBase | SettingKey::ApiKey => LiveEffect::ModelSession,
         SettingKey::Temperature | SettingKey::MaxTokens => LiveEffect::ToolsRefresh,
-        SettingKey::InputGuardEnabled => LiveEffect::InputGuard,
-        SettingKey::EnableSandbox
-        | SettingKey::DefaultRiskLevel
-        | SettingKey::SandboxOffAction
-        | SettingKey::SandboxTimeout => LiveEffect::SecurityPolicy,
+        // Security keys are applied via `is_security_setting` in app.rs.
         _ => LiveEffect::None,
     }
 }
 
 /// Whether the running session must be restarted for `key`'s new value to take
 /// effect. The model/credential fields are applied live via `update_model`,
-/// temperature/max_tokens rebuild tools live, `input_guard_enabled` toggles the
-/// cached InputGuard live, the security globals (`enable_sandbox`, etc.) are
-/// pushed into the running `SecurityManager`, and `prompt_style` is read from
+/// temperature/max_tokens rebuild tools live, Security settings are pushed into
+/// the running `SecurityManager` + InputGuard, and `prompt_style` is read from
 /// `self.config` on each render — everything else is consumed only at startup.
 pub fn requires_restart(key: SettingKey) -> bool {
+    if is_security_setting(key) {
+        return false;
+    }
     match key {
         SettingKey::Model
         | SettingKey::ApiBase
         | SettingKey::ApiKey
         | SettingKey::Temperature
         | SettingKey::MaxTokens
-        | SettingKey::InputGuardEnabled
-        | SettingKey::EnableSandbox
-        | SettingKey::DefaultRiskLevel
-        | SettingKey::SandboxOffAction
-        | SettingKey::SandboxTimeout
         | SettingKey::PromptStyle => false,
         // SkillAutoSearch is read once at AiHandler construction, so a change
         // only takes effect after restart (live toggling silently failed
@@ -1011,26 +1113,51 @@ mod tests {
 
     #[test]
     fn choice_current_value_is_case_normalized() {
-        // A stored uppercase value (e.g. merged from security_policy.yaml)
-        // must display as the canonical lowercase option so the "current"
-        // marker and list value line up.
+        // Security enums always render as canonical lowercase options.
+        let mut policy = SecurityPolicy::default();
+        policy.default_risk_level = RiskLevel::Low;
+        assert_eq!(
+            security_current_raw(&policy, SettingKey::DefaultRiskLevel),
+            "low"
+        );
         let mut cfg = default_cfg();
-        cfg.default_risk_level = "LOW".into();
-        assert_eq!(current_raw(&cfg, SettingKey::DefaultRiskLevel), "low");
         cfg.log_level = "DEBUG".into();
         assert_eq!(current_raw(&cfg, SettingKey::LogLevel), "debug");
         // A value outside the option set is passed through unchanged.
-        cfg.sandbox_off_action = "weird".into();
-        assert_eq!(current_raw(&cfg, SettingKey::SandboxOffAction), "weird");
+        cfg.log_level = "weird".into();
+        assert_eq!(current_raw(&cfg, SettingKey::LogLevel), "weird");
+    }
+
+    #[test]
+    fn security_sandbox_roundtrip_uses_policy_not_config() {
+        let mut policy = SecurityPolicy::default();
+        assert_eq!(
+            security_current_raw(&policy, SettingKey::EnableSandbox),
+            "false"
+        );
+        apply_security(&mut policy, SettingKey::EnableSandbox, "on").unwrap();
+        assert!(policy.enable_sandbox);
+        apply_security(&mut policy, SettingKey::SandboxOffAction, "block").unwrap();
+        assert_eq!(policy.sandbox_off_action, SandboxOffAction::Block);
+        assert_eq!(
+            security_current_raw(&policy, SettingKey::SandboxOffAction),
+            "block"
+        );
     }
 
     #[test]
     fn roundtrip_bool_toggle() {
-        let mut cfg = default_cfg();
-        assert_eq!(current_raw(&cfg, SettingKey::InputGuardEnabled), "true");
-        apply(&mut cfg, SettingKey::InputGuardEnabled, "off").unwrap();
-        assert!(!cfg.input_guard_enabled);
-        assert_eq!(current_raw(&cfg, SettingKey::InputGuardEnabled), "false");
+        let mut policy = SecurityPolicy::default();
+        assert_eq!(
+            security_current_raw(&policy, SettingKey::InputGuardEnabled),
+            "true"
+        );
+        apply_security(&mut policy, SettingKey::InputGuardEnabled, "off").unwrap();
+        assert!(!policy.input_guard.enabled);
+        assert_eq!(
+            security_current_raw(&policy, SettingKey::InputGuardEnabled),
+            "false"
+        );
     }
 
     #[test]
@@ -1047,12 +1174,13 @@ mod tests {
         // mis-grade security risk.
         let mut cfg = default_cfg();
         assert!(apply(&mut cfg, SettingKey::LogLevel, "warb").is_err());
-        assert!(apply(&mut cfg, SettingKey::DefaultRiskLevel, "banana").is_err());
+        let mut policy = SecurityPolicy::default();
+        assert!(apply_security(&mut policy, SettingKey::DefaultRiskLevel, "banana").is_err());
         // Valid values pass through.
         apply(&mut cfg, SettingKey::LogLevel, "debug").unwrap();
         assert_eq!(cfg.log_level, "debug");
-        apply(&mut cfg, SettingKey::DefaultRiskLevel, "high").unwrap();
-        assert_eq!(cfg.default_risk_level, "high");
+        apply_security(&mut policy, SettingKey::DefaultRiskLevel, "high").unwrap();
+        assert_eq!(policy.default_risk_level, RiskLevel::High);
     }
 
     #[test]
@@ -1102,42 +1230,26 @@ mod tests {
     fn model_fields_signal_session_refresh() {
         assert_eq!(live_effect(SettingKey::Model), LiveEffect::ModelSession);
         assert_eq!(live_effect(SettingKey::ApiKey), LiveEffect::ModelSession);
-        assert_eq!(
-            live_effect(SettingKey::InputGuardEnabled),
-            LiveEffect::InputGuard
-        );
-        assert_eq!(
-            live_effect(SettingKey::EnableSandbox),
-            LiveEffect::SecurityPolicy
-        );
-        assert_eq!(
-            live_effect(SettingKey::DefaultRiskLevel),
-            LiveEffect::SecurityPolicy
-        );
-        assert_eq!(
-            live_effect(SettingKey::SandboxOffAction),
-            LiveEffect::SecurityPolicy
-        );
-        assert_eq!(
-            live_effect(SettingKey::SandboxTimeout),
-            LiveEffect::SecurityPolicy
-        );
+        // Security keys are handled outside LiveEffect.
+        assert_eq!(live_effect(SettingKey::InputGuardEnabled), LiveEffect::None);
+        assert_eq!(live_effect(SettingKey::EnableSandbox), LiveEffect::None);
+        assert_eq!(live_effect(SettingKey::DefaultRiskLevel), LiveEffect::None);
+        assert_eq!(live_effect(SettingKey::SandboxOffAction), LiveEffect::None);
+        assert_eq!(live_effect(SettingKey::SandboxTimeout), LiveEffect::None);
     }
 
-    /// Regression: `default_raw_of` must match `current_raw(ConfigModel::default())`
-    /// for every key. Previously `default_raw_of(RemoteDangerPatterns)` was
-    /// hand-mirrored to `""`, which (a) flagged every fresh install as changed
-    /// and (b) made Ctrl+R reset silently wipe the production-safety patterns.
-    /// Deriving from `ConfigModel::default()` makes drift impossible.
+    /// Regression: `default_raw_of` must track factory defaults. Security keys
+    /// come from `SecurityPolicy::default()`; the rest from `ConfigModel`.
     #[test]
-    fn default_raw_of_matches_configmodel_default_for_all_keys() {
+    fn default_raw_of_matches_factory_defaults_for_all_keys() {
         let cfg = ConfigModel::default();
+        let policy = SecurityPolicy::default();
         for def in SETTINGS {
-            let expected = current_raw(&cfg, def.key);
+            let expected = raw_value(&cfg, &policy, def.key);
             let actual = default_raw_of(def.key);
             assert_eq!(
                 actual, expected,
-                "default_raw_of({:?}) drifts from ConfigModel::default()",
+                "default_raw_of({:?}) drifts from factory default",
                 def.key
             );
         }
