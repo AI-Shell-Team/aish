@@ -94,6 +94,8 @@ rm -rf "$(target_path "/usr/local/share/aish/skills")"
 rmdir --ignore-fail-on-non-empty "$(target_path "/usr/local/share/aish")" >/dev/null 2>&1 || true
 rm -rf "$(target_path "/usr/share/aish/skills")"
 rmdir --ignore-fail-on-non-empty "$(target_path "/usr/share/aish")" >/dev/null 2>&1 || true
+# Legacy cleanup: older installers placed security_policy.yaml under /etc/aish.
+# Current releases no longer install there (policy lives under ~/.config/aish).
 if [[ "$PURGE_CONFIG" -eq 1 ]]; then
 	rm -f "$(target_path "/etc/aish/security_policy.yaml")"
 	rmdir --ignore-fail-on-non-empty "$(target_path "/etc/aish")" >/dev/null 2>&1 || true

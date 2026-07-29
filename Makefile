@@ -2,7 +2,6 @@
 
 PREFIX ?= /usr
 BINDIR ?= $(PREFIX)/bin
-SYSCONFDIR ?= /etc
 SHAREDIR ?= $(PREFIX)/share
 DATADIR ?= $(SHAREDIR)/aish
 SYSTEMD_UNITDIR ?= /etc/systemd/system
@@ -69,8 +68,8 @@ install:
 	@echo "Installing built artifacts into $(DESTDIR)"
 	install -d "$(DESTDIR)$(BINDIR)"
 	install -m 0755 target/$(TARGET)/release/aish "$(DESTDIR)$(BINDIR)/aish"
-	install -d "$(DESTDIR)$(SYSCONFDIR)/aish"
-	install -m 0644 config/security_policy.yaml "$(DESTDIR)$(SYSCONFDIR)/aish/security_policy.yaml"
+	# security_policy.yaml is compile-time embedded / seeded under ~/.config/aish
+	# at runtime; do not install a system copy under /etc/aish.
 	install -d "$(DESTDIR)$(SYSTEMD_UNITDIR)"
 	sed 's|@AISH_BINDIR@|$(BINDIR)|g' packaging/systemd/aish-sandbox.service.in > "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"
 	chmod 0644 "$(DESTDIR)$(SYSTEMD_UNITDIR)/aish-sandbox.service"

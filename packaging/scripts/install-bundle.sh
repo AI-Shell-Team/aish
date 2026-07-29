@@ -6,16 +6,16 @@ ROOTFS_DIR="${SCRIPT_DIR}/rootfs"
 SYSTEMD_DIR="${SCRIPT_DIR}/systemd"
 MIN_GLIBC_VERSION="2.28"
 BUNDLE_SYSTEMD_UNITDIR="/etc/systemd/system"
-FORCE_CONFIG_OVERWRITE=0
 INSTALL_ROOT="${AISH_INSTALL_ROOT:-}"
 INSTALL_PREFIX=""
 SKIP_SYSTEMD="${AISH_SKIP_SYSTEMD:-0}"
 
 usage() {
 	cat <<'EOF'
-Usage: sudo ./install.sh [--force-config] [--prefix=PATH]
+Usage: sudo ./install.sh [--prefix=PATH]
 
-Installs AI Shell binaries and the security policy.
+Installs AI Shell binaries. Security policy is seeded under
+~/.config/aish/security_policy.yaml on first run (not installed under /etc).
 
 Packaged skills are embedded in the aish binary (loaded at runtime); this
 installer does not write skills into any user's ~/.config/aish/skills.
@@ -104,17 +104,6 @@ install_file() {
 	fi
 }
 
-install_config() {
-	local source_path="$1"
-	local destination_path
-	destination_path="$(target_path "$2")"
-	if [[ -f "$destination_path" && "$FORCE_CONFIG_OVERWRITE" -ne 1 ]]; then
-		echo "Preserving existing config: ${destination_path}"
-		return
-	fi
-	install_file "$source_path" "$2" 0644
-}
-
 install_systemd_units() {
 	if [[ -n "$INSTALL_PREFIX" ]]; then
 		return
@@ -151,10 +140,6 @@ install_systemd_units() {
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-		--force-config)
-			FORCE_CONFIG_OVERWRITE=1
-			shift
-			;;
 		--prefix=*)
 			INSTALL_PREFIX="${1#*=}"
 			shift
@@ -179,7 +164,6 @@ BIN_DIR="$(binary_target_dir)"
 
 install_file "$ROOTFS_DIR/usr/bin/aish" "${BIN_DIR}/aish" 0755
 install_file "$SCRIPT_DIR/uninstall.sh" "${BIN_DIR}/aish-uninstall" 0755
-install_config "$ROOTFS_DIR/etc/aish/security_policy.yaml" "/etc/aish/security_policy.yaml"
 
 install_systemd_units
 
