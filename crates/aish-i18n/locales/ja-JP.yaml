@@ -288,7 +288,7 @@ shell:
     picker_subtitle: "↑↓ 選択、Enter で切替"
     fetch_failed_subtitle: "モデルリストを取得できません（endpointに到達不能）— 現在と履歴のみ表示"
     picker_search: "モデルや URL を検索..."
-    picker_footer: "a アカウント追加  m 管理  Esc キャンセル"
+    picker_footer: "Esc キャンセル"
     action_add: "追加"
     action_del: "削除"
     action_toggle: "切替"
@@ -312,7 +312,7 @@ shell:
     manage_title: "アカウントとフォールバック管理"
     manage_search: "検索..."
     manage_subtitle: "d 選択項目を削除"
-    manage_footer: "d 削除  f フォールバック追加  Esc 戻る"
+    manage_footer: "Esc 戻る"
     manage_empty: "管理するアカウントやフォールバックがありません"
 
   accounts:

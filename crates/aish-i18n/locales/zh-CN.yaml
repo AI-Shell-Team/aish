@@ -633,7 +633,7 @@ shell:
     picker_subtitle: "↑↓ 选择，Enter 切换到该模型/账户"
     fetch_failed_subtitle: "无法获取模型列表（endpoint 不可达）—— 仅显示当前和历史"
     picker_search: "搜索模型或 URL..."
-    picker_footer: "a 添加账户  m 管理  Esc 取消"
+    picker_footer: "Esc 取消"
     action_add: "添加"
     action_del: "删除"
     action_toggle: "启停"
@@ -657,7 +657,7 @@ shell:
     manage_title: "账户与回退管理"
     manage_search: "搜索..."
     manage_subtitle: "d 删除选中项"
-    manage_footer: "d 删除  f 加回退  Esc 返回"
+    manage_footer: "Esc 返回"
     manage_empty: "暂无账户或回退可管理"
 
   accounts:

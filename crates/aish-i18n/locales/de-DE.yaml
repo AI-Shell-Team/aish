@@ -288,7 +288,7 @@ shell:
     picker_subtitle: "↑↓ Auswaehlen, Enter wechseln"
     fetch_failed_subtitle: "Modellliste konnte nicht abgerufen werden (Endpoint unerreichbar) — nur aktuell + Verlauf"
     picker_search: "Modelle oder URLs suchen..."
-    picker_footer: "a Konto hinzufuegen  m verwalten  Esc Abbrechen"
+    picker_footer: "Esc Abbrechen"
     action_add: "neu"
     action_del: "loeschen"
     action_toggle: "an/aus"
@@ -312,7 +312,7 @@ shell:
     manage_title: "Konten & Fallback"
     manage_search: "Suchen..."
     manage_subtitle: "d markierten Eintrag loeschen"
-    manage_footer: "d loeschen  f Fallback hinzufuegen  Esc zurueck"
+    manage_footer: "Esc zurueck"
     manage_empty: "Keine Konten oder Fallbacks zu verwalten"
 
   accounts:

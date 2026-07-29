@@ -671,7 +671,7 @@ shell:
     picker_subtitle: "Up/Dn to select, Enter to switch"
     fetch_failed_subtitle: "Could not fetch model list (endpoint unreachable) — showing current + history only"
     picker_search: "Search models or URLs..."
-    picker_footer: "a add account  m manage  Esc cancel"
+    picker_footer: "Esc cancel"
     action_add: "add"
     action_del: "delete"
     action_toggle: "toggle"
@@ -695,7 +695,7 @@ shell:
     manage_title: "Accounts & fallback"
     manage_search: "Search..."
     manage_subtitle: "d to delete the highlighted entry"
-    manage_footer: "d delete  f add fallback  Esc back"
+    manage_footer: "Esc back"
     manage_empty: "No accounts or fallbacks to manage"
 
   accounts:

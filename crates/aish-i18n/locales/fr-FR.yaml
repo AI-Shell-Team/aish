@@ -288,7 +288,7 @@ shell:
     picker_subtitle: "↑↓ selectionner, Enter basculer"
     fetch_failed_subtitle: "Impossible de recuperer la liste des modeles (endpoint injoignable) — actuel + historique seulement"
     picker_search: "Rechercher modeles ou URLs..."
-    picker_footer: "a ajouter compte  m gerer  Esc annuler"
+    picker_footer: "Esc annuler"
     action_add: "ajouter"
     action_del: "supprimer"
     action_toggle: "act/des"
@@ -312,7 +312,7 @@ shell:
     manage_title: "Comptes et secours"
     manage_search: "Rechercher..."
     manage_subtitle: "d pour supprimer l'entree selectionnee"
-    manage_footer: "d supprimer  f ajouter secours  Esc retour"
+    manage_footer: "Esc retour"
     manage_empty: "Aucun compte ni secours a gerer"
 
   accounts:

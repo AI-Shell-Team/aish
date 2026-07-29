@@ -288,7 +288,7 @@ shell:
     picker_subtitle: "↑↓ seleccionar, Enter cambiar"
     fetch_failed_subtitle: "No se pudo obtener la lista de modelos (endpoint inalcanzable) — solo actual e historial"
     picker_search: "Buscar modelos o URLs..."
-    picker_footer: "a anadir cuenta  m gestionar  Esc cancelar"
+    picker_footer: "Esc cancelar"
     action_add: "anadir"
     action_del: "borrar"
     action_toggle: "act/des"
@@ -312,7 +312,7 @@ shell:
     manage_title: "Cuentas y respaldo"
     manage_search: "Buscar..."
     manage_subtitle: "d para borrar la entrada seleccionada"
-    manage_footer: "d borrar  f anadir respaldo  Esc volver"
+    manage_footer: "Esc volver"
     manage_empty: "No hay cuentas ni respaldos que gestionar"
 
   accounts:

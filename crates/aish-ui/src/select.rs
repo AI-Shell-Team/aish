@@ -552,15 +552,30 @@ impl SearchSelectPanel {
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        let Some(footer) = &self.footer else {
+        // Compose the footer from the registered single-key actions — each
+        // rendered as "key label" (e.g. "a add") — followed by any explicit
+        // footer hint. Actions are the non-obvious shortcuts, so they lead;
+        // the explicit footer carries the conventional Esc/Enter hint. This
+        // keeps the visible hints in sync with the registered actions instead
+        // of duplicating them in a static footer string.
+        let mut parts: Vec<String> = self
+            .actions
+            .iter()
+            .map(|(key, label)| format!("{key} {label}"))
+            .collect();
+        if let Some(footer) = &self.footer {
+            parts.push(footer.clone());
+        }
+        if parts.is_empty() {
             return;
-        };
+        }
         let area = padded_area(area);
         if area.width == 0 {
             return;
         }
+        let text = parts.join("  ");
         frame.render_widget(
-            Paragraph::new(truncate_display(footer, area.width as usize))
+            Paragraph::new(truncate_display(&text, area.width as usize))
                 .style(Style::default().fg(Color::DarkGray)),
             area,
         );
