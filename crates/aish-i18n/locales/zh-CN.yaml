@@ -370,6 +370,7 @@ shell:
     skill: "搜索、安装、校验技能；管理 registry 源"
     export: "导出当前会话为 Markdown"
     fork: "分支当前会话"
+    sessions: "显示会话树"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -571,6 +572,11 @@ shell:
     switch_manual: "使用 `/resume {session_id}` 手动切换"
     failed: "分叉失败：{error}"
     store_unavailable: "会话存储不可用；无法分叉"
+
+  sessions:
+    none: "（无已保存会话）"
+    switch_failed: "切换会话失败：{error}"
+    list_failed: "列出会话失败：{error}"
 
   live_sessions:
     daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："

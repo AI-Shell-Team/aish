@@ -54,6 +54,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/fork",
         "Branch the current session into a new one (copied context)",
     ),
+    ("/sessions", "Show the session tree (roots + forks)"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -832,6 +833,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 20);
+        assert_eq!(SLASH_COMMANDS.len(), 21);
     }
 }

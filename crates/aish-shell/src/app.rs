@@ -3465,6 +3465,7 @@ impl AishShell {
             Some("/skill") => self.handle_skill_command(&parts),
             Some("/export") => self.handle_export_command(&parts),
             Some("/fork") => self.handle_fork_command(),
+            Some("/sessions") => self.handle_sessions_command(),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3722,6 +3723,116 @@ impl AishShell {
                     args
                 })
             ),
+        }
+    }
+
+    /// `/sessions` — browse the session tree in an interactive panel (instead of
+    /// flooding the screen) and switch to the chosen session on submit.
+    fn handle_sessions_command(&mut self) {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.resume.session_store_unavailable"));
+            return;
+        };
+        let roots = match store.session_roots() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.sessions.list_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        if roots.is_empty() {
+            println!("{}", t("shell.sessions.none"));
+            return;
+        }
+
+        // Walk the full session forest depth-first so nested forks stay visible
+        // without dumping every node to stdout.
+        let mut items: Vec<aish_ui::SearchSelectItem> = Vec::new();
+        for root in &roots {
+            self.collect_session_tree(store, root, 0, &mut items);
+        }
+
+        let panel = aish_ui::SearchSelectPanel::new(
+            aish_i18n::t("shell.resume.selector_title"),
+            aish_i18n::t("shell.resume.search_placeholder"),
+            items,
+        );
+        if let Ok(aish_ui::PanelOutcome::Submitted(aish_ui::SearchSelectOutcome::Selected(id))) =
+            aish_ui::PanelRuntime::new().run(panel)
+        {
+            if id != self.session_uuid {
+                if let Err(e) = self.resume_session_with_options(&id, true, true) {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.sessions.switch_failed", &{
+                            let mut args = std::collections::HashMap::new();
+                            args.insert("error".to_string(), e.to_string());
+                            args
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    /// Build one panel row for a session node, indenting forks beneath roots.
+    fn session_tree_item(
+        &self,
+        session: &aish_session::SessionRecord,
+        depth: usize,
+    ) -> aish_ui::SearchSelectItem {
+        let indent = if depth > 0 {
+            format!("{}└ ", "  ".repeat(depth))
+        } else {
+            String::new()
+        };
+        let short = &session.session_uuid[..8.min(session.session_uuid.len())];
+        let when = session.created_at.format("%m-%d %H:%M");
+        let cur = if session.session_uuid == self.session_uuid {
+            " *"
+        } else {
+            ""
+        };
+        let label = format!("{}{} {} {}{}", indent, short, session.model, when, cur);
+        let snap = session.state_snapshot();
+        let preview: String = snap
+            .summary_preview
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        let search = format!("{} {} {}", short, session.model, preview);
+        let mut item = aish_ui::SearchSelectItem::new(session.session_uuid.clone(), label)
+            .with_search_text(search);
+        if !preview.is_empty() {
+            item = item.with_detail(preview);
+        }
+        item
+    }
+
+    /// Depth-first walk of the session tree: push `node` then recurse into its
+    /// children. The fork model guarantees acyclic parent links (a parent always
+    /// exists before its fork), so recursion terminates without a visited set.
+    fn collect_session_tree(
+        &self,
+        store: &aish_session::SessionStore,
+        node: &aish_session::SessionRecord,
+        depth: usize,
+        items: &mut Vec<aish_ui::SearchSelectItem>,
+    ) {
+        items.push(self.session_tree_item(node, depth));
+        if let Ok(children) = store.list_children(&node.session_uuid) {
+            for child in &children {
+                self.collect_session_tree(store, child, depth + 1, items);
+            }
         }
     }
 

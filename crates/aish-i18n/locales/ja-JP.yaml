@@ -185,6 +185,7 @@ shell:
     skill: "スキルの検索・インストール・検証;レジストリ管理"
     export: "現在のセッションを Markdown にエクスポート"
     fork: "現在のセッションを分岐"
+    sessions: "セッションツリーを表示"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -672,6 +673,11 @@ shell:
     switch_manual: "`/resume {session_id}` で手動切り替えしてください"
     failed: "フォーク失敗: {error}"
     store_unavailable: "セッションストアが利用できません；フォークできません"
+
+  sessions:
+    none: "（保存済みセッションはありません）"
+    switch_failed: "セッションの切り替えに失敗しました: {error}"
+    list_failed: "セッション一覧の取得に失敗しました: {error}"
 
   live_sessions:
     daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："
