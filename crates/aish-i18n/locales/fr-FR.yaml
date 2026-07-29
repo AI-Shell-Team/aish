@@ -982,10 +982,11 @@ help:
 
         ## Emplacement de la configuration
 
-        Priorité :
+        Chemin :
         1. Chemin explicitement spécifié
-        2. `/etc/aish/security_policy.yaml`
-        3. `~/.config/aish/security_policy.yaml`
+        2. `~/.config/aish/security_policy.yaml` (généré depuis le modèle embarqué si absent)
+
+        `/etc/aish` n'est pas lu à l'exécution.
 
         ## Niveaux de risque
 

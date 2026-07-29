@@ -982,10 +982,11 @@ help:
 
         ## Ubicación de configuración
 
-        Prioridad：
+        Ruta:
         1. Ruta explícita especificada
-        2. `/etc/aish/security_policy.yaml`
-        3. `~/.config/aish/security_policy.yaml`
+        2. `~/.config/aish/security_policy.yaml` (si falta, se genera desde la plantilla incluida)
+
+        `/etc/aish` no se lee en tiempo de ejecución.
 
         ## Niveles de riesgo
 

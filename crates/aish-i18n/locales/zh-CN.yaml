@@ -1384,10 +1384,11 @@ help:
 
         ## 配置位置
 
-        优先级：
+        路径：
         1. 显式指定的路径
-        2. `/etc/aish/security_policy.yaml`
-        3. `~/.config/aish/security_policy.yaml`
+        2. `~/.config/aish/security_policy.yaml`（不存在时从内置模板生成）
+
+        运行时不再读取 `/etc/aish`。
 
         ## 风险等级
 
