@@ -368,6 +368,7 @@ shell:
     audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
     forget-approvals: "清除本会话记住的命令审批"
     skill: "搜索、安装、校验技能；管理 registry 源"
+    export: "导出当前会话为 Markdown"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -546,6 +547,23 @@ shell:
     no_matches: "没有匹配的会话。"
     current_marker: "(当前)"
     selector_footer: "输入以搜索 · ↑/↓ 选择 · Enter 恢复 · Esc 取消"
+
+  export:
+    md_header: "# aish 会话导出"
+    session_label: "- **会话**：`{uuid}`"
+    model_label: "- **模型**：{model}"
+    api_base_label: "- **api_base**：{base}"
+    forked_label: "- **分叉自**：`{parent}`"
+    created_label: "- **创建时间**：{created}"
+    working_dir: "**工作目录**：`{cwd}`"
+    conversation_header: "## 对话"
+    history_header: "## 命令历史"
+    exported: "已导出 {file}（{msgs} 条消息，{cmds} 条命令）"
+    write_failed: "写入 {file} 失败：{error}"
+    usage: "用法：/export [md]  （仅支持 markdown）"
+    store_unavailable: "会话存储不可用；无法导出"
+    not_found: "在存储中找不到当前会话"
+    load_failed: "加载会话失败：{error}"
 
   live_sessions:
     daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："

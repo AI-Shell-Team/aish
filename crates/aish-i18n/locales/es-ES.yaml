@@ -183,6 +183,7 @@ shell:
     audit: "Consultar el registro de auditoría (quién/cuándo/qué/sugerencia de IA/confirmación)"
     forget-approvals: "Borrar aprobaciones de comandos recordadas (esta sesión)"
     skill: "Buscar, instalar, verificar skills; gestionar registros"
+    export: "Exportar la sesión actual a Markdown"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -647,6 +648,23 @@ shell:
     no_matches: "No hay sesiones coincidentes."
     current_marker: "(actual)"
     selector_footer: "Escribe para buscar · ↑/↓ para seleccionar · Enter para reanudar · Esc para cancelar"
+
+  export:
+    md_header: "# exportación de sesión aish"
+    session_label: "- **sesión**: `{uuid}`"
+    model_label: "- **modelo**: {model}"
+    api_base_label: "- **api_base**: {base}"
+    forked_label: "- **bifurcada de**: `{parent}`"
+    created_label: "- **creada**: {created}"
+    working_dir: "**directorio de trabajo**: `{cwd}`"
+    conversation_header: "## Conversación"
+    history_header: "## Historial de comandos"
+    exported: "exportado {file} ({msgs} mensajes, {cmds} comandos)"
+    write_failed: "fallo al escribir {file}: {error}"
+    usage: "uso: /export [md]  (solo se admite markdown)"
+    store_unavailable: "almacén de sesiones no disponible; no se puede exportar"
+    not_found: "sesión actual no encontrada en el almacén"
+    load_failed: "fallo al cargar la sesión: {error}"
 
   live_sessions:
     daemon_disabled: "Demonio PTY deshabilitado. Habilitar en config.yaml:"

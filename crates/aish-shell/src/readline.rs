@@ -49,6 +49,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/skill",
         "Search, install, verify skills; manage registries",
     ),
+    ("/export", "Export current session to Markdown"),
 ];
 
 // ---------------------------------------------------------------------------
@@ -827,6 +828,6 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 18);
+        assert_eq!(SLASH_COMMANDS.len(), 19);
     }
 }

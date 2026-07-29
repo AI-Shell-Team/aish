@@ -183,6 +183,7 @@ shell:
     audit: "監査ログを照会（誰/いつ/何/AI提案/確認）"
     forget-approvals: "記憶されたコマンド承認を削除（このセッション）"
     skill: "スキルの検索・インストール・検証;レジストリ管理"
+    export: "現在のセッションを Markdown にエクスポート"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -647,6 +648,23 @@ shell:
     no_matches: "一致するセッションはありません。"
     current_marker: "(現在)"
     selector_footer: "入力して検索 · ↑/↓ で選択 · Enter で復元 · Esc でキャンセル"
+
+  export:
+    md_header: "# aish セッションエクスポート"
+    session_label: "- **セッション**: `{uuid}`"
+    model_label: "- **モデル**: {model}"
+    api_base_label: "- **api_base**: {base}"
+    forked_label: "- **フォーク元**: `{parent}`"
+    created_label: "- **作成**: {created}"
+    working_dir: "**作業ディレクトリ**: `{cwd}`"
+    conversation_header: "## 会話"
+    history_header: "## コマンド履歴"
+    exported: "エクスポートしました {file}（{msgs} メッセージ、{cmds} コマンド）"
+    write_failed: "{file} の書き込みに失敗しました: {error}"
+    usage: "使い方: /export [md]  （markdown のみ対応）"
+    store_unavailable: "セッションストアが利用できません；エクスポートできません"
+    not_found: "ストアに現在のセッションが見つかりません"
+    load_failed: "セッションの読み込みに失敗しました: {error}"
 
   live_sessions:
     daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："
