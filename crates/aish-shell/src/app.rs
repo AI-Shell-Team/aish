@@ -298,12 +298,141 @@ fn prompt_edit_value(label: &str, desc: &str, current: &str, secret: bool) -> Op
     }
 }
 
+fn pick_menu(title: &str, options: &[(String, String, String)]) -> Option<String> {
+    let opts: Vec<crate::tui::DialogOption> = options
+        .iter()
+        .map(|(v, l, d)| {
+            let mut o = crate::tui::DialogOption::new(v.as_str(), l.as_str());
+            if !d.is_empty() {
+                o = o.with_description(d.as_str());
+            }
+            o
+        })
+        .collect();
+    match crate::tui::show_selection_dialog(title, "", &opts, false, true) {
+        crate::tui::DialogResult::Selected(v) => Some(v),
+        _ => None,
+    }
+}
+
 fn llm_session_from_config(config: &ConfigModel) -> LlmSession {
-    LlmSession::with_context(
+    let mut session = LlmSession::with_context(
         stream_context_from_config(config),
         Some(config.temperature),
         config.max_tokens,
-    )
+    );
+
+    // Multi-account quota rotation + model fallback. The top-level api_key is
+    // account #0 (the primary); configured api_accounts extend the pool.
+    let accounts = rotation_accounts_from_config(config);
+    if !config.fallback_models.is_empty() || accounts.len() > 1 {
+        let mut policy = aish_llm::RetryPolicy::default();
+        policy.revert_on_cooldown = config.fallback_revert_on_cooldown;
+        let state = aish_llm::RotationState::new(
+            config.model.clone(),
+            accounts,
+            config.fallback_models.clone(),
+            policy,
+        );
+        if state.is_active() {
+            session.set_rotation(state);
+        }
+    }
+    session
+}
+
+/// Build the rotation account pool from config. The primary `api_key` is always
+/// index 0; each entry in `config.api_accounts` follows. Disabled when the key
+/// is empty so rotation skips it instead of wasting an attempt.
+fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccount> {
+    let mut accounts = vec![aish_llm::ApiAccount {
+        name: "primary".to_string(),
+        api_key: config.api_key.clone(),
+        api_base: None,
+        model: None,
+        weight: 1,
+        disabled: config.api_key.trim().is_empty(),
+    }];
+    for acct in &config.api_accounts {
+        accounts.push(aish_llm::ApiAccount {
+            name: acct.name.clone(),
+            api_key: acct.api_key.clone(),
+            api_base: acct.api_base.clone(),
+            model: acct.model.clone(),
+            weight: acct.weight.max(1),
+            disabled: acct.disabled,
+        });
+    }
+    accounts
+}
+
+/// Derive a readable account label from an endpoint URL (its host) or, failing
+/// a parseable host, the model name. Used when an outgoing primary account is
+/// auto-preserved on an endpoint switch.
+fn account_label(base: &str, model: &str) -> String {
+    let host = base
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', ':']).next())
+        .filter(|h| !h.is_empty() && h.contains('.'));
+    host.map(str::to_string)
+        .unwrap_or_else(|| model.to_string())
+}
+
+/// Append a numeric suffix so `label` does not collide with an existing
+/// account name — the manage panel and delete-by-name path key on `name`.
+fn unique_account_name(accounts: &[aish_config::ApiAccountConfig], label: &str) -> String {
+    if !accounts.iter().any(|a| a.name == label) {
+        return label.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{label}-{n}");
+        if !accounts.iter().any(|a| a.name == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+#[cfg(test)]
+mod account_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn account_label_extracts_dotted_host() {
+        assert_eq!(
+            account_label("https://api.openai.com/v1", "gpt-4"),
+            "api.openai.com"
+        );
+    }
+
+    #[test]
+    fn account_label_falls_back_to_model_for_non_fqdn_or_garbage() {
+        // No dot in host → not a usable label.
+        assert_eq!(account_label("http://localhost:8080", "llama"), "llama");
+        // No scheme/host → model fallback.
+        assert_eq!(account_label("not-a-url", "my-model"), "my-model");
+        assert_eq!(account_label("", "my-model"), "my-model");
+    }
+
+    #[test]
+    fn unique_account_name_appends_suffix_only_on_collision() {
+        let existing = aish_config::ApiAccountConfig {
+            name: "api.openai.com".into(),
+            api_key: "k".into(),
+            api_base: None,
+            model: None,
+            weight: 1,
+            disabled: false,
+        };
+        let accts = vec![existing];
+        assert_eq!(unique_account_name(&accts, "free"), "free");
+        assert_eq!(
+            unique_account_name(&accts, "api.openai.com"),
+            "api.openai.com-2"
+        );
+    }
 }
 
 fn stream_context_from_parts(
@@ -4964,19 +5093,605 @@ impl AishShell {
         }
     }
 
-    fn handle_model_command(&mut self, parts: &[&str]) {
-        if parts.len() == 1 {
-            let mut args = std::collections::HashMap::new();
-            args.insert("model".to_string(), self.config.model.clone());
-            println!("{}", t_with_args("shell.model.current", &args));
+    fn accounts_add_interactive(&mut self) {
+        use crate::wizard::model_fetch::fetch_models_from_api;
+        use crate::wizard::verification::{check_connectivity, check_tool_support};
+
+        let name = match prompt_edit_value(
+            &t("shell.accounts.name_label"),
+            &t("shell.accounts.name_desc"),
+            "",
+            false,
+        ) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        let key = match prompt_edit_value(
+            &t("shell.accounts.key_label"),
+            &t("shell.accounts.key_desc"),
+            "",
+            true,
+        ) {
+            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        // api_base defaults to the primary endpoint; the user may override it.
+        let base = match prompt_edit_value(
+            &t("shell.accounts.base_label"),
+            &t("shell.accounts.base_desc"),
+            &self.config.api_base,
+            false,
+        ) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => self.config.api_base.clone(),
+        };
+
+        // "primary" is reserved for the synthetic top-level account (index 0);
+        // reject it case-insensitively so a user account can't collide and make
+        // use_account / delete-by-name ambiguous.
+        let name_taken = name.eq_ignore_ascii_case("primary")
+            || self.config.api_accounts.iter().any(|a| a.name == name);
+        if name_taken {
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.already_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("name".to_string(), name.clone());
+                    args
+                })
+            );
             return;
         }
 
-        if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
+        // Pick a model to verify against (same strategy as /setup):
+        //   - if the endpoint lists models, show them with a "custom" option;
+        //   - otherwise (or when the user picks custom), prompt for a name.
+        let chosen: Option<String> = match fetch_models_from_api(&base, &key, 10) {
+            Ok(models) if !models.is_empty() => {
+                let mut opts: Vec<(String, String, String)> = models
+                    .iter()
+                    .map(|m| (m.clone(), m.clone(), String::new()))
+                    .collect();
+                opts.push((
+                    "__custom__".to_string(),
+                    t("shell.accounts.custom_model"),
+                    String::new(),
+                ));
+                match pick_menu(&t("shell.accounts.select_model"), &opts) {
+                    Some(m) if m == "__custom__" => None,
+                    Some(m) => Some(m),
+                    None => {
+                        println!("{}", t("shell.common.cancelled"));
+                        return;
+                    }
+                }
+            }
+            Ok(_) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.accounts.no_models", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), self.config.model.clone());
+                        args
+                    })
+                );
+                None
+            }
+            Err(e) => {
+                println!(
+                    "{}",
+                    t_with_args("shell.accounts.fetch_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e);
+                        args
+                    })
+                );
+                None
+            }
+        };
+        // Fetch failed/empty or the user picked "custom" -> enter a model name.
+        let model = match chosen {
+            Some(m) => m,
+            None => match prompt_edit_value(
+                &t("shell.accounts.model_label"),
+                &t("shell.accounts.model_desc"),
+                &self.config.model,
+                false,
+            ) {
+                Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+                _ => {
+                    println!("{}", t("shell.common.cancelled"));
+                    return;
+                }
+            },
+        };
+
+        // Verify connectivity + tool support (same probes as /setup).
+        println!("{}", t("shell.accounts.verifying"));
+        let conn = check_connectivity(&base, &key, &model, 15);
+        if conn.ok {
+            println!(
+                "\x1b[32m{}\x1b[0m",
+                t_with_args("shell.accounts.connected", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert(
+                        "latency".to_string(),
+                        conn.latency_ms.unwrap_or(0).to_string(),
+                    );
+                    args.insert("model".to_string(), model.clone());
+                    args
+                })
+            );
+            let tools = check_tool_support(&base, &key, &model, 30);
+            let state = t(if tools.supports {
+                "shell.accounts.tool_yes"
+            } else {
+                "shell.accounts.tool_no"
+            });
+            println!("  {}", state);
+        } else {
+            let err = conn.error.unwrap_or_default();
+            eprintln!(
+                "{}",
+                t_with_args("shell.accounts.verify_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), err);
+                    args
+                })
+            );
+            let save = pick_menu(
+                &t("shell.accounts.verify_failed_title"),
+                &[
+                    (
+                        "save".to_string(),
+                        t("shell.accounts.save_anyway"),
+                        String::new(),
+                    ),
+                    (
+                        "cancel".to_string(),
+                        t("shell.accounts.cancel_add"),
+                        String::new(),
+                    ),
+                ],
+            );
+            match save.as_deref() {
+                Some("save") => {}
+                _ => {
+                    println!("{}", t("shell.common.cancelled"));
+                    return;
+                }
+            }
+        }
+
+        // Persist the endpoint the key was verified against. Storing it
+        // unconditionally (instead of None when it matches the current primary)
+        // means a later primary-endpoint switch can never redirect this
+        // credential to a different host.
+        self.config
+            .api_accounts
+            .push(aish_config::ApiAccountConfig {
+                name: name.clone(),
+                api_key: key,
+                api_base: Some(base),
+                model: Some(model.clone()),
+                weight: 1,
+                disabled: false,
+            });
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.accounts.added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("name".to_string(), name);
+                args.insert(
+                    "count".to_string(),
+                    self.config.api_accounts.len().to_string(),
+                );
+                args
+            })
+        );
+    }
+
+    /// Persist the current config to disk, then rebuild the live rotation state.
+    fn persist_config_and_rebuild_rotation(&mut self) {
+        let config_path = aish_config::ConfigLoader::default_config_path();
+        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.config_save_warning", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            );
+        }
+        self.rebuild_rotation();
+    }
+
+    /// Rebuild the LLM session rotation state from the current config.
+    fn rebuild_rotation(&mut self) {
+        let prev = self.ai_handler.current_rotation_account();
+        let accounts = rotation_accounts_from_config(&self.config);
+        let state = if !self.config.fallback_models.is_empty() || accounts.len() > 1 {
+            let mut policy = aish_llm::RetryPolicy::default();
+            policy.revert_on_cooldown = self.config.fallback_revert_on_cooldown;
+            let mut s = aish_llm::RotationState::new(
+                self.config.model.clone(),
+                accounts,
+                self.config.fallback_models.clone(),
+                policy,
+            );
+            if s.is_active() {
+                if let Some(ref name) = prev {
+                    s.use_account(name);
+                }
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.ai_handler.apply_rotation_state(state);
+    }
+
+    /// `/model` opens a model switcher spanning every configured endpoint:
+    /// it fetches each endpoint's model list, shows the URL next to each
+    /// model, and lets you search by model name or URL. Enter switches the
+    /// primary endpoint+model in place; recently-used entries float to the
+    /// top. `a` adds a multi-key account.
+    fn model_picker_panel(&mut self) {
+        use crate::wizard::model_fetch::fetch_models_from_api;
+        use aish_ui::{
+            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        };
+
+        // Collect endpoints + fetch model lists once on entry. Re-fetched only
+        // after an account is added; switching models reuses the cache.
+        let mut endpoints: Vec<(String, String)> =
+            vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+        for a in &self.config.api_accounts {
+            if a.disabled {
+                continue;
+            }
+            let base = a
+                .api_base
+                .clone()
+                .unwrap_or_else(|| self.config.api_base.clone());
+            // De-duplicate by (base, key): two accounts on the same host with
+            // different keys are distinct endpoints and must both be fetched.
+            if !endpoints.iter().any(|(b, k)| *b == base && *k == a.api_key) {
+                endpoints.push((base, a.api_key.clone()));
+            }
+        }
+        let mut fetched: Vec<(String, String)> = Vec::new();
+        for (base, key) in &endpoints {
+            if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                for m in models {
+                    fetched.push((m, base.clone()));
+                }
+            }
+        }
+
+        loop {
+            let cur_model = self.config.model.clone();
+            let cur_base = self.config.api_base.clone();
+            let current_val = format!("{}\u{0}{}", cur_model, cur_base);
+
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            seen.insert(current_val.clone());
+            let mut items: Vec<SearchSelectItem> =
+                vec![
+                    SearchSelectItem::new(current_val.clone(), cur_model.clone())
+                        .with_detail(&cur_base)
+                        .with_search_text(format!("{} {}", cur_model, cur_base)),
+                ];
+            for r in &self.config.recent_models {
+                if let Some((m, b)) = r.split_once('\u{0}') {
+                    if seen.insert(r.clone()) {
+                        items.push(
+                            SearchSelectItem::new(r.clone(), m.to_string())
+                                .with_detail(b)
+                                .with_search_text(format!("{} {}", m, b))
+                                .with_badge(t("shell.model.recent_badge")),
+                        );
+                    }
+                }
+            }
+            for (m, b) in &fetched {
+                let val = format!("{}\u{0}{}", m, b);
+                if seen.insert(val.clone()) {
+                    items.push(
+                        SearchSelectItem::new(val, m.clone())
+                            .with_detail(b)
+                            .with_search_text(format!("{} {}", m, b)),
+                    );
+                }
+            }
+            // Also surface each account's configured model, in case its endpoint
+            // didn't respond to the /models fetch — the user explicitly set it,
+            // so it must always be reachable in the list.
+            for a in &self.config.api_accounts {
+                if a.disabled {
+                    continue;
+                }
+                if let Some(m) = &a.model {
+                    let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
+                    let val = format!("{}\u{0}{}", m, base);
+                    if seen.insert(val.clone()) {
+                        items.push(
+                            SearchSelectItem::new(val, m.clone())
+                                .with_detail(&base)
+                                .with_search_text(format!("{} {}", m, base)),
+                        );
+                    }
+                }
+            }
+
+            let panel = SearchSelectPanel::new(
+                t("shell.model.picker_title"),
+                t("shell.model.picker_search"),
+                items,
+            )
+            .with_shimmer(Some(&current_val))
+            .with_subtitle(if fetched.is_empty() {
+                t("shell.model.fetch_failed_subtitle")
+            } else {
+                t("shell.model.picker_subtitle")
+            })
+            .with_footer(t("shell.model.picker_footer"))
+            .with_action('a', t("shell.model.action_add"))
+            .with_action('m', t("shell.model.action_manage"));
+
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
+            };
+
+            match outcome {
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(val))) => {
+                    if let Some((model, base)) = val.split_once('\u{0}') {
+                        if model != self.config.model || base != self.config.api_base {
+                            let key = endpoints
+                                .iter()
+                                .find(|(b, _)| b == base)
+                                .map(|(_, k)| k.clone())
+                                .unwrap_or_else(|| self.config.api_key.clone());
+                            self.switch_endpoint_model(base, &key, model);
+                        }
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
+                    self.accounts_add_interactive();
+                    // A new account may have added an endpoint: re-collect + re-fetch.
+                    endpoints = vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+                    for a in &self.config.api_accounts {
+                        if a.disabled {
+                            continue;
+                        }
+                        let base = a
+                            .api_base
+                            .clone()
+                            .unwrap_or_else(|| self.config.api_base.clone());
+                        if !endpoints.iter().any(|(b, _)| b == &base) {
+                            endpoints.push((base, a.api_key.clone()));
+                        }
+                    }
+                    fetched.clear();
+                    for (base, key) in &endpoints {
+                        if let Ok(models) = fetch_models_from_api(base, key, 4) {
+                            for m in models {
+                                fetched.push((m, base.clone()));
+                            }
+                        }
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('m', _))) => {
+                    self.manage_accounts_fallback();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Switch the active endpoint + model. Switching to a *different* endpoint
+    /// demotes the outgoing primary into `api_accounts` (so it stays listed
+    /// and switchable instead of being silently overwritten and lost) and, if
+    /// the target is itself an existing account, promotes it out of the pool to
+    /// avoid a duplicate. Switching only the model on the same endpoint leaves
+    /// the accounts untouched. The choice is recorded in recent history.
+    fn switch_endpoint_model(&mut self, base: &str, key: &str, model: &str) {
+        let prev_base = self.config.api_base.clone();
+        let prev_key = self.config.api_key.clone();
+        let prev_model = self.config.model.clone();
+        let endpoint_changed = base != prev_base || key != prev_key;
+
+        if endpoint_changed {
+            // Preserve the outgoing primary as a named account so a switch to a
+            // different endpoint never loses it. Key the existence check on both
+            // key AND base so a same-key/different-base switch doesn't treat the
+            // outgoing endpoint as already preserved.
+            let outgoing_kept = self.config.api_accounts.iter().any(|a| {
+                a.api_key == prev_key && a.api_base.as_deref() == Some(prev_base.as_str())
+            });
+            if !prev_key.is_empty() && !outgoing_kept {
+                let label = account_label(&prev_base, &prev_model);
+                self.config
+                    .api_accounts
+                    .push(aish_config::ApiAccountConfig {
+                        name: unique_account_name(&self.config.api_accounts, &label),
+                        api_key: prev_key,
+                        api_base: Some(prev_base.clone()),
+                        model: Some(prev_model.clone()),
+                        weight: 1,
+                        disabled: false,
+                    });
+            }
+            // Promote the target: drop the pool entry matching the target's key
+            // AND base so it isn't both primary and a pool entry. Matching on
+            // both prevents removing the just-preserved outgoing endpoint when
+            // the switch reuses the same key on a different base.
+            self.config.api_accounts.retain(|a| {
+                a.api_key.is_empty() || !(a.api_key == key && a.api_base.as_deref() == Some(base))
+            });
+        }
+
+        self.config.api_base = base.to_string();
+        self.config.api_key = key.to_string();
+        self.config.model = model.to_string();
+        self.ai_handler.update_model(model, Some(base), Some(key));
+        if let Some(ai) = &self.inline_ai {
+            ai.update_model(model);
+        }
+        self.refresh_config_dependent_tools();
+        let rec = format!("{}\u{0}{}", model, base);
+        self.config.recent_models.retain(|r| r != &rec);
+        self.config.recent_models.insert(0, rec);
+        self.config.recent_models.truncate(20);
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.switch_success", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model.to_string());
+                args
+            })
+        );
+    }
+
+    /// Manage accounts + fallback chain in a sub-panel: list each, 'd' deletes
+    /// the highlighted entry, 'f' adds a fallback model. Esc returns to /model.
+    fn manage_accounts_fallback(&mut self) {
+        use aish_ui::{
+            PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
+        };
+        loop {
+            let mut items: Vec<SearchSelectItem> = Vec::new();
+            for a in &self.config.api_accounts {
+                let mut item = SearchSelectItem::new(format!("acct:{}", a.name), a.name.clone())
+                    .with_detail(a.api_key.chars().take(6).collect::<String>());
+                if a.disabled {
+                    item = item.with_badge(t("shell.accounts.disabled"));
+                }
+                items.push(item);
+            }
+            for m in &self.config.fallback_models {
+                items.push(
+                    SearchSelectItem::new(format!("fb:{}", m), m.clone())
+                        .with_badge(t("shell.model.fallback_badge")),
+                );
+            }
+            if items.is_empty() {
+                println!("{}", t("shell.model.manage_empty"));
+                return;
+            }
+            let panel = SearchSelectPanel::new(
+                t("shell.model.manage_title"),
+                t("shell.model.manage_search"),
+                items,
+            )
+            .with_subtitle(t("shell.model.manage_subtitle"))
+            .with_footer(t("shell.model.manage_footer"))
+            .with_action('d', t("shell.model.action_del"))
+            .with_action('f', t("shell.model.action_fallback"));
+            let outcome = {
+                let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                PanelRuntime::new().run(panel)
+            };
+            match outcome {
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('d', val))) => {
+                    if let Some(name) = val.strip_prefix("acct:") {
+                        // An API key is irreversible to recover once the
+                        // account row is dropped, so confirm before deleting.
+                        let reason = format!("{}: {}", t("shell.model.action_del"), name);
+                        if !Self::confirm_action(&reason, &t("shell.model.action_del")) {
+                            continue;
+                        }
+                        self.config.api_accounts.retain(|a| a.name != name);
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.accounts.removed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("name".to_string(), name.to_string());
+                                args
+                            })
+                        );
+                    } else if let Some(m) = val.strip_prefix("fb:") {
+                        self.config.fallback_models.retain(|x| x != m);
+                        self.persist_config_and_rebuild_rotation();
+                        println!(
+                            "\x1b[32m{}\x1b[0m",
+                            t_with_args("shell.model.fallback_removed", &{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("model".to_string(), m.to_string());
+                                args
+                            })
+                        );
+                    }
+                }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('f', _))) => {
+                    self.add_fallback_interactive();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// Prompt for a fallback model name and add it to the chain.
+    fn add_fallback_interactive(&mut self) {
+        let model = match prompt_edit_value(
+            &t("shell.model.fallback_add_label"),
+            &t("shell.model.fallback_add_desc"),
+            "",
+            false,
+        ) {
+            Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+            _ => {
+                println!("{}", t("shell.common.cancelled"));
+                return;
+            }
+        };
+        if self.config.fallback_models.iter().any(|m| m == &model) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.model.fallback_exists", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model);
+                    args
+                })
+            );
+            return;
+        }
+        self.config.fallback_models.push(model.clone());
+        self.persist_config_and_rebuild_rotation();
+        println!(
+            "\x1b[32m{}\x1b[0m",
+            t_with_args("shell.model.fallback_added", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), model);
+                args
+            })
+        );
+    }
+
+    fn handle_model_command(&mut self, parts: &[&str]) {
+        // `/model <name>` switches directly (preserving the pre-panel
+        // shortcut); `/model` with no argument opens the picker panel.
+        if parts.len() == 1 {
+            self.model_picker_panel();
+            return;
+        }
+        if parts[1] == "--help" || parts[1] == "-h" {
             println!("{}", theme::accent(&t("shell.model_usage")));
             return;
         }
-
         let new_model = parts[1..].join(" ");
         if new_model == self.config.model {
             let mut args = std::collections::HashMap::new();
@@ -4984,26 +5699,19 @@ impl AishShell {
             println!("{}", t_with_args("shell.model.switch_same", &args));
             return;
         }
-
-        // Detect provider for the new model
-        let _provider = aish_llm::detect_provider(&new_model, &self.config.api_base);
-
         // Update LLM session
         self.ai_handler.update_model(
             &new_model,
             Some(&self.config.api_base),
             Some(&self.config.api_key),
         );
-
         // Update inline completion model so it follows `/model` switches
         if let Some(ai) = &self.inline_ai {
             ai.update_model(&new_model);
         }
-
         // Update config
         self.config.model = new_model.clone();
         self.refresh_config_dependent_tools();
-
         // Persist to config file
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
@@ -5016,7 +5724,6 @@ impl AishShell {
                 })
             );
         }
-
         let mut args = std::collections::HashMap::new();
         args.insert("model".to_string(), new_model);
         println!("{}", t_with_args("shell.model.switch_success", &args));

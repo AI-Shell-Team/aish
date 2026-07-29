@@ -91,17 +91,34 @@ pub enum SearchSelectOutcome {
     Rename(String),
     /// Exit the panel (triggered by Ctrl+Q). Callers decide exit semantics.
     Quit,
+    /// A configured single-key action was pressed (e.g. 'a' add, 'd' delete).
+    /// Action keys are intercepted before the search buffer.
+    Action(char, String),
 }
 
-/// Match when every whitespace-separated token in `query` is a substring of `search_text`.
-fn matches_tokenized_query(search_text: &str, query: &str) -> bool {
+/// Relevance score for `query` against `search_text`: every whitespace-separated
+/// token must be a substring (AND), but exact matches beat prefix matches beat
+/// substring matches, so the most relevant entry floats to the top. Returns
+/// `None` when any token is absent.
+fn match_score(search_text: &str, query: &str) -> Option<usize> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
-        return true;
+        return Some(0);
     }
-    query
-        .split_whitespace()
-        .all(|token| search_text.contains(token))
+    let st = search_text.to_lowercase();
+    let mut total = 0;
+    for token in query.split_whitespace() {
+        if st == token {
+            total += 100;
+        } else if st.starts_with(token) {
+            total += 50;
+        } else if st.contains(token) {
+            total += 10;
+        } else {
+            return None;
+        }
+    }
+    Some(total)
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +138,9 @@ pub struct SearchSelectPanel {
     shimmer_value: Option<String>,
     /// Animation clock in milliseconds, advanced one tick per redraw.
     anim_ms: u64,
+    /// Configured single-key actions (key, label). These keys are intercepted
+    /// before the search buffer so they trigger `Action(char)`, not typing.
+    actions: Vec<(char, String)>,
 }
 
 impl SearchSelectPanel {
@@ -141,8 +161,16 @@ impl SearchSelectPanel {
             selected: 0,
             max_visible_items: DEFAULT_VISIBLE_ITEMS,
             shimmer_value: None,
+            actions: Vec::new(),
             anim_ms: 0,
         }
+    }
+
+    /// Register a single-key action. The key is intercepted before the search
+    /// buffer and emitted as `SearchSelectOutcome::Action(char)`.
+    pub fn with_action(mut self, key: char, label: impl Into<String>) -> Self {
+        self.actions.push((key.to_ascii_lowercase(), label.into()));
+        self
     }
 
     pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
@@ -196,13 +224,19 @@ impl SearchSelectPanel {
         if query.is_empty() {
             (0..self.items.len()).map(SelectEntry::Item).collect()
         } else {
-            self.items
+            let mut scored: Vec<(usize, usize)> = self
+                .items
                 .iter()
                 .enumerate()
                 .filter_map(|(index, item)| {
-                    matches_tokenized_query(&item.search_text, query)
-                        .then_some(SelectEntry::Item(index))
+                    match_score(&item.search_text, query).map(|s| (index, s))
                 })
+                .collect();
+            // Highest score first; ties keep original order for stability.
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            scored
+                .into_iter()
+                .map(|(i, _)| SelectEntry::Item(i))
                 .collect()
         }
     }
@@ -431,6 +465,27 @@ impl PanelComponent for SearchSelectPanel {
                 if !key.modifiers.contains(KeyModifiers::CONTROL)
                     && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
+                let lower = ch.to_ascii_lowercase();
+                // Action keys only fire on an empty query; once the user is
+                // typing a search, letters must filter instead of triggering a
+                // panel action (otherwise typing "model" would hit the `m`
+                // manage action).
+                if self.query.is_empty() {
+                    if let Some((action_key, _)) = self.actions.iter().find(|(k, _)| *k == lower) {
+                        let Some(value) =
+                            self.filtered_entries()
+                                .get(self.selected)
+                                .and_then(|e| match e {
+                                    SelectEntry::Item(i) => {
+                                        self.items.get(*i).map(|it| it.value.clone())
+                                    }
+                                })
+                        else {
+                            return PanelEvent::Continue;
+                        };
+                        return PanelEvent::Submit(SearchSelectOutcome::Action(*action_key, value));
+                    }
+                }
                 self.query.push(ch);
                 self.selected = 0;
                 self.clamp_selection();
@@ -499,15 +554,30 @@ impl SearchSelectPanel {
     }
 
     fn render_footer(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        let Some(footer) = &self.footer else {
+        // Compose the footer from the registered single-key actions — each
+        // rendered as "key label" (e.g. "a add") — followed by any explicit
+        // footer hint. Actions are the non-obvious shortcuts, so they lead;
+        // the explicit footer carries the conventional Esc/Enter hint. This
+        // keeps the visible hints in sync with the registered actions instead
+        // of duplicating them in a static footer string.
+        let mut parts: Vec<String> = self
+            .actions
+            .iter()
+            .map(|(key, label)| format!("{key} {label}"))
+            .collect();
+        if let Some(footer) = &self.footer {
+            parts.push(footer.clone());
+        }
+        if parts.is_empty() {
             return;
-        };
+        }
         let area = padded_area(area);
         if area.width == 0 {
             return;
         }
+        let text = parts.join("  ");
         frame.render_widget(
-            Paragraph::new(truncate_display(footer, area.width as usize))
+            Paragraph::new(truncate_display(&text, area.width as usize))
                 .style(Style::default().fg(Color::DarkGray)),
             area,
         );

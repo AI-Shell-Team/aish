@@ -329,6 +329,23 @@ impl AiHandler {
         self.llm_session.update_model(model, api_base, api_key);
     }
 
+    pub fn apply_rotation_state(&mut self, state: Option<aish_llm::RotationState>) {
+        match state {
+            Some(s) => self.llm_session.set_rotation(s),
+            None => self.llm_session.clear_rotation(),
+        }
+    }
+
+    /// Manually switch the active rotation account by name (`/accounts use`).
+    pub fn use_rotation_account(&self, name: &str) -> bool {
+        self.llm_session.use_rotation_account(name)
+    }
+
+    /// Name of the account currently in use, for restoring across rebuilds.
+    pub fn current_rotation_account(&self) -> Option<String> {
+        self.llm_session.current_rotation_account()
+    }
+
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
         self.llm_session.register_tool(tool);
     }

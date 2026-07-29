@@ -202,6 +202,17 @@ impl SkillInstallTool {
         }
     }
 
+    /// Shared handle to the session-scoped "auto-vet" flag.
+    ///
+    /// Set when the user picks "remember this session" on the post-install
+    /// review dialog, so later installs skip the dialog and auto-run the
+    /// vetter. `/forget-approvals` swaps it back to `false` so the review
+    /// dialog reappears — the same `[a]` choice reaches this flag and the
+    /// command approval memory, so both must be clearable together.
+    pub fn auto_vet_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.auto_vet.clone()
+    }
+
     fn user_skills_dir() -> PathBuf {
         // Shared with the loader (SkillManager::scan_skill_roots) so installs
         // always land where skills are read from.
@@ -659,5 +670,30 @@ determining its risk is Low or Medium. Never trust a High/Extreme skill."
             },
             Err(e) => ToolResult::error(format!("Failed to trust '{}': {}", name, e)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The handle returned by `auto_vet_handle` must alias the tool's internal
+    /// flag. `/forget-approvals` relies on this to reset a "remember this
+    /// session" decision the skill-install tool recorded privately.
+    #[test]
+    fn auto_vet_handle_resets_the_remembered_decision() {
+        let tool = SkillInstallTool::new(vec![]);
+        let handle = tool.auto_vet_handle();
+        assert!(!handle.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Simulate the user picking "remember this session" on the review
+        // dialog (execute_async_in_session stores into this same flag).
+        handle.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(tool.auto_vet.load(std::sync::atomic::Ordering::SeqCst));
+
+        // `/forget-approvals` swaps the handle back to false; the tool must
+        // observe the reset so later installs re-prompt for review.
+        assert!(handle.swap(false, std::sync::atomic::Ordering::SeqCst));
+        assert!(!tool.auto_vet.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
