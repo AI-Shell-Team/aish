@@ -369,6 +369,7 @@ shell:
     forget-approvals: "Clear remembered command approvals (this session)"
     skill: "Search, install, verify skills; manage registries"
     export: "Export the current session to Markdown"
+    fork: "Branch the current session"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -564,6 +565,12 @@ shell:
     store_unavailable: "session store unavailable; cannot export"
     not_found: "current session not found in store"
     load_failed: "failed to load session: {error}"
+  fork:
+    forked: "forked session {short} (from {parent})"
+    switch_failed: "fork created but switch failed: {error}"
+    switch_manual: "use `/resume {session_id}` to switch manually"
+    failed: "fork failed: {error}"
+    store_unavailable: "session store unavailable; cannot fork"
 
   live_sessions:
     daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"

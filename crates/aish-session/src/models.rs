@@ -11,6 +11,12 @@ pub struct SessionRecord {
     pub api_base: Option<String>,
     pub run_user: Option<String>,
     pub state: serde_json::Value,
+    /// UUID of the session this one was forked from (`None` for a root session).
+    #[serde(default)]
+    pub parent_session_uuid: Option<String>,
+    /// History row id within the parent at which this branch diverges.
+    #[serde(default)]
+    pub branch_point_message_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

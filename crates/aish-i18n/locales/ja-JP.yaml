@@ -184,6 +184,7 @@ shell:
     forget-approvals: "記憶されたコマンド承認を削除（このセッション）"
     skill: "スキルの検索・インストール・検証;レジストリ管理"
     export: "現在のセッションを Markdown にエクスポート"
+    fork: "現在のセッションを分岐"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -665,6 +666,12 @@ shell:
     store_unavailable: "セッションストアが利用できません；エクスポートできません"
     not_found: "ストアに現在のセッションが見つかりません"
     load_failed: "セッションの読み込みに失敗しました: {error}"
+  fork:
+    forked: "セッションをフォークしました {short}（親 {parent}）"
+    switch_failed: "フォークを作成しましたが切り替えに失敗しました: {error}"
+    switch_manual: "`/resume {session_id}` で手動切り替えしてください"
+    failed: "フォーク失敗: {error}"
+    store_unavailable: "セッションストアが利用できません；フォークできません"
 
   live_sessions:
     daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："

@@ -184,6 +184,7 @@ shell:
     forget-approvals: "Borrar aprobaciones de comandos recordadas (esta sesión)"
     skill: "Buscar, instalar, verificar skills; gestionar registros"
     export: "Exportar la sesión actual a Markdown"
+    fork: "Bifurcar la sesión actual"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -665,6 +666,12 @@ shell:
     store_unavailable: "almacén de sesiones no disponible; no se puede exportar"
     not_found: "sesión actual no encontrada en el almacén"
     load_failed: "fallo al cargar la sesión: {error}"
+  fork:
+    forked: "sesión bifurcada {short} (de {parent})"
+    switch_failed: "bifurcación creada pero el cambio falló: {error}"
+    switch_manual: "usa `/resume {session_id}` para cambiar manualmente"
+    failed: "bifurcación fallida: {error}"
+    store_unavailable: "almacén de sesiones no disponible; no se puede bifurcar"
 
   live_sessions:
     daemon_disabled: "Demonio PTY deshabilitado. Habilitar en config.yaml:"

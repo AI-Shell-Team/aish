@@ -184,6 +184,7 @@ shell:
     forget-approvals: "Gemerkte Befehlsgenehmigungen löschen (diese Sitzung)"
     skill: "Skills suchen, installieren, prüfen; Registries verwalten"
     export: "Aktuelle Sitzung als Markdown exportieren"
+    fork: "Aktuelle Sitzung abzweigen"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -665,6 +666,12 @@ shell:
     store_unavailable: "Sitzungsspeicher nicht verfügbar; Export nicht möglich"
     not_found: "aktuelle Sitzung im Speicher nicht gefunden"
     load_failed: "Laden der Sitzung fehlgeschlagen: {error}"
+  fork:
+    forked: "Sitzung verzweigt {short} (von {parent})"
+    switch_failed: "Verzweigung erstellt, aber Wechsel fehlgeschlagen: {error}"
+    switch_manual: "verwende `/resume {session_id}` zum manuellen Wechseln"
+    failed: "Verzweigung fehlgeschlagen: {error}"
+    store_unavailable: "Sitzungsspeicher nicht verfügbar; Verzweigung nicht möglich"
 
   live_sessions:
     daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"
