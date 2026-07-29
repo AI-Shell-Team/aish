@@ -161,30 +161,8 @@ impl SkillManager {
     /// The file must start with a YAML frontmatter block delimited by `---`.
     fn parse_skill_file(&self, source: SkillSource, skill_path: &Path) -> aish_core::Result<Skill> {
         let content = std::fs::read_to_string(skill_path)?;
-        let re = regex::Regex::new(FRONTMATTER_REGEX).map_err(|e| {
-            aish_core::AishError::Skill(format!("Invalid frontmatter regex: {}", e))
-        })?;
-
-        let caps = re.captures(&content).ok_or_else(|| {
-            aish_core::AishError::Skill(
-                "Invalid skill file format: must start with YAML frontmatter".into(),
-            )
-        })?;
-
-        let frontmatter_yaml = caps.get(1).unwrap().as_str();
-        let skill_content = &content[caps.get(0).unwrap().end()..];
-        let skill_content = skill_content.trim();
-
-        let metadata: SkillMetadata = serde_yaml::from_str(frontmatter_yaml)
-            .map_err(|e| aish_core::AishError::Skill(format!("Invalid YAML frontmatter: {}", e)))?;
-        if metadata.context == crate::SkillExecutionContext::SubAgent
-            && metadata.agent.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(aish_core::AishError::Skill(format!(
-                "Skill '{}' uses context=subagent but does not declare an agent",
-                metadata.name
-            )));
-        }
+        let (metadata, body) = parse_skill_metadata(&content)?;
+        let skill_content = body.trim();
 
         let base_dir = skill_path
             .parent()
@@ -319,6 +297,40 @@ impl SkillManager {
         // Default to User if we cannot determine the source.
         SkillSource::User
     }
+}
+
+/// Parse a SKILL.md document: extract the YAML frontmatter, deserialize it
+/// into [`SkillMetadata`], and enforce the loader's invariants. Returns the
+/// parsed metadata and the document body (the content after the frontmatter
+/// block, not yet trimmed).
+///
+/// This is the single source of truth for "would the loader accept this file":
+/// [`SkillManager::parse_skill_file`], the registry installer, and the verifier
+/// all route through it, so install/verify-time validation can never drift from
+/// load-time validation. A skill that fails this (e.g. one that declares
+/// `context: subagent`/`fork` without an `agent`) is rejected here rather than
+/// landing on disk only to be rejected on every hot-reload.
+pub fn parse_skill_metadata(content: &str) -> aish_core::Result<(SkillMetadata, &str)> {
+    let re = regex::Regex::new(FRONTMATTER_REGEX)
+        .map_err(|e| aish_core::AishError::Skill(format!("Invalid frontmatter regex: {}", e)))?;
+    let caps = re.captures(content).ok_or_else(|| {
+        aish_core::AishError::Skill(
+            "Invalid skill file format: must start with YAML frontmatter".into(),
+        )
+    })?;
+    let frontmatter_yaml = caps.get(1).unwrap().as_str();
+    let body = &content[caps.get(0).unwrap().end()..];
+    let metadata: SkillMetadata = serde_yaml::from_str(frontmatter_yaml)
+        .map_err(|e| aish_core::AishError::Skill(format!("Invalid YAML frontmatter: {}", e)))?;
+    if metadata.context == crate::SkillExecutionContext::SubAgent
+        && metadata.agent.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(aish_core::AishError::Skill(format!(
+            "Skill '{}' uses context=subagent but does not declare an agent",
+            metadata.name
+        )));
+    }
+    Ok((metadata, body))
 }
 
 /// Walk a directory recursively, following symlinks while detecting cycles.
@@ -628,5 +640,31 @@ mod tests {
             skill.quarantined,
             "nested SKILL.md under an untrusted skill must be quarantined"
         );
+    }
+    #[test]
+    fn parse_skill_metadata_rejects_fork_without_agent() {
+        // The docker-best-practices bug: `context: fork` aliases to SubAgent,
+        // which requires a named agent. The shared parse must reject it so the
+        // installer and verifier reject it too.
+        let content = "---\nname: docker\ndescription: d\ncontext: fork\n---\nbody\n";
+        let err = parse_skill_metadata(content).expect_err("fork without agent must fail");
+        assert!(err.to_string().contains("agent"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_skill_metadata_accepts_subagent_with_agent_and_returns_body() {
+        let content = "---\nname: diag\ndescription: d\ncontext: subagent\nagent: troubleshoot\n---\n## Body\n";
+        let (metadata, body) =
+            parse_skill_metadata(content).expect("valid subagent skill must parse");
+        assert_eq!(metadata.name, "diag");
+        assert_eq!(metadata.agent.as_deref(), Some("troubleshoot"));
+        assert!(body.trim_start().starts_with("## Body"));
+    }
+
+    #[test]
+    fn parse_skill_metadata_rejects_missing_frontmatter() {
+        let err = parse_skill_metadata("no frontmatter here at all")
+            .expect_err("must require frontmatter");
+        assert!(err.to_string().contains("frontmatter"), "got: {err}");
     }
 }

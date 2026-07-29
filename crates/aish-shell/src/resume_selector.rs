@@ -76,6 +76,8 @@ pub fn select_resume_session(items: &[ResumeSessionItem]) -> io::Result<Option<S
         PanelOutcome::Submitted(SearchSelectOutcome::Rename(_)) => Ok(None),
         // Quit (Ctrl+Q) is not meaningful for the resume picker; cancel.
         PanelOutcome::Submitted(SearchSelectOutcome::Quit) => Ok(None),
+        // Actions are not used by the resume picker; treat as a no-op.
+        PanelOutcome::Submitted(SearchSelectOutcome::Action(_, _)) => Ok(None),
         PanelOutcome::Cancelled => Ok(None),
     }
 }
