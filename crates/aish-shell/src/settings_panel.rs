@@ -624,7 +624,9 @@ pub fn security_current_raw(policy: &SecurityPolicy, key: SettingKey) -> String 
         SettingKey::InputGuardEnabled => bool_str(policy.input_guard.enabled),
         SettingKey::EnableSandbox => bool_str(policy.enable_sandbox),
         SettingKey::DefaultRiskLevel => risk_level_raw(policy.default_risk_level).to_string(),
-        SettingKey::SandboxOffAction => sandbox_off_action_raw(policy.sandbox_off_action).to_string(),
+        SettingKey::SandboxOffAction => {
+            sandbox_off_action_raw(policy.sandbox_off_action).to_string()
+        }
         SettingKey::SandboxTimeout => format!("{}", policy.sandbox_timeout_seconds),
         _ => unreachable!("non-security key rejected above"),
     };

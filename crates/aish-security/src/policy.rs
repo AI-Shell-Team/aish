@@ -727,11 +727,7 @@ mod tests {
         let xdg = dir.path().join("xdg");
         fs::create_dir_all(xdg.join("aish")).unwrap();
         let user_path = xdg.join("aish").join("security_policy.yaml");
-        fs::write(
-            &user_path,
-            "global:\n  enable_sandbox: true\nrules: []\n",
-        )
-        .unwrap();
+        fs::write(&user_path, "global:\n  enable_sandbox: true\nrules: []\n").unwrap();
 
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
         let resolved = resolve_security_policy_path(None);
@@ -775,8 +771,13 @@ mod tests {
         assert!(seeded.contains("id: M-001"));
         assert!(seeded.contains("id: L-001"));
         // Shipped seed is English-only (no CJK comments).
-        let has_cjk = seeded.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-        assert_eq!(has_cjk, false, "seeded policy must not contain CJK comments");
+        let has_cjk = seeded
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        assert_eq!(
+            has_cjk, false,
+            "seeded policy must not contain CJK comments"
+        );
     }
 
     #[test]
@@ -1128,12 +1129,8 @@ rules: []
         )
         .unwrap();
 
-        super::save_policy_ui_fields(
-            &policy_path,
-            &[("enable_sandbox", "true")],
-            Some(false),
-        )
-        .unwrap();
+        super::save_policy_ui_fields(&policy_path, &[("enable_sandbox", "true")], Some(false))
+            .unwrap();
 
         let policy = load_policy(Some(&policy_path));
         assert!(policy.enable_sandbox);

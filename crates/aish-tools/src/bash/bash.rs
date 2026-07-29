@@ -144,12 +144,7 @@ fn security_preflight_with_socket(
     config_path: Option<&Path>,
     sandbox_socket_path: Option<&Path>,
 ) -> PreflightResult {
-    security_preflight_with_policy(
-        command,
-        cwd,
-        load_policy(config_path),
-        sandbox_socket_path,
-    )
+    security_preflight_with_policy(command, cwd, load_policy(config_path), sandbox_socket_path)
 }
 
 fn security_preflight_with_policy(

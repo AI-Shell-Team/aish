@@ -5043,7 +5043,8 @@ impl AishShell {
             // Rebuild items every iteration so values refresh after each edit.
             // `last_key` restores the cursor; `last_category` keeps the user on
             // the same chip instead of bouncing back to "All" after each edit.
-            let (cats, items) = Self::build_settings_items(&self.config, self.security_manager.policy());
+            let (cats, items) =
+                Self::build_settings_items(&self.config, self.security_manager.policy());
             let panel = SettingsPanel::new(t("shell.setting.title").to_string(), cats, items)
                 .with_search_placeholder(t("shell.setting.search_placeholder"))
                 .with_footer_idle(t("shell.setting.footer_idle"))
@@ -5107,7 +5108,11 @@ impl AishShell {
                     let def = settings_panel::find(k);
                     let label = setting_label(def);
                     let desc = setting_desc(def);
-                    let cur_raw = crate::settings_panel::raw_value(&self.config, self.security_manager.policy(), k);
+                    let cur_raw = crate::settings_panel::raw_value(
+                        &self.config,
+                        self.security_manager.policy(),
+                        k,
+                    );
                     let secret = matches!(def.kind, SettingKind::Secret);
                     let submitted = prompt_edit_value(&label, &desc, &cur_raw, secret);
                     let skip = secret && submitted.as_deref().is_some_and(|v| v.is_empty());
@@ -5568,7 +5573,8 @@ impl AishShell {
             SettingKind::Choice(o) => o,
             _ => return None,
         };
-        let cur = crate::settings_panel::raw_value(&self.config, self.security_manager.policy(), key);
+        let cur =
+            crate::settings_panel::raw_value(&self.config, self.security_manager.policy(), key);
         let label = setting_label(def);
         let desc = setting_desc(def);
         let options: Vec<DialogOption> = opts
@@ -5739,11 +5745,9 @@ impl AishShell {
             ("sandbox_off_action", policy.sandbox_off_action.as_str()),
             ("sandbox_timeout_seconds", &timeout_str),
         ];
-        if let Err(e) = aish_security::save_policy_ui_fields(
-            &path,
-            updates,
-            Some(policy.input_guard.enabled),
-        ) {
+        if let Err(e) =
+            aish_security::save_policy_ui_fields(&path, updates, Some(policy.input_guard.enabled))
+        {
             eprintln!(
                 "{}",
                 theme::warning(&format!("could not write {}: {e}", path.display()))
