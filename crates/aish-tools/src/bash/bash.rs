@@ -688,6 +688,35 @@ mod tests {
 
     use super::*;
 
+    fn xdg_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Restore `XDG_CONFIG_HOME` on drop (including panic/assert unwind).
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&std::path::Path>) -> Self {
+            let prev = std::env::var_os(key);
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn bash_preflight_uses_live_policy_slot_over_disk() {
         // Isolate load_policy(None) to an ALLOW-only user policy, then prove
@@ -701,8 +730,10 @@ mod tests {
             "global:\n  enable_sandbox: false\n  sandbox_off_action: ALLOW\n  default_risk_level: LOW\nrules: []\n",
         )
         .unwrap();
-        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.as_path()));
 
         let mut tool = BashTool::new();
         let args = serde_json::json!({"command": "rm -rf /etc"});
@@ -727,11 +758,6 @@ mod tests {
                 assert!(message.contains("live policy blocks etc"), "{message}");
             }
             other => panic!("expected Block from live policy slot, got {other:?}"),
-        }
-
-        match old_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
     }
 

@@ -110,8 +110,9 @@ fn user_security_policy_path() -> PathBuf {
 }
 
 /// Seed `~/.config/aish/security_policy.yaml` if missing from the compile-time
-/// default template. Uses `create_new` so concurrent first-launch races do not
-/// clobber an existing user file.
+/// default template. Writes the full template to a temp file first, then
+/// installs with `create_new` so concurrent races cannot clobber a user file
+/// and a failed seed cannot leave an empty destination.
 fn ensure_user_policy_template(path: &Path) {
     if path.exists() {
         return;
@@ -120,11 +121,32 @@ fn ensure_user_policy_template(path: &Path) {
         let _ = fs::create_dir_all(parent);
     }
 
-    let _ = fs::OpenOptions::new()
+    // Write the full template first. Only then create the destination so a
+    // failed seed cannot leave an empty file that suppresses later retries.
+    let tmp_path = path.with_extension("yaml.seed.tmp");
+    if fs::write(&tmp_path, DEFAULT_POLICY_TEMPLATE).is_err() {
+        let _ = fs::remove_file(&tmp_path);
+        return;
+    }
+
+    use std::io::Write;
+    match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
-        .and_then(|_| fs::write(path, DEFAULT_POLICY_TEMPLATE));
+    {
+        Ok(mut file) => {
+            if file.write_all(DEFAULT_POLICY_TEMPLATE.as_bytes()).is_err() {
+                drop(file);
+                let _ = fs::remove_file(path);
+            }
+        }
+        Err(_) => {
+            // Lost the create_new race, or open failed — leave an existing
+            // user file alone.
+        }
+    }
+    let _ = fs::remove_file(&tmp_path);
 }
 
 /// Resolve the policy file used for **reads**.
@@ -567,7 +589,11 @@ fn update_section_field(text: &str, section: &str, field: &str, value: &str) -> 
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut in_section = false;
     let mut section_line_idx: Option<usize> = None;
-    let mut last_indent: String = String::from("  ");
+    // Indentation of direct children under `section:` (min indent seen).
+    // Nested list/map lines must not overwrite this, or a missing-field
+    // insert lands inside the nested block.
+    let mut child_indent: String = String::from("  ");
+    let mut saw_child_indent = false;
     let mut last_section_child_idx: Option<usize> = None;
     let mut done = false;
 
@@ -590,10 +616,13 @@ fn update_section_field(text: &str, section: &str, field: &str, value: &str) -> 
             let stripped = raw.trim_start();
             let indent_len = raw.len() - stripped.len();
             if indent_len > 0 && !stripped.starts_with('#') && !stripped.is_empty() {
-                // Track the indentation used inside the section so an insertion
-                // (if needed) matches the surrounding style.
-                last_indent = raw[..indent_len].to_string();
+                // Always advance the insert cursor past every descendant line,
+                // but only learn direct-child indent from the shallowest level.
                 last_section_child_idx = Some(i);
+                if !saw_child_indent || indent_len < child_indent.len() {
+                    child_indent = raw[..indent_len].to_string();
+                    saw_child_indent = true;
+                }
             }
             // Match `  field:` exactly (the ':' terminator prevents
             // `enable_sandbox_extra:` from matching `enable_sandbox`).
@@ -625,7 +654,7 @@ fn update_section_field(text: &str, section: &str, field: &str, value: &str) -> 
             let insert_at = last_section_child_idx.map(|c| c + 1).unwrap_or(sidx + 1);
             // Find where `out` currently has the corresponding line — since
             // we pushed every line, indices match `lines`.
-            out.insert(insert_at, format!("{}{}: {}", last_indent, field, value));
+            out.insert(insert_at, format!("{}{}: {}", child_indent, field, value));
         } else {
             // No section at all — append a minimal one.
             if !out.is_empty() && out.last().map(|l| !l.is_empty()).unwrap_or(false) {
@@ -668,6 +697,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{load_policy, resolve_security_policy_path, SecurityPolicy};
+
+    /// Serialize tests that mutate process-global env vars (cargo runs them
+    /// in parallel threads of one process).
+    fn xdg_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
 
     /// RAII env var restore for path-resolution tests.
     struct EnvGuard {
@@ -729,6 +765,9 @@ mod tests {
         let user_path = xdg.join("aish").join("security_policy.yaml");
         fs::write(&user_path, "global:\n  enable_sandbox: true\nrules: []\n").unwrap();
 
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
         let resolved = resolve_security_policy_path(None);
         assert_eq!(resolved.as_deref(), Some(user_path.as_path()));
@@ -741,6 +780,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let xdg = dir.path().join("xdg");
         fs::create_dir_all(&xdg).unwrap();
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
 
         let resolved = resolve_security_policy_path(None).expect("user policy");
@@ -754,6 +796,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let xdg = dir.path().join("xdg");
         fs::create_dir_all(&xdg).unwrap();
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
 
         let path = super::writable_security_policy_path().expect("user path");
@@ -1010,6 +1055,29 @@ rules: []
         assert!(out.contains("default_risk_level: LOW"));
         // Inserted with the same indent as the existing child.
         assert!(out.contains("  enable_sandbox: true"));
+    }
+
+    #[test]
+    fn update_section_field_inserts_at_direct_child_indent_with_nested() {
+        // Nested custom rules must not steal the indent used for a missing
+        // top-level field under the same section.
+        let yaml = concat!(
+            "input_guard:\n",
+            "  custom_block_rules:\n",
+            "    - name: no_rm_data\n",
+            "      pattern: \"rm\"\n",
+            "      message: nope\n",
+        );
+        let out = super::update_section_field(yaml, "input_guard", "enabled", "false");
+        let enabled_line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("enabled:"))
+            .expect("enabled field missing");
+        assert_eq!(
+            enabled_line, "  enabled: false",
+            "enabled must be a direct child of input_guard; got:\n{out}"
+        );
+        assert!(out.contains("custom_block_rules:"));
     }
 
     #[test]
