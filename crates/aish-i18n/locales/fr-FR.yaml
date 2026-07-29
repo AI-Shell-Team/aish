@@ -185,6 +185,7 @@ shell:
     skill: "Rechercher, installer, vérifier des skills; gérer les registres"
     export: "Exporter la session actuelle en Markdown"
     fork: "Créer une branche de la session actuelle"
+    sessions: "Afficher l'arborescence des sessions"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -672,6 +673,11 @@ shell:
     switch_manual: "utilisez `/resume {session_id}` pour changer manuellement"
     failed: "échec de la bifurcation : {error}"
     store_unavailable: "stockage de session indisponible ; bifurcation impossible"
+
+  sessions:
+    none: "(aucune session enregistrée)"
+    switch_failed: "échec du changement de session : {error}"
+    list_failed: "échec de la liste des sessions : {error}"
 
   live_sessions:
     daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"

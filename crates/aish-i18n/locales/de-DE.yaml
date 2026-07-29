@@ -185,6 +185,7 @@ shell:
     skill: "Skills suchen, installieren, prüfen; Registries verwalten"
     export: "Aktuelle Sitzung als Markdown exportieren"
     fork: "Aktuelle Sitzung abzweigen"
+    sessions: "Sitzungsbaum anzeigen"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -672,6 +673,11 @@ shell:
     switch_manual: "verwende `/resume {session_id}` zum manuellen Wechseln"
     failed: "Verzweigung fehlgeschlagen: {error}"
     store_unavailable: "Sitzungsspeicher nicht verfügbar; Verzweigung nicht möglich"
+
+  sessions:
+    none: "(keine gespeicherten Sitzungen)"
+    switch_failed: "Sitzungswechsel fehlgeschlagen: {error}"
+    list_failed: "Sitzungen auflisten fehlgeschlagen: {error}"
 
   live_sessions:
     daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"

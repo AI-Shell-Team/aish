@@ -185,6 +185,7 @@ shell:
     skill: "Buscar, instalar, verificar skills; gestionar registros"
     export: "Exportar la sesión actual a Markdown"
     fork: "Bifurcar la sesión actual"
+    sessions: "Mostrar el árbol de sesiones"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -672,6 +673,11 @@ shell:
     switch_manual: "usa `/resume {session_id}` para cambiar manualmente"
     failed: "bifurcación fallida: {error}"
     store_unavailable: "almacén de sesiones no disponible; no se puede bifurcar"
+
+  sessions:
+    none: "(sin sesiones guardadas)"
+    switch_failed: "fallo al cambiar de sesión: {error}"
+    list_failed: "fallo al listar sesiones: {error}"
 
   live_sessions:
     daemon_disabled: "Demonio PTY deshabilitado. Habilitar en config.yaml:"

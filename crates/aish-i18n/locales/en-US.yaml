@@ -370,6 +370,7 @@ shell:
     skill: "Search, install, verify skills; manage registries"
     export: "Export the current session to Markdown"
     fork: "Branch the current session"
+    sessions: "Show the session tree"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -571,6 +572,11 @@ shell:
     switch_manual: "use `/resume {session_id}` to switch manually"
     failed: "fork failed: {error}"
     store_unavailable: "session store unavailable; cannot fork"
+
+  sessions:
+    none: "(no saved sessions)"
+    switch_failed: "failed to switch session: {error}"
+    list_failed: "failed to list sessions: {error}"
 
   live_sessions:
     daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"
