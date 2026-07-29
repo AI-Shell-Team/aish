@@ -121,29 +121,32 @@ fn ensure_user_policy_template(path: &Path) {
         let _ = fs::create_dir_all(parent);
     }
 
-    // Write the full template first. Only then create the destination so a
-    // failed seed cannot leave an empty file that suppresses later retries.
+    // Write the complete template to a temp file first, then publish it with a
+    // no-clobber install so concurrent readers never observe a partial dest and
+    // an existing user file is never overwritten.
     let tmp_path = path.with_extension("yaml.seed.tmp");
     if fs::write(&tmp_path, DEFAULT_POLICY_TEMPLATE).is_err() {
         let _ = fs::remove_file(&tmp_path);
         return;
     }
 
-    use std::io::Write;
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
-        Ok(mut file) => {
-            if file.write_all(DEFAULT_POLICY_TEMPLATE.as_bytes()).is_err() {
-                drop(file);
-                let _ = fs::remove_file(path);
-            }
-        }
+    match fs::hard_link(&tmp_path, path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => {
-            // Lost the create_new race, or open failed — leave an existing
-            // user file alone.
+            // Fallback when hard links are unavailable: create_new + full write,
+            // removing the destination if that write fails.
+            use std::io::Write;
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                if file.write_all(DEFAULT_POLICY_TEMPLATE.as_bytes()).is_err() {
+                    drop(file);
+                    let _ = fs::remove_file(path);
+                }
+            }
         }
     }
     let _ = fs::remove_file(&tmp_path);
@@ -191,10 +194,6 @@ pub fn writable_security_policy_path() -> Option<PathBuf> {
 
 fn mapping_get<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
     mapping.get(Value::String(key.to_string()))
-}
-
-fn as_mapping(value: Option<&Value>) -> Option<&Mapping> {
-    value.and_then(Value::as_mapping)
 }
 
 fn ensure_list(value: Option<&Value>) -> Vec<&Value> {
@@ -421,6 +420,8 @@ pub enum PolicyLoadError {
     Read { path: PathBuf, message: String },
     /// Policy file is not valid YAML.
     Parse { path: PathBuf, message: String },
+    /// YAML parsed, but required sections have the wrong shape.
+    Invalid { path: PathBuf, message: String },
 }
 
 impl std::fmt::Display for PolicyLoadError {
@@ -442,6 +443,13 @@ impl std::fmt::Display for PolicyLoadError {
                 write!(
                     f,
                     "invalid security policy YAML {}: {message}",
+                    path.display()
+                )
+            }
+            Self::Invalid { path, message } => {
+                write!(
+                    f,
+                    "invalid security policy structure {}: {message}",
                     path.display()
                 )
             }
@@ -473,10 +481,13 @@ pub fn try_load_policy(config_path: Option<&Path>) -> Result<SecurityPolicy, Pol
         message: e.to_string(),
     })?;
     let data = serde_yaml::from_str::<Value>(&text).map_err(|e| PolicyLoadError::Parse {
-        path: effective_path,
+        path: effective_path.clone(),
         message: e.to_string(),
     })?;
-    Ok(policy_from_value(data))
+    policy_from_value(data).map_err(|message| PolicyLoadError::Invalid {
+        path: effective_path,
+        message,
+    })
 }
 
 /// Load security policy for runtime use. On missing/unreadable/invalid files,
@@ -485,10 +496,25 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
     try_load_policy(config_path).unwrap_or_else(|_| SecurityPolicy::default())
 }
 
-fn policy_from_value(data: Value) -> SecurityPolicy {
-    let root = data.as_mapping();
-    let global_cfg = root.and_then(|m| as_mapping(mapping_get(m, "global")));
-    let audit_cfg = root.and_then(|m| as_mapping(mapping_get(m, "audit")));
+fn optional_section_mapping<'a>(
+    root: &'a Mapping,
+    key: &str,
+) -> Result<Option<&'a Mapping>, String> {
+    match mapping_get(root, key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_mapping()
+            .map(Some)
+            .ok_or_else(|| format!("`{key}` must be a mapping")),
+    }
+}
+
+fn policy_from_value(data: Value) -> Result<SecurityPolicy, String> {
+    let root = data
+        .as_mapping()
+        .ok_or_else(|| "root document must be a mapping".to_string())?;
+    let global_cfg = optional_section_mapping(root, "global")?;
+    let audit_cfg = optional_section_mapping(root, "audit")?;
 
     let default_risk_level = parse_risk(
         global_cfg.and_then(|m| mapping_get(m, "default_risk_level")),
@@ -532,11 +558,15 @@ fn policy_from_value(data: Value) -> SecurityPolicy {
         false,
     );
 
-    let rule_mappings: Vec<&Mapping> = root
-        .and_then(|m| mapping_get(m, "rules"))
-        .and_then(Value::as_sequence)
-        .map(|seq| seq.iter().filter_map(Value::as_mapping).collect())
-        .unwrap_or_default();
+    let rule_mappings: Vec<&Mapping> = match mapping_get(root, "rules") {
+        None => Vec::new(),
+        Some(value) => {
+            let seq = value
+                .as_sequence()
+                .ok_or_else(|| "`rules` must be a sequence".to_string())?;
+            seq.iter().filter_map(Value::as_mapping).collect()
+        }
+    };
 
     let v2_items: Vec<&Mapping> = rule_mappings
         .into_iter()
@@ -563,36 +593,41 @@ fn policy_from_value(data: Value) -> SecurityPolicy {
     let mut rules = default_rules();
     rules.extend(parse_v2_rules(&valid_items));
 
-    let secret_patterns: Vec<crate::secret::CustomPattern> = root
-        .and_then(|m| mapping_get(m, "secret_patterns"))
-        .and_then(Value::as_sequence)
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| {
-                    let yaml_str = serde_yaml::to_string(v).unwrap_or_default();
-                    match serde_yaml::from_value(v.clone()) {
-                        Ok(pattern) => Some(pattern),
-                        Err(e) => {
-                            validation_issues.push(ValidationIssue {
-                                rule_id: None,
-                                field: "secret_patterns".to_string(),
-                                value: Some(yaml_str.trim().to_string()),
-                                message: Some(format!("Invalid custom pattern: {e}")),
-                            });
-                            None
+    let secret_patterns: Vec<crate::secret::CustomPattern> =
+        match mapping_get(root, "secret_patterns") {
+            None => Vec::new(),
+            Some(value) => {
+                let seq = value
+                    .as_sequence()
+                    .ok_or_else(|| "`secret_patterns` must be a sequence".to_string())?;
+                seq.iter()
+                    .filter_map(|v| {
+                        let yaml_str = serde_yaml::to_string(v).unwrap_or_default();
+                        match serde_yaml::from_value(v.clone()) {
+                            Ok(pattern) => Some(pattern),
+                            Err(e) => {
+                                validation_issues.push(ValidationIssue {
+                                    rule_id: None,
+                                    field: "secret_patterns".to_string(),
+                                    value: Some(yaml_str.trim().to_string()),
+                                    message: Some(format!("Invalid custom pattern: {e}")),
+                                });
+                                None
+                            }
                         }
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                    })
+                    .collect()
+            }
+        };
 
-    let input_guard: crate::input_guard::config::InputGuardConfig = root
-        .and_then(|m| mapping_get(m, "input_guard"))
-        .and_then(|v| serde_yaml::from_value(v.clone()).ok())
-        .unwrap_or_default();
+    let input_guard: crate::input_guard::config::InputGuardConfig =
+        match mapping_get(root, "input_guard") {
+            None => crate::input_guard::config::InputGuardConfig::default(),
+            Some(value) => serde_yaml::from_value(value.clone())
+                .map_err(|e| format!("invalid `input_guard`: {e}"))?,
+        };
 
-    SecurityPolicy {
+    Ok(SecurityPolicy {
         enable_sandbox,
         sandbox_off_action,
         sandbox_timeout_seconds,
@@ -605,7 +640,7 @@ fn policy_from_value(data: Value) -> SecurityPolicy {
         validation_issues,
         secret_patterns,
         input_guard,
-    }
+    })
 }
 
 /// Persist `/setting` Security fields in one read/modify/write: `global:`
@@ -899,6 +934,38 @@ mod tests {
         }
         // Runtime loader still falls back instead of panicking.
         let _ = load_policy(Some(&policy_path));
+    }
+
+    #[test]
+    fn try_load_policy_rejects_invalid_global_shape() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        // Valid YAML, invalid policy structure: global must be a mapping.
+        fs::write(&policy_path, "global: []\nrules: []\n").unwrap();
+        let err = super::try_load_policy(Some(&policy_path)).expect_err("invalid");
+        match err {
+            super::PolicyLoadError::Invalid { path, message } => {
+                assert_eq!(path, policy_path);
+                assert!(message.contains("`global`"), "{message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        let _ = load_policy(Some(&policy_path));
+    }
+
+    #[test]
+    fn try_load_policy_rejects_invalid_input_guard_shape() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        fs::write(&policy_path, "global: {}\ninput_guard: []\nrules: []\n").unwrap();
+        let err = super::try_load_policy(Some(&policy_path)).expect_err("invalid");
+        match err {
+            super::PolicyLoadError::Invalid { path, message } => {
+                assert_eq!(path, policy_path);
+                assert!(message.contains("`input_guard`"), "{message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]
