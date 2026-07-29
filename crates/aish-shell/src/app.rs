@@ -3463,6 +3463,7 @@ impl AishShell {
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
             Some("/skill") => self.handle_skill_command(&parts),
+            Some("/export") => self.handle_export_command(&parts),
             _ => {
                 eprintln!("{}", {
                     let mut args = std::collections::HashMap::new();
@@ -3489,6 +3490,177 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
+    }
+
+    /// `/export [md]` — export the current session (AI conversation + command
+    /// history) to a Markdown file for postmortem or sharing.
+    fn handle_export_command(&self, parts: &[&str]) {
+        let format = parts.get(1).copied().unwrap_or("md");
+        if format != "md" && format != "markdown" {
+            eprintln!("{}", t("shell.export.usage"));
+            return;
+        }
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.export.store_unavailable"));
+            return;
+        };
+        let uuid = &self.session_uuid;
+        let record = match store.get_session(uuid) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                eprintln!("{}", t("shell.export.not_found"));
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        // Export the full history. The 100k cap is effectively unbounded for
+        // any real session, so a long-lived archive is never silently truncated.
+        let history = match store.get_history(uuid, 100_000) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        let snap = record.state_snapshot();
+
+        let mut md = String::new();
+        md.push_str(&format!("{}\n\n", t("shell.export.md_header")));
+        md.push_str(&format!(
+            "{}\n",
+            t_with_args("shell.export.session_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("uuid".to_string(), uuid.to_string());
+                args
+            })
+        ));
+        md.push_str(&format!(
+            "{}\n",
+            t_with_args("shell.export.model_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("model".to_string(), record.model.clone());
+                args
+            })
+        ));
+        if let Some(base) = &record.api_base {
+            md.push_str(&format!(
+                "{}\n",
+                t_with_args("shell.export.api_base_label", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("base".to_string(), base.clone());
+                    args
+                })
+            ));
+        }
+        md.push_str(&format!(
+            "{}\n",
+            t_with_args("shell.export.created_label", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert(
+                    "created".to_string(),
+                    record
+                        .created_at
+                        .format("%Y-%m-%d %H:%M:%S UTC")
+                        .to_string(),
+                );
+                args
+            })
+        ));
+        if let Some(cwd) = &snap.cwd {
+            md.push_str(&format!(
+                "\n{}\n",
+                t_with_args("shell.export.working_dir", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("cwd".to_string(), cwd.clone());
+                    args
+                })
+            ));
+        }
+
+        md.push_str(&format!("\n{}\n\n", t("shell.export.conversation_header")));
+        for msg in &snap.context_messages_snapshot {
+            let role = match msg.role.as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                "system" => "System",
+                other => other,
+            };
+            md.push_str(&format!("**{}**\n\n{}\n\n", role, msg.content));
+        }
+
+        md.push_str(&format!("\n{}\n\n", t("shell.export.history_header")));
+        md.push_str("| # | source | rc | command |\n|---|---|---|---|\n");
+        for (i, entry) in history.iter().enumerate() {
+            let cmd = entry
+                .command
+                .replace('|', "\\|")
+                .replace('\n', " ")
+                .replace('`', "\\`");
+            let rc = entry
+                .returncode
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into());
+            md.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                i + 1,
+                entry.source,
+                rc,
+                cmd
+            ));
+        }
+
+        let fname = format!("aish-session-{}.md", &uuid[..8.min(uuid.len())]);
+        match std::fs::write(&fname, &md) {
+            Ok(_) => {
+                // Owner-only: the archive contains the full conversation and
+                // raw command history, so restrict it regardless of umask.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&fname, std::fs::Permissions::from_mode(0o600));
+                }
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.export.exported", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("file".to_string(), fname);
+                        args.insert(
+                            "msgs".to_string(),
+                            snap.context_messages_snapshot.len().to_string(),
+                        );
+                        args.insert("cmds".to_string(), history.len().to_string());
+                        args
+                    })
+                )
+            }
+            Err(e) => eprintln!(
+                "{}",
+                t_with_args("shell.export.write_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), fname);
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            ),
+        }
     }
 
     /// Handle `/skill` command — search, list, install, remove, verify.

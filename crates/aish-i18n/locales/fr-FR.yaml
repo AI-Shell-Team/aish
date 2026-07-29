@@ -183,6 +183,7 @@ shell:
     audit: "Consulter le journal d'audit (qui/quand/quoi/suggestion IA/confirmation)"
     forget-approvals: "Effacer les approbations mémorisées (cette session)"
     skill: "Rechercher, installer, vérifier des skills; gérer les registres"
+    export: "Exporter la session actuelle en Markdown"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -647,6 +648,23 @@ shell:
     no_matches: "Aucune session correspondante."
     current_marker: "(actuelle)"
     selector_footer: "Tapez pour rechercher · ↑/↓ pour selectionner · Enter pour reprendre · Esc pour annuler"
+
+  export:
+    md_header: "# exportation de session aish"
+    session_label: "- **session** : `{uuid}`"
+    model_label: "- **modèle** : {model}"
+    api_base_label: "- **api_base** : {base}"
+    forked_label: "- **bifurquée de** : `{parent}`"
+    created_label: "- **créée** : {created}"
+    working_dir: "**répertoire de travail** : `{cwd}`"
+    conversation_header: "## Conversation"
+    history_header: "## Historique des commandes"
+    exported: "exporté {file} ({msgs} messages, {cmds} commandes)"
+    write_failed: "échec d'écriture de {file} : {error}"
+    usage: "usage : /export [md]  (seul markdown est pris en charge)"
+    store_unavailable: "stockage de session indisponible ; export impossible"
+    not_found: "session actuelle introuvable dans le stockage"
+    load_failed: "échec du chargement de la session : {error}"
 
   live_sessions:
     daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"

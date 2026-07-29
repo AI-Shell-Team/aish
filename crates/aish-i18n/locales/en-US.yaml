@@ -368,6 +368,7 @@ shell:
     audit: "Query audit log (who/when/what/AI suggestion/confirm)"
     forget-approvals: "Clear remembered command approvals (this session)"
     skill: "Search, install, verify skills; manage registries"
+    export: "Export the current session to Markdown"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -546,6 +547,23 @@ shell:
     no_matches: "No matching sessions."
     current_marker: "(current)"
     selector_footer: "Type to search · ↑/↓ to select · Enter to resume · Esc to cancel"
+
+  export:
+    md_header: "# aish session export"
+    session_label: "- **session**: `{uuid}`"
+    model_label: "- **model**: {model}"
+    api_base_label: "- **api_base**: {base}"
+    forked_label: "- **forked from**: `{parent}`"
+    created_label: "- **created**: {created}"
+    working_dir: "**working dir**: `{cwd}`"
+    conversation_header: "## Conversation"
+    history_header: "## Command history"
+    exported: "exported {file} ({msgs} messages, {cmds} commands)"
+    write_failed: "failed to write {file}: {error}"
+    usage: "usage: /export [md]  (only markdown is supported)"
+    store_unavailable: "session store unavailable; cannot export"
+    not_found: "current session not found in store"
+    load_failed: "failed to load session: {error}"
 
   live_sessions:
     daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"

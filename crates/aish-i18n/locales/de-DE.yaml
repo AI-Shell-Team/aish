@@ -183,6 +183,7 @@ shell:
     audit: "Audit-Protokoll abfragen (wer/wann/was/KI-Vorschlag/Bestaetigung)"
     forget-approvals: "Gemerkte Befehlsgenehmigungen löschen (diese Sitzung)"
     skill: "Skills suchen, installieren, prüfen; Registries verwalten"
+    export: "Aktuelle Sitzung als Markdown exportieren"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -647,6 +648,23 @@ shell:
     no_matches: "Keine passenden Sitzungen."
     current_marker: "(aktuell)"
     selector_footer: "Tippen zum Suchen · ↑/↓ zum Auswählen · Enter zum Fortsetzen · Esc zum Abbrechen"
+
+  export:
+    md_header: "# aish Sitzungsexport"
+    session_label: "- **Sitzung**: `{uuid}`"
+    model_label: "- **Modell**: {model}"
+    api_base_label: "- **api_base**: {base}"
+    forked_label: "- **verzweigt von**: `{parent}`"
+    created_label: "- **erstellt**: {created}"
+    working_dir: "**Arbeitsverzeichnis**: `{cwd}`"
+    conversation_header: "## Unterhaltung"
+    history_header: "## Befehlsverlauf"
+    exported: "exportiert {file} ({msgs} Nachrichten, {cmds} Befehle)"
+    write_failed: "Schreiben von {file} fehlgeschlagen: {error}"
+    usage: "Verwendung: /export [md]  (nur markdown wird unterstützt)"
+    store_unavailable: "Sitzungsspeicher nicht verfügbar; Export nicht möglich"
+    not_found: "aktuelle Sitzung im Speicher nicht gefunden"
+    load_failed: "Laden der Sitzung fehlgeschlagen: {error}"
 
   live_sessions:
     daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"
