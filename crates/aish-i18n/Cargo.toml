@@ -8,3 +8,4 @@ aish-core.workspace = true
 serde_yaml.workspace = true
 tracing.workspace = true
 dirs.workspace = true
+semver.workspace = true

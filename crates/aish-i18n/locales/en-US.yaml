@@ -340,6 +340,10 @@ shell:
     changelog_title: "What's New in {version}"
     changelog_hint_prefix: "{count} updates -"
     changelog_hint_suffix: "to view all"
+    changelog_summary_title: "What's new ({current} → {latest}):"
+    changelog_summary_version: "v{version}"
+    changelog_summary_more: "... and {count} more"
+    changelog_summary_truncated: "... truncated. Full notes ship in CHANGELOG.md."
 
   # General error messages
   general_error: "error: {error}"

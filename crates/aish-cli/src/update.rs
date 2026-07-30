@@ -411,22 +411,27 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
 // Archive extraction & install
 // ---------------------------------------------------------------------------
 
-fn find_install_sh(dir: &Path) -> Result<PathBuf, AishError> {
-    fn search(dir: &Path) -> Option<PathBuf> {
+fn find_file_named(dir: &Path, name: &str) -> Option<PathBuf> {
+    fn search(dir: &Path, name: &str) -> Option<PathBuf> {
         for entry in std::fs::read_dir(dir).ok()? {
             let entry = entry.ok()?;
             let path = entry.path();
             if path.is_dir() {
-                if let Some(found) = search(&path) {
+                if let Some(found) = search(&path, name) {
                     return Some(found);
                 }
-            } else if path.file_name().is_some_and(|n| n == "install.sh") {
+            } else if path.file_name().is_some_and(|n| n == name) {
                 return Some(path);
             }
         }
         None
     }
-    search(dir).ok_or_else(|| AishError::Config(t("cli.update.install_sh_not_found")))
+    search(dir, name)
+}
+
+fn find_install_sh(dir: &Path) -> Result<PathBuf, AishError> {
+    find_file_named(dir, "install.sh")
+        .ok_or_else(|| AishError::Config(t("cli.update.install_sh_not_found")))
 }
 
 fn install_release(archive_path: &Path) -> Result<(), AishError> {
@@ -730,15 +735,16 @@ pub fn run_update(check_only: bool, pre_release: bool) {
             }
 
             match download_release(&info.tag_name) {
-                Ok(archive_path) => {
-                    if let Err(e) = install_release(&archive_path) {
+                Ok(archive_path) => match install_release(&archive_path) {
+                    Ok(()) => {}
+                    Err(e) => {
                         eprintln!("\x1b[31m{}\x1b[0m", {
                             let mut args = std::collections::HashMap::new();
                             args.insert("error".to_string(), e.to_string());
                             t_with_args("cli.update.installation_error", &args)
                         });
                     }
-                }
+                },
                 Err(e) => {
                     eprintln!("\x1b[31m{}\x1b[0m", {
                         let mut args = std::collections::HashMap::new();

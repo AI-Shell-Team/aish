@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -176,6 +176,71 @@ fn strip_ansi_len_with(s: &str, char_width: impl Fn(char) -> usize) -> usize {
         }
     }
     len
+}
+
+/// Path to the last-seen changelog version marker (`~/.config/aish/last-changelog-version`).
+fn last_changelog_version_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("aish")
+        .join("last-changelog-version")
+}
+
+fn read_last_changelog_version() -> Option<String> {
+    let raw = std::fs::read_to_string(last_changelog_version_path()).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn write_last_changelog_version(version: &str) {
+    let path = last_changelog_version_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, version.trim());
+}
+
+/// Consume the startup upgrade changelog for `current_version`.
+///
+/// Mimics omp: the first interactive launch after an upgrade shows notes from
+/// the embedded CHANGELOG for every version in `last_seen → current`. The
+/// marker then advances so steady-state launches keep the existing
+/// current-version welcome panel.
+///
+/// Returns `(ansi_summary, plain_expand_text, previous_version)` when a range
+/// should be shown.
+pub fn take_startup_changelog_summary(current_version: &str) -> Option<(String, String, String)> {
+    let current = current_version.strip_prefix('v').unwrap_or(current_version);
+    let last = match read_last_changelog_version() {
+        Some(v) => v,
+        None => {
+            write_last_changelog_version(current);
+            return None;
+        }
+    };
+    let last_norm = last.strip_prefix('v').unwrap_or(&last);
+    if last_norm == current {
+        return None;
+    }
+    if aish_i18n::changelog::compare_changelog_versions(last_norm, current)
+        != std::cmp::Ordering::Less
+    {
+        // Marker is ahead or incomparable — reseat to current and skip.
+        write_last_changelog_version(current);
+        return None;
+    }
+
+    let summary = aish_i18n::changelog::format_changelog_range_summary(last_norm, current);
+    let plain = aish_i18n::changelog::format_changelog_range_plain(last_norm, current);
+    write_last_changelog_version(current);
+    match (summary, plain) {
+        (Some(ansi), Some(text)) => Some((ansi, text, last_norm.to_string())),
+        _ => None,
+    }
 }
 
 /// Localized changelog title for the current version (e.g. "v0.3.4 更新内容").
