@@ -371,7 +371,7 @@ shell:
     kill_live_sessions: "Kill live PTY session(s) by ID"
     audit: "Query audit log (who/when/what/AI suggestion/confirm)"
     forget-approvals: "Clear remembered command approvals (this session)"
-    skill: "Search, install, verify skills; manage registries"
+    skill: "Browse, install, trust, verify skills; manage registries"
     export: "Export the current session to Markdown"
     fork: "Branch the current session"
     sessions: "Show the session tree"
@@ -1020,6 +1020,95 @@ shell:
       skill_registries:
         label: "Skill Registry Sources"
         desc: "Manage skill search sources (skills.sh, skillhub.cn). Press Enter for interactive manager"
+
+  skill:
+    title: "Skills"
+    search_placeholder: "Type to filter…"
+    filtered_suffix: "  · filtered from {total}"
+    tab:
+      installed: "Installed"
+      browse: "Browse"
+      registries: "Registries"
+    footer:
+      installed: "Enter review · Esc exit"
+      browse: "Type query · Enter on 🔍 search / on row install · Esc clear"
+      registries: "Space toggle · Enter manage · Esc exit"
+    empty:
+      installed: "No skills installed. Use the Browse tab to find some."
+      browse: "Type a query above, then Enter on the 🔍 row to search."
+      registries: "No registries configured. Select ＋ Add to create one."
+    row:
+      search: "Search registries"
+      add_registry: "＋ Add registry"
+      search_hint_empty: "Type a query above, then Enter here to search registries."
+      search_hint_query: "Enter to search registries for: \"{query}\""
+    status:
+      trusted: "✓ trusted"
+      quarantined: "⚠ quarantined"
+      no_skill_md: "✗ no SKILL.md"
+      registry_on: "[on]"
+      registry_off: "[off]"
+      installs: "{registry} · {count} installs"
+      default_tag: " default"
+    error:
+      empty_query: "Empty query."
+      no_registries: "No enabled registries. Add one in the Registries tab."
+      no_results: "No skills found."
+      install_failed: "Install cancelled or failed for '{name}'."
+      unsafe_name: "Unsafe skill name: {name}"
+      not_found: "Skill '{name}' not found."
+      not_installed: "Skill '{name}' is not installed."
+      already_trusted: "Skill '{name}' is already trusted."
+      failed: "Failed: {error}"
+      trust_failed: "Failed to trust '{name}': {error}"
+    search_progress: "Searching \"{query}\" ..."
+    notice_unknown: "Unknown '/skill {sub}'. Opening the skill manager."
+    action:
+      menu_title: "Skill: {name}"
+      menu_question: "Select an action"
+      vet: "Review files (vet)"
+      trust: "Trust (approve)"
+      verify: "Verify structure"
+      remove: "Remove"
+    result:
+      trusted: "Trusted skill '{name}'. It will load on the next skills refresh."
+      was_trusted: "Skill '{name}' was already trusted."
+      removed: "Removed skill '{name}'."
+      verify_line: "Skill: {name} | Valid: {valid}"
+      check_pass: "PASS"
+      check_fail: "FAIL"
+      verify_passed: "PASSED"
+      verify_warnings: "WARNINGS"
+      verify_valid: "valid"
+      verify_invalid: "invalid"
+      vet_quarantined: "\nThis skill is QUARANTINED. Trust with /skill trust {name} (or /skill remove {name})."
+    review_gate:
+      prompt: "Security review required: skill '{name}' is quarantined (untrusted).\n  [a] AI auto-review   [y] review files now   [n] delete   (other) keep quarantined: "
+      trust_hint: "Trust after review: open the Installed tab and select the skill."
+      removed: "Removed quarantined skill '{name}'."
+      kept: "Kept quarantined. Review it in the Installed tab."
+    vetter:
+      running: "Running AI skill-vetter review on '{name}' (Ctrl+C to cancel)..."
+      cancelled: "Review cancelled. Skill '{name}' left quarantined."
+      failed: "AI review failed: {error}. Skill '{name}' left quarantined."
+    registry:
+      restart_notice: "Restart aish for registry changes to take effect."
+    usage:
+      install: "Usage: /skill install <ID>"
+      install_hint: "  Or browse available skills: /skill search"
+      install_not_found: "Skill '{id}' not found. Use /skill search to find the correct ID."
+      action: "Usage: /skill {action} <name>"
+      searching_for: "Searching for '{query}' ..."
+    review:
+      checklist: "\nVetting checklist: provenance · credential access · network exfiltration · eval/exec · base64 obfuscation · sudo · hidden downloads · destructive ops · prompt-injection."
+      could_not_read: "(could not read SKILL.md: {error})"
+      skill_md_header: "\n--- {path} ---"
+      files_header: "\n--- files in {path} ---"
+    install:
+      installed_quarantined: "Installed: {name} (QUARANTINED — untrusted, not loaded)"
+      path_line: "  Path: {path}"
+      verify_line: "  Verify: {result}"
+      failed: "Install failed: {error}"
 
   ask_user:
     default_title: "User input required"

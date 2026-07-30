@@ -15,9 +15,9 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::util::{padded_area, truncate_line, truncate_str};
 use crate::{PanelComponent, PanelEvent};
 
-const PANEL_PADDING_X: u16 = 2;
 const MIN_PANEL_HEIGHT: u16 = 8;
 const MIN_LIST_ROWS: usize = 4;
 const DESCRIPTION_INDENT: &str = "      ";
@@ -930,75 +930,6 @@ impl SettingsPanel {
         self.selected = 0;
         self.clamp_selected();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Layout / truncation helpers
-// ---------------------------------------------------------------------------
-
-fn padded_area(area: Rect) -> Rect {
-    let padding = PANEL_PADDING_X.min(area.width / 2);
-    Rect::new(
-        area.x + padding,
-        area.y,
-        area.width.saturating_sub(padding * 2),
-        area.height,
-    )
-}
-
-fn truncate_str(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut w = 0usize;
-    for ch in s.chars() {
-        let cw = unicode_width_ch(ch);
-        if w + cw > max_width {
-            out.push('…');
-            break;
-        }
-        w += cw;
-        out.push(ch);
-    }
-    out
-}
-
-fn truncate_line(spans: Vec<Span<'_>>, max_width: usize) -> Line<'_> {
-    if max_width == 0 {
-        return Line::from(Vec::new());
-    }
-    let mut out: Vec<Span<'_>> = Vec::with_capacity(spans.len());
-    let mut w = 0usize;
-    for sp in spans {
-        let sw = sp.content.width();
-        if w + sw > max_width {
-            // Truncate this span's content to fit, append ellipsis.
-            let remaining = max_width.saturating_sub(w);
-            if remaining > 1 {
-                let mut piece = String::new();
-                let mut pw = 0usize;
-                for ch in sp.content.chars() {
-                    let cw = unicode_width_ch(ch);
-                    if pw + cw + 1 > remaining {
-                        break;
-                    }
-                    pw += cw;
-                    piece.push(ch);
-                }
-                piece.push('…');
-                out.push(Span::styled(piece, sp.style));
-            }
-            break;
-        }
-        w += sw;
-        out.push(sp);
-    }
-    Line::from(out)
-}
-
-fn unicode_width_ch(ch: char) -> usize {
-    ch.to_string().width()
 }
 
 #[cfg(test)]

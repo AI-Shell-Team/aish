@@ -47,7 +47,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/skill",
-        "Search, install, verify skills; manage registries",
+        "Browse, install, trust, verify skills; manage registries",
     ),
     ("/export", "Export current session to Markdown"),
     (

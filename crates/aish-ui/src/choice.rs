@@ -7,12 +7,12 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::util::padded_area;
 use crate::{PanelComponent, PanelEvent, SearchSelectItem};
 
 const DEFAULT_VISIBLE_ITEMS: usize = 8;
 const MIN_PANEL_HEIGHT: u16 = 7;
 const RESERVED_LINES: u16 = 3;
-const PANEL_PADDING_X: u16 = 2;
 const DESCRIPTION_INDENT: &str = "    ";
 const FOOTER_WITH_CANCEL: &str = "1-9 quick select | Up/Down navigate | Enter select | Esc cancel";
 const FOOTER_NO_CANCEL: &str = "1-9 quick select | Up/Down navigate | Enter select";
@@ -517,16 +517,6 @@ impl ChoicePanel {
         }
         vec![Line::from(spans)]
     }
-}
-
-fn padded_area(area: Rect) -> Rect {
-    let padding = PANEL_PADDING_X.min(area.width / 2);
-    Rect::new(
-        area.x.saturating_add(padding),
-        area.y,
-        area.width.saturating_sub(padding.saturating_mul(2)),
-        area.height,
-    )
 }
 
 fn truncate_display(value: &str, max_width: usize) -> String {
