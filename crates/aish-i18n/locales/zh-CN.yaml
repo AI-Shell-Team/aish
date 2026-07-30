@@ -371,7 +371,7 @@ shell:
     kill_live_sessions: "按 ID 终止活跃 PTY 会话"
     audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
     forget-approvals: "清除本会话记住的命令审批"
-    skill: "搜索、安装、校验技能；管理 registry 源"
+    skill: "浏览、安装、信任、验证技能；管理注册表"
     export: "导出当前会话为 Markdown"
     fork: "分支当前会话"
     sessions: "显示会话树"
@@ -1020,6 +1020,95 @@ shell:
       skill_registries:
         label: "Skill Registry 源"
         desc: "管理 skill 搜索源（skills.sh、skillhub.cn）。按 Enter 打开交互式管理面板"
+
+  skill:
+    title: "技能"
+    search_placeholder: "输入以过滤…"
+    filtered_suffix: "  · 已筛选 / 共 {total}"
+    tab:
+      installed: "已安装"
+      browse: "浏览"
+      registries: "注册表"
+    footer:
+      installed: "Enter 审查 · Esc 退出"
+      browse: "输入查询 · 🔍 行 Enter 搜索 / 结果行 Enter 安装 · Esc 清除"
+      registries: "Space 切换 · Enter 管理 · Esc 退出"
+    empty:
+      installed: "未安装技能。去浏览页查找。"
+      browse: "在上方输入查询，然后在 🔍 行按 Enter 搜索。"
+      registries: "未配置注册表。选择 ＋ 添加 创建一个。"
+    row:
+      search: "搜索注册表"
+      add_registry: "＋ 添加注册表"
+      search_hint_empty: "在上方输入查询，然后在此按 Enter 搜索注册表。"
+      search_hint_query: "按 Enter 搜索注册表：\"{query}\""
+    status:
+      trusted: "✓ 已信任"
+      quarantined: "⚠ 已隔离"
+      no_skill_md: "✗ 无 SKILL.md"
+      registry_on: "[开]"
+      registry_off: "[关]"
+      installs: "{registry} · {count} 次安装"
+      default_tag: " 默认"
+    error:
+      empty_query: "查询为空。"
+      no_registries: "没有启用的注册表。在注册表页添加一个。"
+      no_results: "未找到技能。"
+      install_failed: "'{name}' 安装已取消或失败。"
+      unsafe_name: "不安全的技能名：{name}"
+      not_found: "未找到技能 '{name}'。"
+      not_installed: "技能 '{name}' 未安装。"
+      already_trusted: "技能 '{name}' 已是信任状态。"
+      failed: "失败：{error}"
+      trust_failed: "信任 '{name}' 失败：{error}"
+    search_progress: "正在搜索 \"{query}\" ..."
+    notice_unknown: "未知的 '/skill {sub}'。打开技能管理器。"
+    action:
+      menu_title: "技能：{name}"
+      menu_question: "选择一个操作"
+      vet: "审查文件 (vet)"
+      trust: "信任 (批准)"
+      verify: "验证结构"
+      remove: "删除"
+    result:
+      trusted: "已信任技能 '{name}'。下次技能刷新时加载。"
+      was_trusted: "技能 '{name}' 已是信任状态。"
+      removed: "已删除技能 '{name}'。"
+      verify_line: "技能：{name} | 有效：{valid}"
+      check_pass: "通过"
+      check_fail: "失败"
+      verify_passed: "通过"
+      verify_warnings: "警告"
+      verify_valid: "有效"
+      verify_invalid: "无效"
+      vet_quarantined: "\n此技能已隔离。用 /skill trust {name} 信任（或 /skill remove {name} 删除）。"
+    review_gate:
+      prompt: "需要安全审查：技能 '{name}' 已隔离（不受信任）。\n  [a] AI 自动审查   [y] 立即审查文件   [n] 删除   (其他) 保持隔离： "
+      trust_hint: "审查后信任：打开已安装页并选择该技能。"
+      removed: "已删除隔离技能 '{name}'。"
+      kept: "保持隔离。在已安装页审查。"
+    vetter:
+      running: "正在对 '{name}' 运行 AI skill-vetter 审查（Ctrl+C 取消）..."
+      cancelled: "审查已取消。技能 '{name}' 保持隔离。"
+      failed: "AI 审查失败：{error}。技能 '{name}' 保持隔离。"
+    registry:
+      restart_notice: "重启 aish 以使注册表更改生效。"
+    usage:
+      install: "用法：/skill install <ID>"
+      install_hint: "  或浏览可用技能：/skill search"
+      install_not_found: "未找到技能 '{id}'。用 /skill search 查找正确的 ID。"
+      action: "用法：/skill {action} <name>"
+      searching_for: "正在搜索 '{query}' ..."
+    review:
+      checklist: "\n审查清单：来源 · 凭证访问 · 网络外传 · eval/exec · base64 混淆 · sudo · 隐藏下载 · 破坏性操作 · 提示注入。"
+      could_not_read: "（无法读取 SKILL.md：{error}）"
+      skill_md_header: "\n--- {path} ---"
+      files_header: "\n--- {path} 中的文件 ---"
+    install:
+      installed_quarantined: "已安装：{name}（已隔离 — 不受信任，未加载）"
+      path_line: "  路径：{path}"
+      verify_line: "  验证：{result}"
+      failed: "安装失败：{error}"
 
   ask_user:
     default_title: "需要用户输入"

@@ -9,12 +9,12 @@ use ratatui::{
 use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::util::padded_area;
 use crate::{PanelComponent, PanelEvent};
 
 const DEFAULT_VISIBLE_ITEMS: usize = 32;
 const MIN_LIST_ROWS: usize = 5;
 const MIN_PANEL_HEIGHT: u16 = 6;
-const PANEL_PADDING_X: u16 = 2;
 const DESCRIPTION_INDENT: &str = "    ";
 
 // Shimmer sweep tunables (mirrors aish-shell's theme::shimmer_text): a cosine
@@ -783,16 +783,6 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
         (f(h + 1.0 / 3.0) * 255.0).round() as u8,
         (f(h) * 255.0).round() as u8,
         (f(h - 1.0 / 3.0) * 255.0).round() as u8,
-    )
-}
-
-fn padded_area(area: Rect) -> Rect {
-    let padding = PANEL_PADDING_X.min(area.width / 2);
-    Rect::new(
-        area.x.saturating_add(padding),
-        area.y,
-        area.width.saturating_sub(padding.saturating_mul(2)),
-        area.height,
     )
 }
 
