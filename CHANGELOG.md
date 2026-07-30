@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- After upgrading, the next interactive `aish` launch shows a Keep-a-Changelog summary for every version between the previously seen release and the newly installed one (oldest → newest), sourced from the `CHANGELOG.md` embedded in the binary. A `~/.config/aish/last-changelog-version` marker tracks what has already been shown.
+
 ## [0.3.9] - 2026-07-27
 
 ### Added

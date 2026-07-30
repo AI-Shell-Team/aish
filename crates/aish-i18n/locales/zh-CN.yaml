@@ -340,6 +340,10 @@ shell:
     changelog_title: "{version} 更新内容"
     changelog_hint_prefix: "共 {count} 条更新 -"
     changelog_hint_suffix: "查看全部"
+    changelog_summary_title: "更新内容（{current} → {latest}）："
+    changelog_summary_version: "v{version}"
+    changelog_summary_more: "……还有 {count} 条"
+    changelog_summary_truncated: "……已截断。完整说明见 CHANGELOG.md。"
 
   # 通用错误消息
   general_error: "错误: {error}"

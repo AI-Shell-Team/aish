@@ -59,6 +59,7 @@ for artifact_path in "${ARTIFACT_FILES[@]}"; do
         upload_object "$artifact_path" "$release_key" "$cache_control" "${content_type_args[@]}"
 done
 
+
 latest_file="$(mktemp)"
 trap 'rm -f "$latest_file"' EXIT
 printf '%s' "$VERSION" > "$latest_file"
@@ -74,6 +75,7 @@ for artifact_path in "${ARTIFACT_FILES[@]}"; do
         artifact_name="$(basename "$artifact_path")"
         validated_urls+=("${CDN_BASE_URL%/}/${DOWNLOAD_PREFIX}/releases/${VERSION}/${artifact_name}")
 done
+
 
 for url in "${validated_urls[@]}"; do
         echo "Validating ${url}"

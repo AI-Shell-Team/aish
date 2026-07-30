@@ -42,6 +42,7 @@ mkdir -p "${STAGE_DIR}/systemd"
 install -m 0644 packaging/systemd/aish-sandbox.service.in "${STAGE_DIR}/systemd/aish-sandbox.service.in"
 install -m 0644 packaging/systemd/aish-sandbox.socket "${STAGE_DIR}/systemd/aish-sandbox.socket"
 
+
 cat > "${STAGE_DIR}/README.txt" <<EOF
 AI Shell bundle ${VERSION} (${ARCH})
 
