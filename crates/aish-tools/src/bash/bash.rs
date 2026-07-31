@@ -216,6 +216,11 @@ fn bash_preflight(
 }
 
 fn format_security_message(decision: &SecurityDecision) -> String {
+    let primary = primary_security_message(decision);
+    annotate_security_message(primary, decision)
+}
+
+fn primary_security_message(decision: &SecurityDecision) -> String {
     if let Some(confirm_message) = decision.analysis.confirm_message.as_deref() {
         let trimmed = confirm_message.trim();
         if !trimmed.is_empty() {
@@ -237,11 +242,58 @@ fn format_security_message(decision: &SecurityDecision) -> String {
         return reason.clone();
     }
 
+    if let Some(rule) = decision.analysis.matched_rule.as_ref() {
+        if let Some(name) = rule
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return name.to_string();
+        }
+        if let Some(id) = rule.id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            return id.to_string();
+        }
+    }
+
     let mut args = std::collections::HashMap::new();
     args.insert("level".to_string(), decision.level.to_string());
     aish_i18n::t_with_args("tools.bash.security_handling_required", &args)
 }
 
+fn annotate_security_message(primary: String, decision: &SecurityDecision) -> String {
+    let mut extras = Vec::new();
+    if let Some(id) = decision
+        .analysis
+        .matched_rule
+        .as_ref()
+        .and_then(|rule| rule.id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        if !primary.contains(id) {
+            extras.push(id.to_string());
+        }
+    }
+    if !decision.analysis.matched_paths.is_empty() {
+        let preview = decision
+            .analysis
+            .matched_paths
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !preview.is_empty() && !primary.contains(&preview) {
+            extras.push(format!("paths: {preview}"));
+        }
+    }
+    if extras.is_empty() {
+        primary
+    } else {
+        format!("{primary} ({})", extras.join("; "))
+    }
+}
 fn build_security_context(
     command: &str,
     decision: &SecurityDecision,
@@ -982,11 +1034,17 @@ mod tests {
                 message,
                 security: Some(security),
             } => {
-                assert_eq!(message, "system config is protected");
+                assert_eq!(
+                    message,
+                    "system config is protected (H-001; paths: /etc)"
+                );
                 assert_eq!(security.tool_name, "bash");
                 assert_eq!(security.target.as_deref(), Some("rm -rf /etc"));
                 assert_eq!(security.mode, SecurityPanelMode::Blocked);
-                assert_eq!(security.message, "system config is protected");
+                assert_eq!(
+                    security.message,
+                    "system config is protected (H-001; paths: /etc)"
+                );
                 let decision = security.decision.expect("expected security decision");
                 assert_eq!(decision.level.to_string(), "HIGH");
                 assert_eq!(decision.analysis.matched_paths, vec!["/etc".to_string()]);
@@ -1015,7 +1073,10 @@ mod tests {
                 message,
                 security: Some(security),
             } => {
-                assert_eq!(message, "home path is protected");
+                assert_eq!(
+                    message,
+                    "home path is protected (M-001; paths: /home/lixin/a.txt)"
+                );
                 assert_eq!(security.tool_name, "bash");
                 assert_eq!(
                     security.target.as_deref(),
@@ -1140,7 +1201,10 @@ mod tests {
                 message,
                 security: Some(security),
             } => {
-                assert_eq!(message, "system config directory");
+                assert_eq!(
+                    message,
+                    "system config directory (H-001; paths: /etc/aish/config.yaml)"
+                );
                 assert_eq!(
                     security.target.as_deref(),
                     Some("rm -f /etc/aish/config.yaml")
@@ -1160,6 +1224,172 @@ mod tests {
                     decision.analysis.matched_paths,
                     vec!["/etc/aish/config.yaml".to_string()]
                 );
+            }
+            other => panic!("unexpected preflight result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_sandbox_hit_uses_rule_reason_without_description() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        let socket_path = dir.path().join("sandbox.sock");
+        // Seeded H-001 shape: reason only, no description/confirm_message.
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: true\n  sandbox_off_action: ALLOW\n  sandbox_timeout_seconds: 13\n  default_risk_level: LOW\nrules:\n  - id: H-001\n    name: Protect /etc\n    path: [/etc/**]\n    operations: [DELETE]\n    command_list: [rm]\n    risk: HIGH\n    reason: System config changes can break the host\n",
+        )
+        .unwrap();
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request_buf.extend_from_slice(&chunk[..read]);
+                if request_buf.contains(&b'\n') {
+                    break;
+                }
+            }
+
+            let request: serde_json::Value = serde_json::from_slice(&request_buf).unwrap();
+            let id = request["id"].as_str().unwrap();
+            let response = serde_json::json!({
+                "id": id,
+                "ok": true,
+                "result": {
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "changes": [
+                        {"path": "/etc/aish/123", "kind": "deleted"}
+                    ],
+                    "stdout_truncated": false,
+                    "stderr_truncated": false,
+                    "changes_truncated": false
+                }
+            });
+            writeln!(stream, "{}", response).unwrap();
+        });
+
+        let result = security_preflight_with_socket(
+            "rm /etc/aish/123",
+            Some(dir.path()),
+            Some(policy_path.as_path()),
+            Some(socket_path.as_path()),
+        );
+
+        handle.join().unwrap();
+        match result {
+            PreflightResult::Block {
+                message,
+                security: Some(security),
+            } => {
+                assert_eq!(
+                    message,
+                    "System config changes can break the host (H-001; paths: /etc/aish/123)"
+                );
+                assert_eq!(
+                    security.message,
+                    "System config changes can break the host (H-001; paths: /etc/aish/123)"
+                );
+                assert!(
+                    !message.contains("security handling"),
+                    "must not fall back to generic level message: {message}"
+                );
+                let decision = security.decision.expect("expected security decision");
+                assert_eq!(
+                    decision
+                        .analysis
+                        .matched_rule
+                        .as_ref()
+                        .and_then(|rule| rule.id.as_deref()),
+                    Some("H-001")
+                );
+            }
+            other => panic!("unexpected preflight result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bash_tool_preflight_sandbox_hit_falls_back_to_rule_identity() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("security_policy.yaml");
+        let socket_path = dir.path().join("sandbox.sock");
+        // No reason/description/confirm_message — still must avoid generic level copy.
+        fs::write(
+            &policy_path,
+            "global:\n  enable_sandbox: true\n  sandbox_off_action: ALLOW\n  sandbox_timeout_seconds: 13\n  default_risk_level: LOW\nrules:\n  - id: H-001\n    name: Protect /etc\n    path: [/etc/**]\n    operations: [DELETE]\n    command_list: [rm]\n    risk: HIGH\n",
+        )
+        .unwrap();
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request_buf.extend_from_slice(&chunk[..read]);
+                if request_buf.contains(&b'\n') {
+                    break;
+                }
+            }
+
+            let request: serde_json::Value = serde_json::from_slice(&request_buf).unwrap();
+            let id = request["id"].as_str().unwrap();
+            let response = serde_json::json!({
+                "id": id,
+                "ok": true,
+                "result": {
+                    "exit_code": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "changes": [
+                        {"path": "/etc/aish/identity", "kind": "deleted"}
+                    ],
+                    "stdout_truncated": false,
+                    "stderr_truncated": false,
+                    "changes_truncated": false
+                }
+            });
+            writeln!(stream, "{}", response).unwrap();
+        });
+
+        let result = security_preflight_with_socket(
+            "rm /etc/aish/identity",
+            Some(dir.path()),
+            Some(policy_path.as_path()),
+            Some(socket_path.as_path()),
+        );
+
+        handle.join().unwrap();
+        match result {
+            PreflightResult::Block {
+                message,
+                security: Some(security),
+            } => {
+                assert!(
+                    message.contains("Protect /etc") || message.contains("H-001"),
+                    "expected rule identity in message, got {message}"
+                );
+                assert!(
+                    message.contains("paths: /etc/aish/identity"),
+                    "expected matched paths in message, got {message}"
+                );
+                assert!(
+                    !message.contains("security handling") && !message.contains("安全处理"),
+                    "must not fall back to generic level message: {message}"
+                );
+                assert_eq!(security.mode, SecurityPanelMode::Blocked);
             }
             other => panic!("unexpected preflight result: {other:?}"),
         }
@@ -1187,7 +1417,10 @@ mod tests {
                 message,
                 security: Some(security),
             } => {
-                assert_eq!(message, "test-home-rule");
+                assert_eq!(
+                    message,
+                    "test-home-rule (M-001; paths: /home/lixin/123)"
+                );
                 assert_eq!(security.target.as_deref(), Some("rm /home/lixin/123"));
                 assert_eq!(security.mode, SecurityPanelMode::Confirm);
                 let decision = security.decision.expect("expected security decision");

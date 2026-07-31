@@ -78,7 +78,18 @@ pub(crate) fn assess_sandbox_result(
         (policy.default_risk_level, Vec::new())
     };
 
+    let primary_rule = selected_hits.first().map(|(_, _, rule)| (*rule).clone());
+
     let mut reasons = Vec::new();
+    if let Some(rule_reason) = primary_rule
+        .as_ref()
+        .and_then(|rule| rule.reason.as_deref())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        // Keep policy reason user-visible (fallback/degraded paths do the same).
+        reasons.push(rule_reason.to_string());
+    }
     if !selected_hits.is_empty() {
         reasons.push(format!(
             "sandbox matched {} {}-risk filesystem change(s)",
@@ -112,15 +123,29 @@ pub(crate) fn assess_sandbox_result(
         }
     }
 
-    let primary_rule = selected_hits.first().map(|(_, _, rule)| (*rule).clone());
+    let impact_description = primary_rule
+        .as_ref()
+        .and_then(|rule| {
+            rule.description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    rule.reason
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                })
+        })
+        .unwrap_or_default();
+
     let mut analysis = SecurityAnalysis {
         risk_level,
         reasons,
         changes,
-        impact_description: primary_rule
-            .as_ref()
-            .and_then(|rule| rule.description.clone())
-            .unwrap_or_default(),
+        impact_description,
         suggested_alternatives: primary_rule
             .as_ref()
             .map(|rule| parse_suggestions(rule.suggestion.as_deref()))
@@ -347,6 +372,56 @@ mod tests {
         assert_eq!(analysis.changes[0].kind, "deleted");
         assert!(analysis.sandbox.enabled);
         assert_eq!(analysis.sandbox.exit_code, Some(0));
+    }
+
+    #[test]
+    fn assess_sandbox_result_exposes_rule_reason_when_description_missing() {
+        // Mirrors seeded H-001: reason is set, but description/confirm_message are absent.
+        let policy = policy_with_rules(vec![PolicyRule {
+            pattern: "/etc/**".to_string(),
+            risk: RiskLevel::High,
+            description: None,
+            operations: Some(BTreeSet::from(["DELETE".to_string()])),
+            command_list: Some(BTreeSet::from(["rm".to_string()])),
+            exclude: None,
+            rule_id: Some("H-001".to_string()),
+            name: Some("Protect /etc".to_string()),
+            reason: Some("System config changes can break the host".to_string()),
+            confirm_message: None,
+            suggestion: Some("Edit /etc manually with a backup/change process.".to_string()),
+        }]);
+        let sandbox = SandboxResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            changes: vec![change("/etc/aish/123", FsChangeKind::Deleted)],
+            stdout_truncated: false,
+            stderr_truncated: false,
+            changes_truncated: false,
+        };
+
+        let analysis = assess_sandbox_result(&policy, "rm /etc/aish/123", &sandbox);
+
+        assert_eq!(analysis.risk_level, RiskLevel::High);
+        assert!(
+            analysis
+                .reasons
+                .iter()
+                .any(|reason| reason == "System config changes can break the host"),
+            "expected rule reason in analysis.reasons, got {:?}",
+            analysis.reasons
+        );
+        assert_eq!(
+            analysis.impact_description,
+            "System config changes can break the host"
+        );
+        assert_eq!(
+            analysis
+                .matched_rule
+                .as_ref()
+                .and_then(|rule| rule.id.as_deref()),
+            Some("H-001")
+        );
     }
 
     #[test]
