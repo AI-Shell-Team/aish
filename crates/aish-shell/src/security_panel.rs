@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-
-use aish_i18n::t_with_args;
 use aish_llm::{PreflightSecurityContext, SecurityPanel};
 
 pub(crate) fn build_security_panel(context: &PreflightSecurityContext) -> SecurityPanel {
@@ -12,107 +9,188 @@ pub(crate) fn build_security_panel(context: &PreflightSecurityContext) -> Securi
         );
     };
 
-    let reasons = panel_reasons(decision);
+    let reason = primary_panel_reason(decision, &context.message);
     let alternatives = decision.analysis.suggested_alternatives.clone();
-    let message = if reasons.is_empty() {
-        context.message.clone()
-    } else {
-        reasons.join("; ")
-    };
 
     SecurityPanel {
         mode: context.mode,
         tool_name: context.tool_name.clone(),
         target: context.target.clone(),
-        message,
+        message: reason.clone(),
         risk_level: Some(decision.level.to_string()),
-        reasons,
+        reasons: if reason.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![reason]
+        },
         alternatives,
     }
 }
 
-fn panel_reasons(decision: &aish_security::SecurityDecision) -> Vec<String> {
-    let analysis = &decision.analysis;
-    let mut reasons = Vec::new();
+pub(crate) fn security_panel_rows(context: &PreflightSecurityContext) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
 
-    if analysis.sandbox.enabled {
-        reasons.extend(localized_sandbox_assessment_reasons(analysis));
-    } else if let Some(reason) = analysis.sandbox.reason.as_deref() {
-        reasons.push(localized_sandbox_degraded_reason(analysis, reason));
-    }
+    rows.push((
+        aish_i18n::t("shell.confirm_dialog_tool")
+            .trim_end_matches(['：', ':'])
+            .to_string(),
+        context.tool_name.clone(),
+    ));
 
-    if analysis.fallback_rule_matched && !analysis.matched_paths.is_empty() {
-        reasons.push(localized_preview_paths(&analysis.matched_paths));
-    }
-
-    reasons.extend(
-        analysis
-            .reasons
-            .iter()
-            .filter(|reason| !is_internal_security_reason(reason))
-            .cloned(),
-    );
-    reasons.dedup();
-    reasons
-}
-
-fn localized_sandbox_assessment_reasons(analysis: &aish_security::SecurityAnalysis) -> Vec<String> {
-    let mut reasons = Vec::new();
-
-    if analysis.changes.is_empty() {
-        reasons.push(aish_i18n::t("security.ai_risk.no_fs_changes"));
-    } else if !analysis.matched_paths.is_empty() {
-        let mut args = std::collections::HashMap::new();
-        args.insert(
-            "count".to_string(),
-            analysis.matched_paths.len().to_string(),
-        );
-        let key = match analysis.risk_level {
-            aish_security::RiskLevel::High => "security.ai_risk.high_hits",
-            aish_security::RiskLevel::Medium => "security.ai_risk.medium_hits",
-            aish_security::RiskLevel::Low => "security.ai_risk.low_or_unmatched_hits",
-        };
-        reasons.push(aish_i18n::t_with_args(key, &args));
-        reasons.push(localized_preview_paths(&analysis.matched_paths));
-    } else {
-        let mut args = std::collections::HashMap::new();
-        args.insert("count".to_string(), analysis.changes.len().to_string());
-        reasons.push(aish_i18n::t_with_args(
-            "security.ai_risk.unmatched_hits",
-            &args,
+    if let Some(target) = context
+        .target
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        rows.push((
+            aish_i18n::t("shell.security.label.command"),
+            target.to_string(),
         ));
-        let preview_paths: Vec<String> = analysis
-            .changes
+    }
+
+    let Some(decision) = context.decision.as_ref() else {
+        if !context.message.trim().is_empty() {
+            rows.push((
+                aish_i18n::t("shell.security.label.reasons"),
+                context.message.clone(),
+            ));
+        }
+        return rows;
+    };
+
+    rows.push((
+        aish_i18n::t("shell.security.label.risk_level"),
+        decision.level.to_string(),
+    ));
+
+    let reason = primary_panel_reason(decision, &context.message);
+    if !reason.trim().is_empty() {
+        rows.push((aish_i18n::t("shell.security.label.reasons"), reason));
+    }
+
+    if let Some(rule) = matched_rule_label(decision) {
+        rows.push((aish_i18n::t("shell.security.label.rule"), rule));
+    }
+
+    if !decision.analysis.matched_paths.is_empty() {
+        let paths = decision
+            .analysis
+            .matched_paths
             .iter()
-            .map(|change| change.path.clone())
             .take(3)
-            .collect();
-        if !preview_paths.is_empty() {
-            reasons.push(localized_preview_paths(&preview_paths));
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !paths.is_empty() {
+            rows.push((
+                aish_i18n::t("shell.security.label.matched_paths"),
+                paths,
+            ));
+        }
+    } else if let Some(sandbox_reason) = decision.analysis.sandbox.reason.as_deref() {
+        let note = localized_sandbox_degraded_reason(&decision.analysis, sandbox_reason);
+        if !note.trim().is_empty()
+            && primary_panel_reason(decision, &context.message) != note
+        {
+            rows.push((
+                aish_i18n::t("shell.security.label.fallback_hint"),
+                note,
+            ));
         }
     }
 
-    if analysis
-        .reasons
-        .iter()
-        .any(|reason| reason.starts_with("sandbox change list was truncated"))
-    {
-        reasons.push(aish_i18n::t("security.ai_risk.truncated_changes"));
+    if !decision.analysis.suggested_alternatives.is_empty() {
+        rows.push((
+            aish_i18n::t("shell.security.label.alternatives"),
+            decision.analysis.suggested_alternatives.join("\n"),
+        ));
     }
 
-    reasons
+    rows
 }
 
-fn localized_preview_paths(paths: &[String]) -> String {
-    let preview_paths = paths
+fn panel_title_key(mode: aish_llm::SecurityPanelMode) -> &'static str {
+    match mode {
+        aish_llm::SecurityPanelMode::Confirm => "shell.security.panel_title.confirm",
+        aish_llm::SecurityPanelMode::Blocked => "shell.security.panel_title.blocked",
+        aish_llm::SecurityPanelMode::Info => "shell.security.panel_title.notice",
+    }
+}
+
+pub(crate) fn security_panel_title(mode: aish_llm::SecurityPanelMode) -> String {
+    aish_i18n::t(panel_title_key(mode))
+}
+
+fn primary_panel_reason(decision: &aish_security::SecurityDecision, fallback: &str) -> String {
+    if let Some(reason) = decision
+        .analysis
+        .reasons
         .iter()
-        .take(3)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut args = std::collections::HashMap::new();
-    args.insert("paths".to_string(), preview_paths);
-    t_with_args("security.ai_risk.preview_paths", &args)
+        .find(|reason| !is_internal_security_reason(reason))
+    {
+        return reason.clone();
+    }
+
+    let impact = decision.analysis.impact_description.trim();
+    if !impact.is_empty() {
+        return impact.to_string();
+    }
+
+    if let Some(sandbox_reason) = decision.analysis.sandbox.reason.as_deref() {
+        if !decision.analysis.sandbox.enabled {
+            return localized_sandbox_degraded_reason(&decision.analysis, sandbox_reason);
+        }
+    }
+
+    strip_message_annotation(fallback)
+}
+
+fn matched_rule_label(decision: &aish_security::SecurityDecision) -> Option<String> {
+    let rule = decision.analysis.matched_rule.as_ref()?;
+    let mut identity = String::new();
+    if let Some(id) = rule
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        identity.push_str(id);
+    }
+    if let Some(name) = rule
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !identity.is_empty() {
+            identity.push_str(" — ");
+        }
+        identity.push_str(name);
+    }
+    if identity.is_empty() {
+        None
+    } else {
+        Some(identity)
+    }
+}
+
+fn strip_message_annotation(message: &str) -> String {
+    // format_security_message may append " (H-001; paths: ...)" for LLM/block text.
+    let trimmed = message.trim();
+    if let Some(idx) = trimmed.rfind(" (") {
+        let suffix = &trimmed[idx + 2..];
+        if suffix.ends_with(')')
+            && (suffix.contains("paths:")
+                || suffix
+                    .trim_end_matches(')')
+                    .split(';')
+                    .any(|part| part.trim().starts_with('H') || part.trim().starts_with('M') || part.trim().starts_with('L')))
+        {
+            return trimmed[..idx].trim().to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn localized_sandbox_degraded_reason(
@@ -190,8 +268,40 @@ fn is_internal_security_reason(reason: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use aish_llm::{PreflightSecurityContext, SecurityPanelMode};
+    use aish_security::{MatchedRuleSummary, RiskLevel, SecurityAnalysis, SecurityDecision};
 
-    use super::build_security_panel;
+    use super::{build_security_panel, security_panel_rows};
+
+    fn blocked_etc_context() -> PreflightSecurityContext {
+        let mut analysis = SecurityAnalysis {
+            risk_level: RiskLevel::High,
+            reasons: vec![
+                "System config changes can break the host".to_string(),
+                "sandbox matched 1 high-risk filesystem change(s)".to_string(),
+            ],
+            impact_description: "System config changes can break the host".to_string(),
+            suggested_alternatives: vec![
+                "Edit /etc manually with a backup/change process.".to_string()
+            ],
+            matched_rule: Some(MatchedRuleSummary {
+                id: Some("H-001".to_string()),
+                name: Some("Protect /etc".to_string()),
+                pattern: "/etc/**".to_string(),
+            }),
+            matched_paths: vec!["/etc/aish/123".to_string()],
+            ..Default::default()
+        };
+        analysis.sandbox.enabled = true;
+        let decision = SecurityDecision::block(RiskLevel::High, analysis);
+        PreflightSecurityContext {
+            tool_name: "bash".to_string(),
+            target: Some("rm /etc/aish/123".to_string()),
+            message: "System config changes can break the host (H-001; paths: /etc/aish/123)"
+                .to_string(),
+            mode: SecurityPanelMode::Blocked,
+            decision: Some(decision),
+        }
+    }
 
     #[test]
     fn fallback_context_builds_fallback_panel() {
@@ -208,5 +318,79 @@ mod tests {
         assert_eq!(panel.message, "generic security message");
         assert!(panel.reasons.is_empty());
         assert!(panel.alternatives.is_empty());
+    }
+
+    #[test]
+    fn decision_context_builds_primary_reason_message() {
+        let context = blocked_etc_context();
+        let panel = build_security_panel(&context);
+
+        assert_eq!(panel.risk_level.as_deref(), Some("HIGH"));
+        assert_eq!(
+            panel.message,
+            "System config changes can break the host"
+        );
+        assert_eq!(
+            panel.reasons,
+            vec!["System config changes can break the host".to_string()]
+        );
+        assert_eq!(
+            panel.alternatives,
+            vec!["Edit /etc manually with a backup/change process.".to_string()]
+        );
+    }
+
+    #[test]
+    fn security_panel_rows_separate_reason_rule_and_paths() {
+        let context = blocked_etc_context();
+        let rows = security_panel_rows(&context);
+        let map: std::collections::HashMap<&str, &str> = rows
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.as_str()))
+            .collect();
+
+        let reason = rows
+            .iter()
+            .find(|(label, _)| label.contains("Reason") || label.contains("原因") || label.contains("理由") || label.contains("Motivos") || label.contains("Raisons") || label.contains("Gründe"))
+            .map(|(_, value)| value.as_str())
+            .expect("reason row");
+        assert_eq!(reason, "System config changes can break the host");
+        assert!(
+            !reason.contains("H-001"),
+            "primary reason must not mash rule id into the same value: {reason}"
+        );
+
+        let rule = rows
+            .iter()
+            .find(|(label, _)| {
+                label.contains("Rule")
+                    || label.contains("规则")
+                    || label.contains("ルール")
+                    || label.contains("Regel")
+                    || label.contains("Règle")
+                    || label.contains("Regla")
+            })
+            .map(|(_, value)| value.as_str())
+            .expect("rule row");
+        assert!(rule.contains("H-001") && rule.contains("Protect /etc"), "{rule}");
+
+        let paths = rows
+            .iter()
+            .find(|(label, _)| {
+                label.contains("Path")
+                    || label.contains("路径")
+                    || label.contains("パス")
+                    || label.contains("Pfad")
+                    || label.contains("Chemin")
+                    || label.contains("Ruta")
+            })
+            .map(|(_, value)| value.as_str())
+            .expect("paths row");
+        assert_eq!(paths, "/etc/aish/123");
+
+        assert!(map.values().any(|value| value.contains("HIGH")));
+        assert!(rows.iter().any(|(_, value)| {
+            value.contains("Edit /etc manually with a backup/change process.")
+        }));
     }
 }

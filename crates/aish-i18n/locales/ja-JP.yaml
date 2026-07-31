@@ -235,6 +235,8 @@ shell:
       fallback_hint: "注意"
       risk_level: "リスクレベル"
       reasons: "理由"
+      rule: "ルール"
+      matched_paths: "パス"
       alternatives: "代替案"
       impact: "影響"
       no_additional_info: "追加情報はありません。"

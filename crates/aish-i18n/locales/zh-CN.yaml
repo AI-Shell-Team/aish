@@ -480,6 +480,8 @@ shell:
       fallback_hint: "提示"
       risk_level: "风险等级"
       reasons: "原因"
+      rule: "规则"
+      matched_paths: "路径"
       alternatives: "替代方案"
       impact: "影响"
       no_additional_info: "未提供更多信息。"
