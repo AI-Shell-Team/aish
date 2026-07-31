@@ -31,6 +31,7 @@ use crate::prompt;
 use crate::readline::ShellReadline;
 use crate::renderer::ShellRenderer;
 use crate::resume_selector::{select_resume_session, ResumeSessionItem};
+use crate::security_panel::{build_security_panel, security_panel_rows, security_panel_title};
 use crate::theme;
 use crate::types::ShellState;
 
@@ -1867,98 +1868,17 @@ impl AishShell {
         let confirmation_callback: Arc<
             dyn Fn(&aish_llm::PreflightSecurityContext) -> aish_llm::ApprovalChoice + Send + Sync,
         > = Arc::new(|ctx: &aish_llm::PreflightSecurityContext| {
-            let width = std::env::var("COLUMNS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(80);
-            let inner_width = width.saturating_sub(4).max(20);
-            let border = "─".repeat(inner_width);
-            println!();
-            println!("{}", theme::warning(&format!("╭{}╮", border)));
-            let sec_title = theme::bold(&theme::warning(" ⚠  Security Confirmation Required"));
-            print_panel_line(&sec_title, inner_width);
-            print_panel_line("", inner_width);
-            let tool_label = theme::bold(&theme::accent(&t("shell.confirm_dialog_tool")));
-            print_panel_line(
-                &format!("  {}   {}", tool_label, ctx.tool_name),
-                inner_width,
-            );
-            let command = ctx.target.as_deref().unwrap_or("");
-            if !command.is_empty() {
-                let cmd_label = theme::bold(&theme::accent(&t("shell.confirm_dialog_command")));
-                let safe_command = sanitize_for_display(command);
-                let cmd_lines = wrap_text(&safe_command, width.saturating_sub(14));
-                print_panel_line(
-                    &format!("  {} {}", cmd_label, cmd_lines.lines().next().unwrap_or("")),
-                    inner_width,
-                );
-                for line in cmd_lines.lines().skip(1) {
-                    print_panel_line(&format!("         {}", line), inner_width);
-                }
-            }
-            let reason_lines = wrap_text(&ctx.message, width.saturating_sub(14));
-            let reason_label = theme::bold(&theme::accent("Reason:"));
-            print_panel_line(
-                &format!(
-                    "  {} {}",
-                    reason_label,
-                    reason_lines.lines().next().unwrap_or("")
-                ),
-                inner_width,
-            );
-            for line in reason_lines.lines().skip(1) {
-                print_panel_line(&format!("         {}", line), inner_width);
-            }
-            print_panel_line("", inner_width);
-            print_panel_line(
-                &format!("  {}", theme::accent(&t("shell.confirm_dialog_options"))),
-                inner_width,
-            );
-            // Input line lives inside the panel so it stays visually attached
-            // to the question and the pressed key is echoed back to the user.
-            let prompt_text = t("shell.confirm_dialog_question");
-            let prompt_vis = ansi_display_width(&prompt_text);
-            print!(
-                "{}  {} ",
-                theme::warning("│"),
-                theme::bold(&theme::accent(&prompt_text))
-            );
-            let _ = std::io::stdout().flush();
-            let (pressed, choice) = read_approval_choice();
-            let echo_ch = match pressed {
-                b'\r' | b'\n' => '↵',
-                0 => '?',
-                c if (c as char).is_ascii_graphic() => c as char,
-                _ => '·',
-            };
-            let used = 2 + prompt_vis + 1 + 1;
-            let pad = inner_width.saturating_sub(used);
-            // Reprint the entire input line from column 0 (`\r`) so the echoed
-            // key always sits right after the prompt with both borders intact,
-            // regardless of any terminal-side echo or cursor drift during the
-            // blocking read. The prompt prefix was already printed above; this
-            // overwrites it (and any stray echo) with the clean final line.
-            print!(
-                "\r{}  {} {}{}{}",
-                theme::warning("│"),
-                theme::bold(&theme::accent(&prompt_text)),
-                theme::accent(&echo_ch.to_string()),
-                " ".repeat(pad),
-                theme::warning("│"),
-            );
-            println!();
-            println!("{}", theme::warning(&format!("╰{}╯", border)));
-            let verdict_key = match choice {
-                aish_llm::ApprovalChoice::Once => "shell.confirm_choice_once",
-                aish_llm::ApprovalChoice::RememberSession => "shell.confirm_choice_remember",
-                aish_llm::ApprovalChoice::ReplyToAi => "shell.confirm_choice_reply",
-                aish_llm::ApprovalChoice::Deny => "shell.confirm_choice_deny",
-            };
-            println!("  {} {}", theme::accent("→"), theme::bold(&t(verdict_key)));
-            choice
+            render_security_context_panel(ctx, true)
+        });
+
+        let security_notice_callback: Arc<
+            dyn Fn(&aish_llm::PreflightSecurityContext) + Send + Sync,
+        > = Arc::new(|ctx: &aish_llm::PreflightSecurityContext| {
+            let _ = render_security_context_panel(ctx, false);
         });
 
         llm_session.set_confirmation_callback(confirmation_callback);
+        llm_session.set_security_notice_callback(security_notice_callback);
 
         // Session-scoped approval memory: when the user approves a command with
         // "remember", equivalent commands (same host + normalized text) skip
@@ -10574,6 +10494,227 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     let truncated: String = s.chars().take(max_len - 3).collect();
     format!("{}...", truncated)
 }
+
+fn estimate_security_panel_lines(
+    rows: &[(String, String)],
+    width: usize,
+    interactive: bool,
+) -> usize {
+    let mut lines = 2usize; // top border + title
+    lines += 1; // blank after title
+    for (_, value) in rows {
+        let safe_value = sanitize_for_display(value);
+        if safe_value.is_empty() {
+            lines += 1;
+            continue;
+        }
+        for raw_line in safe_value.lines() {
+            let wrapped = wrap_text(raw_line, width.saturating_sub(14));
+            lines += wrapped.lines().count().max(1);
+        }
+    }
+
+    if !interactive {
+        return lines + 1; // bottom border
+    }
+
+    // blank + options + input + bottom + verdict
+    lines + 5
+}
+
+fn render_security_context_panel(
+    ctx: &aish_llm::PreflightSecurityContext,
+    interactive: bool,
+) -> aish_llm::ApprovalChoice {
+    let panel = build_security_panel(ctx);
+    let rows = security_panel_rows(ctx);
+    // Pause EscWatcher before CPR/ScrollUp so space reservation is reliable.
+    let _input_guard = if interactive {
+        Some(aish_tools::bash::acquire_interactive_input_guard())
+    } else {
+        None
+    };
+
+    let width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .or_else(|| {
+            crossterm::terminal::size()
+                .ok()
+                .map(|(cols, _)| cols as usize)
+        })
+        .unwrap_or(80);
+    let inner_width = width.saturating_sub(4).max(20);
+    let border = "─".repeat(inner_width);
+    let paint_border = |s: &str| -> String {
+        match panel.mode {
+            aish_llm::SecurityPanelMode::Blocked => theme::error(s),
+            aish_llm::SecurityPanelMode::Info => theme::accent(s),
+            aish_llm::SecurityPanelMode::Confirm => theme::warning(s),
+        }
+    };
+
+    let print_line = |content: &str| {
+        let rendered = truncate_ansi_display_width(content, inner_width);
+        let visible = ansi_display_width(&rendered);
+        let padding = inner_width.saturating_sub(visible);
+        println!(
+            "{}{}{}{}",
+            paint_border("│"),
+            rendered,
+            " ".repeat(padding),
+            paint_border("│")
+        );
+    };
+
+    let estimated_lines = estimate_security_panel_lines(&rows, width, interactive);
+    ensure_security_panel_space(estimated_lines);
+
+    println!("{}", paint_border(&format!("╭{}╮", border)));
+    let title = theme::bold(&paint_border(&format!(
+        " ⚠  {}",
+        security_panel_title(panel.mode)
+    )));
+    print_line(&title);
+    print_line("");
+
+    for (label, value) in &rows {
+        let safe_value = sanitize_for_display(value);
+        let label_text = theme::bold(&theme::accent(&format!("{label}:")));
+        let mut first = true;
+        let source_lines = if safe_value.is_empty() {
+            vec![String::new()]
+        } else {
+            safe_value.lines().map(str::to_string).collect()
+        };
+        for raw_line in source_lines {
+            // Preserve author newlines; wrap_text collapses whitespace, so wrap each line.
+            let wrapped = wrap_text(&raw_line, width.saturating_sub(14));
+            let wrapped_lines = if wrapped.is_empty() {
+                vec![String::new()]
+            } else {
+                wrapped.lines().map(str::to_string).collect()
+            };
+            for line in wrapped_lines {
+                if first {
+                    print_line(&format!("  {} {}", label_text, line));
+                    first = false;
+                } else {
+                    print_line(&format!("         {}", line));
+                }
+            }
+        }
+    }
+
+    if !interactive {
+        println!("{}", paint_border(&format!("╰{}╯", border)));
+        return aish_llm::ApprovalChoice::Deny;
+    }
+
+    let options_text = t("shell.confirm_dialog_options");
+    let prompt_text = t("shell.confirm_dialog_question");
+    let prompt_vis = ansi_display_width(&prompt_text);
+
+    // Draw a complete box before blocking on input, then move the cursor
+    // back onto the prompt line so the typed key still appears inside.
+    print_line("");
+    print_line(&format!("  {}", theme::accent(&options_text)));
+    let used_before_echo = 2 + prompt_vis + 1; // leading spaces + prompt + gap
+    let pad = inner_width.saturating_sub(used_before_echo);
+    println!(
+        "{}  {} {}{}",
+        paint_border("│"),
+        theme::bold(&theme::accent(&prompt_text)),
+        " ".repeat(pad),
+        paint_border("│"),
+    );
+    println!("{}", paint_border(&format!("╰{}╯", border)));
+    // Move to the prompt line (2 lines up: bottom + input), column after prompt.
+    let col = (1 + 2 + prompt_vis + 1) as u16; // │ + two spaces + prompt + gap
+    let _ = crossterm::execute!(
+        io::stdout(),
+        crossterm::cursor::MoveUp(2),
+        crossterm::cursor::MoveToColumn(col),
+    );
+    let _ = std::io::stdout().flush();
+    let (pressed, choice) = read_approval_choice();
+    let echo_ch = match pressed {
+        b'\r' | b'\n' => '↵',
+        0 => '?',
+        c if (c as char).is_ascii_graphic() => c as char,
+        _ => '·',
+    };
+    let verdict_key = match choice {
+        aish_llm::ApprovalChoice::Once => "shell.confirm_choice_once",
+        aish_llm::ApprovalChoice::RememberSession => "shell.confirm_choice_remember",
+        aish_llm::ApprovalChoice::ReplyToAi => "shell.confirm_choice_reply",
+        aish_llm::ApprovalChoice::Deny => "shell.confirm_choice_deny",
+    };
+    let used = 2 + prompt_vis + 1 + 1;
+    let pad = inner_width.saturating_sub(used);
+    print!(
+        "\r{}  {} {}{}{}",
+        paint_border("│"),
+        theme::bold(&theme::accent(&prompt_text)),
+        theme::accent(&echo_ch.to_string()),
+        " ".repeat(pad),
+        paint_border("│"),
+    );
+    // Bottom border is already on the next line; skip it, then print verdict.
+    let _ = crossterm::execute!(
+        io::stdout(),
+        crossterm::cursor::MoveDown(2),
+        crossterm::cursor::MoveToColumn(0),
+    );
+    println!("  {} {}", theme::accent("→"), theme::bold(&t(verdict_key)));
+    choice
+}
+
+fn ensure_security_panel_space(lines_needed: usize) {
+    // Reserve room by scrolling the viewport. Do NOT println!() blanks here —
+    // that inserts visible empty lines above the panel.
+    let Ok((_, rows)) = crossterm::terminal::size() else {
+        return;
+    };
+    let rows = rows as usize;
+    if rows == 0 || lines_needed == 0 {
+        return;
+    }
+
+    let cursor_row = match crossterm::cursor::position() {
+        Ok((_, row)) => row as usize,
+        Err(_) => {
+            // CPR can fail while EscWatcher owns stdin. Fall back to a
+            // conservative scroll so bottom-clipped panels still move up.
+            let scroll = lines_needed.min(rows.saturating_sub(1));
+            if scroll > 0 {
+                let _ = crossterm::execute!(
+                    io::stdout(),
+                    crossterm::terminal::ScrollUp(scroll as u16),
+                    crossterm::cursor::MoveUp(scroll as u16),
+                );
+            }
+            return;
+        }
+    };
+
+    let available = rows.saturating_sub(cursor_row);
+    if lines_needed <= available {
+        return;
+    }
+    let scroll = (lines_needed - available)
+        .min(lines_needed)
+        .min(rows.saturating_sub(1));
+    if scroll == 0 {
+        return;
+    }
+    let _ = crossterm::execute!(
+        io::stdout(),
+        crossterm::terminal::ScrollUp(scroll as u16),
+        crossterm::cursor::MoveUp(scroll as u16),
+    );
+}
+
 
 fn print_panel_line(content: &str, inner_width: usize) {
     let rendered = truncate_ansi_display_width(content, inner_width);
