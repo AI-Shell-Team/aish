@@ -10715,7 +10715,6 @@ fn ensure_security_panel_space(lines_needed: usize) {
     );
 }
 
-
 fn print_panel_line(content: &str, inner_width: usize) {
     let rendered = truncate_ansi_display_width(content, inner_width);
     let visible = ansi_display_width(&rendered);

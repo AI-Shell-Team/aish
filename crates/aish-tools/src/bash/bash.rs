@@ -1034,10 +1034,7 @@ mod tests {
                 message,
                 security: Some(security),
             } => {
-                assert_eq!(
-                    message,
-                    "system config is protected (H-001; paths: /etc)"
-                );
+                assert_eq!(message, "system config is protected (H-001; paths: /etc)");
                 assert_eq!(security.tool_name, "bash");
                 assert_eq!(security.target.as_deref(), Some("rm -rf /etc"));
                 assert_eq!(security.mode, SecurityPanelMode::Blocked);
@@ -1417,10 +1414,7 @@ mod tests {
                 message,
                 security: Some(security),
             } => {
-                assert_eq!(
-                    message,
-                    "test-home-rule (M-001; paths: /home/lixin/123)"
-                );
+                assert_eq!(message, "test-home-rule (M-001; paths: /home/lixin/123)");
                 assert_eq!(security.target.as_deref(), Some("rm /home/lixin/123"));
                 assert_eq!(security.mode, SecurityPanelMode::Confirm);
                 let decision = security.decision.expect("expected security decision");
