@@ -236,10 +236,36 @@ fn format_security_message(decision: &SecurityDecision) -> String {
     {
         return reason.clone();
     }
-
-    let mut args = std::collections::HashMap::new();
-    args.insert("level".to_string(), decision.level.to_string());
-    aish_i18n::t_with_args("tools.bash.security_handling_required", &args)
+    // Last-resort fallback: instead of a bare generic level message,
+    // include the matched rule id/name and preview paths so the user can
+    // see what triggered the block (issue #408).
+    let mut parts = vec![aish_i18n::t_with_args(
+        "tools.bash.security_handling_required",
+        &{
+            let mut args = std::collections::HashMap::new();
+            args.insert("level".to_string(), decision.level.to_string());
+            args
+        },
+    )];
+    if let Some(rule) = &decision.analysis.matched_rule {
+        if let Some(id) = &rule.id {
+            parts.push(format!("rule: {}", id));
+        } else if let Some(name) = &rule.name {
+            parts.push(format!("rule: {}", name));
+        }
+    }
+    if !decision.analysis.matched_paths.is_empty() {
+        let preview = decision
+            .analysis
+            .matched_paths
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        parts.push(format!("paths: {}", preview));
+    }
+    parts.join(" | ")
 }
 
 fn build_security_context(
@@ -1203,5 +1229,70 @@ mod tests {
             }
             other => panic!("unexpected preflight result: {other:?}"),
         }
+    }
+    #[test]
+    fn test_format_security_message_shows_rule_reason_from_sandbox() {
+        // Issue #408: when a sandbox hit matches a rule that has `reason`
+        // but no `description`/`confirm_message`, the block message should
+        // surface the rule's reason — not a generic "needs HIGH security".
+        let decision = SecurityDecision {
+            level: aish_security::RiskLevel::High,
+            allow: false,
+            require_confirmation: false,
+            analysis: aish_security::SecurityAnalysis {
+                risk_level: aish_security::RiskLevel::High,
+                reasons: vec![
+                    "system config is protected".to_string(),
+                    "sandbox matched 1 high-risk filesystem change(s)".to_string(),
+                    "matched paths: /etc/aish/123".to_string(),
+                ],
+                matched_rule: Some(aish_security::MatchedRuleSummary {
+                    id: Some("H-001".to_string()),
+                    name: Some("Protect /etc".to_string()),
+                    pattern: "/etc/**".to_string(),
+                }),
+                matched_paths: vec!["/etc/aish/123".to_string()],
+                ..aish_security::SecurityAnalysis::default()
+            },
+        };
+
+        let message = format_security_message(&decision);
+        assert_eq!(message, "system config is protected");
+    }
+
+    #[test]
+    fn test_format_security_message_fallback_includes_rule_id_and_paths() {
+        // Issue #408: when no human-readable reason is available at all,
+        // the fallback should include the rule id and matched paths
+        // rather than just a bare generic level message.
+        let decision = SecurityDecision {
+            level: aish_security::RiskLevel::High,
+            allow: false,
+            require_confirmation: false,
+            analysis: aish_security::SecurityAnalysis {
+                risk_level: aish_security::RiskLevel::High,
+                reasons: vec![
+                    "sandbox matched 1 high-risk filesystem change(s)".to_string(),
+                    "matched paths: /etc/aish/123".to_string(),
+                ],
+                matched_rule: Some(aish_security::MatchedRuleSummary {
+                    id: Some("H-001".to_string()),
+                    name: Some("Protect /etc".to_string()),
+                    pattern: "/etc/**".to_string(),
+                }),
+                matched_paths: vec!["/etc/aish/123".to_string()],
+                ..aish_security::SecurityAnalysis::default()
+            },
+        };
+
+        let message = format_security_message(&decision);
+        assert!(
+            message.contains("H-001"),
+            "fallback should mention rule id, got: {message}"
+        );
+        assert!(
+            message.contains("/etc/aish/123"),
+            "fallback should mention matched paths, got: {message}"
+        );
     }
 }

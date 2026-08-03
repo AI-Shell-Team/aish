@@ -78,8 +78,23 @@ pub(crate) fn assess_sandbox_result(
         (policy.default_risk_level, Vec::new())
     };
 
+    let primary_rule = selected_hits.first().map(|(_, _, rule)| (*rule).clone());
     let mut reasons = Vec::new();
     if !selected_hits.is_empty() {
+        // Prepend the primary rule's human-readable `reason` so downstream
+        // message formatting (format_security_message) has a non-internal
+        // reason to display — matching the pattern in risk.rs / degraded.rs.
+        // Internal diagnostics ("sandbox matched ...", "matched paths: ...")
+        // are filtered out by is_internal_security_reason, so without this
+        // the message degrades to a generic "needs HIGH security" fallback.
+        if let Some(reason) = primary_rule
+            .as_ref()
+            .and_then(|rule| rule.reason.as_deref())
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+        {
+            reasons.push(reason.to_string());
+        }
         reasons.push(format!(
             "sandbox matched {} {}-risk filesystem change(s)",
             selected_hits.len(),
@@ -112,7 +127,6 @@ pub(crate) fn assess_sandbox_result(
         }
     }
 
-    let primary_rule = selected_hits.first().map(|(_, _, rule)| (*rule).clone());
     let mut analysis = SecurityAnalysis {
         risk_level,
         reasons,
@@ -339,6 +353,9 @@ mod tests {
                 .and_then(|rule| rule.id.as_deref()),
             Some("H-001")
         );
+        // The rule's `reason` should be the first (human-readable) reason,
+        // preceding internal diagnostics like "sandbox matched ...".
+        assert_eq!(analysis.reasons.first(), Some(&"system config is protected".to_string()));
         assert_eq!(analysis.impact_description, "system config directory");
         assert_eq!(
             analysis.suggested_alternatives,
