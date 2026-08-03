@@ -10508,8 +10508,9 @@ fn estimate_security_panel_lines(
             lines += 1;
             continue;
         }
+        let wrap_width = security_panel_wrap_width(width);
         for raw_line in safe_value.lines() {
-            let wrapped = wrap_text(raw_line, width.saturating_sub(14));
+            let wrapped = wrap_text(raw_line, wrap_width);
             lines += wrapped.lines().count().max(1);
         }
     }
@@ -10587,9 +10588,10 @@ fn render_security_context_panel(
         } else {
             safe_value.lines().map(str::to_string).collect()
         };
+        let wrap_width = security_panel_wrap_width(width);
         for raw_line in source_lines {
             // Preserve author newlines; wrap_text collapses whitespace, so wrap each line.
-            let wrapped = wrap_text(&raw_line, width.saturating_sub(14));
+            let wrapped = wrap_text(&raw_line, wrap_width);
             let wrapped_lines = if wrapped.is_empty() {
                 vec![String::new()]
             } else {
@@ -10783,6 +10785,11 @@ fn ansi_display_width(s: &str) -> usize {
         width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
     }
     width
+}
+
+fn security_panel_wrap_width(width: usize) -> usize {
+    // Keep estimate/render consistent on narrow terminals: never wrap with 0.
+    width.saturating_sub(14).max(1)
 }
 
 /// Wrap text to the given width, preserving word boundaries.

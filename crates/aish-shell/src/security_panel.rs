@@ -66,7 +66,7 @@ pub(crate) fn security_panel_rows(context: &PreflightSecurityContext) -> Vec<(St
 
     let reason = primary_panel_reason(decision, &context.message);
     if !reason.trim().is_empty() {
-        rows.push((aish_i18n::t("shell.security.label.reasons"), reason));
+        rows.push((aish_i18n::t("shell.security.label.reasons"), reason.clone()));
     }
 
     if let Some(rule) = matched_rule_label(decision) {
@@ -85,9 +85,13 @@ pub(crate) fn security_panel_rows(context: &PreflightSecurityContext) -> Vec<(St
         if !paths.is_empty() {
             rows.push((aish_i18n::t("shell.security.label.matched_paths"), paths));
         }
-    } else if let Some(sandbox_reason) = decision.analysis.sandbox.reason.as_deref() {
+    }
+
+    // Paths and degraded-sandbox notes are independent: a fallback decision can
+    // carry matched paths while still needing to disclose that sandbox was down.
+    if let Some(sandbox_reason) = decision.analysis.sandbox.reason.as_deref() {
         let note = localized_sandbox_degraded_reason(&decision.analysis, sandbox_reason);
-        if !note.trim().is_empty() && primary_panel_reason(decision, &context.message) != note {
+        if !note.trim().is_empty() && reason != note {
             rows.push((aish_i18n::t("shell.security.label.fallback_hint"), note));
         }
     }
@@ -172,13 +176,19 @@ fn strip_message_annotation(message: &str) -> String {
     let trimmed = message.trim();
     if let Some(idx) = trimmed.rfind(" (") {
         let suffix = &trimmed[idx + 2..];
+        let looks_like_rule_id = |part: &str| {
+            let part = part.trim();
+            matches!(part.as_bytes().first(), Some(b'H' | b'M' | b'L'))
+                && part.len() > 2
+                && part.as_bytes()[1] == b'-'
+                && part[2..].bytes().all(|b| b.is_ascii_digit())
+        };
         if suffix.ends_with(')')
             && (suffix.contains("paths:")
-                || suffix.trim_end_matches(')').split(';').any(|part| {
-                    part.trim().starts_with('H')
-                        || part.trim().starts_with('M')
-                        || part.trim().starts_with('L')
-                }))
+                || suffix
+                    .trim_end_matches(')')
+                    .split(';')
+                    .any(looks_like_rule_id))
         {
             return trimmed[..idx].trim().to_string();
         }
@@ -263,7 +273,7 @@ mod tests {
     use aish_llm::{PreflightSecurityContext, SecurityPanelMode};
     use aish_security::{MatchedRuleSummary, RiskLevel, SecurityAnalysis, SecurityDecision};
 
-    use super::{build_security_panel, security_panel_rows};
+    use super::{build_security_panel, security_panel_rows, strip_message_annotation};
 
     fn blocked_etc_context() -> PreflightSecurityContext {
         let mut analysis = SecurityAnalysis {
@@ -392,5 +402,77 @@ mod tests {
         assert!(rows.iter().any(|(_, value)| {
             value.contains("Edit /etc manually with a backup/change process.")
         }));
+    }
+
+    fn degraded_with_paths_context() -> PreflightSecurityContext {
+        let mut analysis = SecurityAnalysis {
+            risk_level: RiskLevel::Medium,
+            reasons: vec!["home path is protected".to_string()],
+            impact_description: "home path is protected".to_string(),
+            matched_rule: Some(MatchedRuleSummary {
+                id: Some("M-001".to_string()),
+                name: Some("Protect /home".to_string()),
+                pattern: "/home/**".to_string(),
+            }),
+            matched_paths: vec!["/home/lixin/123".to_string()],
+            ..Default::default()
+        };
+        analysis.sandbox.enabled = false;
+        analysis.sandbox.reason = Some("sandbox_ipc_unavailable".to_string());
+        let decision = SecurityDecision::confirm(RiskLevel::Medium, analysis);
+        PreflightSecurityContext {
+            tool_name: "bash".to_string(),
+            target: Some("rm /home/lixin/123".to_string()),
+            message: "home path is protected (M-001; paths: /home/lixin/123)".to_string(),
+            mode: SecurityPanelMode::Confirm,
+            decision: Some(decision),
+        }
+    }
+
+    fn row_value<'a>(rows: &'a [(String, String)], needles: &[&str]) -> Option<&'a str> {
+        rows.iter()
+            .find(|(label, _)| needles.iter().any(|n| label.contains(n)))
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn security_panel_rows_show_paths_and_sandbox_fallback_hint() {
+        let context = degraded_with_paths_context();
+        let rows = security_panel_rows(&context);
+
+        let paths = row_value(&rows, &["Path", "路径", "パス", "Pfad", "Chemin", "Ruta"])
+            .expect("paths row");
+        assert_eq!(paths, "/home/lixin/123");
+
+        let note = row_value(
+            &rows,
+            &["Note", "提示", "Hinweis", "Nota", "Remarque", "注記"],
+        )
+        .expect("fallback hint row");
+        assert!(
+            !note.trim().is_empty(),
+            "expected degraded-sandbox note, got empty"
+        );
+        assert_ne!(note, "home path is protected");
+    }
+
+    #[test]
+    fn strip_message_annotation_keeps_host_unreachable_parenthetical() {
+        let message = "cannot verify command (Host unreachable)";
+        assert_eq!(strip_message_annotation(message), message);
+    }
+
+    #[test]
+    fn strip_message_annotation_strips_rule_id_and_paths() {
+        assert_eq!(
+            strip_message_annotation(
+                "System config changes can break the host (H-001; paths: /etc/aish/123)"
+            ),
+            "System config changes can break the host"
+        );
+        assert_eq!(
+            strip_message_annotation("home path is protected (M-001)"),
+            "home path is protected"
+        );
     }
 }
