@@ -83,20 +83,12 @@ pub(crate) fn security_panel_rows(context: &PreflightSecurityContext) -> Vec<(St
             .collect::<Vec<_>>()
             .join(", ");
         if !paths.is_empty() {
-            rows.push((
-                aish_i18n::t("shell.security.label.matched_paths"),
-                paths,
-            ));
+            rows.push((aish_i18n::t("shell.security.label.matched_paths"), paths));
         }
     } else if let Some(sandbox_reason) = decision.analysis.sandbox.reason.as_deref() {
         let note = localized_sandbox_degraded_reason(&decision.analysis, sandbox_reason);
-        if !note.trim().is_empty()
-            && primary_panel_reason(decision, &context.message) != note
-        {
-            rows.push((
-                aish_i18n::t("shell.security.label.fallback_hint"),
-                note,
-            ));
+        if !note.trim().is_empty() && primary_panel_reason(decision, &context.message) != note {
+            rows.push((aish_i18n::t("shell.security.label.fallback_hint"), note));
         }
     }
 
@@ -182,10 +174,11 @@ fn strip_message_annotation(message: &str) -> String {
         let suffix = &trimmed[idx + 2..];
         if suffix.ends_with(')')
             && (suffix.contains("paths:")
-                || suffix
-                    .trim_end_matches(')')
-                    .split(';')
-                    .any(|part| part.trim().starts_with('H') || part.trim().starts_with('M') || part.trim().starts_with('L')))
+                || suffix.trim_end_matches(')').split(';').any(|part| {
+                    part.trim().starts_with('H')
+                        || part.trim().starts_with('M')
+                        || part.trim().starts_with('L')
+                }))
         {
             return trimmed[..idx].trim().to_string();
         }
@@ -326,10 +319,7 @@ mod tests {
         let panel = build_security_panel(&context);
 
         assert_eq!(panel.risk_level.as_deref(), Some("HIGH"));
-        assert_eq!(
-            panel.message,
-            "System config changes can break the host"
-        );
+        assert_eq!(panel.message, "System config changes can break the host");
         assert_eq!(
             panel.reasons,
             vec!["System config changes can break the host".to_string()]
@@ -351,7 +341,14 @@ mod tests {
 
         let reason = rows
             .iter()
-            .find(|(label, _)| label.contains("Reason") || label.contains("原因") || label.contains("理由") || label.contains("Motivos") || label.contains("Raisons") || label.contains("Gründe"))
+            .find(|(label, _)| {
+                label.contains("Reason")
+                    || label.contains("原因")
+                    || label.contains("理由")
+                    || label.contains("Motivos")
+                    || label.contains("Raisons")
+                    || label.contains("Gründe")
+            })
             .map(|(_, value)| value.as_str())
             .expect("reason row");
         assert_eq!(reason, "System config changes can break the host");
@@ -372,7 +369,10 @@ mod tests {
             })
             .map(|(_, value)| value.as_str())
             .expect("rule row");
-        assert!(rule.contains("H-001") && rule.contains("Protect /etc"), "{rule}");
+        assert!(
+            rule.contains("H-001") && rule.contains("Protect /etc"),
+            "{rule}"
+        );
 
         let paths = rows
             .iter()
