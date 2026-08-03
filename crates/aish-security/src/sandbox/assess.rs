@@ -355,7 +355,10 @@ mod tests {
         );
         // The rule's `reason` should be the first (human-readable) reason,
         // preceding internal diagnostics like "sandbox matched ...".
-        assert_eq!(analysis.reasons.first(), Some(&"system config is protected".to_string()));
+        assert_eq!(
+            analysis.reasons.first(),
+            Some(&"system config is protected".to_string())
+        );
         assert_eq!(analysis.impact_description, "system config directory");
         assert_eq!(
             analysis.suggested_alternatives,
