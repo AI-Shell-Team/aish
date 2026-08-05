@@ -2,9 +2,6 @@ name: CI
 
 on:
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
   push:
     branches:
       - main
@@ -61,27 +58,44 @@ jobs:
   lint-test:
     name: Lint and test
     needs: changes
-    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
 
     steps:
+      # Required status check "Lint and test" must always report success on PRs.
+      # Docs/skills-only changes skip the heavy Rust work below.
+      - name: Skip heavy checks for non-code PRs
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ] \
+            || [ "${{ needs.changes.outputs.code }}" = "true" ] \
+            || [ "${{ needs.changes.outputs.packaging }}" = "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No code/packaging changes; marking Lint and test as passed."
+          fi
+
       - name: Checkout repository
+        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v6
 
       - name: Read pinned Rust toolchain
         id: rust_toolchain
+        if: steps.gate.outputs.run == 'true'
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
           test -n "$channel"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
+        if: steps.gate.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
           components: clippy,rustfmt
 
       - name: Cache Cargo registry
+        if: steps.gate.outputs.run == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -92,29 +106,37 @@ jobs:
             ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
       - name: Check formatting
+        if: steps.gate.outputs.run == 'true'
         run: make format-check
 
       - name: Run clippy
+        if: steps.gate.outputs.run == 'true'
         run: make lint
 
       - name: Run tests
+        if: steps.gate.outputs.run == 'true'
         run: cargo test --workspace
 
       - name: Run packaging release script smoke tests
+        if: steps.gate.outputs.run == 'true'
         run: |
           ./packaging/tests/release_scripts_smoke.sh
           ./packaging/tests/seed_skills_ownership_smoke.sh
 
       - name: Install musl tools
+        if: steps.gate.outputs.run == 'true'
         run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl --toolchain "${{ steps.rust_toolchain.outputs.channel }}"
 
       - name: Build release binary (musl)
+        if: steps.gate.outputs.run == 'true'
         run: cargo build --release --target x86_64-unknown-linux-musl
 
       - name: Smoke test binary
+        if: steps.gate.outputs.run == 'true'
         run: ./target/x86_64-unknown-linux-musl/release/aish --help
 
       - name: Upload release binary
+        if: steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v6
         with:
           name: aish-linux-amd64
