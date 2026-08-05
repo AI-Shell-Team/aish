@@ -58,7 +58,7 @@ pub struct LlmSession {
     /// Session-scoped approval memory. When set, commands the user approved
     /// with "remember" skip confirmation (and the sandbox preflight) for the
     /// rest of the session on the same host.
-    approval_memory: Option<Arc<Mutex<ApprovalMemory>>>,
+    approval_memory: Option<Arc<parking_lot::Mutex<ApprovalMemory>>>,
     /// Callback invoked when the tool-call iteration limit is reached.
     /// Receives the current iteration count and returns true to reset and continue.
     iteration_limit_callback: Option<Arc<dyn Fn(u32) -> bool + Send + Sync>>,
@@ -239,7 +239,7 @@ impl LlmSession {
     /// Install session-scoped approval memory. When present, commands approved
     /// with "remember" skip confirmation (and sandbox preflight) for the rest
     /// of the session.
-    pub fn set_approval_memory(&mut self, memory: Arc<Mutex<ApprovalMemory>>) {
+    pub fn set_approval_memory(&mut self, memory: Arc<parking_lot::Mutex<ApprovalMemory>>) {
         self.approval_memory = Some(memory);
     }
 
@@ -844,89 +844,17 @@ impl LlmSession {
                         messages.push(chat_msg);
                     }
 
-                    // Execute each tool call and append results
-                    for tc in &tool_calls {
-                        let result = self.execute_tool(tc).await;
-                        let short_circuit = is_short_circuit_result(&result);
-                        let output = result.output.clone();
-
-                        // Log tool call span to Langfuse
-                        if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
-                            langfuse
-                                .span_tool_call(tid, &tc.name, &tc.arguments, &output, 0)
-                                .await;
-                        }
-                        if short_circuit {
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::GenerationEnd,
-                                data: serde_json::json!({}),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::OpEnd,
-                                data: serde_json::json!({"reason": "short_circuit"}),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            // Sub-agent cancel is shown by the shell as `shell.interrupted`
-                            // (same as Ctrl+C); do not return the tool string as AI body.
-                            let suppress_body = result.meta.as_ref().is_some_and(|meta| {
-                                matches!(
-                                    meta.get("reason").and_then(|v| v.as_str()),
-                                    Some("sub_agent_cancelled") | Some("user_cancelled")
-                                )
-                            });
-                            let text = if self.security_notice_callback.is_some() || suppress_body {
-                                String::new()
-                            } else {
-                                output
-                            };
-                            let new_messages = messages[initial_len..].to_vec();
-                            return Ok(crate::types::ProcessResult { text, new_messages });
-                        }
-
-                        // Track consecutive failures for early termination.
-                        // short_circuit results (security blocked) are excluded.
-                        if result.ok {
-                            consecutive_failures = 0;
-                        } else {
-                            consecutive_failures += 1;
-                        }
-                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                            tracing::warn!(
-                                consecutive_failures,
-                                "Too many consecutive tool failures, stopping loop"
-                            );
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::Error,
-                                data: serde_json::json!({
-                                    "error": format!(
-                                        "Stopped: {} consecutive tool failures",
-                                        consecutive_failures
-                                    ),
-                                    "consecutive_failures": consecutive_failures,
-                                }),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::OpEnd,
-                                data: serde_json::json!({"reason": "consecutive_failures"}),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            messages.push(ChatMessage::tool_result(&tc.id, output));
-                            let text = format!(
-                                "Stopped after {} consecutive tool execution failures. \
-                                 Please check your connection and retry.",
-                                consecutive_failures
-                            );
-                            let new_messages = messages[initial_len..].to_vec();
-                            return Ok(crate::types::ProcessResult { text, new_messages });
-                        }
-
-                        messages.push(ChatMessage::tool_result(&tc.id, output));
+                    if let Some(pr) = self
+                        .run_tool_calls(
+                            &tool_calls,
+                            &mut messages,
+                            &mut consecutive_failures,
+                            &trace_id,
+                            initial_len,
+                        )
+                        .await
+                    {
+                        return Ok(pr);
                     }
 
                     // Trim old tool-call rounds to prevent unbounded growth
@@ -1242,89 +1170,17 @@ impl LlmSession {
                     }
                     messages.push(assistant_msg);
 
-                    // Execute tools
-                    for tc in &tool_calls {
-                        let result = self.execute_tool(tc).await;
-                        let short_circuit = is_short_circuit_result(&result);
-                        let output = result.output.clone();
-
-                        // Log tool call span to Langfuse
-                        if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, &trace_id) {
-                            langfuse
-                                .span_tool_call(tid, &tc.name, &tc.arguments, &output, 0)
-                                .await;
-                        }
-                        if short_circuit {
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::GenerationEnd,
-                                data: serde_json::json!({}),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::OpEnd,
-                                data: serde_json::json!({"reason": "short_circuit"}),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            // Sub-agent cancel is shown by the shell as `shell.interrupted`
-                            // (same as Ctrl+C); do not return the tool string as AI body.
-                            let suppress_body = result.meta.as_ref().is_some_and(|meta| {
-                                matches!(
-                                    meta.get("reason").and_then(|v| v.as_str()),
-                                    Some("sub_agent_cancelled") | Some("user_cancelled")
-                                )
-                            });
-                            let text = if self.security_notice_callback.is_some() || suppress_body {
-                                String::new()
-                            } else {
-                                output
-                            };
-                            let new_messages = messages[initial_len..].to_vec();
-                            return Ok(crate::types::ProcessResult { text, new_messages });
-                        }
-
-                        // Track consecutive failures for early termination.
-                        // short_circuit results (security blocked) are excluded.
-                        if result.ok {
-                            consecutive_failures = 0;
-                        } else {
-                            consecutive_failures += 1;
-                        }
-                        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                            tracing::warn!(
-                                consecutive_failures,
-                                "Too many consecutive tool failures, stopping loop"
-                            );
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::Error,
-                                data: serde_json::json!({
-                                    "error": format!(
-                                        "Stopped: {} consecutive tool failures",
-                                        consecutive_failures
-                                    ),
-                                    "consecutive_failures": consecutive_failures,
-                                }),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            self.emit_event(LlmEvent {
-                                event_type: LlmEventType::OpEnd,
-                                data: serde_json::json!({"reason": "consecutive_failures"}),
-                                timestamp: now_timestamp(),
-                                metadata: None,
-                            });
-                            messages.push(ChatMessage::tool_result(&tc.id, output));
-                            let text = format!(
-                                "Stopped after {} consecutive tool execution failures. \
-                                 Please check your connection and retry.",
-                                consecutive_failures
-                            );
-                            let new_messages = messages[initial_len..].to_vec();
-                            return Ok(crate::types::ProcessResult { text, new_messages });
-                        }
-
-                        messages.push(ChatMessage::tool_result(&tc.id, output));
+                    if let Some(pr) = self
+                        .run_tool_calls(
+                            &tool_calls,
+                            &mut messages,
+                            &mut consecutive_failures,
+                            &trace_id,
+                            initial_len,
+                        )
+                        .await
+                    {
+                        return Ok(pr);
                     }
 
                     // Smart-trim old tool outputs to prevent unbounded growth
@@ -1523,6 +1379,164 @@ impl LlmSession {
             ToolResult::error(format!("Unknown tool: {}", tool_call.name))
         }
     }
+    /// Post-process one tool result inside the tool-calling loop: log the
+    /// Langfuse span, honor short-circuit (security block / cancel), track
+    /// consecutive failures, and append the `tool_result` message.
+    ///
+    /// Returns `Some(ProcessResult)` when the caller must return immediately
+    /// (short-circuit or failure threshold reached); `None` to keep looping.
+    async fn process_tool_call_result(
+        &self,
+        tc: &ToolCall,
+        result: ToolResult,
+        messages: &mut Vec<ChatMessage>,
+        consecutive_failures: &mut usize,
+        trace_id: &Option<String>,
+        initial_len: usize,
+    ) -> Option<crate::types::ProcessResult> {
+        let short_circuit = is_short_circuit_result(&result);
+        let output = result.output.clone();
+
+        // Log tool call span to Langfuse
+        if let (Some(ref langfuse), Some(ref tid)) = (&self.langfuse, trace_id) {
+            langfuse
+                .span_tool_call(tid, &tc.name, &tc.arguments, &output, 0)
+                .await;
+        }
+        if short_circuit {
+            self.emit_event(LlmEvent {
+                event_type: LlmEventType::GenerationEnd,
+                data: serde_json::json!({}),
+                timestamp: now_timestamp(),
+                metadata: None,
+            });
+            self.emit_event(LlmEvent {
+                event_type: LlmEventType::OpEnd,
+                data: serde_json::json!({"reason": "short_circuit"}),
+                timestamp: now_timestamp(),
+                metadata: None,
+            });
+            // Sub-agent cancel is shown by the shell as `shell.interrupted`
+            // (same as Ctrl+C); do not return the tool string as AI body.
+            let suppress_body = result.meta.as_ref().is_some_and(|meta| {
+                matches!(
+                    meta.get("reason").and_then(|v| v.as_str()),
+                    Some("sub_agent_cancelled") | Some("user_cancelled")
+                )
+            });
+            let text = if self.security_notice_callback.is_some() || suppress_body {
+                String::new()
+            } else {
+                output
+            };
+            let new_messages = messages[initial_len..].to_vec();
+            return Some(crate::types::ProcessResult { text, new_messages });
+        }
+
+        // Track consecutive failures for early termination.
+        // short_circuit results (security blocked) are excluded.
+        if result.ok {
+            *consecutive_failures = 0;
+        } else {
+            *consecutive_failures += 1;
+        }
+        if *consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            tracing::warn!(
+                consecutive_failures = *consecutive_failures,
+                "Too many consecutive tool failures, stopping loop"
+            );
+            self.emit_event(LlmEvent {
+                event_type: LlmEventType::Error,
+                data: serde_json::json!({
+                    "error": format!(
+                        "Stopped: {} consecutive tool failures",
+                        *consecutive_failures
+                    ),
+                    "consecutive_failures": *consecutive_failures,
+                }),
+                timestamp: now_timestamp(),
+                metadata: None,
+            });
+            self.emit_event(LlmEvent {
+                event_type: LlmEventType::OpEnd,
+                data: serde_json::json!({"reason": "consecutive_failures"}),
+                timestamp: now_timestamp(),
+                metadata: None,
+            });
+            messages.push(ChatMessage::tool_result(&tc.id, output));
+            let text = format!(
+                "Stopped after {} consecutive tool execution failures. \
+                 Please check your connection and retry.",
+                *consecutive_failures
+            );
+            let new_messages = messages[initial_len..].to_vec();
+            return Some(crate::types::ProcessResult { text, new_messages });
+        }
+
+        messages.push(ChatMessage::tool_result(&tc.id, output));
+        None
+    }
+
+    /// Execute a batch of tool calls and post-process every result.
+    ///
+    /// When every call targets the `Agent` sub-agent tool and there is more
+    /// than one, the calls run **concurrently** — each `Agent` spawns an
+    /// isolated `SubSession` (independent tool registry, cancellation, and
+    /// event handling), so there are no shared mutable side effects between
+    /// them. All other batches execute **sequentially**, preserving the
+    /// original "stop on first short-circuit" semantics.
+    async fn run_tool_calls(
+        &self,
+        tool_calls: &[ToolCall],
+        messages: &mut Vec<ChatMessage>,
+        consecutive_failures: &mut usize,
+        trace_id: &Option<String>,
+        initial_len: usize,
+    ) -> Option<crate::types::ProcessResult> {
+        let parallel = tool_calls.len() > 1 && tool_calls.iter().all(|tc| tc.name == "Agent");
+
+        if parallel {
+            tracing::info!(
+                count = tool_calls.len(),
+                "executing sub-agent tool calls in parallel"
+            );
+            let results: Vec<ToolResult> =
+                futures::future::join_all(tool_calls.iter().map(|tc| self.execute_tool(tc))).await;
+            for (tc, result) in tool_calls.iter().zip(results) {
+                if let Some(pr) = self
+                    .process_tool_call_result(
+                        tc,
+                        result,
+                        messages,
+                        consecutive_failures,
+                        trace_id,
+                        initial_len,
+                    )
+                    .await
+                {
+                    return Some(pr);
+                }
+            }
+        } else {
+            for tc in tool_calls {
+                let result = self.execute_tool(tc).await;
+                if let Some(pr) = self
+                    .process_tool_call_result(
+                        tc,
+                        result,
+                        messages,
+                        consecutive_failures,
+                        trace_id,
+                        initial_len,
+                    )
+                    .await
+                {
+                    return Some(pr);
+                }
+            }
+        }
+        None
+    }
 
     /// Create an isolated subsession that shares the LLM client credentials
     /// and confirmation callback but has independent event handling, cancellation,
@@ -1585,7 +1599,7 @@ impl LlmSession {
         if memory_command.is_some_and(|command| {
             self.approval_memory
                 .as_ref()
-                .is_some_and(|memory| memory.lock().unwrap().is_allowed(command))
+                .is_some_and(|memory| memory.lock().is_allowed(command))
         }) {
             self.emit_audit(AuditEvent::security_decision(
                 chrono::Utc::now(),
@@ -1634,7 +1648,7 @@ impl LlmSession {
                 if matches!(choice, ApprovalChoice::RememberSession) {
                     if let Some(memory) = &self.approval_memory {
                         if let Some(command) = memory_command {
-                            memory.lock().unwrap().remember(command);
+                            memory.lock().remember(command);
                         }
                     }
                 }
@@ -3244,7 +3258,7 @@ mod tests {
         session.set_confirmation_callback(std::sync::Arc::new(
             |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
         ));
-        session.set_approval_memory(std::sync::Arc::new(std::sync::Mutex::new(
+        session.set_approval_memory(std::sync::Arc::new(parking_lot::Mutex::new(
             ApprovalMemory::new(),
         )));
 
@@ -3277,7 +3291,7 @@ mod tests {
         session.set_confirmation_callback(std::sync::Arc::new(
             |_ctx: &PreflightSecurityContext| ApprovalChoice::ReplyToAi,
         ));
-        session.set_approval_memory(std::sync::Arc::new(std::sync::Mutex::new(
+        session.set_approval_memory(std::sync::Arc::new(parking_lot::Mutex::new(
             ApprovalMemory::new(),
         )));
 
@@ -3291,5 +3305,168 @@ mod tests {
         assert!(result.output.contains("different approach"));
         // Preflight still ran once (memory miss → confirm → reply).
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    /// Tool that echoes a `tag` from its args so parallel calls can be told
+    /// apart and matched back to their originating call id.
+    struct ArgsEchoTool;
+
+    impl Tool for ArgsEchoTool {
+        fn name(&self) -> &str {
+            "Agent"
+        }
+        fn description(&self) -> &str {
+            "echo args tag"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, args: serde_json::Value) -> crate::types::ToolResult {
+            let tag = args.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
+            crate::types::ToolResult::success(format!("echo:{tag}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_agent_calls_all_execute_and_keep_id_order() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        // Turn 1: two independent Agent calls in one batch; turn 2: plain text.
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[
+                ("c1", "Agent", r#"{"tag":"alpha"}"#),
+                ("c2", "Agent", r#"{"tag":"beta"}"#),
+            ])),
+            Ok(mock_text_response("all done")),
+        ]);
+        session.register_tool(Box::new(ArgsEchoTool));
+
+        let result = session
+            .process_input(
+                &ChatMessage::user("spawn two agents"),
+                &[],
+                Some("system"),
+                false,
+            )
+            .await
+            .expect("process_input should succeed");
+
+        // Both sub-agent calls executed, and each tool_result carries the tag
+        // from its own args — proving results were matched back to the correct
+        // call id rather than collapsed or swapped.
+        let tool_outputs: Vec<String> = result
+            .new_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| {
+                m.content
+                    .as_ref()
+                    .and_then(|c| c.to_text())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            tool_outputs.len(),
+            2,
+            "both agent calls must produce a tool result"
+        );
+        assert_eq!(
+            tool_outputs,
+            vec!["echo:alpha".to_string(), "echo:beta".to_string()],
+            "join_all + zip must preserve tool_call order: {tool_outputs:?}"
+        );
+    }
+    use std::future::Future;
+    use std::pin::Pin;
+    /// Tool that tracks live concurrency: increments a counter on entry,
+    /// sleeps long enough to force overlap, decrements on exit, and records
+    /// the peak number of simultaneously-active calls. This makes parallel
+    /// vs sequential execution directly observable (peak >= 2 means the
+    /// calls actually overlapped; peak == 1 means they ran one after another).
+    struct ConcurrencyProbe {
+        inflight: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        peak: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl Tool for ConcurrencyProbe {
+        fn name(&self) -> &str {
+            "Agent"
+        }
+        fn description(&self) -> &str {
+            "concurrency probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+            crate::types::ToolResult::success("probe")
+        }
+        fn execute_async<'a>(
+            &'a self,
+            _args: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = crate::types::ToolResult> + Send + 'a>> {
+            let inflight = self.inflight.clone();
+            let peak = self.peak.clone();
+            Box::pin(async move {
+                use std::sync::atomic::Ordering;
+                let cur = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut known = peak.load(Ordering::SeqCst);
+                while cur > known {
+                    match peak.compare_exchange(known, cur, Ordering::SeqCst, Ordering::SeqCst) {
+                        Ok(_) => break,
+                        Err(actual) => known = actual,
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                inflight.fetch_sub(1, Ordering::SeqCst);
+                crate::types::ToolResult::success("probe")
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_agent_batch_runs_concurrently() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+        use std::sync::atomic::Ordering;
+
+        let inflight = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[
+                ("c1", "Agent", "{}"),
+                ("c2", "Agent", "{}"),
+                ("c3", "Agent", "{}"),
+            ])),
+            Ok(mock_text_response("done")),
+        ]);
+        session.register_tool(Box::new(ConcurrencyProbe {
+            inflight: inflight.clone(),
+            peak: peak.clone(),
+        }));
+
+        session
+            .process_input(&ChatMessage::user("x"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        // join_all runs the probes concurrently, so at least two must overlap.
+        // If `run_tool_calls` regresses to sequential `for` (or `parallel` is
+        // forced false), peak stays 1 and this assertion fails.
+        let observed = peak.load(Ordering::SeqCst);
+        assert!(
+            observed >= 2,
+            "expected concurrent sub-agent execution (peak >= 2), got peak = {observed}"
+        );
     }
 }
