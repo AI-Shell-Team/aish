@@ -55,10 +55,11 @@ Short-path, read-only diagnosis for lag, slowness, resource pressure, or a recen
 4. **Follow-ups fill gaps only**: the next probe answers “what is still missing”, not “scan every focus again”.
 5. **Advice needs confirmation**: prefer action targets; give concrete kill/restart commands only if asked, and remind the user to save work.
 6. **Isolated sessions**: do not run report-writing scripts under this skill (for example `scripts/diagnose.sh`).
+7. **Honest probes**: if a tool is missing or a probe fails, state that in Evidence—do not treat it as “no problem found”.
 
 ## Workflow
 
-```
+```text
 Understand symptom → quick check (only if vague) → focused probes → answer
                          ↑ stop when evidence is enough ↑
 ```
@@ -109,26 +110,26 @@ Add only the set that fills the current gap. If a tool is missing, skip it and n
 free -h
 swapon --show
 ps -eo pid,user,comm,rss,%mem --sort=-rss | head -20
-journalctl -k -b --no-pager 2>/dev/null | grep -iE 'out of memory|oom|killed process' | tail -30
+journalctl -k -b --no-pager | grep -iE 'out of memory|oom|killed process' | tail -30
 ```
 
 If still missing “who was killed / cache vs anon”:
 
 ```bash
 grep -E 'MemTotal|MemAvailable|Buffers|Cached|AnonPages|Shmem|SwapTotal|SwapFree' /proc/meminfo
-df -h /dev/shm /run /tmp 2>/dev/null
+df -h /dev/shm /run /tmp
 ```
 
 #### Disk
 
 ```bash
 vmstat 1 5
-iostat -xz 1 5 2>/dev/null || true
+iostat -xz 1 5
 df -h
 ps -eo pid,state,comm,wchan:32 | awk '$2=="D" || $2=="d"' | head -20
 ```
 
-If still missing “who is writing” and the tool exists: `pidstat -d 1 5` or `iotop -boPqqq -n 3`.
+Skip `iostat` if missing and note that in Evidence. If still missing “who is writing” and the tool exists: `pidstat -d 1 5` or `iotop -boPqqq -n 3`.
 
 #### CPU
 
@@ -138,7 +139,7 @@ vmstat 1 5
 ps -eo pid,user,comm,state,%cpu,%mem --sort=-%cpu | head -20
 ```
 
-If still missing “what it waits on”, for a suspect PID: `cat /proc/<pid>/wchan 2>/dev/null`.
+If still missing “what it waits on”, for a suspect PID: `cat /proc/<pid>/wchan`.
 
 #### Local network (only when the user mentions network)
 
@@ -152,14 +153,15 @@ Inspect local sockets and error/retransmit counters first. For full path quality
 
 #### Incident (sudden reboot / crash recovery)
 
+Start with `last -x`. Prefer specific signatures (OOM killed process, kernel panic, I/O error)—not generic `error`/`fail`/`hung` alone.
+
 ```bash
-journalctl -b -1 -p warning..alert --no-pager 2>/dev/null | tail -80
-journalctl -k -b -1 --no-pager 2>/dev/null | grep -iE 'panic|oops|oom|error|fail|watchdog' | tail -40
-dmesg -T 2>/dev/null | grep -iE 'panic|oops|oom|error|fail|hung' | tail -40
 last -x | head -20
+journalctl -b -1 -p warning..alert --no-pager | tail -80
+journalctl -k -b -1 --no-pager | grep -iE 'Out of memory|Killed process|Kernel panic|Oops:|I/O error' | tail -40
 ```
 
-Clear OOM/panic/I/O errors → conclude from that. Otherwise say evidence is thin and suggest re-running right after the next incident or using `sosreport-analyzer`.
+Correlated OOM/panic/I/O → conclude from that. Otherwise inconclusive; suggest re-running after the next incident or using `sosreport-analyzer`.
 
 ### 4. Threshold hints (secondary to evidence)
 
@@ -179,7 +181,7 @@ Thresholds help; **conclusions must follow this run’s samples and logs**.
 ## Evidence
 - Only metrics/processes/logs that support the conclusion
 - Label timing: current sample / current boot logs / previous boot logs
-- If a tool was missing: “no xxx; used yyy instead”
+- Note unavailable or failed probes when relevant
 
 ## Recommendations
 - Short-term action targets (close user apps, free space, etc.)

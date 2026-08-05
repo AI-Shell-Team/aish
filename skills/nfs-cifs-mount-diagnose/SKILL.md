@@ -46,12 +46,13 @@ Troubleshoot NFS or CIFS/SMB mount failures, boot-time automount failures, and p
 
 1. **Collect first**: protocol (NFS/CIFS), server, export/share path, full error text, mount command used.
 2. **Read-only first**: modules, network, current mounts, fstab—do not mount on your own.
-3. **Match error patterns early**: many failures are identifiable from the message alone.
+3. **Match error patterns early**: treat them as **candidates**, then verify.
 4. **Stop when enough**: stop once the likely root cause is clear.
+5. **No secrets in chat**: do not paste passwords or `password=` / `credentials=` options.
 
 ## Workflow
 
-```
+```text
 Collect info → error pattern match → client environment → connectivity → recommendations
 ```
 
@@ -71,10 +72,10 @@ Collect info → error pattern match → client environment → connectivity →
 
 | Error / symptom | Common cause | Direction |
 |-----------------|--------------|-----------|
-| `access denied by server while mounting` with a **subdirectory** path | Remote subdir does not exist (not auto-created) | Mount the export root, create the subdir, remount |
+| `access denied by server while mounting` (esp. with a **subdirectory** path) | Export/ACL/IP, wrong path, or missing subdir | Do not assume “subdir missing” from the message alone; check exports (`showmount -e`), then the path |
 | `mount.nfs: No such device` | `nfs`/`sunrpc` not loaded, or bad sunrpc option spelling | Check `lsmod`, `/etc/modprobe.d/*sunrpc*`; use `tcp_slot_table_entries` not `tcp_slot_entries` |
 | `Operation not permitted` on NFSv4 while v3 works | NFSv4 client id / hostname conflict, etc. | Try v3 to confirm; check hostname / nfs4 unique id; check server exports |
-| `Connection timed out` / `No route to host` | Network, firewall, ports (often 2049) | `ping`/`nc` before tuning mount options |
+| `Connection timed out` / `No route to host` | Network, firewall, NFS/RPC ports | `ping` / 2049 / 111 before tuning mount options |
 | `Protocol not supported` | Missing `nfs-common` or version mismatch | Install client package; align `vers=` |
 | Works manually, fails at boot | `remote-fs` / fstab options / network not ready | `_netdev`, `x-systemd.automount`, `remote-fs.target` |
 | `mount: can't find ... in /etc/fstab` | Wrong mount command shape | Missing source or target in the command |
@@ -105,13 +106,15 @@ lsmod | grep cifs
 
 ```bash
 getent ahosts <server> | head -5
-ping -c 3 -W 2 <server> 2>/dev/null || true
-nc -zv -w 3 <server> 2049 2>&1
-showmount -e <server> 2>/dev/null || true
-nc -zv -w 3 <server> 445 2>&1
+ping -c 3 -W 2 <server>
+nc -zv -w 3 <server> 2049
+nc -zv -w 3 <server> 111
+rpcinfo -p <server> 2>/dev/null | head -20
+showmount -e <server> 2>/dev/null | head -20
+nc -zv -w 3 <server> 445
 ```
 
-Port closed → fix network/firewall before mount options.  
+Port/RPC issues → fix network/firewall before mount options.  
 Resolve fails → consider `dns-diagnose`.
 
 ### 5. Example command shapes (suggestions only)
@@ -153,6 +156,7 @@ Reply in the user's language.
 
 **User**: `mount.nfs: access denied by server while mounting 10.0.0.5:/data/backup`
 
-1. Pattern → subdirectory `/data/backup` may not exist  
-2. Suggest mounting `10.0.0.5:/data` (or the real export root) first  
-3. If root is also denied → server exports/ACLs and client network next  
+1. Candidates → export ACL / wrong path / possibly missing subdir  
+2. `showmount -e` / RPC checks; try export root only if appropriate  
+3. Root denied → server/client ACL; root works but `/backup` fails → fix subdir  
+

@@ -5,7 +5,7 @@ description: >
   Diagnose network path quality from this host to a target using ping/mtr/curl.
   Investigate packet loss, high latency, jitter, and reachability failures; interpret
   hop results and suggest follow-up tests. Do not change network config. Also matches
-  Chinese requests such as 丢包、延迟高、链路质量、ping 不通、网络抖动.
+  Chinese requests such as 网络丢包、延迟高、链路质量、ping 不通、网络抖动.
 author: aish
 context: subagent
 agent: troubleshoot
@@ -24,7 +24,7 @@ triggers:
   - network jitter
   - 网络路径诊断
   - 链路质量
-  - 丢包
+  - 网络丢包
   - 延迟高
   - ping 不通
   - 网络抖动
@@ -48,12 +48,12 @@ Measure reachability and path quality (**packet loss, latency, jitter**) from **
 1. **Need a target first**: ask for IP/host/URL if missing; do not invent defaults.
 2. **Read-only probes**: ping/mtr/curl/ss are fine; do not change NICs, routes, or firewall.
 3. **Stop when enough**: stop once the symptom is explained; do not add unrelated probes.
-4. **Missing tools**: if `mtr` is absent, fall back to `ping` + `traceroute`/`tracepath` and say so.
+4. **Missing tools**: if `mtr` is absent, fall back to `ping` + `traceroute`/`tracepath` and note that in Evidence.
 5. **Uncontrollable peers**: for public DNS and similar hosts you cannot log into, run forward tests only and state that reverse MTR is impossible.
 
 ## Workflow
 
-```
+```text
 Confirm target & symptom → quick reachability → path quality (mtr) → TCP/port follow-up if needed → answer
 ```
 
