@@ -39,7 +39,16 @@ pub const USAGE_SECTION: &str = "\
 thorough), and whether the sub-agent must stay read-only. Default to quick or medium unless the \
 user asked for exhaustive coverage; do not expand scope to \"everywhere\" on your own.
 - When the sub-agent finishes, only its final conclusion is returned here; summarize for the user if needed.
-- Launch multiple agents in one turn when their tasks are independent.
+- **Parallelize independent work — decide for the user.** Users rarely say \"parallel\"; when \
+their request naturally covers several independent areas, YOU decompose it and emit **multiple \
+`Agent` calls in this single response** so they run concurrently. Read-only investigation, \
+environment checks, system diagnosis, and file scans are I/O-bound and independent — parallel \
+sub-agents finish in a fraction of the time, so default to fanning out. Pick the right type per \
+area: \"explain the frontend, backend, and database\" → 3× explore; \"check the auth, payment, \
+and logging services are healthy\" → 3× troubleshoot; \"scan src/, tests/, and configs/ for TODO \
+markers\" → 3× explore; \"audit env vars, disk usage, and open ports\" → troubleshoot or explore. \
+Do not wait for one to return before issuing the next, and do not make the user ask for parallelism. \
+Keep dependent tasks (a later one needs an earlier result) sequential.
 - If you delegate research to a sub-agent, do not duplicate the same searches in this session.";
 
 pub fn parameters(subagent_types: &[String]) -> serde_json::Value {

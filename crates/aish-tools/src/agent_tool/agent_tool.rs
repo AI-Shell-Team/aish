@@ -125,7 +125,15 @@ impl Tool for AgentTool {
         args: serde_json::Value,
         session: &'a LlmSession,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
-        Box::pin(async move {
+        use futures::FutureExt;
+        // Wrap the sub-agent run in `catch_unwind` so a panicking sub-session
+        // degrades to a `ToolResult::error` instead of unwinding through the
+        // caller. This matches the framework's `Tool::execute_async` contract
+        // (types.rs) and is essential under parallel `join_all` execution,
+        // where an uncontained panic would abort every concurrent sibling and
+        // the whole turn (e.g. a poisoned `Arc<Mutex>` shared via the parent
+        // session cascades a `.lock().unwrap()` panic to all siblings).
+        let inner = std::panic::AssertUnwindSafe(async move {
             let (_description, prompt, subagent_type) = match Self::validate_args(&args) {
                 Ok(v) => v,
                 Err(err) => return err,
@@ -162,6 +170,21 @@ impl Tool for AgentTool {
             }
 
             Self::spawn_result_to_tool_result(result)
+        });
+        Box::pin(async move {
+            match inner.catch_unwind().await {
+                Ok(result) => result,
+                Err(payload) => {
+                    let message = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "Agent sub-agent execution panicked".to_string()
+                    };
+                    ToolResult::error(format!("Error: {}", message))
+                }
+            }
         })
     }
 }
@@ -213,5 +236,25 @@ mod tests {
         assert!(names.contains(&"troubleshoot"));
         assert!(!names.contains(&"command-diagnose"));
         assert!(!names.contains(&"diagnose"));
+    }
+    #[test]
+    fn description_encourages_parallel_independent_agents() {
+        let tool = AgentTool::new();
+        // The tool prompt must steer the model toward emitting multiple Agent
+        // calls in one response — that is what unlocks concurrent execution.
+        let desc = tool.description();
+        assert!(desc.contains("Parallelize"), "missing parallel guidance");
+        assert!(
+            desc.contains("this single response"),
+            "must tell the model to emit calls in one response"
+        );
+        assert!(
+            desc.contains("concurrently"),
+            "must state the calls run concurrently"
+        );
+        assert!(
+            desc.contains("I/O-bound"),
+            "must explain why read-only tasks parallelize well"
+        );
     }
 }

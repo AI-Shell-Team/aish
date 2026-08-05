@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -674,7 +674,7 @@ pub struct AishShell {
     inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
     /// Session-scoped approval memory shared with the LLM session. Kept on the
     /// shell so slash commands (e.g. `/forget-approvals`) can reset it.
-    approval_memory: Arc<Mutex<aish_llm::ApprovalMemory>>,
+    approval_memory: Arc<parking_lot::Mutex<aish_llm::ApprovalMemory>>,
 }
 
 impl AishShell {
@@ -1258,8 +1258,8 @@ impl AishShell {
         let compaction_active_ref = compaction_active.clone();
         let compaction_notice_shown = Arc::new(AtomicBool::new(false));
         let compaction_notice_shown_ref = compaction_notice_shown.clone();
-        let sub_agent_ui_active = Arc::new(AtomicBool::new(false));
-        let sub_agent_ui_active_ref = sub_agent_ui_active.clone();
+        let sub_agent_active_count = Arc::new(AtomicU32::new(0));
+        let sub_agent_active_count_ref = sub_agent_active_count.clone();
         let sub_agent_animation = Arc::new(SubAgentThinkingAnimation::new());
         let sub_agent_animation_ref = sub_agent_animation.clone();
 
@@ -1358,9 +1358,16 @@ impl AishShell {
                         compaction_notice_shown_ref.store(false, Ordering::SeqCst);
                         animation_ref.start(&t("shell.status.thinking"));
                     }
+                    LlmEventType::OpEnd if crate::llm_event_ui::sub_agent_llm_event(&event) => {
+                        // A sub-agent OpEnd marks one sub-session finishing, not the
+                        // parent turn end. Ignore it so a fast-finishing sibling does
+                        // not reset the active count (or stop the spinner) while other
+                        // sub-agents are still running. The count is decremented via
+                        // ToolExecutionEnd's saturating subtraction instead.
+                    }
                     LlmEventType::OpEnd => {
                         // Operation ends — stop animation and show timing
-                        sub_agent_ui_active_ref.store(false, Ordering::SeqCst);
+                        sub_agent_active_count_ref.store(0, Ordering::SeqCst);
                         sub_agent_animation_ref.stop();
                         animation_ref.stop();
                         let ttft = *ttft_value_ref.lock().unwrap();
@@ -1417,7 +1424,7 @@ impl AishShell {
                         reasoning_buf_ref.lock().unwrap().clear();
                         reasoning_frame_ref.store(0, Ordering::SeqCst);
                         renderer_ref.lock().unwrap().reset();
-                        if !sub_agent_ui_active_ref.load(Ordering::SeqCst) {
+                        if sub_agent_active_count_ref.load(Ordering::SeqCst) == 0 {
                             animation_ref.start(&t("shell.status.thinking"));
                         }
                     }
@@ -1573,7 +1580,7 @@ impl AishShell {
                     }
                     LlmEventType::ToolExecutionStart => {
                         if crate::llm_event_ui::is_parent_agent_spawn_tool_event(&event) {
-                            sub_agent_ui_active_ref.store(true, Ordering::SeqCst);
+                            sub_agent_active_count_ref.fetch_add(1, Ordering::SeqCst);
                             animation_ref.stop();
                             sub_agent_animation_ref.stop();
                             clear_reasoning();
@@ -1669,7 +1676,13 @@ impl AishShell {
                     }
                     LlmEventType::ToolExecutionEnd => {
                         if crate::llm_event_ui::is_parent_agent_spawn_tool_event(&event) {
-                            sub_agent_ui_active_ref.store(false, Ordering::SeqCst);
+                            // Decrement; saturating so a stray End (no matching Start,
+                            // e.g. after an OpEnd reset) cannot underflow the count.
+                            sub_agent_active_count_ref
+                                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                                    Some(v.saturating_sub(1))
+                                })
+                                .ok();
                         }
                         // Stop progress spinner started at ToolExecutionStart.
                         animation_ref.stop();
@@ -1883,8 +1896,8 @@ impl AishShell {
         // Session-scoped approval memory: when the user approves a command with
         // "remember", equivalent commands (same host + normalized text) skip
         // confirmation — and the sandbox preflight — for the rest of the session.
-        let approval_memory: Arc<Mutex<aish_llm::ApprovalMemory>> =
-            Arc::new(Mutex::new(aish_llm::ApprovalMemory::new()));
+        let approval_memory: Arc<parking_lot::Mutex<aish_llm::ApprovalMemory>> =
+            Arc::new(parking_lot::Mutex::new(aish_llm::ApprovalMemory::new()));
         llm_session.set_approval_memory(approval_memory.clone());
 
         if let Some(ref audit) = audit_store {
@@ -3423,7 +3436,7 @@ impl AishShell {
     /// so previously "remembered" commands prompt for confirmation again.
     fn handle_forget_approvals(&mut self) {
         let count = {
-            let mut memory = self.approval_memory.lock().unwrap();
+            let mut memory = self.approval_memory.lock();
             let n = memory.len();
             memory.clear();
             n
