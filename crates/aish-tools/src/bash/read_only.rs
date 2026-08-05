@@ -111,6 +111,12 @@ fn split_compound_segments(command: &str) -> Vec<String> {
 
         if !in_single_quote && !in_double_quote {
             if ch == '&' {
+                // `>&N` / `<&N` duplicate a file descriptor; the `&` is part of
+                // the redirect token, not a command separator.
+                if current.ends_with('>') || current.ends_with('<') {
+                    current.push(ch);
+                    continue;
+                }
                 if chars.peek() == Some(&'&') {
                     chars.next();
                     segments.push(current.clone());
@@ -153,27 +159,39 @@ fn has_background_operator(command: &str) -> bool {
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut chars = command.chars().peekable();
+    let mut prev: Option<char> = None;
 
     while let Some(ch) = chars.next() {
         if ch == '\'' && !in_double_quote {
             in_single_quote = !in_single_quote;
+            prev = Some(ch);
             continue;
         }
         if ch == '"' && !in_single_quote {
             in_double_quote = !in_double_quote;
+            prev = Some(ch);
             continue;
         }
         if ch == '\\' && !in_single_quote {
             chars.next();
+            prev = None;
             continue;
         }
         if !in_single_quote && !in_double_quote && ch == '&' {
+            // `>&N` / `<&N` duplicate a file descriptor (e.g. `2>&1`, `<&2`);
+            // the `&` is part of the redirect, not a background operator.
+            if prev == Some('>') || prev == Some('<') {
+                prev = Some(ch);
+                continue;
+            }
             if chars.peek() == Some(&'&') {
                 chars.next();
+                prev = Some('&');
                 continue;
             }
             return true;
         }
+        prev = Some(ch);
     }
 
     false
@@ -188,10 +206,18 @@ fn non_readonly_segment_reason(segment: &str) -> Option<String> {
     }) {
         return Some("command or process substitution".into());
     }
-    if scan_outside_quotes(segment, |window| window.starts_with('*')) {
-        return Some("unquoted glob".into());
-    }
     if scan_outside_quotes(segment, |window| {
+        // `>&N` (e.g. `2>&1`) duplicates a file descriptor and `>&-` closes
+        // it; both are read-only. But `>&word` where `word` is NOT a digit
+        // or `-` redirects stdout to a file (e.g. `echo x >& /tmp/f` writes
+        // /tmp/f in bash), which IS a write — let it fall through to the `>`
+        // check below instead of blanket-allowing every `>&`.
+        if window.starts_with(">&") {
+            let after = window[2..].chars().next();
+            if matches!(after, Some(c) if c.is_ascii_digit()) || after == Some('-') {
+                return false;
+            }
+        }
         if let Some(rest) = window.strip_prefix(">>") {
             return !rest.trim_start().starts_with("/dev/null");
         }
@@ -242,15 +268,10 @@ fn non_readonly_segment_reason(segment: &str) -> Option<String> {
         }
     }
 
-    if base == "find"
-        && tokens.iter().any(|token| {
-            matches!(
-                token.to_ascii_lowercase().as_str(),
-                "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
-            )
-        })
-    {
-        return Some("find mutating or command execution".into());
+    if base == "find" {
+        if let Some(reason) = find_action_not_readonly(&tokens) {
+            return Some(reason);
+        }
     }
 
     if base == "curl" && curl_writes_or_mutates(segment) {
@@ -262,6 +283,44 @@ fn non_readonly_segment_reason(segment: &str) -> Option<String> {
         return Some("in-place edit".into());
     }
 
+    None
+}
+
+/// Judge `find` action flags. `-delete` is inherently destructive; `-exec`,
+/// `-execdir`, `-ok` and `-okdir` run an embedded command whose read-only
+/// status is determined by recursively classifying it. This lets
+/// `find ... -exec grep/wc/head {} \;` through while still blocking
+/// `find ... -exec rm {} \;`.
+fn find_action_not_readonly(tokens: &[String]) -> Option<String> {
+    const EXEC_FLAGS: [&str; 4] = ["-exec", "-execdir", "-ok", "-okdir"];
+    let mut index = 0;
+    while index < tokens.len() {
+        let flag = tokens[index].to_ascii_lowercase();
+        if flag == "-delete" {
+            return Some("find -delete".into());
+        }
+        if EXEC_FLAGS.contains(&flag.as_str()) {
+            // Collect the embedded command up to the terminator `\;` or `+`.
+            let mut end = index + 1;
+            while end < tokens.len() {
+                let term = normalize_shell_word(&tokens[end]);
+                if term == ";" || term == "+" {
+                    break;
+                }
+                end += 1;
+            }
+            let embedded = tokens[index + 1..end].join(" ");
+            if embedded.trim().is_empty() {
+                return Some("find -exec without command".into());
+            }
+            if !matches!(classify(&embedded), ReadOnlyVerdict::ReadOnly) {
+                return Some("find -exec non-read-only command".into());
+            }
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
     None
 }
 
@@ -698,8 +757,13 @@ mod tests {
     }
 
     #[test]
-    fn blocks_unquoted_glob() {
-        assert_not_read_only("ls *.txt");
+    fn allows_unquoted_glob() {
+        // Glob expansion does not mutate the filesystem; write commands
+        // (`rm *.txt`, `cp *.x /d`) are still caught by the BLOCKED list and
+        // redirects (`echo *.x > f`) by the write-redirect check.
+        assert_read_only("ls *.txt");
+        assert_read_only("grep -r foo *.md");
+        assert_read_only("cat *.log");
     }
 
     #[test]
@@ -727,11 +791,41 @@ mod tests {
     fn blocks_trailing_background_operator() {
         assert_not_read_only("sleep 9999 &");
     }
+    #[test]
+    fn fd_redirects_are_read_only() {
+        // `2>&1`, `>&2`, `<&2` duplicate file descriptors; they are read-only
+        // and must not be misclassified as background jobs or write redirects.
+        assert_read_only("ls 2>&1");
+        assert_read_only("cat foo 2>&1");
+        assert_read_only("grep bar file 2>&1 | head");
+        assert_read_only("echo hi >&2");
+        assert_read_only("echo hi >&-");
+        assert_read_only("cmd <&2");
+        // Real background operators and write redirects are still caught.
+        assert_not_read_only("sleep 10 &");
+        assert_not_read_only("cmd > file &");
+        assert_not_read_only("echo hi > file");
+        // `>&word` where `word` is NOT a digit redirects stdout to a file
+        // (verified in bash: `echo x >& /tmp/f` writes the file). These must
+        // NOT slip through the `>&N` allowance.
+        assert_not_read_only("echo x >& /tmp/f");
+        assert_not_read_only("echo x >&/tmp/f");
+        assert_not_read_only("echo x >& f");
+    }
 
     #[test]
-    fn blocks_find_exec_and_ok() {
+    fn blocks_find_exec_mutating_and_allows_read_only() {
+        // -exec/-ok/-execdir running a mutating command -> blocked
         assert_not_read_only("find . -exec rm {} \\;");
         assert_not_read_only("find . -ok rm {} \\;");
+        assert_not_read_only("find . -execdir mv {} /tmp \\;");
+        // -exec/-ok running a read-only command -> allowed
+        assert_read_only("find . -exec grep foo {} \\;");
+        assert_read_only("find . -exec wc -l {} \\;");
+        assert_read_only("find . -exec head -n 1 {} \\;");
+        assert_read_only("find . -ok grep foo {} \\;");
+        // -delete stays destructive
+        assert_not_read_only("find . -name '*.tmp' -delete");
     }
 
     #[test]
