@@ -47,6 +47,8 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'Makefile'
+              - 'rust-toolchain.toml'
               - '.github/workflows/ci.yml'
             packaging:
               - 'packaging/**'
