@@ -45,10 +45,11 @@ Use `openssl` on **this host** to inspect certificates, verify key/cert/CSR pair
 ## Rules
 
 1. **Clarify intent first**: inspect / match / generate CSR / convert / verify—ask if unclear.
-2. **Confirm before writing files**: output paths for keys, CSRs, and conversions need user approval.
+2. **Confirm before writing files**: confirm output paths; do not overwrite existing files unless asked.
 3. **Protect private keys**: never paste key material into chat; suggest mode `0600`; do not log key bodies.
 4. **Dependency**: require `openssl` (`command -v openssl`). `keytool` only for JKS.
 5. **Stop when enough**: after match/inspect succeeds, do not “optimize” unrelated files.
+6. **Fail closed on match**: if OpenSSL cannot parse an input, report that—never treat empty digests as MATCH.
 
 ## Capabilities
 
@@ -76,19 +77,16 @@ openssl pkcs12 -in <file.pfx> -nokeys -clcerts -passin env:CERT_PASS
 
 ## Match check (cert / key / CSR)
 
-Compare moduli (RSA) or public keys (RSA/ECDSA):
+Compare public keys (preferred) or RSA moduli. Each openssl extract must succeed and produce non-empty output before comparing:
 
 ```bash
-openssl x509 -in <cert.pem> -noout -modulus 2>/dev/null | openssl md5
-openssl rsa -in <key.pem> -noout -modulus 2>/dev/null | openssl md5
-openssl req -in <csr.pem> -noout -modulus 2>/dev/null | openssl md5
-
 openssl x509 -in <cert.pem> -noout -pubkey | openssl md5
-openssl pkey -in <key.pem> -pubout 2>/dev/null | openssl md5
-openssl req -in <csr.pem> -noout -pubkey 2>/dev/null | openssl md5
+openssl pkey -in <key.pem> -pubout | openssl md5
+openssl req -in <csr.pem> -noout -pubkey | openssl md5   # if CSR given
 ```
 
-Same digests → **MATCH**; otherwise say which pair differs.
+Parse failure or empty digest → not MATCH. Equal non-empty digests → **MATCH**.  
+Optional: `openssl req -in <csr.pem> -noout -verify` (CSR signature; separate from key match).
 
 ## Generate CSR
 

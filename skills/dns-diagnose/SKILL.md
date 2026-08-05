@@ -47,11 +47,12 @@ Troubleshoot domain resolution failures, wrong answers, or “I changed the reco
 2. **Read-only**: inspect resolution and config; do not change DNS servers or hosts unless the user explicitly asks (default is advice only).
 3. **Stop when enough**: once you can separate “local resolver” vs “authoritative/record” issues, answer.
 4. **Missing tools**: prefer `dig`; else `host` / `nslookup` / `getent`.
+5. Ask before sending **internal/sensitive** names to public DNS, `+trace`, or `whois`.
 
 ## Workflow
 
-```
-Confirm domain & symptom → local resolver → recursive queries → authority check if needed → answer
+```text
+Confirm domain & symptom → local resolver → local dig → optional external checks → answer
 ```
 
 ### 1. Confirm inputs
@@ -78,40 +79,43 @@ grep -E "^\s*[0-9a-fA-F:.]+\s+.*\b<domain>\b" /etc/hosts 2>/dev/null || true
 | Bad `/etc/hosts` entry | Local hijack |
 | No nameserver / broken resolved | Local resolver config |
 
-### 3. Recursive queries
+### 3. Local dig (default)
 
 ```bash
 command -v dig
 dig +noall +answer +stats <domain> A
 dig +noall +answer <domain> AAAA
-dig @1.1.1.1 +noall +answer <domain> A
-dig @8.8.8.8 +noall +answer <domain> A
-dig +trace <domain> A 2>/dev/null | tail -40
 ```
 
-Without dig:
-
-```bash
-host -a <domain> 2>/dev/null || nslookup <domain> 2>/dev/null
-```
+Without dig: `host <domain>` or `nslookup <domain>`.
 
 | Status | Meaning |
 |--------|---------|
 | NXDOMAIN | Name/label missing (or not delegated) |
 | NOERROR with empty answer | No records of that type |
 | SERVFAIL / timeout | Upstream / network / firewall |
-| Different answers across resolvers | Cache / propagation (check TTL) |
-| System resolver fails, public DNS works | Local upstream DNS problem |
 
-### 4. Authority / registration (when needed)
+Stop here if this explains the symptom.
+
+### 4. Optional external checks
+
+Use when still needed (after consent for sensitive/internal names):
 
 ```bash
+dig @1.1.1.1 +noall +answer <domain> A
+dig @8.8.8.8 +noall +answer <domain> A
+dig +trace <domain> A | tail -40
 dig NS <apex> +short
 dig @<auth-ns> <domain> A +noall +answer
-command -v whois && whois <apex> 2>/dev/null | head -60
+command -v whois && whois <apex> | head -60
 ```
 
-Use this for delegation and one-sided records. No cloud DNS APIs.
+| Status | Meaning |
+|--------|---------|
+| Different answers across resolvers | Cache / propagation / split-horizon (check TTL) |
+| System resolver fails, public DNS works | Local upstream DNS problem |
+
+No cloud DNS vendor APIs.
 
 ## Output format
 
