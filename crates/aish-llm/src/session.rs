@@ -1416,6 +1416,11 @@ impl LlmSession {
                 timestamp: now_timestamp(),
                 metadata: None,
             });
+            // Record this call's tool_result before returning so the assistant
+            // message never carries a dangling tool_call_id — providers reject
+            // an assistant tool_call with no following tool_result. Remaining
+            // calls in the batch are backfilled by `run_tool_calls`.
+            messages.push(ChatMessage::tool_result(&tc.id, output.clone()));
             // Sub-agent cancel is shown by the shell as `shell.interrupted`
             // (same as Ctrl+C); do not return the tool string as AI body.
             let suppress_body = result.meta.as_ref().is_some_and(|meta| {
@@ -1502,11 +1507,11 @@ impl LlmSession {
             );
             let results: Vec<ToolResult> =
                 futures::future::join_all(tool_calls.iter().map(|tc| self.execute_tool(tc))).await;
-            for (tc, result) in tool_calls.iter().zip(results) {
+            for idx in 0..tool_calls.len() {
                 if let Some(pr) = self
                     .process_tool_call_result(
-                        tc,
-                        result,
+                        &tool_calls[idx],
+                        results[idx].clone(),
                         messages,
                         consecutive_failures,
                         trace_id,
@@ -1514,15 +1519,32 @@ impl LlmSession {
                     )
                     .await
                 {
-                    return Some(pr);
+                    // A short-circuit / failure threshold stops the loop
+                    // here, but the assistant message already lists every
+                    // tool_call. Append the remaining (already-computed)
+                    // results so no tool_call_id is left without a
+                    // tool_result — providers reject an assistant tool_call
+                    // that has no matching tool_result.
+                    for (rest_tc, rest_result) in
+                        tool_calls[idx + 1..].iter().zip(&results[idx + 1..])
+                    {
+                        messages.push(ChatMessage::tool_result(
+                            &rest_tc.id,
+                            rest_result.output.clone(),
+                        ));
+                    }
+                    return Some(crate::types::ProcessResult {
+                        text: pr.text,
+                        new_messages: messages[initial_len..].to_vec(),
+                    });
                 }
             }
         } else {
-            for tc in tool_calls {
-                let result = self.execute_tool(tc).await;
+            for idx in 0..tool_calls.len() {
+                let result = self.execute_tool(&tool_calls[idx]).await;
                 if let Some(pr) = self
                     .process_tool_call_result(
-                        tc,
+                        &tool_calls[idx],
                         result,
                         messages,
                         consecutive_failures,
@@ -1531,7 +1553,19 @@ impl LlmSession {
                     )
                     .await
                 {
-                    return Some(pr);
+                    // Backfill the remaining (never-executed) tool calls with
+                    // a synthetic tool_result so the assistant message carries
+                    // no dangling tool_call_id (provider API invariant).
+                    for rest_tc in &tool_calls[idx + 1..] {
+                        messages.push(ChatMessage::tool_result(
+                            &rest_tc.id,
+                            "[skipped: tool execution stopped after a blocking result]",
+                        ));
+                    }
+                    return Some(crate::types::ProcessResult {
+                        text: pr.text,
+                        new_messages: messages[initial_len..].to_vec(),
+                    });
                 }
             }
         }
@@ -3467,6 +3501,95 @@ mod tests {
         assert!(
             observed >= 2,
             "expected concurrent sub-agent execution (peak >= 2), got peak = {observed}"
+        );
+    }
+    /// Agent tool that short-circuits (`sub_agent_cancelled`) when its args
+    /// carry `"cancel": true`, else succeeds. Exercises the parallel
+    /// short-circuit path and the tool_result backfill.
+    struct ShortCircuitAgent;
+
+    impl Tool for ShortCircuitAgent {
+        fn name(&self) -> &str {
+            "Agent"
+        }
+        fn description(&self) -> &str {
+            "short-circuit probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, args: serde_json::Value) -> crate::types::ToolResult {
+            if args
+                .get("cancel")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                crate::types::ToolResult {
+                    ok: false,
+                    output: "cancelled".into(),
+                    meta: Some(serde_json::json!({
+                        "dispatch_status": "short_circuit",
+                        "reason": "sub_agent_cancelled",
+                    })),
+                }
+            } else {
+                crate::types::ToolResult::success("ok")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_short_circuit_pairs_every_tool_call() {
+        use crate::agents::mock_tool_call_response;
+        use std::collections::HashSet;
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        // Three Agent calls in one batch; the first short-circuits. join_all
+        // still runs all three, so the loop hits the short-circuit at idx 0.
+        // Without the backfill, c2/c3 would be dangling tool_call_ids in the
+        // persisted assistant message (providers reject that next turn).
+        session.set_test_chat_responses(vec![Ok(mock_tool_call_response(&[
+            ("c1", "Agent", r#"{"cancel":true}"#),
+            ("c2", "Agent", "{}"),
+            ("c3", "Agent", "{}"),
+        ]))]);
+        session.register_tool(Box::new(ShortCircuitAgent));
+
+        let result = session
+            .process_input(&ChatMessage::user("x"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        // Every assistant tool_call_id must have a matching tool_result.
+        let mut expected: HashSet<String> = HashSet::new();
+        for m in &result.new_messages {
+            if m.role == "assistant" {
+                if let Some(calls) = &m.tool_calls {
+                    for c in calls {
+                        expected.insert(c.id.clone());
+                    }
+                }
+            }
+        }
+        let mut answered: HashSet<String> = HashSet::new();
+        for m in &result.new_messages {
+            if m.role == "tool" {
+                if let Some(id) = &m.tool_call_id {
+                    answered.insert(id.clone());
+                }
+            }
+        }
+        assert!(
+            !expected.is_empty(),
+            "test setup error: no assistant tool_calls found"
+        );
+        assert_eq!(
+            expected, answered,
+            "every tool_call_id must have a tool_result"
         );
     }
 }

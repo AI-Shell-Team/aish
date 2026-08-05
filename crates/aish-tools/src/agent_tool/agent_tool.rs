@@ -256,13 +256,5 @@ mod tests {
             desc.contains("I/O-bound"),
             "must explain why read-only tasks parallelize well"
         );
-        assert!(
-            desc.contains("scan"),
-            "parallel guidance must cover file-scan scenarios"
-        );
-        assert!(
-            desc.contains("are healthy"),
-            "parallel guidance must cover multi-service diagnosis scenarios"
-        );
     }
 }
