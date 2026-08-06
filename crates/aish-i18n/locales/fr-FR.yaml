@@ -186,6 +186,8 @@ shell:
     export: "Exporter la session actuelle en Markdown"
     fork: "Créer une branche de la session actuelle"
     sessions: "Afficher l'arborescence des sessions"
+    rollback: "Examiner et annuler les modifications de fichier de l'IA (edit_file/write_file) cette session"
+    undo: "Annuler la dernière modification de fichier (edit_file/write_file) cette session"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -718,6 +720,16 @@ shell:
     is_current: "{id} est la session actuelle — utilisez 'exit' pour quitter."
     summary: "{killed} terminees, {failed} echouees."
     all_terminated: "{count} session(s) terminee(s)."
+  rollback:
+    title: "Retour arrière"
+    prompt: "Revenir à une modification (abandonne celle-ci et les ultérieures):"
+    empty: "Aucune modification de fichier enregistrée cette session."
+  undo:
+    nothing_to_undo: "Aucune modification de fichier à annuler."
+    restored: "{path} restauré"
+    removed: "{path} supprimé"
+    restore_failed: "Restauration échouée: {error}"
+    remove_failed: "Suppression échouée: {error}"
 
   time:
     seconds_ago: "il y a {seconds}s"
@@ -890,6 +902,16 @@ security:
   command_blocked_with_reason: "Erreur : commande bloquee par le systeme de securite : {reason}"
 
 tools:
+  fs:
+    edit_file:
+      stale_tag: "Le fichier {path} a changé depuis la dernière lecture — relisez-le avant de modifier"
+      invalid_tag: "Étiquette d'instantané '{tag}' invalide pour {path}"
+    undo_edit:
+      nothing_to_undo: "Aucune modification de fichier à annuler."
+      restored: "{path} restauré à son contenu précédent."
+      removed: "{path} supprimé (créé par la modification annulée)."
+      restore_failed: "Échec de la restauration de {path} : {error}"
+      remove_failed: "Échec de la suppression de {path} : {error}"
   ask_user:
     description: "Poser a l'utilisateur une question de clarification ciblee. Avec seulement prompt, ask_user utilise la saisie texte ; avec options, il propose des choix."
     unknown_kind: "Type inconnu : {kind}"

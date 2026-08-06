@@ -2,11 +2,15 @@ use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
 use super::prompt;
+use crate::fs::{SharedSnapshotStore, SnapshotOp, SnapshotTag};
+use std::path::Path;
 
 const SIZE_LIMIT: u64 = 32 * 1024;
 
 /// Edit file tool (string replacement).
-pub struct EditFileTool;
+pub struct EditFileTool {
+    store: Option<SharedSnapshotStore>,
+}
 
 impl Default for EditFileTool {
     fn default() -> Self {
@@ -16,7 +20,11 @@ impl Default for EditFileTool {
 
 impl EditFileTool {
     pub fn new() -> Self {
-        Self
+        Self { store: None }
+    }
+
+    pub fn with_store(store: SharedSnapshotStore) -> Self {
+        Self { store: Some(store) }
     }
 }
 
@@ -120,13 +128,63 @@ impl Tool for EditFileTool {
             content.replacen(old, new, 1)
         };
 
-        match std::fs::write(path, new_content) {
-            Ok(()) => {
+        // Server-side drift enforcement: if this file was observed before
+        // (read_file/edit_file/write_file), the on-disk content must still
+        // match the remembered tag — a mismatch means it drifted since the
+        // model last saw it, so reject and force a re-read. Files never
+        // observed have no baseline and pass through.
+        if let Some(store) = &self.store {
+            let fresh = store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_fresh(Path::new(path), &content);
+            if !fresh {
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("path".to_string(), path.to_string());
-                ToolResult::success(aish_i18n::t_with_args(
-                    "tools.fs.edit_file.edit_success",
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.stale_tag",
                     &args_map,
+                ));
+            }
+        }
+        // Validate an explicit tag's format when supplied. The drift check
+        // above already covers staleness regardless of the tag value.
+        if let Some(tag_str) = args.get("tag").and_then(|t| t.as_str()) {
+            if tag_str.parse::<SnapshotTag>().is_err() {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("tag".to_string(), tag_str.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.invalid_tag",
+                    &args_map,
+                ));
+            }
+        }
+
+        match std::fs::write(path, &new_content) {
+            Ok(()) => {
+                // Record the mutation for rollback and mint a fresh tag.
+                let tag_suffix = if let Some(store) = &self.store {
+                    store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record_mutation(
+                            Path::new(path),
+                            Some(content.into_bytes()),
+                            &new_content,
+                            SnapshotOp::Edit,
+                        );
+                    let new_tag = SnapshotTag::from_content(&new_content);
+                    format!("\n[{}#{}]", path, new_tag)
+                } else {
+                    String::new()
+                };
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                ToolResult::success(format!(
+                    "{}{}",
+                    aish_i18n::t_with_args("tools.fs.edit_file.edit_success", &args_map),
+                    tag_suffix
                 ))
             }
             Err(e) => {
@@ -216,6 +274,92 @@ mod tests {
             result.output.contains("limit") || result.output.contains("bytes"),
             "Expected size limit error, got: {}",
             result.output
+        );
+    }
+
+    #[test]
+    fn edit_file_rejects_stale_drift_without_tag() {
+        // #3: server-side enforcement — even with no `tag` arg, an edit on a
+        // file that changed since read_file must be rejected.
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "v1").unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        // Simulate read_file observing "v1", then the file drifts.
+        store.lock().unwrap().record_read(&f, "v1");
+        fs::write(&f, "v2").unwrap();
+
+        let tool = EditFileTool::with_store(store);
+        let res = tool.execute(serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "old_string": "v2",
+            "new_string": "v3",
+        }));
+        assert!(!res.ok, "stale edit must be rejected even without a tag");
+        assert!(
+            res.output.contains("changed") || res.output.contains("re-read"),
+            "expected stale message, got: {}",
+            res.output
+        );
+        assert_eq!(fs::read_to_string(&f).unwrap(), "v2");
+    }
+
+    #[test]
+    fn edit_file_allows_when_fresh_and_records_mutation() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+
+        let dir = temp_dir();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "hello").unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        store.lock().unwrap().record_read(&f, "hello");
+
+        let tool = EditFileTool::with_store(store.clone());
+        let res = tool.execute(serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "world",
+        }));
+        assert!(res.ok, "fresh edit must succeed");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "world");
+        assert_eq!(store.lock().unwrap().history_len(), 1);
+    }
+
+    #[test]
+    fn edit_file_rejects_malformed_tag() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "hello").unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        store.lock().unwrap().record_read(&f, "hello");
+
+        let tool = EditFileTool::with_store(store);
+        let res = tool.execute(serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "old_string": "hello",
+            "new_string": "world",
+            "tag": "ZZZZ",
+        }));
+        assert!(!res.ok, "malformed tag must be rejected");
+        assert!(
+            res.output.contains("Invalid") || res.output.contains("invalid"),
+            "expected invalid-tag message, got: {}",
+            res.output
         );
     }
 }

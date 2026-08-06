@@ -375,6 +375,8 @@ shell:
     export: "Export the current session to Markdown"
     fork: "Branch the current session"
     sessions: "Show the session tree"
+    rollback: "Review and roll back AI file edits (edit_file/write_file) this session"
+    undo: "Undo the last file change (edit_file/write_file) this session"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -621,6 +623,16 @@ shell:
     is_current: "{id} is the current session — use 'exit' to quit."
     summary: "{killed} killed, {failed} failed."
     all_terminated: "{count} live session(s) terminated."
+  rollback:
+    title: "Rollback"
+    prompt: "Roll back to a change (discards it and all later changes):"
+    empty: "No file changes recorded this session."
+  undo:
+    nothing_to_undo: "No file changes to undo."
+    restored: "Restored {path}"
+    removed: "Removed {path}"
+    restore_failed: "Restore failed: {error}"
+    remove_failed: "Remove failed: {error}"
 
   time:
     seconds_ago: "{seconds}s ago"
@@ -1240,6 +1252,14 @@ tools:
       old_string_ambiguous: "'old_string' appears {count} times in {path} - use replace_all=true or provide more context"
       edit_success: "Edited {path}"
       edit_write_failed: "Failed to write {path}: {error}"
+      stale_tag: "File {path} changed since you last read it — re-read before editing"
+      invalid_tag: "Invalid snapshot tag '{tag}' for {path}"
+    undo_edit:
+      nothing_to_undo: "No file changes to undo."
+      restored: "Restored {path} to its prior content."
+      removed: "Removed {path} (it was created by the undone change)."
+      restore_failed: "Failed to restore {path}: {error}"
+      remove_failed: "Failed to remove {path}: {error}"
 
   ask_user:
     description: "Ask the user a focused clarifying question. Use prompt for text input, and add options when you can offer choices."

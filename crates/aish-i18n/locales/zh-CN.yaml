@@ -375,6 +375,8 @@ shell:
     export: "导出当前会话为 Markdown"
     fork: "分支当前会话"
     sessions: "显示会话树"
+    rollback: "查看并回滚本次会话中 AI 的文件修改 (edit_file/write_file)"
+    undo: "撤销本次会话最后一次文件修改 (edit_file/write_file)"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -621,6 +623,16 @@ shell:
     is_current: "{id} 是当前会话 — 请使用 'exit' 退出。"
     summary: "已终止 {killed} 个，失败 {failed} 个。"
     all_terminated: "已终止 {count} 个活跃会话。"
+  rollback:
+    title: "回滚"
+    prompt: "选择一个修改回滚（将丢弃它及之后的所有修改）:"
+    empty: "本次会话没有记录文件修改。"
+  undo:
+    nothing_to_undo: "没有可撤销的文件修改。"
+    restored: "已恢复 {path}"
+    removed: "已删除 {path}"
+    restore_failed: "恢复失败: {error}"
+    remove_failed: "删除失败: {error}"
 
   time:
     seconds_ago: "{seconds}秒前"
@@ -1239,6 +1251,14 @@ tools:
       old_string_ambiguous: "'old_string' 在 {path} 中出现了 {count} 次 - 使用 replace_all=true 或提供更多上下文"
       edit_success: "已编辑 {path}"
       edit_write_failed: "写入 {path} 失败: {error}"
+      stale_tag: "文件 {path} 自上次读取后已变更 — 请重新读取后再编辑"
+      invalid_tag: "{path} 的快照标签 '{tag}' 无效"
+    undo_edit:
+      nothing_to_undo: "没有可撤销的文件修改。"
+      restored: "已将 {path} 恢复到修改前的内容。"
+      removed: "已删除 {path}（它由被撤销的修改创建）。"
+      restore_failed: "恢复 {path} 失败: {error}"
+      remove_failed: "删除 {path} 失败: {error}"
 
   ask_user:
     description: “向用户提出一个聚焦的澄清问题。只填 prompt 时为文本输入，提供 options 时为选项交互。”
