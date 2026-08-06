@@ -186,6 +186,8 @@ shell:
     export: "Aktuelle Sitzung als Markdown exportieren"
     fork: "Aktuelle Sitzung abzweigen"
     sessions: "Sitzungsbaum anzeigen"
+    rollback: "KI-Dateibearbeitungen dieser Sitzung prüfen und zurückrollen (edit_file/write_file)"
+    undo: "Letzte Dateiänderung dieser Sitzung rückgängig machen (edit_file/write_file)"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -718,6 +720,16 @@ shell:
     is_current: "{id} ist die aktuelle Sitzung — verwenden Sie 'exit' zum Beenden."
     summary: "{killed} beendet, {failed} fehlgeschlagen."
     all_terminated: "{count} Sitzung(en) beendet."
+  rollback:
+    title: "Zurücksetzen"
+    prompt: "Auf eine Änderung zurücksetzen (verwirft sie und alle späteren):"
+    empty: "In dieser Sitzung wurden keine Dateiänderungen aufgezeichnet."
+  undo:
+    nothing_to_undo: "Keine Dateiänderungen zum Rückgängigmachen."
+    restored: "{path} wiederhergestellt"
+    removed: "{path} entfernt"
+    restore_failed: "Wiederherstellung fehlgeschlagen: {error}"
+    remove_failed: "Entfernen fehlgeschlagen: {error}"
 
   time:
     seconds_ago: "vor {seconds}s"
@@ -890,6 +902,16 @@ security:
   command_blocked_with_reason: "Fehler: Befehl wurde vom Sicherheitssystem blockiert: {reason}"
 
 tools:
+  fs:
+    edit_file:
+      stale_tag: "Datei {path} wurde seit dem letzten Lesen geändert — neu lesen vor dem Bearbeiten"
+      invalid_tag: "Ungültiger Snapshot-Tag '{tag}' für {path}"
+    undo_edit:
+      nothing_to_undo: "Keine Dateiänderungen zum Rückgängigmachen."
+      restored: "{path} auf vorherigen Inhalt zurückgesetzt."
+      removed: "{path} entfernt (durch die rückgängig gemachte Änderung erstellt)."
+      restore_failed: "Wiederherstellen von {path} fehlgeschlagen: {error}"
+      remove_failed: "Entfernen von {path} fehlgeschlagen: {error}"
   ask_user:
     description: "Stellt dem Benutzer eine gezielte Rückfrage. Nur mit prompt wird Texteingabe verwendet; mit options werden Auswahlmöglichkeiten angeboten."
     unknown_kind: "Unbekannter Typ: {kind}"

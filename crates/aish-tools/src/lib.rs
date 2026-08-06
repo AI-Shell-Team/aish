@@ -60,9 +60,22 @@ pub mod edit_file {
     pub use self::edit_file::*;
 }
 
+pub mod undo_edit {
+    mod prompt;
+    mod undo_edit;
+
+    pub use self::undo_edit::UndoEditTool;
+}
+
 pub mod fs {
+    mod snapshot_store;
+    pub use self::snapshot_store::{
+        ApplyOutcome, FileSnapshot, SharedSnapshotStore, SnapshotOp, SnapshotStore, SnapshotTag,
+        UndoResult,
+    };
     pub use crate::edit_file::EditFileTool;
     pub use crate::read_file::{ReadFileTool, SshReadFileTool};
+    pub use crate::undo_edit::UndoEditTool;
     pub use crate::write_file::WriteFileTool;
 }
 

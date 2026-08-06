@@ -55,6 +55,14 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "Branch the current session into a new one (copied context)",
     ),
     ("/sessions", "Show the session tree (roots + forks)"),
+    (
+        "/undo",
+        "Undo the last file change (edit_file/write_file) this session",
+    ),
+    (
+        "/rollback",
+        "Review and roll back AI file edits (edit_file/write_file) this session",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -833,6 +841,23 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 21);
+        assert_eq!(SLASH_COMMANDS.len(), 23);
+    }
+
+    #[test]
+    fn slash_commands_have_i18n_descriptions() {
+        // Every SLASH_COMMANDS entry must resolve shell.slash.<cmd> to a real
+        // translation, not the raw key. Regression: a slash command once
+        // rendered its raw i18n key in the popup (shell.slash.<cmd> missing).
+        aish_i18n::set_locale("en-US");
+        for (name, _desc) in SLASH_COMMANDS {
+            let cmd = name.trim_start_matches('/');
+            let key = format!("shell.slash.{cmd}");
+            let translated = aish_i18n::t(&key);
+            assert_ne!(
+                translated, key,
+                "missing i18n key {key} for slash command {name}"
+            );
+        }
     }
 }

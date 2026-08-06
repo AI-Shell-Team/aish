@@ -186,6 +186,8 @@ shell:
     export: "Exportar la sesión actual a Markdown"
     fork: "Bifurcar la sesión actual"
     sessions: "Mostrar el árbol de sesiones"
+    rollback: "Revisar y revertir ediciones de archivo de la IA (edit_file/write_file) de esta sesión"
+    undo: "Deshacer el último cambio de archivo (edit_file/write_file) de esta sesión"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -718,6 +720,16 @@ shell:
     is_current: "{id} es la sesion actual — use 'exit' para salir."
     summary: "{killed} terminadas, {failed} fallaron."
     all_terminated: "{count} sesion(es) terminada(s)."
+  rollback:
+    title: "Revertir"
+    prompt: "Revertir a un cambio (descarta ese y todos los posteriores):"
+    empty: "No se registraron cambios de archivos en esta sesión."
+  undo:
+    nothing_to_undo: "No hay cambios de archivos para deshacer."
+    restored: "{path} restaurado"
+    removed: "{path} eliminado"
+    restore_failed: "Restauración fallida: {error}"
+    remove_failed: "Eliminación fallida: {error}"
 
   time:
     seconds_ago: "hace {seconds}s"
@@ -889,6 +901,16 @@ security:
   command_blocked_with_reason: "Error: el comando fue bloqueado por el sistema de seguridad: {reason}"
 
 tools:
+  fs:
+    edit_file:
+      stale_tag: "El archivo {path} cambió desde la última lectura — reléelo antes de editar"
+      invalid_tag: "Etiqueta de instantánea '{tag}' no válida para {path}"
+    undo_edit:
+      nothing_to_undo: "No hay cambios de archivos para deshacer."
+      restored: "{path} restaurado a su contenido previo."
+      removed: "{path} eliminado (fue creado por el cambio deshecho)."
+      restore_failed: "Error al restaurar {path}: {error}"
+      remove_failed: "Error al eliminar {path}: {error}"
   ask_user:
     description: "Haz al usuario una pregunta de aclaración enfocada. Con solo prompt se usa texto libre; con options se ofrecen elecciones."
     unknown_kind: "Tipo desconocido: {kind}"

@@ -1,5 +1,6 @@
 pub(crate) const DESCRIPTION: &str = "\
-Write text content to a file. Use when the user explicitly wants a file created or overwritten.";
+Create or overwrite a text file — the correct way to create files. Never use \
+bash (echo >, cat >, printf >, tee) to create files; use this tool instead.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to create or overwrite a text file.
 

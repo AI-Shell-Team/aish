@@ -639,6 +639,7 @@ pub struct AishShell {
     secret_check_closure:
         std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync>,
     secret_vault: std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>,
+    snapshot_store: aish_tools::fs::SharedSnapshotStore,
     pub session_store: Option<SessionStore>,
     audit_store: Option<std::sync::Arc<aish_session::AuditStore>>,
     audit_user: Option<String>,
@@ -990,9 +991,20 @@ impl AishShell {
             std::sync::Arc::new(std::sync::Mutex::new(None));
         bash_tool.set_secret_vault(vault_slot.clone());
         tool_registry.register(Box::new(bash_tool));
-        tool_registry.register(Box::new(aish_tools::fs::ReadFileTool::new()));
-        tool_registry.register(Box::new(aish_tools::fs::WriteFileTool::new()));
-        tool_registry.register(Box::new(aish_tools::fs::EditFileTool::new()));
+        let snapshot_store: aish_tools::fs::SharedSnapshotStore =
+            std::sync::Arc::new(std::sync::Mutex::new(aish_tools::fs::SnapshotStore::new()));
+        tool_registry.register(Box::new(aish_tools::fs::ReadFileTool::with_store(
+            snapshot_store.clone(),
+        )));
+        tool_registry.register(Box::new(aish_tools::fs::WriteFileTool::with_store(
+            snapshot_store.clone(),
+        )));
+        tool_registry.register(Box::new(aish_tools::fs::EditFileTool::with_store(
+            snapshot_store.clone(),
+        )));
+        tool_registry.register(Box::new(aish_tools::fs::UndoEditTool::new(
+            snapshot_store.clone(),
+        )));
         tool_registry.register(Box::new(aish_tools::AskUserTool::with_runtime(Arc::new(
             crate::tui::run_ask_user_request,
         ))));
@@ -2087,6 +2099,7 @@ impl AishShell {
             shared_recorder,
             inline_ai: None,
             approval_memory,
+            snapshot_store,
         })
     }
 
@@ -3415,6 +3428,119 @@ impl AishShell {
             Some("/status") => self.handle_status_command(),
             Some("/live_sessions") => self.handle_live_sessions_command(),
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
+            Some("/undo") => {
+                let path = parts.get(1).copied();
+                // Peek without consuming — commit only after the disk restore
+                // succeeds, so a failed IO does not lose the snapshot.
+                let peeked = {
+                    let store = self
+                        .snapshot_store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    match path {
+                        Some(p) => store.peek_undo_last_for(std::path::Path::new(p)),
+                        None => store.peek_undo_last(),
+                    }
+                };
+                let msg = match peeked {
+                    None => aish_i18n::t("shell.undo.nothing_to_undo"),
+                    Some(result) => {
+                        let (ok, m) = apply_restore_action(&result, false);
+                        if ok {
+                            let mut store = self
+                                .snapshot_store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            match path {
+                                Some(p) => store.commit_undo_last_for(
+                                    std::path::Path::new(p),
+                                    result.snapshot_id,
+                                ),
+                                None => store.commit_undo_last(result.snapshot_id),
+                            };
+                        }
+                        m
+                    }
+                };
+                println!("{}", msg);
+            }
+            Some("/rollback") => {
+                // AI file-edit history (newest first). Selecting one rolls
+                // back to before that change, discarding it and all later
+                // changes.
+                let items: Vec<aish_ui::SearchSelectItem> = {
+                    let store = self
+                        .snapshot_store
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    store
+                        .history()
+                        .iter()
+                        .rev()
+                        .map(|s| {
+                            let prior = s.prior_content.as_deref().map(|c| c.len()).unwrap_or(0);
+                            aish_ui::SearchSelectItem::new(
+                                s.id.to_string(),
+                                format!(
+                                    "#{} {:>5} {} ({}B prior)",
+                                    s.id,
+                                    s.op,
+                                    s.path.display(),
+                                    prior
+                                ),
+                            )
+                        })
+                        .collect()
+                };
+                if items.is_empty() {
+                    println!("{}", aish_i18n::t("shell.rollback.empty"));
+                } else {
+                    let panel = aish_ui::ChoicePanel::new(
+                        aish_i18n::t("shell.rollback.title"),
+                        aish_i18n::t("shell.rollback.prompt"),
+                        items,
+                    );
+                    let _guard = aish_tools::bash::acquire_interactive_input_guard();
+                    let outcome = aish_ui::PanelRuntime::new().run(panel);
+                    if let Ok(aish_ui::PanelOutcome::Submitted(aish_ui::ChoiceOutcome::Selected(
+                        value,
+                    ))) = outcome
+                    {
+                        if let Ok(id) = value.parse::<u64>() {
+                            // Peek -> disk restore -> commit only on success.
+                            let peeked = {
+                                let store = self
+                                    .snapshot_store
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                store.peek_restore(id)
+                            };
+                            if let Some(actions) = peeked {
+                                // Apply every rollback action (reverse order:
+                                // newest first); commit only if all succeed.
+                                let mut all_ok = true;
+                                let mut msgs: Vec<String> = Vec::new();
+                                for action in &actions {
+                                    let (ok, msg) = apply_restore_action(action, true);
+                                    msgs.push(msg);
+                                    if !ok {
+                                        all_ok = false;
+                                        break;
+                                    }
+                                }
+                                if all_ok {
+                                    let mut store = self
+                                        .snapshot_store
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    store.commit_restore(id);
+                                }
+                                println!("{}", msgs.join("\n"));
+                            }
+                        }
+                    }
+                }
+            }
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
             Some("/skill") => self.handle_skill_command(&parts),
@@ -10857,6 +10983,33 @@ fn emit_osc(op: &str) {
     // OSC 5151 ; <op> BEL
     let _ = write!(std::io::stdout(), "\x1b]5151;{}\x07", op);
     let _ = std::io::stdout().flush();
+}
+
+/// Apply one rollback action to disk and format a user-facing message.
+/// Returns `(ok, message)`. `tolerate_missing` lets a delete of an
+/// already-absent file succeed (idempotent retry after a partial batch).
+fn apply_restore_action(
+    result: &aish_tools::fs::UndoResult,
+    tolerate_missing: bool,
+) -> (bool, String) {
+    use aish_tools::fs::ApplyOutcome;
+    use std::collections::HashMap;
+
+    let mut args = HashMap::new();
+    args.insert("path".to_string(), result.path.display().to_string());
+    match result.apply_to_disk(tolerate_missing) {
+        Ok(ApplyOutcome::Restored) => (true, aish_i18n::t_with_args("shell.undo.restored", &args)),
+        Ok(ApplyOutcome::Removed) => (true, aish_i18n::t_with_args("shell.undo.removed", &args)),
+        Err(e) => {
+            args.insert("error".to_string(), e.to_string());
+            let key = if result.content.is_some() {
+                "shell.undo.restore_failed"
+            } else {
+                "shell.undo.remove_failed"
+            };
+            (false, aish_i18n::t_with_args(key, &args))
+        }
+    }
 }
 
 /// Format a duration in seconds as a localized "N s/min/h ago" string.

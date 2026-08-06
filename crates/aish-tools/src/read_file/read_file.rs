@@ -2,11 +2,15 @@ use aish_i18n;
 use aish_llm::{Tool, ToolResult};
 
 use super::prompt;
+use crate::fs::SharedSnapshotStore;
+use std::path::Path;
 
 const SIZE_LIMIT: usize = 32 * 1024;
 
 /// Read file content tool.
-pub struct ReadFileTool;
+pub struct ReadFileTool {
+    store: Option<SharedSnapshotStore>,
+}
 
 impl Default for ReadFileTool {
     fn default() -> Self {
@@ -16,7 +20,11 @@ impl Default for ReadFileTool {
 
 impl ReadFileTool {
     pub fn new() -> Self {
-        Self
+        Self { store: None }
+    }
+
+    pub fn with_store(store: SharedSnapshotStore) -> Self {
+        Self { store: Some(store) }
     }
 }
 
@@ -122,7 +130,18 @@ impl Tool for ReadFileTool {
             .map(|(i, line)| format!("{:>6}\t{}", offset + i + 1, line))
             .collect();
 
-        ToolResult::success(selected.join("\n"))
+        let body = selected.join("\n");
+
+        // Stamp a snapshot tag so a later edit_file can detect stale content.
+        if let Some(store) = &self.store {
+            let tag = store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_read(Path::new(path), &content);
+            ToolResult::success(format!("[{}#{}]\n{}", path, tag, body))
+        } else {
+            ToolResult::success(body)
+        }
     }
 }
 

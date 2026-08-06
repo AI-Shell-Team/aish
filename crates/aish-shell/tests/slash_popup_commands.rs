@@ -30,7 +30,7 @@ fn each_builtin_command_enter_executes() {
 
 #[test]
 fn slash_commands_table_has_expected_count() {
-    assert_eq!(SLASH_COMMANDS.len(), 21);
+    assert_eq!(SLASH_COMMANDS.len(), 23);
 }
 
 #[test]

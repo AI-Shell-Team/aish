@@ -186,6 +186,8 @@ shell:
     export: "現在のセッションを Markdown にエクスポート"
     fork: "現在のセッションを分岐"
     sessions: "セッションツリーを表示"
+    rollback: "このセッションの AI によるファイル編集を確認・ロールバック (edit_file/write_file)"
+    undo: "このセッションの最後のファイル変更を取り消す (edit_file/write_file)"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -718,6 +720,16 @@ shell:
     is_current: "{id} は現在のセッションです — 'exit' で終了してください。"
     summary: "{killed} 件終了、{failed} 件失敗。"
     all_terminated: "{count} 件のセッションを終了しました。"
+  rollback:
+    title: "ロールバック"
+    prompt: "変更を選んでロールバック（その変更以降のすべてを破棄）:"
+    empty: "このセッションではファイル変更が記録されていません。"
+  undo:
+    nothing_to_undo: "元に戻すファイル変更がありません。"
+    restored: "{path} を復元しました"
+    removed: "{path} を削除しました"
+    restore_failed: "復元失敗: {error}"
+    remove_failed: "削除失敗: {error}"
 
   time:
     seconds_ago: "{seconds}秒前"
@@ -890,6 +902,16 @@ security:
   command_blocked_with_reason: "エラー: コマンドはセキュリティシステムによりブロックされました: {reason}"
 
 tools:
+  fs:
+    edit_file:
+      stale_tag: "ファイル {path} は最後の読み取り以降に変更されました — 編集前に再読み込みしてください"
+      invalid_tag: "{path} のスナップショットタグ '{tag}' が無効です"
+    undo_edit:
+      nothing_to_undo: "元に戻すファイル変更がありません。"
+      restored: "{path} を以前の内容に復元しました。"
+      removed: "{path} を削除しました（取り消した変更で作成されたファイルです）。"
+      restore_failed: "{path} の復元に失敗: {error}"
+      remove_failed: "{path} の削除に失敗: {error}"
   ask_user:
     description: "ユーザーに焦点を絞った確認質問をします。prompt のみならテキスト入力、options があれば選択肢を提示します。"
     unknown_kind: "不明な種類です: {kind}"
