@@ -504,12 +504,17 @@ fn line_diff(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
     out
 }
 
+/// Default unchanged-context lines shown around each changed region.
+const DIFF_CONTEXT: usize = 3;
+
 /// Render a colored unified diff between `old` and `new` text.
 ///
-/// Produces a line-level diff (LCS-based). Added lines are green (`+`),
-/// removed lines are red (`-`), unchanged context lines are dimmed. Output is
-/// capped at `max_lines` diff lines; a `... N more lines` hint is appended
-/// when truncated. Returns an empty string when inputs are identical.
+/// Output is split into hunks centered on changed lines (added/removed), each
+/// surrounded by up to [`DIFF_CONTEXT`] unchanged context lines. Edits at the
+/// end of a large file stay fully visible — leading context no longer crowds
+/// them out. `max_lines` caps total output; context is shed first, and only
+/// when the bare changed lines themselves overflow the cap are lines dropped
+/// (with a trailing `... N more lines` hint). Returns empty when identical.
 pub fn render_diff(old: &str, new: &str, max_lines: usize) -> String {
     // Skip expensive LCS when inputs are byte-identical.
     if old == new {
@@ -524,27 +529,147 @@ pub fn render_diff(old: &str, new: &str, max_lines: usize) -> String {
         &old_lines[..old_lines.len().min(MAX_LCS_LINES)],
         &new_lines[..new_lines.len().min(MAX_LCS_LINES)],
     );
-
-    let mut out = String::new();
-    let total = diff.len();
-    if total == 0 {
-        return out;
+    if max_lines == 0 {
+        return String::new();
     }
-    let shown = total.min(max_lines);
-    for line in diff.iter().take(shown) {
-        match line {
-            DiffLine::Context(s) => out.push_str(&format!("{}\n", muted(&format!("  {s}")))),
-            DiffLine::Added(s) => out.push_str(&format!("{}\n", success(&format!("+ {s}")))),
-            DiffLine::Removed(s) => out.push_str(&format!("{}\n", error(&format!("- {s}")))),
+    let has_change = diff.iter().any(|l| !matches!(l, DiffLine::Context(_)));
+    if !has_change {
+        // Bounded region shows no change but inputs differ: the change lies
+        // beyond the LCS bound. Fall back to diffing the tails so a
+        // large-file tail edit is rendered instead of an empty diff.
+        if old_lines.len() > MAX_LCS_LINES || new_lines.len() > MAX_LCS_LINES {
+            let start_o = old_lines.len().saturating_sub(MAX_LCS_LINES);
+            let start_n = new_lines.len().saturating_sub(MAX_LCS_LINES);
+            let tail_diff = line_diff(&old_lines[start_o..], &new_lines[start_n..]);
+            if tail_diff.iter().any(|l| !matches!(l, DiffLine::Context(_))) {
+                return render_diff_hunks(&tail_diff, max_lines);
+            }
+        }
+        return String::new();
+    }
+    render_diff_hunks(&diff, max_lines)
+}
+
+/// Merge changed-line indices into contiguous `[start, end)` regions, each
+/// padded by `ctx` unchanged lines on both sides and clamped to `0..n`.
+/// Adjacent or overlapping regions collapse into one.
+fn merged_regions(changes: &[usize], ctx: usize, n: usize) -> Vec<(usize, usize)> {
+    let pad = ctx as isize;
+    let clamp = |v: isize| v.clamp(0, n as isize) as usize;
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    for &c in changes {
+        let s = clamp(c as isize - pad);
+        let e = clamp((c + 1) as isize + pad);
+        if let Some(last) = regions.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        regions.push((s, e));
+    }
+    regions
+}
+
+/// Total rendered line count for a set of regions: content lines plus one
+/// separator line per gap (before the first region when it does not start at
+/// the file head, between regions, and after the last when it does not reach
+/// the tail).
+fn rendered_size(regions: &[(usize, usize)], n: usize) -> usize {
+    let content: usize = regions.iter().map(|(s, e)| e - s).sum();
+    let lead = usize::from(regions.first().is_some_and(|(s, _)| *s > 0));
+    let between = regions.len().saturating_sub(1);
+    let tail = usize::from(regions.last().is_some_and(|(_, e)| *e < n));
+    content + lead + between + tail
+}
+
+/// Choose the largest context whose rendered output fits `max_lines`; shed
+/// context before dropping any changed line. Falls back to zero context when
+/// even the bare changes overflow the cap.
+fn choose_regions(changes: &[usize], n: usize, max_lines: usize) -> Vec<(usize, usize)> {
+    let mut best = merged_regions(changes, 0, n);
+    for try_ctx in (1..=DIFF_CONTEXT).rev() {
+        let r = merged_regions(changes, try_ctx, n);
+        if rendered_size(&r, n) <= max_lines {
+            best = r;
+            break;
         }
     }
-    if total > shown {
-        out.push_str(&format!(
-            "{}\n",
-            dim(&format!("  ... {} more lines", total - shown))
-        ));
+    best
+}
+
+/// Render the diff as hunks: changed regions padded with context, separated
+/// by `... N lines` hints for the elided stretches.
+fn render_diff_hunks(diff: &[DiffLine], max_lines: usize) -> String {
+    let n = diff.len();
+    let changes: Vec<usize> = diff
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| match l {
+            DiffLine::Context(_) => None,
+            _ => Some(i),
+        })
+        .collect();
+    if changes.is_empty() || max_lines == 0 {
+        return String::new();
+    }
+    let regions = choose_regions(&changes, n, max_lines);
+
+    let mut lines: Vec<String> = Vec::with_capacity(max_lines);
+    let mut prev_end = 0usize;
+    // Reserve one line for a trailing elision marker when content is
+    // dropped, so output never exceeds max_lines. Emit whole regions and
+    // stop at a region boundary on overflow — earlier changed lines stay
+    // visible instead of truncating mid-region and hiding a later hunk.
+    let soft_cap = max_lines.saturating_sub(1);
+    let mut dropped = false;
+
+    for &(s, e) in &regions {
+        let gap_marker = match (prev_end, s) {
+            (0, sp) if sp > 0 => Some(format!("  ... {} lines above", sp)),
+            (pe, sp) if pe > 0 && sp > pe => Some(format!("  ... {} lines hidden", sp - pe)),
+            _ => None,
+        };
+        let need = gap_marker.as_ref().map(|_| 1).unwrap_or(0) + (e - s);
+        if !lines.is_empty() && lines.len() + need > soft_cap {
+            dropped = true;
+            break;
+        }
+        if let Some(m) = gap_marker {
+            lines.push(dim(&m));
+        }
+        // A single oversized region (nothing emitted yet) still shows its
+        // leading lines up to the soft cap so changed lines surface.
+        let room = soft_cap.saturating_sub(lines.len());
+        for line in diff[s..e].iter().take(room) {
+            lines.push(render_diff_line(line));
+        }
+        if e - s > room {
+            dropped = true;
+            prev_end = s + room;
+            break;
+        }
+        prev_end = e;
+    }
+
+    if (dropped || prev_end < n) && lines.len() < max_lines {
+        lines.push(dim(&format!("  ... {} more lines", n - prev_end)));
+    }
+
+    let mut out = String::new();
+    for l in &lines {
+        out.push_str(l);
+        out.push('\n');
     }
     out
+}
+
+fn render_diff_line(line: &DiffLine) -> String {
+    match line {
+        DiffLine::Context(s) => muted(&format!("  {s}")),
+        DiffLine::Added(s) => success(&format!("+ {s}")),
+        DiffLine::Removed(s) => error(&format!("- {s}")),
+    }
 }
 
 #[cfg(test)]
@@ -603,7 +728,7 @@ mod diff_tests {
         let old = String::new();
         let new: String = (0..50).map(|i| format!("line {i}\n")).collect();
         let d = strip_ansi(&render_diff(&old, &new, 5));
-        assert!(d.contains("... 46 more lines"));
+        assert!(d.contains("... 47 more lines"));
     }
 
     #[test]
@@ -612,6 +737,107 @@ mod diff_tests {
         // The removed empty line proves trailing-newline changes are surfaced.
         let d = strip_ansi(&render_diff("a\n", "a", 20));
         assert!(!d.is_empty(), "trailing newline diff must not be empty");
+    }
+
+    #[test]
+    fn edit_at_tail_is_not_truncated() {
+        // Regression: an edit appending lines at the end of a long file must
+        // show the change in full. Leading context is collapsed into a hint,
+        // not printed verbatim, so it cannot crowd the edit out of the window.
+        let old: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let mut new = old.clone();
+        new.push_str("added1\n");
+        new.push_str("added2\n");
+        let d = strip_ansi(&render_diff(&old, &new, 20));
+        assert!(d.contains("+ added1"));
+        assert!(d.contains("+ added2"));
+        // Lines far from the edit are elided, not printed as context.
+        assert!(!d.contains("line 0"));
+        assert!(d.contains("lines above"));
+    }
+
+    #[test]
+    fn edit_at_head_is_not_truncated() {
+        let old: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let mut new = old.clone();
+        // Prepend two changed lines at the very top.
+        new.insert_str(0, "added1\nadded2\n");
+        let d = strip_ansi(&render_diff(&old, &new, 20));
+        assert!(d.contains("+ added1"));
+        assert!(d.contains("+ added2"));
+        assert!(!d.contains("line 39"));
+    }
+
+    #[test]
+    fn separate_edits_produce_multiple_hunks() {
+        // Two edits far apart yield two hunks separated by a "... lines hidden"
+        // marker; both edits remain visible within the cap.
+        let mut old: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        let mut new = old.clone();
+        // Edit near the top and near the bottom.
+        old = old.replace("line 2\n", "old top\n");
+        old = old.replace("line 27\n", "old bottom\n");
+        new = new.replace("line 2\n", "new top\n");
+        new = new.replace("line 27\n", "new bottom\n");
+        let d = strip_ansi(&render_diff(&old, &new, 20));
+        assert!(d.contains("- old top"));
+        assert!(d.contains("+ new top"));
+        assert!(d.contains("- old bottom"));
+        assert!(d.contains("+ new bottom"));
+        assert!(d.contains("lines hidden"));
+    }
+
+    #[test]
+    fn tail_edit_beyond_lcs_bound_is_shown() {
+        // Regression (CodeRabbit B): an edit beyond the 1000-line LCS bound
+        // (leading prefix unchanged) must still render, via the tail fallback.
+        let prefix: String = (0..1005).map(|i| format!("line {i}\n")).collect();
+        let old = format!("{prefix}tail old\n");
+        let new = format!("{prefix}tail new\n");
+        let d = strip_ansi(&render_diff(&old, &new, 20));
+        assert!(
+            !d.is_empty(),
+            "tail edit beyond LCS bound must not be empty"
+        );
+        assert!(d.contains("- tail old"));
+        assert!(d.contains("+ tail new"));
+    }
+
+    #[test]
+    fn output_never_exceeds_max_lines() {
+        // Regression (CodeRabbit C): output must never exceed max_lines, even
+        // with many scattered changes. The trailing elision marker is budgeted.
+        let mut old = String::new();
+        let mut new = String::new();
+        for i in 0..60 {
+            old.push_str(&format!("old {i}\n"));
+            new.push_str(&format!("new {i}\n"));
+        }
+        let d = strip_ansi(&render_diff(&old, &new, 10));
+        let line_count = d.lines().count();
+        assert!(
+            line_count <= 10,
+            "output must not exceed max_lines: got {line_count}"
+        );
+        assert!(!d.is_empty());
+    }
+
+    #[test]
+    fn distant_hunks_kept_when_changed_fit() {
+        // Regression (CodeRabbit C): when changed lines fit within max_lines,
+        // distant hunks stay visible (not truncated away) and output <= cap.
+        let mut old: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        let mut new = old.clone();
+        old = old.replace("line 5\n", "old a\n");
+        old = old.replace("line 45\n", "old b\n");
+        new = new.replace("line 5\n", "new a\n");
+        new = new.replace("line 45\n", "new b\n");
+        let d = strip_ansi(&render_diff(&old, &new, 12));
+        assert!(d.contains("- old a"));
+        assert!(d.contains("+ new a"));
+        assert!(d.contains("- old b"));
+        assert!(d.contains("+ new b"));
+        assert!(d.lines().count() <= 12, "output must not exceed max_lines");
     }
 
     #[test]
