@@ -39,7 +39,13 @@ pub mod raw_mode;
 pub use bindings::default_bindings;
 pub use events::{read_event, ShellEvent};
 #[cfg(unix)]
+pub use raw_mode::drain_terminal_responses;
+#[cfg(unix)]
 pub use raw_mode::InputRawGuard;
+
+// No-op stub so non-Unix builds keep a usable symbol.
+#[cfg(not(unix))]
+pub fn drain_terminal_responses() {}
 
 #[cfg(test)]
 mod tests {
