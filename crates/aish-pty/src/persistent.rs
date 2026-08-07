@@ -55,9 +55,93 @@ where
     true
 }
 
+/// Count of active TUI/remote programs running inside the PTY. While > 0,
+/// `write_stdout_all` forwards bytes verbatim (no query stripping) so they
+/// can get their device-query answers from the real terminal. A counter
+/// (not a bool) keeps nested/concurrent commands correct: the outer guard
+/// stays armed until every inner guard has dropped.
+static RAW_OUTPUT_PASSTHROUGH: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// RAII guard that arms [`RAW_OUTPUT_PASSTHROUGH`] for its lifetime so TUI
+/// programs receive their terminal-query responses through the real terminal.
+/// Nestable: each `enter_if(true)` increments the counter, each drop
+/// decrements it.
+struct RawOutputPassthroughGuard(bool);
+
+impl RawOutputPassthroughGuard {
+    fn enter_if(tui: bool) -> Self {
+        if tui {
+            RAW_OUTPUT_PASSTHROUGH.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        Self(tui)
+    }
+}
+
+impl Drop for RawOutputPassthroughGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            RAW_OUTPUT_PASSTHROUGH.fetch_sub(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+/// Remove terminal device-query *request* sequences from `buf` so the real
+/// terminal is never asked to respond. Its response would otherwise be echoed
+/// as garbled text (`ESC[…R`, `ESC[…c`) while the shell sits in cooked mode
+/// between prompts.
+///
+/// Stripped: CPR/DSR requests `ESC[…n`, and device-attribute requests
+/// `ESC[…c` reached via the `>`/`=` private markers or no marker (DA1/DA2/DA3
+/// requests). DA1 *responses* keep the `?` marker, which this scan does not
+/// treat as a private marker, so they pass through unchanged (harmless to
+/// forward). Stateless per call; query sequences are short and rarely span
+/// the 8 KB read boundary.
+fn strip_device_queries(buf: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !buf.contains(&0x1b) {
+        return std::borrow::Cow::Borrowed(buf);
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(buf.len());
+    let mut i = 0;
+    while i < buf.len() {
+        // Match CSI query requests: ESC [ (private '>' | '=')? digits (n | c).
+        if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'[' {
+            let mut j = i + 2;
+            if j < buf.len() && matches!(buf[j], b'>' | b'=') {
+                j += 1;
+            }
+            while j < buf.len() && buf[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j < buf.len() && matches!(buf[j], b'n' | b'c') {
+                // Complete query request: drop the whole sequence.
+                i = j + 1;
+                continue;
+            }
+            // Not a query — copy ESC and rescan from the next byte.
+        }
+        out.push(buf[i]);
+        i += 1;
+    }
+    if out.len() == buf.len() {
+        std::borrow::Cow::Borrowed(buf)
+    } else {
+        std::borrow::Cow::Owned(out)
+    }
+}
+
 fn write_stdout_all(buf: &[u8]) {
+    // Strip terminal device-query requests unless a real TUI/remote program is
+    // running and needs the real terminal to answer them. Forwarded prompt-tool
+    // queries (CPR/DA) would otherwise make the real terminal respond, and that
+    // response echoes as garbled text while the shell is in cooked mode.
+    let filtered = if RAW_OUTPUT_PASSTHROUGH.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        std::borrow::Cow::Borrowed(buf)
+    } else {
+        strip_device_queries(buf)
+    };
     // Return value intentionally ignored: callers fire-and-forget stdout writes.
-    let _ = write_all_with_retry(buf, |remaining| {
+    let _ = write_all_with_retry(&filtered, |remaining| {
         let rc = unsafe {
             libc::write(
                 libc::STDOUT_FILENO,
@@ -1136,6 +1220,11 @@ impl PersistentPty {
         remote_show_kube: bool,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
+        // Real TUI/remote programs (vim/less/ssh/...) need the real terminal
+        // to answer their device queries; let their output through verbatim.
+        // Everything else has prompt-tool queries stripped (see write_stdout_all).
+        let _raw_output_guard =
+            RawOutputPassthroughGuard::enter_if(is_interactive_command(command) || is_session);
         debug!(
             "send_command_interactive ENTER: cmd={:?}, is_session={}, master_fd={}, control_fd={}",
             command, is_session, self.master_fd, self.control_fd
@@ -7088,6 +7177,62 @@ mod tests {
         assert!(is_interactive_command("htop"));
         assert!(!is_interactive_command("ls -la"));
         assert!(!is_interactive_command("echo hello"));
+    }
+
+    #[test]
+    fn strip_device_queries_removes_cpr_and_da_requests() {
+        // CPR request ESC[6n and DA2 request ESC[>c removed; visible text kept.
+        let out = strip_device_queries(b"hi\x1b[6n\x1b[>cbye");
+        assert_eq!(&out[..], b"hibye");
+    }
+
+    #[test]
+    fn strip_device_queries_removes_da1_variants() {
+        assert_eq!(&strip_device_queries(b"\x1b[c")[..], b"");
+        assert_eq!(&strip_device_queries(b"\x1b[0c")[..], b"");
+        assert_eq!(&strip_device_queries(b"x\x1b[0cy")[..], b"xy");
+    }
+
+    #[test]
+    fn strip_device_queries_removes_da3_and_dsr() {
+        assert_eq!(&strip_device_queries(b"\x1b[=c")[..], b"");
+        assert_eq!(&strip_device_queries(b"\x1b[5n")[..], b"");
+    }
+
+    #[test]
+    fn strip_device_queries_preserves_da_responses() {
+        // DA1 response keeps '?' -> not a request -> forwarded unchanged.
+        assert_eq!(&strip_device_queries(b"\x1b[?64;1c")[..], b"\x1b[?64;1c");
+        // DA2 response has ';' (params beyond digits) -> preserved.
+        assert_eq!(
+            &strip_device_queries(b"\x1b[>0;115;0c")[..],
+            b"\x1b[>0;115;0c"
+        );
+    }
+
+    #[test]
+    fn strip_device_queries_preserves_other_csi() {
+        // SGR colors, cursor moves, clear-line must survive.
+        assert_eq!(
+            &strip_device_queries(b"\x1b[31mtext\x1b[0m\x1b[2K\x1b[1;1H")[..],
+            b"\x1b[31mtext\x1b[0m\x1b[2K\x1b[1;1H"
+        );
+    }
+
+    #[test]
+    fn strip_device_queries_fast_path_no_esc() {
+        // No ESC byte -> borrowed, zero alloc.
+        match strip_device_queries(b"plain text no escapes") {
+            std::borrow::Cow::Borrowed(_) => {}
+            other => panic!("expected borrowed, got owned: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_device_queries_realistic_prompt_burst() {
+        // A prompt-tool burst (two CPR + DA2) embedded in prompt output.
+        let input = b"before\x1b[6n\x1b[6n\x1b[>cafter";
+        assert_eq!(&strip_device_queries(input)[..], b"beforeafter");
     }
 
     #[test]

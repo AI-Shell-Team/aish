@@ -720,6 +720,10 @@ impl ShellReadline {
         if let Some(ai) = &self.inline_ai {
             ai.cancel();
         }
+        // Discard terminal query responses (CPR/DA) that leaked into stdin
+        // while the prompt was away — otherwise rustyline reads them as
+        // key events and corrupts the input line.
+        crate::keyboard::drain_terminal_responses();
         match self.editor.readline_with_initial(prompt, initial) {
             Ok(line) => Ok(Some(line)),
             Err(rustyline::error::ReadlineError::Eof) => Ok(None),
@@ -740,6 +744,10 @@ impl ShellReadline {
         if let Some(ai) = &self.inline_ai {
             ai.cancel();
         }
+        // Discard terminal query responses (CPR/DA) that leaked into stdin
+        // while the prompt was away — otherwise rustyline reads them as
+        // key events and corrupts the input line.
+        crate::keyboard::drain_terminal_responses();
         let line = match self.editor.readline(prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Eof) => return Ok(None),
@@ -755,6 +763,7 @@ impl ShellReadline {
         result.truncate(result.len() - 1); // remove trailing backslash
 
         loop {
+            crate::keyboard::drain_terminal_responses();
             match self.editor.readline("> ") {
                 Ok(next) => {
                     if next.is_empty() {
