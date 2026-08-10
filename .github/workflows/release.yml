@@ -35,23 +35,10 @@ jobs:
           version: ${{ github.ref_name }}
           artifact_prefix: release
 
-  release-gate:
-    name: Release boundary checkpoint
-    needs: release-meta
-    runs-on: ubuntu-latest
-    environment: release
-    steps:
-      - name: Confirm release payload
-        run: |
-          echo "Release ${RELEASE_TAG} is ready for bundle publishing."
-        env:
-          RELEASE_TAG: ${{ needs.release-meta.outputs.tag }}
-
   create-release:
     name: Create GitHub release
     needs:
       - release-meta
-      - release-gate
     runs-on: ubuntu-latest
     steps:
       - name: Create release entry with changelog notes
@@ -66,7 +53,6 @@ jobs:
     name: Build release bundle (${{ matrix.arch }})
     needs:
       - release-meta
-      - release-gate
       - create-release
     strategy:
       fail-fast: false
@@ -132,7 +118,6 @@ jobs:
     name: Build PyPI package (${{ matrix.arch }})
     needs:
       - release-meta
-      - release-gate
       - create-release
     strategy:
       fail-fast: false
@@ -204,14 +189,16 @@ jobs:
           path: artifacts/pypi/${{ matrix.arch }}/*
           if-no-files-found: error
 
-  publish-release-bundles:
-    name: Publish release bundles
+  publish-release:
+    name: Publish release
     needs:
       - release-meta
-      - release-gate
       - build-release-packages
+      - build-pypi-packages
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      id-token: write
     env:
       VERSION: ${{ needs.release-meta.outputs.version }}
       ARTIFACT_ROOT: artifacts/release
@@ -243,17 +230,6 @@ jobs:
       - name: Publish release bundles
         run: bash ./packaging/scripts/publish_release.sh
 
-  publish-pypi:
-    name: Publish PyPI package
-    needs:
-      - release-meta
-      - release-gate
-      - build-pypi-packages
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      id-token: write
-    steps:
       - name: Skip PyPI publish for prerelease versions
         if: ${{ contains(needs.release-meta.outputs.version, '-') }}
         run: |
@@ -290,8 +266,7 @@ jobs:
       - create-release
       - build-release-packages
       - build-pypi-packages
-      - publish-release-bundles
-      - publish-pypi
+      - publish-release
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
