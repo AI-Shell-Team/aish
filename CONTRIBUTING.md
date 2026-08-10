@@ -50,7 +50,7 @@ Welcome to make Shell smarter!
 - `make prepare-release-files VERSION=X.Y.Z[-PRERELEASE] [DATE=YYYY-MM-DD]` updates the workspace version files and inserts a dated release section at the top of `CHANGELOG.md`.
 - Prepare release files locally in a normal PR, merge that PR into `main`, then run `Release Preparation` as the single preflight validation for the target version. It includes release metadata checks and bundle dry-run validation before publication.
 - `Release Preparation` validates the target version, generates a release summary from the versioned changelog section, builds dry-run bundles, and runs install smoke checks before publication.
-- `Release` is triggered by pushing a tag `vX.Y.Z` or `vX.Y.Z-PRERELEASE`. It validates the tag against repository metadata, verifies that the tagged commit is on `main` or the temporary `rust` release branch, creates the GitHub Release entry with the versioned changelog notes, marks prerelease tags as GitHub prereleases, builds bundle/PyPI artifacts, then waits on a single protected `release` environment approval before publishing to the CDN and PyPI.
+- `Release` is triggered by pushing a tag `vX.Y.Z` or `vX.Y.Z-PRERELEASE`. It validates the tag against repository metadata, verifies that the tagged commit is on `main`, creates the GitHub Release entry with the versioned changelog notes, marks prerelease tags as GitHub prereleases, builds release artifacts, then waits on a single protected `release` environment approval before publishing to the CDN. Stable tags also build and publish PyPI packages; prerelease tags skip PyPI.
 - Configure the GitHub Environment named `release` with required reviewers if you want manual approval before production publishing.
 
 ## Code Style
