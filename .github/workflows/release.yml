@@ -198,6 +198,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      contents: read
       id-token: write
     env:
       VERSION: ${{ needs.release-meta.outputs.version }}
@@ -270,12 +271,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
+        env:
+          RELEASE_VERSION: ${{ needs.release-meta.outputs.version }}
+          RELEASE_TAG: ${{ needs.release-meta.outputs.tag }}
         run: |
-          cat <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          # Release Assets Published
-
-          - Version: ${{ needs.release-meta.outputs.version }}
-          - Tag: ${{ needs.release-meta.outputs.tag }}
-
-          GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, stable releases were published to PyPI via Trusted Publishing, and the CDN channel was updated for this release.
-          EOF
+          {
+            echo "# Release Assets Published"
+            echo
+            echo "- Version: ${RELEASE_VERSION}"
+            echo "- Tag: ${RELEASE_TAG}"
+            echo
+            if [[ "${RELEASE_VERSION}" == *-* ]]; then
+              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, PyPI publishing was skipped for this prerelease, and the CDN beta channel was updated for this release."
+            else
+              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, the package was published to PyPI via Trusted Publishing, and the CDN channel was updated for this release."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
