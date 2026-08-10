@@ -158,7 +158,8 @@ jobs:
           AISH_INSTALL_ROOT="$INSTALL_ROOT" AISH_SKIP_SYSTEMD=1 "$EXTRACT_DIR/${BUNDLE}/install.sh"
 
           test -x "$INSTALL_ROOT/usr/local/bin/aish"
-          test -f "$INSTALL_ROOT/etc/aish/security_policy.yaml"
+          # Security policy is seeded under ~/.config/aish on first run (#416), not under /etc.
+          test ! -e "$INSTALL_ROOT/etc/aish/security_policy.yaml"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.service"
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
 
