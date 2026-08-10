@@ -7,11 +7,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.10] - 2026-08-10
 
 ### Added
 
+- Multi-source skill registry with search, install, verify, trust/quarantine, and an AI-callable `skill_install` tool (`/skill`, `aish skill`), including built-in adapters for `skills.sh` and `skillhub.cn`.
+- Interactive `/skill` manager panel (Installed / Browse / Registries tabs) for search, install, trust, verify, remove, and registry enable/disable; complete-arg subcommands still run directly.
+- `/model` multi-account rotation and interactive model picker: recoverable failures (429 / usage limits) rotate across configured API accounts.
+- Session workflow commands: `/export [md]` (session → Markdown), `/fork` (branch a session while preserving the original), and `/sessions` (browse the session tree and switch).
+- File-change snapshot store with `/undo [path]` and interactive `/rollback` to restore prior checkpoints in the current session; `write_file` / `edit_file` results report when a write is not undoable.
+- Parallel execution for batches of independent `Agent` (sub-agent) tool calls.
 - After upgrading, the next interactive `aish` launch shows a Keep-a-Changelog summary for every version between the previously seen release and the newly installed one (oldest → newest), sourced from the `CHANGELOG.md` embedded in the binary. A `~/.config/aish/last-changelog-version` marker tracks what has already been shown.
+- Built-in local ops diagnostic skills: rewritten symptom-first `diagnose_system_lag`, plus `network-path-diagnose`, `dns-diagnose`, `nfs-cifs-mount-diagnose`, and `ssl-cert-toolkit`.
+
+### Changed
+
+- `security_policy.yaml` is the sole source of truth for security settings: `/setting` reads/writes the live `SecurityManager`, security fields are stripped from `config.yaml` on load (with a warning), and installs no longer write `/etc/aish` security config.
+- Hardened the read-only bash classifier so harmless inspection redirects/globs are allowed while real write redirects are not misclassified as read-only.
+- File-edit diffs render as centered hunks with bounded context so edits near the end of large files stay visible.
+
+### Fixed
+
+- Restored rich sandbox policy reasons (rule id / paths / human-facing `reason`) instead of generic HIGH-level block text; wired the security panel UI with a closed confirm layout and independent Paths / degraded-sandbox Note rows.
+- Fixed PTY handling so terminal device-query responses (CPR/DA/DSR) no longer leak into stdin as garbage keystrokes (e.g. `0;115;0c`) under ssh/tmux/pager scenarios.
+- CI always reports the Lint and test required check for docs-only PRs, and treats `Makefile` / `rust-toolchain.toml` as code changes.
 
 ## [0.3.9] - 2026-07-27
 
