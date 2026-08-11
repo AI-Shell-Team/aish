@@ -18,14 +18,58 @@ const DEFAULT_BETA_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download/be
 const CONNECTION_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
 
+fn print_dim(msg: &str) {
+    println!("\x1b[2m{msg}\x1b[0m");
+}
+
+fn print_success(msg: &str) {
+    println!("\x1b[32m{msg}\x1b[0m");
+}
+
+fn print_error(msg: &str) {
+    eprintln!("\x1b[31m{msg}\x1b[0m");
+}
+
+fn print_update_available(current: &str, latest: &str) {
+    let mut args = std::collections::HashMap::new();
+    args.insert("current".to_string(), current.to_string());
+    args.insert("latest".to_string(), latest.to_string());
+    let versions = t_with_args("cli.update.update_available_versions", &args);
+    println!(
+        "\x1b[1m{}\x1b[0m \x1b[2m{}\x1b[0m",
+        t("cli.update.update_available_label"),
+        versions
+    );
+}
+
+fn print_release_notes(url: &str) {
+    if url.is_empty() {
+        return;
+    }
+    let mut args = std::collections::HashMap::new();
+    args.insert("url".to_string(), url.to_string());
+    print_dim(&t_with_args("cli.update.release_notes", &args));
+}
+
+fn print_checking(version: &str) {
+    let mut args = std::collections::HashMap::new();
+    args.insert("version".to_string(), version.to_string());
+    print_dim(&t_with_args("cli.update.checking", &args));
+}
+
+fn print_updated(current: &str, latest: &str) {
+    let mut args = std::collections::HashMap::new();
+    args.insert("current".to_string(), current.to_string());
+    args.insert("latest".to_string(), latest.to_string());
+    print_success(&t_with_args("cli.update.installation_successful", &args));
+}
+
 #[derive(Debug)]
 pub struct UpdateInfo {
     pub tag_name: String,
     pub current_version: String,
     pub latest_version: String,
     pub html_url: String,
-    #[allow(dead_code)]
-    pub release_notes: String,
 }
 
 #[derive(Debug)]
@@ -210,7 +254,6 @@ fn build_update_info(
         current_version: current.to_string(),
         latest_version: latest.to_string(),
         html_url: format!("{base}/releases/{latest}"),
-        release_notes: String::new(),
     })
 }
 
@@ -256,7 +299,36 @@ pub fn check_for_updates(
 // Download with progress
 // ---------------------------------------------------------------------------
 
-fn download_with_progress(url: &str, dest: &Path, label: &str) -> Result<(), AishError> {
+fn progress_bar(pct: u32, width: usize) -> String {
+    let filled = ((pct as usize).min(100) * width / 100).min(width);
+    let mut bar = String::with_capacity(width + 2);
+    bar.push('[');
+    for i in 0..width {
+        bar.push(if i < filled { '█' } else { '░' });
+    }
+    bar.push(']');
+    bar
+}
+
+fn format_download_progress(downloaded: u64, total: u64) -> String {
+    let downloaded_mb = downloaded as f64 / 1_048_576.0;
+    if total > 0 {
+        let pct = ((downloaded as f64 / total as f64) * 100.0).min(100.0) as u32;
+        let total_mb = total as f64 / 1_048_576.0;
+        let mut args = std::collections::HashMap::with_capacity(4);
+        args.insert("bar".to_string(), progress_bar(pct, 24));
+        args.insert("pct".to_string(), pct.to_string());
+        args.insert("downloaded".to_string(), format!("{downloaded_mb:.1}"));
+        args.insert("total".to_string(), format!("{total_mb:.1}"));
+        t_with_args("cli.update.progress_mb", &args)
+    } else {
+        let mut args = std::collections::HashMap::with_capacity(1);
+        args.insert("downloaded".to_string(), format!("{downloaded_mb:.1}"));
+        t_with_args("cli.update.progress_mb_no_total", &args)
+    }
+}
+
+fn download_with_progress(url: &str, dest: &Path) -> Result<(), AishError> {
     let client = build_http_client(DOWNLOAD_TIMEOUT_SECS)?;
 
     let resp = client.get(url).send().map_err(|e| {
@@ -317,63 +389,14 @@ fn download_with_progress(url: &str, dest: &Path, label: &str) -> Result<(), Ais
         })?;
         downloaded += n as u64;
 
-        if total > 0 {
-            let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
-            let downloaded_mb = downloaded as f64 / 1_048_576.0;
-            let total_mb = total as f64 / 1_048_576.0;
-            print!("\r\x1b[2K\x1b[1;36m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::with_capacity(4);
-                args.insert("label".to_string(), label.to_string());
-                args.insert("downloaded".to_string(), format!("{:.1}", downloaded_mb));
-                args.insert("total".to_string(), format!("{:.1}", total_mb));
-                args.insert("pct".to_string(), pct.to_string());
-                t_with_args("cli.update.progress_mb", &args)
-            });
-        } else {
-            let downloaded_mb = downloaded as f64 / 1_048_576.0;
-            print!("\r\x1b[2K\x1b[1;36m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::with_capacity(2);
-                args.insert("label".to_string(), label.to_string());
-                args.insert("downloaded".to_string(), format!("{:.1}", downloaded_mb));
-                t_with_args("cli.update.progress_mb_no_total", &args)
-            });
-        }
+        print!(
+            "\r\x1b[2K\x1b[2m{}\x1b[0m",
+            format_download_progress(downloaded, total)
+        );
         std::io::stdout().flush().ok();
     }
     println!();
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// SHA256
-// ---------------------------------------------------------------------------
-
-fn sha256_file(path: &Path) -> Result<String, AishError> {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    let mut file = std::fs::File::open(path).map_err(|e| {
-        AishError::Config({
-            let mut args = std::collections::HashMap::new();
-            args.insert("error".to_string(), e.to_string());
-            t_with_args("cli.update.open_error", &args)
-        })
-    })?;
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = file.read(&mut buf).map_err(|e| {
-            AishError::Config({
-                let mut args = std::collections::HashMap::new();
-                args.insert("error".to_string(), e.to_string());
-                t_with_args("cli.update.read_error", &args)
-            })
-        })?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 // ---------------------------------------------------------------------------
@@ -396,14 +419,7 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
 
     let dest_path = temp_dir.join(&filename);
     let cdn_url = get_release_download_url(tag_name, &filename);
-    println!("\x1b[1;36mDownloading release bundle...\x1b[0m");
-    download_with_progress(&cdn_url, &dest_path, &filename)?;
-    let path_str = dest_path.display().to_string();
-    println!("\x1b[32m{}\x1b[0m", {
-        let mut args = std::collections::HashMap::new();
-        args.insert("path".to_string(), path_str);
-        t_with_args("cli.update.downloaded", &args)
-    });
+    download_with_progress(&cdn_url, &dest_path)?;
     Ok(dest_path)
 }
 
@@ -434,7 +450,41 @@ fn find_install_sh(dir: &Path) -> Result<PathBuf, AishError> {
         .ok_or_else(|| AishError::Config(t("cli.update.install_sh_not_found")))
 }
 
-fn install_release(archive_path: &Path) -> Result<(), AishError> {
+fn sudo_credentials_cached() -> bool {
+    std::process::Command::new("sudo")
+        .args(["-n", "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Ensure sudo credentials are available. Uses `sudo -p` for a single prompt line.
+fn ensure_sudo_ready() -> Result<(), AishError> {
+    if sudo_credentials_cached() {
+        return Ok(());
+    }
+
+    let prompt = t("cli.update.sudo_password_required");
+    let status = std::process::Command::new("sudo")
+        .args(["-v", "-p", &prompt])
+        .status()
+        .map_err(|e| {
+            AishError::Config({
+                let mut args = std::collections::HashMap::new();
+                args.insert("error".to_string(), e.to_string());
+                t_with_args("cli.update.install_script_failed", &args)
+            })
+        })?;
+
+    if !status.success() {
+        return Err(AishError::Config(t("cli.update.sudo_auth_failed")));
+    }
+    Ok(())
+}
+
+fn install_release(archive_path: &Path, current: &str, latest: &str) -> Result<(), AishError> {
     let extract_dir = std::env::temp_dir().join("aish_update").join("extract");
 
     // Clean previous extraction
@@ -447,8 +497,6 @@ fn install_release(archive_path: &Path) -> Result<(), AishError> {
         })
     })?;
 
-    // Extract via system tar
-    println!("\x1b[1;36m{}\x1b[0m", t("cli.update.extracting"));
     let output = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(archive_path)
@@ -474,23 +522,15 @@ fn install_release(archive_path: &Path) -> Result<(), AishError> {
         }));
     }
 
-    // Locate install.sh
     let install_script = find_install_sh(&extract_dir)?;
 
-    // Show SHA256 for verification
-    let hash = sha256_file(&install_script)?;
-    println!("\x1b[2m{}\x1b[0m", {
-        let mut args = std::collections::HashMap::new();
-        args.insert("hash".to_string(), hash);
-        t_with_args("cli.update.install_sh_hash", &args)
-    });
+    if sudo_credentials_cached() {
+        print_dim(&t("cli.update.running_install_script"));
+    }
+    ensure_sudo_ready()?;
 
-    // Run with sudo
-    println!(
-        "\x1b[1;36m{}\x1b[0m",
-        t("cli.update.running_install_script")
-    );
     let result = std::process::Command::new("sudo")
+        .arg("-n")
         .arg(&install_script)
         .output()
         .map_err(|e| {
@@ -512,7 +552,7 @@ fn install_release(archive_path: &Path) -> Result<(), AishError> {
         }));
     }
 
-    println!("\x1b[32m{}\x1b[0m", t("cli.update.installation_successful"));
+    print_updated(current, latest);
     Ok(())
 }
 
@@ -601,7 +641,6 @@ fn check_for_pip_updates(
         current_version: current.to_string(),
         latest_version: check_info.latest_version,
         html_url: check_info.html_url.unwrap_or_default(),
-        release_notes: String::new(),
     }))
 }
 
@@ -654,32 +693,22 @@ fn run_pip_update(context: &PipChannelContext, pre_release: bool) -> Result<(), 
 pub fn run_update(check_only: bool, pre_release: bool) {
     let current = env!("CARGO_PKG_VERSION").to_string();
 
-    println!("\x1b[1;36m{}\x1b[0m", t("cli.update.checking"));
+    print_checking(&current);
 
     if let Some(InstallChannel::Pip(context)) = current_install_channel() {
         match check_for_pip_updates(&context, &current, pre_release) {
             Ok(Some(info)) => {
-                println!("\x1b[1;33m{}\x1b[0m", {
-                    let mut args = std::collections::HashMap::new();
-                    args.insert("current".to_string(), info.current_version.clone());
-                    args.insert("latest".to_string(), info.latest_version.clone());
-                    t_with_args("cli.update.update_available", &args)
-                });
-                if !info.html_url.is_empty() {
-                    println!("\x1b[2m{}\x1b[0m", info.html_url);
-                }
+                print_update_available(&info.current_version, &info.latest_version);
 
                 if check_only {
+                    print_release_notes(&info.html_url);
                     return;
                 }
 
-                println!(
-                    "\x1b[1;36m{}\x1b[0m",
-                    t("cli.update.running_install_script")
-                );
+                print_dim(&t("cli.update.running_install_script"));
 
                 if let Err(error) = run_pip_update(&context, pre_release) {
-                    eprintln!("\x1b[31m{}\x1b[0m", {
+                    print_error(&{
                         let mut args = std::collections::HashMap::new();
                         args.insert("error".to_string(), error.to_string());
                         t_with_args("cli.update.pip_update_failed", &args)
@@ -687,17 +716,17 @@ pub fn run_update(check_only: bool, pre_release: bool) {
                     return;
                 }
 
-                println!("\x1b[32m{}\x1b[0m", t("cli.update.pip_update_success"));
+                print_updated(&info.current_version, &info.latest_version);
             }
             Ok(None) => {
-                println!("\x1b[32m{}\x1b[0m", {
+                print_success(&{
                     let mut args = std::collections::HashMap::new();
                     args.insert("version".to_string(), current);
                     t_with_args("cli.update.already_latest", &args)
                 });
             }
             Err(error) => {
-                eprintln!("\x1b[31m{}\x1b[0m", {
+                print_error(&{
                     let mut args = std::collections::HashMap::new();
                     args.insert("error".to_string(), error.to_string());
                     t_with_args("cli.update.update_check_failed", &args)
@@ -709,44 +738,32 @@ pub fn run_update(check_only: bool, pre_release: bool) {
 
     match check_for_updates(&current, pre_release) {
         Ok(Some(info)) => {
-            println!("\x1b[1;33m{}\x1b[0m", {
-                let mut args = std::collections::HashMap::new();
-                args.insert("current".to_string(), info.current_version.clone());
-                args.insert("latest".to_string(), info.latest_version.clone());
-                t_with_args("cli.update.update_available", &args)
-            });
-            println!("\x1b[2m{}\x1b[0m", info.html_url);
+            print_update_available(&info.current_version, &info.latest_version);
 
             if check_only {
-                return;
-            }
-
-            print!(
-                "\n\x1b[33m{}\x1b[0m",
-                t("cli.update.download_install_prompt")
-            );
-            std::io::stdout().flush().unwrap();
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer).unwrap();
-            let ans = answer.trim().to_lowercase();
-            if ans != "y" && ans != "yes" {
-                println!("{}", t("cli.update.update_cancelled"));
+                print_release_notes(&info.html_url);
                 return;
             }
 
             match download_release(&info.tag_name) {
-                Ok(archive_path) => match install_release(&archive_path) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        eprintln!("\x1b[31m{}\x1b[0m", {
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("error".to_string(), e.to_string());
-                            t_with_args("cli.update.installation_error", &args)
-                        });
+                Ok(archive_path) => {
+                    match install_release(
+                        &archive_path,
+                        &info.current_version,
+                        &info.latest_version,
+                    ) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            print_error(&{
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("error".to_string(), e.to_string());
+                                t_with_args("cli.update.installation_error", &args)
+                            });
+                        }
                     }
-                },
+                }
                 Err(e) => {
-                    eprintln!("\x1b[31m{}\x1b[0m", {
+                    print_error(&{
                         let mut args = std::collections::HashMap::new();
                         args.insert("error".to_string(), e.to_string());
                         t_with_args("cli.update.download_error", &args)
@@ -757,14 +774,14 @@ pub fn run_update(check_only: bool, pre_release: bool) {
             cleanup();
         }
         Ok(None) => {
-            println!("\x1b[32m{}\x1b[0m", {
+            print_success(&{
                 let mut args = std::collections::HashMap::new();
                 args.insert("version".to_string(), current);
                 t_with_args("cli.update.already_latest", &args)
             });
         }
         Err(e) => {
-            eprintln!("\x1b[31m{}\x1b[0m", {
+            print_error(&{
                 let mut args = std::collections::HashMap::new();
                 args.insert("error".to_string(), e.to_string());
                 t_with_args("cli.update.update_check_failed", &args)
@@ -776,6 +793,29 @@ pub fn run_update(check_only: bool, pre_release: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_progress_bar_bounds() {
+        assert_eq!(progress_bar(0, 10), "[░░░░░░░░░░]");
+        assert_eq!(progress_bar(50, 10), "[█████░░░░░]");
+        assert_eq!(progress_bar(100, 10), "[██████████]");
+        assert_eq!(progress_bar(200, 4), "[████]");
+    }
+
+    #[test]
+    fn test_format_download_progress_uses_preformatted_sizes() {
+        let line = format_download_progress(1_048_576, 2_097_152);
+        assert!(line.contains("50%"), "expected percent in {line}");
+        assert!(line.contains("1.0/2.0 MB"), "expected sizes in {line}");
+        assert!(
+            !line.contains("{downloaded"),
+            "placeholders must be substituted: {line}"
+        );
+        assert!(
+            !line.contains("{total"),
+            "placeholders must be substituted: {line}"
+        );
+    }
 
     #[test]
     fn test_compare_versions_equal() {
@@ -933,20 +973,6 @@ mod tests {
         let (plat, arch) = result.unwrap();
         assert!(plat == "linux" || plat == "darwin");
         assert!(arch == "amd64" || arch == "arm64");
-    }
-
-    #[test]
-    fn test_sha256_file() {
-        let dir = std::env::temp_dir().join("aish_test_sha256");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.txt");
-        std::fs::write(&path, b"hello world").unwrap();
-        let hash = sha256_file(&path).unwrap();
-        assert_eq!(
-            hash,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
