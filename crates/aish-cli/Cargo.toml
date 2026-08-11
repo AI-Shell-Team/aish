@@ -25,6 +25,5 @@ tracing-subscriber.workspace = true
 dirs.workspace = true
 reqwest.workspace = true
 semver.workspace = true
-sha2.workspace = true
 libc.workspace = true
 uuid.workspace = true
