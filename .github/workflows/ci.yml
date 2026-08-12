@@ -26,6 +26,7 @@ jobs:
   changes:
     name: Detect changed areas
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || steps.default.outputs.code }}
       packaging: ${{ github.event_name == 'pull_request' && steps.filter.outputs.packaging || steps.default.outputs.packaging }}
@@ -62,6 +63,7 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -109,6 +111,7 @@ jobs:
           - arch: arm64
             runs_on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -144,6 +147,7 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -159,6 +163,7 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -213,6 +218,7 @@ jobs:
       - packaging_smoke
       - build_smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Verify required CI jobs
@@ -239,6 +245,7 @@ jobs:
     name: Build bundle
     if: github.event_name != 'pull_request' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs:
       - changes
       - lint-test
