@@ -57,134 +57,30 @@ jobs:
               - '.github/workflows/release.yml'
               - '.github/workflows/release-preparation.yml'
 
-  lint-test:
-    name: Lint and test
+  lint:
+    name: Lint
     needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
     runs-on: ubuntu-latest
 
     steps:
-      # Required status check "Lint and test" must always report success on PRs.
-      # Docs/skills-only changes skip the heavy Rust work below.
-      - name: Skip heavy checks for non-code PRs
-        id: gate
-        run: |
-          if [ "${{ github.event_name }}" != "pull_request" ] \
-            || [ "${{ needs.changes.outputs.code }}" = "true" ] \
-            || [ "${{ needs.changes.outputs.packaging }}" = "true" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "No code/packaging changes; marking Lint and test as passed."
-          fi
-
       - name: Checkout repository
-        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v6
 
       - name: Read pinned Rust toolchain
         id: rust_toolchain
-        if: steps.gate.outputs.run == 'true'
         run: |
           channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
           test -n "$channel"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
-        if: steps.gate.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.rust_toolchain.outputs.channel }}
           components: clippy,rustfmt
 
       - name: Cache Cargo registry
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
-
-      - name: Check formatting
-        if: steps.gate.outputs.run == 'true'
-        run: make format-check
-
-      - name: Run clippy
-        if: steps.gate.outputs.run == 'true'
-        run: make lint
-
-      - name: Run tests
-        if: steps.gate.outputs.run == 'true'
-        run: cargo test --workspace
-
-      - name: Run packaging release script smoke tests
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          ./packaging/tests/release_scripts_smoke.sh
-          ./packaging/tests/seed_skills_ownership_smoke.sh
-
-      - name: Install musl tools
-        if: steps.gate.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools && rustup target add x86_64-unknown-linux-musl --toolchain "${{ steps.rust_toolchain.outputs.channel }}"
-
-      - name: Build release binary (musl)
-        if: steps.gate.outputs.run == 'true'
-        run: cargo build --release --target x86_64-unknown-linux-musl
-
-      - name: Smoke test binary
-        if: steps.gate.outputs.run == 'true'
-        run: ./target/x86_64-unknown-linux-musl/release/aish --help
-
-      - name: Upload release binary
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/upload-artifact@v6
-        with:
-          name: aish-linux-amd64
-          path: target/x86_64-unknown-linux-musl/release/aish
-          if-no-files-found: error
-
-  arm64-test:
-    name: Test (ARM64)
-    needs: changes
-    runs-on: ubuntu-24.04-arm
-
-    steps:
-      # Keep the ARM64 status visible while avoiding unnecessary Rust builds
-      # for documentation- and skills-only pull requests.
-      - name: Skip tests for non-code PRs
-        id: gate
-        run: |
-          if [ "${{ github.event_name }}" != "pull_request" ] \
-            || [ "${{ needs.changes.outputs.code }}" = "true" ] \
-            || [ "${{ needs.changes.outputs.packaging }}" = "true" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "No code/packaging changes; marking ARM64 tests as passed."
-          fi
-
-      - name: Checkout repository
-        if: steps.gate.outputs.run == 'true'
-        uses: actions/checkout@v6
-
-      - name: Read pinned Rust toolchain
-        id: rust_toolchain
-        if: steps.gate.outputs.run == 'true'
-        run: |
-          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
-          test -n "$channel"
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust toolchain
-        if: steps.gate.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
-
-      - name: Cache Cargo registry
-        if: steps.gate.outputs.run == 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -194,9 +90,150 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
 
+      - name: Check formatting
+        run: make format-check
+
+      - name: Run clippy
+        run: make lint
+
+  test:
+    name: Test (${{ matrix.arch }})
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs_on: ubuntu-latest
+          - arch: arm64
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-cargo-${{ env.CACHE_KEY_SUFFIX }}-
+
       - name: Run tests
-        if: steps.gate.outputs.run == 'true'
         run: cargo test --workspace
+
+  packaging_smoke:
+    name: Packaging smoke
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run packaging release script smoke tests
+        run: |
+          ./packaging/tests/release_scripts_smoke.sh
+          ./packaging/tests/seed_skills_ownership_smoke.sh
+
+  build_smoke:
+    name: Build smoke (AMD64)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.code == 'true' || needs.changes.outputs.packaging == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read pinned Rust toolchain
+        id: rust_toolchain
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust_toolchain.outputs.channel }}
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-musl-cargo-${{ env.CACHE_KEY_SUFFIX }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-musl-cargo-${{ env.CACHE_KEY_SUFFIX }}-
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Smoke test binary
+        run: ./target/x86_64-unknown-linux-musl/release/aish --help
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: aish-linux-amd64
+          path: target/x86_64-unknown-linux-musl/release/aish
+          if-no-files-found: error
+
+  lint-test:
+    name: Lint and test
+    if: always()
+    needs:
+      - changes
+      - lint
+      - test
+      - packaging_smoke
+      - build_smoke
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify required CI jobs
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGING_RESULT: ${{ needs.packaging_smoke.result }}
+          BUILD_RESULT: ${{ needs.build_smoke.result }}
+        run: |
+          for result in \
+            "$CHANGES_RESULT" \
+            "$LINT_RESULT" \
+            "$TEST_RESULT" \
+            "$PACKAGING_RESULT" \
+            "$BUILD_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "Required CI job finished with result: $result"; exit 1 ;;
+            esac
+          done
 
   build-bundle:
     name: Build bundle
