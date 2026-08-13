@@ -45,6 +45,7 @@ pub mod theme;
 pub mod token_store;
 pub mod tui;
 pub mod types;
+pub mod update_check;
 pub mod wizard;
 
 pub use app::AishShell;

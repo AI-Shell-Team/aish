@@ -670,6 +670,29 @@ fn wrap_text(text: &str, max: usize) -> Vec<String> {
     lines
 }
 
+/// Print a one-shot omp-style "update available" notice.
+pub fn print_update_available(latest: &str) {
+    let rule = theme::warning(&"─".repeat(46));
+    let mut args = HashMap::new();
+    args.insert("latest".to_string(), latest.to_string());
+    println!();
+    println!("{rule}");
+    println!(
+        "  {}",
+        theme::bold(&theme::warning(&t("shell.update_available.title")))
+    );
+    println!(
+        "  {}",
+        theme::muted(&t_with_args("shell.update_available.version_line", &args))
+    );
+    println!(
+        "  {} {}",
+        theme::muted(&t("shell.update_available.run_prefix")),
+        theme::accent("aish update")
+    );
+    println!("{rule}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

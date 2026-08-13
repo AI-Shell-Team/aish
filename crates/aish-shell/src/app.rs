@@ -2166,6 +2166,26 @@ impl AishShell {
             sigterm_stream.recv().await;
             sigterm_flag.store(true, Ordering::SeqCst);
         });
+        // omp-style async update check: fire-and-forget, never blocks startup.
+        let update_notice = Arc::new(parking_lot::Mutex::new(
+            crate::update_check::UpdateNotice::Pending,
+        ));
+        if self.config.check_update_on_startup
+            && std::io::IsTerminal::is_terminal(&std::io::stdout())
+        {
+            let notice = update_notice.clone();
+            let current = self.version.clone();
+            runtime.handle().spawn(async move {
+                let res = tokio::task::spawn_blocking(move || {
+                    crate::update_check::probe_update(&current)
+                })
+                .await;
+                *notice.lock() = match res {
+                    Ok(Some(info)) => crate::update_check::UpdateNotice::Available(info),
+                    _ => crate::update_check::UpdateNotice::Done,
+                };
+            });
+        }
 
         // Build the shared AutoSuggest engine up here, before ShellReadline::new.
         let autosuggest = Arc::new(Mutex::new(crate::autosuggest::AutoSuggest::new(5000)));
@@ -2246,6 +2266,18 @@ impl AishShell {
             }
             if sigterm_exit.load(Ordering::SeqCst) {
                 break;
+            }
+
+            // Drain the one-shot update notice once the background probe lands.
+            {
+                let drained = {
+                    let mut guard = update_notice.lock();
+                    std::mem::replace(&mut *guard, crate::update_check::UpdateNotice::Done)
+                };
+                if let crate::update_check::UpdateNotice::Available(info) = drained {
+                    prompt::print_update_available(&info.latest);
+                    let _ = io::stdout().flush();
+                }
             }
 
             // Check for skill hot-reload changes

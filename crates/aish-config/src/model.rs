@@ -507,6 +507,10 @@ pub struct ConfigModel {
     /// a fallback. Default: true.
     #[serde(default = "default_true")]
     pub fallback_revert_on_cooldown: bool,
+    /// Check for a newer aish release on startup (omp-style async notice).
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub check_update_on_startup: bool,
 }
 
 impl Default for ConfigModel {
@@ -558,6 +562,7 @@ impl Default for ConfigModel {
             fallback_models: vec![],
             recent_models: vec![],
             fallback_revert_on_cooldown: default_true(),
+            check_update_on_startup: default_true(),
         }
     }
 }
