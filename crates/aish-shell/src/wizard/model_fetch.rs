@@ -287,7 +287,7 @@ mod tests {
         let catalog = get_models_for_provider("openai", "http://127.0.0.1:1", Some("fake-key"));
         assert_eq!(catalog.kind, ModelCatalogKind::Local);
         assert!(catalog.error.is_none());
-        assert!(catalog.models.iter().any(|m| m == "gpt-4o"));
+        assert!(catalog.models.iter().any(|m| m == "gpt-5.6-sol"));
     }
 
     #[test]
