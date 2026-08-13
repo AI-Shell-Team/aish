@@ -164,6 +164,11 @@ shell:
     risk: "Von der KI erzeugte Inhalte können riskant sein; bitte sorgfältig prüfen."
     skills_loaded_suffix: " geladen"
 
+  update_available:
+    title: "Update verfügbar"
+    version_line: "Neue Version {latest} verfügbar"
+    run_prefix: "Befehl:"
+
   slash:
     help: "Hilfeinformationen anzeigen"
     model: "KI-Modell anzeigen oder wechseln"

@@ -333,6 +333,11 @@ shell:
     changelog_summary_more: "... and {count} more"
     changelog_summary_truncated: "... truncated. Full notes ship in CHANGELOG.md."
 
+  update_available:
+    title: "Update Available"
+    version_line: "New version {latest} is available"
+    run_prefix: "Run:"
+
   # General error messages
   general_error: "error: {error}"
   readline_init_failed: "Failed to initialize readline: {error}"

@@ -164,6 +164,11 @@ shell:
     risk: "AI が生成した内容にはリスクがあるため、必ず注意して確認してください。"
     skills_loaded_suffix: " 件読み込み済み"
 
+  update_available:
+    title: "更新があります"
+    version_line: "新バージョン {latest} が利用可能です"
+    run_prefix: "コマンド:"
+
   slash:
     help: "ヘルプ情報を表示"
     model: "AI モデルの表示・切替"

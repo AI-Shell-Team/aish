@@ -164,6 +164,11 @@ shell:
     risk: "El contenido generado por IA puede ser arriesgado; verificalo con cuidado."
     skills_loaded_suffix: " cargadas"
 
+  update_available:
+    title: "Actualización disponible"
+    version_line: "Nueva versión {latest} disponible"
+    run_prefix: "Comando:"
+
   slash:
     help: "Mostrar información de ayuda"
     model: "Mostrar o cambiar modelo de IA"

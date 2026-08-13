@@ -333,6 +333,11 @@ shell:
     changelog_summary_more: "……还有 {count} 条"
     changelog_summary_truncated: "……已截断。完整说明见 CHANGELOG.md。"
 
+  update_available:
+    title: "发现新版本"
+    version_line: "新版本 {latest} 可用"
+    run_prefix: "升级命令："
+
   # 通用错误消息
   general_error: "错误: {error}"
   readline_init_failed: "初始化 readline 失败: {error}"

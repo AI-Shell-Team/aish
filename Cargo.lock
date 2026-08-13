@@ -263,6 +263,7 @@ dependencies = [
  "richrs",
  "rusqlite",
  "rustyline",
+ "semver",
  "serde",
  "serde_json",
  "serde_yaml",
