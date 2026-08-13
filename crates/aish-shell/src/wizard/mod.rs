@@ -870,36 +870,41 @@ impl SetupWizard {
         }
     }
 
-    /// Step 3: Model selection (with dynamic fetch from provider API).
+    /// Step 3: Model selection. Known providers use the local catalog immediately;
+    /// Ollama / vLLM / unknown endpoints discover models live.
     fn select_model(&mut self) -> Result<(), AishError> {
         let provider = self
             .selected_provider
             .as_ref()
             .ok_or(AishError::Cancelled)?;
+        let provider_key = provider.key.clone();
+        let provider_label = provider.label.clone();
 
         let mut args = std::collections::HashMap::new();
-        args.insert("provider".to_string(), provider.label.clone());
+        args.insert("provider".to_string(), provider_label);
         let title = t_with_args("cli.setup.model_header", &args);
 
-        let api_base = self.api_base.as_deref().unwrap_or("");
+        let api_base = self.api_base.clone().unwrap_or_default();
+        let api_key = self.api_key.clone();
 
-        // Try dynamic model fetch first; fall back to static list.
-        let dynamic_models = if let Some(api_key) = &self.api_key {
-            model_fetch::get_models_for_provider(&provider.key, api_base, Some(api_key.as_str()))
-        } else if provider.key == "ollama" || provider.key == "vllm" {
-            model_fetch::get_models_for_provider(&provider.key, api_base, None)
+        let fetch =
+            || model_fetch::get_models_for_provider(&provider_key, &api_base, api_key.as_deref());
+        let catalog = if model_fetch::uses_live_discovery(&provider_key) {
+            clack_log::step(&t("cli.setup.model_discover_in_progress"));
+            clack_log::with_spinner("...", fetch)
         } else {
-            vec![]
+            fetch()
         };
 
-        let models = if dynamic_models.is_empty() {
-            get_provider_models(&provider.key)
-        } else {
-            dynamic_models
-        };
+        if let Some(err) = catalog.error.as_deref() {
+            let mut err_args = std::collections::HashMap::new();
+            err_args.insert("reason".to_string(), err.to_string());
+            clack_log::error(&t_with_args("cli.setup.model_discover_failed", &err_args));
+        }
 
-        if !models.is_empty() {
-            let options: Vec<DialogOption> = models
+        if !catalog.models.is_empty() {
+            let options: Vec<DialogOption> = catalog
+                .models
                 .iter()
                 .map(|m| DialogOption::new(m, m.clone()))
                 .collect();

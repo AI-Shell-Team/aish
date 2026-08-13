@@ -67,6 +67,8 @@ cli:
     model_custom_option: "カスタムモデル..."
     model_custom_required: "モデル名は必須です"
     model_custom_saved_as: "保存名: {model}"
+    model_discover_in_progress: "利用可能なモデルを検出しています..."
+    model_discover_failed: "モデルを検出できませんでした: {reason}"
     verify_title: "検証"
     verify_connectivity_in_progress: "接続性を確認しています..."
     verify_tool_in_progress: "API が tools パラメータを受け付けるか確認しています..."
