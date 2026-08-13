@@ -226,6 +226,8 @@ cli:
     model_custom_option: "自定义模型..."
     model_custom_required: "模型名称不能为空"
     model_custom_saved_as: "将保存为：{model}"
+    model_discover_in_progress: "正在发现可用模型..."
+    model_discover_failed: "无法发现模型：{reason}"
     verify_title: "验证"
     verify_connectivity_in_progress: "正在检查连通性..."
     verify_tool_in_progress: "正在检查 API 是否接受 tools 参数..."

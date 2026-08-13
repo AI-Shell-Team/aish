@@ -226,6 +226,8 @@ cli:
     model_custom_option: "Custom model..."
     model_custom_required: "Model name is required"
     model_custom_saved_as: "Will be saved as: {model}"
+    model_discover_in_progress: "Discovering available models..."
+    model_discover_failed: "Could not discover models: {reason}"
     verify_title: "Verification"
     verify_connectivity_in_progress: "Checking connectivity..."
     verify_tool_in_progress: "Checking whether the API accepts tools parameters..."

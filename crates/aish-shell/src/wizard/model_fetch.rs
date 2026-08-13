@@ -1,13 +1,62 @@
 //! Dynamic model fetching from provider APIs.
 //!
-//! Provides functions to fetch available models from OpenAI-compatible and
-//! Ollama APIs, with graceful fallback to static model lists.
+//! Known providers with a local catalog skip the network during setup.
+//! Ollama, vLLM, and providers without a local catalog discover models live.
 
 use tracing::debug;
 
 use aish_llm::trim_model_name;
 
 use super::get_provider_models;
+
+/// How the setup model list was obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCatalogKind {
+    /// Built-in catalog; no network request was made.
+    Local,
+    /// Result of a live discovery request (success or failure).
+    Discovered,
+}
+
+/// Models shown in setup, plus whether they came from the local catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCatalog {
+    pub models: Vec<String>,
+    pub kind: ModelCatalogKind,
+    pub error: Option<String>,
+}
+
+impl ModelCatalog {
+    fn local(models: Vec<String>) -> Self {
+        Self {
+            models,
+            kind: ModelCatalogKind::Local,
+            error: None,
+        }
+    }
+
+    fn discovered(models: Vec<String>) -> Self {
+        Self {
+            models,
+            kind: ModelCatalogKind::Discovered,
+            error: None,
+        }
+    }
+
+    fn discover_failed(error: String) -> Self {
+        Self {
+            models: Vec::new(),
+            kind: ModelCatalogKind::Discovered,
+            error: Some(error),
+        }
+    }
+}
+
+/// Providers with no reliable local catalog (Ollama, vLLM, custom/unknown, or
+/// hosted providers that ship an empty built-in list) must be discovered online.
+pub fn uses_live_discovery(provider_key: &str) -> bool {
+    matches!(provider_key, "ollama" | "vllm") || get_provider_models(provider_key).is_empty()
+}
 
 // ---------------------------------------------------------------------------
 // Default timeout
@@ -160,91 +209,37 @@ pub fn fetch_ollama_models(timeout_s: u64) -> Result<Vec<String>, String> {
     Ok(models)
 }
 
-/// Get models for a provider, combining dynamic fetch with static fallback.
+/// Resolve the setup model list for a provider.
 ///
-/// - For "ollama": calls [`fetch_ollama_models`], falls back to static list on
-///   error.
-/// - For known providers with an `api_key`: calls [`fetch_models_from_api`],
-///   merges with the static list.
-/// - For unknown providers with an `api_key`: tries [`fetch_models_from_api`],
-///   returns empty on failure.
-/// - Results are deduplicated while preserving order (dynamic models first).
+/// Known providers return the local catalog immediately. Ollama, vLLM, and
+/// providers without a local catalog discover models from the endpoint and
+/// never substitute the built-in list on failure.
 pub fn get_models_for_provider(
     provider_key: &str,
     api_base: &str,
     api_key: Option<&str>,
-) -> Vec<String> {
-    let static_models = get_provider_models(provider_key);
-    let is_known_provider = !static_models.is_empty() || provider_key == "ollama";
+) -> ModelCatalog {
+    if !uses_live_discovery(provider_key) {
+        return ModelCatalog::local(get_provider_models(provider_key));
+    }
 
-    // --- Ollama special path ---
     if provider_key == "ollama" {
-        match fetch_ollama_models(DEFAULT_FETCH_TIMEOUT_S) {
-            Ok(dynamic) => {
-                if dynamic.is_empty() {
-                    return static_models;
-                }
-                return merge_dedup(dynamic, static_models);
-            }
+        return match fetch_ollama_models(DEFAULT_FETCH_TIMEOUT_S) {
+            Ok(models) => ModelCatalog::discovered(models),
             Err(e) => {
-                debug!("Ollama fetch failed, using static list: {}", e);
-                return static_models;
+                debug!("Ollama discovery failed: {}", e);
+                ModelCatalog::discover_failed(e)
             }
+        };
+    }
+
+    match fetch_models_from_api(api_base, api_key.unwrap_or(""), DEFAULT_FETCH_TIMEOUT_S) {
+        Ok(models) => ModelCatalog::discovered(models),
+        Err(e) => {
+            debug!("Live discovery failed for '{}': {}", provider_key, e);
+            ModelCatalog::discover_failed(e)
         }
     }
-
-    // --- Providers with API key ---
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            match fetch_models_from_api(api_base, key, DEFAULT_FETCH_TIMEOUT_S) {
-                Ok(dynamic) => {
-                    if is_known_provider {
-                        return merge_dedup(dynamic, static_models);
-                    } else {
-                        // Unknown provider: return whatever we got (may be empty).
-                        return dynamic;
-                    }
-                }
-                Err(e) => {
-                    debug!(
-                        "Dynamic fetch failed for '{}', using fallback: {}",
-                        provider_key, e
-                    );
-                    if is_known_provider {
-                        return static_models;
-                    }
-                    // Unknown provider with failed fetch: return empty.
-                    return Vec::new();
-                }
-            }
-        }
-    }
-
-    // No API key available — static fallback for known providers.
-    if is_known_provider {
-        return static_models;
-    }
-
-    Vec::new()
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Merge two Vecs, deduplicating while preserving order (items from `first`
-/// appear before items from `second` that are not duplicates).
-fn merge_dedup(first: Vec<String>, second: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut result = Vec::new();
-
-    for item in first.into_iter().chain(second) {
-        if seen.insert(item.clone()) {
-            result.push(item);
-        }
-    }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -272,53 +267,53 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_dedup_preserves_order() {
-        let a = vec!["a".to_string(), "b".to_string()];
-        let b = vec!["b".to_string(), "c".to_string()];
-        let result = merge_dedup(a, b);
-        assert_eq!(result, vec!["a", "b", "c"]);
+    fn known_providers_skip_live_discovery() {
+        assert!(!uses_live_discovery("openai"));
+        assert!(!uses_live_discovery("anthropic"));
+        assert!(!uses_live_discovery("openai-codex"));
     }
 
     #[test]
-    fn test_merge_dedup_empty_first() {
-        let a: Vec<String> = vec![];
-        let b = vec!["x".to_string()];
-        let result = merge_dedup(a, b);
-        assert_eq!(result, vec!["x"]);
+    fn discovery_only_providers_use_live_discovery() {
+        assert!(uses_live_discovery("ollama"));
+        assert!(uses_live_discovery("vllm"));
+        assert!(uses_live_discovery("custom"));
+        assert!(uses_live_discovery("unknown-provider"));
+        assert!(uses_live_discovery("openrouter"));
     }
 
     #[test]
-    fn test_merge_dedup_all_duplicates() {
-        let a = vec!["a".to_string(), "b".to_string()];
-        let b = vec!["a".to_string(), "b".to_string()];
-        let result = merge_dedup(a, b);
-        assert_eq!(result, vec!["a", "b"]);
+    fn known_provider_returns_local_catalog_without_using_endpoint() {
+        let catalog = get_models_for_provider("openai", "http://127.0.0.1:1", Some("fake-key"));
+        assert_eq!(catalog.kind, ModelCatalogKind::Local);
+        assert!(catalog.error.is_none());
+        assert!(catalog.models.iter().any(|m| m == "gpt-4o"));
     }
 
     #[test]
-    fn test_get_models_for_provider_ollama_fallback() {
-        // Ollama is almost certainly not running in CI, so this tests the
-        // fallback to the static list.
-        let models = get_models_for_provider("ollama", "http://localhost:11434", None);
-        assert!(!models.is_empty());
-        // Should contain at least one entry from the static list.
-        assert!(models.iter().any(|m| m.contains("llama")));
+    fn ollama_discovery_failure_does_not_return_builtin_list() {
+        let catalog = get_models_for_provider("ollama", "http://localhost:11434", None);
+        assert_eq!(catalog.kind, ModelCatalogKind::Discovered);
+        if catalog.error.is_some() {
+            assert!(catalog.models.is_empty());
+        }
     }
 
     #[test]
-    fn test_get_models_for_provider_unknown_no_key() {
-        let models =
-            get_models_for_provider("unknown-provider", "https://api.example.com/v1", None);
-        assert!(models.is_empty());
+    fn vllm_discovery_failure_does_not_return_builtin_list() {
+        let catalog = get_models_for_provider("vllm", "http://127.0.0.1:1", None);
+        assert_eq!(catalog.kind, ModelCatalogKind::Discovered);
+        assert!(catalog.error.is_some());
+        assert!(catalog.models.is_empty());
     }
 
     #[test]
-    fn test_get_models_for_provider_known_static_fallback() {
-        // Use an unreachable endpoint to force a fetch failure, which should
-        // fall back to the static list for known providers.
-        let models = get_models_for_provider("openai", "http://127.0.0.1:1", Some("fake-key"));
-        assert!(!models.is_empty());
-        assert!(models.iter().any(|m| m == "gpt-4o"));
+    fn unknown_provider_discovery_failure_is_empty_not_local() {
+        let catalog =
+            get_models_for_provider("unknown-provider", "http://127.0.0.1:1", Some("fake-key"));
+        assert_eq!(catalog.kind, ModelCatalogKind::Discovered);
+        assert!(catalog.error.is_some());
+        assert!(catalog.models.is_empty());
     }
 
     #[test]

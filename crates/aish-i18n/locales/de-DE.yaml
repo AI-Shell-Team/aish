@@ -67,6 +67,8 @@ cli:
     model_custom_option: "Benutzerdefiniertes Modell..."
     model_custom_required: "Modellname ist erforderlich"
     model_custom_saved_as: "Wird gespeichert als: {model}"
+    model_discover_in_progress: "Verfügbare Modelle werden ermittelt..."
+    model_discover_failed: "Modelle konnten nicht ermittelt werden: {reason}"
     verify_title: "Verifizierung"
     verify_connectivity_in_progress: "Konnektivität wird geprüft..."
     verify_tool_in_progress: "Prüfen, ob die API tools-Parameter akzeptiert..."
