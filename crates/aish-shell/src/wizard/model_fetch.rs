@@ -47,7 +47,7 @@ impl ModelCatalog {
         Self {
             models: Vec::new(),
             kind: ModelCatalogKind::Discovered,
-            error: Some(error),
+            error: Some(aish_ui::strip_ansi_escapes(&error)),
         }
     }
 }
@@ -115,7 +115,8 @@ pub fn fetch_models_from_api(
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().unwrap_or_default();
+            // Strip ANSI/C0 before truncating so the 200-byte cap is visible text.
+            let body = aish_ui::strip_ansi_escapes(&response.text().unwrap_or_default());
             let detail = if body.len() > 200 {
                 let mut end = 200;
                 while end > 0 && !body.is_char_boundary(end) {
@@ -305,6 +306,16 @@ mod tests {
         assert_eq!(catalog.kind, ModelCatalogKind::Discovered);
         assert!(catalog.error.is_some());
         assert!(catalog.models.is_empty());
+    }
+
+    #[test]
+    fn discovery_error_strips_ansi_and_control_sequences() {
+        let catalog = ModelCatalog::discover_failed(
+            "HTTP 500: \x1b[31mred\x1b[0m \x1b]0;evil\x07ok\x08".into(),
+        );
+        assert_eq!(catalog.error.as_deref(), Some("HTTP 500: red ok"));
+        assert!(catalog.models.is_empty());
+        assert_eq!(catalog.kind, ModelCatalogKind::Discovered);
     }
 
     #[test]
