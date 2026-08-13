@@ -197,30 +197,44 @@ pub fn get_all_providers() -> Vec<ProviderInfo> {
 // Model lists (static for common providers)
 // ---------------------------------------------------------------------------
 
-/// Get predefined models for a provider (matches Python's constants).
+/// Get predefined models for a provider.
+///
+/// IDs follow OpenClaw's shipped provider catalogs (non-deprecated rows).
+/// Ollama / vLLM still have leftover names here but setup discovers them live.
 pub fn get_provider_models(provider_key: &str) -> Vec<String> {
     match provider_key {
         "openai" => vec![
-            "gpt-4o".into(),
-            "gpt-4o-mini".into(),
-            "gpt-4-turbo".into(),
-            "gpt-3.5-turbo".into(),
+            "gpt-5.6-sol".into(),
+            "gpt-5.6-terra".into(),
+            "gpt-5.6-luna".into(),
+            "gpt-5.4".into(),
+            "gpt-5.4-pro".into(),
+            "gpt-5.4-mini".into(),
+            "gpt-5.4-nano".into(),
         ],
         "anthropic" => vec![
-            "claude-sonnet-4-20250514".into(),
-            "claude-3-5-sonnet-20241022".into(),
-            "claude-3-5-haiku-20241022".into(),
-            "claude-3-opus-20240229".into(),
+            "claude-opus-5".into(),
+            "claude-sonnet-5".into(),
+            "claude-fable-5".into(),
+            "claude-mythos-5".into(),
+            "claude-haiku-4-5".into(),
         ],
         "gemini" | "google" => vec![
-            "gemini-2.5-flash-preview".into(),
+            "gemini-3.1-pro-preview".into(),
+            "gemini-3.5-flash".into(),
+            "gemini-3-flash-preview".into(),
+            "gemini-3.1-flash-lite".into(),
             "gemini-2.5-flash".into(),
-            "gemini-2.0-flash-exp".into(),
-            "gemini-1.5-pro".into(),
+            "gemini-2.5-flash-lite".into(),
         ],
-        "deepseek" => vec!["deepseek-chat".into(), "deepseek-coder".into()],
-        "xai" => vec!["grok-4".into()],
-        "openai-codex" => vec!["openai-codex/gpt-5.4".into()],
+        "deepseek" => vec!["deepseek-v4-pro".into(), "deepseek-v4-flash".into()],
+        "xai" => vec!["grok-4.6".into(), "grok-4.5".into(), "grok-4.3".into()],
+        "openai-codex" => vec![
+            "openai-codex/gpt-5.6-sol".into(),
+            "openai-codex/gpt-5.6-terra".into(),
+            "openai-codex/gpt-5.6-luna".into(),
+            "openai-codex/gpt-5.4".into(),
+        ],
         "ollama" => vec![
             "llama3.2".into(),
             "llama3.1".into(),
@@ -230,36 +244,32 @@ pub fn get_provider_models(provider_key: &str) -> Vec<String> {
             "codellama".into(),
         ],
         "minimax" => vec![
-            "MiniMax-M2.5".into(),
-            "MiniMax-M2.5-highspeed".into(),
-            "MiniMax-M2.5-Lightning".into(),
+            "MiniMax-M3".into(),
+            "MiniMax-M2.7".into(),
+            "MiniMax-M2.7-highspeed".into(),
         ],
         "moonshot" => vec![
-            "kimi-k2.5".into(),
-            "kimi-k2-turbo-preview".into(),
-            "k2p5".into(),
+            "kimi-k3".into(),
+            "kimi-k2.7-code".into(),
+            "kimi-k2.7-code-highspeed".into(),
+            "kimi-k2.6".into(),
         ],
         "zai" => vec![
-            "glm-5".into(),
-            "glm-4.7".into(),
-            "glm-4.7-flash".into(),
-            "glm-4.7-flashx".into(),
+            "glm-5.2".into(),
+            "glm-5-turbo".into(),
+            "glm-5v-turbo".into(),
         ],
         "qianfan" => vec![
-            "deepseek-v3.2".into(),
-            "ernie-5.0-thinking-preview".into(),
-            "ernie-4.0-8k".into(),
-            "ernie-4.0-turbo-8k".into(),
-            "ernie-3.5-8k".into(),
+            "deepseek-v4-pro".into(),
+            "ernie-5.1".into(),
+            "ernie-5.0".into(),
         ],
         "mistral" => vec![
             "mistral-large-latest".into(),
-            "mistral-large-2411".into(),
-            "pixtral-12b-2409".into(),
-            "mistral-nemo".into(),
-            "open-mistral-7b".into(),
-            "open-mixtral-8x7b".into(),
-            "open-mixtral-8x22b".into(),
+            "mistral-medium-3-5".into(),
+            "mistral-small-latest".into(),
+            "codestral-latest".into(),
+            "mistral-small-2603".into(),
         ],
         "together" => vec![
             "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo".into(),
@@ -277,12 +287,13 @@ pub fn get_provider_models(provider_key: &str) -> Vec<String> {
             "bigcode/starcoder2-15b".into(),
         ],
         "qwen" => vec![
-            "qwen-max".into(),
-            "qwen-plus".into(),
-            "qwen-turbo".into(),
-            "qwen-long".into(),
-            "qwen-vl-max".into(),
-            "qwen-vl-plus".into(),
+            "qwen3.5-plus".into(),
+            "qwen3.7-plus".into(),
+            "qwen3.7-max".into(),
+            "qwen3.6-plus".into(),
+            "qwen3.6-flash".into(),
+            "qwen3-coder-plus".into(),
+            "qwen3-coder-next".into(),
         ],
         "kilocode" => vec![
             "openai/gpt-4o".into(),
@@ -1292,15 +1303,14 @@ mod tests {
     fn test_get_provider_models() {
         let openai_models = get_provider_models("openai");
         assert!(!openai_models.is_empty());
-        assert!(openai_models.contains(&"gpt-4o".to_string()));
+        assert!(openai_models.contains(&"gpt-5.6-sol".to_string()));
 
         let anthropic_models = get_provider_models("anthropic");
         assert!(!anthropic_models.is_empty());
         assert!(anthropic_models.iter().any(|m| m.starts_with("claude-")));
 
-        // Verify updated xai model
         let xai_models = get_provider_models("xai");
-        assert!(xai_models.contains(&"grok-4".to_string()));
+        assert!(xai_models.contains(&"grok-4.6".to_string()));
 
         // Verify new providers have models
         let qianfan_models = get_provider_models("qianfan");
