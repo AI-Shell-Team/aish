@@ -1,6 +1,7 @@
 //! Tool filtering for sub-agent spawn paths.
 
 use super::registry::{AgentDefinition, ToolStrategy};
+use crate::tool_names_match;
 use crate::types::ToolSpec;
 
 const SKILL_TOOL_NAME: &str = "skill";
@@ -21,13 +22,18 @@ pub fn resolve_tool_names_for_agent(
     match &def.tool_strategy {
         ToolStrategy::Allowlist(allowed) => allowed
             .iter()
-            .filter(|name| parent_tool_names.contains(&name.as_str()))
-            .cloned()
+            .filter_map(|name| {
+                parent_tool_names
+                    .iter()
+                    .copied()
+                    .find(|parent| tool_names_match(name, parent))
+                    .map(str::to_string)
+            })
             .collect(),
         ToolStrategy::Denylist(denied) => parent_tool_names
             .iter()
             .filter(|name| {
-                if denied.contains(&name.to_string()) {
+                if denied.iter().any(|denied| tool_names_match(name, denied)) {
                     return false;
                 }
                 if **name == SKILL_TOOL_NAME && !parent_has_skill {
@@ -273,5 +279,20 @@ mod tests {
 
     fn command_diagnose_def() -> AgentDefinition {
         AgentDefinition::command_diagnose("sys".into())
+    }
+
+    #[test]
+    fn test_allowlist_maps_web_fetch_alias_to_parent_webfetch() {
+        let def = AgentDefinition {
+            subagent_type: "alias-check".into(),
+            when_to_use: String::new(),
+            system_prompt: String::new(),
+            max_turns: 1,
+            tool_strategy: ToolStrategy::Allowlist(vec!["web_fetch".into()]),
+            tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
+        };
+        let parent = vec!["WebFetch", "bash"];
+        let names = resolve_tool_names_for_agent(&def, &parent, false);
+        assert_eq!(names, vec!["WebFetch".to_string()]);
     }
 }

@@ -38,6 +38,7 @@ pub enum ApprovalChoice {
 #[derive(Debug, Default)]
 pub struct ApprovalMemory {
     allowed: HashSet<(String, String)>,
+    allowed_targets: HashSet<(String, String)>,
 }
 
 impl ApprovalMemory {
@@ -74,19 +75,37 @@ impl ApprovalMemory {
         }
     }
 
+    /// Whether this tool + target was remembered for the session.
+    pub fn is_target_allowed(&self, tool_name: &str, target: &str) -> bool {
+        !target.is_empty()
+            && self
+                .allowed_targets
+                .contains(&(tool_name.to_string(), target.to_string()))
+    }
+
+    /// Remember a tool + target (for example WebFetch Host key) for the session.
+    pub fn remember_target(&mut self, tool_name: &str, target: &str) {
+        if target.is_empty() {
+            return;
+        }
+        self.allowed_targets
+            .insert((tool_name.to_string(), target.to_string()));
+    }
+
     /// Forget all remembered approvals for this session.
     pub fn clear(&mut self) {
         self.allowed.clear();
+        self.allowed_targets.clear();
     }
 
     /// Number of remembered approvals (mainly for diagnostics/tests).
     pub fn len(&self) -> usize {
-        self.allowed.len()
+        self.allowed.len() + self.allowed_targets.len()
     }
 
     /// Whether no approvals are currently remembered.
     pub fn is_empty(&self) -> bool {
-        self.allowed.is_empty()
+        self.allowed.is_empty() && self.allowed_targets.is_empty()
     }
 }
 
@@ -287,6 +306,18 @@ mod tests {
         mem.remember("");
         assert!(mem.is_empty());
         assert!(!mem.is_allowed(""));
+    }
+
+    #[test]
+    fn remembers_tool_target_for_session() {
+        let mut mem = ApprovalMemory::new();
+        mem.remember_target("WebFetch", "example.com");
+        assert!(mem.is_target_allowed("WebFetch", "example.com"));
+        assert!(!mem.is_target_allowed("WebFetch", "other.com"));
+        assert!(!mem.is_target_allowed("bash", "example.com"));
+        mem.clear();
+        assert!(!mem.is_target_allowed("WebFetch", "example.com"));
+        assert!(mem.is_empty());
     }
 
     #[test]

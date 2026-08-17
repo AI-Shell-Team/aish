@@ -134,15 +134,23 @@ fn intersect_tool_strategy(definition: &AgentDefinition, skill_tools: &[String])
         ToolStrategy::Allowlist(agent_tools) => ToolStrategy::Allowlist(
             agent_tools
                 .iter()
-                .filter(|tool| skill_tools.contains(tool))
+                .filter(|tool| {
+                    skill_tools
+                        .iter()
+                        .any(|skill_tool| aish_llm::tool_names_match(tool, skill_tool))
+                })
                 .cloned()
                 .collect(),
         ),
         ToolStrategy::Denylist(denied) => ToolStrategy::Allowlist(
             skill_tools
                 .iter()
-                .filter(|tool| !denied.contains(tool))
-                .cloned()
+                .map(|tool| aish_llm::canonicalize_tool_name(tool))
+                .filter(|tool| {
+                    !denied
+                        .iter()
+                        .any(|denied| aish_llm::tool_names_match(tool, denied))
+                })
                 .collect(),
         ),
     }
@@ -394,5 +402,17 @@ mod tests {
         assert!(!tool.prompt().contains("host-diagnose"));
         assert!(child_tool.prompt().contains("host-diagnose"));
         assert!(child_tool.prompt().contains("Diagnose host performance"));
+    }
+
+    #[test]
+    fn skill_web_fetch_alias_intersects_webfetch() {
+        let def = AgentDefinition::general_purpose();
+        match intersect_tool_strategy(&def, &["web_fetch".into(), "bash".into()]) {
+            ToolStrategy::Allowlist(names) => {
+                assert!(names.iter().any(|name| name == "WebFetch"));
+                assert!(names.iter().any(|name| name == "bash"));
+            }
+            other => panic!("expected allowlist, got {other:?}"),
+        }
     }
 }

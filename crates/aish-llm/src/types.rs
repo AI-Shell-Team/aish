@@ -499,6 +499,25 @@ pub enum PreflightResult {
     },
 }
 
+/// Whether two tool names refer to the same built-in.
+/// `WebFetch` and `web_fetch` are aliases; other names match exactly.
+pub fn tool_names_match(left: &str, right: &str) -> bool {
+    left == right || (is_webfetch_alias(left) && is_webfetch_alias(right))
+}
+
+fn is_webfetch_alias(name: &str) -> bool {
+    name.eq_ignore_ascii_case("WebFetch") || name.eq_ignore_ascii_case("web_fetch")
+}
+
+/// Canonical runtime name for a tool listed in skill metadata or allowlists.
+pub fn canonicalize_tool_name(name: &str) -> String {
+    if is_webfetch_alias(name) {
+        "WebFetch".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Whether a tool's [`Tool::prompt`] is included in the system appendix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PromptVisibility {
@@ -549,6 +568,12 @@ pub trait Tool: Send + Sync {
     ) -> PreflightResult {
         let _ = ctx;
         self.preflight(args)
+    }
+
+    /// Session-remembered identity for this call, if the tool supports remembering
+    /// something other than a bash `command` (for example a WebFetch Host key).
+    fn approval_memory_key(&self, _args: &serde_json::Value) -> Option<String> {
+        None
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult;
@@ -771,6 +796,16 @@ mod tests {
                 security: None,
             }
         );
+    }
+
+    #[test]
+    fn web_fetch_aliases_match_runtime_name() {
+        assert!(tool_names_match("WebFetch", "web_fetch"));
+        assert!(tool_names_match("web_fetch", "WebFetch"));
+        assert!(tool_names_match("webfetch", "WebFetch"));
+        assert_eq!(canonicalize_tool_name("web_fetch"), "WebFetch");
+        assert!(!tool_names_match("WebFetch", "web_search"));
+        assert!(!tool_names_match("Bash", "bash"));
     }
 
     #[test]
