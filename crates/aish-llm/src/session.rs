@@ -1627,13 +1627,19 @@ impl LlmSession {
             )));
         }
 
-        // Approval memory: if this command was previously approved for the
-        // session, skip the whole preflight (including the sandbox pre-run).
+        // Approval memory: if this command or tool target was previously
+        // approved for the session, skip the whole preflight (including the
+        // sandbox pre-run).
         let memory_command = args.get("command").and_then(|value| value.as_str());
+        let memory_target = tool.approval_memory_key(args);
         if memory_command.is_some_and(|command| {
             self.approval_memory
                 .as_ref()
                 .is_some_and(|memory| memory.lock().is_allowed(command))
+        }) || memory_target.as_deref().is_some_and(|target| {
+            self.approval_memory
+                .as_ref()
+                .is_some_and(|memory| memory.lock().is_target_allowed(tool_name, target))
         }) {
             self.emit_audit(AuditEvent::security_decision(
                 chrono::Utc::now(),
@@ -1683,6 +1689,9 @@ impl LlmSession {
                     if let Some(memory) = &self.approval_memory {
                         if let Some(command) = memory_command {
                             memory.lock().remember(command);
+                        }
+                        if let Some(target) = memory_target.as_deref() {
+                            memory.lock().remember_target(tool_name, target);
                         }
                     }
                 }
@@ -3315,6 +3324,168 @@ mod tests {
             1,
             "remembered command must skip preflight entirely"
         );
+    }
+
+    struct ConfirmCountingNamedTool {
+        name: &'static str,
+        preflight_calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        memory_key: Option<String>,
+    }
+
+    impl Tool for ConfirmCountingNamedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "confirm-counting test tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn approval_memory_key(&self, args: &serde_json::Value) -> Option<String> {
+            if let Some(key) = &self.memory_key {
+                return Some(key.clone());
+            }
+            let url = args.get("url")?.as_str()?;
+            reqwest::Url::parse(url)
+                .ok()?
+                .host_str()
+                .map(str::to_string)
+        }
+        fn preflight(&self, _args: &serde_json::Value) -> PreflightResult {
+            self.preflight_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            PreflightResult::Confirm {
+                message: "test confirmation".to_string(),
+                security: None,
+            }
+        }
+        fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::success("executed")
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_memory_skips_preflight_on_remembered_webfetch_host() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingNamedTool {
+            name: "WebFetch",
+            preflight_calls: counter.clone(),
+            memory_key: Some("example.com".into()),
+        }));
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
+        ));
+        session.set_approval_memory(std::sync::Arc::new(parking_lot::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+
+        let first = ToolCall {
+            id: "call_1".into(),
+            name: "WebFetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.com/a" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&first).await.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let second = ToolCall {
+            id: "call_2".into(),
+            name: "WebFetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.com/b" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&second).await.ok);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "remembered WebFetch Host key must skip preflight"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_once_does_not_remember_webfetch_host() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingNamedTool {
+            name: "WebFetch",
+            preflight_calls: counter.clone(),
+            memory_key: Some("example.com".into()),
+        }));
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::Once,
+        ));
+        session.set_approval_memory(std::sync::Arc::new(parking_lot::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "WebFetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.com/a" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&call).await.ok);
+        assert!(session.execute_tool_external(&call).await.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn approval_memory_still_confirms_other_webfetch_host() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingNamedTool {
+            name: "WebFetch",
+            preflight_calls: counter.clone(),
+            memory_key: None,
+        }));
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
+        ));
+        session.set_approval_memory(std::sync::Arc::new(parking_lot::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+
+        let first = ToolCall {
+            id: "call_1".into(),
+            name: "WebFetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.com/a" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&first).await.ok);
+
+        let other = ToolCall {
+            id: "call_2".into(),
+            name: "WebFetch".into(),
+            arguments: serde_json::json!({ "url": "https://other.com/a" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&other).await.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn approval_memory_clear_reconfirms_webfetch_host() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingNamedTool {
+            name: "WebFetch",
+            preflight_calls: counter.clone(),
+            memory_key: Some("example.com".into()),
+        }));
+        session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
+        ));
+        let memory = std::sync::Arc::new(parking_lot::Mutex::new(ApprovalMemory::new()));
+        session.set_approval_memory(memory.clone());
+
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "WebFetch".into(),
+            arguments: serde_json::json!({ "url": "https://example.com/a" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&call).await.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        memory.lock().clear();
+        assert!(session.execute_tool_external(&call).await.ok);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

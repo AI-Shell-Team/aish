@@ -358,11 +358,7 @@ fn is_permitted_redirect(original: &Url, redirect_url: &Url) -> bool {
     let Some(redirect_host) = redirect_url.host_str() else {
         return false;
     };
-    strip_www(original_host) == strip_www(redirect_host)
-}
-
-fn strip_www(host: &str) -> &str {
-    host.strip_prefix("www.").unwrap_or(host)
+    super::preapproved::host_key(original_host) == super::preapproved::host_key(redirect_host)
 }
 
 async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
@@ -554,6 +550,11 @@ mod tests {
         assert!(is_permitted_redirect(&original, &same));
         assert!(!is_permitted_redirect(&original, &other));
         assert!(!is_permitted_redirect(&original, &http));
+        let mixed_case = Url::parse("https://WWW.EXAMPLE.COM/docs").unwrap();
+        assert!(is_permitted_redirect(&original, &mixed_case));
+        let gist = Url::parse("https://gist.github.com/docs").unwrap();
+        let github = Url::parse("https://github.com/docs").unwrap();
+        assert!(!is_permitted_redirect(&github, &gist));
     }
 
     #[test]

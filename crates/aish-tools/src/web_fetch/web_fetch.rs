@@ -128,24 +128,31 @@ impl Tool for WebFetchTool {
             }
         };
 
-        let hostname = normalized.host_str().unwrap_or("").to_string();
-        if is_preapproved_host(&hostname, normalized.path()) {
+        let hostname = normalized.host_str().unwrap_or("");
+        if is_preapproved_host(hostname, normalized.path()) {
             return PreflightResult::Allow;
         }
 
+        let host = super::preapproved::host_key(hostname);
         let message = aish_i18n::t_with_args(
             "tools.web_fetch.confirm_fetch",
-            &HashMap::from([("host".to_string(), hostname.clone())]),
+            &HashMap::from([("host".to_string(), host)]),
         );
         PreflightResult::Confirm {
             message: message.clone(),
             security: Some(PreflightSecurityContext::fallback(
                 TOOL_NAME,
-                Some(hostname),
+                Some(url.to_string()),
                 message,
                 SecurityPanelMode::Confirm,
             )),
         }
+    }
+
+    fn approval_memory_key(&self, args: &serde_json::Value) -> Option<String> {
+        let url = args.get("url")?.as_str()?;
+        let parsed = validate_and_normalize_url(url).ok()?;
+        parsed.host_str().map(super::preapproved::host_key)
     }
 
     fn execute(&self, _args: serde_json::Value) -> ToolResult {
@@ -287,5 +294,63 @@ mod tests {
                 "expected fetched content to contain {expected:?}"
             );
         }
+    }
+
+    fn tool() -> WebFetchTool {
+        WebFetchTool::new("", "", "", Some(0.1), Some(256))
+    }
+
+    #[test]
+    fn preflight_allows_preapproved_host_key() {
+        let args = serde_json::json!({
+            "url": "https://WWW.docs.python.org./3/",
+            "prompt": "summarize"
+        });
+        assert_eq!(tool().preflight(&args), PreflightResult::Allow);
+    }
+
+    #[test]
+    fn preflight_confirms_host_key_and_shows_full_url() {
+        let url = "https://WWW.Example.COM/path?token=secret";
+        let args = serde_json::json!({ "url": url, "prompt": "summarize" });
+        match tool().preflight(&args) {
+            PreflightResult::Confirm { message, security } => {
+                assert!(message.contains("example.com"), "{message}");
+                assert!(
+                    !message.to_ascii_lowercase().contains("www.example.com"),
+                    "{message}"
+                );
+                let security = security.expect("confirm should include security context");
+                assert_eq!(security.target.as_deref(), Some(url));
+            }
+            other => panic!("expected Confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_still_confirms_github_outside_anthropics() {
+        let args = serde_json::json!({
+            "url": "https://github.com/AI-Shell-Team/aish",
+            "prompt": "summarize"
+        });
+        assert!(matches!(
+            tool().preflight(&args),
+            PreflightResult::Confirm { .. }
+        ));
+    }
+
+    #[test]
+    fn approval_memory_key_is_host_key() {
+        let args = serde_json::json!({ "url": "https://WWW.Example.COM./a" });
+        assert_eq!(
+            tool().approval_memory_key(&args).as_deref(),
+            Some("example.com")
+        );
+        let apex = serde_json::json!({ "url": "https://example.com/b" });
+        let www = serde_json::json!({ "url": "https://www.example.com/c" });
+        assert_eq!(
+            tool().approval_memory_key(&apex),
+            tool().approval_memory_key(&www)
+        );
     }
 }

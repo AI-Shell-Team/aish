@@ -93,17 +93,26 @@ const PREAPPROVED_HOSTS: &[&str] = &[
     "httpd.apache.org",
 ];
 
+/// Host key: lowercase, no trailing dot, a leading `www.` treated as the apex.
+pub(crate) fn host_key(hostname: &str) -> String {
+    let normalized = hostname.trim_end_matches('.').to_ascii_lowercase();
+    match normalized.strip_prefix("www.") {
+        Some(rest) if !rest.is_empty() => rest.to_string(),
+        _ => normalized,
+    }
+}
+
 pub(crate) fn is_preapproved_host(hostname: &str, pathname: &str) -> bool {
+    let hostname = host_key(hostname);
     for entry in PREAPPROVED_HOSTS {
         if let Some((host, prefix)) = entry.split_once('/') {
-            if hostname == host {
-                let prefix = format!("/{}", prefix);
-                if pathname == prefix || pathname.starts_with(&(prefix + "/")) {
+            if hostname == host_key(host) {
+                let prefix = format!("/{prefix}");
+                if pathname == prefix || pathname.starts_with(&format!("{prefix}/")) {
                     return true;
                 }
             }
-        }
-        if hostname == *entry {
+        } else if hostname == host_key(entry) {
             return true;
         }
     }
@@ -122,5 +131,27 @@ mod tests {
             "/anthropics-evil/project"
         ));
         assert!(is_preapproved_host("doc.rust-lang.org", "/book/"));
+    }
+
+    #[test]
+    fn host_key_lowercases_strips_dot_and_www() {
+        assert_eq!(host_key("WWW.Example.COM."), "example.com");
+        assert_eq!(host_key("docs.python.org"), "docs.python.org");
+        assert_eq!(host_key("www.docs.python.org"), "docs.python.org");
+    }
+
+    #[test]
+    fn preapproved_host_uses_host_key() {
+        assert!(is_preapproved_host("WWW.docs.python.org.", "/3/"));
+        assert!(is_preapproved_host(
+            "www.github.com",
+            "/anthropics/claude-code"
+        ));
+        assert!(!is_preapproved_host("www.github.com", "/other/repo"));
+        assert!(is_preapproved_host("php.net", "/"));
+        assert!(!is_preapproved_host(
+            "gist.github.com",
+            "/anthropics/claude-code"
+        ));
     }
 }

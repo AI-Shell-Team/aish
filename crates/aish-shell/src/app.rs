@@ -3590,8 +3590,8 @@ impl AishShell {
         true
     }
 
-    /// Handle `/forget-approvals` — clear all session-scoped command approvals
-    /// so previously "remembered" commands prompt for confirmation again.
+    /// Handle `/forget-approvals` — clear session-scoped command and Host key
+    /// approvals so previously remembered confirmations prompt again.
     fn handle_forget_approvals(&mut self) {
         let count = {
             let mut memory = self.approval_memory.lock();
@@ -10585,7 +10585,7 @@ fn format_tool_args_for_display(tool_name: &str, args: &serde_json::Value) -> St
             "bash" | "secure_bash" => "command",
             "read_file" | "edit_file" => "path",
             "grep" | "glob" => "pattern",
-            "web_fetch" => "url",
+            "WebFetch" | "web_fetch" => "url",
             "ask_user" | "agent" => "prompt",
             _ => "",
         };
@@ -10619,6 +10619,23 @@ fn format_tool_args_for_display(tool_name: &str, args: &serde_json::Value) -> St
     }
 
     truncate_str(&args.to_string(), 120)
+}
+
+#[cfg(test)]
+mod webfetch_display_tests {
+    use super::format_tool_args_for_display;
+
+    #[test]
+    fn webfetch_display_shows_url() {
+        let args = serde_json::json!({
+            "url": "https://example.com/page",
+            "prompt": "summarize"
+        });
+        let shown = format_tool_args_for_display("WebFetch", &args);
+        assert!(shown.contains("https://example.com/page"), "{shown}");
+        let alias = format_tool_args_for_display("web_fetch", &args);
+        assert!(alias.contains("https://example.com/page"), "{alias}");
+    }
 }
 
 /// Truncate a string to max_len *display columns*, accounting for CJK double-width chars.
