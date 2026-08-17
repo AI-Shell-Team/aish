@@ -180,7 +180,7 @@ impl LlmClient {
         if let Some(temp) = temperature {
             body["temperature"] = serde_json::json!(temp);
         }
-        body["max_tokens"] = serde_json::json!(effective_max_tokens(max_tokens));
+        apply_max_token_fields(&mut body, max_tokens);
         if let Some(tools) = tools {
             body["tools"] = serde_json::json!(tools);
             body["tool_choice"] = serde_json::json!("auto");
@@ -258,6 +258,13 @@ fn effective_max_tokens(max_tokens: Option<u32>) -> u32 {
         None | Some(0) => DEFAULT_MAX_TOKENS,
         Some(n) => n,
     }
+}
+
+/// Newer OpenAI-compatible models reject `max_tokens` and require
+/// `max_completion_tokens >= 1`. `None`/`0` still maps to the default budget
+/// so gateways do not fill this field with 0.
+fn apply_max_token_fields(body: &mut serde_json::Value, max_tokens: Option<u32>) {
+    body["max_completion_tokens"] = serde_json::json!(effective_max_tokens(max_tokens));
 }
 
 /// Format an HTTP error response into a user-friendly error message.
@@ -414,6 +421,24 @@ mod tests {
         assert_eq!(effective_max_tokens(None), DEFAULT_MAX_TOKENS);
         assert_eq!(effective_max_tokens(Some(0)), DEFAULT_MAX_TOKENS);
         assert_eq!(effective_max_tokens(Some(1000)), 1000);
+    }
+
+    #[test]
+    fn test_apply_max_token_fields_sends_completion_tokens_only() {
+        let mut body = serde_json::json!({});
+        apply_max_token_fields(&mut body, None);
+        assert_eq!(body["max_completion_tokens"], DEFAULT_MAX_TOKENS);
+        assert!(body.get("max_tokens").is_none());
+
+        let mut body = serde_json::json!({});
+        apply_max_token_fields(&mut body, Some(0));
+        assert_eq!(body["max_completion_tokens"], DEFAULT_MAX_TOKENS);
+        assert!(body.get("max_tokens").is_none());
+
+        let mut body = serde_json::json!({});
+        apply_max_token_fields(&mut body, Some(1000));
+        assert_eq!(body["max_completion_tokens"], 1000);
+        assert!(body.get("max_tokens").is_none());
     }
 
     #[test]
