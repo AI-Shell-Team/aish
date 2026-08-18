@@ -96,6 +96,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "Cargo.toml"
+          - "crates/**/Cargo.toml"
           - "Cargo.lock"
           - "rust-toolchain.toml"
 
