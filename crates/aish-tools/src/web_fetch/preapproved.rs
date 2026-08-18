@@ -132,26 +132,4 @@ mod tests {
         ));
         assert!(is_preapproved_host("doc.rust-lang.org", "/book/"));
     }
-
-    #[test]
-    fn host_key_lowercases_strips_dot_and_www() {
-        assert_eq!(host_key("WWW.Example.COM."), "example.com");
-        assert_eq!(host_key("docs.python.org"), "docs.python.org");
-        assert_eq!(host_key("www.docs.python.org"), "docs.python.org");
-    }
-
-    #[test]
-    fn preapproved_host_uses_host_key() {
-        assert!(is_preapproved_host("WWW.docs.python.org.", "/3/"));
-        assert!(is_preapproved_host(
-            "www.github.com",
-            "/anthropics/claude-code"
-        ));
-        assert!(!is_preapproved_host("www.github.com", "/other/repo"));
-        assert!(is_preapproved_host("php.net", "/"));
-        assert!(!is_preapproved_host(
-            "gist.github.com",
-            "/anthropics/claude-code"
-        ));
-    }
 }

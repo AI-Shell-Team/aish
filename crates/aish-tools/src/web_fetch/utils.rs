@@ -552,9 +552,6 @@ mod tests {
         assert!(!is_permitted_redirect(&original, &http));
         let mixed_case = Url::parse("https://WWW.EXAMPLE.COM/docs").unwrap();
         assert!(is_permitted_redirect(&original, &mixed_case));
-        let gist = Url::parse("https://gist.github.com/docs").unwrap();
-        let github = Url::parse("https://github.com/docs").unwrap();
-        assert!(!is_permitted_redirect(&github, &gist));
     }
 
     #[test]

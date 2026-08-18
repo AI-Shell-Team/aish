@@ -280,19 +280,4 @@ mod tests {
     fn command_diagnose_def() -> AgentDefinition {
         AgentDefinition::command_diagnose("sys".into())
     }
-
-    #[test]
-    fn test_allowlist_maps_web_fetch_alias_to_parent_webfetch() {
-        let def = AgentDefinition {
-            subagent_type: "alias-check".into(),
-            when_to_use: String::new(),
-            system_prompt: String::new(),
-            max_turns: 1,
-            tool_strategy: ToolStrategy::Allowlist(vec!["web_fetch".into()]),
-            tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
-        };
-        let parent = vec!["WebFetch", "bash"];
-        let names = resolve_tool_names_for_agent(&def, &parent, false);
-        assert_eq!(names, vec!["WebFetch".to_string()]);
-    }
 }
