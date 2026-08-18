@@ -1,101 +1,90 @@
-# Labeler configuration for aish
-# Auto-labels PRs based on changed files
+# Path-based PR labels. Label names match auto-response classification groups.
+# Size / contributor labels are applied separately in .github/workflows/labeler.yml.
 
 "core":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/*.py"
-          - "src/aish/__init__.py"
+          - "crates/aish-core/**"
+          - "crates/aish-md-table/**"
 
 "pty":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/shell_enhanced/**"
-          - "src/aish/shell.py"
-          - "src/aish/offload/**"
+          - "crates/aish-pty/**"
+          - "crates/aish-hosts/**"
 
 "agent":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/agents.py"
-          - "src/aish/llm.py"
-          - "src/aish/prompts.py"
-          - "src/aish/command.py"
+          - "crates/aish-llm/**"
+          - "crates/aish-session/**"
+          - "crates/aish-context/**"
+          - "crates/aish-memory/**"
+          - "crates/aish-prompts/**"
 
 "skills":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/skills/**"
-          - "src/aish/tools/skill.py"
+          - "crates/aish-skills/**"
           - "skills/**"
 
 "tools":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/tools/**"
+          - "crates/aish-tools/**"
 
 "security":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/security/**"
-          - "tests/security/**"
-          - "security_policy.yaml"
-          - "docs/*security*.md"
+          - "crates/aish-security/**"
+          - "config/security_policy.yaml"
 
 "sandbox":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/sandboxd.py"
-          - "src/aish/security/sandbox*.py"
-          - "tests/security/sandbox/**"
-          - "docs/*sandbox*.md"
+          - "crates/aish-security/src/sandbox/**"
+          - "packaging/systemd/**"
 
 "config":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/config.py"
-          - "src/aish/wizard/**"
+          - "crates/aish-config/**"
           - "CONFIGURATION.md"
 
 "cli":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/cli.py"
-          - "src/aish/help_manager.py"
-          - "src/aish/welcome_screen.py"
-          - "main.py"
+          - "crates/aish-cli/**"
+          - "crates/aish-shell/**"
+          - "crates/aish-ui/**"
 
 "i18n":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/i18n/**"
-          - "tests/test_i18n_*.py"
+          - "crates/aish-i18n/**"
 
 "docs":
   - changed-files:
       - any-glob-to-any-file:
           - "docs/**"
-          - "*.md"
           - "README*.md"
           - "QUICKSTART.md"
           - "CONFIGURATION.md"
+          - "CONTRIBUTING.md"
+          - "CHANGELOG.md"
 
 "packaging":
   - changed-files:
       - any-glob-to-any-file:
           - "packaging/**"
-          - "aish.spec"
           - "build.sh"
           - "Makefile"
-          - "main.py"
 
 "tests":
   - changed-files:
       - any-glob-to-any-file:
-          - "tests/**"
-          - "test_*.py"
-          - "*_test.py"
-          - "conftest.py"
+          - "crates/**/tests/**"
+          - "packaging/tests/**"
 
 "ci-cd":
   - changed-files:
@@ -106,18 +95,18 @@
 "dependencies":
   - changed-files:
       - any-glob-to-any-file:
-          - "pyproject.toml"
-          - "uv.lock"
+          - "Cargo.toml"
+          - "Cargo.lock"
+          - "rust-toolchain.toml"
 
 "observability":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/logging_utils.py"
-          - "src/aish/session_store.py"
-          - "tests/test_litellm_langfuse.py"
-          - "docs/*langfuse*.md"
+          - "crates/aish-llm/src/langfuse.rs"
 
 "builtin":
   - changed-files:
       - any-glob-to-any-file:
-          - "src/aish/builtin/**"
+          - "crates/aish-scripts/**"
+          - "crates/aish-shell/src/commands.rs"
+          - "crates/aish-ui/src/slash_input.rs"
