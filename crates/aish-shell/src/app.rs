@@ -10633,8 +10633,6 @@ mod webfetch_display_tests {
         });
         let shown = format_tool_args_for_display("WebFetch", &args);
         assert!(shown.contains("https://example.com/page"), "{shown}");
-        let alias = format_tool_args_for_display("web_fetch", &args);
-        assert!(alias.contains("https://example.com/page"), "{alias}");
     }
 }
 

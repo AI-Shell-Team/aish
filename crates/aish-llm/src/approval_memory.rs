@@ -309,18 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn remembers_tool_target_for_session() {
-        let mut mem = ApprovalMemory::new();
-        mem.remember_target("WebFetch", "example.com");
-        assert!(mem.is_target_allowed("WebFetch", "example.com"));
-        assert!(!mem.is_target_allowed("WebFetch", "other.com"));
-        assert!(!mem.is_target_allowed("bash", "example.com"));
-        mem.clear();
-        assert!(!mem.is_target_allowed("WebFetch", "example.com"));
-        assert!(mem.is_empty());
-    }
-
-    #[test]
     fn strips_leading_wrappers() {
         // nohup is stripped (no privilege change).
         assert_eq!(

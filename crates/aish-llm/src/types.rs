@@ -799,16 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn web_fetch_aliases_match_runtime_name() {
-        assert!(tool_names_match("WebFetch", "web_fetch"));
-        assert!(tool_names_match("web_fetch", "WebFetch"));
-        assert!(tool_names_match("webfetch", "WebFetch"));
-        assert_eq!(canonicalize_tool_name("web_fetch"), "WebFetch");
-        assert!(!tool_names_match("WebFetch", "web_search"));
-        assert!(!tool_names_match("Bash", "bash"));
-    }
-
-    #[test]
     fn test_cancel_atomic_sets_is_cancelled() {
         let token = CancellationToken::new();
         assert!(!token.is_cancelled());

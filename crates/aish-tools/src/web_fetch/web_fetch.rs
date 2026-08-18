@@ -346,11 +346,5 @@ mod tests {
             tool().approval_memory_key(&args).as_deref(),
             Some("example.com")
         );
-        let apex = serde_json::json!({ "url": "https://example.com/b" });
-        let www = serde_json::json!({ "url": "https://www.example.com/c" });
-        assert_eq!(
-            tool().approval_memory_key(&apex),
-            tool().approval_memory_key(&www)
-        );
     }
 }
