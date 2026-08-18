@@ -7,6 +7,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.11] - 2026-08-18
+
+### Added
+
+- Startup update check in the interactive shell: after entering the REPL, if `cdn.aishell.ai` has a newer release, show a one-time omp-style tip (`check_update_on_startup`, default `true`; failures stay silent).
+- Setup model picker shows the built-in local catalog immediately instead of blocking on `GET /models`; only Ollama, vLLM, and endpoints without a local catalog discover models online, and failed discovery no longer silently substitutes a built-in list.
+- Refreshed the built-in local model catalog so known providers show current model IDs in setup.
+
+### Changed
+
+- `aish update` output is denser and less debug-like, progress placeholders are fixed, and the `y/N` confirm is dropped so at most one sudo prompt remains.
+
+### Fixed
+
+- WebFetch "remember this session" now keys on Host (not bash command memory), shows the full URL in the confirm panel, and treats `web_fetch` as an alias of `WebFetch` for skills and display.
+- Chat Completions requests send `max_completion_tokens` so newer OpenAI-compatible gateways that reject `max_tokens` or treat a missing budget as `0` no longer break tool probes and live tool calls.
+- Setup live model discovery strips ANSI/control sequences from untrusted HTTP error bodies before they reach the terminal.
+
 ## [0.3.10] - 2026-08-10
 
 ### Added
