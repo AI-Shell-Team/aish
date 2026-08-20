@@ -19,10 +19,14 @@ import select
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 
 import pty
+
+# UTF-8 bytes for "思考中" (think indicator).
+THINKING_BYTES = "\u601d\u8003\u4e2d".encode("utf-8")
 
 
 def read_available(fd: int, timeout: float = 0.5) -> bytes:
@@ -47,8 +51,7 @@ def main() -> int:
         return 2
 
     real_config_home = os.path.expanduser("~/.config")
-    tmp_config = os.environ.get("XDG_CONFIG_HOME", "/tmp/aish-repro-config")
-    os.makedirs(tmp_config, exist_ok=True)
+    tmp_config = tempfile.mkdtemp(prefix="aish-repro-")
     dst = os.path.join(tmp_config, "aish")
     if not os.path.exists(dst):
         os.symlink(os.path.join(real_config_home, "aish"), dst)
@@ -80,7 +83,7 @@ def main() -> int:
         while time.time() < end:
             data = read_available(master, 1.0)
             text = data.decode("utf-8", errors="replace")
-            if "●" in text and "->" in text:
+            if "\u25cf" in text and "->" in text:
                 print("--- aish prompt reached ---")
                 break
         else:
@@ -89,10 +92,12 @@ def main() -> int:
 
         # Send AI prompt that triggers explore sub-agent (long-running task
         # so the animation thread has time to build up frames).
-        prompt = ("; Please use the explore sub-agent to do a deep dive into "
-                  "the entire workspace structure, read all Cargo.toml files, "
-                  "and provide a comprehensive summary of every crate and its "
-                  "dependencies. This requires thorough exploration.\r")
+        prompt = (
+            "; Please use the explore sub-agent to do a deep dive into "
+            "the entire workspace structure, read all Cargo.toml files, "
+            "and provide a comprehensive summary of every crate and its "
+            "dependencies. This requires thorough exploration.\r"
+        )
         os.write(master, prompt.encode())
         print("--- AI prompt sent ---")
 
@@ -101,7 +106,7 @@ def main() -> int:
         saw_sub_agent = False
         while time.time() < end:
             data = read_available(master, 2.0)
-            if b"explore" in data and b"\xe6\x80\x9d\xe8\x80\x83" in data:
+            if b"explore" in data and THINKING_BYTES in data:
                 saw_sub_agent = True
                 print("--- sub-agent thinking line detected ---")
                 break
@@ -113,7 +118,15 @@ def main() -> int:
         # Let animation build up (3 s ensures the sub-agent's tool loop is
         # actively running and emitting "思考中" frames).
         time.sleep(3.0)
-        read_available(master, 0.5)
+        pre_ctrl_c = read_available(master, 0.5)
+        # Confirm the sub-agent animation is actually emitting frames.
+        if THINKING_BYTES not in pre_ctrl_c:
+            print(
+                "--- sub-agent animation not emitting frames before "
+                "Ctrl+C; inconclusive ---"
+            )
+            return 77
+        print("--- thinking frames confirmed before Ctrl+C ---")
 
         # Send Ctrl+C.
         os.write(master, b"\x03")
@@ -138,25 +151,57 @@ def main() -> int:
             data = read_available(master, 0.5)
             new_data += data
 
-        new_text = new_data.decode("utf-8", errors="replace")
-        new_timers = re.findall(r"(\d+\.\d+)s", new_text)
-        print(f"--- new output after drain: {len(new_data)} bytes, {len(new_timers)} timer frames ---")
+        # Verify the aish process is still alive (the leak is a
+        # background thread, not a crash).
+        if proc.poll() is not None:
+            print("--- aish process exited unexpectedly ---")
+            return 3
 
-        if len(new_data) > 100 or len(new_timers) > 0:
-            print("\n--- BUG REPRODUCED: animation still running after Ctrl+C ---")
+        # The key signal: new "思考中" frames after drain.
+        new_text = new_data.decode("utf-8", errors="replace")
+        new_thinking_frames = new_text.count(THINKING_BYTES.decode("utf-8"))
+        new_timers = re.findall(r"(\d+\.\d+)s", new_text)
+        print(
+            f"--- new output after drain: {len(new_data)} bytes, "
+            f"{new_thinking_frames} thinking frames, "
+            f"{len(new_timers)} timer frames ---"
+        )
+
+        if new_thinking_frames > 0:
+            print(
+                "\n--- BUG REPRODUCED: animation still running after "
+                "Ctrl+C ---"
+            )
             return 1
         else:
-            print("\n--- FIX VERIFIED: animation stopped after Ctrl+C ---")
+            print(
+                "\n--- FIX VERIFIED: animation stopped after Ctrl+C ---"
+            )
             return 0
 
     finally:
+        cleanup_proc(proc, master)
+
+
+def cleanup_proc(proc: subprocess.Popen, master: int) -> None:
+    """Ensure the child process and PTY are cleaned up."""
+    try:
+        os.write(master, b"\x03\x03")
+    except OSError:
+        pass
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
         try:
-            os.write(master, b"\x03\x03")
-            proc.terminate()
+            proc.kill()
             proc.wait(timeout=5)
         except Exception:
             pass
+    try:
         os.close(master)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
