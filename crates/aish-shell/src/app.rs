@@ -1763,6 +1763,11 @@ impl AishShell {
                         }
                         // Stop progress spinner started at ToolExecutionStart.
                         animation_ref.stop();
+                        // Also stop the sub-agent thinking animation so its
+                        // background thread does not keep overwriting the
+                        // terminal line with \r\x1b[K while we print the
+                        // tool result and status indicator below.
+                        sub_agent_animation_ref.stop();
                         let tool_ok = event
                             .data
                             .get("ok")
