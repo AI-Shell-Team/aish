@@ -666,6 +666,16 @@ pub struct AishShell {
     last_ctrl_c: Option<std::time::Instant>,
     /// Shared animation spinner, stored so it can be stopped on cancellation.
     animation: Arc<SharedAnimation>,
+    /// Sub-agent thinking animation (`  └─ explore · 思考中`), stored so it
+    /// can be stopped on cancellation — without this, a Ctrl+C during a
+    /// sub-agent tool loop leaks the animation thread, which keeps
+    /// overwriting the terminal line.
+    sub_agent_animation: Arc<SubAgentThinkingAnimation>,
+    /// Monotonic operation generation counter, bumped before each AI turn.
+    /// The event callback captures the generation at callback-build time and
+    /// rejects events from stale (older) operations to avoid restarting
+    /// animations after cancellation + new-operation reset.
+    ai_op_generation: Arc<std::sync::atomic::AtomicU64>,
     /// Session history of collapsed outputs for Ctrl+O browsing.
     expand_history: Arc<Mutex<crate::expand_history::ExpandHistory>>,
     /// Shared terminal session recorder for asciinema v2 recording.
@@ -1274,6 +1284,8 @@ impl AishShell {
         let sub_agent_active_count_ref = sub_agent_active_count.clone();
         let sub_agent_animation = Arc::new(SubAgentThinkingAnimation::new());
         let sub_agent_animation_ref = sub_agent_animation.clone();
+        let ai_op_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ai_op_generation_cb = ai_op_generation.clone();
 
         // Shared history of collapsed bash outputs for Ctrl+O browsing.
         let expand_history = Arc::new(Mutex::new(crate::expand_history::ExpandHistory::new()));
@@ -1341,6 +1353,18 @@ impl AishShell {
         }
 
         let shared_recorder_cb = shared_recorder.clone();
+        // Capture the cancellation token so the event callback can check
+        // is_cancelled() before starting animations — late LLM events
+        // arriving after Ctrl+C would otherwise restart the animation
+        // thread, leaking it.
+        let cancel_token_for_cb = llm_session.cancellation_token_arc();
+
+        // Per-operation generation: the callback captures the generation
+        // at OpStart and rejects events whose generation is stale (from a
+        // prior cancelled operation whose token was reset).
+        let op_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ai_op_generation_cb_ref = ai_op_generation_cb.clone();
+
         let event_callback: Arc<dyn Fn(LlmEvent) -> Option<LlmCallbackResult> + Send + Sync> =
             Arc::new(move |event: LlmEvent| {
                 // Helper: clear multi-line reasoning overlay and reset state.
@@ -1357,6 +1381,34 @@ impl AishShell {
                     reasoning_active_ref.store(false, Ordering::SeqCst);
                 };
 
+                // Reject events from a stale (older) operation whose token
+                // was reset by a newer operation.
+                let is_stale = || {
+                    op_gen.load(Ordering::SeqCst) != ai_op_generation_cb_ref.load(Ordering::SeqCst)
+                };
+
+                // Start `anim` with label only if the operation has not been
+                // cancelled and is not stale.  Re-check after start() to
+                // close the TOCTOU window between is_cancelled() and start().
+                let guarded_start = |anim: &SharedAnimation, label: &str| {
+                    if !cancel_token_for_cb.is_cancelled() && !is_stale() {
+                        anim.start(label);
+                        if cancel_token_for_cb.is_cancelled() {
+                            anim.stop();
+                        }
+                    }
+                };
+                // Same guard for sub-agent animation (two-arg start).
+                let guarded_start_sub =
+                    |anim: &SubAgentThinkingAnimation, prefix: &str, label: &str| {
+                        if !cancel_token_for_cb.is_cancelled() && !is_stale() {
+                            anim.start(prefix, label);
+                            if cancel_token_for_cb.is_cancelled() {
+                                anim.stop();
+                            }
+                        }
+                    };
+
                 match event.event_type {
                     LlmEventType::OpStart => {
                         // Operation begins — start thinking animation
@@ -1368,7 +1420,11 @@ impl AishShell {
                         reasoning_active_ref.store(false, Ordering::SeqCst);
                         compaction_active_ref.store(false, Ordering::SeqCst);
                         compaction_notice_shown_ref.store(false, Ordering::SeqCst);
-                        animation_ref.start(&t("shell.status.thinking"));
+                        op_gen.store(
+                            ai_op_generation_cb_ref.load(Ordering::SeqCst),
+                            Ordering::SeqCst,
+                        );
+                        guarded_start(&animation_ref, &t("shell.status.thinking"));
                     }
                     LlmEventType::OpEnd if crate::llm_event_ui::sub_agent_llm_event(&event) => {
                         // A sub-agent OpEnd marks one sub-session finishing, not the
@@ -1396,10 +1452,10 @@ impl AishShell {
                         }
                         *thinking_start_ref.lock().unwrap() = None;
                     }
-                    LlmEventType::ContextCompactionStart => {
-                        if !compaction_active_ref.swap(true, Ordering::SeqCst) {
-                            animation_ref.start(&t("shell.status.compacting_context"));
-                        }
+                    LlmEventType::ContextCompactionStart
+                        if !compaction_active_ref.swap(true, Ordering::SeqCst) =>
+                    {
+                        guarded_start(&animation_ref, &t("shell.status.compacting_context"));
                     }
                     LlmEventType::ContextCompactionEnd => {
                         compaction_active_ref.store(false, Ordering::SeqCst);
@@ -1410,16 +1466,25 @@ impl AishShell {
                             }
                         }
                     }
-                    LlmEventType::GenerationStart if react_agent_llm_event(&event) => {}
                     LlmEventType::GenerationStart
                         if crate::llm_event_ui::sub_agent_llm_event(&event) =>
                     {
                         animation_ref.stop();
                         clear_reasoning();
+                        // Late sub-agent events arriving after Ctrl+C would
+                        // restart the animation thread — bail out instead.
+                        if cancel_token_for_cb.is_cancelled() || is_stale() {
+                            sub_agent_animation_ref.stop();
+                            return None;
+                        }
                         if let Some(prefix) =
                             crate::llm_event_ui::sub_agent_thinking_animation_prefix(&event)
                         {
-                            sub_agent_animation_ref.start(&prefix, &t("shell.sub_agent.thinking"));
+                            guarded_start_sub(
+                                &sub_agent_animation_ref,
+                                &prefix,
+                                &t("shell.sub_agent.thinking"),
+                            );
                         }
                     }
                     LlmEventType::GenerationStart => {
@@ -1437,7 +1502,7 @@ impl AishShell {
                         reasoning_frame_ref.store(0, Ordering::SeqCst);
                         renderer_ref.lock().unwrap().reset();
                         if sub_agent_active_count_ref.load(Ordering::SeqCst) == 0 {
-                            animation_ref.start(&t("shell.status.thinking"));
+                            guarded_start(&animation_ref, &t("shell.status.thinking"));
                         }
                     }
                     LlmEventType::GenerationEnd if react_agent_llm_event(&event) => {}
@@ -1682,7 +1747,7 @@ impl AishShell {
                                 && !is_interactive_tool
                                 && !bash_needs_tty
                             {
-                                animation_ref.start(&theme::tool_status_label(name));
+                                guarded_start(&animation_ref, &theme::tool_status_label(name));
                             }
                         }
                     }
@@ -1698,6 +1763,11 @@ impl AishShell {
                         }
                         // Stop progress spinner started at ToolExecutionStart.
                         animation_ref.stop();
+                        // Also stop the sub-agent thinking animation so its
+                        // background thread does not keep overwriting the
+                        // terminal line with \r\x1b[K while we print the
+                        // tool result and status indicator below.
+                        sub_agent_animation_ref.stop();
                         let tool_ok = event
                             .data
                             .get("ok")
@@ -1883,6 +1953,7 @@ impl AishShell {
                             println!("{}", theme::accent(prompt_text));
                         }
                     }
+                    _ => {}
                 }
                 None // Always continue
             });
@@ -2095,6 +2166,8 @@ impl AishShell {
             interruption: InterruptionState::default(),
             last_ctrl_c: None,
             animation,
+            sub_agent_animation: sub_agent_animation.clone(),
+            ai_op_generation,
             expand_history,
             shared_recorder,
             inline_ai: None,
@@ -2129,6 +2202,10 @@ impl AishShell {
 
         // Clear any leftover cancellation state from a previous operation.
         self.ai_handler.cancellation_token().reset();
+        // Bump the operation generation so the event callback can reject
+        // stale events from a prior (cancelled) operation.
+        self.ai_op_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let token_ptr = self.ai_handler.cancellation_token() as *const CancellationToken;
         CANCEL_TOKEN_PTR.store(token_ptr as *mut (), Ordering::SeqCst);
@@ -2552,6 +2629,7 @@ impl AishShell {
                                 }
                                 Err(aish_core::AishError::Cancelled) => {
                                     self.animation.stop();
+                                    self.sub_agent_animation.stop();
                                     crate::recorder::shared_record_output(
                                         &self.shared_recorder,
                                         &format!("{}\r\n", theme::warning("Interrupted")),
@@ -2622,6 +2700,7 @@ impl AishShell {
                     match result {
                         Ok(response) => {
                             if self.ai_handler.cancellation_token().is_cancelled() {
+                                self.sub_agent_animation.stop();
                                 // Agent short-circuit cancel returns Ok("") — show the same
                                 // user-facing line as Err(Cancelled). Do not treat as success
                                 // (no plan approval / history-as-ok).
@@ -2793,6 +2872,7 @@ impl AishShell {
                         }
                         Err(aish_core::AishError::Cancelled) => {
                             self.animation.stop();
+                            self.sub_agent_animation.stop();
                             println!("{}", theme::warning(&t("shell.interrupted")));
                         }
                         Err(e) => {
@@ -2961,6 +3041,7 @@ impl AishShell {
                                 match result {
                                     Ok(response) => {
                                         if self.ai_handler.cancellation_token().is_cancelled() {
+                                            self.sub_agent_animation.stop();
                                             // Same as Err(Cancelled): do not persist/history as success.
                                             println!("{}", theme::warning(&t("shell.interrupted")));
                                         } else {
@@ -2982,6 +3063,7 @@ impl AishShell {
                                     }
                                     Err(aish_core::AishError::Cancelled) => {
                                         self.animation.stop();
+                                        self.sub_agent_animation.stop();
                                         println!("{}", theme::warning(&t("shell.interrupted")));
                                     }
                                     Err(e) => {
@@ -3320,6 +3402,7 @@ impl AishShell {
                 match result {
                     Ok(response) => {
                         if self.ai_handler.cancellation_token().is_cancelled() {
+                            self.sub_agent_animation.stop();
                             println!("{}", theme::warning(&t("shell.interrupted")));
                         } else if !did_stream && !response.trim().is_empty() {
                             let mut sep = ShellRenderer::new();
@@ -3330,6 +3413,7 @@ impl AishShell {
                         }
                     }
                     Err(aish_core::AishError::Cancelled) => {
+                        self.sub_agent_animation.stop();
                         println!("{}", theme::warning(&t("shell.interrupted")));
                     }
                     Err(e) => {
@@ -4725,6 +4809,7 @@ impl AishShell {
         esc_watcher.stop();
         Self::restore_ai_sigint_handler(old_sigint);
         self.animation.stop();
+        self.sub_agent_animation.stop();
 
         match result {
             Ok(_) => {
@@ -4732,6 +4817,7 @@ impl AishShell {
                 // and outcome (trusted on Low/Medium, quarantined on High).
             }
             Err(aish_core::AishError::Cancelled) => {
+                self.sub_agent_animation.stop();
                 println!(
                     "\n{}",
                     t_with_args("shell.skill.vetter.cancelled", &name_args)
@@ -5661,6 +5747,7 @@ impl AishShell {
         let report = match diagnose_result {
             Ok(parsed) => parsed,
             Err(aish_core::AishError::Cancelled) => {
+                self.sub_agent_animation.stop();
                 println!("{}", theme::warning(&t("shell.command_cancelled")));
                 return;
             }
@@ -7644,6 +7731,7 @@ impl AishShell {
                 );
             }
             Err(aish_core::AishError::Cancelled) => {
+                self.sub_agent_animation.stop();
                 eprintln!("{}", theme::warning(&t("shell.setup.cancelled")));
             }
             Err(e) => {
@@ -7896,6 +7984,8 @@ impl AishShell {
     pub fn shutdown(&mut self) {
         self.set_phase(ShellPhase::Exiting);
         self.lock_pty().stop();
+        self.animation.stop();
+        self.sub_agent_animation.stop();
     }
 
     fn restart_pty_with_notice(&mut self, show_notice: bool) -> aish_core::Result<()> {
