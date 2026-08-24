@@ -39,7 +39,7 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/kill_live_sessions", "Kill live PTY session(s) by ID"),
     (
         "/audit",
-        "Query audit log (who/when/what/AI suggestion/confirm)",
+        "Query audit log or export audit package (who/when/what/AI suggestion/confirm)",
     ),
     (
         "/forget-approvals",

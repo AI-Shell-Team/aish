@@ -364,7 +364,7 @@ shell:
     status: "显示系统环境状态"
     live_sessions: "列出活跃 PTY 会话"
     kill_live_sessions: "按 ID 终止活跃 PTY 会话"
-    audit: "查询审计日志（谁/何时/什么/AI建议/确认）"
+    audit: "查询审计日志或导出审计包（谁/何时/什么/AI建议/确认）"
     forget-approvals: "清除本会话记住的命令审批"
     skill: "浏览、安装、信任、验证技能；管理注册表"
     export: "导出当前会话为 Markdown"
@@ -570,6 +570,13 @@ shell:
     store_unavailable: "会话存储不可用；无法导出"
     not_found: "在存储中找不到当前会话"
     load_failed: "加载会话失败：{error}"
+  audit_export:
+    usage: "用法：/audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  输出包含 audit.md、events.jsonl 和 manifest.json 的目录"
+    no_events: "未找到匹配过滤条件的审计事件"
+    mkdir_failed: "创建临时目录失败：{error}"
+    build_failed: "构建审计包失败：{error}"
+    publish_failed: "发布审计包失败：{error}"
+    exported: "已导出审计包到 {path}（{events} 条事件，{files} 个文件）"
   fork:
     forked: "已分叉会话 {short}（来自 {parent}）"
     switch_failed: "分叉已创建但切换失败：{error}"
@@ -1628,9 +1635,10 @@ help:
 
         路径：
         1. 显式指定的路径
-        2. `~/.config/aish/security_policy.yaml`（不存在时从内置模板生成）
+        2. `/etc/aish/security_policy.yaml`（系统级，存在时优先使用）
+        3. `~/.config/aish/security_policy.yaml`（不存在时从内置模板生成）
 
-        运行时不再读取 `/etc/aish`。
+        当 `/etc/aish/security_policy.yaml` 存在时，完全覆盖用户级配置。
 
         ## 风险等级
 

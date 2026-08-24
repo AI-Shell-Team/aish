@@ -49,6 +49,7 @@ libc.workspace = true
 open.workspace = true
 cliclack.workspace = true
 parking_lot.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -93,9 +93,23 @@ impl Default for SecurityPolicy {
 }
 
 /// Default policy content shipped with aish. Seeded into
-/// `~/.config/aish/security_policy.yaml` on first use — runtime never reads
-/// `/etc/aish`.
+/// `~/.config/aish/security_policy.yaml` on first use (when no system-level
+/// policy exists at `/etc/aish/security_policy.yaml`).
 const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../config/security_policy.yaml");
+
+/// Default system-level policy path — takes full precedence over the
+/// user-level policy when it exists. Allows administrators to enforce a
+/// single security policy for all users on the machine.
+const DEFAULT_SYSTEM_POLICY_PATH: &str = "/etc/aish/security_policy.yaml";
+
+/// Resolve the system-level policy path. In tests this can be overridden
+/// via the `AISH_SYSTEM_POLICY_PATH` environment variable to avoid touching
+/// the real `/etc/aish/`.
+fn system_policy_path() -> PathBuf {
+    env::var_os("AISH_SYSTEM_POLICY_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SYSTEM_POLICY_PATH))
+}
 
 fn user_security_policy_path() -> PathBuf {
     let base_dir = env::var_os("XDG_CONFIG_HOME")
@@ -156,11 +170,14 @@ fn ensure_user_policy_template(path: &Path) {
 ///
 /// Priority:
 /// 1. Explicit `config_path` (tests / overrides)
-/// 2. `~/.config/aish/security_policy.yaml` (auto-seeded from the shipped
+/// 2. `/etc/aish/security_policy.yaml` (system-level, read-only)
+/// 3. `~/.config/aish/security_policy.yaml` (auto-seeded from the shipped
 ///    template when missing)
 ///
-/// `/etc/aish` is never consulted — all runtime policy I/O is under the user
-/// config directory.
+/// When the system-level policy exists it takes full precedence — the
+/// user-level file is not consulted. This allows administrators to enforce
+/// a single security policy across all users. When no system-level policy
+/// exists, the user-level file is used (and auto-seeded if missing).
 pub fn resolve_security_policy_path(config_path: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = config_path {
         if path.exists() {
@@ -168,6 +185,13 @@ pub fn resolve_security_policy_path(config_path: Option<&Path>) -> Option<PathBu
         }
     }
 
+    // System-level policy takes full precedence when present.
+    let system_path = system_policy_path();
+    if system_path.exists() {
+        return Some(system_path);
+    }
+
+    // Fall back to user-level policy (auto-seeded from the shipped template).
     let user_path = user_security_policy_path();
     if !user_path.exists() {
         ensure_user_policy_template(&user_path);
@@ -866,6 +890,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+        // Point system policy at a non-existent path so the user-level file
+        // is the effective fallback.
+        let _sys_guard = EnvGuard::set(
+            "AISH_SYSTEM_POLICY_PATH",
+            Some(dir.path().join("no-system-policy.yaml").to_str().unwrap()),
+        );
         let resolved = resolve_security_policy_path(None);
         assert_eq!(resolved.as_deref(), Some(user_path.as_path()));
         let policy = load_policy(None);
@@ -873,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_security_policy_path_seeds_user_and_ignores_etc() {
+    fn resolve_security_policy_path_seeds_user_when_no_system_policy() {
         let dir = tempdir().unwrap();
         let xdg = dir.path().join("xdg");
         fs::create_dir_all(&xdg).unwrap();
@@ -881,11 +911,52 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+        // Point system policy at a non-existent path so the user-level file
+        // is seeded and used.
+        let _sys_guard = EnvGuard::set(
+            "AISH_SYSTEM_POLICY_PATH",
+            Some(dir.path().join("no-system-policy.yaml").to_str().unwrap()),
+        );
 
         let resolved = resolve_security_policy_path(None).expect("user policy");
         assert!(resolved.starts_with(&xdg));
-        assert!(!resolved.starts_with("/etc"));
         assert!(resolved.exists());
+    }
+
+    #[test]
+    fn resolve_security_policy_path_prefers_system_over_user() {
+        let dir = tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        fs::create_dir_all(xdg.join("aish")).unwrap();
+        let user_path = xdg.join("aish").join("security_policy.yaml");
+        // User-level policy with sandbox enabled — should NOT be used.
+        fs::write(&user_path, "global:\n  enable_sandbox: true\nrules: []\n").unwrap();
+
+        // System-level policy with sandbox disabled — should be used.
+        let system_path = dir.path().join("system-policy.yaml");
+        fs::write(
+            &system_path,
+            "global:\n  enable_sandbox: false\nrules: []\n",
+        )
+        .unwrap();
+
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+        let _sys_guard = EnvGuard::set(
+            "AISH_SYSTEM_POLICY_PATH",
+            Some(system_path.to_str().unwrap()),
+        );
+
+        let resolved = resolve_security_policy_path(None);
+        assert_eq!(resolved.as_deref(), Some(system_path.as_path()));
+
+        let policy = load_policy(None);
+        assert!(
+            !policy.enable_sandbox,
+            "system policy should override user policy"
+        );
     }
 
     #[test]

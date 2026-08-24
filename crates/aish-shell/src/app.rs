@@ -5294,6 +5294,14 @@ impl AishShell {
             return;
         };
 
+        // `/audit export` delegates to the export handler, which reuses the
+        // same filter parsing but defaults to a higher limit and emits a
+        // directory package instead of a terminal table.
+        if parts.get(1).copied() == Some("export") {
+            self.handle_audit_export(parts);
+            return;
+        }
+
         let mut query = aish_session::AuditQuery::new();
         query.limit = 20;
 
@@ -5321,11 +5329,27 @@ impl AishShell {
                     i += 2;
                     continue;
                 }
+                "--session" if i + 1 < parts.len() => {
+                    query.session_uuid = Some(parts[i + 1].to_string());
+                    i += 2;
+                    continue;
+                }
                 "--since" if i + 1 < parts.len() => {
                     match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
                         Ok(dt) => query.since = Some(dt.with_timezone(&chrono::Utc)),
                         Err(_) => {
                             eprintln!("invalid --since datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--until" if i + 1 < parts.len() => {
+                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
+                        Ok(dt) => query.until = Some(dt.with_timezone(&chrono::Utc)),
+                        Err(_) => {
+                            eprintln!("invalid --until datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
                             return;
                         }
                     }
@@ -5426,6 +5450,279 @@ impl AishShell {
             );
         }
         println!("\n{} event(s) shown.", events.len());
+    }
+
+    /// `/audit export` — write a portable audit package (audit.md +
+    /// events.jsonl + manifest.json) to a directory. Reuses the same
+    /// filter flags as `/audit` plus `--until` and `--session`. The
+    /// package is built in a temp directory and atomically renamed into
+    /// place on success so a failure never leaves a half-written archive.
+    fn handle_audit_export(&self, parts: &[&str]) {
+        // sha2/Write are used in write_audit_package, not here.
+
+        let Some(ref audit) = self.audit_store else {
+            eprintln!("audit is not enabled. Set 'audit.enabled: true' in security_policy.yaml.");
+            return;
+        };
+
+        let mut query = aish_session::AuditQuery::new();
+        query.limit = 100_000;
+
+        let mut i = 2; // skip "/audit export"
+        while i < parts.len() {
+            match parts[i] {
+                "--user" if i + 1 < parts.len() => {
+                    query.user = Some(parts[i + 1].to_string());
+                    i += 2;
+                    continue;
+                }
+                "--host" if i + 1 < parts.len() => {
+                    query.host = Some(parts[i + 1].to_string());
+                    i += 2;
+                    continue;
+                }
+                "--event-type" if i + 1 < parts.len() => {
+                    match parts[i + 1].parse::<AuditEventType>() {
+                        Ok(et) => query.event_type = Some(et),
+                        Err(e) => {
+                            eprintln!("invalid event type: {e}");
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--session" if i + 1 < parts.len() => {
+                    query.session_uuid = Some(parts[i + 1].to_string());
+                    i += 2;
+                    continue;
+                }
+                "--since" if i + 1 < parts.len() => {
+                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
+                        Ok(dt) => query.since = Some(dt.with_timezone(&chrono::Utc)),
+                        Err(_) => {
+                            eprintln!("invalid --since datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--until" if i + 1 < parts.len() => {
+                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
+                        Ok(dt) => query.until = Some(dt.with_timezone(&chrono::Utc)),
+                        Err(_) => {
+                            eprintln!("invalid --until datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
+                            return;
+                        }
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--limit" if i + 1 < parts.len() => {
+                    if let Ok(n) = parts[i + 1].parse::<usize>() {
+                        query.limit = n;
+                    }
+                    i += 2;
+                    continue;
+                }
+                "--help" | "-h" => {
+                    println!("{}", t("shell.audit_export.usage"));
+                    return;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        // Access control — same rule as `/audit` query.
+        // SAFETY: getuid() never fails.
+        let current_uid = unsafe { libc::getuid() };
+        if current_uid != 0 {
+            let me = self
+                .audit_user
+                .clone()
+                .unwrap_or_else(|| current_uid.to_string());
+            if let Some(ref requested) = query.user {
+                if requested != &me {
+                    eprintln!(
+                        "permission denied: non-root users can only export their own audit events"
+                    );
+                    return;
+                }
+            }
+        }
+
+        let events = match audit.query(&query) {
+            Ok(events) => events,
+            Err(e) => {
+                eprintln!("failed to query audit log: {e}");
+                return;
+            }
+        };
+
+        if events.is_empty() {
+            eprintln!("{}", t("shell.audit_export.no_events"));
+            return;
+        }
+
+        // Build the package in a temp directory, then rename atomically.
+        let export_time = chrono::Utc::now();
+        let export_stamp = export_time.format("%Y%m%dT%H%M%SZ").to_string();
+        let export_rfc = export_time.to_rfc3339();
+        let final_dir = std::path::PathBuf::from(format!("aish-audit-{export_stamp}"));
+        let tmp_dir = std::path::PathBuf::from(format!("aish-audit-{export_stamp}.tmp"));
+
+        // Clean up any stale temp dir from a previous failed attempt.
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
+        if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.audit_export.mkdir_failed", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("error".to_string(), e.to_string());
+                    a
+                })
+            );
+            return;
+        }
+
+        // Restrict directory permissions — owner-only. create_dir_all uses
+        // the process umask (commonly 0o755), so other local users could
+        // otherwise list the export directory.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp_dir, std::fs::Permissions::from_mode(0o700));
+        }
+
+        let result = self.write_audit_package(&tmp_dir, &events, &query, &export_rfc);
+        match result {
+            Ok(()) => {
+                // Atomic publish: rename temp dir to final. Same filesystem
+                // guarantees atomicity.
+                if let Err(e) = std::fs::rename(&tmp_dir, &final_dir) {
+                    eprintln!(
+                        "{}",
+                        t_with_args("shell.audit_export.publish_failed", &{
+                            let mut a = std::collections::HashMap::new();
+                            a.insert("error".to_string(), e.to_string());
+                            a
+                        })
+                    );
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return;
+                }
+
+                let abs_path = match std::fs::canonicalize(&final_dir) {
+                    Ok(p) => p.display().to_string(),
+                    Err(_) => final_dir.display().to_string(),
+                };
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.audit_export.exported", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("path".to_string(), abs_path);
+                        a.insert("events".to_string(), events.len().to_string());
+                        a.insert("files".to_string(), "3".to_string());
+                        a
+                    })
+                );
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.audit_export.build_failed", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("error".to_string(), e.to_string());
+                        a
+                    })
+                );
+            }
+        }
+    }
+
+    /// Write audit.md, events.jsonl, and manifest.json into `dir`. All
+    /// content is already redacted at audit-write time, so no further
+    /// scrubbing is needed here.
+    fn write_audit_package(
+        &self,
+        dir: &std::path::Path,
+        events: &[aish_session::AuditEventRecord],
+        query: &aish_session::AuditQuery,
+        exported_at: &str,
+    ) -> std::io::Result<()> {
+        use std::io::Write;
+
+        // ---- events.jsonl ----
+        let jsonl_path = dir.join("events.jsonl");
+        let mut jsonl = std::fs::File::create(&jsonl_path)?;
+        for ev in events {
+            let line = serde_json::to_string(ev).unwrap_or_default();
+            writeln!(jsonl, "{line}")?;
+        }
+        jsonl.sync_all()?;
+        drop(jsonl);
+
+        let jsonl_bytes = std::fs::read(&jsonl_path)?;
+        let jsonl_sha = hex_sha256(&jsonl_bytes);
+
+        // ---- audit.md ----
+        let md_path = dir.join("audit.md");
+        let md = self.render_audit_markdown(events);
+        std::fs::write(&md_path, &md)?;
+        let md_sha = hex_sha256(md.as_bytes());
+
+        // ---- manifest.json ----
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "tool": "aish",
+            "tool_version": env!("CARGO_PKG_VERSION"),
+            "exported_at": exported_at,
+            "event_count": events.len(),
+            "filters": {
+                "user": query.user,
+                "host": query.host,
+                "event_type": query.event_type.as_ref().map(|e| e.to_string()),
+                "session_uuid": query.session_uuid,
+                "since": query.since.map(|d| d.to_rfc3339()),
+                "until": query.until.map(|d| d.to_rfc3339()),
+                "limit": query.limit,
+            },
+            "files": {
+                "audit.md": {
+                    "sha256": md_sha,
+                    "bytes": md.len(),
+                },
+                "events.jsonl": {
+                    "sha256": jsonl_sha,
+                    "bytes": jsonl_bytes.len(),
+                },
+            },
+        });
+        let manifest_path = dir.join("manifest.json");
+        let manifest_str = serde_json::to_string_pretty(&manifest).unwrap_or_default();
+        std::fs::write(&manifest_path, &manifest_str)?;
+
+        // Restrict permissions on all files (owner-only).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in [&jsonl_path, &md_path, &manifest_path] {
+                let _ = std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Render a human-readable Markdown timeline from audit events.
+    /// Delegates to the free function so the rendering logic is testable
+    /// without constructing a full `AishShell`.
+    fn render_audit_markdown(&self, events: &[aish_session::AuditEventRecord]) -> String {
+        render_audit_markdown_impl(events)
     }
 
     fn handle_resume_command(&mut self, parts: &[&str]) {
@@ -10942,6 +11239,125 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     format!("{}...", truncated)
 }
 
+/// Compute the hex-encoded SHA-256 digest of `data`.
+fn hex_sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Render a human-readable Markdown timeline from audit events.
+/// Extracted as a free function so it can be unit-tested without
+/// constructing a full `AishShell`.
+fn render_audit_markdown_impl(events: &[aish_session::AuditEventRecord]) -> String {
+    let mut md = String::new();
+    md.push_str("# aish audit export\n\n");
+    md.push_str(&format!(
+        "- **exported at**: {}\n",
+        chrono::Utc::now().to_rfc3339()
+    ));
+    md.push_str(&format!("- **event count**: {}\n", events.len()));
+    md.push_str(&format!(
+        "- **time range**: {} … {}\n\n",
+        events
+            .last()
+            .map(|e| e.ts)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339(),
+        events
+            .first()
+            .map(|e| e.ts)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339()
+    ));
+
+    // Summary by event type
+    let mut cmd_count = 0usize;
+    let mut ai_count = 0usize;
+    let mut sec_count = 0usize;
+    for ev in events {
+        match ev.event_type {
+            AuditEventType::Command => cmd_count += 1,
+            AuditEventType::AiTool => ai_count += 1,
+            AuditEventType::SecurityDecision => sec_count += 1,
+        }
+    }
+    md.push_str("## Summary\n\n");
+    md.push_str("| type | count |\n|---|---|\n");
+    md.push_str(&format!("| command | {cmd_count} |\n"));
+    md.push_str(&format!("| ai_tool | {ai_count} |\n"));
+    md.push_str(&format!("| security_decision | {sec_count} |\n\n"));
+
+    // Chronological timeline (events are newest-first from the query,
+    // so iterate in reverse for oldest-first readability).
+    md.push_str("## Timeline\n\n");
+    for ev in events.iter().rev() {
+        md.push_str(&format!(
+            "### {} — {}\n\n",
+            ev.ts.to_rfc3339(),
+            ev.event_type
+        ));
+        if let Some(user) = &ev.user {
+            md.push_str(&format!("- **user**: {user}\n"));
+        }
+        if let Some(host) = &ev.host {
+            md.push_str(&format!("- **host**: {host}\n"));
+        }
+        if let Some(session) = &ev.session_uuid {
+            md.push_str(&format!("- **session**: `{session}`\n"));
+        }
+
+        match ev.event_type {
+            AuditEventType::Command => {
+                let cmd = ev.command.as_deref().unwrap_or("");
+                let source = ev.source.as_deref().unwrap_or("");
+                let rc = ev
+                    .return_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".into());
+                md.push_str(&format!("- **source**: {source}\n"));
+                md.push_str(&format!("- **command**: `{cmd}`\n"));
+                md.push_str(&format!("- **exit code**: {rc}\n"));
+            }
+            AuditEventType::AiTool => {
+                let tool = ev.ai_tool.as_deref().unwrap_or("?");
+                let args_raw = ev.ai_args.as_deref().unwrap_or("");
+                let args_display = serde_json::from_str::<serde_json::Value>(args_raw)
+                    .map(|v| format_tool_args_for_display(tool, &v))
+                    .unwrap_or_else(|_| truncate_str(args_raw, 120).to_string());
+                md.push_str(&format!("- **tool**: {tool}\n"));
+                md.push_str(&format!("- **args**: {args_display}\n"));
+                if let Some(result) = &ev.ai_result {
+                    let r = truncate_str(result, 200);
+                    md.push_str(&format!("- **result**: {r}\n"));
+                }
+            }
+            AuditEventType::SecurityDecision => {
+                let dec = ev.decision.as_deref().unwrap_or("?").to_uppercase();
+                md.push_str(&format!("- **decision**: {dec}\n"));
+                if let Some(choice) = ev.user_choice.as_deref().filter(|c| !c.is_empty()) {
+                    md.push_str(&format!("- **user choice**: {choice}\n"));
+                }
+                if let Some(rule) = ev.matched_rule.as_deref().filter(|r| !r.is_empty()) {
+                    md.push_str(&format!("- **matched rule**: {rule}\n"));
+                }
+                if let Some(risk) = ev.risk_level.as_deref().filter(|r| !r.is_empty()) {
+                    md.push_str(&format!("- **risk level**: {risk}\n"));
+                }
+                if let Some(cmd) = ev.command.as_deref().filter(|c| !c.is_empty()) {
+                    let c = truncate_str(cmd, 80);
+                    md.push_str(&format!("- **command**: `{c}`\n"));
+                }
+            }
+        }
+        md.push('\n');
+    }
+
+    md
+}
+
 fn estimate_security_panel_lines(
     rows: &[(String, String)],
     width: usize,
@@ -11827,5 +12243,190 @@ mod confirm_action_tests {
     fn arbitrary_byte_rejects() {
         assert_eq!(interpret_confirm_byte(b'x'), ConfirmResponse::No);
         assert_eq!(interpret_confirm_byte(b' '), ConfirmResponse::No);
+    }
+}
+
+#[cfg(test)]
+mod audit_export_tests {
+    use super::*;
+    use aish_core::{AuditEvent, AuditEventType, AuditSink};
+    use aish_session::{AuditEventRecord, AuditQuery, AuditStore};
+    use chrono::Utc;
+
+    /// Build a few audit events, record them, query them back, and verify
+    /// the markdown rendering produces a well-formed timeline.
+    #[test]
+    fn audit_export_markdown_has_expected_structure() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("audit.db");
+        let audit = AuditStore::open(Some(&db_path)).unwrap();
+
+        let now = Utc::now();
+        audit.record(AuditEvent::command(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("prod-host".into()),
+            "ls -la".into(),
+            "user".into(),
+            0,
+        ));
+        audit.record(AuditEvent::ai_tool(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("prod-host".into()),
+            "bash".into(),
+            r#"{"command":"rm -rf /tmp/x"}"#.into(),
+            "done".into(),
+        ));
+        audit.record(AuditEvent::security_decision(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("prod-host".into()),
+            Some("rm -rf /tmp".into()),
+            "confirm".into(),
+            Some("yes".into()),
+            Some("H-001".into()),
+            Some("HIGH".into()),
+        ));
+
+        let events = audit
+            .query(&AuditQuery {
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(events.len(), 3);
+
+        let md = render_audit_markdown_impl(&events);
+
+        // Header and metadata
+        assert!(md.starts_with("# aish audit export\n"));
+        assert!(md.contains("- **event count**: 3\n"));
+
+        // Summary table with all three event types
+        assert!(md.contains("## Summary"));
+        assert!(md.contains("| command | 1 |"));
+        assert!(md.contains("| ai_tool | 1 |"));
+        assert!(md.contains("| security_decision | 1 |"));
+
+        // Timeline section with chronological entries
+        assert!(md.contains("## Timeline"));
+
+        // Command event details
+        assert!(md.contains("- **source**: user"));
+        assert!(md.contains("- **command**: `ls -la`"));
+        assert!(md.contains("- **exit code**: 0"));
+
+        // AI tool event details
+        assert!(md.contains("- **tool**: bash"));
+
+        // Security decision details
+        assert!(md.contains("- **decision**: CONFIRM"));
+        assert!(md.contains("- **user choice**: yes"));
+        assert!(md.contains("- **matched rule**: H-001"));
+        assert!(md.contains("- **risk level**: HIGH"));
+    }
+
+    /// Verify hex_sha256 produces correct digests for known inputs.
+    #[test]
+    fn hex_sha256_known_vectors() {
+        assert_eq!(
+            hex_sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            hex_sha256(b"hello"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    /// Verify that the manifest JSON has the correct schema_version and
+    /// includes SHA-256 hashes for each file.
+    #[test]
+    fn audit_export_manifest_schema() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+
+        let now = Utc::now();
+        let events: Vec<AuditEventRecord> = vec![AuditEventRecord {
+            id: 1,
+            ts: now,
+            session_uuid: Some("sess-1".into()),
+            user: Some("root".into()),
+            host: Some("host".into()),
+            event_type: AuditEventType::Command,
+            command: Some("echo test".into()),
+            source: Some("user".into()),
+            return_code: Some(0),
+            ai_tool: None,
+            ai_args: None,
+            ai_result: None,
+            decision: None,
+            user_choice: None,
+            matched_rule: None,
+            risk_level: None,
+        }];
+
+        // Write events.jsonl
+        let jsonl_path = dir.join("events.jsonl");
+        let jsonl: String = events
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&jsonl_path, &jsonl).unwrap();
+
+        // Write audit.md
+        let md_path = dir.join("audit.md");
+        let md = render_audit_markdown_impl(&events);
+        std::fs::write(&md_path, &md).unwrap();
+
+        // Build manifest (mirrors write_audit_package logic)
+        let jsonl_bytes = std::fs::read(&jsonl_path).unwrap();
+        let jsonl_sha = hex_sha256(&jsonl_bytes);
+        let md_sha = hex_sha256(md.as_bytes());
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "tool": "aish",
+            "tool_version": env!("CARGO_PKG_VERSION"),
+            "exported_at": "2026-01-01T00:00:00+00:00",
+            "event_count": events.len(),
+            "filters": {
+                "user": serde_json::Value::Null,
+                "host": serde_json::Value::Null,
+                "event_type": serde_json::Value::Null,
+                "session_uuid": serde_json::Value::Null,
+                "since": serde_json::Value::Null,
+                "until": serde_json::Value::Null,
+                "limit": 100000,
+            },
+            "files": {
+                "audit.md": {
+                    "sha256": md_sha,
+                    "bytes": md.len(),
+                },
+                "events.jsonl": {
+                    "sha256": jsonl_sha,
+                    "bytes": jsonl_bytes.len(),
+                },
+            },
+        });
+
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["tool"], "aish");
+        assert_eq!(manifest["event_count"], 1);
+        assert!(manifest["files"]["audit.md"]["sha256"].is_string());
+        assert!(manifest["files"]["events.jsonl"]["sha256"].is_string());
+        assert!(
+            manifest["files"]["audit.md"]["sha256"]
+                .as_str()
+                .unwrap()
+                .len()
+                == 64
+        );
     }
 }

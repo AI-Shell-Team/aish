@@ -61,6 +61,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_events(user);
 CREATE INDEX IF NOT EXISTS idx_audit_host ON audit_events(host);
 CREATE INDEX IF NOT EXISTS idx_audit_event_type ON audit_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_session_ts
+    ON audit_events(session_uuid, ts DESC);
 "#;
 
 /// SQLite-backed store for sessions and command history.
@@ -497,6 +499,14 @@ impl SessionStore {
             sql.push_str(" AND ts >= ?");
             params_vec.push(Box::new(since.to_rfc3339()));
         }
+        if let Some(until) = query.until {
+            sql.push_str(" AND ts <= ?");
+            params_vec.push(Box::new(until.to_rfc3339()));
+        }
+        if let Some(ref session_uuid) = query.session_uuid {
+            sql.push_str(" AND session_uuid = ?");
+            params_vec.push(Box::new(session_uuid.clone()));
+        }
 
         sql.push_str(" ORDER BY ts DESC LIMIT ?");
         params_vec.push(Box::new(query.limit as i64));
@@ -815,6 +825,90 @@ mod tests {
             })
             .unwrap();
         assert!(other_user.is_empty());
+    }
+
+    #[test]
+    fn audit_query_until_and_session_filters() {
+        use aish_core::{AuditEvent, AuditSink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("audit.db");
+        let audit = AuditStore::open(Some(&db_path)).unwrap();
+
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t1 = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let t2 = chrono::DateTime::parse_from_rfc3339("2026-12-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // Two sessions, events at three timestamps.
+        audit.record(AuditEvent::command(
+            t0,
+            Some("sess-a".into()),
+            Some("root".into()),
+            Some("h".into()),
+            "ls".into(),
+            "user".into(),
+            0,
+        ));
+        audit.record(AuditEvent::command(
+            t1,
+            Some("sess-b".into()),
+            Some("root".into()),
+            Some("h".into()),
+            "pwd".into(),
+            "user".into(),
+            0,
+        ));
+        audit.record(AuditEvent::command(
+            t2,
+            Some("sess-a".into()),
+            Some("root".into()),
+            Some("h".into()),
+            "whoami".into(),
+            "user".into(),
+            0,
+        ));
+
+        // --until filter: only t0 and t1 (inclusive)
+        let until_t1 = audit
+            .query(&AuditQuery {
+                until: Some(t1),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(until_t1.len(), 2);
+        assert!(until_t1.iter().all(|e| e.ts <= t1));
+
+        // --session filter: only sess-a events
+        let sess_a = audit
+            .query(&AuditQuery {
+                session_uuid: Some("sess-a".into()),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(sess_a.len(), 2);
+        assert!(sess_a
+            .iter()
+            .all(|e| e.session_uuid.as_deref() == Some("sess-a")));
+
+        // --since + --until combined: only t1
+        let window = audit
+            .query(&AuditQuery {
+                since: Some(t1),
+                until: Some(t1),
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(window.len(), 1);
+        assert_eq!(window[0].command.as_deref(), Some("pwd"));
     }
     fn temp_store() -> (tempfile::TempDir, SessionStore) {
         let temp = tempfile::tempdir().unwrap();
