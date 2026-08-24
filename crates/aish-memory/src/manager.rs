@@ -224,7 +224,8 @@ impl MemoryManager {
     }
 
     /// Re-verify a memory entry by ID: updates `last_verified_at` to today.
-    /// If `new_ttl_seconds` is provided, also resets `expires_at`.
+    /// If `new_ttl_seconds` is provided, resets `expires_at` to now + ttl.
+    /// If `new_ttl_seconds` is None, clears `expires_at` (makes the entry non-expiring).
     /// Returns true if the entry was found and updated.
     pub fn verify(
         &mut self,
@@ -237,12 +238,18 @@ impl MemoryManager {
         for entry in &mut self.entries {
             if entry.id == id {
                 entry.last_verified_at = Some(now_rfc.clone());
-                if let Some(secs) = new_ttl_seconds {
-                    entry.expires_at = Some(
-                        (now + chrono::Duration::seconds(secs as i64))
-                            .format("%Y-%m-%dT%H:%M:%SZ")
-                            .to_string(),
-                    );
+                match new_ttl_seconds {
+                    Some(secs) => {
+                        entry.expires_at = Some(
+                            (now + chrono::Duration::seconds(secs as i64))
+                                .format("%Y-%m-%dT%H:%M:%SZ")
+                                .to_string(),
+                        );
+                    }
+                    None => {
+                        // Clear expiry — the entry becomes non-expiring.
+                        entry.expires_at = None;
+                    }
                 }
                 found = true;
                 break;
@@ -417,6 +424,9 @@ fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
     let mut entries = Vec::new();
     let mut current_body: Vec<String> = Vec::new();
     let mut current_meta: Option<ParsedMeta> = None;
+    // Once content lines start after the metadata block, subsequent `> ` lines
+    // belong to the content body (e.g. markdown blockquotes), not metadata.
+    let mut in_content = false;
 
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("## [") {
@@ -427,7 +437,8 @@ fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
                 current_body.clear();
             }
             current_meta = parse_header(rest);
-        } else if line.starts_with("> ") {
+            in_content = false;
+        } else if !in_content && line.starts_with("> ") {
             // v2 metadata line — attach to current meta if present
             if let Some(meta) = current_meta.as_mut() {
                 let kv = &line[2..];
@@ -449,6 +460,7 @@ fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
                 }
             }
         } else if current_meta.is_some() {
+            in_content = true;
             current_body.push(line.to_string());
         }
     }
@@ -974,6 +986,69 @@ mod tests {
         let ctx = mgr.get_session_context();
         assert!(!ctx.is_empty());
         assert!(ctx.contains("test entry"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_none_clears_expiry() {
+        let dir = std::env::temp_dir().join("aish_memory_test_verify_clears");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        let id = mgr
+            .store_with_provenance(
+                "temp fact",
+                MemoryCategory::Other,
+                MemoryScope::User,
+                MemorySource { label: "test".to_string(), session_uuid: None, host: None },
+                0.8,
+                Some(3600), // 1 hour TTL
+            )
+            .unwrap();
+        // Entry has expires_at set
+        assert!(mgr.list()[0].expires_at.is_some());
+
+        // verify(id, None) should clear expires_at
+        let ok = mgr.verify(id, None).unwrap();
+        assert!(ok);
+        let entry = mgr.list().iter().find(|e| e.id == id).unwrap();
+        assert!(entry.expires_at.is_none(), "expires_at should be cleared");
+        assert!(entry.last_verified_at.is_some(), "last_verified_at should be set");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_content_with_blockquote() {
+        // Content containing `> ` lines (e.g. markdown blockquotes) must not
+        // be misinterpreted as v2 metadata lines.
+        let dir = std::env::temp_dir().join("aish_memory_test_blockquote");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path.clone()).unwrap();
+        let content = "User said:\n> This is a quote\n> source: not metadata";
+        let id = mgr
+            .store_with_provenance(
+                content,
+                MemoryCategory::Other,
+                MemoryScope::User,
+                MemorySource { label: "test".to_string(), session_uuid: None, host: None },
+                0.8,
+                None,
+            )
+            .unwrap();
+
+        // Reload from disk and verify content is preserved
+        let mgr2 = MemoryManager::new(path).unwrap();
+        let entry = mgr2.list().iter().find(|e| e.id == id).unwrap();
+        assert!(entry.content.contains("> This is a quote"), "blockquote lost");
+        assert!(entry.content.contains("> source: not metadata"), "metadata-like line lost");
+        assert_eq!(entry.source, "test", "source corrupted by content line");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
