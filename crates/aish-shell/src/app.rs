@@ -8,7 +8,7 @@ use aish_context::{
     context_window_hard_min_tokens, context_window_warn_below_tokens,
     effective_reserved_output_tokens, resolve_context_window_tokens, ContextBudgetPolicy,
 };
-use aish_core::{AuditEventType, AuditSink, LlmEvent, LlmEventType, MemoryCategory};
+use aish_core::{AuditEventType, AuditSink, LlmEvent, LlmEventType, MemoryCategory, MemoryScope};
 use aish_i18n::{t, t_with_args};
 use aish_llm::{
     langfuse::{LangfuseClient, LangfuseConfig},
@@ -1033,6 +1033,22 @@ impl AishShell {
         // AgentTool is registered after skill loading so the parent session already
         // has SkillTool when general-purpose / troubleshoot inherit the tool pool.
 
+        // Open session store (best-effort) — moved before memory tool
+        // registration so the session UUID and host are available to the
+        // memory store callback as provenance metadata.
+        let session_store = match &config.session_db_path {
+            Some(path) => SessionStore::open(Some(std::path::Path::new(path))).ok(),
+            None => SessionStore::open(None).ok(),
+        };
+        let session_uuid = if let Some(ref store) = session_store {
+            match store.create_session(&config.model, Some(&config.api_base)) {
+                Ok(record) => record.session_uuid,
+                Err(_) => uuid::Uuid::new_v4().to_string(),
+            }
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        let audit_host = sysinfo::System::host_name();
         // Initialize shared memory manager (best-effort)
         let memory_manager: SharedMemoryManager = Arc::new(Mutex::new(
             MemoryManager::new(MemoryManager::default_path()).ok(),
@@ -1043,6 +1059,8 @@ impl AishShell {
         let mm_for_store = memory_manager.clone();
         let mm_for_delete = memory_manager.clone();
         let mm_for_list = memory_manager.clone();
+        let mem_session_uuid = session_uuid.clone();
+        let mem_audit_host = audit_host.clone();
 
         let memory_tool = aish_tools::MemoryTool::new(
             // search callback
@@ -1056,18 +1074,36 @@ impl AishShell {
                             id: e.id as usize,
                             content: e.content.clone(),
                             category: format!("{:?}", e.category).to_lowercase(),
+                            source: e.source.clone(),
+                            scope: format!("{:?}", e.scope).to_lowercase(),
+                            created_at: e.created_at.clone(),
+                            expires_at: e.expires_at.clone(),
+                            expired: aish_memory::MemoryManager::is_expired(&e),
                         })
                         .collect()
                 } else {
                     vec![]
                 }
             }),
-            // store callback
-            Box::new(move |content, category, source, importance| {
+            // store callback — extended signature with scope and ttl
+            Box::new(move |content, category, source, importance, scope, ttl_seconds| {
                 let mut guard = mm_for_store.lock().unwrap();
                 if let Some(ref mut mm) = *guard {
                     let cat = parse_category_str(category);
-                    match mm.store(content, cat, source, importance as f64) {
+                    let mem_scope = parse_scope_str(scope);
+                    let mem_source = aish_memory::MemorySource {
+                        label: source.to_string(),
+                        session_uuid: Some(mem_session_uuid.clone()),
+                        host: mem_audit_host.clone(),
+                    };
+                    match mm.store_with_provenance(
+                        content,
+                        cat,
+                        mem_scope,
+                        mem_source,
+                        importance as f64,
+                        ttl_seconds,
+                    ) {
                         Ok(id) => id.to_string(),
                         Err(e) => {
                             let mut args = std::collections::HashMap::new();
@@ -1088,7 +1124,7 @@ impl AishShell {
                     false
                 }
             }),
-            // list callback
+            // list callback — enriched with source/scope/expiry
             Box::new(move |limit| {
                 let guard = mm_for_list.lock().unwrap();
                 if let Some(ref mm) = *guard {
@@ -1100,6 +1136,11 @@ impl AishShell {
                             id: e.id as usize,
                             content: e.content.clone(),
                             category: format!("{:?}", e.category).to_lowercase(),
+                            source: e.source.clone(),
+                            scope: format!("{:?}", e.scope).to_lowercase(),
+                            created_at: e.created_at.clone(),
+                            expires_at: e.expires_at.clone(),
+                            expired: aish_memory::MemoryManager::is_expired(&e),
                         })
                         .collect()
                 } else {
@@ -1185,21 +1226,6 @@ impl AishShell {
             llm_session.register_tool(tool);
         }
 
-        // Open session store (best-effort)
-        let session_store = match &config.session_db_path {
-            Some(path) => SessionStore::open(Some(std::path::Path::new(path))).ok(),
-            None => SessionStore::open(None).ok(),
-        };
-
-        // Create session record if store is available
-        let session_uuid = if let Some(ref store) = session_store {
-            match store.create_session(&config.model, Some(&config.api_base)) {
-                Ok(record) => record.session_uuid,
-                Err(_) => uuid::Uuid::new_v4().to_string(),
-            }
-        } else {
-            uuid::Uuid::new_v4().to_string()
-        };
 
         // Open audit store when audit is enabled in the security policy.
         let audit_enabled = security_manager.policy().audit_enabled;
@@ -1234,7 +1260,6 @@ impl AishShell {
             None
         };
         let audit_user = current_user_name();
-        let audit_host = sysinfo::System::host_name();
 
         // Resolve memory config (use defaults if not specified)
         let memory_config = config.memory.clone().unwrap_or_default();
@@ -3657,9 +3682,9 @@ impl AishShell {
                     }
                 }
             }
-            Some("/audit") => self.handle_audit_command(&parts),
             Some("/forget-approvals") => self.handle_forget_approvals(),
-            Some("/skill") => self.handle_skill_command(&parts),
+            Some("/audit") => self.handle_audit_command(&parts),
+            Some("/memory") => self.handle_memory_command(&parts),
             Some("/export") => self.handle_export_command(&parts),
             Some("/fork") => self.handle_fork_command(),
             Some("/sessions") => self.handle_sessions_command(),
@@ -3689,6 +3714,138 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
+    }
+
+    /// `/memory` — view, verify, or forget long-term memories.
+    ///
+    /// Subcommands:
+    /// - `/memory` or `/memory list` — list all entries (active + expired)
+    /// - `/memory verify <id>` — re-verify an entry (renews last_verified_at, clears expiry)
+    /// - `/memory forget <id>` — delete an entry by ID
+    /// - `/memory clear-expired` — remove all expired entries
+    fn handle_memory_command(&mut self, parts: &[&str]) {
+        let sub = parts.get(1).copied().unwrap_or("list");
+        let mut guard = self.memory_manager.lock().unwrap();
+        let Some(mm) = guard.as_mut() else {
+            eprintln!("{}", t("tools.memory.not_available"));
+            return;
+        };
+        match sub {
+            "list" => {
+                let entries = mm.list();
+                if entries.is_empty() {
+                    println!("\x1b[36m{}\x1b[0m", t("tools.memory.empty"));
+                    return;
+                }
+                println!("\x1b[36m{}\x1b[0m", t("tools.memory.list_header"));
+                for e in entries.iter().rev() {
+                    let cat = format!("{:?}", e.category).to_lowercase();
+                    let scope = format_scope_short(&e.scope);
+                    let mut line = format!("  #{} [{}] {} [{}]", e.id, cat, e.content, scope);
+                    if !e.source.is_empty() {
+                        line.push_str(&format!(" ({})", e.source));
+                    }
+                    if let Some(created) = &e.created_at {
+                        line.push_str(&format!(" @{}", created));
+                    }
+                    if aish_memory::MemoryManager::is_expired(e) {
+                        line.push_str(&format!(" \x1b[31m[{}]\x1b[0m", t("tools.memory.expired_tag")));
+                    } else if let Some(exp) = &e.expires_at {
+                        line.push_str(&format!(" ({}: {})", t("tools.memory.field_expires"), exp));
+                    }
+                    println!("{}", line);
+                }
+            }
+            "verify" => {
+                let id_str = match parts.get(2) {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("{}", t("tools.memory.verify_usage"));
+                        return;
+                    }
+                };
+                let id: i64 = match id_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("id".to_string(), id_str.to_string());
+                        eprintln!("{}", t_with_args("tools.memory.invalid_id", &args));
+                        return;
+                    }
+                };
+                match mm.verify(id, None) {
+                    Ok(true) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("id".to_string(), id.to_string());
+                        println!("\x1b[36m{}\x1b[0m", t_with_args("tools.memory.verified", &args));
+                    }
+                    Ok(false) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("id".to_string(), id.to_string());
+                        eprintln!("{}", t_with_args("tools.memory.not_found", &args));
+                    }
+                    Err(e) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        eprintln!("{}", t_with_args("shell.general_error", &args));
+                    }
+                }
+            }
+            "forget" => {
+                let id_str = match parts.get(2) {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("{}", t("tools.memory.forget_usage"));
+                        return;
+                    }
+                };
+                let id: i64 = match id_str.parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("id".to_string(), id_str.to_string());
+                        eprintln!("{}", t_with_args("tools.memory.invalid_id", &args));
+                        return;
+                    }
+                };
+                match mm.remove(id) {
+                    Ok(true) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("id".to_string(), id.to_string());
+                        println!("\x1b[36m{}\x1b[0m", t_with_args("tools.memory.forgot", &args));
+                    }
+                    Ok(false) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("id".to_string(), id.to_string());
+                        eprintln!("{}", t_with_args("tools.memory.not_found", &args));
+                    }
+                    Err(e) => {
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        eprintln!("{}", t_with_args("shell.general_error", &args));
+                    }
+                }
+            }
+            "clear-expired" => {
+                let expired_ids = mm.expired_entry_ids();
+                if expired_ids.is_empty() {
+                    println!("\x1b[36m{}\x1b[0m", t("tools.memory.no_expired"));
+                    return;
+                }
+                let count = expired_ids.len();
+                for id in &expired_ids {
+                    let _ = mm.remove(*id);
+                }
+                let mut args = std::collections::HashMap::new();
+                args.insert("count".to_string(), count.to_string());
+                println!("\x1b[36m{}\x1b[0m", t_with_args("tools.memory.cleared_expired", &args));
+            }
+            _ => {
+                let mut args = std::collections::HashMap::new();
+                args.insert("subcommand".to_string(), sub.to_string());
+                eprintln!("{}", t_with_args("tools.memory.unknown_subcommand", &args));
+            }
+        }
     }
 
     /// `/export [md]` — export the current session (AI conversation + command
@@ -11223,6 +11380,26 @@ fn parse_category_str(s: &str) -> MemoryCategory {
         "solution" => MemoryCategory::Solution,
         "pattern" => MemoryCategory::Pattern,
         _ => MemoryCategory::Other,
+    }
+}
+
+/// Parse a scope string (from the LLM tool call) into a MemoryScope.
+/// Falls back to `User` for unrecognized values — never promote host facts
+/// to global scope by default.
+fn parse_scope_str(s: &str) -> MemoryScope {
+    match s.to_lowercase().as_str() {
+        "host" => MemoryScope::Host,
+        "project" => MemoryScope::Project,
+        _ => MemoryScope::User,
+    }
+}
+
+/// Format a MemoryScope as a short lowercase string for display.
+fn format_scope_short(scope: &MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::User => "user",
+        MemoryScope::Host => "host",
+        MemoryScope::Project => "project",
     }
 }
 

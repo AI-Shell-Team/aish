@@ -195,6 +195,7 @@ shell:
     sessions: "Mostrar el árbol de sesiones"
     rollback: "Revisar y revertir ediciones de archivo de la IA (edit_file/write_file) de esta sesión"
     undo: "Deshacer el último cambio de archivo (edit_file/write_file) de esta sesión"
+    memory: "Ver, verificar u olvidar memorias a largo plazo"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
@@ -963,6 +964,35 @@ tools:
 
   bash:
     security_handling_required: "el comando bash requiere manejo de seguridad de nivel {level}"
+
+  memory:
+    missing_action: "Falta el parámetro 'action'"
+    unknown_action: "Acción desconocida: {action}. Use search/store/forget/list."
+    search_missing_query: "Falta 'query' para search"
+    store_missing_content: "Falta 'content' para store"
+    forget_missing_id: "Falta 'memory_id' para forget"
+    no_results: "No se encontraron memorias coincidentes."
+    stored: "Almacenado como memoria #{id}."
+    forgot: "Se olvidó la memoria #{id}."
+    not_found: "No se encontró la memoria #{id}."
+    empty: "Aún no hay memorias."
+    not_available: "memoria no disponible"
+    confirm_store: "¿Confirmar guardar memoria?"
+    confirm_forget: "Confirmar olvido de memoria"
+    field_category: "Categoría"
+    field_scope: "Ámbito"
+    field_ttl: "TTL"
+    field_reason: "Razón"
+    field_expires: "expira"
+    expired_tag: "EXPIRADO"
+    list_header: "Memorias a largo plazo:"
+    verify_usage: "Uso: /memory verify <id>"
+    forget_usage: "Uso: /memory forget <id>"
+    invalid_id: "ID de memoria inválido: {id}"
+    verified: "Memoria #{id} verificada (expiración borrada)."
+    no_expired: "No hay memorias expiradas."
+    cleared_expired: "Se borraron {count} memoria(s) expirada(s)."
+    unknown_subcommand: "Subcomando desconocido: {subcommand}. Use list/verify/forget/clear-expired."
 
 help:
   labels:

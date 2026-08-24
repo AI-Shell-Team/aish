@@ -63,6 +63,10 @@ pub const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/rollback",
         "Review and roll back AI file edits (edit_file/write_file) this session",
     ),
+    (
+        "/memory",
+        "View, verify, or forget long-term memories (list/verify/forget/clear-expired)",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -850,7 +854,7 @@ mod tests {
                 cmd
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 23);
+        assert_eq!(SLASH_COMMANDS.len(), 24);
     }
 
     #[test]

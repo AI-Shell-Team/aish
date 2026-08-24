@@ -195,6 +195,7 @@ shell:
     sessions: "Afficher l'arborescence des sessions"
     rollback: "Examiner et annuler les modifications de fichier de l'IA (edit_file/write_file) cette session"
     undo: "Annuler la dernière modification de fichier (edit_file/write_file) cette session"
+    memory: "Visualiser, vérifier ou oublier les mémoires"
 
   feedback:
     select_type: "Sélectionner le type de commentaire"
@@ -964,6 +965,35 @@ tools:
 
   bash:
     security_handling_required: "la commande bash nécessite un traitement de sécurité de niveau {level}"
+
+  memory:
+    missing_action: "Paramètre 'action' manquant"
+    unknown_action: "Action inconnue : {action}. Utilisez search/store/forget/list."
+    search_missing_query: "Paramètre 'query' manquant pour search"
+    store_missing_content: "Paramètre 'content' manquant pour store"
+    forget_missing_id: "Paramètre 'memory_id' manquant pour forget"
+    no_results: "Aucune mémoire correspondante trouvée."
+    stored: "Enregistré comme mémoire #{id}."
+    forgot: "Mémoire #{id} oubliée."
+    not_found: "Mémoire #{id} introuvable."
+    empty: "Aucune mémoire pour le moment."
+    not_available: "mémoire indisponible"
+    confirm_store: "Confirmer la sauvegarde de la mémoire ?"
+    confirm_forget: "Confirmer l'oubli de la mémoire"
+    field_category: "Catégorie"
+    field_scope: "Portée"
+    field_ttl: "Durée de vie"
+    field_reason: "Raison"
+    field_expires: "expire"
+    expired_tag: "EXPIRÉ"
+    list_header: "Mémoires à long terme :"
+    verify_usage: "Usage : /memory verify <id>"
+    forget_usage: "Usage : /memory forget <id>"
+    invalid_id: "ID de mémoire invalide : {id}"
+    verified: "Mémoire #{id} vérifiée (expiration effacée)."
+    no_expired: "Aucune mémoire expirée."
+    cleared_expired: "{count} mémoire(s) expirée(s) effacée(s)."
+    unknown_subcommand: "Sous-commande inconnue : {subcommand}. Utilisez list/verify/forget/clear-expired."
 
 help:
   labels:

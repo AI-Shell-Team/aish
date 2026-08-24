@@ -6,9 +6,9 @@ use aish_context::ContextMessage;
 use aish_context::{
     ContextBudgetPolicy, ContextCompactReport, ContextManager, ContextPressureLevel,
 };
-use aish_core::{LlmEvent, MemoryCategory, MemoryType, PlanModeState, PlanPhase};
+use aish_core::{LlmEvent, MemoryCategory, MemoryScope, MemoryType, PlanModeState, PlanPhase};
 use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent, Tool};
-use aish_memory::MemoryManager;
+use aish_memory::{MemoryManager, MemorySource};
 use aish_prompts::PromptManager;
 use aish_session::SessionContextMessage;
 use aish_skills::SkillManager;
@@ -785,6 +785,9 @@ impl AiHandler {
     }
 
     /// Auto-retain user preferences and facts based on pattern matching.
+    /// Auto-retain entries get a short default TTL (7 days) to prevent stale
+    /// facts from accumulating — the user already expressed intent via
+    /// "remember that..." patterns so no confirmation gate is needed.
     fn auto_retain_memory(&mut self, question: &str, _response: &str) {
         if !self.memory_config.auto_retain {
             return;
@@ -794,7 +797,18 @@ impl AiHandler {
             let facts = extract_retainable_facts(question);
             for fact in facts {
                 let category = categorize_fact(&fact);
-                let _ = mm.store(&fact, category, "auto", 1.0);
+                let _ = mm.store_with_provenance(
+                    &fact,
+                    category,
+                    MemoryScope::User,
+                    MemorySource {
+                        label: "auto".to_string(),
+                        session_uuid: None,
+                        host: None,
+                    },
+                    1.0,
+                    Some(604_800), // 7 days
+                );
             }
         }
     }

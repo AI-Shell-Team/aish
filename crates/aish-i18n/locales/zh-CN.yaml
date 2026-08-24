@@ -372,6 +372,7 @@ shell:
     sessions: "显示会话树"
     rollback: "查看并回滚本次会话中 AI 的文件修改 (edit_file/write_file)"
     undo: "撤销本次会话最后一次文件修改 (edit_file/write_file)"
+    memory: "查看、验证或删除长期记忆"
 
   record:
     started: "⏺ 录制已开始: {path}"
@@ -1315,6 +1316,22 @@ tools:
     not_found: "未找到记忆 #{id}。"
     empty: "还没有记忆。"
     not_available: "记忆功能不可用"
+    confirm_store: "确认存储记忆？"
+    confirm_forget: "确认删除记忆"
+    field_category: "分类"
+    field_scope: "范围"
+    field_ttl: "有效期"
+    field_reason: "原因"
+    field_expires: "过期"
+    expired_tag: "已过期"
+    list_header: "长期记忆："
+    verify_usage: "用法：/memory verify <id>"
+    forget_usage: "用法：/memory forget <id>"
+    invalid_id: "无效的记忆 ID：{id}"
+    verified: "记忆 #{id} 已验证（过期时间已清除）。"
+    no_expired: "没有过期的记忆。"
+    cleared_expired: "已清除 {count} 条过期记忆。"
+    unknown_subcommand: "未知子命令：{subcommand}。可用 list/verify/forget/clear-expired。"
 
   host_note:
     missing_action: "缺少 'action' 参数"
