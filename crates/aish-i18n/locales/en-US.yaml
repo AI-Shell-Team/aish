@@ -372,6 +372,7 @@ shell:
     sessions: "Show the session tree"
     rollback: "Review and roll back AI file edits (edit_file/write_file) this session"
     undo: "Undo the last file change (edit_file/write_file) this session"
+    memory: "View, verify, or forget long-term memories"
 
   record:
     started: "⏺ Recording started: {path}"
@@ -1316,6 +1317,22 @@ tools:
     not_found: "Memory #{id} not found."
     empty: "No memories yet."
     not_available: "memory not available"
+    confirm_store: "Confirm store memory?"
+    confirm_forget: "Confirm forget memory"
+    field_category: "Category"
+    field_scope: "Scope"
+    field_ttl: "TTL"
+    field_reason: "Reason"
+    field_expires: "expires"
+    expired_tag: "EXPIRED"
+    list_header: "Long-term memories:"
+    verify_usage: "Usage: /memory verify <id>"
+    forget_usage: "Usage: /memory forget <id>"
+    invalid_id: "Invalid memory ID: {id}"
+    verified: "Memory #{id} verified (expiry cleared)."
+    no_expired: "No expired memories."
+    cleared_expired: "Cleared {count} expired memorie(s)."
+    unknown_subcommand: "Unknown subcommand: {subcommand}. Use list/verify/forget/clear-expired."
 
   host_note:
     missing_action: "Missing 'action' parameter"

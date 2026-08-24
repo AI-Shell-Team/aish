@@ -195,6 +195,7 @@ shell:
     sessions: "セッションツリーを表示"
     rollback: "このセッションの AI によるファイル編集を確認・ロールバック (edit_file/write_file)"
     undo: "このセッションの最後のファイル変更を取り消す (edit_file/write_file)"
+    memory: "長期メモリの表示、検証、削除"
 
   feedback:
     select_type: "フィードバックの種類を選択"
@@ -953,6 +954,35 @@ tools:
       text: "ユーザー入力: {value}"
       empty_answer: "ユーザーは空の回答を返しました。"
       cancelled: "ユーザーが質問をキャンセルしました。"
+
+  memory:
+    missing_action: "'action' パラメータが不足しています"
+    unknown_action: "不明なアクションです: {action}。search/store/forget/list を使用してください。"
+    search_missing_query: "検索に 'query' が必要です"
+    store_missing_content: "保存に 'content' が必要です"
+    forget_missing_id: "削除に 'memory_id' が必要です"
+    no_results: "一致するメモリが見つかりませんでした。"
+    stored: "メモリ #{id} として保存しました。"
+    forgot: "メモリ #{id} を削除しました。"
+    not_found: "メモリ #{id} が見つかりません。"
+    empty: "まだメモリはありません。"
+    not_available: "メモリ機能は利用できません"
+    confirm_store: "メモリの保存を確認しますか？"
+    confirm_forget: "メモリの削除を確認"
+    field_category: "カテゴリ"
+    field_scope: "スコープ"
+    field_ttl: "有効期限"
+    field_reason: "理由"
+    field_expires: "期限切れ"
+    expired_tag: "期限切れ"
+    list_header: "長期メモリ："
+    verify_usage: "使用法：/memory verify <id>"
+    forget_usage: "使用法：/memory forget <id>"
+    invalid_id: "無効なメモリ ID：{id}"
+    verified: "メモリ #{id} を検証しました（期限をクリア）。"
+    no_expired: "期限切れのメモリはありません。"
+    cleared_expired: "{count} 件の期限切れメモリを削除しました。"
+    unknown_subcommand: "不明なサブコマンド：{subcommand}。list/verify/forget/clear-expired を使用してください。"
 
   smart_log:
     summary:

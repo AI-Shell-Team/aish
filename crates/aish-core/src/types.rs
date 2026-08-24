@@ -51,6 +51,14 @@ pub enum MemoryCategory {
     Other,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryScope {
+    #[default]
+    User,
+    Host,
+    Project,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MemoryType {
     Llm,

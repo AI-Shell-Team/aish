@@ -1,6 +1,6 @@
-use crate::models::MemoryEntry;
-use aish_core::{AishError, MemoryCategory};
-use chrono::Utc;
+use crate::models::{MemoryEntry, MemorySource};
+use aish_core::{AishError, MemoryCategory, MemoryScope};
+use chrono::{DateTime, Utc};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +62,35 @@ impl MemoryManager {
         source: &str,
         importance: f64,
     ) -> aish_core::Result<i64> {
+        self.store_with_provenance(
+            content,
+            category,
+            MemoryScope::User,
+            MemorySource {
+                label: source.to_string(),
+                session_uuid: None,
+                host: None,
+            },
+            importance,
+            None,
+        )
+    }
+
+    /// Store a new memory entry with full provenance metadata. Returns the
+    /// assigned ID. If an entry with the same content and category already
+    /// exists, returns the existing ID without creating a duplicate.
+    ///
+    /// `ttl_seconds` controls the optional expiry: `None` means no expiry,
+    /// `Some(secs)` sets `expires_at` to now + secs.
+    pub fn store_with_provenance(
+        &mut self,
+        content: &str,
+        category: MemoryCategory,
+        scope: MemoryScope,
+        source: MemorySource,
+        importance: f64,
+        ttl_seconds: Option<u64>,
+    ) -> aish_core::Result<i64> {
         let content_trimmed = content.trim();
 
         // Duplicate detection: same content (case-insensitive) + same category
@@ -72,19 +101,32 @@ impl MemoryManager {
             }
         }
 
-        let now = Utc::now().format("%Y-%m-%d").to_string();
+        let now = Utc::now();
+        let now_str = now.format("%Y-%m-%d").to_string();
+        let now_rfc = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let id = self.next_id;
         self.next_id += 1;
 
+        let expires_at = ttl_seconds.map(|secs| {
+            (now + chrono::Duration::seconds(secs as i64))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        });
+
         let entry = MemoryEntry {
             id,
-            source: source.to_string(),
+            source: source.label,
+            source_session_uuid: source.session_uuid,
+            source_host: source.host,
             category,
+            scope,
             content: content_trimmed.to_string(),
             importance,
             tags: String::new(),
-            created_at: Some(now.clone()),
-            last_accessed_at: Some(now),
+            created_at: Some(now_str.clone()),
+            last_verified_at: Some(now_rfc.clone()),
+            expires_at,
+            last_accessed_at: Some(now_str),
             access_count: 0,
         };
 
@@ -101,8 +143,10 @@ impl MemoryManager {
         let query_words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
         if query_words.is_empty() {
-            // Return entries sorted by importance when query is empty
-            let mut indices: Vec<usize> = (0..self.entries.len()).collect();
+            // Return active entries sorted by importance when query is empty
+            let mut indices: Vec<usize> = (0..self.entries.len())
+                .filter(|&i| !Self::is_expired(&self.entries[i]))
+                .collect();
             indices.sort_by(|a, b| {
                 self.entries[*b]
                     .importance
@@ -121,6 +165,9 @@ impl MemoryManager {
         // Compute relevance scores
         let mut scored: Vec<(usize, f64)> = Vec::new();
         for (idx, entry) in self.entries.iter().enumerate() {
+            if Self::is_expired(entry) {
+                continue;
+            }
             let content_lower = entry.content.to_lowercase();
             let match_count = query_words
                 .iter()
@@ -176,6 +223,69 @@ impl MemoryManager {
         &self.entries
     }
 
+    /// Re-verify a memory entry by ID: updates `last_verified_at` to today.
+    /// If `new_ttl_seconds` is provided, resets `expires_at` to now + ttl.
+    /// If `new_ttl_seconds` is None, clears `expires_at` (makes the entry non-expiring).
+    /// Returns true if the entry was found and updated.
+    pub fn verify(&mut self, id: i64, new_ttl_seconds: Option<u64>) -> aish_core::Result<bool> {
+        let now = Utc::now();
+        let now_rfc = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut found = false;
+        for entry in &mut self.entries {
+            if entry.id == id {
+                entry.last_verified_at = Some(now_rfc.clone());
+                match new_ttl_seconds {
+                    Some(secs) => {
+                        entry.expires_at = Some(
+                            (now + chrono::Duration::seconds(secs as i64))
+                                .format("%Y-%m-%dT%H:%M:%SZ")
+                                .to_string(),
+                        );
+                    }
+                    None => {
+                        // Clear expiry — the entry becomes non-expiring.
+                        entry.expires_at = None;
+                    }
+                }
+                found = true;
+                break;
+            }
+        }
+        if found {
+            self.persist()?;
+        }
+        Ok(found)
+    }
+    /// Return IDs of all expired entries (expires_at < now).
+    pub fn expired_entry_ids(&self) -> Vec<i64> {
+        let now = Utc::now();
+        self.entries
+            .iter()
+            .filter(|e| Self::is_expired_inner(e, &now))
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// Check whether a single entry is expired.
+    pub fn is_expired(entry: &MemoryEntry) -> bool {
+        Self::is_expired_inner(entry, &Utc::now())
+    }
+
+    fn is_expired_inner(entry: &MemoryEntry, now: &DateTime<Utc>) -> bool {
+        let Some(exp) = &entry.expires_at else {
+            return false;
+        };
+        // Try RFC3339 first, fall back to date-only (%Y-%m-%d)
+        if let Ok(dt) = DateTime::parse_from_rfc3339(exp) {
+            return dt.with_timezone(&Utc) < *now;
+        }
+        if let Ok(date) = chrono::NaiveDate::parse_from_str(exp, "%Y-%m-%d") {
+            let expiry = date.and_hms_opt(23, 59, 59).unwrap_or_default().and_utc();
+            return expiry < *now;
+        }
+        false
+    }
+
     /// Generate a system prompt section describing the memory system.
     /// This should be appended to the LLM system prompt when memory is enabled.
     pub fn get_system_prompt_section(&self) -> String {
@@ -185,43 +295,106 @@ impl MemoryManager {
              1. Before relying on prior preferences, environment details, or project decisions, use the memory tool with action search.\n\
              2. When the user shares an important durable fact, use the memory tool with action store.\n\
              3. Keep stored memories short, factual, and reusable. Avoid saving transient chatter.\n\
-             4. The memory file lives in {}.\n",
+             4. Expired memories are not injected; use /memory to review and renew them.\n\
+             5. The memory file lives in {}.\n",
             self.memory_file.display()
         )
     }
 
     /// Get the full memory file content for session context injection.
-    /// Returns an empty string if no entries exist.
+    /// Expired entries are excluded; a summary of expired entries is appended
+    /// so the user is prompted to review them.
+    /// Returns an empty string if no active entries exist.
     pub fn get_session_context(&self) -> String {
-        if self.entries.is_empty() {
+        let active: Vec<&MemoryEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !Self::is_expired(e))
+            .collect();
+        let expired: Vec<&MemoryEntry> = self
+            .entries
+            .iter()
+            .filter(|e| Self::is_expired(e))
+            .collect();
+
+        if active.is_empty() && expired.is_empty() {
             return String::new();
         }
+
         let mut out = String::from(HEADER);
-        for entry in &self.entries {
+        for entry in &active {
             let category = format_category(&entry.category);
-            let date = entry.created_at.as_deref().unwrap_or("unknown");
             out.push_str(&format!(
-                "\n## [{}] [{}] Source: {} | {}\n{}\n",
-                entry.id, category, entry.source, date, entry.content,
+                "\n## [{}] [{}] [{}]\n{}\n",
+                entry.id,
+                category,
+                format_scope(&entry.scope),
+                entry.content,
             ));
+        }
+        if !expired.is_empty() {
+            out.push_str(&format!(
+                "\n## Expired Memories ({} — use /memory to review)\n",
+                expired.len()
+            ));
+            for entry in &expired {
+                let category = format_category(&entry.category);
+                out.push_str(&format!(
+                    "  #{} [{}] {} (expired: {})\n",
+                    entry.id,
+                    category,
+                    entry.content,
+                    entry.expires_at.as_deref().unwrap_or("?"),
+                ));
+            }
         }
         out
     }
 
     /// Persist the full entry list to the MEMORY.md file.
+    ///
+    /// New format (v2) uses `> key: value` metadata lines under the header:
+    /// ```text
+    /// ## [id] [Category]
+    /// > scope: user
+    /// > source: auto
+    /// > source_session: <uuid>
+    /// > source_host: <host>
+    /// > created: 2026-01-01
+    /// > verified: 2026-01-01
+    /// > expires: 2026-08-01
+    /// > importance: 0.8
+    /// <content>
+    /// ```
+    /// Old format (`## [id] [Category] Source: src | date`) is still readable
+    /// by the parser for backward compatibility.
     fn persist(&self) -> aish_core::Result<()> {
-        // Pre-allocate: header + entries with average size ~100 chars each
-        let estimated_size = HEADER.len() + self.entries.len() * 100;
+        let estimated_size = HEADER.len() + self.entries.len() * 200;
         let mut out = String::with_capacity(estimated_size);
         out.push_str(HEADER);
 
         for entry in &self.entries {
             let category = format_category(&entry.category);
-            let date = entry.created_at.as_deref().unwrap_or("unknown");
-            out.push_str(&format!(
-                "\n## [{}] [{}] Source: {} | {}\n{}\n",
-                entry.id, category, entry.source, date, entry.content,
-            ));
+            out.push_str(&format!("\n## [{}] [{}]\n", entry.id, category));
+            out.push_str(&format!("> scope: {}\n", format_scope(&entry.scope)));
+            out.push_str(&format!("> source: {}\n", entry.source));
+            if let Some(uuid) = &entry.source_session_uuid {
+                out.push_str(&format!("> source_session: {}\n", uuid));
+            }
+            if let Some(host) = &entry.source_host {
+                out.push_str(&format!("> source_host: {}\n", host));
+            }
+            if let Some(date) = &entry.created_at {
+                out.push_str(&format!("> created: {}\n", date));
+            }
+            if let Some(date) = &entry.last_verified_at {
+                out.push_str(&format!("> verified: {}\n", date));
+            }
+            if let Some(exp) = &entry.expires_at {
+                out.push_str(&format!("> expires: {}\n", exp));
+            }
+            out.push_str(&format!("> importance: {}\n", entry.importance));
+            out.push_str(&format!("{}\n", entry.content));
         }
 
         std::fs::write(&self.memory_file, out)
@@ -234,34 +407,61 @@ impl MemoryManager {
 // ---------------------------------------------------------------------------
 
 /// Parse an existing MEMORY.md file into a list of entries.
+///
+/// Supports two formats:
+/// - **v2**: `## [id] [Category]` header followed by `> key: value` metadata
+///   lines, then the content body.
+/// - **v1 (legacy)**: `## [id] [Category] Source: src | date` single-line
+///   header, followed by the content body.
 fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| AishError::Memory(format!("cannot read memory file {:?}: {}", path, e)))?;
 
     let mut entries = Vec::new();
-    let mut current_lines: Vec<String> = Vec::new();
+    let mut current_body: Vec<String> = Vec::new();
     let mut current_meta: Option<ParsedMeta> = None;
+    // Once content lines start after the metadata block, subsequent `> ` lines
+    // belong to the content body (e.g. markdown blockquotes), not metadata.
+    let mut in_content = false;
 
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("## [") {
             // Flush previous entry
             if let Some(meta) = current_meta.take() {
-                let body = current_lines.join("\n").trim().to_string();
+                let body = current_body.join("\n").trim().to_string();
                 entries.push(build_entry(meta, body));
-                current_lines.clear();
+                current_body.clear();
             }
-            // Parse new header
-            if let Some(meta) = parse_header(rest) {
-                current_meta = Some(meta);
+            current_meta = parse_header(rest);
+            in_content = false;
+        } else if !in_content && line.starts_with("> ") {
+            // v2 metadata line — attach to current meta if present
+            if let Some(meta) = current_meta.as_mut() {
+                let kv = &line[2..];
+                if let Some((key, value)) = kv.split_once(':') {
+                    let value = value.trim().to_string();
+                    match key.trim() {
+                        "scope" => meta.scope = parse_scope(&value),
+                        "source" => meta.source = value,
+                        "source_session" => meta.source_session_uuid = Some(value),
+                        "source_host" => meta.source_host = Some(value),
+                        "created" => meta.created_at = Some(value),
+                        "verified" => meta.last_verified_at = Some(value),
+                        "expires" => meta.expires_at = Some(value),
+                        "importance" => meta.importance = value.parse().unwrap_or(1.0),
+                        _ => {}
+                    }
+                }
             }
         } else if current_meta.is_some() {
-            current_lines.push(line.to_string());
+            in_content = true;
+            current_body.push(line.to_string());
         }
     }
 
     // Flush last entry
     if let Some(meta) = current_meta.take() {
-        let body = current_lines.join("\n").trim().to_string();
+        let body = current_body.join("\n").trim().to_string();
         entries.push(build_entry(meta, body));
     }
 
@@ -271,13 +471,20 @@ fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
 struct ParsedMeta {
     id: i64,
     category: MemoryCategory,
+    scope: MemoryScope,
     source: String,
-    date: Option<String>,
+    source_session_uuid: Option<String>,
+    source_host: Option<String>,
+    created_at: Option<String>,
+    last_verified_at: Option<String>,
+    expires_at: Option<String>,
+    importance: f64,
 }
 
 /// Parse a header line after the leading `## [` has been stripped.
 ///
-/// Expected format: `id] [Category] Source: source | date`
+/// v2 format: `id] [Category]`
+/// v1 format: `id] [Category] Source: source | date`
 fn parse_header(rest: &str) -> Option<ParsedMeta> {
     // Find `]` to get the id
     let bracket_pos = rest.find(']')?;
@@ -290,14 +497,29 @@ fn parse_header(rest: &str) -> Option<ParsedMeta> {
     let bracket2 = rest.find(']')?;
     let category_str = &rest[..bracket2];
     let category = parse_category(category_str)?;
-    let rest = &rest[bracket2 + 1..];
+    let rest = &rest[bracket2 + 1..].trim_start();
 
-    // Find "Source: ..."
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix("Source:")?;
-    let rest = rest.trim_start();
+    // v2 format: nothing after [Category] — metadata comes via `> ` lines
+    if rest.is_empty() {
+        return Some(ParsedMeta {
+            id,
+            category,
+            scope: MemoryScope::User,
+            source: String::new(),
+            source_session_uuid: None,
+            source_host: None,
+            created_at: None,
+            last_verified_at: None,
+            expires_at: None,
+            importance: 1.0,
+        });
+    }
 
-    // Split on "|"
+    // v1 legacy format: `Source: source | date`
+    let rest = rest
+        .strip_prefix("Source:")
+        .map(|r| r.trim_start())
+        .unwrap_or("");
     let mut parts = rest.splitn(2, '|');
     let source = parts.next().unwrap_or("").trim().to_string();
     let date = parts.next().map(|d| d.trim().to_string());
@@ -305,20 +527,35 @@ fn parse_header(rest: &str) -> Option<ParsedMeta> {
     Some(ParsedMeta {
         id,
         category,
+        scope: MemoryScope::User,
         source,
-        date,
+        source_session_uuid: None,
+        source_host: None,
+        created_at: date,
+        last_verified_at: None,
+        expires_at: None,
+        importance: 1.0,
     })
 }
 
 fn build_entry(meta: ParsedMeta, content: String) -> MemoryEntry {
+    let created = meta
+        .created_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
     MemoryEntry {
         id: meta.id,
         source: meta.source,
+        source_session_uuid: meta.source_session_uuid,
+        source_host: meta.source_host,
         category: meta.category,
+        scope: meta.scope,
         content,
-        importance: 1.0,
+        importance: meta.importance,
         tags: String::new(),
-        created_at: meta.date,
+        created_at: Some(created),
+        last_verified_at: meta.last_verified_at,
+        expires_at: meta.expires_at,
         last_accessed_at: None,
         access_count: 0,
     }
@@ -342,6 +579,22 @@ fn parse_category(s: &str) -> Option<MemoryCategory> {
         "Pattern" => Some(MemoryCategory::Pattern),
         "Other" => Some(MemoryCategory::Other),
         _ => None,
+    }
+}
+
+fn format_scope(scope: &MemoryScope) -> &'static str {
+    match scope {
+        MemoryScope::User => "user",
+        MemoryScope::Host => "host",
+        MemoryScope::Project => "project",
+    }
+}
+
+fn parse_scope(s: &str) -> MemoryScope {
+    match s.trim() {
+        "host" => MemoryScope::Host,
+        "project" => MemoryScope::Project,
+        _ => MemoryScope::User,
     }
 }
 
@@ -458,10 +711,146 @@ mod tests {
 
     #[test]
     fn test_parse_header() {
+        // v1 legacy format
         let meta = parse_header("1] [Preference] Source: auto | 2024-01-01").unwrap();
         assert_eq!(meta.id, 1);
         assert_eq!(meta.source, "auto");
-        assert_eq!(meta.date.as_deref(), Some("2024-01-01"));
+        assert_eq!(meta.created_at.as_deref(), Some("2024-01-01"));
+        assert_eq!(meta.scope, MemoryScope::User);
+
+        // v2 format — metadata comes via `> ` lines, not the header
+        let meta = parse_header("2] [Environment]").unwrap();
+        assert_eq!(meta.id, 2);
+        assert_eq!(meta.source, "");
+        assert!(meta.created_at.is_none());
+    }
+
+    #[test]
+    fn test_v2_roundtrip_with_provenance() {
+        let dir = std::env::temp_dir().join("aish_memory_test_v2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path.clone()).unwrap();
+        let id = mgr
+            .store_with_provenance(
+                "db port is 5432",
+                MemoryCategory::Environment,
+                MemoryScope::Host,
+                MemorySource {
+                    label: "explicit".to_string(),
+                    session_uuid: Some("sess-abc".to_string()),
+                    host: Some("prod-srv".to_string()),
+                },
+                0.9,
+                Some(86400),
+            )
+            .unwrap();
+        assert_eq!(id, 1);
+
+        // Reload and verify all fields survive
+        let mgr2 = MemoryManager::new(path).unwrap();
+        let e = &mgr2.list()[0];
+        assert_eq!(e.content, "db port is 5432");
+        assert_eq!(e.source, "explicit");
+        assert_eq!(e.source_session_uuid.as_deref(), Some("sess-abc"));
+        assert_eq!(e.source_host.as_deref(), Some("prod-srv"));
+        assert_eq!(e.scope, MemoryScope::Host);
+        assert!(e.expires_at.is_some());
+        assert!(e.last_verified_at.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_v1_backward_compat() {
+        let dir = std::env::temp_dir().join("aish_memory_test_v1_compat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        // Write old v1 format directly
+        std::fs::write(
+            &path,
+            "# Memory\n\n## [1] [Preference] Source: auto | 2024-01-01\nI prefer dark theme\n",
+        )
+        .unwrap();
+
+        let mgr = MemoryManager::new(path).unwrap();
+        assert_eq!(mgr.list().len(), 1);
+        let e = &mgr.list()[0];
+        assert_eq!(e.id, 1);
+        assert_eq!(e.content, "I prefer dark theme");
+        assert_eq!(e.source, "auto");
+        assert_eq!(e.created_at.as_deref(), Some("2024-01-01"));
+        assert_eq!(e.scope, MemoryScope::User);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_updates_last_verified() {
+        let dir = std::env::temp_dir().join("aish_memory_test_verify");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        let id = mgr
+            .store("test entry", MemoryCategory::Other, "test", 1.0)
+            .unwrap();
+        let old_verified = mgr.list()[0].last_verified_at.clone();
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(mgr.verify(id, None).unwrap());
+        let new_verified = mgr.list()[0].last_verified_at.clone();
+        assert_ne!(old_verified, new_verified);
+
+        // Non-existent ID
+        assert!(!mgr.verify(999, None).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_expired_filtering() {
+        let dir = std::env::temp_dir().join("aish_memory_test_expired");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        // Active entry (no TTL)
+        mgr.store("active", MemoryCategory::Other, "test", 1.0)
+            .unwrap();
+        // Expired entry (TTL = 1 second)
+        mgr.store_with_provenance(
+            "expired",
+            MemoryCategory::Other,
+            MemoryScope::User,
+            MemorySource {
+                label: "test".to_string(),
+                session_uuid: None,
+                host: None,
+            },
+            1.0,
+            Some(1),
+        )
+        .unwrap();
+
+        // Wait for it to expire
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        assert_eq!(mgr.list().len(), 2);
+        assert_eq!(mgr.expired_entry_ids().len(), 1);
+
+        // recall should skip expired
+        let results = mgr.recall("", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "active");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -595,6 +984,86 @@ mod tests {
         let ctx = mgr.get_session_context();
         assert!(!ctx.is_empty());
         assert!(ctx.contains("test entry"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_none_clears_expiry() {
+        let dir = std::env::temp_dir().join("aish_memory_test_verify_clears");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        let id = mgr
+            .store_with_provenance(
+                "temp fact",
+                MemoryCategory::Other,
+                MemoryScope::User,
+                MemorySource {
+                    label: "test".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
+                0.8,
+                Some(3600), // 1 hour TTL
+            )
+            .unwrap();
+        // Entry has expires_at set
+        assert!(mgr.list()[0].expires_at.is_some());
+
+        // verify(id, None) should clear expires_at
+        let ok = mgr.verify(id, None).unwrap();
+        assert!(ok);
+        let entry = mgr.list().iter().find(|e| e.id == id).unwrap();
+        assert!(entry.expires_at.is_none(), "expires_at should be cleared");
+        assert!(
+            entry.last_verified_at.is_some(),
+            "last_verified_at should be set"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_parse_content_with_blockquote() {
+        // Content containing `> ` lines (e.g. markdown blockquotes) must not
+        // be misinterpreted as v2 metadata lines.
+        let dir = std::env::temp_dir().join("aish_memory_test_blockquote");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path.clone()).unwrap();
+        let content = "User said:\n> This is a quote\n> source: not metadata";
+        let id = mgr
+            .store_with_provenance(
+                content,
+                MemoryCategory::Other,
+                MemoryScope::User,
+                MemorySource {
+                    label: "test".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
+                0.8,
+                None,
+            )
+            .unwrap();
+
+        // Reload from disk and verify content is preserved
+        let mgr2 = MemoryManager::new(path).unwrap();
+        let entry = mgr2.list().iter().find(|e| e.id == id).unwrap();
+        assert!(
+            entry.content.contains("> This is a quote"),
+            "blockquote lost"
+        );
+        assert!(
+            entry.content.contains("> source: not metadata"),
+            "metadata-like line lost"
+        );
+        assert_eq!(entry.source, "test", "source corrupted by content line");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

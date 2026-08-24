@@ -195,6 +195,7 @@ shell:
     sessions: "Sitzungsbaum anzeigen"
     rollback: "KI-Dateibearbeitungen dieser Sitzung prüfen und zurückrollen (edit_file/write_file)"
     undo: "Letzte Dateiänderung dieser Sitzung rückgängig machen (edit_file/write_file)"
+    memory: "Langfristige Erinnerungen anzeigen, verifizieren oder löschen"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
@@ -964,6 +965,45 @@ tools:
 
   bash:
     security_handling_required: "der Bash-Befehl erfordert eine Sicherheitsbehandlung der Stufe {level}"
+
+  memory:
+    missing_action: "Parameter 'action' fehlt"
+    unknown_action: "Unbekannte Aktion: {action}. Verwenden Sie search/store/forget/list."
+    search_missing_query: "'query' fehlt für search"
+    store_missing_content: "'content' fehlt für store"
+    forget_missing_id: "'memory_id' fehlt für forget"
+    no_results: "Keine übereinstimmenden Erinnerungen gefunden."
+    stored: "Als Erinnerung #{id} gespeichert."
+    forgot: "Erinnerung #{id} vergessen."
+    not_found: "Erinnerung #{id} nicht gefunden."
+    empty: "Noch keine Erinnerungen."
+    not_available: "Erinnerungsfunktion nicht verfügbar"
+    confirm_store: "Speichern der Erinnerung bestätigen?"
+    confirm_forget: "Löschen der Erinnerung bestätigen"
+    field_category: "Kategorie"
+    field_scope: "Bereich"
+    field_ttl: "Gültigkeit"
+    field_reason: "Grund"
+    field_expires: "läuft ab"
+    expired_tag: "ABGELAUFEN"
+    list_header: "Langfristige Erinnerungen:"
+    verify_usage: "Verwendung: /memory verify <id>"
+    forget_usage: "Verwendung: /memory forget <id>"
+    invalid_id: "Ungültige Erinnerungs-ID: {id}"
+    verified: "Erinnerung #{id} verifiziert (Ablauf gelöscht)."
+    no_expired: "Keine abgelaufenen Erinnerungen."
+    cleared_expired: "{count} abgelaufene Erinnerung(en) gelöscht."
+    unknown_subcommand: "Unbekannter Unterbefehl: {subcommand}. Verwenden Sie list/verify/forget/clear-expired."
+
+  host_note:
+    missing_action: "Parameter 'action' fehlt"
+    unknown_action: "Unbekannte Aktion: {action}. Verwenden Sie store/list/forget."
+    store_missing_content: "'content' fehlt für store"
+    forget_missing_keyword: "'keyword' fehlt für forget"
+    empty: "Für diesen Host sind noch keine Notizen gespeichert."
+    stored: "Notiz gespeichert."
+    forgot: "{count} Notiz(en) entfernt."
+    forgot_none: "Keine übereinstimmenden Notizen gefunden."
 
 help:
   labels:
