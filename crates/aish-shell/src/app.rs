@@ -3685,6 +3685,7 @@ impl AishShell {
             Some("/forget-approvals") => self.handle_forget_approvals(),
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/memory") => self.handle_memory_command(&parts),
+            Some("/skill") => self.handle_skill_command(&parts),
             Some("/export") => self.handle_export_command(&parts),
             Some("/fork") => self.handle_fork_command(),
             Some("/sessions") => self.handle_sessions_command(),
