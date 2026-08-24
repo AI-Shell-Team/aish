@@ -107,10 +107,10 @@ impl MemoryManager {
         let id = self.next_id;
         self.next_id += 1;
 
-        let expires_at = ttl_seconds.map(|secs| {
-            (now + chrono::Duration::seconds(secs as i64))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
+        let expires_at = ttl_seconds.and_then(|secs| {
+            let secs = i64::try_from(secs).ok()?;
+            now.checked_add_signed(chrono::Duration::seconds(secs))
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
         });
 
         let entry = MemoryEntry {
@@ -236,11 +236,10 @@ impl MemoryManager {
                 entry.last_verified_at = Some(now_rfc.clone());
                 match new_ttl_seconds {
                     Some(secs) => {
-                        entry.expires_at = Some(
-                            (now + chrono::Duration::seconds(secs as i64))
-                                .format("%Y-%m-%dT%H:%M:%SZ")
-                                .to_string(),
-                        );
+                        entry.expires_at = i64::try_from(secs)
+                            .ok()
+                            .and_then(|s| now.checked_add_signed(chrono::Duration::seconds(s)))
+                            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
                     }
                     None => {
                         // Clear expiry — the entry becomes non-expiring.
@@ -394,6 +393,9 @@ impl MemoryManager {
                 out.push_str(&format!("> expires: {}\n", exp));
             }
             out.push_str(&format!("> importance: {}\n", entry.importance));
+            // Blank line terminates the metadata block so content that starts
+            // with `> ` is not parsed as metadata on reload.
+            out.push('\n');
             out.push_str(&format!("{}\n", entry.content));
         }
 
@@ -453,6 +455,10 @@ fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
                     }
                 }
             }
+        } else if !in_content && line.is_empty() && current_meta.is_some() {
+            // Blank line terminates the metadata block; subsequent lines
+            // (including `> `-prefixed content) belong to the content body.
+            in_content = true;
         } else if current_meta.is_some() {
             in_content = true;
             current_body.push(line.to_string());

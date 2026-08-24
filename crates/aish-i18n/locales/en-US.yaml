@@ -364,7 +364,7 @@ shell:
     status: "Show system environment status"
     live_sessions: "List live PTY sessions"
     kill_live_sessions: "Kill live PTY session(s) by ID"
-    audit: "Query audit log (who/when/what/AI suggestion/confirm)"
+    audit: "Query audit log or export audit package (who/when/what/AI suggestion/confirm)"
     forget-approvals: "Clear remembered command approvals (this session)"
     skill: "Browse, install, trust, verify skills; manage registries"
     export: "Export the current session to Markdown"
@@ -570,6 +570,13 @@ shell:
     store_unavailable: "session store unavailable; cannot export"
     not_found: "current session not found in store"
     load_failed: "failed to load session: {error}"
+  audit_export:
+    usage: "usage: /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  outputs a directory with audit.md, events.jsonl, and manifest.json"
+    no_events: "no audit events found for the given filters"
+    mkdir_failed: "failed to create temp directory: {error}"
+    build_failed: "failed to build audit package: {error}"
+    publish_failed: "failed to publish audit package: {error}"
+    exported: "exported audit package to {path} ({events} events, {files} files)"
   fork:
     forked: "forked session {short} (from {parent})"
     switch_failed: "fork created but switch failed: {error}"
@@ -1331,7 +1338,7 @@ tools:
     invalid_id: "Invalid memory ID: {id}"
     verified: "Memory #{id} verified (expiry cleared)."
     no_expired: "No expired memories."
-    cleared_expired: "Cleared {count} expired memorie(s)."
+    cleared_expired: "Cleared {count} expired memory entries."
     unknown_subcommand: "Unknown subcommand: {subcommand}. Use list/verify/forget/clear-expired."
 
   host_note:
@@ -1630,9 +1637,10 @@ help:
 
         Path:
         1. Explicit path (if configured)
-        2. `~/.config/aish/security_policy.yaml` (seeded from the shipped template if missing)
+        2. `/etc/aish/security_policy.yaml` (system-level, takes precedence when present)
+        3. `~/.config/aish/security_policy.yaml` (seeded from the shipped template if missing)
 
-        `/etc/aish` is not read at runtime.
+        When `/etc/aish/security_policy.yaml` exists it fully overrides the user-level file.
 
         ## Risk Levels
 

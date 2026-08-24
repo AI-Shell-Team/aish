@@ -91,6 +91,11 @@ pub struct AuditQuery {
     pub host: Option<String>,
     pub event_type: Option<AuditEventType>,
     pub since: Option<DateTime<Utc>>,
+    /// Upper-bound timestamp filter (inclusive). Events at or before this
+    /// time are returned.
+    pub until: Option<DateTime<Utc>>,
+    /// Restrict to events belonging to this session UUID.
+    pub session_uuid: Option<String>,
     pub limit: usize,
 }
 
@@ -101,6 +106,8 @@ impl Default for AuditQuery {
             host: None,
             event_type: None,
             since: None,
+            until: None,
+            session_uuid: None,
             limit: 100,
         }
     }

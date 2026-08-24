@@ -1248,9 +1248,10 @@ help:
 
         Ruta:
         1. Ruta explícita especificada
-        2. `~/.config/aish/security_policy.yaml` (si falta, se genera desde la plantilla incluida)
+        2. `/etc/aish/security_policy.yaml` (nivel del sistema, tiene prioridad si existe)
+        3. `~/.config/aish/security_policy.yaml` (si falta, se genera desde la plantilla incluida)
 
-        `/etc/aish` no se lee en tiempo de ejecución.
+        Cuando `/etc/aish/security_policy.yaml` existe, anula completamente el archivo de nivel de usuario.
 
         ## Niveles de riesgo
 

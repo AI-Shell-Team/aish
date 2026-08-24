@@ -1249,9 +1249,10 @@ help:
 
         Chemin :
         1. Chemin explicitement spécifié
-        2. `~/.config/aish/security_policy.yaml` (généré depuis le modèle embarqué si absent)
+        2. `/etc/aish/security_policy.yaml` (niveau système, prioritaire si présent)
+        3. `~/.config/aish/security_policy.yaml` (généré depuis le modèle embarqué si absent)
 
-        `/etc/aish` n'est pas lu à l'exécution.
+        Quand `/etc/aish/security_policy.yaml` existe, il remplace complètement le fichier de niveau utilisateur.
 
         ## Niveaux de risque
 

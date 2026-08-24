@@ -1259,9 +1259,10 @@ help:
 
         Pfad:
         1. Explizit angegebener Pfad
-        2. `~/.config/aish/security_policy.yaml` (fehlt sie, wird die mitgelieferte Vorlage erzeugt)
+        2. `/etc/aish/security_policy.yaml` (Systemebene, hat Vorrang, wenn vorhanden)
+        3. `~/.config/aish/security_policy.yaml` (fehlt sie, wird die mitgelieferte Vorlage erzeugt)
 
-        `/etc/aish` wird zur Laufzeit nicht gelesen.
+        Wenn `/etc/aish/security_policy.yaml` existiert, wird die benutzerspezifische Datei vollständig überschrieben.
 
         ## Risikostufen
 
