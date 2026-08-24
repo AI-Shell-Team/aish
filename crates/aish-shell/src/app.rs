@@ -1086,35 +1086,37 @@ impl AishShell {
                 }
             }),
             // store callback — extended signature with scope and ttl
-            Box::new(move |content, category, source, importance, scope, ttl_seconds| {
-                let mut guard = mm_for_store.lock().unwrap();
-                if let Some(ref mut mm) = *guard {
-                    let cat = parse_category_str(category);
-                    let mem_scope = parse_scope_str(scope);
-                    let mem_source = aish_memory::MemorySource {
-                        label: source.to_string(),
-                        session_uuid: Some(mem_session_uuid.clone()),
-                        host: mem_audit_host.clone(),
-                    };
-                    match mm.store_with_provenance(
-                        content,
-                        cat,
-                        mem_scope,
-                        mem_source,
-                        importance as f64,
-                        ttl_seconds,
-                    ) {
-                        Ok(id) => id.to_string(),
-                        Err(e) => {
-                            let mut args = std::collections::HashMap::new();
-                            args.insert("error".to_string(), e.to_string());
-                            t_with_args("shell.general_error", &args)
+            Box::new(
+                move |content, category, source, importance, scope, ttl_seconds| {
+                    let mut guard = mm_for_store.lock().unwrap();
+                    if let Some(ref mut mm) = *guard {
+                        let cat = parse_category_str(category);
+                        let mem_scope = parse_scope_str(scope);
+                        let mem_source = aish_memory::MemorySource {
+                            label: source.to_string(),
+                            session_uuid: Some(mem_session_uuid.clone()),
+                            host: mem_audit_host.clone(),
+                        };
+                        match mm.store_with_provenance(
+                            content,
+                            cat,
+                            mem_scope,
+                            mem_source,
+                            importance as f64,
+                            ttl_seconds,
+                        ) {
+                            Ok(id) => id.to_string(),
+                            Err(e) => {
+                                let mut args = std::collections::HashMap::new();
+                                args.insert("error".to_string(), e.to_string());
+                                t_with_args("shell.general_error", &args)
+                            }
                         }
+                    } else {
+                        "memory not available".to_string()
                     }
-                } else {
-                    "memory not available".to_string()
-                }
-            }),
+                },
+            ),
             // delete callback
             Box::new(move |id| {
                 let mut guard = mm_for_delete.lock().unwrap();
@@ -1225,7 +1227,6 @@ impl AishShell {
         for (_name, tool) in tools {
             llm_session.register_tool(tool);
         }
-
 
         // Open audit store when audit is enabled in the security policy.
         let audit_enabled = security_manager.policy().audit_enabled;
@@ -3750,7 +3751,10 @@ impl AishShell {
                         line.push_str(&format!(" @{}", created));
                     }
                     if aish_memory::MemoryManager::is_expired(e) {
-                        line.push_str(&format!(" \x1b[31m[{}]\x1b[0m", t("tools.memory.expired_tag")));
+                        line.push_str(&format!(
+                            " \x1b[31m[{}]\x1b[0m",
+                            t("tools.memory.expired_tag")
+                        ));
                     } else if let Some(exp) = &e.expires_at {
                         line.push_str(&format!(" ({}: {})", t("tools.memory.field_expires"), exp));
                     }
@@ -3778,7 +3782,10 @@ impl AishShell {
                     Ok(true) => {
                         let mut args = std::collections::HashMap::new();
                         args.insert("id".to_string(), id.to_string());
-                        println!("\x1b[36m{}\x1b[0m", t_with_args("tools.memory.verified", &args));
+                        println!(
+                            "\x1b[36m{}\x1b[0m",
+                            t_with_args("tools.memory.verified", &args)
+                        );
                     }
                     Ok(false) => {
                         let mut args = std::collections::HashMap::new();
@@ -3813,7 +3820,10 @@ impl AishShell {
                     Ok(true) => {
                         let mut args = std::collections::HashMap::new();
                         args.insert("id".to_string(), id.to_string());
-                        println!("\x1b[36m{}\x1b[0m", t_with_args("tools.memory.forgot", &args));
+                        println!(
+                            "\x1b[36m{}\x1b[0m",
+                            t_with_args("tools.memory.forgot", &args)
+                        );
                     }
                     Ok(false) => {
                         let mut args = std::collections::HashMap::new();
@@ -3839,7 +3849,10 @@ impl AishShell {
                 }
                 let mut args = std::collections::HashMap::new();
                 args.insert("count".to_string(), count.to_string());
-                println!("\x1b[36m{}\x1b[0m", t_with_args("tools.memory.cleared_expired", &args));
+                println!(
+                    "\x1b[36m{}\x1b[0m",
+                    t_with_args("tools.memory.cleared_expired", &args)
+                );
             }
             _ => {
                 let mut args = std::collections::HashMap::new();

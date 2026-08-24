@@ -8,9 +8,8 @@ pub type MemorySearchFn = Box<dyn Fn(&str, usize) -> Vec<MemorySearchResult> + S
 /// Callback type for memory store operations.
 /// Returns the assigned ID as a string.
 /// Arguments: content, category, source, importance, scope, ttl_seconds.
-pub type MemoryStoreFn = Box<
-    dyn Fn(&str, &str, &str, f32, &str, Option<u64>) -> String + Send + Sync,
->;
+pub type MemoryStoreFn =
+    Box<dyn Fn(&str, &str, &str, f32, &str, Option<u64>) -> String + Send + Sync>;
 /// Callback type for memory delete operations.
 pub type MemoryDeleteFn = Box<dyn Fn(usize) -> bool + Send + Sync>;
 /// Callback type for memory list operations.
@@ -56,9 +55,7 @@ impl MemoryTool {
     pub fn noop() -> Self {
         Self {
             search: Box::new(|_, _| Vec::new()),
-            store: Box::new(|_, _, _, _, _, _| {
-                aish_i18n::t("tools.memory.not_available")
-            }),
+            store: Box::new(|_, _, _, _, _, _| aish_i18n::t("tools.memory.not_available")),
             delete: Box::new(|_| false),
             list: Box::new(|_| Vec::new()),
         }
@@ -116,15 +113,9 @@ impl Tool for MemoryTool {
                     .get("category")
                     .and_then(|v| v.as_str())
                     .unwrap_or("other");
-                let scope = args
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("user");
+                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("user");
                 let ttl = args.get("ttl_seconds").and_then(|v| v.as_u64());
-                let reason = args
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 
                 let mut msg = format!(
                     "{}\n  {}\n  {}: {} | {}: {}",
@@ -136,10 +127,18 @@ impl Tool for MemoryTool {
                     scope,
                 );
                 if let Some(t) = ttl {
-                    msg.push_str(&format!(" | {}: {}s", aish_i18n::t("tools.memory.field_ttl"), t));
+                    msg.push_str(&format!(
+                        " | {}: {}s",
+                        aish_i18n::t("tools.memory.field_ttl"),
+                        t
+                    ));
                 }
                 if !reason.is_empty() {
-                    msg.push_str(&format!("\n  {}: {}", aish_i18n::t("tools.memory.field_reason"), reason));
+                    msg.push_str(&format!(
+                        "\n  {}: {}",
+                        aish_i18n::t("tools.memory.field_reason"),
+                        reason
+                    ));
                 }
 
                 PreflightResult::Confirm {
@@ -167,17 +166,14 @@ impl Tool for MemoryTool {
                         }
                     }
                 };
-                let reason = args
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let mut msg = format!(
-                    "{} #{}",
-                    aish_i18n::t("tools.memory.confirm_forget"),
-                    id,
-                );
+                let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                let mut msg = format!("{} #{}", aish_i18n::t("tools.memory.confirm_forget"), id,);
                 if !reason.is_empty() {
-                    msg.push_str(&format!("\n  {}: {}", aish_i18n::t("tools.memory.field_reason"), reason));
+                    msg.push_str(&format!(
+                        "\n  {}: {}",
+                        aish_i18n::t("tools.memory.field_reason"),
+                        reason
+                    ));
                 }
 
                 PreflightResult::Confirm {
@@ -229,10 +225,7 @@ impl Tool for MemoryTool {
                     .get("category")
                     .and_then(|v| v.as_str())
                     .unwrap_or("other");
-                let scope = args
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("user");
+                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("user");
                 let ttl_seconds = args.get("ttl_seconds").and_then(|v| v.as_u64());
                 let id = (self.store)(content, category, "explicit", 0.8, scope, ttl_seconds);
                 let mut args_map = std::collections::HashMap::new();
@@ -284,7 +277,11 @@ fn format_search_result(r: &MemorySearchResult) -> String {
     }
     if let Some(ref exp) = r.expires_at {
         if !r.expired {
-            line.push_str(&format!(" ({}: {})", aish_i18n::t("tools.memory.field_expires"), exp));
+            line.push_str(&format!(
+                " ({}: {})",
+                aish_i18n::t("tools.memory.field_expires"),
+                exp
+            ));
         }
     }
     line
@@ -302,7 +299,11 @@ fn format_list_result(r: &MemorySearchResult) -> String {
     if r.expired {
         line.push_str(&format!(" [{}]", aish_i18n::t("tools.memory.expired_tag")));
     } else if let Some(ref exp) = r.expires_at {
-        line.push_str(&format!(" ({}: {})", aish_i18n::t("tools.memory.field_expires"), exp));
+        line.push_str(&format!(
+            " ({}: {})",
+            aish_i18n::t("tools.memory.field_expires"),
+            exp
+        ));
     }
     line
 }

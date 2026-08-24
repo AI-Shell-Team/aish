@@ -157,7 +157,7 @@ impl MemoryManager {
                 .into_iter()
                 .take(limit)
                 .map(|i| &self.entries[i])
- .collect();
+                .collect();
         }
 
         let now = Utc::now().format("%Y-%m-%d").to_string();
@@ -227,11 +227,7 @@ impl MemoryManager {
     /// If `new_ttl_seconds` is provided, resets `expires_at` to now + ttl.
     /// If `new_ttl_seconds` is None, clears `expires_at` (makes the entry non-expiring).
     /// Returns true if the entry was found and updated.
-    pub fn verify(
-        &mut self,
-        id: i64,
-        new_ttl_seconds: Option<u64>,
-    ) -> aish_core::Result<bool> {
+    pub fn verify(&mut self, id: i64, new_ttl_seconds: Option<u64>) -> aish_core::Result<bool> {
         let now = Utc::now();
         let now_rfc = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let mut found = false;
@@ -452,9 +448,7 @@ fn parse_file(path: &Path) -> aish_core::Result<Vec<MemoryEntry>> {
                         "created" => meta.created_at = Some(value),
                         "verified" => meta.last_verified_at = Some(value),
                         "expires" => meta.expires_at = Some(value),
-                        "importance" => {
-                            meta.importance = value.parse().unwrap_or(1.0)
-                        }
+                        "importance" => meta.importance = value.parse().unwrap_or(1.0),
                         _ => {}
                     }
                 }
@@ -522,7 +516,10 @@ fn parse_header(rest: &str) -> Option<ParsedMeta> {
     }
 
     // v1 legacy format: `Source: source | date`
-    let rest = rest.strip_prefix("Source:").map(|r| r.trim_start()).unwrap_or("");
+    let rest = rest
+        .strip_prefix("Source:")
+        .map(|r| r.trim_start())
+        .unwrap_or("");
     let mut parts = rest.splitn(2, '|');
     let source = parts.next().unwrap_or("").trim().to_string();
     let date = parts.next().map(|d| d.trim().to_string());
@@ -542,9 +539,10 @@ fn parse_header(rest: &str) -> Option<ParsedMeta> {
 }
 
 fn build_entry(meta: ParsedMeta, content: String) -> MemoryEntry {
-    let created = meta.created_at.clone().unwrap_or_else(|| {
-        Utc::now().format("%Y-%m-%d").to_string()
-    });
+    let created = meta
+        .created_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
     MemoryEntry {
         id: meta.id,
         source: meta.source,
@@ -1003,7 +1001,11 @@ mod tests {
                 "temp fact",
                 MemoryCategory::Other,
                 MemoryScope::User,
-                MemorySource { label: "test".to_string(), session_uuid: None, host: None },
+                MemorySource {
+                    label: "test".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
                 0.8,
                 Some(3600), // 1 hour TTL
             )
@@ -1016,7 +1018,10 @@ mod tests {
         assert!(ok);
         let entry = mgr.list().iter().find(|e| e.id == id).unwrap();
         assert!(entry.expires_at.is_none(), "expires_at should be cleared");
-        assert!(entry.last_verified_at.is_some(), "last_verified_at should be set");
+        assert!(
+            entry.last_verified_at.is_some(),
+            "last_verified_at should be set"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1037,7 +1042,11 @@ mod tests {
                 content,
                 MemoryCategory::Other,
                 MemoryScope::User,
-                MemorySource { label: "test".to_string(), session_uuid: None, host: None },
+                MemorySource {
+                    label: "test".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
                 0.8,
                 None,
             )
@@ -1046,8 +1055,14 @@ mod tests {
         // Reload from disk and verify content is preserved
         let mgr2 = MemoryManager::new(path).unwrap();
         let entry = mgr2.list().iter().find(|e| e.id == id).unwrap();
-        assert!(entry.content.contains("> This is a quote"), "blockquote lost");
-        assert!(entry.content.contains("> source: not metadata"), "metadata-like line lost");
+        assert!(
+            entry.content.contains("> This is a quote"),
+            "blockquote lost"
+        );
+        assert!(
+            entry.content.contains("> source: not metadata"),
+            "metadata-like line lost"
+        );
         assert_eq!(entry.source, "test", "source corrupted by content line");
 
         let _ = std::fs::remove_dir_all(&dir);
