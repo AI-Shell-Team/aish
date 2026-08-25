@@ -720,6 +720,8 @@ shell:
     exit_no_note_title: "Ajouter une note avant de détacher ?"
     exit_no_note_hint: "Cette session n'a pas de note — les sessions sans nom sont difficiles a distinguer apres déconnexion."
     exit_no_note_footer: "Enter enregistrer & détacher · Esc détacher sans nommer"
+    resource_detail: "CPU {cpu} · RSS {rss}"
+    resource_alert: "⚠ La session {id} a atteint le seuil de ressources (CPU {cpu} / RSS {rss}). Utilisez /live_sessions pour y basculer ou /kill_live_sessions pour la terminer."
 
   kill_live_sessions:
     daemon_disabled: "Daemon PTY desactive. Activer dans config.yaml :"

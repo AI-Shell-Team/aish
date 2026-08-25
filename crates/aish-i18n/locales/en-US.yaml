@@ -611,6 +611,8 @@ shell:
     exit_no_note_title: "Add a note before detaching?"
     exit_no_note_hint: "This session has no note — unnamed sessions are hard to tell apart after detach."
     exit_no_note_footer: "Enter save & detach · Esc detach without naming"
+    resource_detail: "CPU {cpu} · RSS {rss}"
+    resource_alert: "⚠ Session {id} reached the resource threshold (CPU {cpu} / RSS {rss}). Use /live_sessions to switch to it, or /kill_live_sessions to terminate it."
 
   kill_live_sessions:
     daemon_disabled: "PTY daemon is disabled. Enable it in config.yaml:"

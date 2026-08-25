@@ -720,6 +720,8 @@ shell:
     exit_no_note_title: "¿Añadir una nota antes de desconectar?"
     exit_no_note_hint: "Esta sesion no tiene nota — las sesiones sin nombre son dificiles de distinguir tras desconectar."
     exit_no_note_footer: "Enter guardar y desconectar · Esc desconectar sin nombre"
+    resource_detail: "CPU {cpu} · RSS {rss}"
+    resource_alert: "⚠ La sesion {id} alcanzo el umbral de recursos (CPU {cpu} / RSS {rss}). Usa /live_sessions para cambiar a ella o /kill_live_sessions para terminarla."
 
   kill_live_sessions:
     daemon_disabled: "Demonio PTY deshabilitado. Habilitar en config.yaml:"
