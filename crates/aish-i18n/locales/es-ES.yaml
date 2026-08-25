@@ -679,6 +679,13 @@ shell:
     store_unavailable: "almacén de sesiones no disponible; no se puede exportar"
     not_found: "sesión actual no encontrada en el almacén"
     load_failed: "fallo al cargar la sesión: {error}"
+  audit_export:
+    usage: "uso: /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  genera un directorio con audit.md, events.jsonl y manifest.json"
+    no_events: "no se encontraron eventos de auditoría para los filtros indicados"
+    mkdir_failed: "no se pudo crear el directorio temporal: {error}"
+    build_failed: "no se pudo construir el paquete de auditoría: {error}"
+    publish_failed: "no se pudo publicar el paquete de auditoría: {error}"
+    exported: "paquete de auditoría exportado a {path} ({events} eventos, {files} archivos)"
   fork:
     forked: "sesión bifurcada {short} (de {parent})"
     switch_failed: "bifurcación creada pero el cambio falló: {error}"

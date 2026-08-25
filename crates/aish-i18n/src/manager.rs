@@ -334,4 +334,33 @@ shell:
             }
         }
     }
+
+    #[test]
+    fn audit_export_keys_present_in_all_embedded_locales() {
+        // Regression guard: /audit export initially shipped its keys in
+        // en-US/zh-CN only, so four locales rendered raw dotted keys.
+        // Build the manager straight from the embedded YAML so a host-side
+        // locale file override cannot mask a missing embedded key.
+        for &(tag, yaml) in EMBEDDED_LOCALES {
+            let mgr = I18nManager {
+                translations: parse_yaml(yaml),
+                locale: tag.to_string(),
+            };
+            for key in [
+                "shell.audit_export.usage",
+                "shell.audit_export.no_events",
+                "shell.audit_export.mkdir_failed",
+                "shell.audit_export.build_failed",
+                "shell.audit_export.publish_failed",
+                "shell.audit_export.exported",
+            ] {
+                let val = mgr.t(key);
+                assert_ne!(
+                    val, key,
+                    "embedded locale {:?} is missing key {:?} (returned the key itself)",
+                    tag, key
+                );
+            }
+        }
+    }
 }

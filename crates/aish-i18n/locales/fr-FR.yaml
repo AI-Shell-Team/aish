@@ -679,6 +679,13 @@ shell:
     store_unavailable: "stockage de session indisponible ; export impossible"
     not_found: "session actuelle introuvable dans le stockage"
     load_failed: "échec du chargement de la session : {error}"
+  audit_export:
+    usage: "usage : /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  produit un répertoire avec audit.md, events.jsonl et manifest.json"
+    no_events: "aucun événement d'audit trouvé pour ces filtres"
+    mkdir_failed: "impossible de créer le répertoire temporaire : {error}"
+    build_failed: "impossible de construire le paquet d'audit : {error}"
+    publish_failed: "impossible de publier le paquet d'audit : {error}"
+    exported: "paquet d'audit exporté vers {path} ({events} événements, {files} fichiers)"
   fork:
     forked: "session bifurquée {short} (depuis {parent})"
     switch_failed: "bifurcation créée mais le changement a échoué : {error}"

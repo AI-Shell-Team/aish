@@ -679,6 +679,13 @@ shell:
     store_unavailable: "Sitzungsspeicher nicht verfügbar; Export nicht möglich"
     not_found: "aktuelle Sitzung im Speicher nicht gefunden"
     load_failed: "Laden der Sitzung fehlgeschlagen: {error}"
+  audit_export:
+    usage: "Verwendung: /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  gibt ein Verzeichnis mit audit.md, events.jsonl und manifest.json aus"
+    no_events: "keine Audit-Ereignisse für die angegebenen Filter gefunden"
+    mkdir_failed: "temporäres Verzeichnis konnte nicht erstellt werden: {error}"
+    build_failed: "Audit-Paket konnte nicht erstellt werden: {error}"
+    publish_failed: "Audit-Paket konnte nicht veröffentlicht werden: {error}"
+    exported: "Audit-Paket nach {path} exportiert ({events} Ereignisse, {files} Dateien)"
   fork:
     forked: "Sitzung verzweigt {short} (von {parent})"
     switch_failed: "Verzweigung erstellt, aber Wechsel fehlgeschlagen: {error}"

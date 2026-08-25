@@ -679,6 +679,13 @@ shell:
     store_unavailable: "セッションストアが利用できません；エクスポートできません"
     not_found: "ストアに現在のセッションが見つかりません"
     load_failed: "セッションの読み込みに失敗しました: {error}"
+  audit_export:
+    usage: "使い方: /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  audit.md、events.jsonl、manifest.json を含むディレクトリを出力します"
+    no_events: "指定したフィルタに一致する監査イベントが見つかりません"
+    mkdir_failed: "一時ディレクトリの作成に失敗しました: {error}"
+    build_failed: "監査パッケージの構築に失敗しました: {error}"
+    publish_failed: "監査パッケージの公開に失敗しました: {error}"
+    exported: "監査パッケージを {path} にエクスポートしました（{events} イベント、{files} ファイル）"
   fork:
     forked: "セッションをフォークしました {short}（親 {parent}）"
     switch_failed: "フォークを作成しましたが切り替えに失敗しました: {error}"

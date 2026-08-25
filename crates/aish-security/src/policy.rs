@@ -102,13 +102,19 @@ const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../config/security_pol
 /// single security policy for all users on the machine.
 const DEFAULT_SYSTEM_POLICY_PATH: &str = "/etc/aish/security_policy.yaml";
 
-/// Resolve the system-level policy path. In tests this can be overridden
-/// via the `AISH_SYSTEM_POLICY_PATH` environment variable to avoid touching
-/// the real `/etc/aish/`.
+/// Resolve the system-level policy path.
+///
+/// The `AISH_SYSTEM_POLICY_PATH` override only exists in test and debug
+/// builds so unit/integration tests can point at a temp file. In release
+/// builds the path is fixed — otherwise any user could export
+/// `AISH_SYSTEM_POLICY_PATH=/nonexistent` and silently skip an
+/// administrator's enforced system-level policy.
 fn system_policy_path() -> PathBuf {
-    env::var_os("AISH_SYSTEM_POLICY_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SYSTEM_POLICY_PATH))
+    #[cfg(any(test, debug_assertions))]
+    if let Some(path) = env::var_os("AISH_SYSTEM_POLICY_PATH") {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(DEFAULT_SYSTEM_POLICY_PATH)
 }
 
 fn user_security_policy_path() -> PathBuf {

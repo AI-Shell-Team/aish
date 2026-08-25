@@ -305,6 +305,7 @@ dependencies = [
  "aish-core",
  "aish-i18n",
  "aish-llm",
+ "aish-memory",
  "aish-pty",
  "aish-security",
  "aish-skills",

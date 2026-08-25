@@ -8,6 +8,7 @@ aish-config.workspace = true
 aish-core.workspace = true
 aish-i18n.workspace = true
 aish-llm.workspace = true
+aish-memory.workspace = true
 aish-pty.workspace = true
 aish-security.workspace = true
 aish-skills.workspace = true

@@ -1,8 +1,9 @@
+use aish_core::{MemoryCategory, MemoryScope};
 use aish_i18n;
 use aish_llm::{PreflightResult, PreflightSecurityContext, SecurityPanelMode, Tool, ToolResult};
+use aish_memory::ttl::resolve_ttl;
 
 use super::prompt;
-
 /// Callback type for memory search operations.
 pub type MemorySearchFn = Box<dyn Fn(&str, usize) -> Vec<MemorySearchResult> + Send + Sync>;
 /// Callback type for memory store operations.
@@ -109,12 +110,11 @@ impl Tool for MemoryTool {
                         )),
                     };
                 }
-                let category = args
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("other");
-                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("user");
-                let ttl = args.get("ttl_seconds").and_then(|v| v.as_u64());
+                let (category, scope, ttl) = store_policy(&args);
+                let permanent = args
+                    .get("permanent")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("");
 
                 let mut msg = format!(
@@ -124,9 +124,15 @@ impl Tool for MemoryTool {
                     aish_i18n::t("tools.memory.field_category"),
                     category,
                     aish_i18n::t("tools.memory.field_scope"),
-                    scope,
+                    effective_scope(&scope),
                 );
-                if let Some(t) = ttl {
+                if permanent {
+                    // Prominent marker: permanent stores skip all expiry.
+                    msg.push_str(&format!(
+                        " | {}: PERMANENT (no expiry)",
+                        aish_i18n::t("tools.memory.field_ttl")
+                    ));
+                } else if let Some(t) = ttl {
                     msg.push_str(&format!(
                         " | {}: {}s",
                         aish_i18n::t("tools.memory.field_ttl"),
@@ -221,13 +227,8 @@ impl Tool for MemoryTool {
                         ))
                     }
                 };
-                let category = args
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("other");
-                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("user");
-                let ttl_seconds = args.get("ttl_seconds").and_then(|v| v.as_u64());
-                let id = (self.store)(content, category, "explicit", 0.8, scope, ttl_seconds);
+                let (category, scope, ttl_seconds) = store_policy(&args);
+                let id = (self.store)(content, &category, "explicit", 0.8, &scope, ttl_seconds);
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("id".to_string(), id.clone());
                 ToolResult::success(aish_i18n::t_with_args("tools.memory.stored", &args_map))
@@ -306,4 +307,199 @@ fn format_list_result(r: &MemorySearchResult) -> String {
         ));
     }
     line
+}
+
+/// Extract the store-policy tuple (category, scope, effective TTL) from a
+/// store action's args. Shared by preflight (confirmation display) and
+/// execute (actual write) so the user always confirms the TTL that will be
+/// persisted.
+fn store_policy(args: &serde_json::Value) -> (String, String, Option<u64>) {
+    let category = args
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("other")
+        .to_string();
+    let scope = args
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("user")
+        .to_string();
+    let proposed = args.get("ttl_seconds").and_then(|v| v.as_u64());
+    // An explicit user-requested permanent store bypasses TTL defaults and
+    // caps. The preflight panel highlights it so the user stays in control.
+    if args
+        .get("permanent")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return (category, scope, None);
+    }
+    // Resolve against the *parsed* category/scope so TTL matches what the
+    // shell callback will actually persist.
+    let ttl = resolve_ttl(proposed, &parse_category(&category), &parse_scope(&scope));
+    (category, scope, ttl)
+}
+
+/// Short lowercase scope name matching what the shell callback persists
+/// after its own parse (invalid values fall back to "user").
+fn effective_scope(scope: &str) -> &str {
+    match parse_scope(scope) {
+        MemoryScope::User => "user",
+        MemoryScope::Host => "host",
+        MemoryScope::Project => "project",
+    }
+}
+
+/// Parse a category string (from the LLM tool call) into a MemoryCategory.
+/// Falls back to `Other` for unrecognized values, matching the shell-side
+/// `parse_category_str`.
+fn parse_category(s: &str) -> MemoryCategory {
+    match s.to_lowercase().as_str() {
+        "preference" => MemoryCategory::Preference,
+        "environment" => MemoryCategory::Environment,
+        "solution" => MemoryCategory::Solution,
+        "pattern" => MemoryCategory::Pattern,
+        _ => MemoryCategory::Other,
+    }
+}
+
+/// Parse a scope string (from the LLM tool call) into a MemoryScope.
+/// Falls back to `User` for unrecognized values — never promote host facts
+/// to global scope by default.
+fn parse_scope(s: &str) -> MemoryScope {
+    match s.to_lowercase().as_str() {
+        "host" => MemoryScope::Host,
+        "project" => MemoryScope::Project,
+        _ => MemoryScope::User,
+    }
+}
+
+#[cfg(test)]
+mod ttl_policy_tests {
+    use super::*;
+
+    /// Capture what the store callback receives for (scope, ttl).
+    fn tool_with_capture(
+        captured: std::sync::Arc<std::sync::Mutex<Vec<(String, Option<u64>)>>>,
+    ) -> MemoryTool {
+        MemoryTool::new(
+            Box::new(|_, _| Vec::new()),
+            Box::new(move |_c, _cat, _src, _imp, scope, ttl| {
+                captured.lock().unwrap().push((scope.to_string(), ttl));
+                "1".to_string()
+            }),
+            Box::new(|_| false),
+            Box::new(|_| Vec::new()),
+        )
+    }
+
+    #[test]
+    fn store_missing_ttl_uses_category_default() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "prod db endpoint",
+            "category": "environment",
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        // Environment without a model proposal gets the 7-day default,
+        // not permanent.
+        assert_eq!(got[0].1, Some(7 * 24 * 3600));
+    }
+
+    #[test]
+    fn store_overlong_environment_proposal_clamped() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "test host ip",
+            "category": "environment",
+            "ttl_seconds": 10 * 365 * 24 * 3600,
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        assert_eq!(got[0].1, Some(aish_memory::ttl::ENVIRONMENT_CAP_SECS));
+    }
+
+    #[test]
+    fn store_host_scope_silent_model_never_permanent() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "machine fact",
+            "category": "preference",
+            "scope": "host",
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        // Host facts are capped regardless of category.
+        assert_eq!(got[0].0, "host");
+        assert_eq!(got[0].1, Some(aish_memory::ttl::HOST_SCOPE_CAP_SECS));
+    }
+
+    #[test]
+    fn store_explicit_permanent_bypasses_environment_default() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "prod master db host",
+            "category": "environment",
+            "permanent": true,
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        // User explicitly requested permanent: no TTL despite the volatile
+        // category's 7-day default.
+        assert_eq!(got[0].1, None);
+    }
+
+    #[test]
+    fn store_explicit_permanent_bypasses_host_cap() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "machine fact",
+            "category": "environment",
+            "scope": "host",
+            "permanent": true,
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        assert_eq!(got[0].1, None);
+    }
+
+    #[test]
+    fn store_permanent_false_falls_back_to_policy() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "staging endpoint",
+            "category": "environment",
+            "permanent": false,
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        assert_eq!(got[0].1, Some(7 * 24 * 3600));
+    }
+
+    #[test]
+    fn store_stable_preference_without_ttl_stays_permanent() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tool = tool_with_capture(captured.clone());
+        let res = tool.execute(serde_json::json!({
+            "action": "store",
+            "content": "prefers vim",
+            "category": "preference",
+        }));
+        assert!(res.ok);
+        let got = captured.lock().unwrap();
+        assert_eq!(got[0].1, None);
+    }
 }
