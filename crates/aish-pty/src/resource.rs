@@ -221,7 +221,15 @@ pub fn kill_process_tree(root: u32) {
         }
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
+    // Re-derive the surviving tree: a pid that exited during the grace
+    // window may have been recycled onto an unrelated process, so only
+    // pids still inside the root's descendant closure get the SIGKILL.
+    let mut survivors = descendant_pids(root);
+    survivors.push(root);
     for &pid in &victims {
+        if !survivors.contains(&pid) {
+            continue;
+        }
         // SAFETY: [Category 8 — FFI] `kill(pid, SIGKILL)` — see SIGTERM.
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);

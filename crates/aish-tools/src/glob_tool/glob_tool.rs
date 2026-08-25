@@ -188,14 +188,30 @@ fn run_glob(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         }
     };
 
-    // Absolute patterns are matched against the full path (the root argument
-    // only guards existence, matching the previous `glob::glob` behaviour).
+    // Absolute patterns are matched against the full path, but the walk
+    // starts at the longest wildcard-free prefix so it does not traverse
+    // the whole filesystem from `/` (matching the old `glob::glob`
+    // behaviour).
     let (start, strip) = if pattern.starts_with('/') {
-        (PathBuf::from("/"), None)
+        let mut base = PathBuf::from("/");
+        for comp in Path::new(&pattern).components().skip(1) {
+            let comp = comp.as_os_str().to_string_lossy();
+            if comp.contains(['*', '?', '[']) {
+                break;
+            }
+            base.push(comp.as_ref());
+        }
+        (base, None)
     } else {
         let root = root.canonicalize().unwrap_or(root);
         (root.clone(), Some(root))
     };
+    if !start.is_dir() {
+        return ToolResult::error(format!(
+            "Error: root directory not found: {}",
+            start.display()
+        ));
+    }
 
     let should_stop: Box<dyn Fn() -> bool> = match cancel {
         Some(t) => Box::new(move || t.is_cancelled()),
@@ -234,6 +250,14 @@ fn run_glob(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
     }
 
     if outcome.matches.is_empty() {
+        if outcome.timed_out {
+            // Never report a definitive negative result from an incomplete
+            // walk — the agent would conclude the files do not exist.
+            return ToolResult::success(format!(
+                "No files found.\n(timed out after {:.0}s — narrow the pattern or root)",
+                TRAVERSAL_TIMEOUT.as_secs()
+            ));
+        }
         return ToolResult::success("No files found.");
     }
 
@@ -326,6 +350,21 @@ mod tests {
         fs::write(root.join("src/b.rs"), "x").unwrap();
         fs::write(root.join("src/deep/c.rs"), "x").unwrap();
         fs::write(root.join("target/debug/ignored.rs"), "x").unwrap();
+    }
+
+    #[test]
+    fn nonexistent_absolute_literal_prefix_errors_without_full_walk() {
+        // The walk must start at the literal prefix, so a nonexistent
+        // prefix fails fast instead of scanning the filesystem from `/`.
+        let out = tool().execute(serde_json::json!({
+            "pattern": "/definitely/not/a/real/prefix/**/*.rs",
+        }));
+        assert!(!out.ok);
+        assert!(
+            out.output.contains("root directory not found"),
+            "out: {}",
+            out.output
+        );
     }
 
     #[test]
