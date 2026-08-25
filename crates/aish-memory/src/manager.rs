@@ -93,11 +93,22 @@ impl MemoryManager {
     ) -> aish_core::Result<i64> {
         let content_trimmed = content.trim();
 
-        // Duplicate detection: same content (case-insensitive) + same category
+        // Duplicate detection: same content (case-insensitive) + same category.
+        // The confirmed TTL of THIS store wins: a later re-store (e.g. the
+        // user confirms `permanent`) must refresh the existing entry's expiry
+        // instead of silently keeping the old one.
         let content_lower = content_trimmed.to_lowercase();
-        for entry in &self.entries {
+        for entry in &mut self.entries {
             if entry.category == category && entry.content.to_lowercase() == content_lower {
-                return Ok(entry.id);
+                let now = Utc::now();
+                entry.expires_at = ttl_seconds.and_then(|secs| {
+                    let secs = i64::try_from(secs).ok()?;
+                    now.checked_add_signed(chrono::Duration::seconds(secs))
+                        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                });
+                let id = entry.id;
+                self.persist()?;
+                return Ok(id);
             }
         }
 
@@ -270,6 +281,36 @@ impl MemoryManager {
         Self::is_expired_inner(entry, &Utc::now())
     }
 
+    /// Return IDs of entries that expire within `days` from now (not yet
+    /// expired). Used to nudge the user to review/renew before facts vanish.
+    pub fn expiring_soon_ids(&self, days: i64) -> Vec<i64> {
+        let now = Utc::now();
+        let horizon = now + chrono::Duration::days(days);
+        self.entries
+            .iter()
+            .filter(|e| {
+                !Self::is_expired_inner(e, &now)
+                    && e.expires_at
+                        .as_deref()
+                        .and_then(|exp| {
+                            DateTime::parse_from_rfc3339(exp)
+                                .map(|dt| dt.with_timezone(&Utc) <= horizon)
+                                .ok()
+                                .or_else(|| {
+                                    chrono::NaiveDate::parse_from_str(exp, "%Y-%m-%d")
+                                        .map(|d| {
+                                            d.and_hms_opt(0, 0, 0).unwrap_or_default().and_utc()
+                                                <= horizon
+                                        })
+                                        .ok()
+                                })
+                        })
+                        .unwrap_or(false)
+            })
+            .map(|e| e.id)
+            .collect()
+    }
+
     fn is_expired_inner(entry: &MemoryEntry, now: &DateTime<Utc>) -> bool {
         let Some(exp) = &entry.expires_at else {
             return false;
@@ -295,7 +336,13 @@ impl MemoryManager {
              2. When the user shares an important durable fact, use the memory tool with action store.\n\
              3. Keep stored memories short, factual, and reusable. Avoid saving transient chatter.\n\
              4. Expired memories are not injected; use /memory to review and renew them.\n\
-             5. The memory file lives in {}.\n",
+             5. The memory file lives in {}.\n\
+             6. CRITICAL: a fact is stored ONLY when the memory tool returns a\n\
+             result containing an entry id. NEVER tell the user something is\n\
+             recorded/remembered without having actually called the tool in\n\
+             THIS turn and seeing its result. Restating an earlier successful\n\
+             store does not store anything new: if the user asks to remember\n\
+             new or changed content, you must call the tool again.\n",
             self.memory_file.display()
         )
     }
@@ -898,6 +945,54 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_reapplies_confirmed_ttl() {
+        let dir = std::env::temp_dir().join("aish_memory_test_dup_ttl");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        // First store: Environment entry with a 7-day TTL.
+        let id1 = mgr
+            .store_with_provenance(
+                "prod db endpoint",
+                MemoryCategory::Environment,
+                MemoryScope::User,
+                MemorySource {
+                    label: "auto".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
+                1.0,
+                Some(7 * 24 * 3600),
+            )
+            .unwrap();
+        assert!(mgr.list()[0].expires_at.is_some());
+
+        // Re-store the same content as permanent: the confirmed TTL of THIS
+        // store must win, clearing the old expiry instead of keeping it.
+        let id2 = mgr
+            .store_with_provenance(
+                "prod db endpoint",
+                MemoryCategory::Environment,
+                MemoryScope::User,
+                MemorySource {
+                    label: "explicit".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
+                1.0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(mgr.list().len(), 1);
+        assert!(mgr.list()[0].expires_at.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_duplicate_case_insensitive() {
         let dir = std::env::temp_dir().join("aish_memory_test_dup_case");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1070,6 +1165,50 @@ mod tests {
             "metadata-like line lost"
         );
         assert_eq!(entry.source, "test", "source corrupted by content line");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_expiring_soon_ids() {
+        let dir = std::env::temp_dir().join("aish_memory_test_expiring_soon");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        let soon = mgr
+            .store_with_provenance(
+                "expires in 3 days",
+                MemoryCategory::Environment,
+                MemoryScope::User,
+                MemorySource {
+                    label: "test".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
+                0.8,
+                Some(3 * 24 * 3600),
+            )
+            .unwrap();
+        let far = mgr
+            .store_with_provenance(
+                "expires in 90 days",
+                MemoryCategory::Other,
+                MemoryScope::User,
+                MemorySource {
+                    label: "test".to_string(),
+                    session_uuid: None,
+                    host: None,
+                },
+                0.8,
+                Some(90 * 24 * 3600),
+            )
+            .unwrap();
+
+        let expiring = mgr.expiring_soon_ids(7);
+        assert!(expiring.contains(&soon), "3-day entry must be flagged");
+        assert!(!expiring.contains(&far), "90-day entry must not be flagged");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

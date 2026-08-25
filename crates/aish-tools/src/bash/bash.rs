@@ -786,6 +786,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.as_path()));
+        // A system-level policy (/etc/aish/security_policy.yaml) takes
+        // precedence over the user-level file, so point the override at a
+        // non-existent path to keep this test isolated from the machine.
+        let _sys_guard = EnvGuard::set(
+            "AISH_SYSTEM_POLICY_PATH",
+            Some(dir.path().join("no-system-policy.yaml").as_path()),
+        );
 
         let mut tool = BashTool::new();
         let args = serde_json::json!({"command": "rm -rf /etc"});

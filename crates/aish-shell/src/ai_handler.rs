@@ -8,34 +8,22 @@ use aish_context::{
 };
 use aish_core::{LlmEvent, MemoryCategory, MemoryScope, MemoryType, PlanModeState, PlanPhase};
 use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent, Tool};
+use aish_memory::ttl::default_ttl;
 use aish_memory::{MemoryManager, MemorySource};
 use aish_prompts::PromptManager;
 use aish_session::SessionContextMessage;
 use aish_skills::SkillManager;
-
 /// Shared handle for the memory manager, accessible from both AiHandler and tools.
 pub type SharedMemoryManager = Arc<Mutex<Option<MemoryManager>>>;
 
 /// Classify a fact string into a memory category using keyword matching.
 fn categorize_fact(fact: &str) -> MemoryCategory {
     let lower = fact.to_lowercase();
-
-    // Preference keywords
-    if lower.contains("prefer")
-        || lower.contains("like")
-        || lower.contains("always")
-        || lower.contains("never")
-        || lower.contains("favorite")
-        || lower.contains("favourite")
-        || lower.contains("default")
-        || lower.contains("want")
-        || lower.contains("don't like")
-        || lower.contains("avoid")
-    {
-        return MemoryCategory::Preference;
-    }
-
-    // Environment keywords
+    // Environment keywords — checked BEFORE preference/solution keywords:
+    // generic durability words ("always", "never") must not override
+    // environment indicators, otherwise "the server is always 10.0.0.1"
+    // would be mis-filed as a permanent Preference instead of a volatile
+    // Environment fact subject to the 7-day default TTL.
     if lower.contains("port")
         || lower.contains("host")
         || lower.contains("ip ")
@@ -56,6 +44,21 @@ fn categorize_fact(fact: &str) -> MemoryCategory {
         || lower.contains("credential")
     {
         return MemoryCategory::Environment;
+    }
+
+    // Preference keywords
+    if lower.contains("prefer")
+        || lower.contains("like")
+        || lower.contains("always")
+        || lower.contains("never")
+        || lower.contains("favorite")
+        || lower.contains("favourite")
+        || lower.contains("default")
+        || lower.contains("want")
+        || lower.contains("don't like")
+        || lower.contains("avoid")
+    {
+        return MemoryCategory::Preference;
     }
 
     // Solution keywords
@@ -777,6 +780,28 @@ impl AiHandler {
                 "<long-term-memory source=\"recall\">\n{}\n</long-term-memory>",
                 text
             );
+
+            // Nudge: entries expiring within 7 days may silently vanish from
+            // context later. Tell the model so it can mention renewal
+            // (/memory verify <id>) when it actually relies on such a fact.
+            let expiring = mm.expiring_soon_ids(7);
+            let content = if expiring.is_empty() {
+                content
+            } else {
+                format!(
+                    "{}\n[memory notice] {} entries expire within 7 days (ids: {}). \
+                     If your answer relies on them, tell the user they can renew \
+                     with /memory verify <id>.",
+                    content,
+                    expiring.len(),
+                    expiring
+                        .iter()
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+
             // Stable injection — only replaces if content actually changed,
             // preserving cache prefix stability across calls.
             self.context_manager
@@ -785,9 +810,10 @@ impl AiHandler {
     }
 
     /// Auto-retain user preferences and facts based on pattern matching.
-    /// Auto-retain entries get a short default TTL (7 days) to prevent stale
-    /// facts from accumulating — the user already expressed intent via
-    /// "remember that..." patterns so no confirmation gate is needed.
+    /// The TTL is category-aware (#472): volatile facts (Environment) get a
+    /// short default window, stable ones (Preference, Pattern) never expire.
+    /// The user already expressed intent via "remember that..." patterns so
+    /// no confirmation gate is needed.
     fn auto_retain_memory(&mut self, question: &str, _response: &str) {
         if !self.memory_config.auto_retain {
             return;
@@ -797,6 +823,7 @@ impl AiHandler {
             let facts = extract_retainable_facts(question);
             for fact in facts {
                 let category = categorize_fact(&fact);
+                let ttl = default_ttl(&category, &MemoryScope::User);
                 let _ = mm.store_with_provenance(
                     &fact,
                     category,
@@ -807,7 +834,7 @@ impl AiHandler {
                         host: None,
                     },
                     1.0,
-                    Some(604_800), // 7 days
+                    ttl,
                 );
             }
         }
@@ -1687,6 +1714,26 @@ mod tests {
         assert!(matches!(
             categorize_fact("API endpoint at /v1/chat"),
             MemoryCategory::Environment
+        ));
+    }
+
+    #[test]
+    fn test_categorize_environment_beats_preference_cues() {
+        // Generic durability words must not override environment indicators:
+        // otherwise this volatile fact would get a permanent Preference TTL
+        // instead of the 7-day Environment default.
+        assert!(matches!(
+            categorize_fact("the server is always 10.0.0.1"),
+            MemoryCategory::Environment
+        ));
+        assert!(matches!(
+            categorize_fact("I never store passwords in plain text files under config"),
+            MemoryCategory::Environment
+        ));
+        // Pure preference phrasing without environment cues stays Preference.
+        assert!(matches!(
+            categorize_fact("I always use vim"),
+            MemoryCategory::Preference
         ));
     }
 
