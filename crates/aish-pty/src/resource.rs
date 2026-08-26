@@ -7,6 +7,7 @@
 //! picture of what one live session costs, including tool subprocesses.
 
 use std::collections::HashMap;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::Path;
 use std::time::Instant;
 
@@ -206,52 +207,110 @@ pub fn descendant_pids(root: u32) -> Vec<u32> {
 ///
 /// Each aish layer calls `setsid()` (daemon child, persistent bash), so a
 /// process-group kill cannot reach the full tree — the descendant set is
-/// walked once up front (before parents die and orphans get reparented),
-/// then swept with SIGTERM for graceful shutdown. After the grace window
-/// each victim's identity (`/proc/<pid>/stat` start time) is revalidated
-/// before SIGKILL so a pid recycled during the window is never signalled.
-/// Errors (ESRCH for already-dead pids) are ignored.
+/// walked once up front (before parents die and orphans get reparented).
+/// Each victim is pinned with a pidfd BEFORE any signal: pidfds reference
+/// the exact process instance, so an exited-and-recycled pid can never be
+/// signalled, for SIGTERM or SIGKILL alike. Signals are sent via
+/// `pidfd_send_signal` (fallback: `/proc/<pid>/stat` start-time check then
+/// `kill`). Failures (ESRCH for already-dead pids) are ignored.
 pub fn kill_process_tree(root: u32) {
-    // Identity snapshot: a pid's start time is unique per boot and never
-    // changes for a live process, so (pid, starttime) reliably detects
-    // recycling.
-    let victims: Vec<(u32, u64)> = descendant_pids(root)
+    let victims: Vec<(u32, PidFd)> = descendant_pids(root)
         .into_iter()
         .chain(std::iter::once(root))
-        .filter_map(|pid| proc_starttime(pid).map(|st| (pid, st)))
+        .filter_map(|pid| pidfd_open(pid).map(|fd| (pid, fd)))
         .collect();
-    for &(pid, _) in &victims {
-        // SAFETY: [Category 8 — FFI] `kill(pid, SIGTERM)` — pid comes from
-        // our own /proc walk; failures (ESRCH, EPERM) are deliberately
-        // ignored so one dead pid cannot abort the sweep.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
+    for (pid, fd) in &victims {
+        pidfd_signal(fd, pid, libc::SIGTERM);
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
-    for &(pid, starttime) in &victims {
-        // Skip pids that exited during the grace window and were recycled
-        // onto an unrelated process.
-        if proc_starttime(pid) != Some(starttime) {
-            continue;
-        }
-        // SAFETY: [Category 8 — FFI] `kill(pid, SIGKILL)` — see SIGTERM.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    for (pid, fd) in &victims {
+        pidfd_signal(fd, pid, libc::SIGKILL);
+    }
+}
+
+/// Signal the process pinned by `fd` with `sig`, tolerating every failure.
+///
+/// Preferred path: `pidfd_send_signal(2)` — the fd pins the exact process
+/// instance, so a recycled pid can never be signalled. Fallback (kernels
+/// without the syscall, < 5.1): `kill` only when `/proc/<pid>/stat` still
+/// reports the pid that the fdinfo of the pinning fd captured, which proves
+/// the pid was not recycled in between.
+fn pidfd_signal(fd: &PidFd, pid: &u32, sig: libc::c_int) {
+    if pidfd_send_signal(fd, sig).is_some() {
+        return;
+    }
+    if let Some(pinned) = pidfd_pid(fd) {
+        if proc_stat_pid(*pid) == Some(pinned) {
+            // SAFETY: [Category 8 — FFI] `kill(pid, sig)` — pid comes from
+            // our own /proc walk; failures (ESRCH, EPERM) are deliberately
+            // ignored so one dead pid cannot abort the sweep.
+            unsafe {
+                libc::kill(*pid as libc::pid_t, sig);
+            }
         }
     }
 }
 
-/// Process start time (field 22 of `/proc/<pid>/stat`, in clock ticks since
-/// boot). `None` when the process does not exist or cannot be read.
-fn proc_starttime(pid: u32) -> Option<u64> {
-    let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let mut it = stat_fields_after_comm(&content);
-    // Fields 3..=21 (state .. num_threads itrealvalue); starttime is 22.
-    for _ in 3..=21 {
-        it.next()?;
+/// A pinned process handle (`pidfd_open`). The fd stays valid after the
+/// target exits (reads then fail with ESRCH semantics), so the identity it
+/// captured can never drift onto a recycled pid.
+struct PidFd(std::os::fd::OwnedFd);
+
+/// `pidfd_open(2)`. `None` when the syscall is unavailable or the process
+/// is already gone.
+fn pidfd_open(pid: u32) -> Option<PidFd> {
+    const SYS_PIDFD_OPEN: libc::c_long = 434;
+    // SAFETY: [Category 8 — FFI] `syscall(SYS_pidfd_open, pid, 0)` — a
+    // direct Linux syscall; flags must be 0 per the man page. Returns a
+    // new fd (>= 0) or -1 with errno.
+    let fd = unsafe { libc::syscall(SYS_PIDFD_OPEN, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return None;
     }
-    it.next()?.parse().ok()
+    let fd = fd as libc::c_int;
+    // SAFETY: [Category 8 — FFI] fd is a valid, owned descriptor returned
+    // by the syscall above.
+    Some(PidFd(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }))
+}
+
+/// `pidfd_send_signal(2)`. `None` when the syscall is unavailable; a
+/// `Some(())` result whose signal failed is indistinguishable from success
+/// only in that the target had already exited, which is fine here.
+fn pidfd_send_signal(fd: &PidFd, sig: libc::c_int) -> Option<()> {
+    const SYS_PIDFD_SEND_SIGNAL: libc::c_long = 424;
+    // SAFETY: [Category 8 — FFI] `syscall(SYS_pidfd_send_signal, fd, sig,
+    // NULL, 0)` — a direct Linux syscall with the reserved info pointer
+    // NULL and flags 0.
+    unsafe {
+        libc::syscall(
+            SYS_PIDFD_SEND_SIGNAL,
+            fd.0.as_raw_fd(),
+            sig,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        ) >= 0
+    }
+    .then_some(())
+}
+
+/// The pid that the fd pins, read from the fd's `fdinfo`. `None` when the
+fn pidfd_pid(fd: &PidFd) -> Option<u32> {
+    let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.0.as_raw_fd())).ok()?;
+    for line in info.lines() {
+        if let Some(rest) = line.strip_prefix("Pid:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
+}
+
+/// The pid reported by `/proc/<pid>/stat` (field 1). `None` when the
+/// process does not exist — a recycled pid reports the NEW process's pid
+/// there only after the namespace re-maps it, which cannot happen for the
+/// init-pid-namespace view this code uses.
+fn proc_stat_pid(pid: u32) -> Option<u32> {
+    let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    content.split_whitespace().next()?.parse().ok()
 }
 
 /// Process page size (`sysconf(_SC_PAGESIZE)`), cached.
