@@ -611,6 +611,8 @@ shell:
     exit_no_note_title: "分离前添加备注？"
     exit_no_note_hint: "当前会话没有备注——脱离后未命名会话难以辨认。"
     exit_no_note_footer: "Enter 保存并分离 · Esc 不命名分离"
+    resource_detail: "CPU {cpu} · 内存 {rss}"
+    resource_alert: "⚠ 会话 {id} 资源占用达到阈值（CPU {cpu} / 内存 {rss}），使用 /live_sessions 切换到该会话，或 /kill_live_sessions 终止该会话"
 
   kill_live_sessions:
     daemon_disabled: "PTY 守护进程未启用，请在 config.yaml 中开启："

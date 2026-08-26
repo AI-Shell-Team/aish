@@ -1055,14 +1055,12 @@ pub fn run_pty_daemon_shell(
                                     for frame in frames {
                                         // KillSession allowed from any state
                                         if frame.frame_type == TYPE_KILL_SESSION {
-                                            let _ = nix::sys::signal::kill(
-                                                child,
-                                                Some(nix::sys::signal::Signal::SIGTERM),
-                                            );
-                                            std::thread::sleep(Duration::from_millis(200));
-                                            let _ = nix::sys::signal::kill(
-                                                child,
-                                                Some(nix::sys::signal::Signal::SIGKILL),
+                                            // Kill the REPL AND its worker tree
+                                            // (bash + running tools); signalling
+                                            // only the direct child leaves
+                                            // orphaned CPU burners behind.
+                                            crate::resource::kill_process_tree(
+                                                child.as_raw() as u32
                                             );
                                             child_exited = true;
                                             remove = true;
@@ -1137,14 +1135,11 @@ pub fn run_pty_daemon_shell(
                                             }
                                             TYPE_DETACH => remove = true,
                                             TYPE_KILL_SESSION => {
-                                                let _ = nix::sys::signal::kill(
-                                                    child,
-                                                    Some(nix::sys::signal::Signal::SIGTERM),
-                                                );
-                                                std::thread::sleep(Duration::from_millis(200));
-                                                let _ = nix::sys::signal::kill(
-                                                    child,
-                                                    Some(nix::sys::signal::Signal::SIGKILL),
+                                                // Kill the whole worker tree, not
+                                                // just the direct child (see the
+                                                // early KillSession branch above).
+                                                crate::resource::kill_process_tree(
+                                                    child.as_raw() as u32
                                                 );
                                                 child_exited = true;
                                             }

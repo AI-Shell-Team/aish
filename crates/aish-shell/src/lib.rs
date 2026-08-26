@@ -37,6 +37,7 @@ pub mod prompt;
 pub mod readline;
 pub mod recorder;
 pub mod renderer;
+pub mod resource_monitor;
 pub mod resume_selector;
 pub mod security_panel;
 pub mod settings_panel;

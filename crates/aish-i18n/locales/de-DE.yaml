@@ -720,6 +720,8 @@ shell:
     exit_no_note_title: "Notiz vor dem Trennen hinzufuegen?"
     exit_no_note_hint: "Diese Sitzung hat keinen Namen — unbenannte Sitzungen sind nach dem Trennen schwer zu unterscheiden."
     exit_no_note_footer: "Enter speichern & trennen · Esc ohne Namen trennen"
+    resource_detail: "CPU {cpu} · RSS {rss}"
+    resource_alert: "⚠ Sitzung {id} hat den Ressourcen-Schwellwert erreicht (CPU {cpu} / RSS {rss}). Mit /live_sessions dorthin wechseln oder mit /kill_live_sessions beenden."
 
   kill_live_sessions:
     daemon_disabled: "PTY-Daemon ist deaktiviert. In config.yaml aktivieren:"

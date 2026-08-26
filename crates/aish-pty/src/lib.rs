@@ -28,6 +28,7 @@ pub mod offload;
 pub mod output_buffer;
 pub mod persistent;
 pub mod readline_tab;
+pub mod resource;
 pub mod scrollback;
 pub mod session_interceptor;
 pub mod types;
@@ -63,6 +64,10 @@ pub use offload::{
 pub use output_buffer::OutputBuffer;
 pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
 pub use readline_tab::{should_complete_path_locally, ReadlineTabResult};
+pub use resource::{
+    descendant_pids, kill_process_tree, sample_groups, sample_sessions_with_cpu, GroupResources,
+    SessionResourceSample,
+};
 pub use scrollback::{ScrollbackBuffer, DEFAULT_SCROLLBACK_SIZE, SCROLLBACK_CHUNK_SIZE};
 pub use session_interceptor::{
     pop_last_utf8_char, AiCallback, AiEvent, AiQuery, AiResponse, AskUserAnswer, AskUserChannel,

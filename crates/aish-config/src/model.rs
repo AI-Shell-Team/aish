@@ -47,6 +47,18 @@ fn default_terminal_resize_mode() -> String {
     "full".into()
 }
 
+fn default_resource_check_interval() -> u64 {
+    30
+}
+
+fn default_resource_cpu_threshold() -> f64 {
+    80.0
+}
+
+fn default_resource_rss_threshold() -> u64 {
+    1024
+}
+
 fn default_micro_keep_recent_messages() -> usize {
     6
 }
@@ -365,6 +377,21 @@ pub struct ConfigModel {
     pub memory: Option<MemoryConfig>,
     pub session_db_path: Option<String>,
 
+    /// Interval between live-session resource checks in the REPL. 0 disables
+    /// the background check entirely (the `/live_sessions` panel still shows
+    /// resources when opened). Default: 30.
+    #[serde(default = "default_resource_check_interval")]
+    pub pty_resource_check_interval_secs: u64,
+    /// CPU percent (whole process group, 100 = one core) above which other
+    /// live sessions trigger a warning in the current session. 0 disables
+    /// the CPU alert. Default: 80.
+    #[serde(default = "default_resource_cpu_threshold")]
+    pub pty_resource_cpu_percent: f64,
+    /// Resident set size in MiB above which other live sessions trigger a
+    /// warning. 0 disables the memory alert. Default: 1024.
+    #[serde(default = "default_resource_rss_threshold")]
+    pub pty_resource_rss_mb: u64,
+
     /// Inject git branch awareness into remote bash prompts during SSH/telnet
     /// sessions. When true, aish prepends a `|branch` marker (magenta, matching
     /// local prompt style) to the remote PS1 by installing a PROMPT_COMMAND
@@ -526,6 +553,9 @@ impl Default for ConfigModel {
             tool_arg_preview_max_length: 200,
             bash_output_offload: None,
             pty_output_keep_bytes: 4096,
+            pty_resource_check_interval_secs: default_resource_check_interval(),
+            pty_resource_cpu_percent: default_resource_cpu_threshold(),
+            pty_resource_rss_mb: default_resource_rss_threshold(),
             memory: None,
             session_db_path: None,
             enable_remote_git_prompt: true,
