@@ -207,12 +207,20 @@ pub fn descendant_pids(root: u32) -> Vec<u32> {
 /// Each aish layer calls `setsid()` (daemon child, persistent bash), so a
 /// process-group kill cannot reach the full tree — the descendant set is
 /// walked once up front (before parents die and orphans get reparented),
-/// then swept with SIGTERM for graceful shutdown followed by SIGKILL for
-/// stragglers. Errors (ESRCH for already-dead pids) are ignored.
+/// then swept with SIGTERM for graceful shutdown. After the grace window
+/// each victim's identity (`/proc/<pid>/stat` start time) is revalidated
+/// before SIGKILL so a pid recycled during the window is never signalled.
+/// Errors (ESRCH for already-dead pids) are ignored.
 pub fn kill_process_tree(root: u32) {
-    let mut victims = descendant_pids(root);
-    victims.push(root);
-    for &pid in &victims {
+    // Identity snapshot: a pid's start time is unique per boot and never
+    // changes for a live process, so (pid, starttime) reliably detects
+    // recycling.
+    let victims: Vec<(u32, u64)> = descendant_pids(root)
+        .into_iter()
+        .chain(std::iter::once(root))
+        .filter_map(|pid| proc_starttime(pid).map(|st| (pid, st)))
+        .collect();
+    for &(pid, _) in &victims {
         // SAFETY: [Category 8 — FFI] `kill(pid, SIGTERM)` — pid comes from
         // our own /proc walk; failures (ESRCH, EPERM) are deliberately
         // ignored so one dead pid cannot abort the sweep.
@@ -221,13 +229,10 @@ pub fn kill_process_tree(root: u32) {
         }
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
-    // Re-derive the surviving tree: a pid that exited during the grace
-    // window may have been recycled onto an unrelated process, so only
-    // pids still inside the root's descendant closure get the SIGKILL.
-    let mut survivors = descendant_pids(root);
-    survivors.push(root);
-    for &pid in &victims {
-        if !survivors.contains(&pid) {
+    for &(pid, starttime) in &victims {
+        // Skip pids that exited during the grace window and were recycled
+        // onto an unrelated process.
+        if proc_starttime(pid) != Some(starttime) {
             continue;
         }
         // SAFETY: [Category 8 — FFI] `kill(pid, SIGKILL)` — see SIGTERM.
@@ -235,6 +240,18 @@ pub fn kill_process_tree(root: u32) {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
     }
+}
+
+/// Process start time (field 22 of `/proc/<pid>/stat`, in clock ticks since
+/// boot). `None` when the process does not exist or cannot be read.
+fn proc_starttime(pid: u32) -> Option<u64> {
+    let content = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut it = stat_fields_after_comm(&content);
+    // Fields 3..=21 (state .. num_threads itrealvalue); starttime is 22.
+    for _ in 3..=21 {
+        it.next()?;
+    }
+    it.next()?.parse().ok()
 }
 
 /// Process page size (`sysconf(_SC_PAGESIZE)`), cached.
