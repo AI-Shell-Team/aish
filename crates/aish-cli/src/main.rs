@@ -14,7 +14,21 @@
 )]
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
+
+/// Routes tracing log lines through the shell animation's terminal lock so a
+/// `WARN` emitted during an active `Thinking` animation starts on a fresh
+/// line instead of gluing onto the partially rendered frame (issue #490).
+struct AnimationAwareMakeWriter;
+
+impl<'a> MakeWriter<'a> for AnimationAwareMakeWriter {
+    type Writer = aish_shell::animation::LogLineWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        aish_shell::animation::LogLineWriter::new()
+    }
+}
 
 mod install_channel;
 mod models_auth;
@@ -265,6 +279,7 @@ fn main() {
         .map(|c| c.log_level)
         .unwrap_or_else(|_| "warn".to_string());
     tracing_subscriber::fmt()
+        .with_writer(AnimationAwareMakeWriter)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)),
         )
