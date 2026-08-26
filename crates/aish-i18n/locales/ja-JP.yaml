@@ -720,6 +720,8 @@ shell:
     exit_no_note_title: "切り離し前にメモを追加しますか？"
     exit_no_note_hint: "このセッションにはメモがありません。名前のないセッションは切断後に見分けがつきません。"
     exit_no_note_footer: "Enter 保存して切り離し · Esc 名前なしで切り離し"
+    resource_detail: "CPU {cpu} · メモリ {rss}"
+    resource_alert: "⚠ セッション {id} がリソース閾値に達しました（CPU {cpu} / メモリ {rss}）。/live_sessions で切り替えるか、/kill_live_sessions で終了してください。"
 
   kill_live_sessions:
     daemon_disabled: "PTYデーモンが無効です。config.yaml で有効にしてください："

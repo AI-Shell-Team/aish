@@ -656,6 +656,11 @@ pub struct AishShell {
     pty: Arc<Mutex<aish_pty::PersistentPty>>,
     /// UUID for the current session, used to associate history entries.
     session_uuid: String,
+    /// Live-session resource monitor: warns when other detached sessions
+    /// exceed CPU/RSS thresholds.
+    resource_monitor: crate::resource_monitor::Monitor,
+    /// When the REPL last ran a resource check (throttled by config).
+    last_resource_check: Option<std::time::Instant>,
     /// Whether streaming has started printing content (to avoid double-printing).
     streamed_content: Arc<AtomicBool>,
     /// Current shell lifecycle phase
@@ -2165,6 +2170,11 @@ impl AishShell {
             let mut guard = vault_slot.lock().unwrap();
             *guard = Some(secret_vault.clone());
         }
+        // Read resource thresholds before `config` is moved into Self.
+        let resource_thresholds = crate::resource_monitor::Thresholds {
+            cpu_percent: config.pty_resource_cpu_percent,
+            rss_mb: config.pty_resource_rss_mb,
+        };
 
         Ok(Self {
             state,
@@ -2195,6 +2205,8 @@ impl AishShell {
             sub_agent_animation: sub_agent_animation.clone(),
             ai_op_generation,
             expand_history,
+            resource_monitor: crate::resource_monitor::Monitor::new(resource_thresholds),
+            last_resource_check: None,
             shared_recorder,
             inline_ai: None,
             approval_memory,
@@ -2383,6 +2395,9 @@ impl AishShell {
                 }
             }
 
+            // Periodic live-session resource check: warn when another
+            // detached session hogs CPU or memory.
+            self.check_live_session_resources();
             // Check for skill hot-reload changes
             if let Some(ref reloader) = self.skill_hot_reloader {
                 let affected = reloader.apply_changes(&mut self.skill_manager);
@@ -5725,6 +5740,47 @@ impl AishShell {
         render_audit_markdown_impl(events)
     }
 
+    /// Throttled live-session resource check. Warns in the current session
+    /// when another live PTY session exceeds the configured CPU/RSS
+    /// thresholds. Interval and thresholds come from config; interval 0
+    /// disables the check.
+    fn check_live_session_resources(&mut self) {
+        let interval = self.config.pty_resource_check_interval_secs;
+        if interval == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due = match self.last_resource_check {
+            None => true,
+            Some(last) => now.duration_since(last).as_secs() >= interval,
+        };
+        if !due {
+            return;
+        }
+        self.last_resource_check = Some(now);
+
+        let current_id = std::env::var("AISH_SESSION_ID").unwrap_or_default();
+        // Exclude only the current session. When the env var is unset this
+        // shell is not a daemon child, so every live session counts as
+        // "another" instead of silently disabling the check.
+        let others: Vec<aish_pty::DaemonSessionInfo> = aish_pty::discover_sessions()
+            .into_iter()
+            .filter(|s| {
+                !s.session_id.is_empty()
+                    && (current_id.is_empty()
+                        || (s.session_id != current_id && !s.session_id.starts_with(&current_id)))
+            })
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        for alert in self.resource_monitor.check(&others) {
+            let msg = crate::resource_monitor::format_resource_alert(&alert);
+            println!("{}", theme::warning(&msg));
+        }
+        let _ = io::stdout().flush();
+    }
+
     fn handle_resume_command(&mut self, parts: &[&str]) {
         match parts.len() {
             1 => self.select_recent_session(),
@@ -5764,6 +5820,14 @@ impl AishShell {
                 .unwrap_or_default()
                 .as_secs();
 
+            // Sample CPU/RSS for every live session's process group so the
+            // picker can show what each session actually costs.
+            let pgids: Vec<(String, u32)> = sessions
+                .iter()
+                .map(|s| (s.session_id.clone(), s.daemon_pid))
+                .collect();
+            let resource_samples = aish_pty::sample_sessions_with_cpu(&pgids, 250);
+
             // Value of the current session's picker row, used to drive the
             // animated shimmer sweep on that row.
             let current_value = current_id.as_ref().and_then(|c| {
@@ -5790,14 +5854,29 @@ impl AishShell {
                         s.cwd.clone()
                     };
                     let age_str = format_age(now.saturating_sub(s.started_at));
+                    let base_detail =
+                        t_with_args("shell.live_sessions.started_label", &age_args(age_str));
+                    // Append live CPU/RSS so runaway sessions are visible
+                    // directly in the picker.
+                    let resource_detail = resource_samples
+                        .iter()
+                        .find(|r| r.session_id == s.session_id)
+                        .map(|r| {
+                            crate::resource_monitor::format_resource_detail(
+                                r.cpu_percent,
+                                r.rss_bytes,
+                            )
+                        })
+                        .unwrap_or_default();
                     let detail = if is_current {
                         format!(
-                            "{} {}",
-                            t_with_args("shell.live_sessions.started_label", &age_args(age_str)),
-                            t("shell.live_sessions.current_tag")
+                            "{} {} · {}",
+                            base_detail,
+                            t("shell.live_sessions.current_tag"),
+                            resource_detail
                         )
                     } else {
-                        t_with_args("shell.live_sessions.started_label", &age_args(age_str))
+                        format!("{} · {}", base_detail, resource_detail)
                     };
                     // Label is short id + cwd; a custom name (if any) is the
                     // bold green highlight prefix so it stands out at a glance.
