@@ -210,44 +210,53 @@ pub fn descendant_pids(root: u32) -> Vec<u32> {
 /// walked once up front (before parents die and orphans get reparented).
 /// Each victim is pinned with a pidfd BEFORE any signal: pidfds reference
 /// the exact process instance, so an exited-and-recycled pid can never be
-/// signalled, for SIGTERM or SIGKILL alike. Signals are sent via
-/// `pidfd_send_signal` (fallback: `/proc/<pid>/stat` start-time check then
-/// `kill`). Failures (ESRCH for already-dead pids) are ignored.
+/// signalled, for SIGTERM or SIGKILL alike.
+///
+/// When `pidfd_open` is unavailable (kernel < 5.3, seccomp/container
+/// policy, EPERM) the pid is still signalled by plain `kill` — dropping
+/// it would silently turn the termination into a no-op, which is exactly
+/// the runaway-session failure this exists to fix. That path accepts the
+/// theoretical TOCTOU of a pid recycled between the /proc scan and the
+/// signal; `pidfd_send_signal` failure with a pinned fd additionally
+/// cross-checks identity via fdinfo before falling back to `kill`.
 pub fn kill_process_tree(root: u32) {
-    let victims: Vec<(u32, PidFd)> = descendant_pids(root)
+    let victims: Vec<(u32, Option<PidFd>)> = descendant_pids(root)
         .into_iter()
         .chain(std::iter::once(root))
-        .filter_map(|pid| pidfd_open(pid).map(|fd| (pid, fd)))
+        .map(|pid| (pid, pidfd_open(pid)))
         .collect();
     for (pid, fd) in &victims {
-        pidfd_signal(fd, pid, libc::SIGTERM);
+        pidfd_signal(fd.as_ref(), pid, libc::SIGTERM);
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
     for (pid, fd) in &victims {
-        pidfd_signal(fd, pid, libc::SIGKILL);
+        pidfd_signal(fd.as_ref(), pid, libc::SIGKILL);
     }
 }
 
-/// Signal the process pinned by `fd` with `sig`, tolerating every failure.
+/// Signal the process behind `pid` with `sig`, tolerating every failure.
 ///
-/// Preferred path: `pidfd_send_signal(2)` — the fd pins the exact process
-/// instance, so a recycled pid can never be signalled. Fallback (kernels
-/// without the syscall, < 5.1): `kill` only when `/proc/<pid>/stat` still
-/// reports the pid that the fdinfo of the pinning fd captured, which proves
-/// the pid was not recycled in between.
-fn pidfd_signal(fd: &PidFd, pid: &u32, sig: libc::c_int) {
-    if pidfd_send_signal(fd, sig).is_some() {
-        return;
-    }
-    if let Some(pinned) = pidfd_pid(fd) {
-        if proc_stat_pid(*pid) == Some(pinned) {
-            // SAFETY: [Category 8 — FFI] `kill(pid, sig)` — pid comes from
-            // our own /proc walk; failures (ESRCH, EPERM) are deliberately
-            // ignored so one dead pid cannot abort the sweep.
-            unsafe {
-                libc::kill(*pid as libc::pid_t, sig);
+/// - Pinned fd, working `pidfd_send_signal`: signal the exact instance.
+/// - Pinned fd, syscall blocked: `kill` only when the fdinfo pid still
+///   matches `/proc/<pid>/stat`, proving no recycling.
+/// - No fd (pidfd_open unavailable): straight `kill` — termination must
+///   not silently degrade to a no-op on old kernels.
+fn pidfd_signal(fd: Option<&PidFd>, pid: &u32, sig: libc::c_int) {
+    if let Some(fd) = fd {
+        if pidfd_send_signal(fd, sig).is_some() {
+            return;
+        }
+        if let Some(pinned) = pidfd_pid(fd) {
+            if proc_stat_pid(*pid) != Some(pinned) {
+                return; // pid was recycled; do not signal the stranger
             }
         }
+    }
+    // SAFETY: [Category 8 — FFI] `kill(pid, sig)` — pid comes from our own
+    // /proc walk; failures (ESRCH, EPERM) are deliberately ignored so one
+    // dead pid cannot abort the sweep.
+    unsafe {
+        libc::kill(*pid as libc::pid_t, sig);
     }
 }
 
