@@ -78,6 +78,10 @@ pub struct LlmSession {
     langfuse_session_id: std::sync::Mutex<Option<String>>,
     /// Monotonic turn counter for naming spans within the session trace.
     langfuse_turn_counter: std::sync::atomic::AtomicU32,
+    /// Monotonic turn sequence (always incremented, unlike the Langfuse
+    /// counter) used to make synthetic tool-call ids unique across turns —
+    /// persisted history replays ids from previous turns alongside new ones.
+    turn_seq: std::sync::atomic::AtomicU32,
     /// Maximum context token budget. Messages are trimmed when exceeded.
     max_context_tokens: usize,
     context_budget_policy: ContextBudgetPolicy,
@@ -151,6 +155,7 @@ impl LlmSession {
             langfuse: None,
             langfuse_session_id: std::sync::Mutex::new(None),
             langfuse_turn_counter: std::sync::atomic::AtomicU32::new(0),
+            turn_seq: std::sync::atomic::AtomicU32::new(0),
             max_context_tokens: 100_000,
             context_budget_policy: ContextBudgetPolicy::default(),
             compact_consecutive_failures: std::sync::Mutex::new(0),
@@ -606,6 +611,9 @@ impl LlmSession {
     ) -> Result<crate::types::ProcessResult, AishError> {
         self.cancellation_token.reset();
         self.last_turn_compaction.lock().unwrap().take();
+        let turn_seq = self
+            .turn_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Emit operation start event
         self.emit_event(LlmEvent {
@@ -1098,8 +1106,10 @@ impl LlmSession {
                         .filter_map(|(seq_idx, (orig_idx, (id, name, args)))| {
                             // Some providers omit the id in streaming deltas.
                             // Fall back to a synthetic id so the tool call can still execute.
+                            // The turn sequence keeps ids unique across turns
+                            // now that tool-call history persists in context.
                             let id = if id.is_empty() {
-                                format!("tc_{orig_idx}")
+                                format!("tc_{turn_seq}_{orig_idx}")
                             } else {
                                 id
                             };
@@ -1604,6 +1614,7 @@ impl LlmSession {
             context_budget_policy: self.context_budget_policy.clone(),
             compact_consecutive_failures: std::sync::Mutex::new(0),
             rotation: None,
+            turn_seq: std::sync::atomic::AtomicU32::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
@@ -1813,9 +1824,8 @@ impl LlmSession {
     ) -> Vec<ChatMessage> {
         let policy = &self.context_budget_policy;
         if !policy.enabled {
-            return trim_messages(messages, self.max_context_tokens, 5);
+            return sanitize_tool_pairs(trim_messages(messages, self.max_context_tokens, 5));
         }
-
         let before_tokens = estimate_chat_tokens(&messages, policy);
         let before_state = policy.state_for_tokens(before_tokens);
         let mut compaction_changed = false;
@@ -1892,11 +1902,11 @@ impl LlmSession {
             );
         }
 
-        trim_messages(
+        sanitize_tool_pairs(trim_messages(
             messages,
             self.max_context_tokens,
             policy.micro_keep_recent_messages.max(5),
-        )
+        ))
     }
 
     async fn full_compact_chat_messages_with_model(
@@ -2119,7 +2129,15 @@ fn estimate_one_chat_message(message: &ChatMessage, _policy: &ContextBudgetPolic
         .as_ref()
         .map(|c| c.len())
         .unwrap_or(0);
-    ((content_len + reasoning_len) / 4).max(1)
+    // Tool-call arguments (raw JSON, can be kilobytes) ride on assistant
+    // messages and must count or compaction triggers late.
+    let tool_calls_len: usize = message
+        .tool_calls
+        .iter()
+        .flatten()
+        .map(|tc| tc.name.len() + tc.arguments.len())
+        .sum();
+    ((content_len + reasoning_len + tool_calls_len) / 4).max(1)
 }
 
 fn microcompact_chat_messages(
@@ -2364,6 +2382,74 @@ fn trim_messages(
     let mut result = system;
     result.extend(kept_middle);
     result.extend(recent);
+    result
+}
+
+/// Repair provider tool-call pairing in a message sequence before send.
+///
+/// Defensive layer for history rebuilt from persisted context: drops tool
+/// results with no preceding assistant tool_call, and removes tool_calls
+/// that never received a tool result (backfilling a synthetic result is not
+/// possible here because the tool never ran).
+fn sanitize_tool_pairs(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    use std::collections::HashSet;
+
+    // Pass 1a: ids the assistants actually requested.
+    let called: HashSet<String> = messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .flat_map(|m| m.tool_calls.iter().flatten())
+        .map(|c| c.id.clone())
+        .collect();
+    // Pass 1b: ids that received a tool result.
+    let answered: HashSet<String> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.tool_call_id.clone())
+        .filter(|id| called.contains(id))
+        .collect();
+
+    // Pass 2: drop orphan tool results; prune unanswered tool_calls from
+    // assistant messages (dropping the whole message if it becomes empty
+    // of both content and tool_calls).
+    let mut result = Vec::with_capacity(messages.len());
+    for mut msg in messages {
+        if msg.role == "tool" {
+            match msg.tool_call_id.as_deref() {
+                Some(id) if called.contains(id) => result.push(msg),
+                _ => {
+                    tracing::warn!(
+                        "dropping orphan tool result without matching tool_call before send"
+                    );
+                }
+            }
+            continue;
+        }
+        if msg.role == "assistant" {
+            if let Some(ref calls) = msg.tool_calls {
+                let kept: Vec<ToolCall> = calls
+                    .iter()
+                    .filter(|c| answered.contains(&c.id))
+                    .cloned()
+                    .collect();
+                if kept.len() < calls.len() {
+                    tracing::warn!(
+                        dropped = calls.len() - kept.len(),
+                        "dropping unanswered tool_calls from assistant message before send"
+                    );
+                }
+                if kept.is_empty() {
+                    msg.tool_calls = None;
+                    if msg.text_byte_len() == 0 {
+                        continue;
+                    }
+                } else {
+                    msg.tool_calls = Some(kept);
+                }
+            }
+        }
+        result.push(msg);
+    }
     result
 }
 
@@ -2891,6 +2977,13 @@ mod tests {
         });
 
         let mut msgs = vec![make_msg("system", "sys")];
+        let mut assistant_call = ChatMessage::assistant("");
+        assistant_call.tool_calls = Some(vec![ToolCall {
+            id: "call-old".to_string(),
+            name: "bash".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        msgs.push(assistant_call);
         msgs.push(ChatMessage::tool_result(
             "call-old",
             format!(
@@ -3762,5 +3855,54 @@ mod tests {
             expected, answered,
             "every tool_call_id must have a tool_result"
         );
+    }
+
+    #[test]
+    fn sanitize_tool_pairs_repairs_dangling_sequences() {
+        let mut assistant = ChatMessage::assistant("working on it");
+        assistant.tool_calls = Some(vec![
+            ToolCall {
+                id: "answered".to_string(),
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            },
+            ToolCall {
+                id: "unanswered".to_string(),
+                name: "read".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ]);
+        let messages = vec![
+            make_msg("system", "sys"),
+            assistant,
+            ChatMessage::tool_result("answered", "ok"),
+            ChatMessage::tool_result("orphan", "no matching call"),
+            make_msg("user", "next question"),
+        ];
+
+        let sanitized = sanitize_tool_pairs(messages);
+        let roles: Vec<&str> = sanitized.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["system", "assistant", "tool", "user"]);
+
+        // The unanswered tool_call is pruned; the answered one is kept.
+        let calls = sanitized[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "answered");
+        assert_eq!(sanitized[2].tool_call_id.as_deref(), Some("answered"));
+    }
+
+    #[test]
+    fn sanitize_tool_pairs_drops_empty_assistant_after_pruning() {
+        let mut assistant = ChatMessage::assistant("");
+        assistant.tool_calls = Some(vec![ToolCall {
+            id: "never".to_string(),
+            name: "bash".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        let messages = vec![make_msg("user", "q"), assistant, make_msg("user", "next")];
+
+        let sanitized = sanitize_tool_pairs(messages);
+        let roles: Vec<&str> = sanitized.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "user"]);
     }
 }

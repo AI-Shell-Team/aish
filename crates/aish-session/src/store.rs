@@ -699,6 +699,7 @@ mod tests {
                 memory_type: MemoryType::Llm,
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
             }],
             updated_at: Some(Utc::now()),
         };
@@ -932,6 +933,7 @@ mod tests {
                 memory_type: MemoryType::Llm,
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
             }],
             updated_at: Some(Utc::now()),
         };

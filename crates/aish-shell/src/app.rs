@@ -2072,7 +2072,7 @@ impl AishShell {
         llm_session.set_iteration_limit_callback(iteration_limit_callback);
 
         // Build AI handler with all subsystems
-        let ai_handler = AiHandler::new(
+        let mut ai_handler = AiHandler::new(
             llm_session,
             memory_manager.clone(),
             skill_manager,
@@ -2083,6 +2083,15 @@ impl AishShell {
             context_budget_policy,
             config.skills.auto_search,
         );
+
+        // Redact secrets from tool outputs before they enter persistent
+        // LLM context (same scanner as the audit path).
+        {
+            let scanner = security_manager.secret_scanner().clone();
+            ai_handler.set_secret_redactor(Arc::new(move |text: &str| {
+                aish_security::secret::redact_secrets(text, &scanner)
+            }));
+        }
 
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
 

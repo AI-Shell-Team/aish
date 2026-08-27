@@ -26,6 +26,10 @@ pub struct SessionContextMessage {
     pub memory_type: MemoryType,
     pub name: Option<String>,
     pub tool_call_id: Option<String>,
+    /// Tool calls attached to an assistant message. Optional so snapshots
+    /// persisted before this field existed still deserialize.
+    #[serde(default)]
+    pub tool_calls: Option<Vec<aish_core::ContextToolCall>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

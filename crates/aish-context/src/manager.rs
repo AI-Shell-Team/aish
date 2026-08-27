@@ -122,6 +122,7 @@ impl ContextManager {
                 memory_type,
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
             },
         );
     }
@@ -146,6 +147,9 @@ impl ContextManager {
                 }
                 if let Some(ref id) = m.tool_call_id {
                     obj.insert("tool_call_id".into(), serde_json::Value::String(id.clone()));
+                }
+                if let Some(ref calls) = m.tool_calls {
+                    obj.insert("tool_calls".into(), serde_json::json!(calls));
                 }
                 serde_json::Value::Object(obj)
             })
@@ -175,7 +179,15 @@ impl ContextManager {
     }
 
     pub fn estimate_message_tokens(&self, msg: &ContextMessage) -> usize {
-        self.estimate_tokens(&msg.content)
+        // Tool-call arguments can be kilobytes (bash/write_file payloads)
+        // and must count toward the budget or compaction triggers late.
+        let tool_calls_len: usize = msg
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|tc| tc.name.len() + tc.arguments.len())
+            .sum();
+        self.estimate_tokens(&msg.content) + tool_calls_len / 4
     }
 
     /// Return the total number of stored messages.
@@ -239,14 +251,37 @@ impl ContextManager {
     }
 
     pub fn full_compact_candidate_messages(&self) -> Vec<ContextMessage> {
-        let keep_recent = self.budget_policy.micro_keep_recent_messages.max(2);
-        let recent_start = self.messages.len().saturating_sub(keep_recent);
+        let recent_start = self.snapped_recent_start();
         self.messages
             .iter()
             .take(recent_start)
             .filter(|m| m.role != "system" && !m.content.starts_with(SUMMARY_TAG))
             .cloned()
             .collect()
+    }
+
+    /// Raw recent-window boundary snapped outward so an assistant tool-call
+    /// group is never split: either the whole group stays in the kept recent
+    /// tail, or the whole group is summarized away. Both
+    /// `full_compact_candidate_messages` and `rewrite_with_summary` must use
+    /// this same boundary or a straddling group would be duplicated into
+    /// both the summary and the retained tail.
+    fn snapped_recent_start(&self) -> usize {
+        let keep_recent = self.budget_policy.micro_keep_recent_messages.max(2);
+        let raw = self.messages.len().saturating_sub(keep_recent);
+        let mut boundary = raw;
+        while boundary > 0 && self.messages[boundary - 1].role == "tool" {
+            boundary -= 1;
+        }
+        if boundary > 0
+            && self.messages[boundary - 1]
+                .tool_calls
+                .as_ref()
+                .is_some_and(|c| !c.is_empty())
+        {
+            boundary -= 1;
+        }
+        boundary
     }
 
     pub fn apply_full_compact_summary(
@@ -455,41 +490,50 @@ impl ContextManager {
 
     /// Remove the oldest non-system messages of a given type until we are
     /// within the specified limit.
+    ///
+    /// Assistant tool-call messages and their tool results form atomic
+    /// groups: removing either side would leave a dangling tool_call_id or
+    /// an orphan tool result, both rejected by provider APIs. Groups are
+    /// counted and removed as a unit.
     fn trim_by_type(&mut self, memory_type: MemoryType, limit: usize) {
-        let count = self
-            .messages
+        let groups = tool_call_groups(&self.messages);
+        let count: usize = groups
             .iter()
-            .filter(|m| m.memory_type == memory_type && m.role != "system")
-            .count();
+            .filter(|g| {
+                g.iter().any(|&i| {
+                    self.messages[i].memory_type == memory_type && self.messages[i].role != "system"
+                })
+            })
+            .map(|g| g.len())
+            .sum();
 
         if count <= limit {
             return;
         }
 
         let to_remove = count - limit;
-        let mut removed = 0;
-
-        self.messages.retain(|m| {
+        let mut removed = 0usize;
+        let mut remove_indices: Vec<usize> = Vec::new();
+        for group in &groups {
             if removed >= to_remove {
-                return true;
+                break;
             }
-            if m.memory_type == memory_type && m.role != "system" {
-                removed += 1;
-                debug!(role = %m.role, ?memory_type, "trimmed message");
-                false
-            } else {
-                true
+            if group.iter().any(|&i| {
+                self.messages[i].memory_type == memory_type && self.messages[i].role != "system"
+            }) {
+                removed += group.len();
+                remove_indices.extend_from_slice(group);
             }
-        });
+        }
+        self.retain_indices(&remove_indices);
     }
 
     /// Remove the oldest non-system messages until the total token count is
     /// within the budget.
     ///
-    /// Uses `retain()` for a single O(n) pass instead of O(n^2) repeated
-    /// `remove()` calls.
+    /// Assistant tool-call groups are removed as atomic units so the
+    /// remaining sequence stays protocol-valid.
     fn trim_to_token_budget(&mut self, budget: usize) {
-        // Calculate total tokens.
         let total_tokens: usize = self
             .messages
             .iter()
@@ -500,28 +544,40 @@ impl ContextManager {
             return;
         }
 
-        // Walk forward to compute how many tokens we need to shed, recording
-        // which messages should be removed. We stop as soon as the budget is
-        // satisfied.
+        // Walk groups forward to compute how many tokens we need to shed,
+        // recording which messages should be removed. We stop as soon as
+        // the budget is satisfied.
         let mut current = total_tokens;
-        let mut should_remove = vec![false; self.messages.len()];
+        let mut remove_indices: Vec<usize> = Vec::new();
 
-        for (i, m) in self.messages.iter().enumerate() {
+        for group in tool_call_groups(&self.messages) {
             if current <= budget {
                 break;
             }
-            if m.role != "system" {
-                let tokens = self.estimate_tokens(&m.content);
-                current = current.saturating_sub(tokens);
-                debug!(role = %m.role, tokens, "trimmed message for token budget");
-                should_remove[i] = true;
+            if group.len() == 1 && self.messages[group[0]].role == "system" {
+                continue;
             }
+            let group_tokens: usize = group
+                .iter()
+                .map(|&i| self.estimate_tokens(&self.messages[i].content))
+                .sum();
+            current = current.saturating_sub(group_tokens);
+            debug!(
+                roles = ?group.iter().map(|&i| self.messages[i].role.as_str()).collect::<Vec<_>>(),
+                group_tokens,
+                "trimmed message group for token budget"
+            );
+            remove_indices.extend_from_slice(&group);
         }
+        self.retain_indices(&remove_indices);
+    }
 
-        // Single-pass retain: O(n) instead of O(n^2).
+    /// Remove the given message indices (single O(n) retain pass).
+    fn retain_indices(&mut self, remove: &[usize]) {
+        let to_drop: std::collections::HashSet<usize> = remove.iter().copied().collect();
         let mut idx = 0;
         self.messages.retain(|_| {
-            let keep = !should_remove[idx];
+            let keep = !to_drop.contains(&idx);
             idx += 1;
             keep
         });
@@ -570,8 +626,7 @@ impl ContextManager {
         }
 
         let before_tokens = self.total_estimated_tokens();
-        let keep_recent = self.budget_policy.micro_keep_recent_messages.max(2);
-        let recent_start = self.messages.len().saturating_sub(keep_recent);
+        let recent_start = self.snapped_recent_start();
 
         let mut new_messages = Vec::with_capacity(32);
         for (idx, msg) in self.messages.iter().enumerate() {
@@ -588,6 +643,7 @@ impl ContextManager {
             memory_type: MemoryType::Knowledge,
             name: None,
             tool_call_id: None,
+            tool_calls: None,
         });
         new_messages.extend(self.messages.iter().skip(recent_start).cloned());
 
@@ -612,6 +668,35 @@ impl ContextManager {
             summary_tokens,
         })
     }
+}
+
+/// Partition message indices into atomic groups.
+///
+/// An assistant message carrying tool_calls starts a group that extends
+/// through all immediately-following `tool` messages (their results).
+/// Everything else forms single-message groups. Trimming and compaction
+/// operate on whole groups so provider tool-call pairing is never broken.
+fn tool_call_groups(messages: &[ContextMessage]) -> Vec<Vec<usize>> {
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        if messages[i]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        {
+            let start = i;
+            i += 1;
+            while i < messages.len() && messages[i].role == "tool" {
+                i += 1;
+            }
+            groups.push((start..i).collect::<Vec<usize>>());
+        } else {
+            groups.push(vec![i]);
+            i += 1;
+        }
+    }
+    groups
 }
 
 fn normalize_summary(summary: String) -> String {
@@ -1066,5 +1151,172 @@ mod tests {
         assert_eq!(cm.compact_consecutive_failures(), 1);
         let second = cm.compact_for_send(None);
         assert!(second.skipped_full_compact_due_to_fuse);
+    }
+
+    fn tool_call_msg(id: &str, name: &str) -> ContextMessage {
+        ContextMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![aish_core::ContextToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            }]),
+        }
+    }
+
+    fn tool_result_msg(id: &str, output: &str) -> ContextMessage {
+        ContextMessage {
+            role: "tool".to_string(),
+            content: output.to_string(),
+            memory_type: MemoryType::Llm,
+            name: Some("bash".to_string()),
+            tool_call_id: Some(id.to_string()),
+            tool_calls: None,
+        }
+    }
+
+    #[test]
+    fn trim_by_type_keeps_tool_call_groups_atomic() {
+        let mut cm = ContextManager::with_limits(3, 10, 10);
+        cm.add_message("user", "q1", MemoryType::Llm);
+        cm.add_memory(MemoryType::Llm, tool_call_msg("t1", "bash"));
+        cm.add_memory(MemoryType::Llm, tool_result_msg("t1", "output1"));
+        cm.add_message("user", "q2", MemoryType::Llm);
+        cm.add_memory(MemoryType::Llm, tool_call_msg("t2", "bash"));
+        cm.add_memory(MemoryType::Llm, tool_result_msg("t2", "output2"));
+        cm.trim();
+
+        // With a limit of 3 messages the oldest group (q1 + t1 pair = 3
+        // messages) is removed as a unit; the t2 pair stays intact.
+        let roles: Vec<&str> = cm.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+        let assistant = &cm.messages[1];
+        assert!(assistant
+            .tool_calls
+            .as_ref()
+            .is_some_and(|c| c[0].id == "t2"));
+        assert_eq!(cm.messages[2].tool_call_id.as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn trim_to_token_budget_removes_groups_atomically() {
+        let mut cm = ContextManager::new();
+        cm.set_token_budget(Some(1)); // force maximum trimming
+        cm.add_message("user", &"x".repeat(64), MemoryType::Llm);
+        cm.add_memory(MemoryType::Llm, tool_call_msg("t1", "bash"));
+        cm.add_memory(MemoryType::Llm, tool_result_msg("t1", "output"));
+        cm.trim();
+
+        // Either the whole group survives or nothing does — never an
+        // orphan tool result or a dangling tool_call.
+        let has_tool = cm.messages.iter().any(|m| m.role == "tool");
+        let has_tool_calls = cm
+            .messages
+            .iter()
+            .any(|m| m.tool_calls.as_ref().is_some_and(|c| !c.is_empty()));
+        assert_eq!(has_tool, has_tool_calls);
+    }
+
+    #[test]
+    fn rewrite_with_summary_does_not_split_tool_call_group() {
+        let mut cm = ContextManager::new();
+        cm.set_budget_policy(ContextBudgetPolicy {
+            context_window_tokens: 2_000,
+            reserved_output_tokens: 200,
+            auto_compact_buffer_tokens: 200,
+            warning_buffer_tokens: 200,
+            blocking_buffer_tokens: 100,
+            micro_keep_recent_messages: 2,
+            enable_token_estimation: false,
+            ..ContextBudgetPolicy::default()
+        });
+        for idx in 0..8 {
+            cm.add_message(
+                "user",
+                &format!("investigate {idx} {}", "x".repeat(1200)),
+                MemoryType::Llm,
+            );
+        }
+        cm.add_memory(MemoryType::Llm, tool_call_msg("t9", "bash"));
+        cm.add_memory(MemoryType::Llm, tool_result_msg("t9", "recent output"));
+
+        let report = cm.compact_for_send(None);
+        assert!(report.full_compact.is_some());
+
+        // The recent tool-call group must survive full compaction intact.
+        let tail: Vec<&str> = cm.messages.iter().map(|m| m.role.as_str()).collect();
+        let last_two = &tail[tail.len() - 2..];
+        assert_eq!(last_two, vec!["assistant", "tool"]);
+    }
+
+    #[test]
+    fn legacy_snapshot_without_tool_calls_deserializes() {
+        let legacy = r#"{
+            "role": "assistant",
+            "content": "hello",
+            "memory_type": "Llm",
+            "name": null,
+            "tool_call_id": null
+        }"#;
+        let msg: ContextMessage = serde_json::from_str(legacy).expect("legacy snapshot must parse");
+        assert_eq!(msg.role, "assistant");
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn as_messages_includes_tool_calls() {
+        let mut cm = ContextManager::new();
+        cm.add_memory(MemoryType::Llm, tool_call_msg("t1", "bash"));
+        let messages = cm.as_messages();
+        let tc = messages[0].get("tool_calls").expect("tool_calls present");
+        let call = &tc[0];
+        assert_eq!(call["id"], "t1");
+        assert_eq!(call["name"], "bash");
+    }
+
+    #[test]
+    fn estimate_message_tokens_counts_tool_call_arguments() {
+        let cm = ContextManager::new();
+        let plain = ContextMessage {
+            role: "assistant".to_string(),
+            content: "x".repeat(400),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        };
+        let with_calls = ContextMessage {
+            tool_calls: Some(vec![aish_core::ContextToolCall {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                arguments: "y".repeat(400),
+            }]),
+            ..plain.clone()
+        };
+        assert!(cm.estimate_message_tokens(&with_calls) > cm.estimate_message_tokens(&plain));
+    }
+
+    #[test]
+    fn full_compact_candidates_use_snapped_group_boundary() {
+        let mut cm = ContextManager::new();
+        cm.set_budget_policy(ContextBudgetPolicy {
+            micro_keep_recent_messages: 2,
+            enable_token_estimation: false,
+            ..ContextBudgetPolicy::default()
+        });
+        cm.add_message("user", "q1", MemoryType::Llm);
+        cm.add_memory(MemoryType::Llm, tool_call_msg("t9", "bash"));
+        cm.add_memory(MemoryType::Llm, tool_result_msg("t9", "recent output"));
+
+        // Raw boundary (len - keep_recent) = 1 lands between the assistant
+        // and its result; the snapped boundary must exclude the whole group.
+        let candidates = cm.full_compact_candidate_messages();
+        assert!(candidates
+            .iter()
+            .all(|m| m.tool_calls.is_none() && m.role != "tool"));
     }
 }
