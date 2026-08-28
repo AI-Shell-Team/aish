@@ -488,13 +488,25 @@ impl AiHandler {
         }
 
         // Step 5: Build context and system messages.
-        // Split system message into static core (cached) and dynamic env block.
-        // The static core goes as the main system_message; the env block is
-        // prepended to context_messages so the cache breakpoint lands on the
-        // stable prefix.
+        // The static core goes as the main system_message (stable prefix).
+        // The dynamic env block (cwd) is appended as a persistent message
+        // at the natural turn position — right before this turn's user
+        // message — so it replays byte-identically next turn. Placing it
+        // in front of the history instead would bust the whole prefix
+        // whenever cwd changes.
         let (static_core, env_block) = self.system_message_parts();
-        let mut context_messages = self.build_context_messages();
-        context_messages.insert(0, ChatMessage::system(&env_block));
+        self.context_manager.add_memory(
+            MemoryType::Llm,
+            ContextMessage {
+                role: "system".to_string(),
+                content: env_block,
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        let context_messages = self.build_context_messages();
 
         // Step 6: Extract images from the question text
         let extracted = crate::image::extract_images(&question_processed);
@@ -544,6 +556,17 @@ impl AiHandler {
             .process_input(&user_msg, &context_messages, Some(&static_core), true)
             .await?;
         let response = process_result.text;
+
+        // Surface the persistent-layer compaction mode to the UI (the send
+        // path no longer compacts outgoing copies).
+        let compaction_mode: Option<&'static str> = if compact_report.full_compact.is_some() {
+            Some("full_compact")
+        } else if compact_report.microcompact.changed_messages > 0 {
+            Some("microcompact")
+        } else {
+            None
+        };
+        self.llm_session.set_last_turn_compaction(compaction_mode);
 
         // Step 7: Store the exchange in context.
         //
@@ -862,9 +885,10 @@ impl AiHandler {
             };
             let results = mm.recall(&search_query, self.memory_config.recall_limit);
             if results.is_empty() {
-                // No results — clear stale recall to keep context clean
-                self.context_manager
-                    .inject_knowledge_stable("memory_recall", "");
+                // Append-only: keep previous recall blocks in history as
+                // plain turn-scoped facts. Deleting the old block would
+                // open a hole mid-history and bust the provider prefix
+                // cache from that point on.
                 return;
             }
 
@@ -915,11 +939,22 @@ impl AiHandler {
                         .join(", ")
                 )
             };
-
-            // Stable injection — only replaces if content actually changed,
-            // preserving cache prefix stability across calls.
-            self.context_manager
-                .inject_knowledge_stable("memory_recall", &content);
+            // Append the recall at the natural turn position (right before
+            // this turn's user message) instead of replacing a stable-slot
+            // message. The wire bytes of every past turn stay identical on
+            // replay, so the provider prefix cache holds; old recall blocks
+            // are compacted later like any other low-value output.
+            self.context_manager.add_memory(
+                MemoryType::Llm,
+                ContextMessage {
+                    role: "system".to_string(),
+                    content,
+                    memory_type: MemoryType::Llm,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            );
         }
     }
 

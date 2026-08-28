@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aish_context::{ContextBudgetPolicy, ContextMessage, ContextPressureLevel, MicrocompactReport};
+use aish_context::{ContextBudgetPolicy, ContextMessage};
 use aish_core::{
     AishError, AuditEvent, AuditSink, LlmEvent, LlmEventType, MemoryType, PlanModeState, PlanPhase,
 };
@@ -85,7 +85,6 @@ pub struct LlmSession {
     /// Maximum context token budget. Messages are trimmed when exceeded.
     max_context_tokens: usize,
     context_budget_policy: ContextBudgetPolicy,
-    compact_consecutive_failures: std::sync::Mutex<usize>,
     /// Plan mode state for dynamic tool filtering.
     plan_state: Arc<Mutex<PlanModeState>>,
     /// Cumulative token usage statistics for this session.
@@ -158,7 +157,6 @@ impl LlmSession {
             turn_seq: std::sync::atomic::AtomicU32::new(0),
             max_context_tokens: 100_000,
             context_budget_policy: ContextBudgetPolicy::default(),
-            compact_consecutive_failures: std::sync::Mutex::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
@@ -385,6 +383,13 @@ impl LlmSession {
     /// `Some("microcompact")` — only stale tool output was cleared.
     pub fn last_turn_compaction(&self) -> Option<&'static str> {
         *self.last_turn_compaction.lock().unwrap()
+    }
+
+    /// Report the compaction mode applied by the persistent context layer
+    /// for the current turn, so the UI flag keeps working now that the
+    /// send path no longer compacts outgoing copies.
+    pub fn set_last_turn_compaction(&self, mode: Option<&'static str>) {
+        *self.last_turn_compaction.lock().unwrap() = mode;
     }
 
     /// Return a snapshot of cumulative token usage statistics.
@@ -1612,7 +1617,6 @@ impl LlmSession {
             langfuse_turn_counter: std::sync::atomic::AtomicU32::new(0),
             max_context_tokens: self.max_context_tokens,
             context_budget_policy: self.context_budget_policy.clone(),
-            compact_consecutive_failures: std::sync::Mutex::new(0),
             rotation: None,
             turn_seq: std::sync::atomic::AtomicU32::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
@@ -1820,134 +1824,22 @@ impl LlmSession {
 
     pub(crate) async fn prepare_messages_for_send(
         &self,
-        mut messages: Vec<ChatMessage>,
+        messages: Vec<ChatMessage>,
     ) -> Vec<ChatMessage> {
+        // No copy-level compaction here. The persistent context layer
+        // (ContextManager via compact_context_before_send) is the single
+        // compaction authority: rewriting an outgoing COPY per request
+        // makes the wire bytes a moving function of token pressure, so the
+        // replayed history diverges between turns and busts the provider
+        // prefix cache. This path only enforces the hard budget with a
+        // head-preserving trim (equivalent to a compaction boundary) and
+        // repairs tool-call pairing.
         let policy = &self.context_budget_policy;
-        if !policy.enabled {
-            return sanitize_tool_pairs(trim_messages(messages, self.max_context_tokens, 5));
-        }
-        let before_tokens = estimate_chat_tokens(&messages, policy);
-        let before_state = policy.state_for_tokens(before_tokens);
-        let mut compaction_changed = false;
-        let mut emitted_compaction_start = false;
-        let mut compaction_mode = "microcompact";
-
-        if matches!(
-            before_state.pressure,
-            ContextPressureLevel::Warning
-                | ContextPressureLevel::AutoCompact
-                | ContextPressureLevel::Blocking
-        ) {
-            let report = microcompact_chat_messages(&mut messages, policy);
-            if report.changed_messages > 0 {
-                compaction_changed = true;
-                *self.last_turn_compaction.lock().unwrap() = Some("microcompact");
-                tracing::info!(
-                    changed_messages = report.changed_messages,
-                    reclaimed_tokens = report.reclaimed_tokens,
-                    compaction = "microcompact",
-                    "send-path context microcompact completed"
-                );
-            }
-        }
-
-        let after_micro_tokens = estimate_chat_tokens(&messages, policy);
-        let after_micro_state = policy.state_for_tokens(after_micro_tokens);
-        if after_micro_state.is_above_auto_compact_threshold && policy.full_compact_enabled {
-            self.emit_context_compaction_start("send_path", "full_compact");
-            emitted_compaction_start = true;
-            compaction_mode = "full_compact";
-            let failures = *self.compact_consecutive_failures.lock().unwrap();
-            if failures >= policy.max_consecutive_failures {
-                tracing::warn!(
-                    failures,
-                    "send-path full compact skipped because failure fuse is open"
-                );
-            } else {
-                match self
-                    .full_compact_chat_messages_with_model(messages.clone(), policy)
-                    .await
-                {
-                    Ok(_compacted) => {
-                        *self.compact_consecutive_failures.lock().unwrap() = 0;
-                        compaction_changed = true;
-                        *self.last_turn_compaction.lock().unwrap() = Some("full_compact");
-                        tracing::info!(
-                            compaction = "full_compact",
-                            "send-path full compact completed, compaction flag set"
-                        );
-                        messages = _compacted;
-                    }
-                    Err(err) => {
-                        let mut guard = self.compact_consecutive_failures.lock().unwrap();
-                        *guard = (*guard).saturating_add(1);
-                        tracing::warn!(
-                            error = %err,
-                            failures = *guard,
-                            "send-path full compact failed; falling back to final trim"
-                        );
-                    }
-                }
-            }
-        }
-
-        if emitted_compaction_start || compaction_changed {
-            let after_tokens = estimate_chat_tokens(&messages, policy);
-            self.emit_context_compaction_end(
-                "send_path",
-                compaction_mode,
-                before_tokens,
-                after_tokens,
-                compaction_changed,
-            );
-        }
-
         sanitize_tool_pairs(trim_messages(
             messages,
             self.max_context_tokens,
             policy.micro_keep_recent_messages.max(5),
         ))
-    }
-
-    async fn full_compact_chat_messages_with_model(
-        &self,
-        messages: Vec<ChatMessage>,
-        policy: &ContextBudgetPolicy,
-    ) -> Result<Vec<ChatMessage>, String> {
-        let keep_recent = policy.micro_keep_recent_messages.max(2);
-        let recent_start = messages.len().saturating_sub(keep_recent);
-        let old_messages: Vec<ChatMessage> = messages
-            .iter()
-            .take(recent_start)
-            .filter(|m| m.role != "system")
-            .cloned()
-            .collect();
-        if old_messages.is_empty() {
-            return Err("no old chat messages available for full compact".to_string());
-        }
-
-        let prompt = build_chat_summary_prompt(&old_messages, policy.summary_max_tokens);
-        let summary = self
-            .generate_compact_summary(prompt, policy.summary_max_tokens)
-            .await
-            .map_err(|err| err.to_string())?;
-
-        let mut compacted = Vec::new();
-        for (idx, msg) in messages.iter().enumerate() {
-            if idx >= recent_start {
-                break;
-            }
-            if msg.role == "system" {
-                compacted.push(msg.clone());
-            }
-        }
-        compacted.push(ChatMessage::system(summary));
-        compacted.extend(messages.into_iter().skip(recent_start));
-        tracing::info!(
-            compacted_messages = old_messages.len(),
-            "send-path model full compact completed"
-        );
-        Ok(compacted)
     }
 
     async fn generate_compact_summary(
@@ -2031,34 +1923,6 @@ fn build_context_summary_prompt(
     prompt
 }
 
-fn build_chat_summary_prompt(messages: &[ChatMessage], summary_max_tokens: usize) -> String {
-    let mut prompt = String::new();
-    prompt.push_str("Summarize the older in-flight chat/tool context below for AI Shell.\n");
-    prompt.push_str("Preserve user intent, command/tool results, failures, important stderr, and pending next steps. Drop verbose stdout and repeated low-value details.\n");
-    prompt.push_str(&format!(
-        "Target summary budget: about {} tokens.\n\n",
-        summary_max_tokens
-    ));
-    prompt.push_str("Return exactly one <conversation-summary> block.\n\n");
-    for (idx, msg) in messages.iter().enumerate() {
-        let content = msg.text_content().unwrap_or("");
-        prompt.push_str(&format!(
-            "\n<message index=\"{}\" role=\"{}\">\n{}\n</message>\n",
-            idx,
-            msg.role,
-            truncate_for_summary_prompt(content, 4_000)
-        ));
-        if let Some(reasoning) = &msg.reasoning_content {
-            prompt.push_str(&format!(
-                "<reasoning index=\"{}\">\n{}\n</reasoning>\n",
-                idx,
-                truncate_for_summary_prompt(reasoning, 1_000)
-            ));
-        }
-    }
-    prompt
-}
-
 fn memory_type_label(memory_type: &MemoryType) -> &'static str {
     match memory_type {
         MemoryType::Llm => "llm",
@@ -2138,164 +2002,6 @@ fn estimate_one_chat_message(message: &ChatMessage, _policy: &ContextBudgetPolic
         .map(|tc| tc.name.len() + tc.arguments.len())
         .sum();
     ((content_len + reasoning_len + tool_calls_len) / 4).max(1)
-}
-
-fn microcompact_chat_messages(
-    messages: &mut [ChatMessage],
-    policy: &ContextBudgetPolicy,
-) -> MicrocompactReport {
-    let before_tokens = estimate_chat_tokens(messages, policy);
-    let recent_start = messages
-        .len()
-        .saturating_sub(policy.micro_keep_recent_messages);
-    let mut changed_messages = 0usize;
-
-    for (idx, msg) in messages.iter_mut().enumerate() {
-        if idx >= recent_start || msg.role == "system" {
-            continue;
-        }
-
-        let mut changed = false;
-        if msg.role == "tool" {
-            if let Some(content) = msg.text_content() {
-                if content.len() > 256 || is_low_value_chat_output(content) {
-                    let mut replacement = String::from(
-                        "[old tool output cleared by context microcompact; key metadata retained]",
-                    );
-                    if let Some(id) = &msg.tool_call_id {
-                        replacement.push_str(&format!("\ntool_call_id: {}", id));
-                    }
-                    if let Some(return_code) = extract_return_code(content) {
-                        replacement.push_str(&format!("\nreturn_code: {}", return_code));
-                    }
-                    msg.content = Some(MessageContent::Text(replacement));
-                    changed = true;
-                }
-            }
-        }
-
-        if msg
-            .reasoning_content
-            .as_ref()
-            .is_some_and(|s| s.len() > 512)
-        {
-            msg.reasoning_content =
-                Some("[old reasoning content cleared by context microcompact]".to_string());
-            changed = true;
-        }
-
-        if changed {
-            changed_messages += 1;
-        }
-    }
-
-    let after_tokens = estimate_chat_tokens(messages, policy);
-    MicrocompactReport {
-        changed_messages,
-        reclaimed_tokens: before_tokens.saturating_sub(after_tokens),
-    }
-}
-
-#[cfg(test)]
-fn full_compact_chat_messages(
-    messages: Vec<ChatMessage>,
-    policy: &ContextBudgetPolicy,
-) -> Result<Vec<ChatMessage>, String> {
-    let keep_recent = policy.micro_keep_recent_messages.max(2);
-    let recent_start = messages.len().saturating_sub(keep_recent);
-    let old_messages: Vec<ChatMessage> = messages
-        .iter()
-        .take(recent_start)
-        .filter(|m| m.role != "system")
-        .cloned()
-        .collect();
-    if old_messages.is_empty() {
-        return Err("no old chat messages available for full compact".to_string());
-    }
-
-    let summary = build_chat_summary(&old_messages, policy.summary_max_tokens);
-    if summary.trim().is_empty() {
-        return Err("chat compact summary is empty".to_string());
-    }
-
-    let mut compacted = Vec::new();
-    for (idx, msg) in messages.iter().enumerate() {
-        if idx >= recent_start {
-            break;
-        }
-        if msg.role == "system" {
-            compacted.push(msg.clone());
-        }
-    }
-    compacted.push(ChatMessage::system(summary));
-    compacted.extend(messages.into_iter().skip(recent_start));
-    tracing::info!(
-        compacted_messages = old_messages.len(),
-        "send-path full compact completed"
-    );
-    Ok(compacted)
-}
-
-#[cfg(test)]
-fn build_chat_summary(old_messages: &[ChatMessage], summary_max_tokens: usize) -> String {
-    let mut lines = vec![
-        "<conversation-summary source=\"send_path_auto_compact\">".to_string(),
-        "Summary:".to_string(),
-        format!("- Compacted older chat messages: {}.", old_messages.len()),
-    ];
-    for msg in old_messages
-        .iter()
-        .rev()
-        .take(10)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        let content = msg.text_content().unwrap_or("");
-        lines.push(format!(
-            "- {}: {}",
-            msg.role,
-            summarize_chat_line(content, 220)
-        ));
-    }
-    lines.push("</conversation-summary>".to_string());
-    let mut summary = lines.join("\n");
-    let max_chars = summary_max_tokens.saturating_mul(4).max(512);
-    if summary.len() > max_chars {
-        let mut end = max_chars.min(summary.len());
-        while end > 0 && !summary.is_char_boundary(end) {
-            end -= 1;
-        }
-        summary.truncate(end);
-        summary.push_str("\n</conversation-summary>");
-    }
-    summary
-}
-
-#[cfg(test)]
-fn summarize_chat_line(content: &str, max_chars: usize) -> String {
-    let one_line = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .take(4)
-        .collect::<Vec<_>>()
-        .join(" | ");
-    if one_line.len() <= max_chars {
-        return one_line;
-    }
-    let mut end = max_chars.min(one_line.len());
-    while end > 0 && !one_line.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &one_line[..end])
-}
-
-fn is_low_value_chat_output(content: &str) -> bool {
-    content.contains("<stdout>")
-        || content.contains("<stderr>")
-        || content.contains("<offload>")
-        || content.len() > 8_000
 }
 
 fn extract_return_code(content: &str) -> Option<String> {
@@ -2902,55 +2608,6 @@ mod tests {
     }
 
     #[test]
-    fn test_microcompact_chat_messages_clears_old_tool_output() {
-        let policy = ContextBudgetPolicy {
-            micro_keep_recent_messages: 1,
-            enable_token_estimation: false,
-            ..ContextBudgetPolicy::default()
-        };
-        let mut msgs = vec![
-            make_msg("system", "sys"),
-            ChatMessage::tool_result(
-                "call-old",
-                "<stdout>very noisy output</stdout>\n<return_code>0</return_code>",
-            ),
-            ChatMessage::tool_result("call-new", "<stdout>recent output</stdout>"),
-        ];
-
-        let report = microcompact_chat_messages(&mut msgs, &policy);
-        assert_eq!(report.changed_messages, 1);
-        assert!(msgs[1]
-            .text_content()
-            .unwrap()
-            .contains("old tool output cleared"));
-        assert!(msgs[2].text_content().unwrap().contains("recent output"));
-    }
-
-    #[test]
-    fn test_full_compact_chat_messages_adds_summary_and_preserves_recent() {
-        let policy = ContextBudgetPolicy {
-            micro_keep_recent_messages: 2,
-            summary_max_tokens: 200,
-            ..ContextBudgetPolicy::default()
-        };
-        let msgs = vec![
-            make_msg("system", "sys"),
-            make_msg("user", "old request"),
-            make_msg("assistant", "old answer"),
-            make_msg("user", "recent request"),
-            make_msg("assistant", "recent answer"),
-        ];
-
-        let result = full_compact_chat_messages(msgs, &policy).unwrap();
-        assert_eq!(result[0].role, "system");
-        assert!(result.iter().any(|m| m
-            .text_content()
-            .unwrap_or("")
-            .contains("conversation-summary")));
-        assert_eq!(result.last().unwrap().text_content(), Some("recent answer"));
-    }
-
-    #[test]
     fn test_format_compact_summary_wraps_model_text() {
         let formatted = format_compact_summary(
             "<analysis>scratch</analysis><summary>Current Goal:\n- Diagnose nginx</summary>"
@@ -2961,8 +2618,12 @@ mod tests {
         assert!(!formatted.contains("scratch"));
     }
 
+    /// Send path no longer compacts an outgoing copy (that made wire bytes
+    /// a moving function of token pressure and busted prefix caches).
+    /// It must pass the messages through byte-preserved (only head-trim
+    /// when the hard budget is exceeded — not the case here).
     #[tokio::test]
-    async fn test_prepare_messages_for_send_triggers_microcompact_without_model() {
+    async fn test_prepare_messages_for_send_preserves_wire_bytes() {
         let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
         session.set_context_budget_policy(ContextBudgetPolicy {
             context_window_tokens: 2_000,
@@ -2978,6 +2639,7 @@ mod tests {
 
         let mut msgs = vec![make_msg("system", "sys")];
         let mut assistant_call = ChatMessage::assistant("");
+        assistant_call.content = None;
         assistant_call.tool_calls = Some(vec![ToolCall {
             id: "call-old".to_string(),
             name: "bash".to_string(),
@@ -2986,37 +2648,14 @@ mod tests {
         msgs.push(assistant_call);
         msgs.push(ChatMessage::tool_result(
             "call-old",
-            format!(
-                "<stdout>{}</stdout>\n<return_code>1</return_code>",
-                "old noisy output\n".repeat(400)
-            ),
-        ));
-        let mut assistant_call2 = ChatMessage::assistant("");
-        assistant_call2.tool_calls = Some(vec![ToolCall {
-            id: "call-old-2".to_string(),
-            name: "bash".to_string(),
-            arguments: "{}".to_string(),
-        }]);
-        msgs.push(assistant_call2);
-        msgs.push(ChatMessage::tool_result(
-            "call-old-2",
-            format!(
-                "<stdout>{}</stdout>\n<return_code>1</return_code>",
-                "more old noisy output\n".repeat(400)
-            ),
+            "<stdout>noisy output under no pressure</stdout>\n<return_code>1</return_code>",
         ));
         msgs.push(make_msg("user", "recent request"));
         msgs.push(make_msg("assistant", "recent answer"));
 
+        let expected = serde_json::to_string(&msgs).unwrap();
         let prepared = session.prepare_messages_for_send(msgs).await;
-        assert!(prepared.iter().any(|m| m
-            .text_content()
-            .unwrap_or("")
-            .contains("old tool output cleared")));
-        assert_eq!(
-            prepared.last().unwrap().text_content(),
-            Some("recent answer")
-        );
+        assert_eq!(serde_json::to_string(&prepared).unwrap(), expected);
     }
 
     #[test]

@@ -633,7 +633,10 @@ impl ContextManager {
             if idx >= recent_start {
                 break;
             }
-            if msg.role == "system" && !msg.content.starts_with(SUMMARY_TAG) {
+            if msg.role == "system"
+                && !msg.content.starts_with(SUMMARY_TAG)
+                && !is_transient_system(&msg.content)
+            {
                 new_messages.push(msg.clone());
             }
         }
@@ -720,7 +723,18 @@ fn is_low_value_output(content: &str) -> bool {
         || content.contains("<offload>")
         || content.contains("</stdout>")
         || content.contains("</stderr>")
+        // Per-turn transient blocks (env cwd updates, memory recall) age
+        // into low value immediately after their turn passes.
+        || content.contains("**Environment Update:**")
+        || content.contains("<long-term-memory")
         || content.len() > 8_000
+}
+
+/// Per-turn transient system blocks. They ride at the natural turn position
+/// for cache stability but must not survive full compaction — the current
+/// turn's env/recall is re-appended every turn anyway.
+fn is_transient_system(content: &str) -> bool {
+    content.contains("**Environment Update:**") || content.contains("<long-term-memory")
 }
 
 fn compact_shell_content(content: &str) -> Option<String> {
