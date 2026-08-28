@@ -123,6 +123,7 @@ impl ContextManager {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         );
     }
@@ -179,15 +180,16 @@ impl ContextManager {
     }
 
     pub fn estimate_message_tokens(&self, msg: &ContextMessage) -> usize {
-        // Tool-call arguments can be kilobytes (bash/write_file payloads)
-        // and must count toward the budget or compaction triggers late.
+        // Tool-call arguments (bash/write_file payloads) and reasoning
+        // content must count toward the budget or compaction triggers late.
         let tool_calls_len: usize = msg
             .tool_calls
             .iter()
             .flatten()
             .map(|tc| tc.name.len() + tc.arguments.len())
             .sum();
-        self.estimate_tokens(&msg.content) + tool_calls_len / 4
+        let reasoning_len = msg.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0);
+        self.estimate_tokens(&msg.content) + (tool_calls_len + reasoning_len) / 4
     }
 
     /// Return the total number of stored messages.
@@ -195,7 +197,6 @@ impl ContextManager {
         self.messages.len()
     }
 
-    /// Get statistics about the current context state.
     pub fn get_context_stats(&self) -> ContextStats {
         let mut stats = ContextStats {
             total_messages: self.messages.len(),
@@ -659,6 +660,7 @@ impl ContextManager {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         });
         new_messages.extend(self.messages.iter().skip(recent_start).cloned());
 
@@ -1187,6 +1189,7 @@ mod tests {
                 name: name.to_string(),
                 arguments: "{}".to_string(),
             }]),
+            reasoning_content: None,
         }
     }
 
@@ -1198,6 +1201,7 @@ mod tests {
             name: Some("bash".to_string()),
             tool_call_id: Some(id.to_string()),
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -1310,6 +1314,7 @@ mod tests {
             name: None,
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         };
         let with_calls = ContextMessage {
             tool_calls: Some(vec![aish_core::ContextToolCall {
@@ -1360,6 +1365,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         );
         cm.add_memory(
@@ -1373,6 +1379,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         );
         // Recent tail keeps the current turn intact.

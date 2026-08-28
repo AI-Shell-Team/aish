@@ -272,6 +272,7 @@ impl AiHandler {
                 name: message.name,
                 tool_call_id: message.tool_call_id,
                 tool_calls: message.tool_calls,
+                reasoning_content: message.reasoning_content,
             })
             .collect()
     }
@@ -286,6 +287,7 @@ impl AiHandler {
                 name: message.name,
                 tool_call_id: message.tool_call_id,
                 tool_calls: message.tool_calls,
+                reasoning_content: message.reasoning_content,
             })
             .collect();
         self.restore_context_messages(restored);
@@ -515,6 +517,7 @@ impl AiHandler {
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             );
         }
@@ -694,6 +697,17 @@ impl AiHandler {
                     name: m.name.clone(),
                     tool_call_id: m.tool_call_id.clone(),
                     tool_calls: kept_calls.filter(|c| !c.is_empty()),
+                    // Reasoning content must replay byte-identically or the
+                    // provider prompt cache busts at this message on every
+                    // following turn (observed with DeepSeek-style
+                    // reasoning models). Redaction is string-preserving;
+                    // no truncation so replayed bytes equal wire bytes.
+                    reasoning_content: m.reasoning_content.as_ref().map(|r| {
+                        match &self.secret_redactor {
+                            Some(redactor) => redactor(r),
+                            None => r.clone(),
+                        }
+                    }),
                 })
             })
             .collect()
@@ -973,6 +987,7 @@ impl AiHandler {
                         name: None,
                         tool_call_id: None,
                         tool_calls: None,
+                        reasoning_content: None,
                     },
                 );
             }
@@ -1106,7 +1121,7 @@ If the user's request is NOT covered by any loaded skill above, follow this work
                     }),
                     tool_call_id: m.tool_call_id,
                     name: m.name,
-                    reasoning_content: None,
+                    reasoning_content: m.reasoning_content,
                     cache_control: None,
                 }
             })
@@ -2376,5 +2391,74 @@ mod tests {
         messages.pop(); // remove the tool result
         let persisted = handler.redact_turn_messages(&messages);
         assert!(persisted.is_empty());
+    }
+
+    #[test]
+    fn env_block_persists_once_for_unchanged_cwd() {
+        // Two turns with identical env blocks must append only one block.
+        let mut handler = test_handler();
+        let env = "\n**Environment Update:**\n- Current directory: /w";
+
+        let count_env = |h: &AiHandler| {
+            h.context_manager
+                .messages_snapshot()
+                .iter()
+                .filter(|m| m.content.contains("**Environment Update:**"))
+                .count()
+        };
+
+        for _ in 0..2 {
+            let last_unchanged = handler
+                .context_manager
+                .messages_snapshot()
+                .iter()
+                .rev()
+                .find(|m| m.role == "system" && m.content.contains("**Environment Update:**"))
+                .is_some_and(|m| m.content == env);
+            if !last_unchanged {
+                handler.context_manager.add_memory(
+                    MemoryType::Llm,
+                    ContextMessage {
+                        role: "system".to_string(),
+                        content: env.to_string(),
+                        memory_type: MemoryType::Llm,
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                        reasoning_content: None,
+                    },
+                );
+            }
+            handler
+                .context_manager
+                .add_message("user", "q", MemoryType::Llm);
+        }
+        assert_eq!(count_env(&handler), 1);
+    }
+
+    /// Reasoning models (DeepSeek-style) require reasoning_content to be
+    /// echoed back; persisting and replaying it verbatim keeps the prefix
+    /// cache intact (observed busting every turn otherwise).
+    #[test]
+    fn reasoning_content_round_trips_byte_identically() {
+        let mut handler = test_handler();
+        let mut turn = turn_with_tool_call();
+        turn[0].reasoning_content = Some("用户想执行标记命令，我先调用 bash。".to_string());
+
+        let wire: Vec<ChatMessage> = turn.clone();
+        for msg in handler.redact_turn_messages(&turn) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        let replayed = handler.build_context_messages();
+
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&replayed).unwrap(),
+            "replayed reasoning must be byte-identical to wire bytes"
+        );
+        assert_eq!(
+            replayed[0].reasoning_content.as_deref(),
+            Some("用户想执行标记命令，我先调用 bash。")
+        );
     }
 }

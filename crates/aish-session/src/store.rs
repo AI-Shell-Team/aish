@@ -738,6 +738,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             }],
             updated_at: Some(Utc::now()),
         };
@@ -972,6 +973,7 @@ mod tests {
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
+                reasoning_content: None,
             }],
             updated_at: Some(Utc::now()),
         };

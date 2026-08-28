@@ -30,6 +30,9 @@ pub struct SessionContextMessage {
     /// persisted before this field existed still deserialize.
     #[serde(default)]
     pub tool_calls: Option<Vec<aish_core::ContextToolCall>>,
+    /// Reasoning content echoed back by reasoning-model providers.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
