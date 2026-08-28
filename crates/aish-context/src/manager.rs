@@ -12,6 +12,13 @@ const CLEARED_SHELL_OUTPUT: &str =
 const CLEARED_LLM_OUTPUT: &str = "[old low-value output cleared by context microcompact]";
 const SUMMARY_TAG: &str = "<conversation-summary";
 
+/// A message whose suffix (all messages after it) exceeds this many
+/// estimated tokens sits deep inside the provider's warm prompt-cache
+/// prefix: rewriting it forces the provider to re-write the entire suffix
+/// at cache-write premium. Microcompact skips such messages; full
+/// compaction (which rebuilds the cache anyway) reclaims them.
+const CACHE_WARM_SUFFIX_TOKENS: usize = 8_000;
+
 /// Statistics about the current context state.
 #[derive(Debug, Clone)]
 pub struct ContextStats {
@@ -356,6 +363,22 @@ impl ContextManager {
         let keep_recent_messages = self.budget_policy.micro_keep_recent_messages;
         let recent_start = self.messages.len().saturating_sub(keep_recent_messages);
 
+        // Cache-warm suffix guard (modeled on oh-my-pi's
+        // cacheWarmSuffixTokens): rewriting a message whose suffix already
+        // went on the wire forces the provider to re-write that entire
+        // suffix at cache-write premium. Messages deeper than
+        // CACHE_WARM_SUFFIX_TOKENS from the end are left for full
+        // compaction (which rebuilds the cache anyway); microcompact only
+        // reclaims from the cold tail.
+        let mut suffix_tokens = vec![0usize; self.messages.len() + 1];
+        for idx in (0..self.messages.len()).rev() {
+            suffix_tokens[idx] =
+                suffix_tokens[idx + 1] + self.estimate_message_tokens(&self.messages[idx]);
+        }
+        let cache_warm = |idx: usize| {
+            suffix_tokens.get(idx + 1).copied().unwrap_or(0) > CACHE_WARM_SUFFIX_TOKENS
+        };
+
         let shell_indices: Vec<usize> = self
             .messages
             .iter()
@@ -374,6 +397,9 @@ impl ContextManager {
             .collect();
 
         for idx in 0..self.messages.len() {
+            if cache_warm(idx) {
+                continue;
+            }
             let msg = &mut self.messages[idx];
             if msg.content.starts_with(SUMMARY_TAG) {
                 continue;
@@ -1392,5 +1418,48 @@ mod tests {
         assert!(!cm.messages[1].content.contains("/old/path"));
         assert!(!cm.messages[2].content.contains("old fact"));
         assert_eq!(cm.messages[3].content, "current question");
+    }
+
+    #[test]
+    fn microcompact_skips_messages_inside_warm_cache_suffix() {
+        // An old low-value output followed by >8k tokens of conversation
+        // sits in the provider's warm prefix: rewriting it would bust the
+        // cache for the whole suffix. It must be skipped; only the cold
+        // tail (small suffix) is compacted.
+        let mut cm = ContextManager::new();
+        cm.set_budget_policy(ContextBudgetPolicy {
+            micro_keep_recent_messages: 2,
+            enable_token_estimation: false,
+            ..ContextBudgetPolicy::default()
+        });
+        // Warm message: old, low-value, big suffix.
+        cm.add_message(
+            "user",
+            &format!("<stdout>{}</stdout>", "warm old output ".repeat(64)),
+            MemoryType::Llm,
+        );
+        // >8k tokens after it (32k chars of content / 4).
+        for i in 0..8 {
+            cm.add_message(
+                "assistant",
+                &format!("turn-{i}-{}", "x".repeat(4_000)),
+                MemoryType::Llm,
+            );
+        }
+        // Cold message: low-value, tiny suffix.
+        cm.add_message(
+            "user",
+            &format!("<stdout>{}</stdout>", "cold old output ".repeat(64)),
+            MemoryType::Llm,
+        );
+        cm.add_message("assistant", "after cold", MemoryType::Llm);
+        cm.add_message("user", "recent question", MemoryType::Llm);
+        cm.add_message("assistant", "recent answer", MemoryType::Llm);
+
+        let report = cm.microcompact();
+        // Exactly the cold message is rewritten; the warm one is skipped.
+        assert_eq!(report.changed_messages, 1);
+        assert!(cm.messages[0].content.contains("warm old output"));
+        assert!(cm.messages[9].content.contains("cleared"));
     }
 }
