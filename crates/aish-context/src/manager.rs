@@ -374,7 +374,19 @@ impl ContextManager {
 
         for idx in 0..self.messages.len() {
             let msg = &mut self.messages[idx];
-            if msg.role == "system" || msg.content.starts_with(SUMMARY_TAG) {
+            if msg.content.starts_with(SUMMARY_TAG) {
+                continue;
+            }
+            if msg.role == "system" {
+                // Aged per-turn transient blocks (env cwd updates, memory
+                // recall) are compacted to a minimal placeholder; every
+                // other system message (static core, skills, summaries)
+                // stays verbatim. No length guard: aging, not size, is
+                // the trigger.
+                if idx < recent_start && is_transient_system(&msg.content) {
+                    msg.content = "[cleared]".to_string();
+                    changed_messages += 1;
+                }
                 continue;
             }
 
@@ -702,6 +714,10 @@ fn tool_call_groups(messages: &[ContextMessage]) -> Vec<Vec<usize>> {
     groups
 }
 
+fn estimate_tokens_rough(text: &str) -> usize {
+    (text.len() / 4).max(1)
+}
+
 fn normalize_summary(summary: String) -> String {
     let trimmed = summary.trim();
     if trimmed.starts_with(SUMMARY_TAG) {
@@ -713,20 +729,12 @@ fn normalize_summary(summary: String) -> String {
     )
 }
 
-fn estimate_tokens_rough(text: &str) -> usize {
-    (text.len() / 4).max(1)
-}
-
 fn is_low_value_output(content: &str) -> bool {
     content.contains("<stdout>")
         || content.contains("<stderr>")
         || content.contains("<offload>")
         || content.contains("</stdout>")
         || content.contains("</stderr>")
-        // Per-turn transient blocks (env cwd updates, memory recall) age
-        // into low value immediately after their turn passes.
-        || content.contains("**Environment Update:**")
-        || content.contains("<long-term-memory")
         || content.len() > 8_000
 }
 
@@ -1332,5 +1340,50 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|m| m.tool_calls.is_none() && m.role != "tool"));
+    }
+
+    #[test]
+    fn microcompact_clears_aged_transient_system_blocks_only() {
+        let mut cm = ContextManager::new();
+        cm.set_budget_policy(ContextBudgetPolicy {
+            micro_keep_recent_messages: 2,
+            enable_token_estimation: false,
+            ..ContextBudgetPolicy::default()
+        });
+        cm.add_message("system", "static skills appendix", MemoryType::Knowledge);
+        cm.add_memory(
+            MemoryType::Llm,
+            ContextMessage {
+                role: "system".to_string(),
+                content: "**Environment Update:**\n- Current directory: /old/path".to_string(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        cm.add_memory(
+            MemoryType::Llm,
+            ContextMessage {
+                role: "system".to_string(),
+                content:
+                    "<long-term-memory source=\"recall\">\n- [Env] old fact\n</long-term-memory>"
+                        .to_string(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+        // Recent tail keeps the current turn intact.
+        cm.add_message("user", "current question", MemoryType::Llm);
+        cm.add_message("assistant", "current answer", MemoryType::Llm);
+
+        let report = cm.microcompact();
+        assert_eq!(report.changed_messages, 2);
+        assert_eq!(cm.messages[0].content, "static skills appendix");
+        assert!(!cm.messages[1].content.contains("/old/path"));
+        assert!(!cm.messages[2].content.contains("old fact"));
+        assert_eq!(cm.messages[3].content, "current question");
     }
 }

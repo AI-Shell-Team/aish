@@ -495,17 +495,29 @@ impl AiHandler {
         // in front of the history instead would bust the whole prefix
         // whenever cwd changes.
         let (static_core, env_block) = self.system_message_parts();
-        self.context_manager.add_memory(
-            MemoryType::Llm,
-            ContextMessage {
-                role: "system".to_string(),
-                content: env_block,
-                memory_type: MemoryType::Llm,
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-            },
-        );
+        // Append-only with consecutive dedupe: skip when cwd is unchanged
+        // so history does not accumulate identical env blocks; a change
+        // appends a new block at the natural turn position.
+        let last_env_unchanged = self
+            .context_manager
+            .messages_snapshot()
+            .iter()
+            .rev()
+            .find(|m| m.role == "system" && m.content.contains("**Environment Update:**"))
+            .is_some_and(|m| m.content == env_block);
+        if !last_env_unchanged {
+            self.context_manager.add_memory(
+                MemoryType::Llm,
+                ContextMessage {
+                    role: "system".to_string(),
+                    content: env_block,
+                    memory_type: MemoryType::Llm,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+            );
+        }
         let context_messages = self.build_context_messages();
 
         // Step 6: Extract images from the question text
@@ -939,22 +951,31 @@ impl AiHandler {
                         .join(", ")
                 )
             };
-            // Append the recall at the natural turn position (right before
-            // this turn's user message) instead of replacing a stable-slot
-            // message. The wire bytes of every past turn stay identical on
-            // replay, so the provider prefix cache holds; old recall blocks
-            // are compacted later like any other low-value output.
-            self.context_manager.add_memory(
-                MemoryType::Llm,
-                ContextMessage {
-                    role: "system".to_string(),
-                    content,
-                    memory_type: MemoryType::Llm,
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                },
-            );
+            // Append-only with consecutive dedupe: skip when the recall
+            // equals the most recent stored recall (same memory set) so
+            // repeated same-domain questions do not accumulate identical
+            // blocks. Old recall blocks age out via transient-system
+            // compaction.
+            let last_recall_unchanged = self
+                .context_manager
+                .messages_snapshot()
+                .iter()
+                .rev()
+                .find(|m| m.role == "system" && m.content.contains("<long-term-memory"))
+                .is_some_and(|m| m.content == content);
+            if !last_recall_unchanged {
+                self.context_manager.add_memory(
+                    MemoryType::Llm,
+                    ContextMessage {
+                        role: "system".to_string(),
+                        content,
+                        memory_type: MemoryType::Llm,
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                );
+            }
         }
     }
 
