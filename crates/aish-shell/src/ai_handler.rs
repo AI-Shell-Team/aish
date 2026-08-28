@@ -574,8 +574,6 @@ impl AiHandler {
     /// ContextMessages, applying secret redaction and a size cap to tool
     /// results before they enter long-lived context.
     fn redact_turn_messages(&self, messages: &[ChatMessage]) -> Vec<ContextMessage> {
-        const MAX_TOOL_OUTPUT: usize = 4 * 1024;
-
         // Write-time pairing repair: only persist tool_calls that actually
         // received results, and drop orphan results, so the stored context
         // is self-consistent without relying on the send-path sanitizer.
@@ -643,13 +641,15 @@ impl AiHandler {
                     if let Some(redactor) = &self.secret_redactor {
                         content = redactor(&content);
                     }
-                    if content.len() > MAX_TOOL_OUTPUT {
-                        let mut end = MAX_TOOL_OUTPUT;
-                        while end > 0 && !content.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        content = format!("{}...(truncated)", &content[..end]);
-                    }
+                    // Backstop only: construction already capped the wire
+                    // bytes (ChatMessage::tool_result), so for fresh turns
+                    // this is a no-op and replay stays byte-identical. It
+                    // still guards tool outputs restored from legacy
+                    // snapshots that predate the construction-time cap.
+                    // Redaction itself is the one accepted divergence:
+                    // secrets must not persist even at the cost of a cache
+                    // re-write for that (rare) turn.
+                    content = aish_llm::cap_tool_output(content);
                 }
 
                 Some(ContextMessage {
@@ -1023,23 +1023,36 @@ If the user's request is NOT covered by any loaded skill above, follow this work
         self.context_manager
             .messages_snapshot()
             .into_iter()
-            .map(|m| ChatMessage {
-                role: m.role,
-                content: Some(MessageContent::Text(m.content)),
-                tool_calls: m.tool_calls.map(|calls| {
-                    calls
-                        .into_iter()
-                        .map(|tc| aish_llm::ToolCall {
-                            id: tc.id,
-                            name: tc.name,
-                            arguments: tc.arguments,
-                        })
-                        .collect()
-                }),
-                tool_call_id: m.tool_call_id,
-                name: m.name,
-                reasoning_content: None,
-                cache_control: None,
+            .map(|m| {
+                let has_tool_calls = m.tool_calls.as_ref().is_some_and(|c| !c.is_empty());
+                let role = m.role.clone();
+                // An assistant tool-call message with empty content was
+                // sent with content ABSENT (null) during the live turn;
+                // replay it the same way so the serialized prefix stays
+                // byte-identical and the provider prompt cache holds.
+                let content = if m.content.is_empty() && role == "assistant" && has_tool_calls {
+                    None
+                } else {
+                    Some(MessageContent::Text(m.content.clone()))
+                };
+                ChatMessage {
+                    role,
+                    content,
+                    tool_calls: m.tool_calls.map(|calls| {
+                        calls
+                            .into_iter()
+                            .map(|tc| aish_llm::ToolCall {
+                                id: tc.id,
+                                name: tc.name,
+                                arguments: tc.arguments,
+                            })
+                            .collect()
+                    }),
+                    tool_call_id: m.tool_call_id,
+                    name: m.name,
+                    reasoning_content: None,
+                    cache_control: None,
+                }
             })
             .collect()
     }
@@ -2115,6 +2128,8 @@ mod tests {
 
     fn turn_with_tool_call() -> Vec<ChatMessage> {
         let mut assistant = ChatMessage::assistant("");
+        // Live streaming turns produce null content on tool-call messages.
+        assistant.content = None;
         assistant.tool_calls = Some(vec![aish_llm::ToolCall {
             id: "call_1".to_string(),
             name: "bash".to_string(),
@@ -2193,6 +2208,63 @@ mod tests {
 
         assert!(context[1].tool_calls.is_some());
         assert_eq!(context[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    /// Prompt-cache invariant: the replayed turn must serialize to the
+    /// exact bytes the provider already saw during the live turn (no
+    /// redactor set, output under the construction-time cap). Any
+    /// divergence here busts the provider prefix cache at that point.
+    #[test]
+    fn replayed_turn_is_byte_identical_to_wire() {
+        let mut handler = test_handler();
+        let user = ChatMessage::user("run the marker command");
+        let turn = turn_with_tool_call();
+
+        // What process_input actually sent during the live tool loop.
+        let wire: Vec<ChatMessage> = vec![user.clone(), turn[0].clone(), turn[1].clone()];
+
+        // Persist exactly like handle_question (final assistant text
+        // appended after the replayed prefix, as turn N+1 sends it), then
+        // rebuild and compare the replayed turn-N prefix.
+        handler
+            .context_manager
+            .add_message("user", "run the marker command", MemoryType::Llm);
+        for msg in handler.redact_turn_messages(&turn) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        handler
+            .context_manager
+            .add_message("assistant", "CHECK_DONE", MemoryType::Llm);
+        let replayed = handler.build_context_messages();
+        let replayed_prefix: Vec<ChatMessage> = replayed[..wire.len()].to_vec();
+
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&replayed_prefix).unwrap(),
+            "replayed turn-N prefix must be byte-identical to the wire bytes"
+        );
+        assert_eq!(replayed[wire.len()].text_content(), Some("CHECK_DONE"));
+    }
+
+    /// Large outputs are capped at construction, so even oversized tool
+    /// results replay byte-identically (no persist-time re-truncation).
+    #[test]
+    fn oversized_tool_output_replays_byte_identically() {
+        let mut handler = test_handler();
+        let mut turn = turn_with_tool_call();
+        turn[1] = ChatMessage::tool_result("call_1", "y".repeat(64 * 1024));
+
+        let wire: Vec<ChatMessage> = turn.clone();
+        for msg in handler.redact_turn_messages(&turn) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        let replayed = handler.build_context_messages();
+
+        assert!(wire[1].text_content().unwrap().len() <= 4 * 1024 + 32);
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&replayed).unwrap()
+        );
     }
 
     #[test]

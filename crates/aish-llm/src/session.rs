@@ -2991,6 +2991,20 @@ mod tests {
                 "old noisy output\n".repeat(400)
             ),
         ));
+        let mut assistant_call2 = ChatMessage::assistant("");
+        assistant_call2.tool_calls = Some(vec![ToolCall {
+            id: "call-old-2".to_string(),
+            name: "bash".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        msgs.push(assistant_call2);
+        msgs.push(ChatMessage::tool_result(
+            "call-old-2",
+            format!(
+                "<stdout>{}</stdout>\n<return_code>1</return_code>",
+                "more old noisy output\n".repeat(400)
+            ),
+        ));
         msgs.push(make_msg("user", "recent request"));
         msgs.push(make_msg("assistant", "recent answer"));
 
