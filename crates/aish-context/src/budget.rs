@@ -4,6 +4,10 @@ const DEFAULT_RESERVED_OUTPUT_TOKENS: usize = 20_000;
 const DEFAULT_AUTO_COMPACT_BUFFER_TOKENS: usize = 13_000;
 const DEFAULT_WARNING_BUFFER_TOKENS: usize = 20_000;
 const DEFAULT_BLOCKING_BUFFER_TOKENS: usize = 3_000;
+
+/// Default suffix depth below which microcompact may rewrite messages;
+/// deeper (cache-warm) messages are left for full compaction.
+const DEFAULT_CACHE_WARM_SUFFIX_TOKENS: usize = 8_000;
 const MIN_EFFECTIVE_CONTEXT_WINDOW_TOKENS: usize = 1_000;
 const MIN_PROMPT_BUDGET_TOKENS: usize = 8_000;
 const CONTEXT_WINDOW_WARN_BELOW_TOKENS: usize = 8_000;
@@ -54,6 +58,11 @@ pub struct ContextBudgetPolicy {
     pub blocking_buffer_tokens: usize,
     pub micro_keep_recent_messages: usize,
     pub shell_keep_recent_commands: usize,
+    /// Messages whose trailing suffix exceeds this many estimated tokens
+    /// sit inside the provider's warm prompt-cache prefix and are never
+    /// rewritten by microcompact; full compaction reclaims them. 0
+    /// disables the guard.
+    pub cache_warm_suffix_tokens: usize,
     pub max_consecutive_failures: usize,
     pub summary_max_tokens: usize,
     pub enable_token_estimation: bool,
@@ -72,6 +81,7 @@ impl Default for ContextBudgetPolicy {
             blocking_buffer_tokens: DEFAULT_BLOCKING_BUFFER_TOKENS,
             micro_keep_recent_messages: 6,
             shell_keep_recent_commands: 8,
+            cache_warm_suffix_tokens: DEFAULT_CACHE_WARM_SUFFIX_TOKENS,
             max_consecutive_failures: 3,
             summary_max_tokens: 4_000,
             enable_token_estimation: true,

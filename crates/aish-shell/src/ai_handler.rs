@@ -177,6 +177,9 @@ pub struct AiHandler {
     prompt_manager: PromptManager,
     token_store: crate::token_store::TokenUsageStore,
     auto_search: bool,
+    /// Optional secret redactor applied to tool outputs before they enter
+    /// the persistent context (memory + session snapshot).
+    secret_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
 }
 
 impl AiHandler {
@@ -209,7 +212,13 @@ impl AiHandler {
                 crate::token_store::TokenUsageStore::default_path(),
             ),
             auto_search,
+            secret_redactor: None,
         }
+    }
+
+    /// Set the secret redactor used before persisting tool outputs.
+    pub fn set_secret_redactor(&mut self, redactor: Arc<dyn Fn(&str) -> String + Send + Sync>) {
+        self.secret_redactor = Some(redactor);
     }
 
     /// Set the event callback for real-time LLM streaming display.
@@ -262,6 +271,8 @@ impl AiHandler {
                 memory_type: message.memory_type,
                 name: message.name,
                 tool_call_id: message.tool_call_id,
+                tool_calls: message.tool_calls,
+                reasoning_content: message.reasoning_content,
             })
             .collect()
     }
@@ -275,6 +286,8 @@ impl AiHandler {
                 memory_type: message.memory_type,
                 name: message.name,
                 tool_call_id: message.tool_call_id,
+                tool_calls: message.tool_calls,
+                reasoning_content: message.reasoning_content,
             })
             .collect();
         self.restore_context_messages(restored);
@@ -477,13 +490,38 @@ impl AiHandler {
         }
 
         // Step 5: Build context and system messages.
-        // Split system message into static core (cached) and dynamic env block.
-        // The static core goes as the main system_message; the env block is
-        // prepended to context_messages so the cache breakpoint lands on the
-        // stable prefix.
+        // The static core goes as the main system_message (stable prefix).
+        // The dynamic env block (cwd) is appended as a persistent message
+        // at the natural turn position — right before this turn's user
+        // message — so it replays byte-identically next turn. Placing it
+        // in front of the history instead would bust the whole prefix
+        // whenever cwd changes.
         let (static_core, env_block) = self.system_message_parts();
-        let mut context_messages = self.build_context_messages();
-        context_messages.insert(0, ChatMessage::system(&env_block));
+        // Append-only with consecutive dedupe: skip when cwd is unchanged
+        // so history does not accumulate identical env blocks; a change
+        // appends a new block at the natural turn position.
+        let last_env_unchanged = self
+            .context_manager
+            .messages_snapshot()
+            .iter()
+            .rev()
+            .find(|m| m.role == "system" && m.content.contains("**Environment Update:**"))
+            .is_some_and(|m| m.content == env_block);
+        if !last_env_unchanged {
+            self.context_manager.add_memory(
+                MemoryType::Llm,
+                ContextMessage {
+                    role: "system".to_string(),
+                    content: env_block,
+                    memory_type: MemoryType::Llm,
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: None,
+                    reasoning_content: None,
+                },
+            );
+        }
+        let context_messages = self.build_context_messages();
 
         // Step 6: Extract images from the question text
         let extracted = crate::image::extract_images(&question_processed);
@@ -534,9 +572,29 @@ impl AiHandler {
             .await?;
         let response = process_result.text;
 
-        // Step 7: Store the exchange in context
+        // Surface the persistent-layer compaction mode to the UI (the send
+        // path no longer compacts outgoing copies).
+        let compaction_mode: Option<&'static str> = if compact_report.full_compact.is_some() {
+            Some("full_compact")
+        } else if compact_report.microcompact.changed_messages > 0 {
+            Some("microcompact")
+        } else {
+            None
+        };
+        self.llm_session.set_last_turn_compaction(compaction_mode);
+
+        // Step 7: Store the exchange in context.
+        //
+        // For turns with tool calls, persist the full intermediate history
+        // (assistant tool_calls + tool results) so the next turn — and a
+        // resumed session — can see what the AI executed. `new_messages`
+        // never contains the final assistant text, so the response is
+        // appended unconditionally without duplication.
         self.context_manager
             .add_message("user", &question_processed, MemoryType::Llm);
+        for ctx_msg in self.redact_turn_messages(&process_result.new_messages) {
+            self.context_manager.add_memory(MemoryType::Llm, ctx_msg);
+        }
         self.context_manager
             .add_message("assistant", &response, MemoryType::Llm);
         self.context_manager.trim();
@@ -548,6 +606,111 @@ impl AiHandler {
         self.persist_token_usage();
 
         Ok(response)
+    }
+
+    /// Convert a turn's intermediate ChatMessages into persistable
+    /// ContextMessages, applying secret redaction and a size cap to tool
+    /// results before they enter long-lived context.
+    fn redact_turn_messages(&self, messages: &[ChatMessage]) -> Vec<ContextMessage> {
+        // Write-time pairing repair: only persist tool_calls that actually
+        // received results, and drop orphan results, so the stored context
+        // is self-consistent without relying on the send-path sanitizer.
+        let called: std::collections::HashSet<&str> = messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .flat_map(|m| m.tool_calls.iter().flatten())
+            .map(|tc| tc.id.as_str())
+            .collect();
+        let answered: std::collections::HashSet<&str> = messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .filter(|id| called.contains(id))
+            .collect();
+
+        messages
+            .iter()
+            .filter(|m| m.content.is_none() || m.text_content().is_some())
+            .filter(|m| {
+                m.role != "tool"
+                    || m.tool_call_id
+                        .as_deref()
+                        .is_some_and(|id| called.contains(id))
+            })
+            .filter_map(|m| {
+                let kept_calls: Option<Vec<aish_core::ContextToolCall>> =
+                    m.tool_calls.as_ref().map(|calls| {
+                        calls
+                            .iter()
+                            .filter(|tc| answered.contains(tc.id.as_str()))
+                            .map(|tc| {
+                                // Arguments routinely echo secrets (e.g.
+                                // bearer tokens inside bash commands); the
+                                // audit path redacts them (session.rs
+                                // execute_tool), so must the persistence
+                                // path. Redaction is string-preserving, so
+                                // the JSON arguments stay valid.
+                                let arguments = match &self.secret_redactor {
+                                    Some(redactor) => redactor(&tc.arguments),
+                                    None => tc.arguments.clone(),
+                                };
+                                aish_core::ContextToolCall {
+                                    id: tc.id.clone(),
+                                    name: tc.name.clone(),
+                                    arguments,
+                                }
+                            })
+                            .collect()
+                    });
+                if m.role == "assistant"
+                    && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+                    && kept_calls.as_ref().is_none_or(|c| c.is_empty())
+                    && m.text_content().is_none_or(|t| t.is_empty())
+                {
+                    return None;
+                }
+
+                // Non-text content (image blocks) cannot round-trip through
+                // ContextMessage and is skipped above. Tool-call assistant
+                // messages commonly have null content — keep them with an
+                // empty string so their tool_calls stay paired with results.
+                let mut content = m.text_content().unwrap_or("").to_string();
+                if m.role == "tool" {
+                    if let Some(redactor) = &self.secret_redactor {
+                        content = redactor(&content);
+                    }
+                    // Backstop only: construction already capped the wire
+                    // bytes (ChatMessage::tool_result), so for fresh turns
+                    // this is a no-op and replay stays byte-identical. It
+                    // still guards tool outputs restored from legacy
+                    // snapshots that predate the construction-time cap.
+                    // Redaction itself is the one accepted divergence:
+                    // secrets must not persist even at the cost of a cache
+                    // re-write for that (rare) turn.
+                    content = aish_llm::cap_tool_output(content);
+                }
+
+                Some(ContextMessage {
+                    role: m.role.clone(),
+                    content,
+                    memory_type: MemoryType::Llm,
+                    name: m.name.clone(),
+                    tool_call_id: m.tool_call_id.clone(),
+                    tool_calls: kept_calls.filter(|c| !c.is_empty()),
+                    // Reasoning content must replay byte-identically or the
+                    // provider prompt cache busts at this message on every
+                    // following turn (observed with DeepSeek-style
+                    // reasoning models). Redaction is string-preserving;
+                    // no truncation so replayed bytes equal wire bytes.
+                    reasoning_content: m.reasoning_content.as_ref().map(|r| {
+                        match &self.secret_redactor {
+                            Some(redactor) => redactor(r),
+                            None => r.clone(),
+                        }
+                    }),
+                })
+            })
+            .collect()
     }
 
     /// Handle error correction: analyze a failed command and suggest a fix.
@@ -748,9 +911,10 @@ impl AiHandler {
             };
             let results = mm.recall(&search_query, self.memory_config.recall_limit);
             if results.is_empty() {
-                // No results — clear stale recall to keep context clean
-                self.context_manager
-                    .inject_knowledge_stable("memory_recall", "");
+                // Append-only: keep previous recall blocks in history as
+                // plain turn-scoped facts. Deleting the old block would
+                // open a hole mid-history and bust the provider prefix
+                // cache from that point on.
                 return;
             }
 
@@ -801,11 +965,32 @@ impl AiHandler {
                         .join(", ")
                 )
             };
-
-            // Stable injection — only replaces if content actually changed,
-            // preserving cache prefix stability across calls.
-            self.context_manager
-                .inject_knowledge_stable("memory_recall", &content);
+            // Append-only with consecutive dedupe: skip when the recall
+            // equals the most recent stored recall (same memory set) so
+            // repeated same-domain questions do not accumulate identical
+            // blocks. Old recall blocks age out via transient-system
+            // compaction.
+            let last_recall_unchanged = self
+                .context_manager
+                .messages_snapshot()
+                .iter()
+                .rev()
+                .find(|m| m.role == "system" && m.content.contains("<long-term-memory"))
+                .is_some_and(|m| m.content == content);
+            if !last_recall_unchanged {
+                self.context_manager.add_memory(
+                    MemoryType::Llm,
+                    ContextMessage {
+                        role: "system".to_string(),
+                        content,
+                        memory_type: MemoryType::Llm,
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                        reasoning_content: None,
+                    },
+                );
+            }
         }
     }
 
@@ -904,26 +1089,39 @@ If the user's request is NOT covered by any loaded skill above, follow this work
 
     /// Build context messages from the context manager into ChatMessage format.
     fn build_context_messages(&self) -> Vec<ChatMessage> {
+        // Map from the typed snapshot so tool_call pairing survives the
+        // round-trip into the next provider request.
         self.context_manager
-            .as_messages()
-            .iter()
-            .map(|v| {
-                let role = v
-                    .get("role")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("user")
-                    .to_string();
-                let content = v
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .map(|s| MessageContent::Text(s.to_string()));
+            .messages_snapshot()
+            .into_iter()
+            .map(|m| {
+                let has_tool_calls = m.tool_calls.as_ref().is_some_and(|c| !c.is_empty());
+                let role = m.role.clone();
+                // An assistant tool-call message with empty content was
+                // sent with content ABSENT (null) during the live turn;
+                // replay it the same way so the serialized prefix stays
+                // byte-identical and the provider prompt cache holds.
+                let content = if m.content.is_empty() && role == "assistant" && has_tool_calls {
+                    None
+                } else {
+                    Some(MessageContent::Text(m.content.clone()))
+                };
                 ChatMessage {
                     role,
                     content,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                    reasoning_content: None,
+                    tool_calls: m.tool_calls.map(|calls| {
+                        calls
+                            .into_iter()
+                            .map(|tc| aish_llm::ToolCall {
+                                id: tc.id,
+                                name: tc.name,
+                                arguments: tc.arguments,
+                            })
+                            .collect()
+                    }),
+                    tool_call_id: m.tool_call_id,
+                    name: m.name,
+                    reasoning_content: m.reasoning_content,
                     cache_control: None,
                 }
             })
@@ -1983,5 +2181,284 @@ mod tests {
             block_reason: Some("blocked".into()),
         }]);
         assert_eq!(unknown, FailureDiagnoseConclusion::CannotDetermine);
+    }
+
+    fn test_handler() -> AiHandler {
+        AiHandler::new(
+            LlmSession::new("http://localhost", "key", "model", None, None),
+            Arc::new(Mutex::new(None)),
+            SkillManager::new(),
+            MemoryConfig::default(),
+            50,
+            50,
+            None,
+            ContextBudgetPolicy::default(),
+            false,
+        )
+    }
+
+    fn turn_with_tool_call() -> Vec<ChatMessage> {
+        let mut assistant = ChatMessage::assistant("");
+        // Live streaming turns produce null content on tool-call messages.
+        assistant.content = None;
+        assistant.tool_calls = Some(vec![aish_llm::ToolCall {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            arguments: r#"{"command":"printf '__AISH_TOOL_CONTEXT__\\n'}"#.to_string(),
+        }]);
+        vec![
+            assistant,
+            ChatMessage::tool_result("call_1", "__AISH_TOOL_CONTEXT__\nSECRET_TOKEN"),
+        ]
+    }
+
+    /// Issue #491 core scenario: after a tool turn, the next turn's context
+    /// messages must contain the assistant tool_call and its paired tool
+    /// result — redacted — so the model can see what it just executed.
+    #[test]
+    fn tool_turn_round_trips_into_next_context() {
+        let mut handler = test_handler();
+        handler.set_secret_redactor(Arc::new(|text: &str| {
+            text.replace("SECRET_TOKEN", "[REDACTED]")
+        }));
+
+        // Persist the turn exactly like handle_question does.
+        handler
+            .context_manager
+            .add_message("user", "run the marker command", MemoryType::Llm);
+        for msg in handler.redact_turn_messages(&turn_with_tool_call()) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+
+        let context = handler.build_context_messages();
+        let roles: Vec<&str> = context.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+
+        let calls = context[1]
+            .tool_calls
+            .as_ref()
+            .expect("tool_calls preserved");
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(context[2].tool_call_id.as_deref(), Some("call_1"));
+        assert!(context[2]
+            .text_content()
+            .unwrap()
+            .contains("__AISH_TOOL_CONTEXT__"));
+        assert!(context[2].text_content().unwrap().contains("[REDACTED]"));
+        assert!(!context[2].text_content().unwrap().contains("SECRET_TOKEN"));
+    }
+
+    #[test]
+    fn oversized_tool_output_is_truncated_before_persisting() {
+        let handler = test_handler();
+        let messages = vec![
+            turn_with_tool_call()[0].clone(),
+            ChatMessage::tool_result("call_1", "x".repeat(10 * 1024)),
+        ];
+        let persisted = handler.redact_turn_messages(&messages);
+        assert!(persisted[1].content.len() <= 4 * 1024 + 32);
+        assert!(persisted[1].content.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn session_snapshot_preserves_tool_call_pairing() {
+        let mut handler = test_handler();
+        handler
+            .context_manager
+            .add_message("user", "run the marker command", MemoryType::Llm);
+        for msg in handler.redact_turn_messages(&turn_with_tool_call()) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+
+        // Export → restore → rebuild, as /resume does.
+        let snapshot = handler.export_session_context_snapshot();
+        let mut restored = test_handler();
+        restored.restore_session_context_snapshot(snapshot);
+        let context = restored.build_context_messages();
+
+        assert!(context[1].tool_calls.is_some());
+        assert_eq!(context[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    /// Prompt-cache invariant: the replayed turn must serialize to the
+    /// exact bytes the provider already saw during the live turn (no
+    /// redactor set, output under the construction-time cap). Any
+    /// divergence here busts the provider prefix cache at that point.
+    #[test]
+    fn replayed_turn_is_byte_identical_to_wire() {
+        let mut handler = test_handler();
+        let user = ChatMessage::user("run the marker command");
+        let turn = turn_with_tool_call();
+
+        // What process_input actually sent during the live tool loop.
+        let wire: Vec<ChatMessage> = vec![user.clone(), turn[0].clone(), turn[1].clone()];
+
+        // Persist exactly like handle_question (final assistant text
+        // appended after the replayed prefix, as turn N+1 sends it), then
+        // rebuild and compare the replayed turn-N prefix.
+        handler
+            .context_manager
+            .add_message("user", "run the marker command", MemoryType::Llm);
+        for msg in handler.redact_turn_messages(&turn) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        handler
+            .context_manager
+            .add_message("assistant", "CHECK_DONE", MemoryType::Llm);
+        let replayed = handler.build_context_messages();
+        let replayed_prefix: Vec<ChatMessage> = replayed[..wire.len()].to_vec();
+
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&replayed_prefix).unwrap(),
+            "replayed turn-N prefix must be byte-identical to the wire bytes"
+        );
+        assert_eq!(replayed[wire.len()].text_content(), Some("CHECK_DONE"));
+    }
+
+    /// Large outputs are capped at construction, so even oversized tool
+    /// results replay byte-identically (no persist-time re-truncation).
+    #[test]
+    fn oversized_tool_output_replays_byte_identically() {
+        let mut handler = test_handler();
+        let mut turn = turn_with_tool_call();
+        turn[1] = ChatMessage::tool_result("call_1", "y".repeat(64 * 1024));
+
+        let wire: Vec<ChatMessage> = turn.clone();
+        for msg in handler.redact_turn_messages(&turn) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        let replayed = handler.build_context_messages();
+
+        assert!(wire[1].text_content().unwrap().len() <= 4 * 1024 + 32);
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&replayed).unwrap()
+        );
+    }
+
+    #[test]
+    fn tool_call_arguments_are_redacted_before_persisting() {
+        let mut handler = test_handler();
+        handler.set_secret_redactor(Arc::new(|text: &str| {
+            text.replace("SECRET_TOKEN", "[REDACTED]")
+        }));
+        let mut messages = turn_with_tool_call();
+        messages[0].tool_calls.as_mut().unwrap()[0].arguments =
+            r#"{"command":"curl -H 'Authorization: Bearer SECRET_TOKEN' http://x"}"#.to_string();
+
+        let persisted = handler.redact_turn_messages(&messages);
+        let args = persisted[0].tool_calls.as_ref().unwrap()[0]
+            .arguments
+            .clone();
+        assert!(args.contains("[REDACTED]"));
+        assert!(!args.contains("SECRET_TOKEN"));
+        // String-preserving redaction keeps the JSON arguments valid.
+        assert!(serde_json::from_str::<serde_json::Value>(&args).is_ok());
+    }
+
+    #[test]
+    fn write_time_persists_only_paired_tool_calls() {
+        let handler = test_handler();
+        let mut messages = turn_with_tool_call();
+        // Second declared call never received a result.
+        messages[0]
+            .tool_calls
+            .as_mut()
+            .unwrap()
+            .push(aish_llm::ToolCall {
+                id: "call_never".to_string(),
+                name: "read".to_string(),
+                arguments: "{}".to_string(),
+            });
+        // Orphan result without any assistant call.
+        messages.push(ChatMessage::tool_result("call_orphan", "stray"));
+
+        let persisted = handler.redact_turn_messages(&messages);
+        let roles: Vec<&str> = persisted.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "tool"]);
+        let calls = persisted[0].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(persisted[1].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn empty_assistant_with_only_unanswered_calls_is_dropped() {
+        let handler = test_handler();
+        let mut messages = turn_with_tool_call();
+        messages.pop(); // remove the tool result
+        let persisted = handler.redact_turn_messages(&messages);
+        assert!(persisted.is_empty());
+    }
+
+    #[test]
+    fn env_block_persists_once_for_unchanged_cwd() {
+        // Two turns with identical env blocks must append only one block.
+        let mut handler = test_handler();
+        let env = "\n**Environment Update:**\n- Current directory: /w";
+
+        let count_env = |h: &AiHandler| {
+            h.context_manager
+                .messages_snapshot()
+                .iter()
+                .filter(|m| m.content.contains("**Environment Update:**"))
+                .count()
+        };
+
+        for _ in 0..2 {
+            let last_unchanged = handler
+                .context_manager
+                .messages_snapshot()
+                .iter()
+                .rev()
+                .find(|m| m.role == "system" && m.content.contains("**Environment Update:**"))
+                .is_some_and(|m| m.content == env);
+            if !last_unchanged {
+                handler.context_manager.add_memory(
+                    MemoryType::Llm,
+                    ContextMessage {
+                        role: "system".to_string(),
+                        content: env.to_string(),
+                        memory_type: MemoryType::Llm,
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                        reasoning_content: None,
+                    },
+                );
+            }
+            handler
+                .context_manager
+                .add_message("user", "q", MemoryType::Llm);
+        }
+        assert_eq!(count_env(&handler), 1);
+    }
+
+    /// Reasoning models (DeepSeek-style) require reasoning_content to be
+    /// echoed back; persisting and replaying it verbatim keeps the prefix
+    /// cache intact (observed busting every turn otherwise).
+    #[test]
+    fn reasoning_content_round_trips_byte_identically() {
+        let mut handler = test_handler();
+        let mut turn = turn_with_tool_call();
+        turn[0].reasoning_content = Some("用户想执行标记命令，我先调用 bash。".to_string());
+
+        let wire: Vec<ChatMessage> = turn.clone();
+        for msg in handler.redact_turn_messages(&turn) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        let replayed = handler.build_context_messages();
+
+        assert_eq!(
+            serde_json::to_string(&wire).unwrap(),
+            serde_json::to_string(&replayed).unwrap(),
+            "replayed reasoning must be byte-identical to wire bytes"
+        );
+        assert_eq!(
+            replayed[0].reasoning_content.as_deref(),
+            Some("用户想执行标记命令，我先调用 bash。")
+        );
     }
 }

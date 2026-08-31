@@ -338,7 +338,11 @@ impl ChatMessage {
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".into(),
-            content: Some(MessageContent::Text(content.into())),
+            // Cap at construction so the exact bytes that go on the wire
+            // are the bytes persisted for later-turn replay — a later
+            // truncate would silently diverge the replayed prefix from
+            // what the provider already saw and bust its prompt cache.
+            content: Some(MessageContent::Text(cap_tool_output(content))),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
@@ -402,6 +406,26 @@ pub struct ProcessResult {
     /// tool_result pairs). Callers should extend their conversation
     /// history with these to preserve tool execution context.
     pub new_messages: Vec<ChatMessage>,
+}
+
+/// Hard cap for a single tool result entering the message stream.
+///
+/// Applied once, at message construction, so the wire bytes and the
+/// persisted replay bytes stay identical (prompt-cache prefix stability).
+pub const MAX_TOOL_RESULT_BYTES: usize = 4 * 1024;
+
+/// Cap a tool-result output at [`MAX_TOOL_RESULT_BYTES`] on a UTF-8
+/// character boundary, appending an explicit truncation marker.
+pub fn cap_tool_output(content: impl Into<String>) -> String {
+    let content = content.into();
+    if content.len() <= MAX_TOOL_RESULT_BYTES {
+        return content;
+    }
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...(truncated)", &content[..end])
 }
 
 /// Specification of a function tool exposed to the LLM.

@@ -66,6 +66,21 @@ pub enum MemoryType {
     Knowledge,
 }
 
+/// A tool call recorded on an assistant context message.
+///
+/// Shared by aish-context and aish-session so persisted conversation
+/// snapshots can round-trip the assistant tool_calls -> tool-result pairing
+/// required by provider APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextToolCall {
+    /// Provider-issued tool call id (matches the tool result's tool_call_id).
+    pub id: String,
+    /// Tool name the model requested.
+    pub name: String,
+    /// Raw JSON-encoded arguments string.
+    pub arguments: String,
+}
+
 // ---------------------------------------------------------------------------
 // Skills
 // ---------------------------------------------------------------------------

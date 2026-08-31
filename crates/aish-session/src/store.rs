@@ -96,6 +96,13 @@ impl SessionStore {
             AishError::Session(format!("failed to open session db at {:?}: {e}", db_path))
         })?;
 
+        // The database holds conversation snapshots (including tool outputs
+        // and command arguments) and audit events; SQLite creates it with
+        // the process umask (typically 0644). Tighten to owner-only, also
+        // covering pre-existing files from older builds and the WAL/SHM
+        // siblings SQLite creates at runtime.
+        restrict_db_permissions(&db_path);
+
         // Enable WAL for better concurrent read performance.
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| AishError::Session(format!("failed to enable WAL mode: {e}")))?;
@@ -605,6 +612,37 @@ fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRec
     })
 }
 
+/// Restrict the session database (and its WAL/SHM siblings) to owner-only
+/// permissions on Unix. Best-effort: failures are logged, not fatal — the
+/// store still works if the filesystem rejects chmod.
+#[cfg(unix)]
+fn restrict_db_permissions(db_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut candidates = vec![db_path.to_path_buf()];
+    if let Some(stem) = db_path.file_name().and_then(|n| n.to_str()) {
+        let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+        candidates.push(parent.join(format!("{stem}-wal")));
+        candidates.push(parent.join(format!("{stem}-shm")));
+    }
+    for path in candidates {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            let mut perms = meta.permissions();
+            perms.set_mode(mode & 0o600);
+            if let Err(e) = std::fs::set_permissions(&path, perms) {
+                tracing::warn!(path = ?path, error = %e, "failed to restrict session db permissions");
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_db_permissions(_db_path: &Path) {}
+
 /// Add columns introduced after the initial schema (`parent_session_uuid`,
 /// `branch_point_message_id`) to databases created by older builds. Idempotent:
 /// each column is added only when missing, detected via `PRAGMA table_info`.
@@ -699,6 +737,8 @@ mod tests {
                 memory_type: MemoryType::Llm,
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
             }],
             updated_at: Some(Utc::now()),
         };
@@ -932,6 +972,8 @@ mod tests {
                 memory_type: MemoryType::Llm,
                 name: None,
                 tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
             }],
             updated_at: Some(Utc::now()),
         };
@@ -1095,5 +1137,33 @@ mod tests {
         let roots = store.session_roots().unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].session_uuid, "legacy-1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_db_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let _store = SessionStore::open(Some(&db_path)).unwrap();
+        let mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "newly created db must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_world_readable_db_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        // Simulate a database created by an older build with default umask.
+        std::fs::write(&db_path, []).unwrap();
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _store = SessionStore::open(Some(&db_path)).unwrap();
+        let mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "existing loose db must be tightened");
     }
 }
