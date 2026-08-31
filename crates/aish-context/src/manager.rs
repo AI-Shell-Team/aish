@@ -12,13 +12,6 @@ const CLEARED_SHELL_OUTPUT: &str =
 const CLEARED_LLM_OUTPUT: &str = "[old low-value output cleared by context microcompact]";
 const SUMMARY_TAG: &str = "<conversation-summary";
 
-/// A message whose suffix (all messages after it) exceeds this many
-/// estimated tokens sits deep inside the provider's warm prompt-cache
-/// prefix: rewriting it forces the provider to re-write the entire suffix
-/// at cache-write premium. Microcompact skips such messages; full
-/// compaction (which rebuilds the cache anyway) reclaims them.
-const CACHE_WARM_SUFFIX_TOKENS: usize = 8_000;
-
 /// Statistics about the current context state.
 #[derive(Debug, Clone)]
 pub struct ContextStats {
@@ -358,7 +351,6 @@ impl ContextManager {
     }
 
     pub fn microcompact(&mut self) -> MicrocompactReport {
-        let before_tokens = self.total_estimated_tokens();
         let mut changed_messages = 0usize;
         let keep_recent_messages = self.budget_policy.micro_keep_recent_messages;
         let recent_start = self.messages.len().saturating_sub(keep_recent_messages);
@@ -366,18 +358,20 @@ impl ContextManager {
         // Cache-warm suffix guard (modeled on oh-my-pi's
         // cacheWarmSuffixTokens): rewriting a message whose suffix already
         // went on the wire forces the provider to re-write that entire
-        // suffix at cache-write premium. Messages deeper than
-        // CACHE_WARM_SUFFIX_TOKENS from the end are left for full
+        // suffix at cache-write premium. Messages deeper than the
+        // cache_warm_suffix_tokens budget from the end are left for full
         // compaction (which rebuilds the cache anyway); microcompact only
-        // reclaims from the cold tail.
+        // reclaims from the cold tail. The suffix sums double as the
+        // before-token total, saving a separate full tokenization pass.
         let mut suffix_tokens = vec![0usize; self.messages.len() + 1];
         for idx in (0..self.messages.len()).rev() {
             suffix_tokens[idx] =
                 suffix_tokens[idx + 1] + self.estimate_message_tokens(&self.messages[idx]);
         }
-        let cache_warm = |idx: usize| {
-            suffix_tokens.get(idx + 1).copied().unwrap_or(0) > CACHE_WARM_SUFFIX_TOKENS
-        };
+        let before_tokens = suffix_tokens[0];
+        let warm_threshold = self.budget_policy.cache_warm_suffix_tokens;
+        let cache_warm =
+            |idx: usize| suffix_tokens.get(idx + 1).copied().unwrap_or(0) > warm_threshold;
 
         let shell_indices: Vec<usize> = self
             .messages
