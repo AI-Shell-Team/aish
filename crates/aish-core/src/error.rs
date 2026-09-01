@@ -54,3 +54,24 @@ impl From<serde_json::Error> for AishError {
 
 /// Convenience alias used across all aish crates.
 pub type Result<T> = std::result::Result<T, AishError>;
+impl AishError {
+    /// Stable, machine-readable category for this error variant.
+    pub fn category(&self) -> &'static str {
+        match self {
+            AishError::Config(_) => "config",
+            AishError::Io(_) => "io",
+            AishError::Llm(_) => "llm",
+            AishError::Pty(_) => "pty",
+            AishError::Security(_) => "security",
+            AishError::Skill(_) => "skill",
+            AishError::Memory(_) => "memory",
+            AishError::Session(_) => "session",
+            AishError::Tool(_) => "tool",
+            AishError::I18n(_) => "i18n",
+            AishError::Shell(_) => "shell",
+            AishError::Parse(_) => "parse",
+            AishError::Cancelled => "cancelled",
+            AishError::Timeout => "timeout",
+        }
+    }
+}
