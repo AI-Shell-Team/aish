@@ -44,8 +44,9 @@ impl ToolLoopConfig {
 }
 
 /// Termination status of a tool calling loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LoopStatus {
+    #[default]
     Complete,
     Incomplete,
     Cancelled,
@@ -80,9 +81,10 @@ impl LoopOutcome {
         Self::from_spawn_outcome(outcome, Vec::new(), Some(AishError::Cancelled))
     }
 
-    fn fatal(error: AishError) -> Self {
+    /// Fatal outcome that retains messages accumulated before the error.
+    fn fatal_with_messages(error: AishError, messages: Vec<ChatMessage>) -> Self {
         let outcome = extract_spawn_outcome(TerminationKind::Fatal, &OutcomeConfig::default());
-        Self::from_spawn_outcome(outcome, Vec::new(), Some(error))
+        Self::from_spawn_outcome(outcome, messages, Some(error))
     }
 }
 
@@ -153,7 +155,7 @@ pub async fn run_tool_loop_until_done(
                     timestamp: now_timestamp(),
                     metadata: None,
                 });
-                return LoopOutcome::fatal(e);
+                return LoopOutcome::fatal_with_messages(e, loop_messages);
             }
         };
 
@@ -165,9 +167,10 @@ pub async fn run_tool_loop_until_done(
         });
 
         let LlmResponse::Json(json) = response else {
-            return LoopOutcome::fatal(AishError::Llm(
-                "run_tool_loop_until_done requires non-streaming responses".into(),
-            ));
+            return LoopOutcome::fatal_with_messages(
+                AishError::Llm("run_tool_loop_until_done requires non-streaming responses".into()),
+                loop_messages,
+            );
         };
 
         let (content, _reasoning, tool_calls, usage) = StreamParser::parse_response(&json);
@@ -453,6 +456,96 @@ mod tests {
         assert!(
             session.cancellation_token().is_cancelled(),
             "session token must stay cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_loop_fatal_after_one_tool_preserves_messages() {
+        // First turn: assistant calls `grep` and the tool returns a unique
+        // marker. Second turn: LLM request fails. The loop must retain the
+        // assistant tool-call message and the tool-result so the parent can
+        // persist evidence of already-completed work (issue #489).
+        let mut session = test_session_with_responses(vec![
+            Ok(mock_tool_call_response(&[(
+                "c1",
+                "grep",
+                r#"{"pattern":"x"}"#,
+            )])),
+            Err(AishError::Llm("upstream failure".into())),
+        ]);
+        session.register_tool(Box::new(MockTool::new("grep", "SUBAGENT_TOOL_OK")));
+
+        let outcome = run_tool_loop_until_done(
+            &session,
+            &ChatMessage::user("task"),
+            &[],
+            &ToolLoopConfig::default(),
+        )
+        .await;
+
+        assert_eq!(outcome.status, LoopStatus::Fatal);
+        assert!(outcome.error.is_some());
+        // The accumulated messages must survive the fatal error.
+        assert!(
+            !outcome.new_messages.is_empty(),
+            "partial messages must be preserved on fatal"
+        );
+        let has_tool_result = outcome
+            .new_messages
+            .iter()
+            .any(|m| m.role == "tool" && m.text_content() == Some("SUBAGENT_TOOL_OK"));
+        assert!(
+            has_tool_result,
+            "tool result must be retained in new_messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_loop_fatal_after_multiple_tools_preserves_all() {
+        // Two tool calls succeed, then the third LLM request fails. All
+        // accumulated assistant/tool messages must be retained.
+        let mut session = test_session_with_responses(vec![
+            Ok(mock_tool_call_response(&[(
+                "c1",
+                "grep",
+                r#"{"pattern":"a"}"#,
+            )])),
+            Ok(mock_tool_call_response(&[(
+                "c2",
+                "read_file",
+                r#"{"path":"x"}"#,
+            )])),
+            Err(AishError::Llm("connection reset".into())),
+        ]);
+        session.register_tool(Box::new(MockTool::new("grep", "grep_out")));
+        session.register_tool(Box::new(MockTool::new("read_file", "file_out")));
+
+        let outcome = run_tool_loop_until_done(
+            &session,
+            &ChatMessage::user("task"),
+            &[],
+            &ToolLoopConfig::default(),
+        )
+        .await;
+
+        assert_eq!(outcome.status, LoopStatus::Fatal);
+        // 2 assistant tool-call messages + 2 tool-result messages = 4.
+        assert_eq!(
+            outcome.new_messages.len(),
+            4,
+            "all partial messages must be preserved: got {:?}",
+            outcome.new_messages
+        );
+        let outputs: Vec<_> = outcome
+            .new_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.text_content().unwrap_or_default())
+            .collect();
+        assert!(outputs.contains(&"grep_out"), "grep result must survive");
+        assert!(
+            outputs.contains(&"file_out"),
+            "read_file result must survive"
         );
     }
 }

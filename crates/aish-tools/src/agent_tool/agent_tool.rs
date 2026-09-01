@@ -5,7 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use aish_llm::{
-    spawn_builtin, AgentRegistry, LlmSession, LoopStatus, SpawnResult, Tool, ToolResult,
+    spawn_builtin, AgentRegistry, ChatMessage, LlmSession, LoopStatus, SpawnResult, Tool,
+    ToolResult,
 };
 
 use super::prompt;
@@ -74,6 +75,8 @@ impl AgentTool {
     }
 
     pub(crate) fn spawn_result_to_tool_result(result: SpawnResult) -> ToolResult {
+        let partial_messages = result.partial_messages;
+        let error_category = result.error_category;
         match result.status {
             LoopStatus::Complete | LoopStatus::Incomplete => ToolResult::success(result.text),
             LoopStatus::Cancelled => {
@@ -81,7 +84,72 @@ impl AgentTool {
                 // meta.reason stays machine-readable for short-circuit handling.
                 Self::short_circuit_error(aish_i18n::t("shell.interrupted"), "sub_agent_cancelled")
             }
-            LoopStatus::Fatal => Self::short_circuit_error("Sub-agent failed", "sub_agent_fatal"),
+            LoopStatus::Fatal => {
+                let category = error_category.unwrap_or_else(|| "unknown".to_string());
+                Self::fatal_tool_result(result.text, category, partial_messages)
+            }
+        }
+    }
+
+    /// Build a structured fatal `ToolResult` that preserves the sub-agent's
+    /// completed work (tool calls + results) and the stable error category.
+    /// The parent session can then persist partial evidence so a retry does
+    /// not re-execute already-completed tools.
+    fn fatal_tool_result(
+        final_text: String,
+        category: String,
+        partial_messages: Vec<ChatMessage>,
+    ) -> ToolResult {
+        let completed_tool_names: Vec<&str> = partial_messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .map(|tc| tc.name.as_str())
+            .collect();
+        let tool_result_msgs: Vec<&ChatMessage> = partial_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .collect();
+        let partial_summaries: Vec<serde_json::Value> = tool_result_msgs
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "tool_call_id": m.tool_call_id,
+                    "name": m.name,
+                    "output": m.text_content(),
+                })
+            })
+            .collect();
+        // Build a human/LLM-readable summary of completed work so the parent
+        // agent can see which tools already ran and their results — not just
+        // a bare "Sub-agent failed". This prevents the parent from blindly
+        // retrying the same steps. The structured `meta` remains available for
+        // programmatic consumers (persistence, retry logic).
+        let mut output = format!("Sub-agent failed ({category})");
+        if !final_text.is_empty() {
+            output.push_str(&format!(": {final_text}"));
+        }
+        if !completed_tool_names.is_empty() {
+            output.push_str("\n\nCompleted before failure:");
+            for (i, tool_name) in completed_tool_names.iter().enumerate() {
+                let result_text = tool_result_msgs
+                    .get(i)
+                    .and_then(|m| m.text_content())
+                    .unwrap_or("(no result)");
+                output.push_str(&format!("\n  {i}. {tool_name}: {result_text}"));
+            }
+        }
+        ToolResult {
+            ok: false,
+            output,
+            meta: Some(serde_json::json!({
+                "dispatch_status": "short_circuit",
+                "reason": "sub_agent_fatal",
+                "error_category": category,
+                "completed_tools": completed_tool_names,
+                "partial_messages": partial_summaries,
+            })),
         }
     }
 
