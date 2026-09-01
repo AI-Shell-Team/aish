@@ -118,7 +118,14 @@ where
     SpawnResult {
         text: outcome.text,
         status: outcome.status,
-        error_category: outcome.error.as_ref().map(error_category),
+        // Invariant: `error_category` is only meaningful for fatal outcomes.
+        // Cancelled outcomes carry `Some(AishError::Cancelled)` internally,
+        // but that is control flow, not a failure to classify.
+        error_category: if outcome.status == LoopStatus::Fatal {
+            outcome.error.as_ref().map(error_category)
+        } else {
+            None
+        },
         partial_messages: outcome.new_messages,
     }
 }
@@ -609,6 +616,9 @@ mod tests {
         .await;
 
         assert_eq!(result.status, LoopStatus::Cancelled);
+        // Documented invariant: error_category must stay None for
+        // cancellations even though the outcome carries AishError::Cancelled.
+        assert_eq!(result.error_category, None);
     }
 
     struct SlowMockTool {
@@ -675,6 +685,7 @@ mod tests {
 
         let result = run.await;
         assert_eq!(result.status, LoopStatus::Cancelled);
+        assert_eq!(result.error_category, None);
     }
 
     #[tokio::test]
