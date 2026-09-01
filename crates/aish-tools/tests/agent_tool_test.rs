@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use aish_llm::{LoopStatus, SpawnResult, Tool};
+use aish_llm::{ChatMessage, LoopStatus, SpawnResult, Tool, ToolCall};
 use aish_tools::{AgentTool, SpawnFn};
 
 fn mock_spawn_ok<'a>(
@@ -14,6 +14,8 @@ fn mock_spawn_ok<'a>(
         Ok(SpawnResult {
             text: "explore conclusion".to_string(),
             status: LoopStatus::Complete,
+            error_category: None,
+            partial_messages: Vec::new(),
         })
     })
 }
@@ -27,6 +29,7 @@ fn mock_spawn_cancelled<'a>(
         Ok(SpawnResult {
             text: String::new(),
             status: LoopStatus::Cancelled,
+            ..Default::default()
         })
     })
 }
@@ -40,6 +43,7 @@ fn mock_spawn_incomplete<'a>(
         Ok(SpawnResult {
             text: "[incomplete: max turns reached]\npartial conclusion".to_string(),
             status: LoopStatus::Incomplete,
+            ..Default::default()
         })
     })
 }
@@ -53,6 +57,23 @@ fn mock_spawn_fatal<'a>(
         Ok(SpawnResult {
             text: String::new(),
             status: LoopStatus::Fatal,
+            error_category: Some("llm".to_string()),
+            partial_messages: vec![
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "c1".to_string(),
+                        name: "grep".to_string(),
+                        arguments: r#"{"pattern":"x"}"#.to_string(),
+                    }]),
+                    tool_call_id: None,
+                    name: None,
+                    reasoning_content: None,
+                    cache_control: None,
+                },
+                ChatMessage::tool_result("c1", "SUBAGENT_TOOL_OK"),
+            ],
         })
     })
 }
@@ -190,13 +211,61 @@ async fn test_agent_tool_mock_spawn_fatal_errors() {
         )
         .await;
     assert!(!result.ok);
-    assert!(result.output.contains("failed"));
+    // Output must be enriched with completed work, not bare "failed".
+    assert!(
+        result.output.contains("Sub-agent failed (llm)"),
+        "output should name the category: got {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("Completed before failure"),
+        "output should list completed work: got {}",
+        result.output
+    );
+    assert!(
+        result.output.contains("SUBAGENT_TOOL_OK"),
+        "output should include tool result evidence: got {}",
+        result.output
+    );
+    // Structured meta for programmatic consumers.
     assert_eq!(
-        result
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("reason"))
-            .and_then(|v| v.as_str()),
-        Some("sub_agent_fatal")
+        result.meta.as_ref().and_then(|m| m.get("reason")),
+        Some(&serde_json::Value::String("sub_agent_fatal".to_string()))
+    );
+    assert_eq!(
+        result.meta.as_ref().and_then(|m| m.get("error_category")),
+        Some(&serde_json::Value::String("llm".to_string()))
+    );
+    let completed = result
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("completed_tools"))
+        .and_then(|v| v.as_array());
+    assert_eq!(
+        completed.map(|c| c.len()),
+        Some(1),
+        "completed_tools should have one entry"
+    );
+    assert_eq!(
+        completed.and_then(|c| c.first()).and_then(|v| v.as_str()),
+        Some("grep")
+    );
+    let partial = result
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("partial_messages"))
+        .and_then(|v| v.as_array());
+    assert_eq!(
+        partial.map(|c| c.len()),
+        Some(1),
+        "partial_messages should have one tool result"
+    );
+    assert!(
+        partial
+            .and_then(|c| c.first())
+            .and_then(|v| v.get("output"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("SUBAGENT_TOOL_OK")),
+        "partial_messages should contain the tool result"
     );
 }

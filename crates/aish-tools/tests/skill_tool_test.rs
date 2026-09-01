@@ -75,6 +75,7 @@ async fn subagent_skill_spawns_with_builtin_and_intersected_tools() {
             Ok(SpawnResult {
                 text: "disk IO is saturated".to_string(),
                 status: LoopStatus::Complete,
+                ..Default::default()
             })
         }) as Pin<Box<dyn Future<Output = Result<SpawnResult, String>> + Send>>
     });
@@ -133,6 +134,7 @@ async fn general_purpose_skill_allowlist_does_not_make_bash_read_only() {
             Ok(SpawnResult {
                 text: "updated".to_string(),
                 status: LoopStatus::Complete,
+                ..Default::default()
             })
         })
     });

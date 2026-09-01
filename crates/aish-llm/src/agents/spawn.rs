@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use aish_core::LlmEvent;
+use aish_core::{AishError, LlmEvent};
 use uuid::Uuid;
 
 use crate::prompt::PromptContext;
@@ -43,10 +43,20 @@ impl Default for SpawnConfig {
 }
 
 /// Result of a synchronous sub-agent spawn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpawnResult {
     pub text: String,
     pub status: LoopStatus,
+    /// Structured fatal-error category (only present when `status == Fatal`).
+    /// Stable, machine-readable string (e.g. `"llm"`, `"parse"`) so the parent
+    /// can distinguish network/protocol/parse failures without inspecting the
+    /// raw error text.
+    pub error_category: Option<String>,
+    /// Messages accumulated before the terminal condition: assistant tool calls
+    /// and tool results produced before a fatal error or cancel. Lets the
+    /// parent session and persistence retain evidence of already-completed work
+    /// instead of dropping it at the `spawn()` boundary.
+    pub partial_messages: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,7 +118,21 @@ where
     SpawnResult {
         text: outcome.text,
         status: outcome.status,
+        // Invariant: `error_category` is only meaningful for fatal outcomes.
+        // Cancelled outcomes carry `Some(AishError::Cancelled)` internally,
+        // but that is control flow, not a failure to classify.
+        error_category: if outcome.status == LoopStatus::Fatal {
+            outcome.error.as_ref().map(error_category)
+        } else {
+            None
+        },
+        partial_messages: outcome.new_messages,
     }
+}
+
+/// Stable, machine-readable category for a sub-agent fatal error.
+fn error_category(error: &AishError) -> String {
+    error.category().to_string()
 }
 
 /// Spawn a sub-agent from an [`AgentDefinition`] (built-in or shell-only).
@@ -592,6 +616,9 @@ mod tests {
         .await;
 
         assert_eq!(result.status, LoopStatus::Cancelled);
+        // Documented invariant: error_category must stay None for
+        // cancellations even though the outcome carries AishError::Cancelled.
+        assert_eq!(result.error_category, None);
     }
 
     struct SlowMockTool {
@@ -658,6 +685,7 @@ mod tests {
 
         let result = run.await;
         assert_eq!(result.status, LoopStatus::Cancelled);
+        assert_eq!(result.error_category, None);
     }
 
     #[tokio::test]
@@ -982,5 +1010,82 @@ mod tests {
 
         assert_eq!(result.status, LoopStatus::Complete);
         assert_eq!(result.text, "cpu contended");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_fatal_preserves_partial_messages() {
+        // First turn: assistant calls `grep`, MockTool returns "ok".
+        // Second turn: LLM request fails. The parent must receive the
+        // completed tool result (issue #489).
+        let parent = LlmSession::new("http://localhost", "key", "model", None, None);
+
+        let result = spawn(&parent, "task", SpawnConfig::default(), |sub| {
+            disable_context_budget(sub);
+            sub.set_test_chat_responses(vec![
+                Ok(mock_tool_call_response(&[(
+                    "c1",
+                    "grep",
+                    r#"{"pattern":"x"}"#,
+                )])),
+                Err(AishError::Llm("upstream failure".into())),
+            ]);
+            sub.register_tool(Box::new(MockTool::new("grep")));
+        })
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Fatal);
+        assert_eq!(result.error_category, Some("llm".to_string()));
+        assert!(
+            !result.partial_messages.is_empty(),
+            "partial messages must propagate"
+        );
+        let has_ok = result
+            .partial_messages
+            .iter()
+            .any(|m| m.role == "tool" && m.text_content() == Some("ok"));
+        assert!(has_ok, "tool result must be retained in partial_messages");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_fatal_preserves_multiple_tool_results() {
+        // Two tools succeed, then LLM fails. All tool results must survive.
+        let parent = LlmSession::new("http://localhost", "key", "model", None, None);
+
+        let result = spawn(&parent, "task", SpawnConfig::default(), |sub| {
+            disable_context_budget(sub);
+            sub.set_test_chat_responses(vec![
+                Ok(mock_tool_call_response(&[(
+                    "c1",
+                    "grep",
+                    r#"{"pattern":"a"}"#,
+                )])),
+                Ok(mock_tool_call_response(&[(
+                    "c2",
+                    "read_file",
+                    r#"{"path":"x"}"#,
+                )])),
+                Err(AishError::Llm("connection reset".into())),
+            ]);
+            sub.register_tool(Box::new(MockTool::new("grep")));
+            sub.register_tool(Box::new(MockTool::new("read_file")));
+        })
+        .await;
+
+        assert_eq!(result.status, LoopStatus::Fatal);
+        assert_eq!(result.error_category, Some("llm".to_string()));
+        // 2 assistant tool-call messages + 2 tool-result messages = 4.
+        assert_eq!(
+            result.partial_messages.len(),
+            4,
+            "all partial messages must be preserved: got {:?}",
+            result.partial_messages
+        );
+        let outputs: Vec<_> = result
+            .partial_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.text_content().unwrap_or_default())
+            .collect();
+        assert!(outputs.contains(&"ok"), "tool result must survive");
     }
 }
