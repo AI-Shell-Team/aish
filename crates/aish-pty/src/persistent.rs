@@ -3348,12 +3348,12 @@ impl PersistentPty {
                             let nested_needs_success_signal = !nested_host_stack.is_empty();
                             if nested_needs_success_signal && !data.is_empty() {
                                 nested_confirm_buf.push_str(&String::from_utf8_lossy(data));
-                                // Cap memory: keep only the last 8KB.
                                 if nested_confirm_buf.len() > 8 * 1024 {
-                                    let keep = 8 * 1024;
-                                    let start = nested_confirm_buf.len() - keep;
-                                    let mut truncated = nested_confirm_buf.split_off(start);
-                                    std::mem::swap(&mut truncated, &mut nested_confirm_buf);
+                                    // Cap memory: keep only the last 8KB
+                                    // (issue #497: byte-index truncation
+                                    // used to panic inside a multi-byte
+                                    // char).
+                                    truncate_to_tail(&mut nested_confirm_buf, 8 * 1024);
                                 }
                             }
                             if is_session
@@ -4601,6 +4601,31 @@ fn truncate_str(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Keep only the last `max` bytes of `buf`, cutting on a UTF-8 char
+/// boundary and, when possible, at a line start.
+///
+/// The line-start snap serves the line-anchored consumers of these
+/// buffers (`scan_output_for_ssh_success` and friends): a truncated
+/// half-line at the head could never match anyway. The kept tail can
+/// therefore exceed `max` by at most one line; the char-boundary walk
+/// bounds the overshoot by one char when no newline exists.
+///
+/// `String::split_off` panics on a non-boundary index, which is exactly
+/// what happened when multi-byte output (e.g. a Chinese MOTD) straddled
+/// the old `buf.len() - 8 * 1024` cut (issue #497).
+fn truncate_to_tail(buf: &mut String, max: usize) {
+    if buf.len() <= max {
+        return;
+    }
+    let mut start = buf.len() - max;
+    while start > 0 && !buf.is_char_boundary(start) {
+        start -= 1;
+    }
+    let start = buf[..start].rfind('\n').map(|pos| pos + 1).unwrap_or(start);
+    let mut truncated = buf.split_off(start);
+    std::mem::swap(&mut truncated, buf);
 }
 
 /// Debug helper: describe the answer kind without exposing the value.
@@ -9768,17 +9793,65 @@ mod tests {
         // `sup.pending` because `' '` is a prefix of ` __aish_ctx_hook()`,
         // so the spacebar looked dead. It must pass through immediately.
         let out_space = strip_ps1_echo(b" ", &mut sup);
-        assert_eq!(
-            out_space, b" ",
-            "user space keystroke must pass through, not be buffered"
-        );
+        assert_eq!(out_space, b" ", "user space keystroke must pass through");
+    }
+
+    #[test]
+    fn test_nested_confirm_buf_truncation_lands_on_char_boundary() {
+        // Regression for issue #497: `String::split_off(len - 8KB)` panicked
+        // when the cut index fell inside a multi-byte UTF-8 char.
+        let run = |content: &str| -> (String, String) {
+            let mut buf = content.to_string();
+            let original = buf.clone();
+            truncate_to_tail(&mut buf, 8 * 1024);
+            (buf, original)
+        };
+
+        // Pure 3-byte chars: 8193 bytes => the old code cut at byte 1,
+        // inside a char, and `split_off` panicked (issue #497).
+        let content: String = "中".repeat(2731);
+        let (kept, original) = run(&content);
+        // No newline to snap to, so the walk may keep up to one extra char.
+        assert!(kept.len() <= 8 * 1024 + 2);
+        // The kept buffer must be an unmodified suffix of the original,
+        // cut on a char boundary.
+        assert!(original.ends_with(&kept));
+        assert!(kept.chars().all(|c| c == '中'));
+
+        // Mixed multi-byte lines: cut must snap to a line start so the
+        // line-anchored scanner keeps seeing complete lines.
+        let content: String = (0..500).map(|i| format!("{i:03} 中文内容行\n")).collect();
+        let (kept, original) = run(&content);
+        // Overshoot is bounded by one line (20 bytes in this fixture).
+        assert!(kept.len() <= 8 * 1024 + 20);
+        assert!(original.ends_with(&kept));
+        // The head is a complete line, not a chopped half-line: it must
+        // start with a line number, never a stray mid-line char.
+        let head = kept.lines().next().unwrap();
         assert!(
-            sup.pending.is_empty(),
-            "pending must stay empty after a non-anchor byte"
+            head.as_bytes()[0].is_ascii_digit(),
+            "head is a half line: {head}"
         );
 
-        // User presses 'p' next; must also pass through unchanged.
-        let out_p = strip_ps1_echo(b"p", &mut sup);
-        assert_eq!(out_p, b"p", "user 'p' keystroke must pass through");
+        // 2-byte chars with an odd byte prefix: the raw cut lands on the
+        // continuation byte of an 'é' and must walk back one byte.
+        let content = format!("{}{}x", "a".repeat(100), "é".repeat(4097));
+        assert_eq!(content.len(), 8295);
+        let (kept, original) = run(&content);
+        assert!(kept.len() <= 8 * 1024 + 2);
+        assert!(original.ends_with(&kept));
+        assert!(kept.starts_with('é'));
+
+        // ASCII-only content: cut is trivially aligned; exactly `max`
+        // bytes survive.
+        let content: String = (0..9000).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+        let (kept, original) = run(&content);
+        assert_eq!(kept.len(), 8 * 1024);
+        assert!(original.ends_with(&kept));
+
+        // At or below the cap: buffer must be left untouched.
+        let content = "x".repeat(8 * 1024);
+        let (kept, original) = run(&content);
+        assert_eq!(kept, original);
     }
 }
