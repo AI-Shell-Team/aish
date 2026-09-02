@@ -71,13 +71,14 @@ impl ApiConnectivityChecker {
                         ),
                     )
                 } else if status.as_u16() == 404 {
-                    // /models not implemented by this provider (common for
-                    // OpenAI-compatible gateways). The server responded, so
-                    // connectivity is fine; chat/completions may still work.
+                    // The server responded, so connectivity is fine. A 404
+                    // often means the provider does not implement /models,
+                    // but it could also indicate a wrong base path — do not
+                    // assert which.
                     CheckItem::pass(
                         "api",
                         format!(
-                            "API reachable ({}ms, {}); /models not implemented — AI calls use /chat/completions",
+                            "API reachable ({}ms, {}); /models returned 404 — verify API base URL and provider compatibility",
                             latency, api_base
                         ),
                     )

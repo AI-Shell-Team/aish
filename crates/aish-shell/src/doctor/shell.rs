@@ -133,7 +133,13 @@ fn probe_baseline() -> BaselineEnv {
             }
             for entry in raw.split('\0') {
                 if let Some((key, value)) = entry.split_once('=') {
-                    baseline.vars.insert(key.to_string(), value.to_string());
+                    // Reject entries whose key is not a valid environment
+                    // variable name: rc files that print to stdout before
+                    // `env -0` can produce text like "hello world" that
+                    // would be misparsed as KEY=VALUE.
+                    if is_valid_env_key(key) {
+                        baseline.vars.insert(key.to_string(), value.to_string());
+                    }
                 }
             }
             if baseline.vars.is_empty() {
@@ -161,6 +167,29 @@ fn probe_baseline() -> BaselineEnv {
     }
 
     baseline
+}
+
+/// Validate an environment variable key: non-empty, uppercase letters,
+/// digits, or underscores, starting with a letter. Rejects rc-file stdout
+/// pollution that `env -0` would otherwise misparse as KEY=VALUE.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let first = chars.next();
+    match first {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// True for proxy variables that may embed credentials in their URL
+/// (e.g. `http://user:pass@proxy:8080`). Values are never printed.
+fn is_proxy_var(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "http_proxy" | "https_proxy" | "all_proxy" | "ftp_proxy"
+    )
 }
 
 fn first_line(s: &str) -> &str {
@@ -436,7 +465,9 @@ impl ShellChecker {
                 (Ok(p), Some(l)) if p != *l => {
                     let item = if *var == "PATH" {
                         self.path_diff_item(p.as_str(), l.as_str())
-                    } else if is_secret_key(var) {
+                    } else if is_secret_key(var) || is_proxy_var(var) {
+                        // Proxy URLs can embed credentials (http://user:pass@…);
+                        // never print their values.
                         CheckItem::warn(
                             format!("value_{}", var),
                             format!(
@@ -801,6 +832,28 @@ mod tests {
     fn test_truncate() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("01234567890", 5), "01234…");
+    }
+
+    #[test]
+    fn test_is_valid_env_key() {
+        assert!(is_valid_env_key("PATH"));
+        assert!(is_valid_env_key("_FOO"));
+        assert!(is_valid_env_key("MY_VAR_123"));
+        // Reject rc-file stdout pollution: spaces, lowercase, leading digit.
+        assert!(!is_valid_env_key("hello world"));
+        assert!(!is_valid_env_key("1PATH"));
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key("key-with-dash"));
+    }
+
+    #[test]
+    fn test_is_proxy_var() {
+        assert!(is_proxy_var("http_proxy"));
+        assert!(is_proxy_var("HTTPS_PROXY"));
+        assert!(is_proxy_var("all_proxy"));
+        assert!(is_proxy_var("ftp_proxy"));
+        assert!(!is_proxy_var("no_proxy"));
+        assert!(!is_proxy_var("PATH"));
     }
 
     #[test]
