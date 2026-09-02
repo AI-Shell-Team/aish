@@ -4608,14 +4608,19 @@ fn truncate_str(s: &str, max: usize) -> &str {
 ///
 /// The line-start snap serves the line-anchored consumers of these
 /// buffers (`scan_output_for_ssh_success` and friends): a truncated
-/// half-line at the head could never match anyway. The kept tail can
-/// therefore exceed `max` by at most one line; the char-boundary walk
-/// bounds the overshoot by one char when no newline exists.
+/// half-line at the head could never match anyway. The snap is capped at
+/// `MAX_LINE_OVERSHOOT` bytes so the kept tail is hard-bounded by
+/// `max + MAX_LINE_OVERSHOOT` regardless of how long a single line the
+/// remote emits (a giant unterminated MOTD line must not balloon the
+/// buffer). When the snap would exceed the cap, the char-boundary cut is
+/// used instead and the head line stays split — the consumer merely
+/// misses one unmatchable line.
 ///
 /// `String::split_off` panics on a non-boundary index, which is exactly
 /// what happened when multi-byte output (e.g. a Chinese MOTD) straddled
 /// the old `buf.len() - 8 * 1024` cut (issue #497).
 fn truncate_to_tail(buf: &mut String, max: usize) {
+    const MAX_LINE_OVERSHOOT: usize = 4 * 1024;
     if buf.len() <= max {
         return;
     }
@@ -4623,7 +4628,12 @@ fn truncate_to_tail(buf: &mut String, max: usize) {
     while start > 0 && !buf.is_char_boundary(start) {
         start -= 1;
     }
-    let start = buf[..start].rfind('\n').map(|pos| pos + 1).unwrap_or(start);
+    if let Some(pos) = buf[..start].rfind('\n') {
+        let line_start = pos + 1;
+        if buf.len() - line_start <= max + MAX_LINE_OVERSHOOT {
+            start = line_start;
+        }
+    }
     let mut truncated = buf.split_off(start);
     std::mem::swap(&mut truncated, buf);
 }
@@ -9853,5 +9863,25 @@ mod tests {
         let content = "x".repeat(8 * 1024);
         let (kept, original) = run(&content);
         assert_eq!(kept, original);
+
+        // A giant single line must not balloon the buffer: the line-start
+        // snap is capped, so the kept tail stays within max + 4KB even
+        // when the remote emits a line far larger than the cap.
+        let content = format!("{}x\n", "X".repeat(1024 * 1024));
+        let (kept, original) = run(&content);
+        assert!(kept.len() <= 8 * 1024 + 4 * 1024);
+        assert!(original.ends_with(&kept));
+        assert!(kept.ends_with("x\n"));
+
+        // Same for a repeated-chunk stream of unterminated giant lines:
+        // appending 8MB in one line still leaves a bounded buffer.
+        let mut buf = String::new();
+        for _ in 0..3 {
+            buf.push_str(&"Y".repeat(4 * 1024 * 1024));
+        }
+        let original = buf.clone();
+        truncate_to_tail(&mut buf, 8 * 1024);
+        assert!(buf.len() <= 8 * 1024 + 4 * 1024);
+        assert!(original.ends_with(&buf));
     }
 }
