@@ -8,6 +8,7 @@ pub mod dirs;
 pub mod memory;
 pub mod output;
 pub mod session;
+pub mod shell;
 pub mod skills;
 pub mod tools;
 
@@ -19,6 +20,7 @@ pub use dirs::DirsChecker;
 pub use memory::MemoryChecker;
 pub use output::Output;
 pub use session::SessionChecker;
+pub use shell::ShellChecker;
 pub use skills::SkillsChecker;
 pub use tools::ExternalToolsChecker;
 
@@ -34,6 +36,7 @@ impl Doctor {
             Box::new(DirsChecker::new()),
             Box::new(SessionChecker::new()),
             Box::new(ExternalToolsChecker::new()),
+            Box::new(ShellChecker::new()),
             Box::new(SkillsChecker::new()),
             Box::new(MemoryChecker::new()),
             Box::new(ApiConnectivityChecker::new()),
@@ -92,7 +95,7 @@ impl Doctor {
                             issues.push(msg);
                         }
                     }
-                    CheckStatus::Pass => {}
+                    CheckStatus::Pass | CheckStatus::NotApplicable => {}
                 }
             }
         }

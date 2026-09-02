@@ -61,9 +61,26 @@ impl ApiConnectivityChecker {
                         "api",
                         format!("API connectivity: OK ({}ms, {})", latency, api_base),
                     )
-                } else if status.as_u16() == 401 {
-                    CheckItem::fail("api", "API connectivity: invalid API key (HTTP 401)")
-                        .hint("Check your API key in config or AISH_API_KEY env var")
+                } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                    // Auth failed but the server IS reachable — connectivity OK.
+                    CheckItem::pass(
+                        "api",
+                        format!(
+                            "API reachable ({}ms, {}); auth returned {} — verify key if AI calls fail",
+                            latency, api_base, status
+                        ),
+                    )
+                } else if status.as_u16() == 404 {
+                    // /models not implemented by this provider (common for
+                    // OpenAI-compatible gateways). The server responded, so
+                    // connectivity is fine; chat/completions may still work.
+                    CheckItem::pass(
+                        "api",
+                        format!(
+                            "API reachable ({}ms, {}); /models not implemented — AI calls use /chat/completions",
+                            latency, api_base
+                        ),
+                    )
                 } else if status.is_server_error() {
                     CheckItem::fail(
                         "api",
@@ -71,14 +88,15 @@ impl ApiConnectivityChecker {
                     )
                     .hint("The API server may be temporarily unavailable")
                 } else if status.is_client_error() {
-                    CheckItem::fail(
+                    // Other 4xx (400, 405, …): server is up, endpoint rejected
+                    // the probe. Connectivity itself is fine.
+                    CheckItem::pass(
                         "api",
                         format!(
-                            "API connectivity: client error (HTTP {}, {})",
-                            status, api_base
+                            "API reachable ({}ms, {}); probe returned {} — AI calls may still work",
+                            latency, api_base, status
                         ),
                     )
-                    .hint("Check your API base URL and endpoint configuration")
                 } else {
                     CheckItem::warn(
                         "api",

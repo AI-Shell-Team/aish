@@ -5,6 +5,9 @@ pub enum CheckStatus {
     Pass,
     Warn,
     Fail,
+    /// Check does not apply to this environment (e.g. zsh-only migration
+    /// advice on a bash-only host). Neutral in aggregation and output.
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,6 +52,16 @@ impl CheckItem {
         Self {
             name: name.into(),
             status: CheckStatus::Fail,
+            message: message.into(),
+            fixable: false,
+            hint: None,
+        }
+    }
+
+    pub fn not_applicable(name: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: CheckStatus::NotApplicable,
             message: message.into(),
             fixable: false,
             hint: None,
