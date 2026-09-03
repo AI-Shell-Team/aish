@@ -686,6 +686,10 @@ impl ShellChecker {
             .arg("-ic")
             .arg(script);
         detach_tty(&mut cmd);
+        // Discard stderr: this probe only needs stdout (the delimited count
+        // marker). rc-file stderr noise is irrelevant here, and discarding
+        // it avoids unbounded buffering from a noisy startup file.
+        cmd.stderr(std::process::Stdio::null());
         let output = cmd.output().ok()?;
         if !output.status.success() {
             return None;

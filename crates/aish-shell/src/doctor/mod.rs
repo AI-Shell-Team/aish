@@ -64,10 +64,13 @@ impl Doctor {
             }
         }
 
-        // Machine-readable JSON output: skip the header/summary, print only
-        // the structured results. Consumers parse this for compatibility
-        // matrices and CI gates.
+        // Machine-readable JSON output: print only the structured results.
+        // --fix is incompatible with --json: fixes require interactive
+        // confirmation and human-readable output, so silently ignore fix.
         if json {
+            if fix {
+                eprintln!("Warning: --fix is ignored with --json (fixes need interactive confirmation)");
+            }
             match serde_json::to_string_pretty(&all_results) {
                 Ok(s) => println!("{}", s),
                 Err(e) => eprintln!("Failed to serialize doctor results: {}", e),
