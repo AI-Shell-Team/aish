@@ -1375,6 +1375,7 @@ tools:
     content_too_large: "WebFetch 响应超过 10MB 限制"
     binary_unsupported: "当前版本的 WebFetch 不支持二进制内容"
     secondary_model_failed: "WebFetch 已抓取页面，但使用二级模型处理失败: {error}"
+    http_error: "WebFetch 请求失败: HTTP {code} {status}"
 
 help:
   labels:

@@ -12,8 +12,8 @@ use reqwest::Url;
 use super::preapproved::is_preapproved_host;
 use super::prompt;
 use super::utils::{
-    fetch_url_content, format_redirect_message, make_secondary_model_prompt, truncate_for_model,
-    validate_and_normalize_url, FetchFailure, FetchedContent,
+    fetch_url_content, format_redirect_message, make_secondary_model_prompt, status_text,
+    truncate_for_model, validate_and_normalize_url, FetchFailure, FetchedContent,
 };
 
 const TOOL_NAME: &str = "WebFetch";
@@ -190,6 +190,22 @@ impl Tool for WebFetchTool {
                         })),
                     };
                 }
+                Err(FetchFailure::HttpStatus(status)) => {
+                    let args_map = HashMap::from([
+                        ("code".to_string(), status.as_u16().to_string()),
+                        ("status".to_string(), status_text(status).to_string()),
+                    ]);
+                    let message = aish_i18n::t_with_args("tools.web_fetch.http_error", &args_map);
+                    return ToolResult {
+                        ok: false,
+                        output: message,
+                        meta: Some(serde_json::json!({
+                            "url": url,
+                            "http_status": status.as_u16(),
+                            "durationMs": start.elapsed().as_millis() as u64,
+                        })),
+                    };
+                }
                 Err(FetchFailure::Blocked(message)) | Err(FetchFailure::Request(message)) => {
                     return ToolResult::error(message)
                 }
@@ -292,6 +308,44 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains(&expected.to_ascii_lowercase()),
                 "expected fetched content to contain {expected:?}"
+            );
+        }
+    }
+
+    /// End-to-end test: web_fetch must return a structured failure with
+    /// `ok=false` and `http_status` in meta when the server responds with a
+    /// 4xx/5xx status. Uses httpbin.org/status/{code} which echoes the
+    /// requested status code. No LLM is invoked on the error path.
+    /// Run with: AISH_LIVE_WEBFETCH=1 cargo test -p aish-tools live_http_error -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_http_error_returns_failure() {
+        if std::env::var("AISH_LIVE_WEBFETCH").ok().as_deref() != Some("1") {
+            eprintln!("set AISH_LIVE_WEBFETCH=1 to run this live network smoke test");
+            return;
+        }
+
+        let codes = [404u16, 410, 429, 500];
+        for code in codes {
+            let url = format!("https://httpbin.org/status/{code}");
+            let args = serde_json::json!({ "url": url, "prompt": "summarize" });
+            let tool = WebFetchTool::new("", "", "", Some(0.1), Some(256));
+            let result = tool.execute_async(args).await;
+
+            assert!(
+                !result.ok,
+                "HTTP {code} should return ok=false, got ok=true\noutput: {}",
+                result.output
+            );
+            let meta = result.meta.expect("HTTP error should include meta");
+            let http_status = meta
+                .get("http_status")
+                .and_then(|v| v.as_u64())
+                .expect("meta should contain http_status");
+            assert_eq!(http_status, code as u64, "http_status should be {code}");
+            println!(
+                "HTTP {code}: ok={} output={:?} meta={}",
+                result.ok, result.output, meta
             );
         }
     }
