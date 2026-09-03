@@ -7,7 +7,7 @@ use aish_llm::{
     ChatMessage, LlmResponse, LlmSession, PreflightResult, PreflightSecurityContext,
     SecurityPanelMode, StreamParser, Tool, ToolResult,
 };
-use reqwest::Url;
+use reqwest::{StatusCode, Url};
 
 use super::preapproved::is_preapproved_host;
 use super::prompt;
@@ -80,6 +80,24 @@ impl WebFetchTool {
     }
 }
 
+
+/// Build a failure `ToolResult` for an HTTP 4xx/5xx response.
+fn http_status_error(url: &str, status: StatusCode, duration_ms: u64) -> ToolResult {
+    let args_map = HashMap::from([
+        ("code".to_string(), status.as_u16().to_string()),
+        ("status".to_string(), status_text(status).to_string()),
+    ]);
+    let message = aish_i18n::t_with_args("tools.web_fetch.http_error", &args_map);
+    ToolResult {
+        ok: false,
+        output: message,
+        meta: Some(serde_json::json!({
+            "url": url,
+            "http_status": status.as_u16(),
+            "durationMs": duration_ms,
+        })),
+    }
+}
 impl Tool for WebFetchTool {
     fn name(&self) -> &str {
         TOOL_NAME
@@ -191,20 +209,7 @@ impl Tool for WebFetchTool {
                     };
                 }
                 Err(FetchFailure::HttpStatus(status)) => {
-                    let args_map = HashMap::from([
-                        ("code".to_string(), status.as_u16().to_string()),
-                        ("status".to_string(), status_text(status).to_string()),
-                    ]);
-                    let message = aish_i18n::t_with_args("tools.web_fetch.http_error", &args_map);
-                    return ToolResult {
-                        ok: false,
-                        output: message,
-                        meta: Some(serde_json::json!({
-                            "url": url,
-                            "http_status": status.as_u16(),
-                            "durationMs": start.elapsed().as_millis() as u64,
-                        })),
-                    };
+                    return http_status_error(url, status, start.elapsed().as_millis() as u64);
                 }
                 Err(FetchFailure::Blocked(message)) | Err(FetchFailure::Request(message)) => {
                     return ToolResult::error(message)
@@ -267,6 +272,39 @@ impl Tool for WebFetchTool {
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn http_status_error_returns_failure() {
+        let result = http_status_error("https://example.com/missing", StatusCode::NOT_FOUND, 50);
+        assert!(!result.ok, "4xx/5xx should return ok=false");
+        assert_eq!(
+            result.meta.as_ref().and_then(|m| m.get("http_status")).and_then(|v| v.as_u64()),
+            Some(404),
+            "meta should contain http_status=404"
+        );
+        let meta = result.meta.as_ref().expect("meta should be present");
+        assert_eq!(meta.get("url").and_then(|v| v.as_str()), Some("https://example.com/missing"));
+        assert_eq!(meta.get("durationMs").and_then(|v| v.as_u64()), Some(50));
+        assert!(
+            result.output.contains("404"),
+            "output should mention the status code: got {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn http_status_error_covers_410_429_500() {
+        for code in [StatusCode::GONE, StatusCode::TOO_MANY_REQUESTS, StatusCode::INTERNAL_SERVER_ERROR] {
+            let result = http_status_error("https://example.com", code, 10);
+            assert!(!result.ok, "{code} should return ok=false");
+            let meta = result.meta.as_ref().expect("meta should be present");
+            assert_eq!(
+                meta.get("http_status").and_then(|v| v.as_u64()),
+                Some(code.as_u16() as u64),
+                "meta http_status should match {code}"
+            );
+        }
+    }
     #[tokio::test]
     #[ignore]
     async fn live_fetch_url() {
