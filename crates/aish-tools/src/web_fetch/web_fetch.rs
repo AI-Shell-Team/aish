@@ -80,7 +80,6 @@ impl WebFetchTool {
     }
 }
 
-
 /// Build a failure `ToolResult` for an HTTP 4xx/5xx response.
 fn http_status_error(url: &str, status: StatusCode, duration_ms: u64) -> ToolResult {
     let args_map = HashMap::from([
@@ -272,18 +271,24 @@ impl Tool for WebFetchTool {
 mod tests {
     use super::*;
 
-
     #[test]
     fn http_status_error_returns_failure() {
         let result = http_status_error("https://example.com/missing", StatusCode::NOT_FOUND, 50);
         assert!(!result.ok, "4xx/5xx should return ok=false");
         assert_eq!(
-            result.meta.as_ref().and_then(|m| m.get("http_status")).and_then(|v| v.as_u64()),
+            result
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("http_status"))
+                .and_then(|v| v.as_u64()),
             Some(404),
             "meta should contain http_status=404"
         );
         let meta = result.meta.as_ref().expect("meta should be present");
-        assert_eq!(meta.get("url").and_then(|v| v.as_str()), Some("https://example.com/missing"));
+        assert_eq!(
+            meta.get("url").and_then(|v| v.as_str()),
+            Some("https://example.com/missing")
+        );
         assert_eq!(meta.get("durationMs").and_then(|v| v.as_u64()), Some(50));
         assert!(
             result.output.contains("404"),
@@ -294,7 +299,11 @@ mod tests {
 
     #[test]
     fn http_status_error_covers_410_429_500() {
-        for code in [StatusCode::GONE, StatusCode::TOO_MANY_REQUESTS, StatusCode::INTERNAL_SERVER_ERROR] {
+        for code in [
+            StatusCode::GONE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
             let result = http_status_error("https://example.com", code, 10);
             assert!(!result.ok, "{code} should return ok=false");
             let meta = result.meta.as_ref().expect("meta should be present");
