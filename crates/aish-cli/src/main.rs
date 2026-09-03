@@ -196,6 +196,9 @@ enum Commands {
         /// Attempt to auto-fix issues
         #[arg(long)]
         fix: bool,
+        /// Output results as machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Search, install, and manage skills
     Skill {
@@ -419,11 +422,11 @@ fn main() {
         Some(Commands::Uninstall { purge }) => {
             uninstall::run_uninstall(purge);
         }
-        Some(Commands::Doctor { fix }) => {
+        Some(Commands::Doctor { fix, json }) => {
             let doctor = aish_shell::doctor::Doctor::new();
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(async {
-                doctor.run(fix).await;
+                doctor.run(fix, json).await;
             });
         }
         Some(Commands::ModelsAuth {

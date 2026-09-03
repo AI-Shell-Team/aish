@@ -18,6 +18,7 @@ impl Output {
             CheckStatus::Pass => theme::success(theme::ICON_SUCCESS),
             CheckStatus::Warn => theme::warning(theme::ICON_WARNING),
             CheckStatus::Fail => theme::error(theme::ICON_ERROR),
+            CheckStatus::NotApplicable => theme::dim("−"),
         };
         println!("[{}] {}", icon, result.checker);
         for item in &result.items {
@@ -30,6 +31,7 @@ impl Output {
             CheckStatus::Pass => theme::success(theme::ICON_SUCCESS),
             CheckStatus::Warn => theme::warning(theme::ICON_WARNING),
             CheckStatus::Fail => theme::error(theme::ICON_ERROR),
+            CheckStatus::NotApplicable => theme::dim("−"),
         };
         let indent = "    ";
         println!("{}{} {}", indent, icon, item.message);

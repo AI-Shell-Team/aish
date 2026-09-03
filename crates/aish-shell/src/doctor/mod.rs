@@ -1,4 +1,5 @@
 use crossterm::style::Stylize;
+use serde_json;
 
 pub mod api;
 pub mod apikey;
@@ -8,6 +9,7 @@ pub mod dirs;
 pub mod memory;
 pub mod output;
 pub mod session;
+pub mod shell;
 pub mod skills;
 pub mod tools;
 
@@ -19,6 +21,7 @@ pub use dirs::DirsChecker;
 pub use memory::MemoryChecker;
 pub use output::Output;
 pub use session::SessionChecker;
+pub use shell::ShellChecker;
 pub use skills::SkillsChecker;
 pub use tools::ExternalToolsChecker;
 
@@ -34,16 +37,14 @@ impl Doctor {
             Box::new(DirsChecker::new()),
             Box::new(SessionChecker::new()),
             Box::new(ExternalToolsChecker::new()),
+            Box::new(ShellChecker::new()),
             Box::new(SkillsChecker::new()),
             Box::new(MemoryChecker::new()),
             Box::new(ApiConnectivityChecker::new()),
         ];
         Self { checkers }
     }
-
-    pub async fn run(&self, fix: bool) {
-        Output::print_header();
-
+    pub async fn run(&self, fix: bool, json: bool) {
         let handles: Vec<_> = self
             .checkers
             .iter()
@@ -62,6 +63,24 @@ impl Doctor {
                 }
             }
         }
+
+        // Machine-readable JSON output: print only the structured results.
+        // --fix is incompatible with --json: fixes require interactive
+        // confirmation and human-readable output, so silently ignore fix.
+        if json {
+            if fix {
+                eprintln!(
+                    "Warning: --fix is ignored with --json (fixes need interactive confirmation)"
+                );
+            }
+            match serde_json::to_string_pretty(&all_results) {
+                Ok(s) => println!("{}", s),
+                Err(e) => eprintln!("Failed to serialize doctor results: {}", e),
+            }
+            return;
+        }
+
+        Output::print_header();
 
         for result in &all_results {
             Output::print_result(result);
@@ -92,7 +111,7 @@ impl Doctor {
                             issues.push(msg);
                         }
                     }
-                    CheckStatus::Pass => {}
+                    CheckStatus::Pass | CheckStatus::NotApplicable => {}
                 }
             }
         }
