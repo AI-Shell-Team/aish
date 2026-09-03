@@ -650,7 +650,60 @@ impl ShellChecker {
             }
         }
 
+        // Alias / function / completion counts: tells the user how many
+        // definitions the interactive bash environment provides. These are
+        // informational (not pass/fail) — a low or zero count may indicate a
+        // minimal rc file, not a problem.
+        match self.shell_definition_counts() {
+            Some((aliases, functions, completions)) => {
+                items.push(CheckItem::pass(
+                    "shell_definitions",
+                    format!(
+                        "interactive bash defines {} alias(es), {} function(s), {} completion(s)",
+                        aliases, functions, completions
+                    ),
+                ));
+            }
+            None => {
+                items.push(CheckItem::not_applicable(
+                    "shell_definitions",
+                    "could not count aliases/functions/completions (probe failed)",
+                ));
+            }
+        }
+
         items
+    }
+
+    /// Count aliases, functions, and completions defined in an interactive
+    /// bash shell (mirrors what the aish PTY would inherit). Returns None if
+    /// the probe fails or the output is unparseable.
+    fn shell_definition_counts(&self) -> Option<(usize, usize, usize)> {
+        let script = "echo \"__AISH__$(compgen -a | wc -l)__$(compgen -A function | wc -l)__$(complete -p 2>/dev/null | wc -l)__AISH__\"";
+        let mut cmd = Command::new("timeout");
+        cmd.arg(format!("{}s", PROBE_TIMEOUT_SECS))
+            .arg("/bin/bash")
+            .arg("-ic")
+            .arg(script);
+        detach_tty(&mut cmd);
+        let output = cmd.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Extract the delimited marker: __AISH__N__N__N__AISH__
+        let start = stdout.find("__AISH__")?;
+        let rest = &stdout[start + 8..];
+        let end = rest.find("__AISH__")?;
+        let inner = &rest[..end];
+        let parts: Vec<&str> = inner.split("__").collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let aliases = parts[0].trim().parse::<usize>().ok()?;
+        let functions = parts[1].trim().parse::<usize>().ok()?;
+        let completions = parts[2].trim().parse::<usize>().ok()?;
+        Some((aliases, functions, completions))
     }
 
     /// Startup-speed item derived from the baseline probe duration.

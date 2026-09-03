@@ -6243,9 +6243,10 @@ impl AishShell {
     fn handle_doctor_command(&mut self, parts: &[&str]) {
         let doctor = crate::doctor::Doctor::new();
         let fix = parts.iter().skip(1).any(|arg| *arg == "--fix");
+        let json = parts.iter().skip(1).any(|arg| *arg == "--json");
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            doctor.run(fix).await;
+            doctor.run(fix, json).await;
         });
     }
 

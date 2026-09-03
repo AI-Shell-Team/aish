@@ -1,4 +1,5 @@
 use crossterm::style::Stylize;
+use serde_json;
 
 pub mod api;
 pub mod apikey;
@@ -43,10 +44,7 @@ impl Doctor {
         ];
         Self { checkers }
     }
-
-    pub async fn run(&self, fix: bool) {
-        Output::print_header();
-
+    pub async fn run(&self, fix: bool, json: bool) {
         let handles: Vec<_> = self
             .checkers
             .iter()
@@ -65,6 +63,19 @@ impl Doctor {
                 }
             }
         }
+
+        // Machine-readable JSON output: skip the header/summary, print only
+        // the structured results. Consumers parse this for compatibility
+        // matrices and CI gates.
+        if json {
+            match serde_json::to_string_pretty(&all_results) {
+                Ok(s) => println!("{}", s),
+                Err(e) => eprintln!("Failed to serialize doctor results: {}", e),
+            }
+            return;
+        }
+
+        Output::print_header();
 
         for result in &all_results {
             Output::print_result(result);
