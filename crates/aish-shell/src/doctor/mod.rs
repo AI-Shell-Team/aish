@@ -69,7 +69,9 @@ impl Doctor {
         // confirmation and human-readable output, so silently ignore fix.
         if json {
             if fix {
-                eprintln!("Warning: --fix is ignored with --json (fixes need interactive confirmation)");
+                eprintln!(
+                    "Warning: --fix is ignored with --json (fixes need interactive confirmation)"
+                );
             }
             match serde_json::to_string_pretty(&all_results) {
                 Ok(s) => println!("{}", s),
