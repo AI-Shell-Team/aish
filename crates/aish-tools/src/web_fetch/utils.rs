@@ -44,6 +44,7 @@ pub(crate) enum FetchFailure {
     Blocked(String),
     Request(String),
     Redirect(RedirectInfo),
+    HttpStatus(StatusCode),
 }
 
 #[derive(Debug)]
@@ -98,6 +99,10 @@ pub(crate) async fn fetch_url_content(raw_url: &str) -> Result<FetchedContent, F
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
+
+    if is_error_status(status) {
+        return Err(FetchFailure::HttpStatus(status));
+    }
 
     if is_binary_content_type(&content_type) {
         return Err(FetchFailure::Request(aish_i18n::t(
@@ -345,6 +350,13 @@ fn is_redirect_status(status: StatusCode) -> bool {
     )
 }
 
+/// Whether `status` is a client (4xx) or server (5xx) error that must not be
+/// treated as a successful fetch: the response body is an error page, not
+/// content, so it must not be cached or analyzed by the secondary model.
+fn is_error_status(status: StatusCode) -> bool {
+    status.is_client_error() || status.is_server_error()
+}
+
 fn is_permitted_redirect(original: &Url, redirect_url: &Url) -> bool {
     if original.scheme() != redirect_url.scheme() || original.port() != redirect_url.port() {
         return false;
@@ -381,7 +393,7 @@ async fn read_limited_body(response: reqwest::Response) -> Result<Vec<u8>, Strin
     Ok(buffer)
 }
 
-fn status_text(status: StatusCode) -> &'static str {
+pub(crate) fn status_text(status: StatusCode) -> &'static str {
     status.canonical_reason().unwrap_or("")
 }
 
@@ -593,5 +605,26 @@ mod tests {
         assert_eq!(decode_html_entities("&amp;quot;"), "&quot;");
         assert_eq!(decode_html_entities("&amp;#39;"), "&#39;");
         assert_eq!(decode_html_entities("&amp;apos;"), "&apos;");
+    }
+
+    #[test]
+    fn is_error_status_classifies_4xx_and_5xx() {
+        assert!(is_error_status(StatusCode::NOT_FOUND));
+        assert!(is_error_status(StatusCode::GONE));
+        assert!(is_error_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_error_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(is_error_status(StatusCode::BAD_REQUEST));
+        assert!(is_error_status(StatusCode::FORBIDDEN));
+        assert!(is_error_status(StatusCode::BAD_GATEWAY));
+        assert!(is_error_status(StatusCode::SERVICE_UNAVAILABLE));
+    }
+
+    #[test]
+    fn is_error_status_rejects_success_and_redirect() {
+        assert!(!is_error_status(StatusCode::OK));
+        assert!(!is_error_status(StatusCode::MOVED_PERMANENTLY));
+        assert!(!is_error_status(StatusCode::FOUND));
+        assert!(!is_error_status(StatusCode::NOT_MODIFIED));
+        assert!(!is_error_status(StatusCode::PARTIAL_CONTENT));
     }
 }
