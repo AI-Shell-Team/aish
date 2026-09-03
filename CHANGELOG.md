@@ -7,6 +7,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.12] - 2026-09-03
+
+### Added
+
+- `/doctor` Shell Compatibility checker: identity, startup files, startup speed, environment inheritance (proxy values redacted), secret detection (set/unset only), PTY bash compatibility probe, and alias/function/completion counts. `aish doctor --json` and `/doctor --json` emit machine-readable results.
+- Live-session resource monitoring: `/live_sessions` shows CPU% and RSS per session; configurable alerts when a detached session exceeds CPU/RSS thresholds (`pty_resource_check_interval_secs` / `_cpu_percent` / `_rss_mb`). Killing a session now terminates the full worker process tree with pidfd-pinned SIGTERM then SIGKILL so recycled PIDs are not hit.
+- Long-term memory: confirm before store/forget, provenance, expiry/TTL, `/memory` (list / verify / forget), and a category-aware TTL policy with an explicit `permanent` flag.
+- `/audit export`: portable audit package (`audit.md` + `events.jsonl` + `manifest.json`) with `--until` and `--session` filters, SHA-256 hashes, and owner-only permissions.
+- System-level security policy: `/etc/aish/security_policy.yaml` takes full precedence over the user-level `~/.config/aish/security_policy.yaml`.
+
+### Changed
+
+- `glob` tool uses pruned DFS (skips `target` / `node_modules` / … at traversal time), a 60s wall-clock budget, Ctrl+C cancellation, and `spawn_blocking`. Cancellation returns partial results so the agent does not retry into another cancelled walk. Absolute patterns start at the longest wildcard-free prefix instead of scanning from `/`.
+- Session database (`sessions.db`) and its WAL/SHM siblings are created or tightened to owner-only `0600` on open.
+
+### Fixed
+
+- `web_fetch` returns a structured failure (`ok=false`, `http_status`) on HTTP 4xx/5xx instead of treating error pages as success, caching them, and sending them to the secondary LLM.
+- `/doctor` no longer hangs forever in the REPL: probe subprocesses are detached from the controlling TTY so interactive bash cannot SIGTTOU-stop itself. Probe stderr noise is a warning rather than a fatal baseline error, and API connectivity treats 401/403/404 as reachable (only 5xx and network errors fail that check).
+- Nested-confirm buffer truncation no longer panics on a UTF-8 character boundary (for example a large CJK MOTD inside nested SSH), and the kept tail is hard-capped.
+- Sub-agent fatal outcomes preserve already-completed tool results and a structured `error_category`, so the parent can continue without redoing finished work.
+- Main session now persists AI tool-call history, so a follow-up question can see what the AI just executed instead of misattributing those commands to the user.
+- Thinking-animation frames no longer swallow tracing log lines, so LLM retry warnings stay visible.
+- Ctrl+C now stops the sub-agent thinking animation thread; tool-result status lines no longer overlap leftover frames.
+
 ## [0.3.11] - 2026-08-18
 
 ### Added
