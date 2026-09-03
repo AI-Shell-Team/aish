@@ -11,6 +11,7 @@ Usage:
 - HTTP URLs are automatically upgraded to HTTPS.
 - HTML content is converted to readable text before being processed by a secondary model.
 - Results may be summarized or truncated when the page is very large.
+- HTTP 4xx/5xx responses (e.g. 404, 410, 429, 500) are returned as failures with `ok=false` and an `http_status` field in the result metadata. The error page body is not fetched, cached, or analyzed.
 - A 15-minute cache is used for repeated requests to the same URL.
 - If a URL redirects to a different host, call WebFetch again with the redirect URL returned by the tool.
 - For GitHub URLs, prefer gh via bash when repository metadata, issues, PRs, releases, or API data are needed."#;

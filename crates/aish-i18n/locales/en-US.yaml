@@ -1376,6 +1376,7 @@ tools:
     content_too_large: "WebFetch response exceeded the 10MB limit"
     binary_unsupported: "WebFetch does not support binary content in this version"
     secondary_model_failed: "WebFetch fetched the page but failed to process it with the secondary model: {error}"
+    http_error: "WebFetch request failed: HTTP {code} {status}"
 
 help:
   labels:
