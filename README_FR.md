@@ -256,8 +256,7 @@ AI Shell effectue l’évaluation de sécurité uniquement sur les commandes **g
 ### Chemin des fichiers de politique de sécurité
 
 Les fichiers de politique sont résolus dans l’ordre suivant :
-1. `/etc/aish/security_policy.yaml` (niveau système)
-2. `~/.config/aish/security_policy.yaml` (niveau utilisateur ; modèle généré automatiquement si absent)
+1. `~/.config/aish/security_policy.yaml` (niveau utilisateur ; modèle généré automatiquement si absent)
 
 ### Exécution préalable en bac à sable (optionnelle, recommandée en production)
 

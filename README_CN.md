@@ -251,8 +251,7 @@ AI Shell 仅对 **AI 生成并准备执行** 的命令进行安全评估。
 ### 安全策略文件路径
 
 策略文件按以下顺序解析：
-1. `/etc/aish/security_policy.yaml`（系统级）
-2. `~/.config/aish/security_policy.yaml`（用户级；若不存在会自动生成模板）
+1. `~/.config/aish/security_policy.yaml`（用户级；若不存在会自动生成模板）
 
 ### 沙箱预跑（可选，推荐生产启用）
 

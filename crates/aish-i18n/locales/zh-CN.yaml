@@ -1638,10 +1638,7 @@ help:
 
         路径：
         1. 显式指定的路径
-        2. `/etc/aish/security_policy.yaml`（系统级，存在时优先使用）
-        3. `~/.config/aish/security_policy.yaml`（不存在时从内置模板生成）
-
-        当 `/etc/aish/security_policy.yaml` 存在时，完全覆盖用户级配置。
+        2. `~/.config/aish/security_policy.yaml`（不存在时从内置模板生成）
 
         ## 风险等级
 
