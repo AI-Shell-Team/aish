@@ -1,7 +1,8 @@
 //! LLM tools for searching and installing skills from registries.
 //!
-//! These tools enable the AI to auto-discover and install skills when a user's
-//! request doesn't match any loaded skill.
+//! These tools let the AI install skills ONLY on explicit user request or
+//! when a task genuinely needs a declarable skill capability — never as a
+//! substitute for ordinary OS package-manager work.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -22,7 +23,10 @@ use serde::{Deserialize, Serialize};
 
 /// Tool for searching skill registries.
 ///
-/// The AI calls this when the user's request doesn't match any loaded skill.
+/// The AI calls this ONLY when the user explicitly asks for an AISH skill or
+/// the task genuinely requires a declarable skill capability — never for
+/// ordinary system work like installing software through the OS package
+/// manager.
 pub struct SkillSearchTool {
     registries: Vec<RegistryConfig>,
     prompt: String,
@@ -104,7 +108,11 @@ impl Tool for SkillSearchTool {
 
     fn description(&self) -> &str {
         "Search skill registries for skills matching a query. \
-Use this when the user's request might be solvable by a skill that is not yet installed."
+Use this ONLY when the user explicitly asks for an AISH skill, or the task \
+genuinely requires a declarable skill capability that no loaded skill \
+provides. NEVER use it for ordinary system tasks such as installing, \
+upgrading, or looking up software via the OS package manager (apt/dnf/\
+pacman/flatpak/snap) or official download sources."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -142,6 +150,31 @@ Use this when the user's request might be solvable by a skill that is not yet in
         let outcome = self.do_search(&search_args.query, search_args.limit);
         let error_registries: Vec<String> =
             outcome.errors.iter().map(|e| e.registry.clone()).collect();
+        // Failure semantics: every registry failed -> the search did not
+        // happen at all, so report failure (ok=false) and let the model
+        // degrade gracefully instead of mistaking it for "no matches".
+        // Partial failures with some results stay ok=true but keep the
+        // errors visible in output and meta; a genuinely empty result with
+        // no errors is a real "no matches" answer.
+        if outcome.results.is_empty() && !outcome.errors.is_empty() {
+            let mut output = String::from("Skill registry search failed for all registries:\n");
+            for e in &outcome.errors {
+                output.push_str(&format!("- {}: {}\n", e.registry, e.error));
+            }
+            output.push_str(
+                "Treat this as a transient failure, not as \"no skills found\". \
+You may retry once or continue the task without skills.",
+            );
+            return ToolResult {
+                ok: false,
+                output,
+                meta: Some(serde_json::json!({
+                    "count": 0,
+                    "query": search_args.query,
+                    "registry_errors": error_registries,
+                })),
+            };
+        }
         ToolResult {
             ok: true,
             output: Self::format_results(&outcome),
@@ -695,5 +728,122 @@ mod tests {
         // observe the reset so later installs re-prompt for review.
         assert!(handle.swap(false, std::sync::atomic::Ordering::SeqCst));
         assert!(!tool.auto_vet.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Spawn a one-shot HTTP server on 127.0.0.1 that answers every request
+    /// with the given status and body, and return its base URL. Used to drive
+    /// the real skills.sh adapter against a local endpoint (no network).
+    fn spawn_local_registry(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status} TEST\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{}", addr), handle)
+    }
+
+    fn search_registry_config(name: &str, url: &str) -> RegistryConfig {
+        RegistryConfig {
+            name: name.to_string(),
+            registry_type: "skills_sh".to_string(),
+            enabled: true,
+            url: url.to_string(),
+        }
+    }
+
+    fn search_args_json(query: &str) -> serde_json::Value {
+        serde_json::json!({ "query": query, "limit": 10 })
+    }
+
+    #[test]
+    fn all_registries_failing_reports_ok_false() {
+        // Registry returns HTTP 500: the search did not happen, so the tool
+        // must fail (ok=false) instead of pretending "no matches".
+        let (url, server) = spawn_local_registry(500, r#"{"error":"boom"}"#);
+        let tool = SkillSearchTool::new(vec![search_registry_config("broken", &url)]);
+
+        let result = tool.execute(search_args_json("lunacy install"));
+        server.join().expect("server thread");
+
+        assert!(!result.ok, "total registry failure must return ok=false");
+        assert!(result.output.contains("search failed"));
+        assert!(result.output.contains("broken"));
+        let meta = result.meta.expect("meta present");
+        assert_eq!(meta["count"], 0);
+        assert_eq!(meta["registry_errors"][0], "broken");
+    }
+
+    #[test]
+    fn partial_registry_failure_with_results_stays_ok_true() {
+        // One registry answers with a result, another is unreachable: the
+        // merged results are valid (ok=true) but the errors must stay visible.
+        let (good_url, good_server) = spawn_local_registry(
+            200,
+            r#"{"skills":[{"id":"a/b/lunacy-skill","name":"Lunacy Skill","installs":5,"source":"a/b"}]}"#,
+        );
+        let (bad_url, bad_server) = spawn_local_registry(500, r#"{"error":"boom"}"#);
+        let tool = SkillSearchTool::new(vec![
+            search_registry_config("good", &good_url),
+            search_registry_config("bad", &bad_url),
+        ]);
+
+        let result = tool.execute(search_args_json("lunacy"));
+        good_server.join().expect("good server thread");
+        bad_server.join().expect("bad server thread");
+
+        assert!(result.ok, "results from a working registry stay ok=true");
+        assert!(
+            result.output.contains("Found 1 skill(s)"),
+            "got: {}",
+            result.output
+        );
+        assert!(result.output.contains("Registry errors"));
+        assert!(result.output.contains("bad:"));
+        let meta = result.meta.expect("meta present");
+        assert_eq!(meta["count"], 1);
+        assert_eq!(meta["registry_errors"][0], "bad");
+    }
+
+    #[test]
+    fn empty_result_without_errors_is_ok_true_no_matches() {
+        // Registry answers 200 with zero skills: a genuine "no matches".
+        let (url, server) = spawn_local_registry(200, r#"{"skills":[]}"#);
+        let tool = SkillSearchTool::new(vec![search_registry_config("empty", &url)]);
+
+        let result = tool.execute(search_args_json("zzz-nonexistent"));
+        server.join().expect("server thread");
+
+        assert!(result.ok);
+        assert!(result.output.contains("No skills found"));
+        let meta = result.meta.expect("meta present");
+        assert_eq!(meta["count"], 0);
+        assert_eq!(meta["registry_errors"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn disabled_registries_fail_fast() {
+        let tool = SkillSearchTool::new(vec![RegistryConfig {
+            name: "off".to_string(),
+            registry_type: "skills_sh".to_string(),
+            enabled: false,
+            url: "http://127.0.0.1:9".to_string(),
+        }]);
+        let result = tool.execute(search_args_json("anything"));
+        assert!(!result.ok);
+        assert!(result.output.contains("No skill registries are enabled"));
     }
 }
