@@ -1153,6 +1153,11 @@ mod tests {
             .map(|s| s.trim().to_string())
     }
 
+    // These tests rely on `dirs::config_dir()` honoring `XDG_CONFIG_HOME`,
+    // which only holds on Linux/Redox. On macOS `config_dir()` returns
+    // `~/Library/Application Support` and ignores the env var, so the tests
+    // would touch the real user marker. CI runs tests on Linux only.
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_startup_summary_does_not_advance_marker() {
         // A transient launch (display only) must leave the marker untouched
@@ -1172,6 +1177,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_commit_advances_marker() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1192,6 +1198,7 @@ mod tests {
         assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_first_install_seeds_marker_without_summary() {
         // Fresh install: no marker → seed silently, never show a range.
@@ -1204,6 +1211,7 @@ mod tests {
         assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_take_accepts_v_prefixed_inputs() {
         // Version strings may arrive with a leading 'v' (e.g. from update
@@ -1225,6 +1233,7 @@ mod tests {
         assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_take_reseats_marker_ahead_of_current() {
         // Marker ahead of the binary (downgrade or corruption): reseat to
