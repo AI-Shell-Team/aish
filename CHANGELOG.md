@@ -7,11 +7,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.13] - 2026-09-04
 
 ### Removed
 
-- System-level security policy: `/etc/aish/security_policy.yaml` is no longer read; the user-level `~/.config/aish/security_policy.yaml` (auto-seeded from the shipped template when missing) is the sole source of security settings. Administrators who relied on a system-wide policy must migrate its content to each user's policy file. The uninstaller still removes leftover `/etc/aish` from older installers.
+- System-level security policy: `/etc/aish/security_policy.yaml` is no longer read; the user-level `~/.config/aish/security_policy.yaml` (auto-seeded from the shipped template when missing) is the sole source of security settings. Administrators who relied on a system-wide policy must migrate its content to each user's policy file. On upgrade, if the user-level file is missing and a leftover `/etc/aish/security_policy.yaml` exists, its content is copied to the user-level path instead of being silently discarded. The uninstaller still removes leftover `/etc/aish` from older installers.
+
+### Fixed
+
+- After an upgrade, the Keep-a-Changelog startup summary is no longer consumed by a flash start (version probe, immediate quit, Ctrl-D, or a daemon-attach race). The `last-changelog-version` marker is only advanced after the user actually uses the shell, so the next real session still shows the notes.
 
 ## [0.3.12] - 2026-09-03
 
