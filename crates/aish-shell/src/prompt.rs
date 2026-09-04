@@ -186,6 +186,10 @@ fn last_changelog_version_path() -> PathBuf {
         .join("last-changelog-version")
 }
 
+/// Read and normalize the last-seen changelog version marker.
+///
+/// Returns the trimmed file content, or `None` when the marker is missing
+/// or blank (treated as a fresh install by the caller).
 fn read_last_changelog_version() -> Option<String> {
     let raw = std::fs::read_to_string(last_changelog_version_path()).ok()?;
     let trimmed = raw.trim();
@@ -196,6 +200,9 @@ fn read_last_changelog_version() -> Option<String> {
     }
 }
 
+/// Write the last-seen changelog version marker, creating the parent
+/// directory on demand. I/O errors are ignored: a missing or stale marker
+/// only affects changelog display, never shell operation.
 fn write_last_changelog_version(version: &str) {
     let path = last_changelog_version_path();
     if let Some(parent) = path.parent() {
