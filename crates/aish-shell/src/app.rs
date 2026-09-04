@@ -1321,6 +1321,10 @@ impl AishShell {
         let sub_agent_animation_ref = sub_agent_animation.clone();
         let ai_op_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let ai_op_generation_cb = ai_op_generation.clone();
+        // Stable per-spawn ordinals (#1, #2, …) so interleaved sub-agent
+        // tool rows pair deterministically with their start rows.
+        let spawn_ordinals = crate::llm_event_ui::new_shared_spawn_ordinals();
+        let spawn_ordinals_ref = spawn_ordinals.clone();
 
         // Shared history of collapsed bash outputs for Ctrl+O browsing.
         let expand_history = Arc::new(Mutex::new(crate::expand_history::ExpandHistory::new()));
@@ -1471,7 +1475,8 @@ impl AishShell {
                     LlmEventType::OpEnd => {
                         // Operation ends — stop animation and show timing
                         sub_agent_active_count_ref.store(0, Ordering::SeqCst);
-                        sub_agent_animation_ref.stop();
+                        // New parent turn: restart spawn numbering at #1.
+                        crate::llm_event_ui::reset_spawn_ordinals(&spawn_ordinals_ref);
                         animation_ref.stop();
                         let ttft = *ttft_value_ref.lock().unwrap();
                         if ttft >= 0.1 {
@@ -1749,6 +1754,7 @@ impl AishShell {
                                         &ctx,
                                         name,
                                         &args_preview,
+                                        &spawn_ordinals_ref,
                                     )
                                 } else {
                                     format!(
@@ -1932,7 +1938,10 @@ impl AishShell {
                         // indent) so Start/End rows pair deterministically.
                         {
                             let mut status_line = crate::llm_event_ui::format_tool_end_line(
-                                &event, end_tool, tool_ok,
+                                &event,
+                                end_tool,
+                                tool_ok,
+                                &spawn_ordinals_ref,
                             );
                             // Truncate to the terminal width (ANSI-aware) so
                             // long tool names stay on one line on narrow
