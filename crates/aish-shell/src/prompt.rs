@@ -186,6 +186,10 @@ fn last_changelog_version_path() -> PathBuf {
         .join("last-changelog-version")
 }
 
+/// Read and normalize the last-seen changelog version marker.
+///
+/// Returns the trimmed file content, or `None` when the marker is missing
+/// or blank (treated as a fresh install by the caller).
 fn read_last_changelog_version() -> Option<String> {
     let raw = std::fs::read_to_string(last_changelog_version_path()).ok()?;
     let trimmed = raw.trim();
@@ -196,6 +200,9 @@ fn read_last_changelog_version() -> Option<String> {
     }
 }
 
+/// Write the last-seen changelog version marker, creating the parent
+/// directory on demand. I/O errors are ignored: a missing or stale marker
+/// only affects changelog display, never shell operation.
 fn write_last_changelog_version(version: &str) {
     let path = last_changelog_version_path();
     if let Some(parent) = path.parent() {
@@ -204,17 +211,22 @@ fn write_last_changelog_version(version: &str) {
     let _ = std::fs::write(path, version.trim());
 }
 
-/// Consume the startup upgrade changelog for `current_version`.
+/// Load the startup upgrade changelog for `current_version`.
 ///
 /// Mimics omp: the first interactive launch after an upgrade shows notes from
-/// the embedded CHANGELOG for every version in `last_seen → current`. The
-/// marker then advances so steady-state launches keep the existing
-/// current-version welcome panel.
+/// the embedded CHANGELOG for every version in `last_seen → current`.
+///
+/// Loading alone does NOT advance the marker: transient launches (a quick
+/// exit, a fire-and-forget attach, or a formatting miss) must not swallow the
+/// summary. Call [`commit_last_changelog_version`] once the user actually
+/// interacts with the shell.
 ///
 /// Returns `(ansi_summary, plain_expand_text, previous_version)` when a range
 /// should be shown.
 pub fn take_startup_changelog_summary(current_version: &str) -> Option<(String, String, String)> {
     let current = current_version.strip_prefix('v').unwrap_or(current_version);
+    // First launch after a fresh install: seed the marker silently so the
+    // very first version seen is never reported as an upgrade.
     let last = match read_last_changelog_version() {
         Some(v) => v,
         None => {
@@ -234,13 +246,29 @@ pub fn take_startup_changelog_summary(current_version: &str) -> Option<(String, 
         return None;
     }
 
+    // No marker write here: the range is returned for display and the marker
+    // only advances when the shell records real user interaction.
     let summary = aish_i18n::changelog::format_changelog_range_summary(last_norm, current);
     let plain = aish_i18n::changelog::format_changelog_range_plain(last_norm, current);
-    write_last_changelog_version(current);
     match (summary, plain) {
         (Some(ansi), Some(text)) => Some((ansi, text, last_norm.to_string())),
-        _ => None,
+        // Nothing renderable for this range (e.g. missing CHANGELOG entries):
+        // reseat so the next launch does not retry an empty range forever.
+        _ => {
+            write_last_changelog_version(current);
+            None
+        }
     }
+}
+
+/// Advance the last-seen changelog marker to `version`.
+///
+/// Called from the REPL once the user submits a real command, so a launch
+/// that never reaches interaction (quick exit, Ctrl-D, attach probe) keeps
+/// the upgrade summary pending for the next launch.
+pub fn commit_last_changelog_version(version: &str) {
+    let current = version.strip_prefix('v').unwrap_or(version);
+    write_last_changelog_version(current);
 }
 
 /// Localized changelog title for the current version (e.g. "v0.3.4 更新内容").
@@ -1091,5 +1119,139 @@ mod tests {
 
         assert_eq!(item1_column, item2_column);
         assert_eq!(item1_column, item3_column);
+    }
+
+    // --- Startup changelog marker (consume/commit decoupling) ------------
+
+    /// Serialize tests that mutate the process-global `XDG_CONFIG_HOME`.
+    fn xdg_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+        &LOCK
+    }
+
+    /// Restore `XDG_CONFIG_HOME` on drop (including panic unwind).
+    struct XdgGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+    impl XdgGuard {
+        fn set(dir: &std::path::Path) -> Self {
+            let prev = std::env::var_os("XDG_CONFIG_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", dir);
+            Self { prev }
+        }
+    }
+    impl Drop for XdgGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    fn marker_path(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("aish").join("last-changelog-version")
+    }
+
+    fn read_marker(dir: &std::path::Path) -> Option<String> {
+        std::fs::read_to_string(marker_path(dir))
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    // These tests rely on `dirs::config_dir()` honoring `XDG_CONFIG_HOME`,
+    // which only holds on Linux/Redox. On macOS `config_dir()` returns
+    // `~/Library/Application Support` and ignores the env var, so the tests
+    // would touch the real user marker. CI runs tests on Linux only.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_startup_summary_does_not_advance_marker() {
+        // A transient launch (display only) must leave the marker untouched
+        // so the next launch still shows the upgrade notes.
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = xdg_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XdgGuard::set(tmp.path());
+        std::fs::create_dir_all(marker_path(tmp.path()).parent().unwrap()).unwrap();
+        std::fs::write(marker_path(tmp.path()), "0.3.10").unwrap();
+
+        let summary = take_startup_changelog_summary("0.3.12");
+        assert!(summary.is_some(), "range 0.3.10 → 0.3.12 should render");
+        assert_eq!(
+            read_marker(tmp.path()).as_deref(),
+            Some("0.3.10"),
+            "display alone must not advance the marker"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_commit_advances_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = xdg_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XdgGuard::set(tmp.path());
+        std::fs::create_dir_all(marker_path(tmp.path()).parent().unwrap()).unwrap();
+        std::fs::write(marker_path(tmp.path()), "0.3.10").unwrap();
+
+        assert!(take_startup_changelog_summary("0.3.12").is_some());
+        assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.10"));
+
+        // First real user command commits the pending version.
+        commit_last_changelog_version("0.3.12");
+        assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
+
+        // Next launch is steady-state: no summary, marker untouched.
+        assert!(take_startup_changelog_summary("0.3.12").is_none());
+        assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_first_install_seeds_marker_without_summary() {
+        // Fresh install: no marker → seed silently, never show a range.
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = xdg_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XdgGuard::set(tmp.path());
+        std::fs::create_dir_all(marker_path(tmp.path()).parent().unwrap()).unwrap();
+
+        assert!(take_startup_changelog_summary("0.3.12").is_none());
+        assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_take_accepts_v_prefixed_inputs() {
+        // Version strings may arrive with a leading 'v' (e.g. from update
+        // tooling); marker comparisons normalize the prefix on both sides.
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = xdg_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XdgGuard::set(tmp.path());
+        std::fs::create_dir_all(marker_path(tmp.path()).parent().unwrap()).unwrap();
+        std::fs::write(marker_path(tmp.path()), "v0.3.10").unwrap();
+
+        let summary = take_startup_changelog_summary("v0.3.12");
+        assert!(summary.is_some());
+        assert_eq!(
+            read_marker(tmp.path()).as_deref(),
+            Some("v0.3.10"),
+            "take must not rewrite a v-prefixed marker"
+        );
+        commit_last_changelog_version("v0.3.12");
+        assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_take_reseats_marker_ahead_of_current() {
+        // Marker ahead of the binary (downgrade or corruption): reseat to
+        // current and never render a backwards range.
+        let tmp = tempfile::tempdir().unwrap();
+        let _lock = xdg_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = XdgGuard::set(tmp.path());
+        std::fs::create_dir_all(marker_path(tmp.path()).parent().unwrap()).unwrap();
+        std::fs::write(marker_path(tmp.path()), "9.9.9").unwrap();
+
+        assert!(take_startup_changelog_summary("0.3.12").is_none());
+        assert_eq!(read_marker(tmp.path()).as_deref(), Some("0.3.12"));
     }
 }

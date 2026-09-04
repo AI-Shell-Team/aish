@@ -691,6 +691,10 @@ pub struct AishShell {
     /// Session-scoped approval memory shared with the LLM session. Kept on the
     /// shell so slash commands (e.g. `/forget-approvals`) can reset it.
     approval_memory: Arc<parking_lot::Mutex<aish_llm::ApprovalMemory>>,
+    /// Upgrade changelog marker version pending confirmation. Set when the
+    /// startup summary is displayed; committed to disk on the first real
+    /// user command so transient launches do not swallow the notes.
+    pending_changelog_marker: Option<String>,
 }
 
 impl AishShell {
@@ -2094,7 +2098,6 @@ impl AishShell {
         }
 
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
-
         let version = env!("CARGO_PKG_VERSION").to_string();
 
         // After an upgrade, show the Keep-a-Changelog range once (omp-style),
@@ -2126,15 +2129,15 @@ impl AishShell {
 
         // Store full changelog in expand_history so Ctrl+O can show all entries
         // when the welcome panel truncates them with "and N more".
-        if let Some((_, plain, prev)) = upgrade_summary {
+        if let Some((_, ref plain, ref prev)) = upgrade_summary {
             let mut args = std::collections::HashMap::new();
-            args.insert("current".to_string(), prev);
+            args.insert("current".to_string(), prev.clone());
             args.insert("latest".to_string(), version.clone());
             let cl_title = aish_i18n::t_with_args("shell.welcome2.changelog_summary_title", &args);
             expand_history
                 .lock()
                 .unwrap()
-                .add(format!("[changelog] {cl_title}"), plain);
+                .add(format!("[changelog] {cl_title}"), plain.clone());
         } else if changelog.len() > 2 {
             let full_text = prompt::format_changelog_full(&version, &changelog);
             let cl_title = prompt::changelog_title(&version);
@@ -2143,6 +2146,10 @@ impl AishShell {
                 .unwrap()
                 .add(format!("[changelog] {}", cl_title), full_text);
         }
+
+        // The marker advances on the first real user command (see run loop),
+        // not here: a transient launch must not consume the upgrade notes.
+        let pending_changelog_marker = upgrade_summary.as_ref().map(|_| version.clone());
 
         // Initialize persistent PTY session
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -2215,6 +2222,7 @@ impl AishShell {
             ai_op_generation,
             expand_history,
             resource_monitor: crate::resource_monitor::Monitor::new(resource_thresholds),
+            pending_changelog_marker,
             last_resource_check: None,
             shared_recorder,
             inline_ai: None,
@@ -2539,6 +2547,13 @@ impl AishShell {
 
             if input.is_empty() {
                 continue;
+            }
+
+            // The user reached a real command: the upgrade changelog summary
+            // (if any) has now been on screen, so its marker can advance.
+            // Transient launches that exit before this point stay pending.
+            if let Some(v) = self.pending_changelog_marker.take() {
+                prompt::commit_last_changelog_version(&v);
             }
 
             // Add to history
@@ -3216,6 +3231,9 @@ impl AishShell {
             return;
         }
         self.echo_user_submitted_line(prompt, input);
+        if let Some(v) = self.pending_changelog_marker.take() {
+            prompt::commit_last_changelog_version(&v);
+        }
         rl.add_history_entry(input);
         self.state.history.push(input.to_string());
         if self.handle_special_command(input) {
@@ -3336,6 +3354,11 @@ impl AishShell {
         let input = line.trim();
         if input.is_empty() {
             return false;
+        }
+        // Popup-recovery submissions count as real interaction too: commit
+        // the pending upgrade-changelog marker exactly like the main loop.
+        if let Some(v) = self.pending_changelog_marker.take() {
+            prompt::commit_last_changelog_version(&v);
         }
         self.state.history.push(input.to_string());
         match input::classify_input(input) {
