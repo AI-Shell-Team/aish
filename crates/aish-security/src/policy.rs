@@ -96,6 +96,11 @@ impl Default for SecurityPolicy {
 /// `~/.config/aish/security_policy.yaml` on first use.
 const DEFAULT_POLICY_TEMPLATE: &str = include_str!("../../../config/security_policy.yaml");
 
+/// Legacy system-level policy location honored by older releases. No longer
+/// read at startup, but used once during migration to preserve an
+/// administrator's enforced rules in the user-level policy.
+const DEFAULT_SYSTEM_POLICY_PATH: &str = "/etc/aish/security_policy.yaml";
+
 fn user_security_policy_path() -> PathBuf {
     let base_dir = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -151,6 +156,36 @@ fn ensure_user_policy_template(path: &Path) {
     let _ = fs::remove_file(&tmp_path);
 }
 
+/// One-time migration from the legacy system-level policy location
+/// (`/etc/aish/security_policy.yaml`, honored by older releases). Copies the
+/// administrator's policy to the user-level path when that path is still
+/// absent, so an upgrade never silently drops enforced rules. Returns `true`
+/// when a migration copy was performed.
+fn migrate_legacy_system_policy(user_path: &Path) -> bool {
+    // Tests can point the legacy location at a temp file; release builds
+    // always use the fixed path so a user cannot bypass a migration.
+    #[cfg(any(test, debug_assertions))]
+    let legacy_path: PathBuf = match env::var_os("AISH_SYSTEM_POLICY_PATH") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(DEFAULT_SYSTEM_POLICY_PATH),
+    };
+    #[cfg(not(any(test, debug_assertions)))]
+    let legacy_path = PathBuf::from(DEFAULT_SYSTEM_POLICY_PATH);
+
+    if !legacy_path.exists() || user_path.exists() {
+        return false;
+    }
+    match fs::read(&legacy_path) {
+        Ok(content) => {
+            if let Some(parent) = user_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(user_path, content).is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
 /// Resolve the policy file used for **reads**.
 ///
 /// Priority:
@@ -167,7 +202,12 @@ pub fn resolve_security_policy_path(config_path: Option<&Path>) -> Option<PathBu
     // Fall back to user-level policy (auto-seeded from the shipped template).
     let user_path = user_security_policy_path();
     if !user_path.exists() {
-        ensure_user_policy_template(&user_path);
+        // Preserve a legacy administrator policy before seeding: older
+        // releases enforced /etc/aish/security_policy.yaml. Copying it keeps
+        // enforced HIGH-risk blocks in effect after the upgrade.
+        if !migrate_legacy_system_policy(&user_path) {
+            ensure_user_policy_template(&user_path);
+        }
     }
     if user_path.exists() {
         return Some(user_path);
@@ -882,6 +922,46 @@ mod tests {
         let resolved = resolve_security_policy_path(None).expect("user policy");
         assert!(resolved.starts_with(&xdg));
         assert!(resolved.exists());
+    }
+
+    #[test]
+    fn migrate_legacy_system_policy_preserves_admin_rules() {
+        // Regression: an administrator policy left over from older releases
+        // (/etc/aish) must be migrated into the user path instead of being
+        // silently replaced by the shipped template.
+        let dir = tempdir().unwrap();
+        let xdg = dir.path().join("xdg");
+        let legacy = dir.path().join("legacy-etc");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(&legacy).unwrap();
+        let legacy_file = legacy.join("security_policy.yaml");
+        fs::write(
+            &legacy_file,
+            "global:\n  enable_sandbox: true\nrules:\n  - id: H-001\n    path: ['/etc/**']\n    risk: HIGH\n",
+        )
+        .unwrap();
+        let _lock = xdg_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap()));
+        let _sys = EnvGuard::set(
+            "AISH_SYSTEM_POLICY_PATH",
+            Some(legacy_file.to_str().unwrap()),
+        );
+
+        let resolved = resolve_security_policy_path(None).expect("migrated policy");
+        assert!(resolved.starts_with(&xdg));
+        let content = fs::read_to_string(&resolved).unwrap();
+        assert!(content.contains("H-001"), "admin rules must survive");
+        // Migrated content must NOT be the shipped template.
+        assert!(
+            !content.contains("Changed"),
+            "template content must not appear"
+        );
+
+        // Second resolve must not re-migrate or reseed over the migrated file.
+        let again = resolve_security_policy_path(None).expect("stable policy");
+        assert_eq!(again, resolved);
     }
 
     #[test]
