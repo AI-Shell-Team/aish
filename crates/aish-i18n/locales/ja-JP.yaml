@@ -1258,10 +1258,7 @@ help:
 
         パス：
         1. 明示的に指定されたパス
-        2. `/etc/aish/security_policy.yaml`（システムレベル、存在する場合は優先）
-        3. `~/.config/aish/security_policy.yaml`（無い場合は同梱テンプレートから生成）
-
-        `/etc/aish/security_policy.yaml` が存在する場合、ユーザーレベルのファイルを完全に上書きします。
+        2. `~/.config/aish/security_policy.yaml`（無い場合は同梱テンプレートから生成）
 
         ## リスクレベル
 

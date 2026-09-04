@@ -256,8 +256,7 @@ AI Shell solo realiza la evaluación de seguridad sobre comandos **generados por
 ### Ruta del archivo de políticas de seguridad
 
 Los archivos de políticas se resuelven en este orden:
-1. `/etc/aish/security_policy.yaml` (nivel sistema)
-2. `~/.config/aish/security_policy.yaml` (nivel usuario; plantilla generada automáticamente si no existe)
+1. `~/.config/aish/security_policy.yaml` (nivel usuario; plantilla generada automáticamente si no existe)
 
 ### Pre-ejecución en sandbox (opcional, recomendada en producción)
 

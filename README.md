@@ -256,8 +256,7 @@ AI Shell only performs security assessment on **AI-generated and ready-to-execut
 ### Security Policy File Path
 
 Policy files are resolved in this order:
-1. `/etc/aish/security_policy.yaml` (system-level)
-2. `~/.config/aish/security_policy.yaml` (user-level; auto-generated template if not exists)
+1. `~/.config/aish/security_policy.yaml` (user-level; auto-generated template if not exists)
 
 ### Sandbox Pre-run (Optional, Recommended for Production)
 

@@ -7,6 +7,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- System-level security policy: `/etc/aish/security_policy.yaml` is no longer read; the user-level `~/.config/aish/security_policy.yaml` (auto-seeded from the shipped template when missing) is the sole source of security settings. Administrators who relied on a system-wide policy must migrate its content to each user's policy file. The uninstaller still removes leftover `/etc/aish` from older installers.
+
 ## [0.3.12] - 2026-09-03
 
 ### Added

@@ -1640,10 +1640,7 @@ help:
 
         Path:
         1. Explicit path (if configured)
-        2. `/etc/aish/security_policy.yaml` (system-level, takes precedence when present)
-        3. `~/.config/aish/security_policy.yaml` (seeded from the shipped template if missing)
-
-        When `/etc/aish/security_policy.yaml` exists it fully overrides the user-level file.
+        2. `~/.config/aish/security_policy.yaml` (seeded from the shipped template if missing)
 
         ## Risk Levels
 
