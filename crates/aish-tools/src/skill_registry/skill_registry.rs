@@ -86,10 +86,9 @@ impl SkillSearchTool {
             out.push_str("To install, use the skill_install tool with the skill ID.\n");
         }
         if outcome.results.is_empty() {
-            if out.is_empty() {
+            if outcome.errors.is_empty() {
                 out.push_str("No skills found matching the query, and no registry errors.");
             } else {
-                out.push('\n');
                 out.push_str("No skills found among the registries that answered successfully.");
             }
         }
@@ -857,6 +856,10 @@ mod tests {
         empty_server.join().expect("empty server thread");
         bad_server.join().expect("bad server thread");
 
+        assert!(
+            !result.output.contains("no registry errors"),
+            "output must not claim 'no registry errors' while listing registry errors"
+        );
         assert!(
             result.ok,
             "a successful empty registry response is not a total failure"
