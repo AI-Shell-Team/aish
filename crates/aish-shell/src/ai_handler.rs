@@ -1051,15 +1051,27 @@ impl AiHandler {
             content.push_str("\n</available-skills>");
         }
 
-        // When auto_search is enabled, tell the AI it can search for new skills
-        // if none of the loaded skills match the user's request.
+        // When auto_search is enabled, inject registry routing rules: regular
+        // system tasks stay on the OS package-manager workflow; registry
+        // search is reserved for explicit skill requests or tasks that
+        // genuinely need a declarable skill capability.
         if self.auto_search {
             if !content.is_empty() {
                 content.push_str("\n\n");
             }
             content.push_str(
                 "<skill-marketplace>\n\
-If the user's request is NOT covered by any loaded skill above, follow this workflow:\n\
+ROUTING RULES (read before every turn):\n\
+- Regular system tasks (installing/upgrading/removing OS packages, checking\n\
+  software availability, downloading binaries, general shell work) MUST be\n\
+  handled with the normal OS workflow first: detect the OS and package\n\
+  manager (apt/dnf/pacman/flatpak/snap/...), then query authoritative\n\
+  sources. Do NOT call `skill_search` for them, even if a same-named skill\n\
+  might exist — a skill is NOT required to install ordinary software.\n\
+- Search the registry ONLY when the user explicitly asks for an AISH skill\n\
+  (e.g. \"find/install a skill for X\"), or the task genuinely needs a\n\
+  declarable skill capability and no loaded skill below covers it.\n\
+When a registry search IS warranted:\n\
 1. Call `skill_search` with keywords describing the user's need.\n\
 2. Call `ask_user` with the search results as options so the user can pick\n\
    which skill to install. Set each option's `value` to the skill's full ID\n\
@@ -2247,6 +2259,73 @@ mod tests {
             .contains("__AISH_TOOL_CONTEXT__"));
         assert!(context[2].text_content().unwrap().contains("[REDACTED]"));
         assert!(!context[2].text_content().unwrap().contains("SECRET_TOKEN"));
+    }
+
+    /// The marketplace injection must route ordinary system tasks to the OS
+    /// package-manager workflow instead of the skill registry (issue #456):
+    /// the prompt must forbid `skill_search` for regular installs and reserve
+    /// it for explicit skill requests.
+    #[test]
+    fn marketplace_prompt_forbids_registry_search_for_regular_tasks() {
+        let mut handler = test_handler();
+        handler.auto_search = true;
+        handler.inject_skills();
+        let content = handler
+            .context_manager
+            .knowledge_cache()
+            .get("skills")
+            .expect("skills knowledge injected")
+            .clone();
+
+        assert!(content.contains("<skill-marketplace>"));
+        assert!(content.contains("ROUTING RULES"));
+        assert!(
+            content.contains("Do NOT call `skill_search`"),
+            "regular system tasks must be routed away from skill_search"
+        );
+        assert!(
+            content.contains("ONLY when the user explicitly asks"),
+            "registry search must be reserved for explicit skill requests"
+        );
+        // The step-by-step workflow (search -> ask_user -> install -> vet)
+        // must survive the rewrite for the cases where a search IS warranted.
+        assert!(content.contains("`skill_search`"));
+        assert!(content.contains("`ask_user`"));
+        assert!(content.contains("`skill_install`"));
+        assert!(content.contains("`skill-vetter`"));
+    }
+
+    #[test]
+    fn marketplace_prompt_absent_when_auto_search_disabled() {
+        let mut handler = test_handler();
+        handler.auto_search = false;
+        handler.inject_skills();
+        let content = handler
+            .context_manager
+            .knowledge_cache()
+            .get("skills")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !content.contains("<skill-marketplace>"),
+            "auto_search=false must not inject the marketplace block"
+        );
+    }
+
+    #[test]
+    fn marketplace_prompt_absent_when_no_skills_and_auto_search_disabled() {
+        // Both injections empty -> no knowledge message at all.
+        let mut handler = test_handler();
+        handler.auto_search = false;
+        handler.inject_skills();
+        assert!(
+            handler
+                .context_manager
+                .knowledge_cache()
+                .get("skills")
+                .is_none_or(|c| c.is_empty()),
+            "empty content must not be injected"
+        );
     }
 
     #[test]

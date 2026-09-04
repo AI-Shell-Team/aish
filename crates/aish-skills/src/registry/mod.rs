@@ -144,6 +144,10 @@ pub struct SearchOutcome {
     pub results: Vec<RegistrySkill>,
     /// Per-registry failures (e.g. timeout, rate limit, DNS).
     pub errors: Vec<RegistrySearchError>,
+    /// Number of registries that completed a successful search (even when
+    /// they returned zero results). Callers use this to distinguish "every
+    /// registry failed" from "some registry legitimately found nothing".
+    pub succeeded: usize,
 }
 
 impl SearchOutcome {
@@ -219,9 +223,13 @@ impl RegistryManager {
     pub fn search_all_with_errors(&self, query: &str, limit: usize) -> SearchOutcome {
         let mut results = Vec::new();
         let mut errors = Vec::new();
+        let mut succeeded = 0usize;
         for adapter in &self.adapters {
             match adapter.search(query, limit) {
-                Ok(r) => results.extend(r),
+                Ok(r) => {
+                    succeeded += 1;
+                    results.extend(r);
+                }
                 Err(e) => {
                     tracing::warn!(
                         registry = adapter.name(),
@@ -237,7 +245,11 @@ impl RegistryManager {
         }
         results.sort_by_key(|s| std::cmp::Reverse(s.installs));
         results.truncate(limit);
-        SearchOutcome { results, errors }
+        SearchOutcome {
+            results,
+            errors,
+            succeeded,
+        }
     }
 
     /// Find a specific adapter by name.
