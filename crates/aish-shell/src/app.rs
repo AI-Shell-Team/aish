@@ -1927,23 +1927,22 @@ impl AishShell {
                                 }
                             }
                         }
-                        // Always print completion indicator with box bottom corner.
+                        // Always print completion indicator with box bottom
+                        // corner. Include the tool name (and sub-agent child
+                        // indent) so Start/End rows pair deterministically.
                         {
-                            let status_line = if tool_ok {
-                                format!(
-                                    "{} {} {}",
-                                    theme::dim(theme::TOOL_BOX_BOT),
-                                    theme::success(theme::ICON_SUCCESS),
-                                    theme::dim("done")
-                                )
-                            } else {
-                                format!(
-                                    "{} {} {}",
-                                    theme::dim(theme::TOOL_BOX_BOT),
-                                    theme::error(theme::ICON_ERROR),
-                                    theme::dim("failed")
-                                )
-                            };
+                            let mut status_line = crate::llm_event_ui::format_tool_end_line(
+                                &event, end_tool, tool_ok,
+                            );
+                            // Truncate to the terminal width (ANSI-aware) so
+                            // long tool names stay on one line on narrow
+                            // terminals instead of wrapping.
+                            let max_cols = crossterm::terminal::size()
+                                .map(|(cols, _)| cols as usize)
+                                .unwrap_or(80);
+                            if max_cols > 0 {
+                                status_line = truncate_ansi_display_width(&status_line, max_cols);
+                            }
                             crate::recorder::shared_record_output(
                                 &shared_recorder_cb,
                                 &format!("{}\n", status_line),

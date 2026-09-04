@@ -95,6 +95,57 @@ pub fn indent_sub_agent_output_block(ctx: &SubAgentContext, block: &str) -> Stri
         .join("\n")
 }
 
+/// Icon + tool name + status shared by all completion-row variants.
+fn format_tool_end_body(name: &str, ok: bool) -> String {
+    let status = if ok { "done" } else { "failed" };
+    let icon = if ok {
+        crate::theme::success(crate::theme::ICON_SUCCESS)
+    } else {
+        crate::theme::error(crate::theme::ICON_ERROR)
+    };
+    format!(
+        "{} {} {}",
+        icon,
+        crate::theme::accent(name),
+        crate::theme::dim(status)
+    )
+}
+
+/// Format a tool completion line for the main session.
+///
+/// Mirrors the start line (`╭─ ❯ tool (args)`) so start/end rows pair by
+/// tool name instead of showing a bare `done`/`failed`.
+pub fn format_main_tool_end_line(name: &str, ok: bool) -> String {
+    format!(
+        "{} {}",
+        crate::theme::dim(crate::theme::TOOL_BOX_BOT),
+        format_tool_end_body(name, ok)
+    )
+}
+
+/// Format a tool completion line for a sub-agent event.
+///
+/// Keeps the child indent used by the sub-agent start line so Start/End
+/// pair deterministically under the agent branch.
+pub fn format_sub_agent_tool_end_line(ctx: &SubAgentContext, name: &str, ok: bool) -> String {
+    format!(
+        "{}{}",
+        sub_agent_child_indent(ctx.depth),
+        format_tool_end_body(name, ok)
+    )
+}
+
+/// Format the completion line for a `ToolExecutionEnd` event.
+///
+/// Dispatches on sub-agent context so completion rows preserve the same
+/// indentation as their start rows.
+pub fn format_tool_end_line(event: &LlmEvent, name: &str, ok: bool) -> String {
+    match sub_agent_context(event) {
+        Some(ctx) => format_sub_agent_tool_end_line(&ctx, name, ok),
+        None => format_main_tool_end_line(name, ok),
+    }
+}
+
 pub fn print_sub_agent_generation_start(event: &LlmEvent) {
     if let Some(ctx) = sub_agent_context(event) {
         let status = aish_i18n::t("shell.sub_agent.thinking");
@@ -112,6 +163,7 @@ pub fn sub_agent_thinking_animation_prefix(event: &LlmEvent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme;
     use aish_core::LlmEventType;
 
     fn sub_agent_event(event_type: LlmEventType, extra: serde_json::Value) -> LlmEvent {
@@ -169,6 +221,60 @@ mod tests {
             serde_json::json!({"tool_name": "glob"}),
         );
         assert!(!is_parent_agent_spawn_tool_event(&sub));
+    }
+
+    #[test]
+    fn main_tool_end_line_pairs_with_start_line() {
+        let ok = format_main_tool_end_line("glob", true);
+        assert!(ok.contains("╰─"));
+        assert!(ok.contains(theme::ICON_SUCCESS));
+        assert!(ok.contains("glob"));
+        assert!(ok.contains("done"));
+        assert!(!ok.contains("failed"));
+
+        let failed = format_main_tool_end_line("bash", false);
+        assert!(failed.contains(theme::ICON_ERROR));
+        assert!(failed.contains("bash"));
+        assert!(failed.contains("failed"));
+        assert!(!failed.contains("done"));
+    }
+
+    #[test]
+    fn sub_agent_tool_end_line_preserves_child_indent() {
+        let ctx = SubAgentContext {
+            agent_type: "explore".into(),
+            depth: 1,
+            spawn_id: "id".into(),
+        };
+        let line = format_sub_agent_tool_end_line(&ctx, "grep", true);
+        // Child indent (4 spaces) matches the sub-agent start line.
+        assert!(line.starts_with("    "));
+        assert!(!line.contains("└─"));
+        assert!(line.contains(theme::ICON_SUCCESS));
+        assert!(line.contains("grep"));
+        assert!(line.contains("done"));
+    }
+
+    #[test]
+    fn format_tool_end_line_dispatches_on_sub_agent_context() {
+        let main = LlmEvent {
+            event_type: LlmEventType::ToolExecutionEnd,
+            data: serde_json::json!({"tool_name": "glob"}),
+            timestamp: 0.0,
+            metadata: None,
+        };
+        let line = format_tool_end_line(&main, "glob", true);
+        assert!(line.contains("╰─"));
+        assert!(line.contains("glob"));
+
+        let sub = sub_agent_event(
+            LlmEventType::ToolExecutionEnd,
+            serde_json::json!({"tool_name": "glob"}),
+        );
+        let line = format_tool_end_line(&sub, "glob", true);
+        assert!(line.starts_with("    "));
+        assert!(line.contains("glob"));
+        assert!(!line.contains("╰─"));
     }
 
     #[test]
