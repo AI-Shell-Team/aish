@@ -73,7 +73,7 @@ impl ConfigChecker {
             }
             Err(e) => {
                 items.push(CheckItem::fail("security_policy", e.to_string()).hint(
-                    "Fix or recreate /etc/aish/security_policy.yaml (system-level) or ~/.config/aish/security_policy.yaml (user-level), or delete the user-level file to reseed",
+                    "Fix or recreate ~/.config/aish/security_policy.yaml (user-level), or delete it to reseed from the shipped template",
                 ));
             }
         }

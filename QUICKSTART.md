@@ -184,8 +184,7 @@ AI Shell performs security assessment only for **AI-generated commands**.
 ### Security Policy Files
 
 Priority order:
-1. `/etc/aish/security_policy.yaml` (system-wide)
-2. `~/.config/aish/security_policy.yaml` (user-level; auto-generated if missing)
+1. `~/.config/aish/security_policy.yaml` (user-level; auto-generated if missing)
 
 ### Sandbox Preview (Optional)
 

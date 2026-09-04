@@ -256,8 +256,7 @@ AI Shell führt Sicherheitsbewertungen nur für **KI-generierte und zur Ausführ
 ### Pfad der Sicherheitsrichtliniendatei
 
 Richtliniendateien werden in folgender Reihenfolge aufgelöst:
-1. `/etc/aish/security_policy.yaml` (systemweit)
-2. `~/.config/aish/security_policy.yaml` (benutzerspezifisch; automatisch generierte Vorlage, falls nicht vorhanden)
+1. `~/.config/aish/security_policy.yaml` (benutzerspezifisch; automatisch generierte Vorlage, falls nicht vorhanden)
 
 ### Sandbox-Probelauf (optional, empfohlen für Produktion)
 
