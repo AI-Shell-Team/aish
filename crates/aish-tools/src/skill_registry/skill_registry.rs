@@ -85,6 +85,14 @@ impl SkillSearchTool {
             }
             out.push_str("To install, use the skill_install tool with the skill ID.\n");
         }
+        if outcome.results.is_empty() {
+            if out.is_empty() {
+                out.push_str("No skills found matching the query, and no registry errors.");
+            } else {
+                out.push('\n');
+                out.push_str("No skills found among the registries that answered successfully.");
+            }
+        }
         if !outcome.errors.is_empty() {
             if !out.is_empty() {
                 out.push('\n');
@@ -93,9 +101,6 @@ impl SkillSearchTool {
             for e in &outcome.errors {
                 out.push_str(&format!("- {}: {}\n", e.registry, e.error));
             }
-        }
-        if out.is_empty() {
-            out.push_str("No skills found matching the query, and no registry errors.")
         }
         out
     }
@@ -150,13 +155,14 @@ pacman/flatpak/snap) or official download sources."
         let outcome = self.do_search(&search_args.query, search_args.limit);
         let error_registries: Vec<String> =
             outcome.errors.iter().map(|e| e.registry.clone()).collect();
-        // Failure semantics: every registry failed -> the search did not
-        // happen at all, so report failure (ok=false) and let the model
+        // Failure semantics: ok=false only when EVERY enabled registry
+        // failed — the search did not happen at all, so the model must
         // degrade gracefully instead of mistaking it for "no matches".
-        // Partial failures with some results stay ok=true but keep the
-        // errors visible in output and meta; a genuinely empty result with
-        // no errors is a real "no matches" answer.
-        if outcome.results.is_empty() && !outcome.errors.is_empty() {
+        // `outcome.succeeded` counts registries that completed a search
+        // (even with zero results); a success-plus-failure mix stays ok=true
+        // with the errors visible in output and meta, and a genuinely empty
+        // result with no errors is a real "no matches" answer.
+        if outcome.succeeded == 0 && !outcome.errors.is_empty() {
             let mut output = String::from("Skill registry search failed for all registries:\n");
             for e in &outcome.errors {
                 output.push_str(&format!("- {}: {}\n", e.registry, e.error));
@@ -832,6 +838,35 @@ mod tests {
         let meta = result.meta.expect("meta present");
         assert_eq!(meta["count"], 0);
         assert_eq!(meta["registry_errors"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn empty_success_plus_failure_stays_ok_true_no_matches() {
+        // Regression: one registry answers 200 with zero skills while
+        // another fails. A successful empty response is a real "no matches"
+        // from that registry, so the merged outcome must stay ok=true (with
+        // the failure visible), never masquerade as a total outage.
+        let (empty_url, empty_server) = spawn_local_registry(200, r#"{"skills":[]}"#);
+        let (bad_url, bad_server) = spawn_local_registry(500, r#"{"error":"boom"}"#);
+        let tool = SkillSearchTool::new(vec![
+            search_registry_config("empty-ok", &empty_url),
+            search_registry_config("bad", &bad_url),
+        ]);
+
+        let result = tool.execute(search_args_json("zzz-nonexistent"));
+        empty_server.join().expect("empty server thread");
+        bad_server.join().expect("bad server thread");
+
+        assert!(
+            result.ok,
+            "a successful empty registry response is not a total failure"
+        );
+        assert!(result.output.contains("No skills found"));
+        assert!(result.output.contains("Registry errors"));
+        assert!(result.output.contains("bad:"));
+        let meta = result.meta.expect("meta present");
+        assert_eq!(meta["count"], 0);
+        assert_eq!(meta["registry_errors"][0], "bad");
     }
 
     #[test]
