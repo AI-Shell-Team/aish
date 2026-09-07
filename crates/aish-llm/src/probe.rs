@@ -201,6 +201,54 @@ async fn collect_response(
             let mut finish_reason: Option<String> = None;
             let mut text_buffer = String::with_capacity(1024);
 
+            // Apply one parsed SSE event to the accumulators.
+            fn apply_event(
+                event: SseEvent,
+                accumulated: &mut String,
+                tool_calls_accum: &mut HashMap<usize, (String, String, String)>,
+                finish_reason: &mut Option<String>,
+            ) {
+                match event {
+                    SseEvent::ContentDelta(delta) => accumulated.push_str(&delta),
+                    SseEvent::ToolCallDelta {
+                        index,
+                        id,
+                        name,
+                        arguments,
+                    } => {
+                        let entry = tool_calls_accum
+                            .entry(index)
+                            .or_insert_with(|| (String::new(), String::new(), String::new()));
+                        if let Some(i) = id.filter(|s| !s.is_empty()) {
+                            entry.0 = i;
+                        }
+                        if let Some(n) = name.filter(|s| !s.is_empty()) {
+                            entry.1 = n;
+                        }
+                        if let Some(a) = arguments {
+                            entry.2.push_str(&a);
+                        }
+                    }
+                    SseEvent::Finish(reason) => *finish_reason = Some(reason),
+                    SseEvent::Done | SseEvent::ReasoningDelta(_) => {}
+                }
+            }
+
+            // Parse one SSE block (already split off the buffer) into events.
+            fn apply_block(
+                block: &str,
+                accumulated: &mut String,
+                tool_calls_accum: &mut HashMap<usize, (String, String, String)>,
+                finish_reason: &mut Option<String>,
+            ) {
+                for line in block.lines() {
+                    let (events, _usage) = StreamParser::parse_sse_chunk(line);
+                    for event in events {
+                        apply_event(event, accumulated, tool_calls_accum, finish_reason);
+                    }
+                }
+            }
+
             loop {
                 match stream.chunk().await {
                     Ok(Some(chunk)) => {
@@ -209,46 +257,29 @@ async fn collect_response(
                         while let Some(pos) = text_buffer.find("\n\n") {
                             let block = text_buffer[..pos].to_string();
                             text_buffer.drain(..pos + 2);
-                            for line in block.lines() {
-                                let (events, _usage) = StreamParser::parse_sse_chunk(line);
-                                for event in events {
-                                    match event {
-                                        SseEvent::ContentDelta(delta) => {
-                                            accumulated.push_str(&delta);
-                                        }
-                                        SseEvent::ToolCallDelta {
-                                            index,
-                                            id,
-                                            name,
-                                            arguments,
-                                        } => {
-                                            let entry = tool_calls_accum
-                                                .entry(index)
-                                                .or_insert_with(|| {
-                                                    (String::new(), String::new(), String::new())
-                                                });
-                                            if let Some(i) = id.filter(|s| !s.is_empty()) {
-                                                entry.0 = i;
-                                            }
-                                            if let Some(n) = name.filter(|s| !s.is_empty()) {
-                                                entry.1 = n;
-                                            }
-                                            if let Some(a) = arguments {
-                                                entry.2.push_str(&a);
-                                            }
-                                        }
-                                        SseEvent::Finish(reason) => {
-                                            finish_reason = Some(reason);
-                                        }
-                                        SseEvent::Done | SseEvent::ReasoningDelta(_) => {}
-                                    }
-                                }
-                            }
+                            apply_block(
+                                &block,
+                                &mut accumulated,
+                                &mut tool_calls_accum,
+                                &mut finish_reason,
+                            );
                         }
                     }
                     Ok(None) => break,
                     Err(e) => return Err(AishError::Llm(format!("Stream error: {}", e))),
                 }
+            }
+
+            // Some providers close the stream without a trailing blank line;
+            // the final event (tool-call delta or finish reason) would otherwise
+            // be lost with the residual buffer.
+            if !text_buffer.trim().is_empty() {
+                apply_block(
+                    &text_buffer,
+                    &mut accumulated,
+                    &mut tool_calls_accum,
+                    &mut finish_reason,
+                );
             }
 
             if tool_calls_accum.is_empty() {
@@ -306,6 +337,42 @@ mod tests {
                     finish_chunk("tool_calls"),
                     done(),
                 ])
+            } else {
+                sse_body(vec![
+                    content_delta(&format!("Result: {PROBE_FINAL_MARKER}")),
+                    finish_chunk("stop"),
+                    done(),
+                ])
+            }
+        });
+        probe_live_tool_support_with_timeout(
+            &server.url,
+            "test-key",
+            "test-model",
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Provider closes the stream without a trailing blank line after the last
+    /// SSE block. The final tool-call delta must still be parsed (regression:
+    /// residual-buffer bytes used to be discarded, producing a false
+    /// "did not issue a tool call" on compliant-ish endpoints).
+    #[tokio::test]
+    async fn test_probe_survives_missing_trailing_blank_line() {
+        let server = spawn_mock(|req_num, _body| {
+            if req_num == 1 {
+                // Same events as the success test, but the last block is
+                // terminated by a bare "\n" (no blank line) and no [DONE].
+                format!(
+                    "{}{}",
+                    tool_call_delta(0, "call_probe_1", PROBE_TOOL_NAME, PROBE_TOOL_ARGS),
+                    finish_chunk("tool_calls")
+                        .strip_suffix("\n\n")
+                        .map(|s| format!("{s}\n"))
+                        .unwrap_or_default(),
+                )
             } else {
                 sse_body(vec![
                     content_delta(&format!("Result: {PROBE_FINAL_MARKER}")),
