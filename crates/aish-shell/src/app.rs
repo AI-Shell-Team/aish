@@ -1321,6 +1321,10 @@ impl AishShell {
         let sub_agent_animation_ref = sub_agent_animation.clone();
         let ai_op_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let ai_op_generation_cb = ai_op_generation.clone();
+        // Stable per-spawn ordinals (#1, #2, …) so interleaved sub-agent
+        // tool rows pair deterministically with their start rows.
+        let spawn_ordinals = crate::llm_event_ui::new_shared_spawn_ordinals();
+        let spawn_ordinals_ref = spawn_ordinals.clone();
 
         // Shared history of collapsed bash outputs for Ctrl+O browsing.
         let expand_history = Arc::new(Mutex::new(crate::expand_history::ExpandHistory::new()));
@@ -1471,7 +1475,8 @@ impl AishShell {
                     LlmEventType::OpEnd => {
                         // Operation ends — stop animation and show timing
                         sub_agent_active_count_ref.store(0, Ordering::SeqCst);
-                        sub_agent_animation_ref.stop();
+                        // New parent turn: restart spawn numbering at #1.
+                        crate::llm_event_ui::reset_spawn_ordinals(&spawn_ordinals_ref);
                         animation_ref.stop();
                         let ttft = *ttft_value_ref.lock().unwrap();
                         if ttft >= 0.1 {
@@ -1749,6 +1754,7 @@ impl AishShell {
                                         &ctx,
                                         name,
                                         &args_preview,
+                                        &spawn_ordinals_ref,
                                     )
                                 } else {
                                     format!(
@@ -1927,23 +1933,25 @@ impl AishShell {
                                 }
                             }
                         }
-                        // Always print completion indicator with box bottom corner.
+                        // Always print completion indicator with box bottom
+                        // corner. Include the tool name (and sub-agent child
+                        // indent) so Start/End rows pair deterministically.
                         {
-                            let status_line = if tool_ok {
-                                format!(
-                                    "{} {} {}",
-                                    theme::dim(theme::TOOL_BOX_BOT),
-                                    theme::success(theme::ICON_SUCCESS),
-                                    theme::dim("done")
-                                )
-                            } else {
-                                format!(
-                                    "{} {} {}",
-                                    theme::dim(theme::TOOL_BOX_BOT),
-                                    theme::error(theme::ICON_ERROR),
-                                    theme::dim("failed")
-                                )
-                            };
+                            let mut status_line = crate::llm_event_ui::format_tool_end_line(
+                                &event,
+                                end_tool,
+                                tool_ok,
+                                &spawn_ordinals_ref,
+                            );
+                            // Truncate to the terminal width (ANSI-aware) so
+                            // long tool names stay on one line on narrow
+                            // terminals instead of wrapping.
+                            let max_cols = crossterm::terminal::size()
+                                .map(|(cols, _)| cols as usize)
+                                .unwrap_or(80);
+                            if max_cols > 0 {
+                                status_line = truncate_ansi_display_width(&status_line, max_cols);
+                            }
                             crate::recorder::shared_record_output(
                                 &shared_recorder_cb,
                                 &format!("{}\n", status_line),
