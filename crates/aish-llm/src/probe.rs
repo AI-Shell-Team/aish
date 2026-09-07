@@ -43,7 +43,10 @@ pub async fn probe_live_tool_support(
     api_key: &str,
     model: &str,
 ) -> Result<(), AishError> {
-    let ctx = StreamContext::new(api_base, api_key, model, None);
+    let mut ctx = StreamContext::new(api_base, api_key, model, None);
+    // One-shot probe: let the server close the stream first so upstream
+    // accounting does not see a client abort after the last SSE byte.
+    ctx.close_connection = true;
     let dialect = resolve_api_dialect(&ctx.config_model, &ctx.api_base, &ctx.api_key);
     let tool = probe_tool_spec();
 
