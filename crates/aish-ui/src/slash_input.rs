@@ -251,7 +251,9 @@ impl SlashInputSession {
             return;
         }
         // Fuzzy match against name + localized description + keywords; keep
-        // only subsequence hits and rank them by best score.
+        // only subsequence hits and rank them by best score. Ties break by
+        // registration order. Groups may interleave; display_rows renders
+        // each group header once at its first occurrence.
         let mut scored: Vec<(i64, usize)> = self
             .entries
             .iter()
@@ -518,7 +520,10 @@ impl SlashInputSession {
     /// before the first command of each new group.
     fn display_rows(&self) -> Vec<DisplayRow> {
         let mut rows = Vec::with_capacity(self.filtered.len() + self.group_labels.len());
-        let mut last_group: Option<usize> = None;
+        // Score order may interleave groups; render each header exactly once,
+        // at the group's first occurrence, so a group is never split by a
+        // repeated header row.
+        let mut rendered_groups: Vec<usize> = Vec::with_capacity(self.group_labels.len());
         for &idx in &self.filtered {
             let entry = &self.entries[idx];
             let Some(label) = self.group_labels.get(entry.group_index) else {
@@ -529,9 +534,9 @@ impl SlashInputSession {
                 rows.push(DisplayRow::Command(idx));
                 continue;
             }
-            if last_group != Some(entry.group_index) {
+            if !rendered_groups.contains(&entry.group_index) {
                 rows.push(DisplayRow::Header(entry.group_index));
-                last_group = Some(entry.group_index);
+                rendered_groups.push(entry.group_index);
             }
             rows.push(DisplayRow::Command(idx));
         }
@@ -1057,6 +1062,33 @@ mod tests {
         assert_eq!(
             session.filtered.first().map(|&i| commands[i].name.as_str()),
             Some("/setting")
+        );
+    }
+
+    #[test]
+    fn display_rows_render_each_group_header_once() {
+        // Score order may interleave groups; each header renders exactly
+        // once at the group's first occurrence — never repeated mid-list.
+        let mut g0 = entry("/aaa", 0);
+        g0.desc = "zzz match".into();
+        let mut g1 = entry("/zzz", 1);
+        g1.desc = "aaa match".into();
+        let commands = vec![g0, g1];
+        let mut session =
+            SlashInputSession::new(commands, vec!["G0".into(), "G1".into()], "aish> ".into());
+        // Simulate a search whose score order interleaves groups: g1 first.
+        session.input = "/match".into();
+        session.cursor = session.input.len();
+        session.filtered = vec![1, 0];
+        let rows = session.display_rows();
+        assert_eq!(
+            rows,
+            vec![
+                DisplayRow::Header(1),
+                DisplayRow::Command(1),
+                DisplayRow::Header(0),
+                DisplayRow::Command(0),
+            ]
         );
     }
 

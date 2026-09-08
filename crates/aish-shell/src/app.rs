@@ -2593,7 +2593,12 @@ impl AishShell {
                                 self.apply_slash_popup_command(&mut rl, &prompt_str, &cmd);
                             }
                             aish_ui::SlashInputOutcome::Fill(text) => {
-                                if self.read_line_after_slash_dismiss(&mut rl, &prompt_str, &text) {
+                                // Fill returns the bare command; the trailing
+                                // space separates it from arguments the user
+                                // types next.
+                                let filled = format!("{text} ");
+                                if self.read_line_after_slash_dismiss(&mut rl, &prompt_str, &filled)
+                                {
                                     break;
                                 }
                             }

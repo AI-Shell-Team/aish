@@ -37,6 +37,11 @@ fn each_builtin_command_enter_executes() {
         let mut session = session_with(c.name);
         match session.dispatch_event(key(KeyCode::Enter)) {
             Some(SlashInputOutcome::Command(text)) => {
+                assert!(
+                    matches!(c.enter, EnterPolicy::Execute),
+                    "unexpected Command for {}",
+                    c.name
+                );
                 assert_eq!(text, c.name, "Enter on {}", c.name);
             }
             Some(SlashInputOutcome::Fill(text)) => {
