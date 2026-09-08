@@ -2107,25 +2107,37 @@ impl AishShell {
 
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
         let version = env!("CARGO_PKG_VERSION").to_string();
-
         // After an upgrade, show the Keep-a-Changelog range once (omp-style),
         // sourced from the CHANGELOG.md embedded in this binary. Steady-state
         // launches keep the existing current-version welcome panel.
         let upgrade_summary = prompt::take_startup_changelog_summary(&version);
-        if let Some((ref ansi, _, _)) = upgrade_summary {
-            print!("\n{ansi}");
-            let _ = io::stdout().flush();
-        }
 
-        let changelog = if upgrade_summary.is_some() {
-            // Range summary already covered the newly installed versions.
-            Vec::new()
-        } else {
-            aish_i18n::changelog::parse_current_changelog(&version)
-        };
+        // Build the changelog entries + optional range title for the panel.
+        // When an upgrade summary exists, the range entries are rendered
+        // inside the welcome panel (not above it) so the display stays
+        // visually consistent between upgrades and steady-state launches.
+        let (changelog, changelog_title_override) =
+            if let Some((_, _, ref prev, ref entries)) = upgrade_summary {
+                let mut args = std::collections::HashMap::new();
+                args.insert("current".to_string(), prev.clone());
+                args.insert("latest".to_string(), version.clone());
+                let title = aish_i18n::t_with_args("shell.welcome2.changelog_summary_title", &args);
+                (entries.clone(), Some(title))
+            } else {
+                (
+                    aish_i18n::changelog::parse_current_changelog(&version),
+                    None,
+                )
+            };
         print!(
             "{}",
-            prompt::render_welcome(&version, &config.model, skill_count, changelog.clone())
+            prompt::render_welcome(
+                &version,
+                &config.model,
+                skill_count,
+                changelog.clone(),
+                changelog_title_override.as_deref(),
+            )
         );
         let _ = io::stdout().flush();
 
@@ -2137,7 +2149,7 @@ impl AishShell {
 
         // Store full changelog in expand_history so Ctrl+O can show all entries
         // when the welcome panel truncates them with "and N more".
-        if let Some((_, ref plain, ref prev)) = upgrade_summary {
+        if let Some((_, ref plain, ref prev, _)) = upgrade_summary {
             let mut args = std::collections::HashMap::new();
             args.insert("current".to_string(), prev.clone());
             args.insert("latest".to_string(), version.clone());
@@ -2146,7 +2158,10 @@ impl AishShell {
                 .lock()
                 .unwrap()
                 .add(format!("[changelog] {cl_title}"), plain.clone());
-        } else if changelog.len() > 2 {
+        } else if !changelog.is_empty() {
+            // Even when there are ≤2 entries, each one is likely truncated
+            // in the panel (inner_width ≈ 56 chars). Store the full text so
+            // Ctrl+O can expand it.
             let full_text = prompt::format_changelog_full(&version, &changelog);
             let cl_title = prompt::changelog_title(&version);
             expand_history
