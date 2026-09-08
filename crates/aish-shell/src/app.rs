@@ -743,17 +743,31 @@ impl AishShell {
 
     /// Show inline slash command popup with real-time filtering.
     fn run_slash_input_session(&self, prompt: &str) -> aish_ui::SlashInputOutcome {
-        let commands: Vec<(String, String)> = crate::readline::SLASH_COMMANDS
+        let group_labels: Vec<String> = crate::readline::SlashGroup::ALL
             .iter()
-            .map(|(name, _desc)| {
-                let cmd = name
+            .map(|g| aish_i18n::t(&format!("shell.slash_group.{}", g.key())))
+            .collect();
+        let entries: Vec<aish_ui::SlashCommandEntry> = crate::readline::SLASH_COMMANDS
+            .iter()
+            .map(|c| {
+                let cmd = c
+                    .name
                     .strip_prefix('/')
                     .expect("slash commands must start with /");
-                let i18n_key = format!("shell.slash.{cmd}");
-                (name.to_string(), aish_i18n::t(&i18n_key))
+                aish_ui::SlashCommandEntry {
+                    name: c.name.to_string(),
+                    desc: aish_i18n::t(&format!("shell.slash.{cmd}")),
+                    keywords: c.keywords.iter().map(|s| s.to_string()).collect(),
+                    group_index: crate::readline::SlashGroup::ALL
+                        .iter()
+                        .position(|g| *g == c.group)
+                        .unwrap_or(0),
+                    fill_only: matches!(c.enter, crate::readline::EnterPolicy::Fill),
+                    status: Some(self.slash_command_status(c.name)),
+                }
             })
             .collect();
-        let session = aish_ui::SlashInputSession::new(commands, prompt.to_string());
+        let session = aish_ui::SlashInputSession::new(entries, group_labels, prompt.to_string());
         // When triggered by Tab on a `/` prefix, pre-fill the popup with
         // the text the user had already typed.
         let session = {
@@ -764,9 +778,71 @@ impl AishShell {
                 session.with_input(prefill)
             }
         };
-        match session.run() {
-            Ok(outcome) => outcome,
-            Err(_) => aish_ui::SlashInputOutcome::Cancelled,
+        session
+            .run()
+            .unwrap_or(aish_ui::SlashInputOutcome::Cancelled(String::new()))
+    }
+
+    /// Availability of one slash command right now. Unavailable commands
+    /// stay visible (greyed) with a localized reason instead of disappearing.
+    fn slash_command_status(&self, name: &str) -> aish_ui::SlashCommandStatus {
+        let disabled_reason: Option<String> = match name {
+            "/diagnose" if !self.state.can_correct_error => Some(aish_i18n::t(
+                "shell.slash_status.reason_diagnose_no_failure",
+            )),
+            "/audit" if self.audit_store.is_none() => {
+                Some(aish_i18n::t("shell.slash_status.reason_audit_disabled"))
+            }
+            "/undo" | "/rollback" => {
+                let count = self
+                    .snapshot_store
+                    .lock()
+                    .map(|store| store.history_len())
+                    .unwrap_or(0);
+                if count == 0 {
+                    Some(aish_i18n::t("shell.slash_status.reason_undo_empty"))
+                } else {
+                    // Enabled rows carry a live count instead of a reason.
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("count".to_string(), count.to_string());
+                    let status_text =
+                        aish_i18n::t_with_args("shell.slash_status.undo_count", &args);
+                    return aish_ui::SlashCommandStatus {
+                        enabled: true,
+                        status_text,
+                        reason: String::new(),
+                    };
+                }
+            }
+            "/plan" => {
+                // Issue #473: the plan row shows the current mode live.
+                let phase = self.ai_handler.plan_phase();
+                let status_text = match phase {
+                    aish_core::types::PlanPhase::Planning => {
+                        aish_i18n::t("shell.slash_status.plan_planning")
+                    }
+                    aish_core::types::PlanPhase::Normal => {
+                        aish_i18n::t("shell.slash_status.plan_normal")
+                    }
+                };
+                return aish_ui::SlashCommandStatus {
+                    enabled: true,
+                    status_text,
+                    reason: String::new(),
+                };
+            }
+            "/live_sessions" | "/kill_live_sessions" if !self.config.pty_daemon_enabled => Some(
+                aish_i18n::t("shell.slash_status.reason_pty_daemon_disabled"),
+            ),
+            _ => None,
+        };
+        match disabled_reason {
+            Some(reason) => aish_ui::SlashCommandStatus {
+                enabled: false,
+                status_text: String::new(),
+                reason,
+            },
+            None => aish_ui::SlashCommandStatus::available(),
         }
     }
 
@@ -2516,12 +2592,28 @@ impl AishShell {
                             aish_ui::SlashInputOutcome::Command(cmd) => {
                                 self.apply_slash_popup_command(&mut rl, &prompt_str, &cmd);
                             }
+                            aish_ui::SlashInputOutcome::Fill(text) => {
+                                if self.read_line_after_slash_dismiss(&mut rl, &prompt_str, &text) {
+                                    break;
+                                }
+                            }
                             aish_ui::SlashInputOutcome::Dismissed(text) => {
                                 if self.read_line_after_slash_dismiss(&mut rl, &prompt_str, &text) {
                                     break;
                                 }
                             }
-                            aish_ui::SlashInputOutcome::Cancelled => {}
+                            aish_ui::SlashInputOutcome::Cancelled(restore) => {
+                                if !restore.is_empty()
+                                    && restore != "/"
+                                    && self.read_line_after_slash_dismiss(
+                                        &mut rl,
+                                        &prompt_str,
+                                        &restore,
+                                    )
+                                {
+                                    break;
+                                }
+                            }
                         }
                         continue;
                     }
@@ -3294,11 +3386,20 @@ impl AishShell {
                                 self.apply_slash_popup_command(rl, prompt, &cmd);
                                 return false;
                             }
+                            aish_ui::SlashInputOutcome::Fill(text) => {
+                                self.record_slash_popup_dismissed(&text);
+                                prefill = format!("{text} ");
+                            }
                             aish_ui::SlashInputOutcome::Dismissed(text) => {
                                 self.record_slash_popup_dismissed(&text);
                                 prefill = text;
                             }
-                            aish_ui::SlashInputOutcome::Cancelled => return false,
+                            aish_ui::SlashInputOutcome::Cancelled(restore) => {
+                                if restore.is_empty() || restore == "/" {
+                                    return false;
+                                }
+                                prefill = restore;
+                            }
                         }
                     } else {
                         crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");
@@ -3344,10 +3445,18 @@ impl AishShell {
                                 self.apply_slash_popup_command(rl, prompt, &cmd);
                                 return false;
                             }
+                            aish_ui::SlashInputOutcome::Fill(text) => {
+                                prefill = format!("{text} ");
+                            }
                             aish_ui::SlashInputOutcome::Dismissed(text) => {
                                 prefill = text;
                             }
-                            aish_ui::SlashInputOutcome::Cancelled => return false,
+                            aish_ui::SlashInputOutcome::Cancelled(restore) => {
+                                if restore.is_empty() || restore == "/" {
+                                    return false;
+                                }
+                                prefill = restore;
+                            }
                         }
                     } else {
                         crate::recorder::shared_record_output(&self.shared_recorder, "\r\n");

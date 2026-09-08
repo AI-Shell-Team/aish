@@ -113,10 +113,10 @@ fn complete_slash_command(before_cursor: &str) -> Vec<Pair> {
     let query = before_cursor.to_lowercase();
     crate::readline::SLASH_COMMANDS
         .iter()
-        .filter(|(name, _)| name.to_lowercase().starts_with(&query))
-        .map(|(name, _)| Pair {
-            display: (*name).to_string(),
-            replacement: (*name).to_string(),
+        .filter(|c| c.name.to_lowercase().starts_with(&query))
+        .map(|c| Pair {
+            display: c.name.to_string(),
+            replacement: c.name.to_string(),
         })
         .collect()
 }

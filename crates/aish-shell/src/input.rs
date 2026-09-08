@@ -23,7 +23,7 @@ pub fn classify_input(input: &str) -> InputIntent {
         && trimmed.split_whitespace().next().is_some_and(|cmd| {
             crate::readline::SLASH_COMMANDS
                 .iter()
-                .any(|(name, _)| *name == cmd)
+                .any(|c| c.name == cmd)
         })
     {
         return InputIntent::SpecialCommand;

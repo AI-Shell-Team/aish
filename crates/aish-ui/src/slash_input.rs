@@ -1,5 +1,10 @@
 use std::io::{self, Write};
 
+use crate::file_mention::fuzzy_score;
+use crate::text::strip_ansi_escapes;
+use crate::util::truncate_str;
+use unicode_width::UnicodeWidthStr;
+
 use crossterm::{
     cursor, event,
     event::{Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -17,24 +22,114 @@ use ratatui::{
 /// Outcome of the slash input session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashInputOutcome {
-    /// User selected a slash command (e.g. "/model gpt-4").
+    /// User selected a slash command to run as typed (e.g. "/help").
     Command(String),
+    /// User picked a command that must not run bare (needs arguments, opens
+    /// a picker, or is destructive): fill the readline with "cmd " and let
+    /// the user confirm with a second Enter.
+    Fill(String),
     /// Input no longer matches any command; return to normal readline with this text.
     Dismissed(String),
-    /// User pressed Esc; cancel and return to empty readline.
-    Cancelled,
+    /// User pressed Esc (or emptied the input): restore this text in the
+    /// readline. Empty string means discard and return to a fresh prompt.
+    Cancelled(String),
 }
 
 const MAX_VISIBLE_COMMANDS: usize = 8;
 const MAX_PANEL_HEIGHT: u16 = 10;
 
-/// Inline slash command autocomplete popup.
-///
-/// Renders the shell prompt + input on the first line, and a filtered
-/// command list below it — no focus mode switching, typing and popup
-/// navigation work simultaneously.
+/// One renderable row in the popup list: a group header or a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayRow {
+    Header(usize),
+    Command(usize),
+}
+
+/// Availability status shown next to a command row. Unavailable commands
+/// stay visible (greyed) with the reason and an enable hint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommandStatus {
+    /// Whether the command can run right now.
+    pub enabled: bool,
+    /// Short state word (e.g. "unavailable") rendered before the reason.
+    pub status_text: String,
+    /// Why it is unavailable, rendered as a suffix on the row.
+    pub reason: String,
+}
+
+impl SlashCommandStatus {
+    /// Default available status; the row renders the description only.
+    pub fn available() -> Self {
+        Self {
+            enabled: true,
+            status_text: String::new(),
+            reason: String::new(),
+        }
+    }
+}
+
+/// One popup row: command name, localized description, and popup metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommandEntry {
+    /// Command with leading "/", e.g. "/help".
+    pub name: String,
+    /// Localized description (already translated by the caller).
+    pub desc: String,
+    /// Extra fuzzy-search terms (English aliases + scenario words).
+    pub keywords: Vec<String>,
+    /// Index into the caller's group-label list; rows sort by (group, name).
+    pub group_index: usize,
+    /// True when Enter must fill instead of execute (Fill policy).
+    pub fill_only: bool,
+    /// Availability status; commands without one are always available.
+    pub status: Option<SlashCommandStatus>,
+}
+
+impl SlashCommandEntry {
+    /// Best fuzzy score across name, description, and keywords. A positive
+    /// score requires a word-initial or consecutive bonus to outweigh the
+    /// position/length penalties, which filters scattered trivial matches.
+    /// Single-char ASCII queries fall back to plain name-prefix matching so
+    /// Tab prefix extension behaves exactly like the old prefix filter
+    /// (fuzzy on one letter matches too many scattered name hits); CJK and
+    /// other non-ASCII single chars use the full fuzzy path because they only
+    /// ever match via descriptions/keywords. From two chars on, descriptions
+    /// and keywords always join the fuzzy match.
+    fn best_score(&self, query: &str) -> Option<i64> {
+        let mut chars = query.chars();
+        let is_single_char = chars.next().is_some() && chars.next().is_none();
+        if is_single_char && query.chars().all(|c| c.is_ascii_alphanumeric()) {
+            let ch = query.chars().next().expect("non-empty");
+            let lower = ch.to_ascii_lowercase();
+            return if self
+                .name
+                .trim_start_matches('/')
+                .to_lowercase()
+                .starts_with(lower)
+            {
+                Some(1)
+            } else {
+                None
+            };
+        }
+        let name = fuzzy_score(query, &self.name);
+        let desc = fuzzy_score(query, &self.desc);
+        let kw = self
+            .keywords
+            .iter()
+            .filter_map(|k| fuzzy_score(query, k))
+            .max();
+        name.into_iter()
+            .chain(desc)
+            .chain(kw)
+            .filter(|s| *s > 0)
+            .max()
+    }
+}
 pub struct SlashInputSession {
-    commands: Vec<(String, String)>,
+    entries: Vec<SlashCommandEntry>,
+    /// Group header labels by group index; empty label = no header row.
+    group_labels: Vec<String>,
     prompt: String,
     input: String,
     cursor: usize,
@@ -43,13 +138,25 @@ pub struct SlashInputSession {
 }
 
 impl SlashInputSession {
-    pub fn new(commands: Vec<(String, String)>, prompt: String) -> Self {
+    /// Build a session. Rows sort by (group_index, name) so the popup order
+    /// is stable regardless of locale; empty group labels hide headers.
+    pub fn new(
+        mut entries: Vec<SlashCommandEntry>,
+        group_labels: Vec<String>,
+        prompt: String,
+    ) -> Self {
+        entries.sort_by(|a, b| {
+            a.group_index
+                .cmp(&b.group_index)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         // Strip ANSI escape codes — ratatui renders via its own style system
-        let prompt = strip_ansi(&prompt);
-        let mut filtered = Vec::with_capacity(commands.len());
-        filtered.extend(0..commands.len());
+        let prompt = strip_ansi_escapes(&prompt);
+        let mut filtered = Vec::with_capacity(entries.len());
+        filtered.extend(0..entries.len());
         Self {
-            commands,
+            entries,
+            group_labels,
             prompt,
             input: String::from("/"),
             cursor: 1,
@@ -132,25 +239,27 @@ impl SlashInputSession {
             None => &self.input,
         }
     }
-
     fn update_filtered(&mut self) {
         if self.should_hide_command_list() {
             self.filtered.clear();
             return;
         }
-        let query = self.command_query().to_lowercase();
-        if query.is_empty() || !query.starts_with('/') {
-            self.filtered.clear();
+        let query = self.command_query().trim_start_matches('/').to_lowercase();
+        if query.is_empty() {
+            self.filtered = (0..self.entries.len()).collect();
             self.selected = 0;
             return;
         }
-        self.filtered = self
-            .commands
+        // Fuzzy match against name + localized description + keywords; keep
+        // only subsequence hits and rank them by best score.
+        let mut scored: Vec<(i64, usize)> = self
+            .entries
             .iter()
             .enumerate()
-            .filter(|(_, (name, _))| name.to_lowercase().starts_with(&query))
-            .map(|(i, _)| i)
+            .filter_map(|(i, e)| e.best_score(&query).map(|s| (s, i)))
             .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        self.filtered = scored.into_iter().map(|(_, i)| i).collect();
         self.selected = 0;
         self.clamp_selected();
     }
@@ -172,15 +281,13 @@ impl SlashInputSession {
         }
     }
 
-    /// Whether the current input is still a prefix of any command name.
+    /// Whether the current input is still a fuzzy match for any command.
     fn has_command_prefix(&self) -> bool {
-        let query = self.command_query().to_lowercase();
-        if query.is_empty() || !query.starts_with('/') {
-            return false;
+        let query = self.command_query().trim_start_matches('/').to_lowercase();
+        if query.is_empty() {
+            return true;
         }
-        self.commands
-            .iter()
-            .any(|(name, _)| name.to_lowercase().starts_with(&query))
+        self.entries.iter().any(|e| e.best_score(&query).is_some())
     }
 
     /// True when input is an exact command followed by a space (Tab completion or typed).
@@ -190,7 +297,7 @@ impl SlashInputSession {
             return false;
         };
         let command_name = &self.input[..space_idx];
-        self.commands.iter().any(|(name, _)| name == command_name)
+        self.entries.iter().any(|e| e.name == command_name)
     }
 
     /// True when the user has started typing arguments (not just a trailing space).
@@ -205,31 +312,45 @@ impl SlashInputSession {
         format!("{command_name} ")
     }
 
-    /// Name of the currently highlighted command in the filtered list.
-    fn selected_command_name(&self) -> Option<&str> {
+    /// Entry of the currently highlighted command in the filtered list.
+    fn selected_entry(&self) -> Option<&SlashCommandEntry> {
         self.filtered
             .get(self.selected)
-            .map(|&idx| self.commands[idx].0.as_str())
+            .map(|&idx| &self.entries[idx])
     }
 
-    /// Enter: exact command match executes; otherwise accept the highlighted item.
+    /// Enter: exact Execute command runs; exact Fill command fills; the
+    /// highlighted row decides otherwise. Disabled commands do nothing
+    /// (popup stays open so the user can read the enable hint).
     fn handle_submit(&mut self) -> Option<SlashInputOutcome> {
         let trimmed = self.input.trim();
         let first_word = trimmed.split_whitespace().next().unwrap_or("");
-        let exact_match = self
-            .commands
+        let exact = self
+            .entries
             .iter()
-            .any(|(name, _)| first_word == name || trimmed == name);
-        if exact_match {
-            return Some(SlashInputOutcome::Command(trimmed.to_string()));
+            .find(|e| first_word == e.name || trimmed == e.name);
+        if let Some(entry) = exact {
+            return self.outcome_for(entry, trimmed);
         }
         if !self.filtered.is_empty() {
-            let Some(command) = self.selected_command_name().map(str::to_string) else {
+            let Some(entry) = self.selected_entry() else {
                 return Some(SlashInputOutcome::Dismissed(self.input.clone()));
             };
-            return Some(SlashInputOutcome::Command(command));
+            return self.outcome_for(entry, &entry.name);
         }
         Some(SlashInputOutcome::Dismissed(self.input.clone()))
+    }
+
+    /// Command/Fill/no-op for one picked entry. Disabled entries never run.
+    fn outcome_for(&self, entry: &SlashCommandEntry, text: &str) -> Option<SlashInputOutcome> {
+        if entry.status.as_ref().is_some_and(|s| !s.enabled) {
+            return None;
+        }
+        Some(if entry.fill_only {
+            SlashInputOutcome::Fill(entry.name.clone())
+        } else {
+            SlashInputOutcome::Command(text.to_string())
+        })
     }
 
     /// Tab: extend shared prefix, or complete the highlighted command and dismiss.
@@ -238,7 +359,7 @@ impl SlashInputSession {
             return None;
         }
         if self.filtered.len() == 1 {
-            let command = self.selected_command_name()?.to_string();
+            let command = self.selected_entry()?.name.clone();
             let completed = Self::format_command_with_trailing_space(&command);
             return Some(SlashInputOutcome::Dismissed(completed));
         }
@@ -246,7 +367,7 @@ impl SlashInputSession {
         let names: Vec<&str> = self
             .filtered
             .iter()
-            .map(|&idx| self.commands[idx].0.as_str())
+            .map(|&idx| self.entries[idx].name.as_str())
             .collect();
         let lcp = longest_common_prefix(&names);
         let query = self.command_query();
@@ -256,7 +377,7 @@ impl SlashInputSession {
             return None;
         }
 
-        let command = self.selected_command_name()?.to_string();
+        let command = self.selected_entry()?.name.clone();
         let completed = Self::format_command_with_trailing_space(&command);
         Some(SlashInputOutcome::Dismissed(completed))
     }
@@ -268,9 +389,9 @@ impl SlashInputSession {
             return None;
         }
 
-        // Ctrl+C always cancels
+        // Ctrl+C discards everything: restore to a fresh prompt.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Some(SlashInputOutcome::Cancelled);
+            return Some(SlashInputOutcome::Cancelled(String::new()));
         }
 
         match key.code {
@@ -301,7 +422,7 @@ impl SlashInputSession {
                     self.cursor = prev;
                     self.update_filtered();
                     if self.input.is_empty() {
-                        return Some(SlashInputOutcome::Cancelled);
+                        return Some(SlashInputOutcome::Cancelled(self.input.clone()));
                     }
                     if !self.has_command_prefix() {
                         return Some(SlashInputOutcome::Dismissed(self.input.clone()));
@@ -351,7 +472,7 @@ impl SlashInputSession {
                 }
                 None
             }
-            KeyCode::Esc => Some(SlashInputOutcome::Cancelled),
+            KeyCode::Esc => Some(SlashInputOutcome::Cancelled(self.input.clone())),
             _ => None,
         }
     }
@@ -393,55 +514,147 @@ impl SlashInputSession {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
+    /// Expand filtered command indexes into rows, inserting a group header
+    /// before the first command of each new group.
+    fn display_rows(&self) -> Vec<DisplayRow> {
+        let mut rows = Vec::with_capacity(self.filtered.len() + self.group_labels.len());
+        let mut last_group: Option<usize> = None;
+        for &idx in &self.filtered {
+            let entry = &self.entries[idx];
+            let Some(label) = self.group_labels.get(entry.group_index) else {
+                rows.push(DisplayRow::Command(idx));
+                continue;
+            };
+            if label.is_empty() {
+                rows.push(DisplayRow::Command(idx));
+                continue;
+            }
+            if last_group != Some(entry.group_index) {
+                rows.push(DisplayRow::Header(entry.group_index));
+                last_group = Some(entry.group_index);
+            }
+            rows.push(DisplayRow::Command(idx));
+        }
+        rows
+    }
+
+    /// Build the spans for one command row: marker, name, description, and
+    /// (when unavailable) the status suffix — all truncated to the width.
+    /// Name and description use separate spans so the DarkGray description
+    /// keeps visual contrast against the bright selected name.
+    fn command_row(&self, idx: usize, is_selected: bool, width: usize) -> Line<'static> {
+        let entry = &self.entries[idx];
+        let disabled = entry.status.as_ref().is_some_and(|s| !s.enabled);
+        let marker = if is_selected { "▸ " } else { "  " };
+        let marker_style = if is_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let name_style = if disabled {
+            Style::default().fg(Color::DarkGray)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let mut name = String::from(entry.name.as_str());
+        name.push_str("  ");
+        let mut desc = entry.desc.clone();
+        let status = entry.status.as_ref();
+        if let Some(status) = status.filter(|s| !s.status_text.is_empty()) {
+            desc.push_str(&format!("  [{}]", status.status_text));
+        }
+        if disabled {
+            let status = status.expect("disabled implies a status");
+            if !status.reason.is_empty() {
+                desc.push_str(&format!(" — {}", status.reason));
+            }
+        }
+        let marker_width = marker.width();
+        let name = truncate_str(&name, width.saturating_sub(marker_width));
+        let desc_budget = width
+            .saturating_sub(marker_width)
+            .saturating_sub(name.width());
+        let desc = truncate_str(&desc, desc_budget);
+
+        let desc_style = if disabled {
+            Style::default().fg(Color::DarkGray)
+        } else if is_selected {
+            Style::default().fg(Color::Gray)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        Line::from(vec![
+            Span::styled(marker.to_string(), marker_style),
+            Span::styled(name, name_style),
+            Span::styled(desc, desc_style),
+        ])
+    }
+
     fn render_command_list(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
         if self.filtered.is_empty() || area.height == 0 {
             return;
         }
 
         let max_visible = area.height as usize;
-        let scroll = self.scroll_offset(max_visible);
-        let end = (scroll + max_visible).min(self.filtered.len());
-        let lines: Vec<Line> = self.filtered[scroll..end]
+        let width = area.width as usize;
+        let rows = self.display_rows();
+        let scroll = self.scroll_offset(&rows, max_visible);
+        let end = (scroll + max_visible).min(rows.len());
+        let header_style = Style::default().fg(Color::DarkGray);
+        let lines: Vec<Line> = rows[scroll..end]
             .iter()
-            .enumerate()
-            .map(|(row, &cmd_idx)| {
-                let absolute_row = scroll + row;
-                let (name, desc) = &self.commands[cmd_idx];
-                let is_selected = absolute_row == self.selected;
-                let marker = if is_selected { "▸ " } else { "  " };
-                let marker_style = if is_selected {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let name_style = if is_selected {
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                let desc_style = Style::default().fg(Color::DarkGray);
-
-                Line::from(vec![
-                    Span::styled(marker, marker_style),
-                    Span::styled(name, name_style),
-                    Span::styled(format!("  {desc}"), desc_style),
-                ])
+            .map(|row| match row {
+                DisplayRow::Header(g) => {
+                    let label = self.group_labels.get(*g).map(String::as_str).unwrap_or("");
+                    Line::from(Span::styled(
+                        truncate_str(&format!("── {label}"), width),
+                        header_style,
+                    ))
+                }
+                DisplayRow::Command(idx) => {
+                    let is_selected = self.selected_command() == Some(*idx);
+                    self.command_row(*idx, is_selected, width)
+                }
             })
             .collect();
 
         frame.render_widget(Paragraph::new(lines), area);
     }
 
-    fn scroll_offset(&self, max_visible: usize) -> usize {
-        if self.selected >= max_visible {
-            self.selected - max_visible + 1
-        } else {
-            0
+    /// Index (into `entries`) of the currently highlighted command.
+    fn selected_command(&self) -> Option<usize> {
+        self.filtered.get(self.selected).copied()
+    }
+
+    /// Row position (within `display_rows`) of the selected command.
+    fn selected_command_row(&self) -> Option<usize> {
+        let target = self.selected_command()?;
+        self.display_rows()
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Command(i) if *i == target))
+    }
+
+    /// First visible row index so the selected command stays on screen.
+    /// A header at the window top would be an orphan row, so scroll past it.
+    fn scroll_offset(&self, rows: &[DisplayRow], max_visible: usize) -> usize {
+        let Some(sel_row) = self.selected_command_row() else {
+            return 0;
+        };
+        if sel_row < max_visible {
+            return 0;
         }
+        let mut start = sel_row + 1 - max_visible;
+        if matches!(rows.get(start), Some(DisplayRow::Header(_))) {
+            start += 1;
+        }
+        start.min(rows.len().saturating_sub(max_visible))
     }
 }
 
@@ -502,45 +715,6 @@ pub(crate) fn longest_common_prefix(names: &[&str]) -> String {
     prefix
 }
 
-/// Strip ANSI CSI/OSC escape sequences from a string.
-pub(crate) fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    // CSI: skip until final byte (0x40..=0x7E)
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if ('\x40'..='\x7e').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    // OSC: skip until BEL or ST
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' {
-                            break;
-                        }
-                        if c == '\x1b' && chars.peek() == Some(&'\\') {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,36 +724,60 @@ mod tests {
         Event::Key(KeyEvent::new(code, mods))
     }
 
-    fn sample_commands() -> Vec<(String, String)> {
+    fn entry(name: &str, group_index: usize) -> SlashCommandEntry {
+        SlashCommandEntry {
+            name: name.to_string(),
+            desc: format!("{name} description"),
+            keywords: Vec::new(),
+            group_index,
+            fill_only: false,
+            status: None,
+        }
+    }
+
+    fn fill_entry(name: &str, group_index: usize) -> SlashCommandEntry {
+        let mut e = entry(name, group_index);
+        e.fill_only = true;
+        e
+    }
+
+    fn disabled_entry(name: &str, group_index: usize, reason: &str) -> SlashCommandEntry {
+        let mut e = entry(name, group_index);
+        e.status = Some(SlashCommandStatus {
+            enabled: false,
+            status_text: String::new(),
+            reason: reason.to_string(),
+        });
+        e
+    }
+
+    fn sample_commands() -> Vec<SlashCommandEntry> {
         vec![
-            ("/help".into(), "Show help".into()),
-            ("/model".into(), "Switch model".into()),
-            ("/quit".into(), "Exit".into()),
+            entry("/help", 0),
+            fill_entry("/model", 1),
+            fill_entry("/quit", 1),
         ]
     }
 
-    fn all_slash_commands() -> Vec<(String, String)> {
+    fn all_slash_commands() -> Vec<SlashCommandEntry> {
         vec![
-            ("/help".into(), "Show help information".into()),
-            ("/model".into(), "Show or switch AI model".into()),
-            ("/setup".into(), "Open setup wizard".into()),
-            ("/setting".into(), "Open interactive settings panel".into()),
-            ("/plan".into(), "Plan mode control".into()),
-            ("/token".into(), "Show token usage".into()),
-            ("/resume".into(), "Resume previous session".into()),
-            ("/feedback".into(), "Submit feedback".into()),
-            (
-                "/record".into(),
-                "Record terminal session (start/stop)".into(),
-            ),
-            ("/quit".into(), "Exit AI Shell".into()),
-            ("/doctor".into(), "Run system diagnostics".into()),
-            ("/status".into(), "Show system environment status".into()),
+            entry("/help", 0),
+            entry("/model", 1),
+            entry("/setup", 1),
+            entry("/setting", 1),
+            entry("/plan", 2),
+            entry("/token", 3),
+            fill_entry("/resume", 4),
+            entry("/feedback", 5),
+            entry("/record", 5),
+            entry("/quit", 6),
+            entry("/doctor", 7),
+            entry("/status", 7),
         ]
     }
 
-    fn session_with_commands(input: &str, commands: &[(String, String)]) -> SlashInputSession {
-        let mut session = SlashInputSession::new(commands.to_vec(), "aish> ".into());
+    fn session_with_commands(input: &str, commands: &[SlashCommandEntry]) -> SlashInputSession {
+        let mut session = SlashInputSession::new(commands.to_vec(), Vec::new(), "aish> ".into());
         session.input = input.to_string();
         session.cursor = input.len();
         session.update_filtered();
@@ -609,11 +807,22 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_exact_command_executes_as_typed() {
+    fn enter_on_exact_fill_command_fills() {
         let mut session = session_with_input("/quit");
         assert_eq!(
             session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(SlashInputOutcome::Command("/quit".into()))
+            Some(SlashInputOutcome::Fill("/quit".into()))
+        );
+    }
+
+    #[test]
+    fn enter_on_ambiguous_fill_prefix_fills_highlighted() {
+        let commands = all_slash_commands();
+        let mut session = session_with_commands("/r", &commands);
+        // /resume sorts before /record within group 4 and is fill-only.
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Fill("/resume".into()))
         );
     }
 
@@ -639,7 +848,6 @@ mod tests {
     fn tab_at_shared_prefix_completes_highlighted() {
         let commands = all_slash_commands();
         let mut session = session_with_commands("/re", &commands);
-        // /resume precedes /record in SLASH_COMMANDS; selected defaults to 0.
         assert_eq!(
             session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
             Some(SlashInputOutcome::Dismissed("/resume ".into()))
@@ -695,12 +903,18 @@ mod tests {
     #[test]
     fn enter_executes_each_exact_command() {
         let commands = all_slash_commands();
-        for (name, _) in &commands {
-            let mut session = session_with_commands(name, &commands);
+        for c in &commands {
+            let mut session = session_with_commands(&c.name, &commands);
+            let expected = if c.fill_only {
+                SlashInputOutcome::Fill(c.name.clone())
+            } else {
+                SlashInputOutcome::Command(c.name.clone())
+            };
             assert_eq!(
                 session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
-                Some(SlashInputOutcome::Command(name.clone())),
-                "Enter on {name}",
+                Some(expected),
+                "Enter on {}",
+                c.name,
             );
         }
     }
@@ -708,8 +922,8 @@ mod tests {
     #[test]
     fn trailing_space_hides_list_for_each_command() {
         let commands = all_slash_commands();
-        for (name, _) in &commands {
-            let input = format!("{name} ");
+        for c in &commands {
+            let input = format!("{} ", c.name);
             let session = session_with_commands(&input, &commands);
             assert!(
                 session.filtered.is_empty(),
@@ -718,24 +932,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn enter_on_ambiguous_prefix_executes_highlighted() {
-        let commands = all_slash_commands();
-        let mut session = session_with_commands("/r", &commands);
-        // /resume precedes /record; default highlight is the first match.
-        assert_eq!(
-            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(SlashInputOutcome::Command("/resume".into()))
-        );
-    }
-
     /// Regression: typing `/se`, navigating Down to `/setting`, then pressing
     /// Enter must execute `/setting` — not dismiss with the partial `/se`.
     #[test]
     fn enter_after_down_arrow_executes_selected_command() {
         let commands = all_slash_commands();
         let mut session = session_with_commands("/se", &commands);
-        // /se matches /setup (selected=0) and /setting (selected=1).
+        // Fuzzy ranks /setting first for "/se".
         session.handle_event(key(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(
             session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
@@ -763,7 +966,97 @@ mod tests {
         let mut session = session_with_input("/");
         assert_eq!(
             session.handle_event(key(KeyCode::Backspace, KeyModifiers::NONE)),
-            Some(SlashInputOutcome::Cancelled)
+            Some(SlashInputOutcome::Cancelled(String::new()))
+        );
+    }
+
+    #[test]
+    fn esc_cancels_with_input_for_restore() {
+        let mut session = session_with_input("/hel");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Cancelled("/hel".into()))
+        );
+    }
+
+    #[test]
+    fn ctrl_c_cancels_with_empty_restore() {
+        let mut session = session_with_input("/hel");
+        assert_eq!(
+            session.handle_event(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(SlashInputOutcome::Cancelled(String::new()))
+        );
+    }
+
+    #[test]
+    fn disabled_command_enter_is_noop() {
+        let commands = vec![disabled_entry("/live", 0, "daemon off"), entry("/help", 0)];
+        let mut session = session_with_commands("/live", &commands);
+        assert_eq!(
+            session.handle_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            None
+        );
+        // Still open: dismissing requires Esc.
+        assert_eq!(
+            session.handle_event(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(SlashInputOutcome::Cancelled("/live".into()))
+        );
+    }
+
+    #[test]
+    fn group_headers_render_between_groups() {
+        let commands = vec![entry("/alpha", 0), entry("/beta", 1), entry("/gamma", 1)];
+        let mut session =
+            SlashInputSession::new(commands, vec!["G0".into(), "G1".into()], "aish> ".into());
+        session.input = "/".into();
+        session.cursor = 1;
+        session.update_filtered();
+        let rows = session.display_rows();
+        assert_eq!(
+            rows,
+            vec![
+                DisplayRow::Header(0),
+                DisplayRow::Command(0),
+                DisplayRow::Header(1),
+                DisplayRow::Command(1),
+                DisplayRow::Command(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn description_query_matches_command() {
+        let mut help = entry("/help", 0);
+        help.desc = "Show help information".into();
+        let commands = vec![help, entry("/model", 1)];
+        let session = session_with_commands("/information", &commands);
+        assert_eq!(
+            session
+                .filtered
+                .first()
+                .map(|&i| session.entries[i].name.as_str()),
+            Some("/help")
+        );
+    }
+
+    #[test]
+    fn keyword_query_matches_command() {
+        let mut doctor = entry("/doctor", 0);
+        doctor.keywords = vec!["diagnose".into()];
+        // new() sorts by (group, name): /doctor precedes /help.
+        let commands = vec![doctor, entry("/help", 0)];
+        let session = session_with_commands("/diagnose", &commands);
+        assert_eq!(session.filtered, vec![0]);
+    }
+
+    #[test]
+    fn fuzzy_ranks_prefix_above_scattered_subsequence() {
+        let commands = all_slash_commands();
+        let session = session_with_commands("/se", &commands);
+        // /setting and /setup match; the word-initial /setting wins.
+        assert_eq!(
+            session.filtered.first().map(|&i| commands[i].name.as_str()),
+            Some("/setting")
         );
     }
 
@@ -800,12 +1093,5 @@ mod tests {
             session.handle_event(key(KeyCode::Tab, KeyModifiers::NONE)),
             Some(SlashInputOutcome::Dismissed("/resume ".into()))
         );
-    }
-
-    #[test]
-    fn description_only_query_does_not_match() {
-        let commands = all_slash_commands();
-        let session = session_with_commands("/show", &commands);
-        assert!(session.filtered.is_empty());
     }
 }

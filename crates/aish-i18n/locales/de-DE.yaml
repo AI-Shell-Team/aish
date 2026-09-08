@@ -194,8 +194,27 @@ shell:
     fork: "Aktuelle Sitzung abzweigen"
     sessions: "Sitzungsbaum anzeigen"
     rollback: "KI-Dateibearbeitungen dieser Sitzung prüfen und zurückrollen (edit_file/write_file)"
-    undo: "Letzte Dateiänderung dieser Sitzung rückgängig machen (edit_file/write_file)"
+    undo: "Letzte KI-Dateiänderung rückgängig machen (edit_file/write_file)"
     memory: "Langfristige Erinnerungen anzeigen, verifizieren oder löschen"
+
+  slash_group:
+    diagnostics: "Diagnose"
+    sessions: "Sitzungen"
+    model_settings: "Modell & Einstellungen"
+    skills: "Fähigkeiten"
+    files_memory: "Dateien & Erinnerungen"
+    record_share: "Aufnahme & Teilen"
+    security_audit: "Sicherheit & Audit"
+    exit: "Beenden"
+
+  slash_status:
+    reason_diagnose_no_failure: "Kein fehlgeschlagener Befehl zum Diagnostizieren"
+    reason_audit_disabled: "Audit-Speicher ist deaktiviert"
+    reason_undo_empty: "Keine Dateiänderungen zum Rückgängigmachen"
+    reason_pty_daemon_disabled: "PTY-Daemon ist nicht aktiviert"
+    undo_count: "{count} Änderung(en) rückgängig machbar"
+    plan_planning: "Planung"
+    plan_normal: "Normal"
 
   feedback:
     select_type: "Feedback-Typ auswählen"
