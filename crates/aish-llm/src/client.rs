@@ -17,6 +17,10 @@ pub struct LlmClient {
     api_base: String,
     api_key: String,
     model: std::sync::Mutex<String>,
+    /// When true, send `Connection: close` so the server terminates the HTTP
+    /// stream and closes first. One-shot probes use this to avoid leaving the
+    /// upstream with a client-abort signature after the last SSE byte.
+    close_connection: bool,
 }
 
 impl LlmClient {
@@ -27,7 +31,15 @@ impl LlmClient {
             api_base: api_base.trim_end_matches('/').into(),
             api_key: api_key.into(),
             model: std::sync::Mutex::new(model),
+            close_connection: false,
         }
+    }
+
+    /// Make this client close each connection after one request/response
+    /// cycle (server-side close via the `Connection: close` header).
+    pub fn with_close_connection(mut self) -> Self {
+        self.close_connection = true;
+        self
     }
 
     /// Return the API base URL.
@@ -209,16 +221,16 @@ impl LlmClient {
                 tokio::time::sleep(delay).await;
             }
 
-            let resp = match self
+            let mut req = self
                 .http
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
-                .timeout(std::time::Duration::from_secs(120))
-                .json(&body)
-                .send()
-                .await
-            {
+                .timeout(std::time::Duration::from_secs(120));
+            if self.close_connection {
+                req = req.header("Connection", "close");
+            }
+            let resp = match req.json(&body).send().await {
                 Ok(r) => r,
                 Err(e) if is_retryable_network_err(&e) => {
                     last_err = Some(AishError::Llm(e.to_string()));
