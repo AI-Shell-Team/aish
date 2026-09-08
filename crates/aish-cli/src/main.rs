@@ -1296,6 +1296,11 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     // scrollback (including the prompt) would never be displayed until
     // the user presses a key to generate new output.
     let mut initial_exit = false;
+    // Track whether any PTY output was actually received during scrollback
+    // replay. When the inner shell exits immediately without producing any
+    // output (e.g. PersistentPty::start failed before the welcome banner),
+    // we return false so the caller can fall back to standalone mode.
+    let mut had_output = false;
     if let Ok(events) = backend.drain_events() {
         for event in events {
             match event {
@@ -1303,6 +1308,7 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                     if !bytes.is_empty() {
                         let (clean, _cmds) = osc.process(&bytes);
                         if !clean.is_empty() {
+                            had_output = true;
                             // SAFETY: [Category 8 — FFI] `write()` to stdout.
                             // `stdout_fd` is valid; `clean` is a Vec whose
                             // buffer is valid for the duration of the call.
@@ -1331,9 +1337,13 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
         unsafe {
             libc::tcsetattr(stdin_fd, libc::TCSANOW, &orig_termios);
         }
-        return true;
+        // If the inner shell exited without producing any output, the user
+        // saw a blank screen. Return false so the caller falls back to
+        // standalone mode and shows the welcome banner.
+        // When output was produced (banner/prompt visible), return true —
+        // the user already saw what they need and the session is done.
+        return had_output;
     }
-
     let mut stdin_buf = [0u8; 1024];
     // True when the inner shell sent ShellExiting (user typed `exit`/`logout`).
     // Distinguishes a true detach (Ctrl+Q — session still alive) from a shell
@@ -1434,6 +1444,7 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                                 }
                                 let (clean, cmds) = osc.process(&bytes);
                                 if !clean.is_empty() {
+                                    had_output = true;
                                     // SAFETY: [Category 8 — FFI] `write()` to
                                     // stdout. `stdout_fd` is valid; `clean`
                                     // is a Vec whose buffer is valid.
@@ -1529,6 +1540,12 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
     // sends EXIT_NOTICE which sets running=false — nothing to reattach to.
     if !shell_exited && backend.is_running() {
         eprintln!("\x1b[32m[aish] {}\x1b[0m", aish_i18n::t("cli.detach_hint"));
+    }
+    // The inner shell exited during the live loop: apply the same
+    // blank-screen rule as the initial drain — success only if output
+    // was actually shown, otherwise let the caller fall back.
+    if shell_exited {
+        return had_output;
     }
     true
 }
