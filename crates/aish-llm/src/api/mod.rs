@@ -40,6 +40,10 @@ pub struct StreamContext {
     /// Model name sent to the HTTP API (prefixes may be stripped).
     pub model: String,
     pub codex_auth_path: Option<PathBuf>,
+    /// Send `Connection: close` on one-shot probe requests so the server
+    /// closes the stream first and upstream accounting does not record a
+    /// client abort. Never enable for interactive sessions.
+    pub close_connection: bool,
 }
 
 impl StreamContext {
@@ -58,6 +62,7 @@ impl StreamContext {
             config_model,
             model,
             codex_auth_path,
+            close_connection: false,
         }
     }
 

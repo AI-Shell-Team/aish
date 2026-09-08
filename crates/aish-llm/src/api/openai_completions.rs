@@ -15,7 +15,10 @@ pub async fn stream(
     temperature: Option<f32>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
-    let client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model);
+    let mut client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model);
+    if ctx.close_connection {
+        client = client.with_close_connection();
+    }
     client
         .chat_completion(messages, tools, stream, temperature, max_tokens)
         .await
