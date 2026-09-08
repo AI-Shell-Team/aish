@@ -1071,23 +1071,27 @@ mod tests {
         // once at the group's first occurrence — never repeated mid-list.
         let mut g0 = entry("/aaa", 0);
         g0.desc = "zzz match".into();
+        let g0b = entry("/bbb", 0);
         let mut g1 = entry("/zzz", 1);
         g1.desc = "aaa match".into();
-        let commands = vec![g0, g1];
+        let commands = vec![g0, g1, g0b];
         let mut session =
             SlashInputSession::new(commands, vec!["G0".into(), "G1".into()], "aish> ".into());
-        // Simulate a search whose score order interleaves groups: g1 first.
+        // Score order interleaves non-adjacent rows of the same group:
+        // g0, g1, then g0 again — the old last-group check re-rendered
+        // Header(0) at the tail. new() sorted entries, so /bbb is index 1.
         session.input = "/match".into();
         session.cursor = session.input.len();
-        session.filtered = vec![1, 0];
+        session.filtered = vec![0, 2, 1];
         let rows = session.display_rows();
         assert_eq!(
             rows,
             vec![
-                DisplayRow::Header(1),
-                DisplayRow::Command(1),
                 DisplayRow::Header(0),
                 DisplayRow::Command(0),
+                DisplayRow::Header(1),
+                DisplayRow::Command(2),
+                DisplayRow::Command(1),
             ]
         );
     }
