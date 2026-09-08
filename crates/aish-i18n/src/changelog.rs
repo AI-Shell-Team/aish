@@ -109,6 +109,24 @@ pub fn select_changelog_range(
         .collect()
 }
 
+/// Collect all changelog entries from the range `after → through` (exclusive
+/// of `after`, inclusive of `through`) in display order (oldest → newest).
+/// Returns a flat list suitable for rendering inside the welcome panel.
+pub fn collect_range_entries(after: &str, through: &str) -> Vec<ChangelogEntry> {
+    let sections = parse_embedded_changelog_sections();
+    let selected = select_changelog_range(&sections, after, through, compare_changelog_versions);
+    let ordered: Vec<_> = selected.into_iter().rev().collect();
+    let mut entries = Vec::new();
+    for section in &ordered {
+        let show = section
+            .entries
+            .len()
+            .min(STARTUP_CHANGELOG_MAX_ENTRIES_PER_VERSION);
+        entries.extend_from_slice(&section.entries[..show]);
+    }
+    entries
+}
+
 /// Extract the text between `## [{version}]` and the next `## [` heading.
 ///
 /// Uses [`parse_version_heading`] so version matching is exact (avoids treating
@@ -209,6 +227,9 @@ fn category_badge(category: &str) -> &'static str {
         "Added" => "\x1b[32m[+]\x1b[0m",
         "Changed" => "\x1b[33m[*]\x1b[0m",
         "Fixed" => "\x1b[31m[!]\x1b[0m",
+        "Removed" => "\x1b[31m[-]\x1b[0m",
+        "Deprecated" => "\x1b[33m[!]\x1b[0m",
+        "Security" => "\x1b[31m[!]\x1b[0m",
         _ => "\x1b[2m[-]\x1b[0m",
     }
 }
@@ -633,6 +654,35 @@ mod tests {
             vec!["0.3.4", "0.3.3"]
         );
         assert!(selected.iter().all(|s| !s.entries.is_empty()));
+    }
+
+    #[test]
+    fn test_collect_range_entries_orders_oldest_first_and_caps_per_version() {
+        // Uses the embedded CHANGELOG.md so the test stays valid as new
+        // releases are appended. Pick the two newest released sections.
+        let sections = parse_embedded_changelog_sections();
+        assert!(
+            sections.len() >= 2,
+            "embedded CHANGELOG.md needs at least two released sections"
+        );
+        let latest = sections[0].version.as_str();
+        let prev = sections[1].version.as_str();
+
+        let entries = collect_range_entries(prev, latest);
+        assert!(
+            !entries.is_empty(),
+            "range {prev} → {latest} should yield entries"
+        );
+        // Every version contributes at most
+        // STARTUP_CHANGELOG_MAX_ENTRIES_PER_VERSION entries; two versions
+        // cap the flat list at 2 × that constant.
+        assert!(
+            entries.len() <= 2 * STARTUP_CHANGELOG_MAX_ENTRIES_PER_VERSION,
+            "flat list must respect the per-version cap"
+        );
+
+        // Out-of-range (after == through) yields nothing.
+        assert!(collect_range_entries(latest, latest).is_empty());
     }
 
     #[test]

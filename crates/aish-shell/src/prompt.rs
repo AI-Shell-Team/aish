@@ -221,9 +221,17 @@ fn write_last_changelog_version(version: &str) {
 /// summary. Call [`commit_last_changelog_version`] once the user actually
 /// interacts with the shell.
 ///
-/// Returns `(ansi_summary, plain_expand_text, previous_version)` when a range
-/// should be shown.
-pub fn take_startup_changelog_summary(current_version: &str) -> Option<(String, String, String)> {
+/// Returns `(ansi_summary, plain_expand_text, previous_version, range_entries)`
+/// when a range should be shown. `range_entries` contains the flat list of
+/// changelog entries for in-panel rendering.
+pub fn take_startup_changelog_summary(
+    current_version: &str,
+) -> Option<(
+    String,
+    String,
+    String,
+    Vec<aish_i18n::changelog::ChangelogEntry>,
+)> {
     let current = current_version.strip_prefix('v').unwrap_or(current_version);
     // First launch after a fresh install: seed the marker silently so the
     // very first version seen is never reported as an upgrade.
@@ -250,8 +258,9 @@ pub fn take_startup_changelog_summary(current_version: &str) -> Option<(String, 
     // only advances when the shell records real user interaction.
     let summary = aish_i18n::changelog::format_changelog_range_summary(last_norm, current);
     let plain = aish_i18n::changelog::format_changelog_range_plain(last_norm, current);
+    let entries = aish_i18n::changelog::collect_range_entries(last_norm, current);
     match (summary, plain) {
-        (Some(ansi), Some(text)) => Some((ansi, text, last_norm.to_string())),
+        (Some(ansi), Some(text)) => Some((ansi, text, last_norm.to_string(), entries)),
         // Nothing renderable for this range (e.g. missing CHANGELOG entries):
         // reseat so the next launch does not retry an empty range forever.
         _ => {
@@ -393,11 +402,17 @@ pub fn render_prompt(
 /// - Quick start tips
 /// - Risk warning
 /// - Changelog entries (up to 2 shown; Ctrl+O expands to full list)
+///
+/// `changelog_title_override` replaces the default "v{version} 更新内容"
+/// header inside the panel — used by the upgrade range summary so the
+/// panel shows "更新内容（0.3.12 → 0.3.13）：" instead of a single-version
+/// title.
 pub fn render_welcome(
     version: &str,
     model: &str,
     skill_count: usize,
     changelog: Vec<aish_i18n::changelog::ChangelogEntry>,
+    changelog_title_override: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push('\n');
@@ -453,7 +468,9 @@ pub fn render_welcome(
 
     // Changelog section (inside the panel)
     if !changelog.is_empty() {
-        let title = changelog_title(version);
+        let title = changelog_title_override
+            .map(String::from)
+            .unwrap_or_else(|| changelog_title(version));
 
         let max_entries = 2usize;
         let entries_to_show = changelog.len().min(max_entries);
@@ -492,6 +509,9 @@ pub fn render_welcome(
                 "Added" => theme::success("[+]"),
                 "Changed" => theme::warning("[*]"),
                 "Fixed" => theme::error("[!]"),
+                "Removed" => theme::error("[-]"),
+                "Deprecated" => theme::warning("[!]"),
+                "Security" => theme::error("[!]"),
                 _ => theme::dim("[-]"),
             };
             let mut line = format!("  {} {}", badge_styled, entry.text);
@@ -639,6 +659,9 @@ pub fn format_changelog_full(
             "Added" => "[+]",
             "Changed" => "[*]",
             "Fixed" => "[!]",
+            "Removed" => "[-]",
+            "Deprecated" => "[!]",
+            "Security" => "[!]",
             _ => "[-]",
         };
         // Wrap long descriptions to fit panel width (~76 visible chars)
@@ -911,6 +934,34 @@ mod tests {
     }
 
     #[test]
+    fn test_render_welcome_changelog_title_override_used_in_panel() {
+        // The upgrade range summary renders inside the panel with a range
+        // title (e.g. "更新内容（0.3.12 → 0.3.13）：") instead of the default
+        // single-version title. Verify the override replaces the default.
+        let entry = aish_i18n::changelog::ChangelogEntry {
+            category: "Removed".to_string(),
+            text: "some removed thing".to_string(),
+        };
+        let range_title = "更新内容（0.3.12 → 0.3.13）：";
+        let result = render_welcome("0.3.13", "gpt-4", 0, vec![entry], Some(range_title));
+        assert!(
+            result.contains(range_title),
+            "panel should render the override range title"
+        );
+        let default_title = changelog_title("0.3.13");
+        assert!(
+            !result.contains(&default_title),
+            "default single-version title must not appear when overridden"
+        );
+        // Removed entries render with the red error badge, not the dim default.
+        let removed_badge = theme::error("[-]");
+        assert!(
+            result.contains(removed_badge.as_str()),
+            "Removed category should use the red [-] badge"
+        );
+    }
+
+    #[test]
     fn test_render_welcome_changelog_truncated_appends_reset() {
         // Long changelog lines get truncated to inner_width-3 chars plus
         // "...". Without an explicit reset, the panel padding after the
@@ -920,7 +971,7 @@ mod tests {
             category: "Added".to_string(),
             text: "X".repeat(120),
         };
-        let result = render_welcome("0.3.5", "gpt-4", 0, vec![entry]);
+        let result = render_welcome("0.3.5", "gpt-4", 0, vec![entry], None);
         let lines: Vec<&str> = result.lines().collect();
         let truncated_line = lines
             .iter()
@@ -1003,6 +1054,7 @@ mod tests {
             "deepseek-v4-flash",
             8,
             vec![mk("short change"), mk("another"), mk("third")],
+            None,
         );
         let panel_lines: Vec<&str> = result
             .lines()
@@ -1031,7 +1083,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_contains_logo() {
-        let result = render_welcome("0.1.0", "gpt-4", 3, vec![]);
+        let result = render_welcome("0.1.0", "gpt-4", 3, vec![], None);
         assert!(result.contains("█████"), "should contain ASCII art logo");
         assert!(result.contains("╭"), "should contain rounded box top-left");
         assert!(result.contains("╮"), "should contain rounded box top-right");
@@ -1053,7 +1105,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_contains_quick_start() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
         assert!(result.contains("•"), "should contain bullet points");
         assert!(result.contains("ls"), "should contain ls example command");
         assert!(result.contains("top"), "should contain top example command");
@@ -1063,7 +1115,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_uses_default_logo_color() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
         assert!(
             !result.contains("\x1b[38;5;250m"),
             "logo should not use grayscale gradient colors"
@@ -1072,7 +1124,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_starts_with_blank_line() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
         assert!(
             result.starts_with('\n'),
             "welcome banner should leave a blank line above the logo"
@@ -1081,7 +1133,7 @@ mod tests {
 
     #[test]
     fn test_render_welcome_aligns_quick_start_content() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![]);
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
         let item1_prefix = t("shell.welcome2.quick_start.item1_prefix");
         let item2_prefix = t("shell.welcome2.quick_start.item2_prefix");
         let item3_prefix = t("shell.welcome2.quick_start.item3_prefix");
