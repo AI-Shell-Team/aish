@@ -20,53 +20,241 @@ use aish_pty::readline_tab::clamp_pos;
 use crate::autosuggest::AutoSuggest;
 use crate::completion::CompletionEngine;
 
-/// Slash commands with descriptions for popup completion.
-pub const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/help", "Show help information"),
-    ("/model", "Show or switch AI model"),
-    ("/setup", "Open setup wizard"),
-    ("/setting", "Open interactive settings panel"),
-    ("/plan", "Plan mode control"),
-    ("/token", "Show token usage"),
-    ("/resume", "Resume previous session"),
-    ("/feedback", "Submit feedback"),
-    ("/record", "Record terminal session (start/stop)"),
-    ("/quit", "Exit AI Shell"),
-    ("/doctor", "Run system diagnostics"),
-    ("/diagnose", "Read-only diagnosis for last failed command"),
-    ("/status", "Show system environment status"),
-    ("/live_sessions", "List live PTY sessions"),
-    ("/kill_live_sessions", "Kill live PTY session(s) by ID"),
-    (
-        "/audit",
-        "Query audit log or export audit package (who/when/what/AI suggestion/confirm)",
-    ),
-    (
-        "/forget-approvals",
-        "Clear remembered command approvals (this session)",
-    ),
-    (
-        "/skill",
-        "Browse, install, trust, verify skills; manage registries",
-    ),
-    ("/export", "Export current session to Markdown"),
-    (
-        "/fork",
-        "Branch the current session into a new one (copied context)",
-    ),
-    ("/sessions", "Show the session tree (roots + forks)"),
-    (
-        "/undo",
-        "Undo the last file change (edit_file/write_file) this session",
-    ),
-    (
-        "/rollback",
-        "Review and roll back AI file edits (edit_file/write_file) this session",
-    ),
-    (
-        "/memory",
-        "View, verify, or forget long-term memories (list/verify/forget/clear-expired)",
-    ),
+/// Group a slash command belongs to in the popup panel. Groups render as
+/// headers and fix the display order regardless of locale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashGroup {
+    Diagnostics,
+    Sessions,
+    ModelSettings,
+    Skills,
+    FilesMemory,
+    RecordShare,
+    SecurityAudit,
+    Exit,
+}
+
+impl SlashGroup {
+    /// All groups in popup display order.
+    pub const ALL: [SlashGroup; 8] = [
+        SlashGroup::Diagnostics,
+        SlashGroup::Sessions,
+        SlashGroup::ModelSettings,
+        SlashGroup::Skills,
+        SlashGroup::FilesMemory,
+        SlashGroup::RecordShare,
+        SlashGroup::SecurityAudit,
+        SlashGroup::Exit,
+    ];
+
+    /// i18n key suffix under `shell.slash_group.`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            SlashGroup::Diagnostics => "diagnostics",
+            SlashGroup::Sessions => "sessions",
+            SlashGroup::ModelSettings => "model_settings",
+            SlashGroup::Skills => "skills",
+            SlashGroup::FilesMemory => "files_memory",
+            SlashGroup::RecordShare => "record_share",
+            SlashGroup::SecurityAudit => "security_audit",
+            SlashGroup::Exit => "exit",
+        }
+    }
+}
+
+/// What Enter does when a command is picked from the popup without extra
+/// arguments typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnterPolicy {
+    /// Bare call is safe: run the command as typed.
+    Execute,
+    /// Bare call needs args, opens a picker, or is destructive: only fill
+    /// the input line and let the user confirm with a second Enter.
+    Fill,
+}
+
+/// Metadata for one built-in slash command shown in the popup panel.
+#[derive(Debug, Clone, Copy)]
+pub struct SlashCommandMeta {
+    pub name: &'static str,
+    /// English fallback description (popup renders the i18n one).
+    pub desc: &'static str,
+    pub group: SlashGroup,
+    /// Extra fuzzy-search terms: English aliases + scenario words.
+    pub keywords: &'static [&'static str],
+    pub enter: EnterPolicy,
+}
+
+/// Slash commands with metadata for the searchable grouped popup.
+pub const SLASH_COMMANDS: &[SlashCommandMeta] = &[
+    SlashCommandMeta {
+        name: "/help",
+        desc: "Show help information",
+        group: SlashGroup::Diagnostics,
+        keywords: &["help", "usage"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/doctor",
+        desc: "Run system diagnostics",
+        group: SlashGroup::Diagnostics,
+        keywords: &["doctor", "health"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/diagnose",
+        desc: "Read-only diagnosis for last failed command",
+        group: SlashGroup::Diagnostics,
+        keywords: &["diagnose", "troubleshoot", "error"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/status",
+        desc: "Show system environment status",
+        group: SlashGroup::Diagnostics,
+        keywords: &["status", "env"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/resume",
+        desc: "Resume previous session",
+        group: SlashGroup::Sessions,
+        keywords: &["resume", "continue", "history"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/sessions",
+        desc: "Show the session tree (roots + forks)",
+        group: SlashGroup::Sessions,
+        keywords: &["sessions", "tree"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/fork",
+        desc: "Branch the current session into a new one (copied context)",
+        group: SlashGroup::Sessions,
+        keywords: &["fork", "branch", "copy"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/live_sessions",
+        desc: "List live PTY sessions",
+        group: SlashGroup::Sessions,
+        keywords: &["live", "pty", "active"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/kill_live_sessions",
+        desc: "Kill live PTY session(s) by ID",
+        group: SlashGroup::Sessions,
+        keywords: &["kill", "terminate", "pty"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/model",
+        desc: "Show or switch AI model",
+        group: SlashGroup::ModelSettings,
+        keywords: &["model", "llm", "switch"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/setting",
+        desc: "Open interactive settings panel",
+        group: SlashGroup::ModelSettings,
+        keywords: &["setting", "config", "preference"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/setup",
+        desc: "Open setup wizard",
+        group: SlashGroup::ModelSettings,
+        keywords: &["setup", "wizard", "init"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/token",
+        desc: "Show token usage",
+        group: SlashGroup::ModelSettings,
+        keywords: &["token", "usage", "cost"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/plan",
+        desc: "Plan mode control",
+        group: SlashGroup::ModelSettings,
+        keywords: &["plan", "mode"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/skill",
+        desc: "Browse, install, trust, verify skills; manage registries",
+        group: SlashGroup::Skills,
+        keywords: &["skill", "plugin", "market"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/undo",
+        desc: "Undo the most recent AI file edit (edit_file/write_file)",
+        group: SlashGroup::FilesMemory,
+        keywords: &["undo", "revert"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/rollback",
+        desc: "Review and roll back AI file edits (edit_file/write_file) this session",
+        group: SlashGroup::FilesMemory,
+        keywords: &["rollback", "revert", "restore"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/memory",
+        desc: "View, verify, or forget long-term memories (list/verify/forget/clear-expired)",
+        group: SlashGroup::FilesMemory,
+        keywords: &["memory", "recall", "forget"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/record",
+        desc: "Record terminal session (start/stop)",
+        group: SlashGroup::RecordShare,
+        keywords: &["record", "capture", "asciinema"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/export",
+        desc: "Export current session to Markdown",
+        group: SlashGroup::RecordShare,
+        keywords: &["export", "markdown", "save"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/feedback",
+        desc: "Submit feedback",
+        group: SlashGroup::RecordShare,
+        keywords: &["feedback", "report", "issue"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
+        name: "/audit",
+        desc: "Query audit log or export audit package (who/when/what/AI suggestion/confirm)",
+        group: SlashGroup::SecurityAudit,
+        keywords: &["audit", "log", "trace"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/forget-approvals",
+        desc: "Clear remembered command approvals (this session)",
+        group: SlashGroup::SecurityAudit,
+        keywords: &["forget", "approvals", "reset"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
+        name: "/quit",
+        desc: "Exit AI Shell",
+        group: SlashGroup::Exit,
+        keywords: &["quit", "exit", "close"],
+        enter: EnterPolicy::Fill,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -216,7 +404,7 @@ impl ConditionalEventHandler for TabCompletionHandler {
             let query = before.to_lowercase();
             if SLASH_COMMANDS
                 .iter()
-                .any(|(name, _)| name.to_lowercase().starts_with(&query))
+                .any(|c| c.name.to_lowercase().starts_with(&query))
             {
                 set_slash_prefill(before.to_string());
                 SLASH_REQUESTED.store(true, Ordering::SeqCst);
@@ -842,16 +1030,16 @@ mod tests {
 
     #[test]
     fn test_slash_commands_format() {
-        for (cmd, desc) in SLASH_COMMANDS {
+        for cmd in SLASH_COMMANDS {
             assert!(
-                cmd.starts_with('/'),
+                cmd.name.starts_with('/'),
                 "slash command must start with /: {}",
-                cmd
+                cmd.name
             );
             assert!(
-                !desc.is_empty(),
+                !cmd.desc.is_empty(),
                 "description must not be empty for {}",
-                cmd
+                cmd.name
             );
         }
         assert_eq!(SLASH_COMMANDS.len(), 24);
@@ -863,13 +1051,14 @@ mod tests {
         // translation, not the raw key. Regression: a slash command once
         // rendered its raw i18n key in the popup (shell.slash.<cmd> missing).
         aish_i18n::set_locale("en-US");
-        for (name, _desc) in SLASH_COMMANDS {
-            let cmd = name.trim_start_matches('/');
-            let key = format!("shell.slash.{cmd}");
+        for cmd in SLASH_COMMANDS {
+            let name = cmd.name.trim_start_matches('/');
+            let key = format!("shell.slash.{name}");
             let translated = aish_i18n::t(&key);
             assert_ne!(
                 translated, key,
-                "missing i18n key {key} for slash command {name}"
+                "missing i18n key {key} for slash command {}",
+                cmd.name
             );
         }
     }

@@ -194,8 +194,27 @@ shell:
     fork: "現在のセッションを分岐"
     sessions: "セッションツリーを表示"
     rollback: "このセッションの AI によるファイル編集を確認・ロールバック (edit_file/write_file)"
-    undo: "このセッションの最後のファイル変更を取り消す (edit_file/write_file)"
+    undo: "AIによる直近のファイル変更を取り消す (edit_file/write_file)"
     memory: "長期メモリの表示、検証、削除"
+
+  slash_group:
+    diagnostics: "診断"
+    sessions: "セッション"
+    model_settings: "モデルと設定"
+    skills: "スキル"
+    files_memory: "ファイルとメモリ"
+    record_share: "録画と共有"
+    security_audit: "セキュリティと監査"
+    exit: "終了"
+
+  slash_status:
+    reason_diagnose_no_failure: "診断する失敗コマンドがありません"
+    reason_audit_disabled: "監査ストアが無効です"
+    reason_undo_empty: "取り消すファイル変更がありません"
+    reason_pty_daemon_disabled: "PTY デーモンが有効ではありません"
+    undo_count: "取り消し可能 {count} 件"
+    plan_planning: "計画中"
+    plan_normal: "通常"
 
   feedback:
     select_type: "フィードバックの種類を選択"

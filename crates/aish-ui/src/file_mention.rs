@@ -25,8 +25,9 @@ use ratatui::{
 };
 
 use crate::slash_input::{
-    drain_pending_events, longest_common_prefix, open_inline_terminal, strip_ansi, RawModeGuard,
+    drain_pending_events, longest_common_prefix, open_inline_terminal, RawModeGuard,
 };
+use crate::text::strip_ansi_escapes;
 
 /// Outcome of the file-mention session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +104,7 @@ impl FileMentionSession {
     pub fn new(cwd: &Path, prompt: String, prefix: String) -> Self {
         let candidates = scan_files(cwd);
         let mut session = Self {
-            prompt: strip_ansi(&prompt),
+            prompt: strip_ansi_escapes(&prompt),
             prefix,
             query: String::new(),
             cursor: 0,
@@ -504,7 +505,7 @@ fn scan_dir(
 /// of `target` (case-insensitive). Matching is case-insensitive; exact-case
 /// matches, contiguous runs, and word-start positions score higher, while
 /// longer targets are penalized so specific short paths win.
-pub(crate) fn fuzzy_score(query: &str, target: &str) -> Option<i64> {
+pub fn fuzzy_score(query: &str, target: &str) -> Option<i64> {
     if query.is_empty() {
         return Some(0);
     }

@@ -371,8 +371,27 @@ shell:
     fork: "Branch the current session"
     sessions: "Show the session tree"
     rollback: "Review and roll back AI file edits (edit_file/write_file) this session"
-    undo: "Undo the last file change (edit_file/write_file) this session"
+    undo: "Undo the most recent AI file edit (edit_file/write_file)"
     memory: "View, verify, or forget long-term memories"
+
+  slash_group:
+    diagnostics: "Diagnostics"
+    sessions: "Sessions"
+    model_settings: "Model & Settings"
+    skills: "Skills"
+    files_memory: "Files & Memory"
+    record_share: "Record & Share"
+    security_audit: "Security & Audit"
+    exit: "Exit"
+
+  slash_status:
+    reason_diagnose_no_failure: "No failed command to diagnose"
+    reason_audit_disabled: "Audit store is disabled"
+    reason_undo_empty: "No file changes to undo"
+    reason_pty_daemon_disabled: "PTY daemon is not enabled"
+    undo_count: "{count} file change(s) can be undone"
+    plan_planning: "Planning"
+    plan_normal: "Normal"
 
   record:
     started: "⏺ Recording started: {path}"

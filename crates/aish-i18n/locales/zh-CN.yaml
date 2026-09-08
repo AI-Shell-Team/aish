@@ -371,8 +371,27 @@ shell:
     fork: "分支当前会话"
     sessions: "显示会话树"
     rollback: "查看并回滚本次会话中 AI 的文件修改 (edit_file/write_file)"
-    undo: "撤销本次会话最后一次文件修改 (edit_file/write_file)"
+    undo: "撤销 AI 最近一次文件修改（edit_file/write_file）"
     memory: "查看、验证或删除长期记忆"
+
+  slash_group:
+    diagnostics: "诊断"
+    sessions: "会话"
+    model_settings: "模型与设置"
+    skills: "技能"
+    files_memory: "文件与记忆"
+    record_share: "录制与分享"
+    security_audit: "安全与审计"
+    exit: "退出"
+
+  slash_status:
+    reason_diagnose_no_failure: "没有可诊断的失败命令"
+    reason_audit_disabled: "审计存储未启用"
+    reason_undo_empty: "没有可撤销的文件修改"
+    reason_pty_daemon_disabled: "PTY 守护进程未启用"
+    undo_count: "可撤销 {count} 项"
+    plan_planning: "规划中"
+    plan_normal: "普通模式"
 
   record:
     started: "⏺ 录制已开始: {path}"

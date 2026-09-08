@@ -194,8 +194,27 @@ shell:
     fork: "Bifurcar la sesión actual"
     sessions: "Mostrar el árbol de sesiones"
     rollback: "Revisar y revertir ediciones de archivo de la IA (edit_file/write_file) de esta sesión"
-    undo: "Deshacer el último cambio de archivo (edit_file/write_file) de esta sesión"
+    undo: "Deshacer la última edición de archivo de la IA (edit_file/write_file)"
     memory: "Ver, verificar u olvidar memorias a largo plazo"
+
+  slash_group:
+    diagnostics: "Diagnóstico"
+    sessions: "Sesiones"
+    model_settings: "Modelo y ajustes"
+    skills: "Habilidades"
+    files_memory: "Archivos y memoria"
+    record_share: "Grabar y compartir"
+    security_audit: "Seguridad y auditoría"
+    exit: "Salir"
+
+  slash_status:
+    reason_diagnose_no_failure: "No hay comando fallido que diagnosticar"
+    reason_audit_disabled: "El almacén de auditoría está deshabilitado"
+    reason_undo_empty: "No hay cambios de archivo que deshacer"
+    reason_pty_daemon_disabled: "El demonio PTY no está habilitado"
+    undo_count: "{count} cambio(s) se pueden deshacer"
+    plan_planning: "Planificando"
+    plan_normal: "Normal"
 
   feedback:
     select_type: "Seleccionar tipo de comentario"
