@@ -3756,7 +3756,12 @@ impl AishShell {
             Some("/live_sessions") => self.handle_live_sessions_command(),
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
             Some("/undo") => {
-                let path = parts.get(1).copied();
+                let path = parts
+                    .iter()
+                    .skip(1)
+                    .find(|p| **p != "--force" && **p != "-f")
+                    .copied();
+                let force = parts.iter().any(|p| *p == "--force" || *p == "-f");
                 // Peek without consuming — commit only after the disk restore
                 // succeeds, so a failed IO does not lose the snapshot.
                 let peeked = {
@@ -3772,21 +3777,38 @@ impl AishShell {
                 let msg = match peeked {
                     None => aish_i18n::t("shell.undo.nothing_to_undo"),
                     Some(result) => {
-                        let (ok, m) = apply_restore_action(&result, false);
-                        if ok {
-                            let mut store = self
-                                .snapshot_store
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            match path {
-                                Some(p) => store.commit_undo_last_for(
-                                    std::path::Path::new(p),
-                                    result.snapshot_id,
-                                ),
-                                None => store.commit_undo_last(result.snapshot_id),
-                            };
+                        use aish_tools::fs::DriftStatus;
+                        let drift = result.check_drift();
+                        let proceed = match (&drift, force) {
+                            (DriftStatus::Fresh, _) => true,
+                            (DriftStatus::Drifted { .. }, true) => true,
+                            (DriftStatus::Drifted { .. }, false) => {
+                                display_drift_warning(&result, &drift);
+                                Self::confirm_action(
+                                    &aish_i18n::t("shell.undo.drift_warning"),
+                                    &aish_i18n::t("shell.undo.force_prompt"),
+                                )
+                            }
+                        };
+                        if !proceed {
+                            aish_i18n::t("shell.undo.cancelled")
+                        } else {
+                            let (ok, m) = apply_restore_action(&result, false);
+                            if ok {
+                                let mut store = self
+                                    .snapshot_store
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                match path {
+                                    Some(p) => store.commit_undo_last_for(
+                                        std::path::Path::new(p),
+                                        result.snapshot_id,
+                                    ),
+                                    None => store.commit_undo_last(result.snapshot_id),
+                                };
+                            }
+                            m
                         }
-                        m
                     }
                 };
                 println!("{}", msg);
@@ -3834,7 +3856,8 @@ impl AishShell {
                     ))) = outcome
                     {
                         if let Ok(id) = value.parse::<u64>() {
-                            // Peek -> disk restore -> commit only on success.
+                            // Peek -> drift preflight -> show diff -> confirm
+                            // -> disk restore -> commit only on success.
                             let peeked = {
                                 let store = self
                                     .snapshot_store
@@ -3843,26 +3866,107 @@ impl AishShell {
                                 store.peek_restore(id)
                             };
                             if let Some(actions) = peeked {
-                                // Apply every rollback action (reverse order:
-                                // newest first); commit only if all succeed.
-                                let mut all_ok = true;
-                                let mut msgs: Vec<String> = Vec::new();
-                                for action in &actions {
-                                    let (ok, msg) = apply_restore_action(action, true);
-                                    msgs.push(msg);
-                                    if !ok {
-                                        all_ok = false;
-                                        break;
+                                // Preflight: check drift on ALL actions before
+                                // touching any file. If any drifted, show the
+                                // diffs and ask for explicit confirmation.
+                                use aish_tools::fs::DriftStatus;
+                                let drifts: Vec<DriftStatus> =
+                                    actions.iter().map(|a| a.check_drift()).collect();
+                                let drifted: Vec<(usize, &DriftStatus)> = drifts
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(i, d)| match d {
+                                        DriftStatus::Fresh => None,
+                                        d @ DriftStatus::Drifted { .. } => Some((i, d)),
+                                    })
+                                    .collect();
+
+                                let proceed = if !drifted.is_empty() {
+                                    // Display impact summary.
+                                    let mut summary_args = std::collections::HashMap::new();
+                                    summary_args
+                                        .insert("count".to_string(), actions.len().to_string());
+                                    summary_args
+                                        .insert("drifted".to_string(), drifted.len().to_string());
+                                    println!(
+                                        "{}",
+                                        theme::warning(&aish_i18n::t_with_args(
+                                            "shell.rollback.drift_summary",
+                                            &summary_args,
+                                        )),
+                                    );
+                                    for (idx, drift) in &drifted {
+                                        display_drift_warning(&actions[*idx], drift);
                                     }
+                                    Self::confirm_action(
+                                        &aish_i18n::t("shell.rollback.drift_warning"),
+                                        &aish_i18n::t("shell.rollback.confirm"),
+                                    )
+                                } else {
+                                    // No drift, but still show a summary diff
+                                    // of what will change before asking.
+                                    let mut summary_args = std::collections::HashMap::new();
+                                    summary_args
+                                        .insert("count".to_string(), actions.len().to_string());
+                                    println!(
+                                        "{}",
+                                        aish_i18n::t_with_args(
+                                            "shell.rollback.impact_summary",
+                                            &summary_args,
+                                        ),
+                                    );
+                                    for action in &actions {
+                                        display_restore_diff(action);
+                                    }
+                                    Self::confirm_action(
+                                        &aish_i18n::t("shell.rollback.confirm_overwrite"),
+                                        &aish_i18n::t("shell.rollback.confirm"),
+                                    )
+                                };
+
+                                if !proceed {
+                                    println!("{}", aish_i18n::t("shell.rollback.cancelled"));
+                                } else {
+                                    // Apply every rollback action (reverse order:
+                                    // newest first); commit only if all succeed.
+                                    let mut all_ok = true;
+                                    let mut msgs: Vec<String> = Vec::new();
+                                    let mut success_count = 0usize;
+                                    for action in &actions {
+                                        let (ok, msg) = apply_restore_action(action, true);
+                                        msgs.push(msg);
+                                        if ok {
+                                            success_count += 1;
+                                        } else {
+                                            all_ok = false;
+                                            break;
+                                        }
+                                    }
+                                    if all_ok {
+                                        let mut store = self
+                                            .snapshot_store
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner());
+                                        store.commit_restore(id);
+                                    } else {
+                                        // Report partial state: which files
+                                        // were restored and which were not.
+                                        let mut args = std::collections::HashMap::new();
+                                        args.insert(
+                                            "restored".to_string(),
+                                            success_count.to_string(),
+                                        );
+                                        args.insert("total".to_string(), actions.len().to_string());
+                                        println!(
+                                            "{}",
+                                            theme::warning(&aish_i18n::t_with_args(
+                                                "shell.rollback.partial",
+                                                &args,
+                                            )),
+                                        );
+                                    }
+                                    println!("{}", msgs.join("\n"));
                                 }
-                                if all_ok {
-                                    let mut store = self
-                                        .snapshot_store
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                    store.commit_restore(id);
-                                }
-                                println!("{}", msgs.join("\n"));
                             }
                         }
                     }
@@ -11983,6 +12087,102 @@ fn apply_restore_action(
             };
             (false, aish_i18n::t_with_args(key, &args))
         }
+    }
+}
+
+/// Display a drift warning showing the current on-disk content versus what
+/// the restore would write. Used before asking for confirmation.
+fn display_drift_warning(result: &aish_tools::fs::UndoResult, drift: &aish_tools::fs::DriftStatus) {
+    let path_display = result.path.display().to_string();
+    println!("{}", theme::warning(&format!("⚠ {path_display}")));
+    match drift {
+        aish_tools::fs::DriftStatus::Fresh => {}
+        aish_tools::fs::DriftStatus::Drifted { current } => {
+            // When the restore action deletes the file (content is None),
+            // there is no "restore content" to diff against — just note it.
+            if result.content.is_none() {
+                if current.is_some() {
+                    println!("  {}", theme::dim(&aish_i18n::t("shell.undo.will_delete")));
+                } else {
+                    println!(
+                        "  {}",
+                        theme::dim(&aish_i18n::t("shell.undo.drift_deleted"))
+                    );
+                }
+                return;
+            }
+            let restore_text = result
+                .content
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .unwrap_or("<binary content>");
+            let current_text = current
+                .as_deref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .unwrap_or("<file deleted or binary>");
+            let diff = theme::render_diff(current_text, restore_text, 20);
+            if !diff.is_empty() {
+                let rail = theme::dim(theme::TOOL_BOX_MID);
+                let diff_ansi: String = diff
+                    .lines()
+                    .map(|l| format!("{}   {}", rail, l))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                println!("{}", diff_ansi);
+            } else if current.is_none() {
+                // File deleted on disk but restore expects it to exist.
+                println!(
+                    "  {}",
+                    theme::dim(&aish_i18n::t("shell.undo.drift_deleted"))
+                );
+            }
+        }
+    }
+}
+
+/// Display a diff of the restore's net effect: current disk content → the
+/// content the restore will write. Used when there is no drift (content
+/// matches expected) but we still want to show the user what will change.
+fn display_restore_diff(result: &aish_tools::fs::UndoResult) {
+    let path_display = result.path.display().to_string();
+
+    // When the restore action deletes the file (content is None), show a
+    // note instead of a diff — there is no "restore content" to diff to.
+    if result.content.is_none() {
+        println!(
+            "  {} ({})",
+            theme::dim(&path_display),
+            theme::dim(&aish_i18n::t("shell.undo.will_delete"))
+        );
+        return;
+    }
+
+    let current = match std::fs::read_to_string(&result.path) {
+        Ok(c) => c,
+        Err(_) => {
+            // File doesn't exist; show a brief note.
+            println!(
+                "  {} ({})",
+                theme::dim(&path_display),
+                theme::dim("(new file)")
+            );
+            return;
+        }
+    };
+    let restore_text = result
+        .content
+        .as_deref()
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .unwrap_or("<binary content>");
+    let diff = theme::render_diff(&current, restore_text, 20);
+    if !diff.is_empty() {
+        let rail = theme::dim(theme::TOOL_BOX_MID);
+        let diff_ansi: String = diff
+            .lines()
+            .map(|l| format!("{}   {}", rail, l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("{}", diff_ansi);
     }
 }
 

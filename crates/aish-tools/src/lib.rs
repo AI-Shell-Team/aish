@@ -70,8 +70,8 @@ pub mod undo_edit {
 pub mod fs {
     mod snapshot_store;
     pub use self::snapshot_store::{
-        ApplyOutcome, FileSnapshot, SharedSnapshotStore, SnapshotOp, SnapshotStore, SnapshotTag,
-        UndoResult,
+        ApplyOutcome, DriftStatus, FileSnapshot, SharedSnapshotStore, SnapshotOp, SnapshotStore,
+        SnapshotTag, UndoResult,
     };
     pub use crate::edit_file::EditFileTool;
     pub use crate::read_file::{ReadFileTool, SshReadFileTool};
