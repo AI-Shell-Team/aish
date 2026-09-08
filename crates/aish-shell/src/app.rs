@@ -2116,13 +2116,17 @@ impl AishShell {
         // When an upgrade summary exists, the range entries are rendered
         // inside the welcome panel (not above it) so the display stays
         // visually consistent between upgrades and steady-state launches.
+        // Single source of truth for the range title so the panel header
+        // and the Ctrl+O expand entry can never drift apart.
+        let range_title = |prev: &str| {
+            let mut args = std::collections::HashMap::new();
+            args.insert("current".to_string(), prev.to_string());
+            args.insert("latest".to_string(), version.clone());
+            aish_i18n::t_with_args("shell.welcome2.changelog_summary_title", &args)
+        };
         let (changelog, changelog_title_override) =
             if let Some((_, _, ref prev, ref entries)) = upgrade_summary {
-                let mut args = std::collections::HashMap::new();
-                args.insert("current".to_string(), prev.clone());
-                args.insert("latest".to_string(), version.clone());
-                let title = aish_i18n::t_with_args("shell.welcome2.changelog_summary_title", &args);
-                (entries.clone(), Some(title))
+                (entries.clone(), Some(range_title(prev)))
             } else {
                 (
                     aish_i18n::changelog::parse_current_changelog(&version),
@@ -2150,10 +2154,7 @@ impl AishShell {
         // Store full changelog in expand_history so Ctrl+O can show all entries
         // when the welcome panel truncates them with "and N more".
         if let Some((_, ref plain, ref prev, _)) = upgrade_summary {
-            let mut args = std::collections::HashMap::new();
-            args.insert("current".to_string(), prev.clone());
-            args.insert("latest".to_string(), version.clone());
-            let cl_title = aish_i18n::t_with_args("shell.welcome2.changelog_summary_title", &args);
+            let cl_title = range_title(prev);
             expand_history
                 .lock()
                 .unwrap()

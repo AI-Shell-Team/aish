@@ -659,6 +659,9 @@ pub fn format_changelog_full(
             "Added" => "[+]",
             "Changed" => "[*]",
             "Fixed" => "[!]",
+            "Removed" => "[-]",
+            "Deprecated" => "[!]",
+            "Security" => "[!]",
             _ => "[-]",
         };
         // Wrap long descriptions to fit panel width (~76 visible chars)
