@@ -3781,7 +3781,6 @@ impl AishShell {
                         let drift = result.check_drift();
                         let proceed = match (&drift, force) {
                             (DriftStatus::Fresh, _) => true,
-                            (DriftStatus::Drifted { .. }, true) => true,
                             (DriftStatus::Drifted { .. }, false) => {
                                 display_drift_warning(&result, &drift);
                                 Self::confirm_action(
@@ -3789,11 +3788,29 @@ impl AishShell {
                                     &aish_i18n::t("shell.undo.force_prompt"),
                                 )
                             }
+                            (DriftStatus::Drifted { .. }, true) => {
+                                // --force still shows the drift warning and
+                                // requires a final y/N confirmation — it is
+                                // an explicit advanced option, not a silent
+                                // bypass. The difference is that --force uses
+                                // a stronger prompt to make the user aware
+                                // they are overriding a drift.
+                                display_drift_warning(&result, &drift);
+                                Self::confirm_action(
+                                    &aish_i18n::t("shell.undo.drift_warning"),
+                                    &aish_i18n::t("shell.undo.force_confirm"),
+                                )
+                            }
                         };
                         if !proceed {
                             aish_i18n::t("shell.undo.cancelled")
                         } else {
-                            let (ok, m) = apply_restore_action(&result, false);
+                            // A delete restore whose file is already gone is
+                            // classified Fresh by check_drift, so tolerate the
+                            // absence here — otherwise the undo reports an
+                            // error and the snapshot is never consumed.
+                            let (ok, m) =
+                                apply_restore_action(&result, result.content.is_none(), force);
                             if ok {
                                 let mut store = self
                                     .snapshot_store
@@ -3933,7 +3950,7 @@ impl AishShell {
                                     let mut msgs: Vec<String> = Vec::new();
                                     let mut success_count = 0usize;
                                     for action in &actions {
-                                        let (ok, msg) = apply_restore_action(action, true);
+                                        let (ok, msg) = apply_restore_action(action, true, true);
                                         msgs.push(msg);
                                         if ok {
                                             success_count += 1;
@@ -12069,16 +12086,21 @@ fn emit_osc(op: &str) {
 fn apply_restore_action(
     result: &aish_tools::fs::UndoResult,
     tolerate_missing: bool,
+    force: bool,
 ) -> (bool, String) {
-    use aish_tools::fs::ApplyOutcome;
+    use aish_tools::fs::{ApplyError, ApplyOutcome};
     use std::collections::HashMap;
 
     let mut args = HashMap::new();
     args.insert("path".to_string(), result.path.display().to_string());
-    match result.apply_to_disk(tolerate_missing) {
+    match result.apply_to_disk_checked(tolerate_missing, force) {
         Ok(ApplyOutcome::Restored) => (true, aish_i18n::t_with_args("shell.undo.restored", &args)),
         Ok(ApplyOutcome::Removed) => (true, aish_i18n::t_with_args("shell.undo.removed", &args)),
-        Err(e) => {
+        Err(ApplyError::Drifted) => (
+            false,
+            aish_i18n::t_with_args("shell.undo.drift_blocked", &args),
+        ),
+        Err(ApplyError::Io(e)) => {
             args.insert("error".to_string(), e.to_string());
             let key = if result.content.is_some() {
                 "shell.undo.restore_failed"
@@ -12159,12 +12181,21 @@ fn display_restore_diff(result: &aish_tools::fs::UndoResult) {
 
     let current = match std::fs::read_to_string(&result.path) {
         Ok(c) => c,
-        Err(_) => {
-            // File doesn't exist; show a brief note.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet — restore will create it.
             println!(
                 "  {} ({})",
                 theme::dim(&path_display),
-                theme::dim("(new file)")
+                theme::dim(&aish_i18n::t("shell.undo.will_create"))
+            );
+            return;
+        }
+        Err(_) => {
+            // File exists but cannot be read as UTF-8 (binary).
+            println!(
+                "  {} ({})",
+                theme::dim(&path_display),
+                theme::dim(&aish_i18n::t("shell.undo.binary_or_unreadable"))
             );
             return;
         }

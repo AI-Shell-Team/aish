@@ -776,8 +776,12 @@ shell:
     drift_warning: "Drift detectado: el archivo cambió en disco desde la edición de la IA."
     drift_deleted: "El archivo ya no existe en disco."
     force_prompt: "¿Forzar sobrescritura?"
+    force_confirm: "Confirmar: ¿sobrescribir archivo modificado?"
     will_delete: "El archivo será eliminado por esta restauración."
     cancelled: "Deshacer cancelado."
+    drift_blocked: "Restauración bloqueada: {path} cambió en disco después de la confirmación."
+    will_create: "archivo nuevo"
+    binary_or_unreadable: "binario o ilegible"
 
   time:
     seconds_ago: "hace {seconds}s"
@@ -959,6 +963,7 @@ tools:
       removed: "{path} eliminado (fue creado por el cambio deshecho)."
       restore_failed: "Error al restaurar {path}: {error}"
       remove_failed: "Error al eliminar {path}: {error}"
+      drifted: "El archivo {path} cambió desde la edición de la IA. Vuelva a leer el archivo e inténtelo de nuevo."
   ask_user:
     description: "Haz al usuario una pregunta de aclaración enfocada. Con solo prompt se usa texto libre; con options se ofrecen elecciones."
     unknown_kind: "Tipo desconocido: {kind}"

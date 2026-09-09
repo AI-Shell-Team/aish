@@ -144,6 +144,26 @@ pub enum ApplyOutcome {
     Removed,
 }
 
+/// Error from [`UndoResult::apply_to_disk_checked`].
+#[derive(Debug)]
+pub enum ApplyError {
+    /// The file changed on disk after preflight (tag mismatch).
+    Drifted,
+    /// Underlying I/O error.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::Drifted => f.write_str("file changed on disk since preflight"),
+            ApplyError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
 impl UndoResult {
     /// Apply this restore action to disk: write the prior bytes back, or
     /// delete the file when `content` is `None` (the mutation created it).
@@ -152,6 +172,10 @@ impl UndoResult {
     /// used by batch `/rollback` so a partial-restore retry converges instead
     /// of wedging on `NotFound`. Single-step undo passes `false` so an
     /// unexpected absence surfaces as an error.
+    ///
+    /// **No apply-time drift recheck.** Use [`apply_to_disk_checked`] when the
+    /// caller needs a final guard against changes made between preflight and
+    /// the actual disk write.
     pub fn apply_to_disk(&self, tolerate_missing: bool) -> std::io::Result<ApplyOutcome> {
         match &self.content {
             Some(bytes) => {
@@ -166,6 +190,26 @@ impl UndoResult {
                 Err(e) => Err(e),
             },
         }
+    }
+
+    /// Like [`apply_to_disk`] but revalidates `expected_tag` immediately before
+    /// writing. This guards against a race where the file changes after the
+    /// preflight `check_drift` but before the disk write. When the tag no
+    /// longer matches, the write is aborted with [`ApplyError::Drifted`].
+    ///
+    /// `force = true` skips the recheck (used by `/undo --force`).
+    pub fn apply_to_disk_checked(
+        &self,
+        tolerate_missing: bool,
+        force: bool,
+    ) -> Result<ApplyOutcome, ApplyError> {
+        if !force {
+            match self.check_drift() {
+                DriftStatus::Fresh => {}
+                DriftStatus::Drifted { .. } => return Err(ApplyError::Drifted),
+            }
+        }
+        self.apply_to_disk(tolerate_missing).map_err(ApplyError::Io)
     }
 
     /// Detect on-disk drift: read the current file content and compare its

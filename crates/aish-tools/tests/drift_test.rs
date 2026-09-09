@@ -143,7 +143,7 @@ fn issue_466_rollback_partial_failure_reporting() {
     let mut success_count = 0usize;
     let mut all_ok = true;
     for action in &actions {
-        let (ok, _) = apply_restore_action(action, false);
+        let (ok, _) = apply_restore_action(action, false, true);
         if ok {
             success_count += 1;
         } else {
@@ -162,11 +162,13 @@ fn issue_466_rollback_partial_failure_reporting() {
 fn apply_restore_action(
     result: &aish_tools::fs::UndoResult,
     tolerate_missing: bool,
+    force: bool,
 ) -> (bool, String) {
-    use aish_tools::fs::ApplyOutcome;
-    match result.apply_to_disk(tolerate_missing) {
+    use aish_tools::fs::{ApplyError, ApplyOutcome};
+    match result.apply_to_disk_checked(tolerate_missing, force) {
         Ok(ApplyOutcome::Restored) => (true, "restored".to_string()),
         Ok(ApplyOutcome::Removed) => (true, "removed".to_string()),
-        Err(e) => (false, e.to_string()),
+        Err(ApplyError::Drifted) => (false, "drifted".to_string()),
+        Err(ApplyError::Io(e)) => (false, e.to_string()),
     }
 }

@@ -776,8 +776,12 @@ shell:
     drift_warning: "ドリフト検出：AI 編集後にファイルがディスク上で変更されました。"
     drift_deleted: "ファイルはディスク上に存在しません。"
     force_prompt: "強制上書きしますか？"
+    force_confirm: "確認：ドリフトしたファイルを上書きしますか？"
     will_delete: "この復元操作によりファイルが削除されます。"
     cancelled: "元に戻すはキャンセルされました。"
+    drift_blocked: "復元ブロック：確認後に {path} がディスク上で変更されました。"
+    will_create: "新規ファイル"
+    binary_or_unreadable: "バイナリまたは読み取り不可"
 
   time:
     seconds_ago: "{seconds}秒前"
@@ -960,6 +964,7 @@ tools:
       removed: "{path} を削除しました（取り消した変更で作成されたファイルです）。"
       restore_failed: "{path} の復元に失敗: {error}"
       remove_failed: "{path} の削除に失敗: {error}"
+      drifted: "ファイル {path} は AI 編集後に変更されました。ファイルを再読み込みして再試行してください。"
   ask_user:
     description: "ユーザーに焦点を絞った確認質問をします。prompt のみならテキスト入力、options があれば選択肢を提示します。"
     unknown_kind: "不明な種類です: {kind}"

@@ -776,8 +776,12 @@ shell:
     drift_warning: "Drift détecté : le fichier a changé sur disque depuis l'édition de l'IA."
     drift_deleted: "Le fichier n'existe plus sur le disque."
     force_prompt: "Forcer l'écrasement ?"
+    force_confirm: "Confirmer : écraser le fichier modifié ?"
     will_delete: "Le fichier sera supprimé par cette restauration."
-    cancelled: "Annulation annulée."
+    cancelled: "Restauration abandonnée."
+    drift_blocked: "Restauration bloquée : {path} a été modifié après confirmation."
+    will_create: "nouveau fichier"
+    binary_or_unreadable: "binaire ou illisible"
 
   time:
     seconds_ago: "il y a {seconds}s"
@@ -960,6 +964,7 @@ tools:
       removed: "{path} supprimé (créé par la modification annulée)."
       restore_failed: "Échec de la restauration de {path} : {error}"
       remove_failed: "Échec de la suppression de {path} : {error}"
+      drifted: "Le fichier {path} a changé depuis l'édition de l'IA. Relisez le fichier et réessayez."
   ask_user:
     description: "Poser a l'utilisateur une question de clarification ciblee. Avec seulement prompt, ask_user utilise la saisie texte ; avec options, il propose des choix."
     unknown_kind: "Type inconnu : {kind}"

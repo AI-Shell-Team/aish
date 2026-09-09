@@ -667,8 +667,12 @@ shell:
     drift_warning: "Drift detected: file changed on disk since the AI's edit."
     drift_deleted: "File no longer exists on disk."
     force_prompt: "Force overwrite?"
+    force_confirm: "Confirm: overwrite drifted file?"
     will_delete: "File will be deleted by this restore."
     cancelled: "Undo cancelled."
+    drift_blocked: "Restore blocked: {path} changed on disk since confirmation."
+    will_create: "new file"
+    binary_or_unreadable: "binary or unreadable"
 
   time:
     seconds_ago: "{seconds}s ago"
@@ -1296,6 +1300,7 @@ tools:
       removed: "Removed {path} (it was created by the undone change)."
       restore_failed: "Failed to restore {path}: {error}"
       remove_failed: "Failed to remove {path}: {error}"
+      drifted: "File {path} changed on disk since the AI's edit. Re-read the file and try again."
 
   ask_user:
     description: "Ask the user a focused clarifying question. Use prompt for text input, and add options when you can offer choices."

@@ -68,16 +68,20 @@ impl Tool for UndoEditTool {
 /// Apply an [`UndoResult`] to disk. Writes prior content back, or removes the
 /// file when the undone mutation had created it.
 fn apply_undo(result: &UndoResult) -> ToolResult {
+    use crate::fs::ApplyError;
     let mut args = std::collections::HashMap::new();
     args.insert("path".to_string(), result.path.display().to_string());
-    match result.apply_to_disk(false) {
+    match result.apply_to_disk_checked(false, true) {
         Ok(ApplyOutcome::Restored) => {
             ToolResult::success(aish_i18n::t_with_args("tools.fs.undo_edit.restored", &args))
         }
         Ok(ApplyOutcome::Removed) => {
             ToolResult::success(aish_i18n::t_with_args("tools.fs.undo_edit.removed", &args))
         }
-        Err(e) => {
+        Err(ApplyError::Drifted) => {
+            ToolResult::error(aish_i18n::t_with_args("tools.fs.undo_edit.drifted", &args))
+        }
+        Err(ApplyError::Io(e)) => {
             args.insert("error".to_string(), e.to_string());
             let key = if result.content.is_some() {
                 "tools.fs.undo_edit.restore_failed"
