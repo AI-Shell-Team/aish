@@ -118,6 +118,21 @@ pub struct UndoResult {
     /// Bytes to write. `None` means delete the file (it was newly created).
     pub content: Option<Vec<u8>>,
     pub snapshot_id: u64,
+    /// Tag of the file content AFTER the mutation that produced this snapshot.
+    /// Used for drift detection: before restoring, the caller reads the disk
+    /// and compares its tag to this. A mismatch means the file changed since
+    /// the AI's edit — restoring would overwrite those external changes.
+    pub expected_tag: SnapshotTag,
+}
+
+/// Result of comparing the on-disk content to the expected post-mutation state.
+#[derive(Debug, Clone)]
+pub enum DriftStatus {
+    /// Disk content still matches the post-mutation tag. Safe to restore.
+    Fresh,
+    /// Disk content differs from the post-mutation state. `current` holds the
+    /// on-disk bytes (if the file still exists) for diff display.
+    Drifted { current: Option<Vec<u8>> },
 }
 
 /// What [`UndoResult::apply_to_disk`] did to the filesystem.
@@ -129,6 +144,26 @@ pub enum ApplyOutcome {
     Removed,
 }
 
+/// Error from [`UndoResult::apply_to_disk_checked`].
+#[derive(Debug)]
+pub enum ApplyError {
+    /// The file changed on disk after preflight (tag mismatch).
+    Drifted,
+    /// Underlying I/O error.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::Drifted => f.write_str("file changed on disk since preflight"),
+            ApplyError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
 impl UndoResult {
     /// Apply this restore action to disk: write the prior bytes back, or
     /// delete the file when `content` is `None` (the mutation created it).
@@ -137,6 +172,10 @@ impl UndoResult {
     /// used by batch `/rollback` so a partial-restore retry converges instead
     /// of wedging on `NotFound`. Single-step undo passes `false` so an
     /// unexpected absence surfaces as an error.
+    ///
+    /// **No apply-time drift recheck.** Use [`apply_to_disk_checked`] when the
+    /// caller needs a final guard against changes made between preflight and
+    /// the actual disk write.
     pub fn apply_to_disk(&self, tolerate_missing: bool) -> std::io::Result<ApplyOutcome> {
         match &self.content {
             Some(bytes) => {
@@ -150,6 +189,57 @@ impl UndoResult {
                 }
                 Err(e) => Err(e),
             },
+        }
+    }
+
+    /// Like [`apply_to_disk`] but revalidates `expected_tag` immediately before
+    /// writing. This guards against a race where the file changes after the
+    /// preflight `check_drift` but before the disk write. When the tag no
+    /// longer matches, the write is aborted with [`ApplyError::Drifted`].
+    ///
+    /// `force = true` skips the recheck (used by `/undo --force`).
+    pub fn apply_to_disk_checked(
+        &self,
+        tolerate_missing: bool,
+        force: bool,
+    ) -> Result<ApplyOutcome, ApplyError> {
+        if !force {
+            match self.check_drift() {
+                DriftStatus::Fresh => {}
+                DriftStatus::Drifted { .. } => return Err(ApplyError::Drifted),
+            }
+        }
+        self.apply_to_disk(tolerate_missing).map_err(ApplyError::Io)
+    }
+
+    /// Detect on-disk drift: read the current file content and compare its
+    /// tag to the expected post-mutation tag. When they differ, the file was
+    /// modified after the AI's edit — restoring would overwrite those changes.
+    ///
+    /// A file that no longer exists counts as drifted (it was deleted or
+    /// moved), unless the restore action itself will delete it (content is
+    /// `None`), in which case absence is the expected state → Fresh.
+    pub fn check_drift(&self) -> DriftStatus {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => {
+                if SnapshotTag::from_bytes(&bytes) == self.expected_tag {
+                    DriftStatus::Fresh
+                } else {
+                    DriftStatus::Drifted {
+                        current: Some(bytes),
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if self.content.is_none() {
+                    // File should be deleted, and it is gone — no drift.
+                    DriftStatus::Fresh
+                } else {
+                    // File should exist but is gone — drifted.
+                    DriftStatus::Drifted { current: None }
+                }
+            }
+            Err(_) => DriftStatus::Drifted { current: None },
         }
     }
 }
@@ -265,6 +355,7 @@ impl SnapshotStore {
             path: snap.path.clone(),
             content: snap.prior_content.clone(),
             snapshot_id: snap.id,
+            expected_tag: snap.tag,
         }
     }
 
@@ -606,5 +697,88 @@ mod tests {
         assert_eq!(store.history_len(), MAX_HISTORY);
         // Oldest entries dropped; the first kept entry is not id 0.
         assert!(store.history()[0].id > 0);
+    }
+
+    // ---- drift detection tests (#466) ----
+
+    #[test]
+    fn check_drift_fresh_when_disk_matches_post_mutation() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "v2").unwrap();
+
+        let mut store = SnapshotStore::new();
+        store.record_mutation(&f, Some(b"v1".to_vec()), "v2", SnapshotOp::Edit);
+        // Disk still has "v2" (post-mutation content) → no drift.
+        let result = store.peek_undo_last().unwrap();
+        assert!(matches!(result.check_drift(), DriftStatus::Fresh));
+    }
+
+    #[test]
+    fn check_drift_detected_when_disk_changed_after_mutation() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "v2").unwrap();
+
+        let mut store = SnapshotStore::new();
+        store.record_mutation(&f, Some(b"v1".to_vec()), "v2", SnapshotOp::Edit);
+        // External change on disk after the AI's edit.
+        fs::write(&f, "v3_external").unwrap();
+
+        let result = store.peek_undo_last().unwrap();
+        assert!(matches!(result.check_drift(), DriftStatus::Drifted { .. }));
+    }
+
+    #[test]
+    fn check_drift_fresh_when_delete_action_and_file_gone() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("new.txt");
+        fs::write(&f, "created").unwrap();
+
+        let mut store = SnapshotStore::new();
+        store.record_mutation(&f, None, "created", SnapshotOp::Write);
+        // File deleted on disk; restore action also deletes → Fresh.
+        fs::remove_file(&f).unwrap();
+        let result = store.peek_undo_last().unwrap();
+        assert!(matches!(result.check_drift(), DriftStatus::Fresh));
+    }
+
+    #[test]
+    fn check_drift_detected_when_file_deleted_but_restore_expects_content() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "v2").unwrap();
+
+        let mut store = SnapshotStore::new();
+        store.record_mutation(&f, Some(b"v1".to_vec()), "v2", SnapshotOp::Edit);
+        // File deleted on disk but restore expects to write content → Drifted.
+        fs::remove_file(&f).unwrap();
+        let result = store.peek_undo_last().unwrap();
+        match result.check_drift() {
+            DriftStatus::Drifted { current } => assert!(current.is_none()),
+            other => panic!("expected Drifted, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn undo_result_carries_expected_tag() {
+        // The UndoResult must carry the post-mutation tag so drift detection
+        // works without the store being queried again.
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        fs::write(&f, "new_content").unwrap();
+
+        let mut store = SnapshotStore::new();
+        store.record_mutation(&f, Some(b"old".to_vec()), "new_content", SnapshotOp::Edit);
+        let result = store.peek_undo_last().unwrap();
+        assert_eq!(
+            result.expected_tag,
+            SnapshotTag::from_content("new_content")
+        );
     }
 }
