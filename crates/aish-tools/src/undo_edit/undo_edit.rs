@@ -71,7 +71,7 @@ fn apply_undo(result: &UndoResult) -> ToolResult {
     use crate::fs::ApplyError;
     let mut args = std::collections::HashMap::new();
     args.insert("path".to_string(), result.path.display().to_string());
-    match result.apply_to_disk_checked(false, true) {
+    match result.apply_to_disk_checked(false, false) {
         Ok(ApplyOutcome::Restored) => {
             ToolResult::success(aish_i18n::t_with_args("tools.fs.undo_edit.restored", &args))
         }

@@ -3809,8 +3809,15 @@ impl AishShell {
                             // classified Fresh by check_drift, so tolerate the
                             // absence here — otherwise the undo reports an
                             // error and the snapshot is never consumed.
-                            let (ok, m) =
-                                apply_restore_action(&result, result.content.is_none(), force);
+                            // Once the user has confirmed an override of a
+                            // detected drift, the apply step must not re-run
+                            // the same check and reject it again.
+                            let apply_force = force || matches!(drift, DriftStatus::Drifted { .. });
+                            let (ok, m) = apply_restore_action(
+                                &result,
+                                result.content.is_none(),
+                                apply_force,
+                            );
                             if ok {
                                 let mut store = self
                                     .snapshot_store
@@ -3883,18 +3890,32 @@ impl AishShell {
                                 store.peek_restore(id)
                             };
                             if let Some(actions) = peeked {
-                                // Preflight: check drift on ALL actions before
-                                // touching any file. If any drifted, show the
-                                // diffs and ask for explicit confirmation.
+                                // Preflight: check drift before touching any
+                                // file. A path may have multiple actions in
+                                // the batch (one per mutation); only the
+                                // FIRST action for a path (the newest
+                                // mutation, which the disk should match) is
+                                // a valid drift probe — intermediate actions
+                                // carry older expected tags that the current
+                                // disk content can never match, so checking
+                                // them would false-report drift without any
+                                // external change.
                                 use aish_tools::fs::DriftStatus;
-                                let drifts: Vec<DriftStatus> =
-                                    actions.iter().map(|a| a.check_drift()).collect();
-                                let drifted: Vec<(usize, &DriftStatus)> = drifts
+                                use std::collections::HashSet;
+                                let mut seen_paths: HashSet<std::path::PathBuf> = HashSet::new();
+                                let drifted: Vec<(usize, DriftStatus)> = actions
                                     .iter()
                                     .enumerate()
-                                    .filter_map(|(i, d)| match d {
-                                        DriftStatus::Fresh => None,
-                                        d @ DriftStatus::Drifted { .. } => Some((i, d)),
+                                    .filter_map(|(i, a)| {
+                                        if !seen_paths.insert(a.path.clone()) {
+                                            // Older action for an
+                                            // already-checked path.
+                                            return None;
+                                        }
+                                        match a.check_drift() {
+                                            DriftStatus::Fresh => None,
+                                            d @ DriftStatus::Drifted { .. } => Some((i, d)),
+                                        }
                                     })
                                     .collect();
 

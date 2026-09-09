@@ -111,6 +111,54 @@ fn issue_466_rollback_preflight_detects_drift() {
 }
 
 #[test]
+fn issue_466_rollback_preflight_no_false_positive_same_path() {
+    // Same path mutated twice, NO external change. Intermediate actions
+    // carry older expected tags; checking them against current disk content
+    // would false-report drift. Only the newest action per path is a valid
+    // drift probe (mirrors the /rollback preflight dedup in app.rs).
+    let dir = tempdir().unwrap();
+    let f = dir.path().join("multi.txt");
+
+    fs::write(&f, "v0").unwrap();
+    let store = Arc::new(Mutex::new(SnapshotStore::new()));
+    let id1 =
+        store
+            .lock()
+            .unwrap()
+            .record_mutation(&f, Some(b"v0".to_vec()), "v1", SnapshotOp::Edit);
+    fs::write(&f, "v1").unwrap();
+    let _id2 =
+        store
+            .lock()
+            .unwrap()
+            .record_mutation(&f, Some(b"v1".to_vec()), "v2", SnapshotOp::Edit);
+    fs::write(&f, "v2").unwrap(); // disk matches newest mutation — no drift
+
+    let actions = store.lock().unwrap().peek_restore(id1).unwrap();
+    assert_eq!(actions.len(), 2);
+
+    // Per-path dedup: only the first (newest) action for the path is checked.
+    use std::collections::HashSet;
+    let mut seen_paths: HashSet<std::path::PathBuf> = HashSet::new();
+    let drifted_count = actions
+        .iter()
+        .filter(|a| seen_paths.insert(a.path.clone()))
+        .filter(|a| matches!(a.check_drift(), DriftStatus::Drifted { .. }))
+        .count();
+    assert_eq!(
+        drifted_count, 0,
+        "no external change → newest action must be Fresh, no false drift"
+    );
+
+    // And the whole batch applies cleanly without force.
+    for action in &actions {
+        let (ok, msg) = apply_restore_action(action, true, false);
+        assert!(ok, "apply failed: {msg}");
+    }
+    assert_eq!(fs::read_to_string(&f).unwrap(), "v0");
+}
+
+#[test]
 fn issue_466_rollback_partial_failure_reporting() {
     // Simulate the partial-restore count tracking:
     // 2 actions, first succeeds, second fails → success_count=1, total=2
