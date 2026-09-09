@@ -5665,8 +5665,8 @@ impl AishShell {
     }
 
     fn handle_audit_command(&self, parts: &[&str]) {
-        let Some(ref audit) = self.audit_store else {
-            eprintln!("audit is not enabled. Set 'audit.enabled: true' in security_policy.yaml.");
+        let Some(audit) = &self.audit_store else {
+            eprintln!("{}", t("shell.audit.disabled"));
             return;
         };
 
@@ -5678,71 +5678,20 @@ impl AishShell {
             return;
         }
 
-        let mut query = aish_session::AuditQuery::new();
-        query.limit = 20;
-
-        let mut i = 1;
-        while i < parts.len() {
-            match parts[i] {
-                "--user" if i + 1 < parts.len() => {
-                    query.user = Some(parts[i + 1].to_string());
-                    i += 2;
-                    continue;
-                }
-                "--host" if i + 1 < parts.len() => {
-                    query.host = Some(parts[i + 1].to_string());
-                    i += 2;
-                    continue;
-                }
-                "--event-type" if i + 1 < parts.len() => {
-                    match parts[i + 1].parse::<AuditEventType>() {
-                        Ok(t) => query.event_type = Some(t),
-                        Err(e) => {
-                            eprintln!("invalid event type: {e}");
-                            return;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--session" if i + 1 < parts.len() => {
-                    query.session_uuid = Some(parts[i + 1].to_string());
-                    i += 2;
-                    continue;
-                }
-                "--since" if i + 1 < parts.len() => {
-                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
-                        Ok(dt) => query.since = Some(dt.with_timezone(&chrono::Utc)),
-                        Err(_) => {
-                            eprintln!("invalid --since datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
-                            return;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--until" if i + 1 < parts.len() => {
-                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
-                        Ok(dt) => query.until = Some(dt.with_timezone(&chrono::Utc)),
-                        Err(_) => {
-                            eprintln!("invalid --until datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
-                            return;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--limit" if i + 1 < parts.len() => {
-                    if let Ok(n) = parts[i + 1].parse::<usize>() {
-                        query.limit = n;
-                    }
-                    i += 2;
-                    continue;
-                }
-                _ => {}
+        // Strict parsing: unknown flags, missing values, and unparsable
+        // values are hard errors — never silently fall back to defaults.
+        let query = match parse_audit_args(parts, 1, 20) {
+            Ok(None) => {
+                println!("{}", t("shell.audit.usage"));
+                return;
             }
-            i += 1;
-        }
+            Ok(Some(q)) => q,
+            Err(msg) => {
+                eprintln!("{msg}");
+                eprintln!("{}", t("shell.audit.usage"));
+                return;
+            }
+        };
 
         // Access control: non-root users may not query another user's events
         // by name. Without --user, all events are shown (the user field in
@@ -5755,11 +5704,9 @@ impl AishShell {
                 .audit_user
                 .clone()
                 .unwrap_or_else(|| current_uid.to_string());
-            if let Some(ref requested) = query.user {
+            if let Some(requested) = &query.user {
                 if requested != &me {
-                    eprintln!(
-                        "permission denied: non-root users can only query their own audit events"
-                    );
+                    eprintln!("{}", t("shell.audit.permission_denied"));
                     return;
                 }
             }
@@ -5768,19 +5715,32 @@ impl AishShell {
         let events = match audit.query(&query) {
             Ok(events) => events,
             Err(e) => {
-                eprintln!("failed to query audit log: {e}");
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.audit.query_failed", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("error".to_string(), e.to_string());
+                        a
+                    })
+                );
                 return;
             }
         };
 
+        println!("{}", format_audit_filter_summary(&query));
+
         if events.is_empty() {
-            println!("No audit events found.");
+            println!("{}", t("shell.audit.no_events"));
             return;
         }
 
         println!(
-            "{:<26} {:<18} {:<10} {:<12} DETAILS",
-            "TIMESTAMP", "EVENT", "USER", "HOST"
+            "{:<26} {:<18} {:<10} {:<12} {}",
+            t("shell.audit.col_timestamp"),
+            t("shell.audit.col_event"),
+            t("shell.audit.col_user"),
+            t("shell.audit.col_host"),
+            t("shell.audit.col_details")
         );
         println!("{}", "─".repeat(100));
         for ev in &events {
@@ -5825,7 +5785,14 @@ impl AishShell {
                 detail
             );
         }
-        println!("\n{} event(s) shown.", events.len());
+        println!(
+            "\n{}",
+            t_with_args("shell.audit.summary", &{
+                let mut a = std::collections::HashMap::new();
+                a.insert("count".to_string(), events.len().to_string());
+                a
+            })
+        );
     }
 
     /// `/audit export` — write a portable audit package (audit.md +
@@ -5836,80 +5803,24 @@ impl AishShell {
     fn handle_audit_export(&self, parts: &[&str]) {
         // sha2/Write are used in write_audit_package, not here.
 
-        let Some(ref audit) = self.audit_store else {
-            eprintln!("audit is not enabled. Set 'audit.enabled: true' in security_policy.yaml.");
+        let Some(audit) = &self.audit_store else {
+            eprintln!("{}", t("shell.audit.disabled"));
             return;
         };
 
-        let mut query = aish_session::AuditQuery::new();
-        query.limit = 100_000;
-
-        let mut i = 2; // skip "/audit export"
-        while i < parts.len() {
-            match parts[i] {
-                "--user" if i + 1 < parts.len() => {
-                    query.user = Some(parts[i + 1].to_string());
-                    i += 2;
-                    continue;
-                }
-                "--host" if i + 1 < parts.len() => {
-                    query.host = Some(parts[i + 1].to_string());
-                    i += 2;
-                    continue;
-                }
-                "--event-type" if i + 1 < parts.len() => {
-                    match parts[i + 1].parse::<AuditEventType>() {
-                        Ok(et) => query.event_type = Some(et),
-                        Err(e) => {
-                            eprintln!("invalid event type: {e}");
-                            return;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--session" if i + 1 < parts.len() => {
-                    query.session_uuid = Some(parts[i + 1].to_string());
-                    i += 2;
-                    continue;
-                }
-                "--since" if i + 1 < parts.len() => {
-                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
-                        Ok(dt) => query.since = Some(dt.with_timezone(&chrono::Utc)),
-                        Err(_) => {
-                            eprintln!("invalid --since datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
-                            return;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--until" if i + 1 < parts.len() => {
-                    match chrono::DateTime::parse_from_rfc3339(parts[i + 1]) {
-                        Ok(dt) => query.until = Some(dt.with_timezone(&chrono::Utc)),
-                        Err(_) => {
-                            eprintln!("invalid --until datetime (use RFC 3339, e.g. 2026-01-01T00:00:00Z)");
-                            return;
-                        }
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--limit" if i + 1 < parts.len() => {
-                    if let Ok(n) = parts[i + 1].parse::<usize>() {
-                        query.limit = n;
-                    }
-                    i += 2;
-                    continue;
-                }
-                "--help" | "-h" => {
-                    println!("{}", t("shell.audit_export.usage"));
-                    return;
-                }
-                _ => {}
+        // Strict parsing shared with `/audit` (see parse_audit_args).
+        let query = match parse_audit_args(parts, 2, 100_000) {
+            Ok(None) => {
+                println!("{}", t("shell.audit_export.usage"));
+                return;
             }
-            i += 1;
-        }
+            Ok(Some(q)) => q,
+            Err(msg) => {
+                eprintln!("{msg}");
+                eprintln!("{}", t("shell.audit_export.usage"));
+                return;
+            }
+        };
 
         // Access control — same rule as `/audit` query.
         // SAFETY: getuid() never fails.
@@ -5919,11 +5830,9 @@ impl AishShell {
                 .audit_user
                 .clone()
                 .unwrap_or_else(|| current_uid.to_string());
-            if let Some(ref requested) = query.user {
+            if let Some(requested) = &query.user {
                 if requested != &me {
-                    eprintln!(
-                        "permission denied: non-root users can only export their own audit events"
-                    );
+                    eprintln!("{}", t("shell.audit_export.permission_denied"));
                     return;
                 }
             }
@@ -5932,7 +5841,14 @@ impl AishShell {
         let events = match audit.query(&query) {
             Ok(events) => events,
             Err(e) => {
-                eprintln!("failed to query audit log: {e}");
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.audit.query_failed", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("error".to_string(), e.to_string());
+                        a
+                    })
+                );
                 return;
             }
         };
@@ -12303,6 +12219,136 @@ fn format_age(secs: u64) -> String {
     }
 }
 
+/// Strict argument parser shared by `/audit` and `/audit export`.
+///
+/// `start` is the index of the first flag token (1 for `/audit`, 2 for
+/// `/audit export`); `default_limit` is applied when `--limit` is absent.
+///
+/// Returns:
+/// - `Ok(Some(query))` on success
+/// - `Ok(None)` when `--help`/`-h` was requested (caller prints usage)
+/// - `Err(message)` on any invalid input — unknown flag, flag missing its
+///   value, unparsable `--limit`, invalid RFC 3339 datetime, or unknown
+///   `--event-type`. Callers must surface the error, never fall back to
+///   defaults silently.
+fn parse_audit_args(
+    parts: &[&str],
+    start: usize,
+    default_limit: usize,
+) -> Result<Option<aish_session::AuditQuery>, String> {
+    let mut query = aish_session::AuditQuery::new();
+    query.limit = default_limit;
+
+    let mut i = start;
+    while i < parts.len() {
+        let flag = parts[i];
+        if flag == "--help" || flag == "-h" {
+            return Ok(None);
+        }
+        let value = match parts.get(i + 1) {
+            // A value that looks like another flag means the current flag
+            // is missing its value.
+            Some(v) if !v.starts_with("--") => *v,
+            _ => {
+                return Err(t_with_args("shell.audit.err_missing_value", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("flag".to_string(), flag.to_string());
+                    a
+                }))
+            }
+        };
+        match flag {
+            "--user" => query.user = Some(value.to_string()),
+            "--host" => query.host = Some(value.to_string()),
+            "--session" => query.session_uuid = Some(value.to_string()),
+            "--event-type" => match value.parse::<AuditEventType>() {
+                Ok(t) => query.event_type = Some(t),
+                Err(e) => {
+                    return Err(t_with_args("shell.audit.err_invalid_event_type", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("error".to_string(), e.to_string());
+                        a
+                    }))
+                }
+            },
+            "--since" | "--until" => match chrono::DateTime::parse_from_rfc3339(value) {
+                Ok(dt) => {
+                    let utc = dt.with_timezone(&chrono::Utc);
+                    if flag == "--since" {
+                        query.since = Some(utc);
+                    } else {
+                        query.until = Some(utc);
+                    }
+                }
+                Err(_) => {
+                    return Err(t_with_args("shell.audit.err_invalid_datetime", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("flag".to_string(), flag.to_string());
+                        a
+                    }))
+                }
+            },
+            "--limit" => match value.parse::<usize>() {
+                Ok(n) if n > 0 => query.limit = n,
+                _ => {
+                    return Err(t_with_args("shell.audit.err_invalid_limit", &{
+                        let mut a = std::collections::HashMap::new();
+                        a.insert("value".to_string(), value.to_string());
+                        a
+                    }))
+                }
+            },
+            _ => {
+                return Err(t_with_args("shell.audit.err_unknown_flag", &{
+                    let mut a = std::collections::HashMap::new();
+                    a.insert("flag".to_string(), flag.to_string());
+                    a
+                }))
+            }
+        }
+        i += 2;
+    }
+    Ok(Some(query))
+}
+/// One-line summary of the effective filters so users can confirm the
+/// actual query scope (defaults included).
+fn format_audit_filter_summary(query: &aish_session::AuditQuery) -> String {
+    use std::fmt::Write;
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |key: &str, value: String| {
+        parts.push(t_with_args(key, &{
+            let mut a = std::collections::HashMap::new();
+            a.insert("value".to_string(), value);
+            a
+        }));
+    };
+
+    if let Some(u) = &query.user {
+        push("shell.audit.filter_user", u.clone());
+    }
+    if let Some(h) = &query.host {
+        push("shell.audit.filter_host", h.clone());
+    }
+    if let Some(et) = &query.event_type {
+        push("shell.audit.filter_event_type", et.to_string());
+    }
+    if let Some(s) = &query.session_uuid {
+        push("shell.audit.filter_session", s.clone());
+    }
+    if let Some(since) = &query.since {
+        push("shell.audit.filter_since", since.to_rfc3339());
+    }
+    if let Some(until) = &query.until {
+        push("shell.audit.filter_until", until.to_rfc3339());
+    }
+    push("shell.audit.filter_limit", query.limit.to_string());
+
+    let mut out = t("shell.audit.filter_header");
+    let _ = write!(out, " {}", parts.join(", "));
+    out
+}
+
 /// Build a single-entry `{age => val}` map for `t_with_args`.
 fn age_args(age: String) -> std::collections::HashMap<String, String> {
     let mut args = std::collections::HashMap::new();
@@ -12979,5 +13025,142 @@ mod audit_export_tests {
                 .len()
                 == 64
         );
+    }
+}
+
+#[cfg(test)]
+mod audit_args_tests {
+    use super::parse_audit_args;
+    use aish_core::AuditEventType;
+    use aish_i18n;
+
+    fn parse(tokens: &[&str]) -> Result<Option<aish_session::AuditQuery>, String> {
+        let mut parts = vec!["/audit"];
+        parts.extend_from_slice(tokens);
+        parse_audit_args(&parts, 1, 20)
+    }
+
+    #[test]
+    fn no_args_uses_defaults() {
+        let q = parse(&[]).unwrap().unwrap();
+        assert_eq!(q.limit, 20);
+        assert!(q.user.is_none() && q.host.is_none() && q.event_type.is_none());
+    }
+
+    #[test]
+    fn help_flag_returns_none() {
+        assert!(parse(&["--help"]).unwrap().is_none());
+        assert!(parse(&["-h"]).unwrap().is_none());
+    }
+
+    #[test]
+    fn valid_flags_are_applied() {
+        let q = parse(&[
+            "--user",
+            "alice",
+            "--host",
+            "box",
+            "--event-type",
+            "ai_tool",
+            "--session",
+            "s-1",
+            "--since",
+            "2026-01-01T00:00:00Z",
+            "--until",
+            "2026-02-01T00:00:00Z",
+            "--limit",
+            "5",
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(q.user.as_deref(), Some("alice"));
+        assert_eq!(q.host.as_deref(), Some("box"));
+        assert_eq!(q.event_type, Some(AuditEventType::AiTool));
+        assert_eq!(q.session_uuid.as_deref(), Some("s-1"));
+        assert!(q.since.is_some() && q.until.is_some());
+        assert_eq!(q.limit, 5);
+    }
+
+    #[test]
+    fn unknown_flag_is_rejected() {
+        let err = parse(&["--limit", "10", "--definitely-unknown"]).unwrap_err();
+        assert!(err.contains("--definitely-unknown"), "got: {err}");
+    }
+
+    #[test]
+    fn flag_without_value_is_rejected() {
+        // Trailing flag with no value — previously silently ignored.
+        let err = parse(&["--host"]).unwrap_err();
+        assert!(err.contains("--host"), "got: {err}");
+        // A flag followed by another flag is also a missing value.
+        let err = parse(&["--user", "--host", "box"]).unwrap_err();
+        assert!(err.contains("--user"), "got: {err}");
+    }
+
+    #[test]
+    fn invalid_limit_is_rejected() {
+        // Previously fell back to the default limit silently.
+        let err = parse(&["--limit", "abc"]).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(parse(&["--limit", "abc"]).is_err());
+        // Zero is also invalid (a limit of 0 returns nothing).
+        assert!(parse(&["--limit", "0"]).is_err());
+        // Negative values don't parse as usize.
+        assert!(parse(&["--limit", "-1"]).is_err());
+    }
+
+    #[test]
+    fn invalid_datetime_and_event_type_are_rejected() {
+        assert!(parse(&["--since", "not-a-date"]).is_err());
+        assert!(parse(&["--until", "not-a-date"]).is_err());
+        assert!(parse(&["--event-type", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn export_subcommand_start_index_skips_prefix() {
+        // `/audit export --limit 3`
+        let parts = ["/audit", "export", "--limit", "3"];
+        let q = parse_audit_args(&parts, 2, 100_000).unwrap().unwrap();
+        assert_eq!(q.limit, 3);
+    }
+
+    #[test]
+    fn audit_i18n_keys_exist_in_all_embedded_locales() {
+        // Regression guard for #469: every user-visible /audit string must
+        // be translated (not fall back to the raw key).
+        let keys = [
+            "shell.audit.disabled",
+            "shell.audit.usage",
+            "shell.audit.permission_denied",
+            "shell.audit.query_failed",
+            "shell.audit.no_events",
+            "shell.audit.col_timestamp",
+            "shell.audit.col_event",
+            "shell.audit.col_user",
+            "shell.audit.col_host",
+            "shell.audit.col_details",
+            "shell.audit.summary",
+            "shell.audit.filter_header",
+            "shell.audit.filter_user",
+            "shell.audit.filter_host",
+            "shell.audit.filter_event_type",
+            "shell.audit.filter_session",
+            "shell.audit.filter_since",
+            "shell.audit.filter_until",
+            "shell.audit.filter_limit",
+            "shell.audit.err_unknown_flag",
+            "shell.audit.err_missing_value",
+            "shell.audit.err_invalid_limit",
+            "shell.audit.err_invalid_datetime",
+            "shell.audit.err_invalid_event_type",
+            "shell.audit_export.permission_denied",
+        ];
+        let mgr = aish_i18n::I18nManager::new_with_locale("zh-CN");
+        for key in keys {
+            let val = mgr.t(key);
+            assert_ne!(val, key, "zh-CN is missing key {key}");
+        }
+        // The summary must contain the count placeholder.
+        assert!(mgr.t("shell.audit.summary").contains("{count}"));
     }
 }
