@@ -651,12 +651,28 @@ shell:
     title: "回滚"
     prompt: "选择一个修改回滚（将丢弃它及之后的所有修改）:"
     empty: "本次会话没有记录文件修改。"
+    drift_summary: "{count} 个文件中有 {drifted} 个在 AI 修改后被外部改动。"
+    drift_warning: "检测到漂移：磁盘内容与 AI 最后修改不一致。"
+    impact_summary: "将恢复 {count} 个文件。请查看以下 Diff："
+    confirm: "确认覆盖？"
+    confirm_overwrite: "确认恢复——这将覆盖上述文件。"
+    cancelled: "回滚已取消。"
+    partial: "部分恢复：{total} 个文件中 {restored} 个成功。"
   undo:
     nothing_to_undo: "没有可撤销的文件修改。"
     restored: "已恢复 {path}"
     removed: "已删除 {path}"
     restore_failed: "恢复失败: {error}"
     remove_failed: "删除失败: {error}"
+    drift_warning: "检测到漂移：文件在 AI 修改后被外部改动。"
+    drift_deleted: "文件在磁盘上已不存在。"
+    force_prompt: "强制覆盖？"
+    force_confirm: "确认：覆盖漂移文件？"
+    will_delete: "此恢复操作将删除该文件。"
+    cancelled: "撤销已取消。"
+    drift_blocked: "恢复被阻止：{path} 在确认后又被修改。"
+    will_create: "新文件"
+    binary_or_unreadable: "二进制或不可读"
 
   time:
     seconds_ago: "{seconds}秒前"
@@ -1283,6 +1299,7 @@ tools:
       removed: "已删除 {path}（它由被撤销的修改创建）。"
       restore_failed: "恢复 {path} 失败: {error}"
       remove_failed: "删除 {path} 失败: {error}"
+      drifted: "文件 {path} 在 AI 修改后被外部改动。请重新读取文件后再试。"
 
   ask_user:
     description: “向用户提出一个聚焦的澄清问题。只填 prompt 时为文本输入，提供 options 时为选项交互。”
