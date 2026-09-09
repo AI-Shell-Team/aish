@@ -3972,6 +3972,14 @@ impl AishShell {
                                     // not be silently overwritten. Same per-path
                                     // dedup as the preflight above — only each
                                     // path's newest action is a valid probe.
+                                    // Paths the user already saw and accepted
+                                    // at preflight must not be re-blocked here;
+                                    // only NEW drift from the confirmation
+                                    // window aborts the restore.
+                                    let confirmed_drift: HashSet<std::path::PathBuf> = drifted
+                                        .iter()
+                                        .map(|(i, _)| actions[*i].path.clone())
+                                        .collect();
                                     let drifted_paths: Vec<String> = {
                                         use aish_tools::fs::DriftStatus;
                                         use std::collections::HashSet;
@@ -3981,6 +3989,7 @@ impl AishShell {
                                             .iter()
                                             .filter(|a| {
                                                 recheck_seen.insert(a.path.clone())
+                                                    && !confirmed_drift.contains(&a.path)
                                                     && matches!(
                                                         a.check_drift(),
                                                         DriftStatus::Drifted { .. }

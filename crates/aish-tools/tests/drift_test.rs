@@ -159,6 +159,62 @@ fn issue_466_rollback_preflight_no_false_positive_same_path() {
 }
 
 #[test]
+fn issue_466_rollback_confirmed_drift_not_reblocked() {
+    // Drift the user already confirmed at preflight must not be re-blocked
+    // by the post-confirmation recheck — only NEW drift during the
+    // confirmation window aborts. Mirrors the confirmed_drift exclusion in
+    // the /rollback recheck (app.rs).
+    let dir = tempdir().unwrap();
+    let f = dir.path().join("drifted.txt");
+
+    fs::write(&f, "v0").unwrap();
+    let store = Arc::new(Mutex::new(SnapshotStore::new()));
+    let id1 =
+        store
+            .lock()
+            .unwrap()
+            .record_mutation(&f, Some(b"v0".to_vec()), "v1", SnapshotOp::Edit);
+    fs::write(&f, "v1").unwrap();
+    // External change → preflight reports drift; user confirms.
+    fs::write(&f, "external").unwrap();
+
+    let actions = store.lock().unwrap().peek_restore(id1).unwrap();
+
+    // Preflight: per-path dedup finds the drift.
+    use std::collections::HashSet;
+    let mut seen_paths: HashSet<std::path::PathBuf> = HashSet::new();
+    let drifted: Vec<&aish_tools::fs::UndoResult> = actions
+        .iter()
+        .filter(|a| seen_paths.insert(a.path.clone()))
+        .filter(|a| matches!(a.check_drift(), DriftStatus::Drifted { .. }))
+        .collect();
+    assert_eq!(drifted.len(), 1, "preflight must detect the drift");
+
+    // User confirmed → recheck excludes the confirmed paths; the same
+    // unchanged disk state must NOT be re-blocked.
+    let confirmed_drift: HashSet<std::path::PathBuf> =
+        drifted.iter().map(|a| a.path.clone()).collect();
+    let mut recheck_seen: HashSet<std::path::PathBuf> = HashSet::new();
+    let new_drift = actions
+        .iter()
+        .filter(|a| recheck_seen.insert(a.path.clone()))
+        .filter(|a| {
+            !confirmed_drift.contains(&a.path)
+                && matches!(a.check_drift(), DriftStatus::Drifted { .. })
+        })
+        .count();
+    assert_eq!(
+        new_drift, 0,
+        "confirmed drift must not be re-blocked by the recheck"
+    );
+
+    // The confirmed restore proceeds and overwrites the external change.
+    let (ok, msg) = apply_restore_action(&actions[0], true, true);
+    assert!(ok, "confirmed restore must proceed: {msg}");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "v0");
+}
+
+#[test]
 fn issue_466_rollback_partial_failure_reporting() {
     // Two actions: the first restore succeeds, the second must genuinely
     // fail with an IO error so the partial-failure counting (success_count /
