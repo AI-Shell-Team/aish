@@ -723,6 +723,9 @@ shell:
     err_invalid_limit: "ungültiger --limit-Wert: {value} (positive Ganzzahl erwartet)"
     err_invalid_datetime: "ungültige {flag}-Zeit (RFC 3339 verwenden, z. B. 2026-01-01T00:00:00Z)"
     err_invalid_event_type: "ungültiger Ereignistyp: {error}"
+    label_rc: "Exit-Code={value}"
+    label_user: "Benutzer={value}"
+    label_rule: "Regel={value}"
   audit_export:
     usage: "Verwendung: /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  gibt ein Verzeichnis mit audit.md, events.jsonl und manifest.json aus"
     no_events: "keine Audit-Ereignisse für die angegebenen Filter gefunden"

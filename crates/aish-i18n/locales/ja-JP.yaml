@@ -723,6 +723,9 @@ shell:
     err_invalid_limit: "無効な --limit の値: {value}（正の整数である必要があります）"
     err_invalid_datetime: "無効な {flag} の日時（RFC 3339 形式、例: 2026-01-01T00:00:00Z）"
     err_invalid_event_type: "無効なイベント種別: {error}"
+    label_rc: "終了コード={value}"
+    label_user: "ユーザー={value}"
+    label_rule: "ルール={value}"
   audit_export:
     usage: "使い方: /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  audit.md、events.jsonl、manifest.json を含むディレクトリを出力します"
     no_events: "指定したフィルタに一致する監査イベントが見つかりません"

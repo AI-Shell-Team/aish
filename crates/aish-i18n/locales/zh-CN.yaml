@@ -614,6 +614,9 @@ shell:
     err_invalid_limit: "无效的 --limit 值：{value}（应为正整数）"
     err_invalid_datetime: "无效的 {flag} 时间（请使用 RFC 3339 格式，如 2026-01-01T00:00:00Z）"
     err_invalid_event_type: "无效的事件类型：{error}"
+    label_rc: "退出码={value}"
+    label_user: "用户={value}"
+    label_rule: "规则={value}"
   audit_export:
     usage: "用法：/audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  输出包含 audit.md、events.jsonl 和 manifest.json 的目录"
     no_events: "未找到匹配过滤条件的审计事件"

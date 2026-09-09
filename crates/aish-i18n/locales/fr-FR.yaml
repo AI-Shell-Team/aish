@@ -723,6 +723,9 @@ shell:
     err_invalid_limit: "valeur --limit invalide : {value} (entier positif attendu)"
     err_invalid_datetime: "date/heure {flag} invalide (utilisez RFC 3339, p. ex. 2026-01-01T00:00:00Z)"
     err_invalid_event_type: "type d'événement invalide : {error}"
+    label_rc: "code={value}"
+    label_user: "utilisateur={value}"
+    label_rule: "règle={value}"
   audit_export:
     usage: "usage : /audit export [--user U] [--host H] [--event-type T] [--session S] [--since T] [--until T] [--limit N]\n  produit un répertoire avec audit.md, events.jsonl et manifest.json"
     no_events: "aucun événement d'audit trouvé pour ces filtres"

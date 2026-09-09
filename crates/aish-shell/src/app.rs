@@ -5749,7 +5749,16 @@ impl AishShell {
                     let cmd = ev.command.as_deref().unwrap_or("");
                     let source = ev.source.as_deref().unwrap_or("");
                     match ev.return_code {
-                        Some(rc) if rc != 0 => format!("[{}] rc={} {}", source, rc, cmd),
+                        Some(rc) if rc != 0 => format!(
+                            "[{}] {} {}",
+                            source,
+                            t_with_args("shell.audit.label_rc", &{
+                                let mut a = std::collections::HashMap::new();
+                                a.insert("value".to_string(), rc.to_string());
+                                a
+                            }),
+                            cmd
+                        ),
                         _ => format!("[{}] {}", source, cmd),
                     }
                 }
@@ -5765,10 +5774,18 @@ impl AishShell {
                     let dec = ev.decision.as_deref().unwrap_or("?").to_uppercase();
                     let mut parts = vec![dec];
                     if let Some(choice) = ev.user_choice.as_deref().filter(|c| !c.is_empty()) {
-                        parts.push(format!("user={}", choice));
+                        parts.push(t_with_args("shell.audit.label_user", &{
+                            let mut a = std::collections::HashMap::new();
+                            a.insert("value".to_string(), choice.to_string());
+                            a
+                        }));
                     }
                     if let Some(rule) = ev.matched_rule.as_deref().filter(|r| !r.is_empty()) {
-                        parts.push(format!("rule={}", rule));
+                        parts.push(t_with_args("shell.audit.label_rule", &{
+                            let mut a = std::collections::HashMap::new();
+                            a.insert("value".to_string(), rule.to_string());
+                            a
+                        }));
                     }
                     if let Some(cmd) = ev.command.as_deref().filter(|c| !c.is_empty()) {
                         parts.push(truncate_str(cmd, 60).to_string());
