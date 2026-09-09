@@ -160,8 +160,10 @@ fn issue_466_rollback_preflight_no_false_positive_same_path() {
 
 #[test]
 fn issue_466_rollback_partial_failure_reporting() {
-    // Simulate the partial-restore count tracking:
-    // 2 actions, first succeeds, second fails → success_count=1, total=2
+    // Two actions: the first restore succeeds, the second must genuinely
+    // fail with an IO error so the partial-failure counting (success_count /
+    // total) is actually exercised. A delete inside a read-only directory
+    // reliably fails with EACCES on Linux.
     let dir = tempdir().unwrap();
     let f1 = dir.path().join("f1.txt");
     let f2 = dir.path().join("f2.txt");
@@ -184,26 +186,45 @@ fn issue_466_rollback_partial_failure_reporting() {
 
     let actions = store.lock().unwrap().peek_restore(id1).unwrap();
     assert_eq!(actions.len(), 2);
+    // peek_restore returns newest-first: [delete f2, restore f1]. Reverse so
+    // the f1 restore runs first (succeeds), then the f2 delete fails — the
+    // same mid-batch failure shape the /rollback loop reports on.
+    let ordered: Vec<_> = actions.iter().rev().collect();
 
-    // Simulate the loop: first succeeds, second fails (delete f2, but we'll
-    // pre-delete it to cause a "tolerate_missing=true" success, so instead
-    // we test with tolerate_missing=false to force a failure).
+    // Make the directory read-only AFTER creating both files: writing f1
+    // back still succeeds (file already exists, dir write permission not
+    // needed for an in-place write), but deleting f2 requires directory
+    // write permission and fails with EACCES.
+    let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+    fs::set_permissions(dir.path(), perms).unwrap();
+
     let mut success_count = 0usize;
     let mut all_ok = true;
-    for action in &actions {
-        let (ok, _) = apply_restore_action(action, false, true);
+    let mut last_msg = String::new();
+    for action in &ordered {
+        let (ok, msg) = apply_restore_action(action, true, true);
         if ok {
             success_count += 1;
         } else {
             all_ok = false;
+            last_msg = msg;
             break;
         }
     }
-    // The second action (delete f2) with tolerate_missing=false should succeed
-    // because f2 exists. So all should succeed.
-    if all_ok {
-        assert_eq!(success_count, 2);
-    }
+
+    // Restore directory permissions so tempdir cleanup succeeds.
+    let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    fs::set_permissions(dir.path(), perms).unwrap();
+
+    assert!(!all_ok, "second action (delete in read-only dir) must fail");
+    assert_eq!(success_count, 1, "exactly one action succeeded");
+    assert!(!last_msg.is_empty(), "failure message must be reported");
+    // The failed delete must not have removed the file.
+    assert!(f2.exists(), "f2 must still exist after failed delete");
+    // The succeeded restore wrote f1's prior content back.
+    assert_eq!(fs::read_to_string(&f1).unwrap(), "orig1");
 }
 
 /// Mirror of apply_restore_action from app.rs for testing.

@@ -3965,45 +3965,85 @@ impl AishShell {
                                 if !proceed {
                                     println!("{}", aish_i18n::t("shell.rollback.cancelled"));
                                 } else {
-                                    // Apply every rollback action (reverse order:
-                                    // newest first); commit only if all succeed.
-                                    let mut all_ok = true;
-                                    let mut msgs: Vec<String> = Vec::new();
-                                    let mut success_count = 0usize;
-                                    for action in &actions {
-                                        let (ok, msg) = apply_restore_action(action, true, true);
-                                        msgs.push(msg);
-                                        if ok {
-                                            success_count += 1;
-                                        } else {
-                                            all_ok = false;
-                                            break;
-                                        }
-                                    }
-                                    if all_ok {
-                                        let mut store = self
-                                            .snapshot_store
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner());
-                                        store.commit_restore(id);
-                                    } else {
-                                        // Report partial state: which files
-                                        // were restored and which were not.
+                                    // Re-preflight after confirmation: the user
+                                    // may have sat on the y/N prompt for minutes,
+                                    // and an external change (editor autosave,
+                                    // config management) during that window must
+                                    // not be silently overwritten. Same per-path
+                                    // dedup as the preflight above — only each
+                                    // path's newest action is a valid probe.
+                                    let drifted_paths: Vec<String> = {
+                                        use aish_tools::fs::DriftStatus;
+                                        use std::collections::HashSet;
+                                        let mut recheck_seen: HashSet<std::path::PathBuf> =
+                                            HashSet::new();
+                                        actions
+                                            .iter()
+                                            .filter(|a| {
+                                                recheck_seen.insert(a.path.clone())
+                                                    && matches!(
+                                                        a.check_drift(),
+                                                        DriftStatus::Drifted { .. }
+                                                    )
+                                            })
+                                            .map(|a| a.path.display().to_string())
+                                            .collect()
+                                    };
+                                    if !drifted_paths.is_empty() {
                                         let mut args = std::collections::HashMap::new();
-                                        args.insert(
-                                            "restored".to_string(),
-                                            success_count.to_string(),
-                                        );
-                                        args.insert("total".to_string(), actions.len().to_string());
+                                        args.insert("path".to_string(), drifted_paths.join(", "));
                                         println!(
                                             "{}",
                                             theme::warning(&aish_i18n::t_with_args(
-                                                "shell.rollback.partial",
+                                                "shell.undo.drift_blocked",
                                                 &args,
                                             )),
                                         );
+                                    } else {
+                                        // Apply every rollback action (reverse order:
+                                        // newest first); commit only if all succeed.
+                                        let mut all_ok = true;
+                                        let mut msgs: Vec<String> = Vec::new();
+                                        let mut success_count = 0usize;
+                                        for action in &actions {
+                                            let (ok, msg) =
+                                                apply_restore_action(action, true, true);
+                                            msgs.push(msg);
+                                            if ok {
+                                                success_count += 1;
+                                            } else {
+                                                all_ok = false;
+                                                break;
+                                            }
+                                        }
+                                        if all_ok {
+                                            let mut store = self
+                                                .snapshot_store
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            store.commit_restore(id);
+                                        } else {
+                                            // Report partial state: which files
+                                            // were restored and which were not.
+                                            let mut args = std::collections::HashMap::new();
+                                            args.insert(
+                                                "restored".to_string(),
+                                                success_count.to_string(),
+                                            );
+                                            args.insert(
+                                                "total".to_string(),
+                                                actions.len().to_string(),
+                                            );
+                                            println!(
+                                                "{}",
+                                                theme::warning(&aish_i18n::t_with_args(
+                                                    "shell.rollback.partial",
+                                                    &args,
+                                                )),
+                                            );
+                                        }
+                                        println!("{}", msgs.join("\n"));
                                     }
-                                    println!("{}", msgs.join("\n"));
                                 }
                             }
                         }
