@@ -5,7 +5,15 @@ use super::prompt;
 use crate::fs::SharedSnapshotStore;
 use std::path::Path;
 
-const SIZE_LIMIT: usize = 32 * 1024;
+/// Upper bound on total file bytes we are willing to read into memory and
+/// return inline. Files larger than this are read by range (offset/limit)
+/// or truncated with a notice so the model knows to fetch the remainder.
+const MAX_READ_BYTES: usize = 256 * 1024;
+
+/// Default number of lines returned when no explicit limit is given and the
+/// file exceeds MAX_READ_BYTES. Keeps a single read within the byte budget
+/// while still returning a useful window of content.
+const DEFAULT_TRUNCATE_LINES: usize = 500;
 
 /// Read file content tool.
 pub struct ReadFileTool {
@@ -64,17 +72,21 @@ impl Tool for ReadFileTool {
             }
         };
 
-        if metadata.len() > SIZE_LIMIT as u64 {
-            let mut args_map = std::collections::HashMap::new();
-            args_map.insert("path".to_string(), path.to_string());
-            args_map.insert("size".to_string(), metadata.len().to_string());
-            args_map.insert("limit".to_string(), SIZE_LIMIT.to_string());
-            return ToolResult::error(aish_i18n::t_with_args(
-                "tools.fs.read_file.file_too_large",
-                &args_map,
-            ));
+        let file_size = metadata.len() as usize;
+        let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+        let limit = args
+            .get("limit")
+            .and_then(|l| l.as_u64())
+            .map(|l| l as usize);
+
+        // Large file path: stream only the requested line range instead of
+        // loading the whole file into memory. When no range is given, return
+        // a bounded head window and tell the model how to read the rest.
+        if file_size > MAX_READ_BYTES {
+            return self.read_large_file(path, file_size, offset, limit);
         }
 
+        // Normal path: file fits in the byte budget, read it all.
         let raw_bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
@@ -106,12 +118,6 @@ impl Tool for ReadFileTool {
             return ToolResult::success(aish_i18n::t("tools.fs.read_file.empty_file"));
         }
 
-        let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
-        let limit = args
-            .get("limit")
-            .and_then(|l| l.as_u64())
-            .map(|l| l as usize);
-
         if offset >= lines.len() {
             let mut args_map = std::collections::HashMap::new();
             args_map.insert("offset".to_string(), offset.to_string());
@@ -141,6 +147,111 @@ impl Tool for ReadFileTool {
             ToolResult::success(format!("[{}#{}]\n{}", path, tag, body))
         } else {
             ToolResult::success(body)
+        }
+    }
+}
+
+impl ReadFileTool {
+    /// Read a large file by streaming only the requested line range, without
+    /// loading the entire file into memory. Uses `BufReader` + line iteration
+    /// so only the window the model asked for is materialized.
+    fn read_large_file(
+        &self,
+        path: &str,
+        file_size: usize,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> ToolResult {
+        use std::io::BufRead;
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.read_file.read_failed",
+                    &args_map,
+                ));
+            }
+        };
+
+        let reader = std::io::BufReader::new(file);
+        let effective_limit = limit.unwrap_or(DEFAULT_TRUNCATE_LINES);
+
+        // Skip `offset` lines, then collect up to `effective_limit` lines.
+        let mut collected: Vec<String> = Vec::with_capacity(effective_limit);
+        let mut line_no = 0usize;
+        let mut total_lines = 0usize;
+
+        for line_result in reader.lines() {
+            total_lines += 1;
+            if line_no < offset {
+                line_no += 1;
+                continue;
+            }
+            if collected.len() >= effective_limit {
+                // Keep counting lines so we know the total for the notice.
+                continue;
+            }
+            match line_result {
+                Ok(line) => collected.push(format!("{:>6}\t{}", line_no + 1, line)),
+                Err(e) => {
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("path".to_string(), path.to_string());
+                    args_map.insert("error".to_string(), e.to_string());
+                    return ToolResult::error(aish_i18n::t_with_args(
+                        "tools.fs.read_file.decode_failed",
+                        &args_map,
+                    ));
+                }
+            }
+            line_no += 1;
+        }
+
+        if collected.is_empty() {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("offset".to_string(), offset.to_string());
+            args_map.insert("length".to_string(), total_lines.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.read_file.offset_exceeds_length",
+                &args_map,
+            ));
+        }
+
+        let body = collected.join("\n");
+
+        // Build a truncation notice when we didn't return the whole file.
+        let truncated = (offset > 0) || (collected.len() < total_lines);
+        let header = if truncated {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            args_map.insert("size".to_string(), file_size.to_string());
+            args_map.insert("lines".to_string(), total_lines.to_string());
+            args_map.insert("shown".to_string(), collected.len().to_string());
+            args_map.insert("offset".to_string(), offset.to_string());
+            aish_i18n::t_with_args("tools.fs.read_file.large_file_truncated", &args_map)
+        } else {
+            String::new()
+        };
+
+        // Large-file reads are partial windows; a tag computed on the
+        // window would never match the full disk content, making every
+        // subsequent edit_file's is_fresh check fail. Skip tagging (like
+        // omp which omits the header for files > 4 MiB) — the model must
+        // re-read before editing.
+        let tag_suffix = if self.store.is_some() {
+            // Do not record_read for partial content — it would create a
+            // false tag baseline. Just emit a plain header without a tag.
+            format!("[{}]\n", path)
+        } else {
+            String::new()
+        };
+        if truncated {
+            ToolResult::success(format!("{}{}{}", tag_suffix, header, body))
+        } else {
+            ToolResult::success(format!("{}{}", tag_suffix, body))
         }
     }
 }
@@ -255,25 +366,66 @@ mod tests {
     }
 
     #[test]
-    fn test_read_file_size_limit() {
+    fn test_read_file_large_file_truncated_with_notice() {
         aish_i18n::set_locale("en-US");
 
         let dir = temp_dir();
         let file_path = dir.path().join("big.txt");
-        let big_content = "x".repeat(33 * 1024);
+        // Exceed MAX_READ_BYTES (256 KiB) to trigger the large-file path.
+        // 30000 lines × ~20 bytes each ≈ 600 KB.
+        let big_content: String = (0..30000)
+            .map(|i| format!("line_{i:05}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(&file_path, &big_content).unwrap();
-
         let tool = ReadFileTool::new();
         let result = tool.execute(serde_json::json!({
             "path": file_path.to_str().unwrap()
         }));
 
-        assert!(!result.ok);
         assert!(
-            result.output.contains("limit") || result.output.contains("bytes"),
-            "Expected size limit error, got: {}",
+            result.ok,
+            "large file should not be rejected: {}",
             result.output
         );
+        // Default truncation: first 500 lines + a notice.
+        assert!(
+            result.output.contains("line_00000"),
+            "should contain the first line"
+        );
+        assert!(
+            result.output.contains("line_00499"),
+            "should contain line 500 (0-based offset 499)"
+        );
+        assert!(
+            !result.output.contains("line_00500"),
+            "should not contain line 501 — truncated"
+        );
+    }
+
+    #[test]
+    fn test_read_file_large_file_with_offset_and_limit() {
+        aish_i18n::set_locale("en-US");
+
+        let dir = temp_dir();
+        let file_path = dir.path().join("big.txt");
+        let big_content: String = (0..30000)
+            .map(|i| format!("line_{i:05}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file_path, &big_content).unwrap();
+
+        let tool = ReadFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "offset": 1000,
+            "limit": 3
+        }));
+
+        assert!(result.ok);
+        assert!(result.output.contains("line_01000"));
+        assert!(result.output.contains("line_01002"));
+        assert!(!result.output.contains("line_01003"));
     }
 
     #[test]

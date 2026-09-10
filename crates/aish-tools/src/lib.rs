@@ -68,7 +68,9 @@ pub mod undo_edit {
 }
 
 pub mod fs {
+    mod atomic_write;
     mod snapshot_store;
+    pub use self::atomic_write::atomic_write;
     pub use self::snapshot_store::{
         ApplyError, ApplyOutcome, DriftStatus, FileSnapshot, SharedSnapshotStore, SnapshotOp,
         SnapshotStore, SnapshotTag, UndoResult,

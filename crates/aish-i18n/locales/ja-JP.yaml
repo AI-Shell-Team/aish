@@ -984,9 +984,37 @@ security:
 
 tools:
   fs:
+    read_file:
+      missing_path: "'path' パラメータがありません"
+      read_failed: "{path} の読み取りに失敗: {error}"
+      file_too_large: "ファイル {path} は {size} バイトで、{limit} バイトの制限を超えています。edit_file の start_line/end_line で行範囲編集してください。"
+      decode_failed: "{path} の UTF-8 デコードに失敗: {error}"
+      empty_file: "(空のファイル)"
+      offset_exceeds_length: "オフセット {offset} がファイル長({length})を超えています"
+      access_denied: "アクセス拒否: パスが offload ディレクトリ内にありません"
+      large_file_truncated: "\n[... ファイル {path} は {size} バイト / {lines} 行；オフセット {offset} から {shown} 行を表示。offset/limit で続きを読んでください ...]"
     edit_file:
+      missing_path: "'path' パラメータがありません"
+      missing_old_string: "'old_string' パラメータがありません"
+      missing_new_string: "'new_string' パラメータがありません"
+      edit_read_failed: "{path} の読み取りに失敗: {error}"
+      file_too_large: "ファイル {path} は {size} バイトで、{limit} バイトの制限を超えています。start_line/end_line で行範囲編集してください。"
+      old_string_not_found: "{path} に 'old_string' が見つかりません"
+      old_string_ambiguous: "'old_string' が {path} に {count} 回出現します - replace_all=true を使うか、より多くのコンテキストを提供してください"
+      edit_success: "{path} を編集しました"
+      edit_write_failed: "{path} の書き込みに失敗: {error}"
       stale_tag: "ファイル {path} は最後の読み取り以降に変更されました — 編集前に再読み込みしてください"
       invalid_tag: "{path} のスナップショットタグ '{tag}' が無効です"
+      invalid_line_range: "無効な行範囲: start_line={start}, end_line={end}。start_line は >= 1、end_line は start_line 以上である必要があります。"
+      line_range_out_of_bounds: "行範囲の開始 {start} がファイル長({lines} 行)を超えています。ファイル内の start_line を使用してください。"
+    write_file:
+      missing_path: "'path' パラメータがありません"
+      missing_content: "'content' パラメータがありません"
+      content_too_large: "{path} のコンテンツは {size} バイトで、{limit} バイトの制限を超えています"
+      create_dirs_failed: "親ディレクトリの作成に失敗: {error}"
+      write_success: "{bytes} バイトを {path} に書き込みました"
+      write_failed: "{path} の書き込みに失敗: {error}"
+      not_undoable_confirm: "{path} を上書きします：既存の内容のスナップショットを作成できないため、この変更は取り消せません（/undo では復元できません）。続行しますか？"
     undo_edit:
       nothing_to_undo: "元に戻すファイル変更がありません。"
       restored: "{path} を以前の内容に復元しました。"

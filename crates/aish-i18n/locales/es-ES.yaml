@@ -983,9 +983,37 @@ security:
 
 tools:
   fs:
+    read_file:
+      missing_path: "Falta el parámetro 'path'"
+      read_failed: "Error al leer {path}: {error}"
+      file_too_large: "El archivo {path} es de {size} bytes, excede el límite de {limit} bytes. Use edit_file con start_line/end_line para editar por rango de líneas."
+      decode_failed: "Error al decodificar {path} como UTF-8: {error}"
+      empty_file: "(archivo vacío)"
+      offset_exceeds_length: "El offset {offset} excede la longitud del archivo ({length})"
+      access_denied: "Acceso denegado: la ruta no está dentro del directorio offload"
+      large_file_truncated: "\n[... archivo {path} es {size} bytes / {lines} líneas; mostrando {shown} líneas desde offset {offset}. Use offset/limit para leer más ...]"
     edit_file:
+      missing_path: "Falta el parámetro 'path'"
+      missing_old_string: "Falta el parámetro 'old_string'"
+      missing_new_string: "Falta el parámetro 'new_string'"
+      edit_read_failed: "Error al leer {path}: {error}"
+      file_too_large: "El archivo {path} es de {size} bytes, excede el límite de {limit} bytes. Use start_line/end_line para editar por rango."
+      old_string_not_found: "'old_string' no encontrado en {path}"
+      old_string_ambiguous: "'old_string' aparece {count} veces en {path} - use replace_all=true o más contexto"
+      edit_success: "{path} editado"
+      edit_write_failed: "Error al escribir {path}: {error}"
       stale_tag: "El archivo {path} cambió desde la última lectura — reléelo antes de editar"
       invalid_tag: "Etiqueta de instantánea '{tag}' no válida para {path}"
+      invalid_line_range: "Rango de líneas inválido: start_line={start}, end_line={end}. start_line debe ser >= 1 y end_line >= start_line."
+      line_range_out_of_bounds: "El inicio del rango {start} excede la longitud del archivo ({lines} líneas). Use un start_line dentro del archivo."
+    write_file:
+      missing_path: "Falta el parámetro 'path'"
+      missing_content: "Falta el parámetro 'content'"
+      content_too_large: "El contenido para {path} es de {size} bytes, excede el límite de {limit} bytes"
+      create_dirs_failed: "Error al crear directorios padre: {error}"
+      write_success: "{bytes} bytes escritos en {path}"
+      write_failed: "Error al escribir {path}: {error}"
+      not_undoable_confirm: "Sobrescribir {path}: no se puede crear una instantánea del contenido previo, por lo que este cambio NO es deshacible (/undo no podrá restaurarlo). ¿Continuar?"
     undo_edit:
       nothing_to_undo: "No hay cambios de archivos para deshacer."
       restored: "{path} restaurado a su contenido previo."

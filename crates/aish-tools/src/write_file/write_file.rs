@@ -1,12 +1,20 @@
 use std::path::Path;
 
 use aish_i18n;
-use aish_llm::{Tool, ToolResult};
+use aish_llm::{PreflightResult, Tool, ToolResult};
 
 use super::prompt;
-use crate::fs::{SharedSnapshotStore, SnapshotOp, SnapshotTag};
+use crate::fs::{atomic_write, SharedSnapshotStore, SnapshotOp, SnapshotTag};
 
-const MAX_WRITE_BYTES: usize = 32 * 1024;
+/// Upper bound on the total content write_file accepts in a single call.
+/// Files larger than this are rejected to avoid unbounded memory use.
+const MAX_WRITE_BYTES: usize = 256 * 1024; // 256 KiB
+
+/// Upper bound on the prior content stored for /undo rollback. Files whose
+/// existing content exceeds this are still written (up to MAX_WRITE_BYTES)
+/// but are not snapshotted — the overwrite is not undoable, which preflight
+/// surfaces as a confirmation prompt (issue #454).
+const SNAPSHOT_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 /// Write file tool (creates or overwrites).
 pub struct WriteFileTool {
@@ -44,6 +52,37 @@ impl Tool for WriteFileTool {
 
     fn prompt(&self) -> &str {
         prompt::PROMPT
+    }
+
+    /// Overwriting an existing file whose prior content cannot be snapshotted
+    /// (unreadable, or larger than the rollback memory cap) is NOT undoable.
+    /// Require explicit user confirmation BEFORE the write happens, so the
+    /// irreversible action never silently proceeds (issue #454).
+    fn preflight(&self, args: &serde_json::Value) -> PreflightResult {
+        // Without a snapshot store there is no rollback layer at all, so
+        // every overwrite is best-effort; confirm those too.
+        let store_missing = self.store.is_none();
+        let path = match args.get("path").and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => return PreflightResult::Allow,
+        };
+        if !Path::new(path).exists() {
+            return PreflightResult::Allow;
+        }
+        let unundoable = store_missing
+            || match std::fs::read(path) {
+                Err(_) => true,
+                Ok(bytes) => bytes.len() > SNAPSHOT_MAX_BYTES,
+            };
+        if !unundoable {
+            return PreflightResult::Allow;
+        }
+        let mut args_map = std::collections::HashMap::new();
+        args_map.insert("path".to_string(), path.to_string());
+        PreflightResult::Confirm {
+            message: aish_i18n::t_with_args("tools.fs.write_file.not_undoable_confirm", &args_map),
+            security: None,
+        }
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -94,11 +133,11 @@ impl Tool for WriteFileTool {
                     match std::fs::read(path) {
                         Ok(bytes) => {
                             // Cap rollback memory: a prior larger than the
-                            // write budget isn't tracked (mirrors the
-                            // SIZE_LIMIT gate in read_file/edit_file). The
-                            // overwrite still happens; it just isn't
-                            // undoable — same boundary those tools enforce.
-                            if bytes.len() > MAX_WRITE_BYTES {
+                            // snapshot budget isn't tracked. The overwrite
+                            // still happens; it just isn't undoable —
+                            // preflight already surfaced a confirmation
+                            // prompt for this case (issue #454).
+                            if bytes.len() > SNAPSHOT_MAX_BYTES {
                                 (None, true)
                             } else {
                                 (Some(bytes), false)
@@ -110,7 +149,7 @@ impl Tool for WriteFileTool {
             }
             None => (None, false),
         };
-        match std::fs::write(path, content) {
+        match atomic_write(Path::new(path), content.as_bytes()) {
             Ok(()) => {
                 let tag_suffix = if let Some(store) = &self.store {
                     let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
@@ -190,7 +229,7 @@ mod tests {
         let tool = WriteFileTool::new();
         let result = tool.execute(serde_json::json!({
             "path": file_path.to_str().unwrap(),
-            "content": "x".repeat(33 * 1024)
+            "content": "x".repeat(MAX_WRITE_BYTES + 1)
         }));
 
         assert!(!result.ok);
@@ -241,16 +280,16 @@ mod tests {
     }
     #[test]
     fn write_file_oversized_prior_skips_rollback() {
-        // A prior larger than MAX_WRITE_BYTES must not enter history (memory
-        // cap + consistency with read_file/edit_file SIZE_LIMIT). The
-        // overwrite still succeeds; it just isn't undoable.
+        // A prior larger than SNAPSHOT_MAX_BYTES must not enter history
+        // (memory cap). The overwrite still succeeds; it just isn't
+        // undoable — preflight already surfaced a confirmation prompt.
         use std::sync::{Arc, Mutex};
 
         use crate::fs::{SharedSnapshotStore, SnapshotStore};
 
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let f = dir.path().join("big.log");
-        fs::write(&f, "x".repeat(MAX_WRITE_BYTES + 1)).unwrap();
+        fs::write(&f, "x".repeat(SNAPSHOT_MAX_BYTES + 1)).unwrap();
 
         let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
         let tool = WriteFileTool::with_store(store.clone());
@@ -272,5 +311,127 @@ mod tests {
         );
         drop(g);
         assert_eq!(fs::read_to_string(&f).unwrap(), "small");
+    }
+
+    #[test]
+    fn preflight_confirms_oversized_prior_overwrite() {
+        // Issue #454: overwriting an existing file whose prior cannot be
+        // snapshotted must require confirmation BEFORE the write.
+        use aish_llm::PreflightResult;
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+
+        aish_i18n::set_locale("en-US");
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let f = dir.path().join("big.log");
+        fs::write(&f, "x".repeat(SNAPSHOT_MAX_BYTES + 1)).unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        let tool = WriteFileTool::with_store(store);
+        let res = tool.preflight(&serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "content": "small",
+        }));
+        match res {
+            PreflightResult::Confirm { message, .. } => {
+                assert!(message.contains("NOT undoable"), "got: {message}");
+            }
+            other => panic!("expected Confirm, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_confirms_unreadable_prior_overwrite() {
+        // Issue #454 path 2: existing file that cannot be read (e.g. mode
+        // 0o222 — writable but not readable). The snapshot cannot be taken,
+        // so the overwrite is not undoable and must be confirmed first.
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+        use aish_llm::PreflightResult;
+
+        aish_i18n::set_locale("en-US");
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let f = dir.path().join("unreadable.bin");
+        fs::write(&f, "secret").unwrap();
+        // 0o222: writable, NOT readable.
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o222)).unwrap();
+
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        let tool = WriteFileTool::with_store(store);
+        let res = tool.preflight(&serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "content": "new",
+        }));
+        match res {
+            PreflightResult::Confirm { message, .. } => {
+                assert!(message.contains("NOT undoable"), "got: {message}");
+            }
+            other => panic!("expected Confirm for unreadable prior, got {:?}", other),
+        }
+
+        // Restore so tempdir cleanup can remove the file.
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn preflight_confirms_when_no_snapshot_store() {
+        // Issue #454 path 1: no snapshot store injected at all — every
+        // overwrite is best-effort (no /undo), so confirm before overwriting.
+        use aish_llm::PreflightResult;
+
+        aish_i18n::set_locale("en-US");
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let f = dir.path().join("plain.txt");
+        fs::write(&f, "prior").unwrap();
+
+        // WriteFileTool::new() has store = None.
+        let tool = WriteFileTool::new();
+        let res = tool.preflight(&serde_json::json!({
+            "path": f.to_str().unwrap(),
+            "content": "next",
+        }));
+        match res {
+            PreflightResult::Confirm { message, .. } => {
+                assert!(message.contains("NOT undoable"), "got: {message}");
+            }
+            other => panic!("expected Confirm without store, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn preflight_allows_normal_overwrite_and_new_file() {
+        use aish_llm::PreflightResult;
+        use std::sync::{Arc, Mutex};
+
+        use crate::fs::{SharedSnapshotStore, SnapshotStore};
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let store: SharedSnapshotStore = Arc::new(Mutex::new(SnapshotStore::new()));
+        let tool = WriteFileTool::with_store(store);
+
+        // Existing small file (snapshot possible): allow.
+        let small = dir.path().join("small.txt");
+        fs::write(&small, "prior").unwrap();
+        assert!(matches!(
+            tool.preflight(&serde_json::json!({
+                "path": small.to_str().unwrap(),
+                "content": "next",
+            })),
+            PreflightResult::Allow
+        ));
+
+        // New file: allow.
+        let fresh = dir.path().join("fresh.txt");
+        assert!(matches!(
+            tool.preflight(&serde_json::json!({
+                "path": fresh.to_str().unwrap(),
+                "content": "next",
+            })),
+            PreflightResult::Allow
+        ));
     }
 }

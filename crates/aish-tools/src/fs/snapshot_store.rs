@@ -18,6 +18,7 @@
 //! collision chance, so a tag match is necessary but not sufficient — stale
 //! detection is a safety net, never a guarantee.
 
+use super::atomic_write::atomic_write;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -73,6 +74,9 @@ impl FromStr for SnapshotTag {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Accept an optional leading '#' (as it appears in the [path#TAG]
+        // header the model copies from read_file output).
+        let s = s.strip_prefix('#').unwrap_or(s);
         if s.len() != 4 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("expected 4 hex chars, got {:?}", s));
         }
@@ -179,7 +183,7 @@ impl UndoResult {
     pub fn apply_to_disk(&self, tolerate_missing: bool) -> std::io::Result<ApplyOutcome> {
         match &self.content {
             Some(bytes) => {
-                std::fs::write(&self.path, bytes)?;
+                atomic_write(&self.path, bytes)?;
                 Ok(ApplyOutcome::Restored)
             }
             None => match std::fs::remove_file(&self.path) {

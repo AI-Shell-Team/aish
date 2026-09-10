@@ -981,12 +981,39 @@ security:
     preview_paths: "Exemples de chemins (partiels, pouvant inclure des fichiers ou repertoires) : {paths}"
   command_blocked: "Erreur : commande bloquee par le systeme de securite"
   command_blocked_with_reason: "Erreur : commande bloquee par le systeme de securite : {reason}"
-
 tools:
   fs:
+    read_file:
+      missing_path: "Paramètre 'path' manquant"
+      read_failed: "Échec de lecture de {path} : {error}"
+      file_too_large: "Le fichier {path} fait {size} octets, dépassant la limite de {limit} octets. Utilisez edit_file avec start_line/end_line pour éditer par plage de lignes."
+      decode_failed: "Échec de décodage de {path} en UTF-8 : {error}"
+      empty_file: "(fichier vide)"
+      offset_exceeds_length: "L'offset {offset} dépasse la longueur du fichier ({length})"
+      access_denied: "Accès refusé : le chemin n'est pas dans le répertoire offload"
+      large_file_truncated: "\n[... fichier {path} fait {size} octets / {lines} lignes ; affichage de {shown} lignes depuis l'offset {offset}. Utilisez offset/limit pour lire plus ...]"
     edit_file:
+      missing_path: "Paramètre 'path' manquant"
+      missing_old_string: "Paramètre 'old_string' manquant"
+      missing_new_string: "Paramètre 'new_string' manquant"
+      edit_read_failed: "Échec de lecture de {path} : {error}"
+      file_too_large: "Le fichier {path} fait {size} octets, dépassant la limite de {limit} octets. Utilisez start_line/end_line pour éditer par plage."
+      old_string_not_found: "'old_string' introuvable dans {path}"
+      old_string_ambiguous: "'old_string' apparaît {count} fois dans {path} - utilisez replace_all=true ou plus de contexte"
+      edit_success: "{path} modifié"
+      edit_write_failed: "Échec d'écriture de {path} : {error}"
       stale_tag: "Le fichier {path} a changé depuis la dernière lecture — relisez-le avant de modifier"
       invalid_tag: "Étiquette d'instantané '{tag}' invalide pour {path}"
+      invalid_line_range: "Plage de lignes invalide : start_line={start}, end_line={end}. start_line doit être >= 1 et end_line >= start_line."
+      line_range_out_of_bounds: "Le début de plage {start} dépasse la longueur du fichier ({lines} lignes). Utilisez un start_line dans le fichier."
+    write_file:
+      missing_path: "Paramètre 'path' manquant"
+      missing_content: "Paramètre 'content' manquant"
+      content_too_large: "Le contenu pour {path} fait {size} octets, dépassant la limite de {limit} octets"
+      create_dirs_failed: "Échec de création des répertoires parents : {error}"
+      write_success: "{bytes} octets écrits dans {path}"
+      write_failed: "Échec d'écriture de {path} : {error}"
+      not_undoable_confirm: "Écraser {path} : impossible de sauvegarder le contenu précédent, cette modification est IRREVERSIBLE (/undo ne pourra pas la restaurer). Continuer ?"
     undo_edit:
       nothing_to_undo: "Aucune modification de fichier à annuler."
       restored: "{path} restauré à son contenu précédent."
