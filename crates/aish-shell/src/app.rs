@@ -4433,11 +4433,16 @@ impl AishShell {
             #[cfg(unix)]
             {
                 use std::io::Write;
-                use std::os::unix::fs::PermissionsExt;
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
                 std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(true)
+                    // `mode(0o600)` makes a *newly created* file owner-only
+                    // at creation (no window where the umask default leaks
+                    // in); `set_permissions` below handles the pre-existing
+                    // file case, which `mode()` alone never touches.
+                    .mode(0o600)
                     .open(&fname)
                     .and_then(|mut f| {
                         // `OpenOptions::mode()` only applies when this call
