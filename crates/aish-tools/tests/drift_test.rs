@@ -243,22 +243,23 @@ fn issue_466_rollback_partial_failure_reporting() {
     let actions = store.lock().unwrap().peek_restore(id1).unwrap();
     assert_eq!(actions.len(), 2);
     // peek_restore returns newest-first: [delete f2, restore f1]. Reverse so
-    // the f1 restore runs first (succeeds), then the f2 delete fails — the
-    // same mid-batch failure shape the /rollback loop reports on.
+    // the f1 restore runs first, then the f2 delete fails — the same
+    // mid-batch failure shape the /rollback loop reports on.
     let ordered: Vec<_> = actions.iter().rev().collect();
-
-    // Make the directory read-only AFTER creating both files: writing f1
-    // back still succeeds (file already exists, dir write permission not
-    // needed for an in-place write), but deleting f2 requires directory
-    // write permission and fails with EACCES.
-    let mut perms = fs::metadata(dir.path()).unwrap().permissions();
-    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
-    fs::set_permissions(dir.path(), perms).unwrap();
 
     let mut success_count = 0usize;
     let mut all_ok = true;
     let mut last_msg = String::new();
-    for action in &ordered {
+    for (i, action) in ordered.iter().enumerate() {
+        // Lock the directory after the first action succeeded: the restore
+        // of f1 is an atomic replace (temp file in the same dir), so it
+        // needs a writable directory — it must run while writable. The f2
+        // delete then fails with EACCES in the read-only dir.
+        if i == 1 {
+            let mut perms = fs::metadata(dir.path()).unwrap().permissions();
+            std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+            fs::set_permissions(dir.path(), perms).unwrap();
+        }
         let (ok, msg) = apply_restore_action(action, true, true);
         if ok {
             success_count += 1;
@@ -277,10 +278,10 @@ fn issue_466_rollback_partial_failure_reporting() {
     assert!(!all_ok, "second action (delete in read-only dir) must fail");
     assert_eq!(success_count, 1, "exactly one action succeeded");
     assert!(!last_msg.is_empty(), "failure message must be reported");
-    // The failed delete must not have removed the file.
-    assert!(f2.exists(), "f2 must still exist after failed delete");
     // The succeeded restore wrote f1's prior content back.
     assert_eq!(fs::read_to_string(&f1).unwrap(), "orig1");
+    // The failed delete must not have removed the file.
+    assert!(f2.exists(), "f2 must still exist after failed delete");
 }
 
 /// Mirror of apply_restore_action from app.rs for testing.

@@ -231,6 +231,112 @@ fn substitute_placeholders(template: &str, args: &HashMap<String, String>) -> St
     result
 }
 
+/// Extract every literal i18n key referenced through `t("…")` /
+/// `t_with_args("…")` from the workspace's Rust sources. Used by the
+/// completeness guard test below so a key added in code but missing from
+/// the locale files fails CI instead of rendering as a raw dotted key in
+/// the UI.
+#[cfg(test)]
+fn scan_source_i18n_keys() -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let crates_dir = std::path::Path::new(manifest)
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crates dir")
+        .join("crates");
+    let mut stack = vec![crates_dir];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip generated/legacy trees that never touch aish_i18n.
+                if path.ends_with("target") || path.ends_with("src/aish") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            // Only the crate's free functions with a string-literal first
+            // argument count. Matching the `aish_i18n::` qualifier avoids
+            // false positives from arbitrary text containing `t(` inside
+            // string literals (URLs, file names, prose).
+            let mut rest = source.as_str();
+            while let Some(pos) = rest.find("aish_i18n::t") {
+                let after = &rest[pos + "aish_i18n::t".len()..];
+                let call = if after.starts_with("_with_args(") {
+                    "_with_args("
+                } else if after.starts_with('(') {
+                    "("
+                } else {
+                    rest = &rest[pos + 1..];
+                    continue;
+                };
+                if let Some(value) = after[call.len()..].trim_start().strip_prefix('"') {
+                    if let Some(end) = value.find('"') {
+                        let key = &value[..end];
+                        if key.contains('.') {
+                            keys.insert(key.to_string());
+                        }
+                    }
+                }
+                rest = &rest[pos + "aish_i18n::t".len()..];
+            }
+        }
+    }
+    keys
+}
+
+#[cfg(test)]
+mod completeness_guard {
+    //! Auto-scanning guard: every i18n key referenced by workspace source
+    //! must exist in every embedded locale. Replaces hand-maintained key
+    //! lists that went stale (stale_tag, not_undoable_confirm).
+
+    use super::*;
+
+    #[test]
+    fn every_source_referenced_key_exists_in_all_embedded_locales() {
+        let keys = scan_source_i18n_keys();
+        assert!(
+            keys.len() > 100,
+            "scanner found only {} keys — workspace source layout changed?",
+            keys.len()
+        );
+        // Full coverage is enforced for en-US and zh-CN. de-DE/es-ES/fr-FR
+        // and ja-JP carry a large historical debt (~60 keys each) tracked in
+        // issue #524; extending full coverage there is a follow-up.
+        let full_coverage: &[&str] = &["en-US", "zh-CN"];
+        let mut missing: Vec<String> = Vec::new();
+        for &(tag, yaml) in EMBEDDED_LOCALES {
+            let translations = parse_yaml(yaml);
+            for key in &keys {
+                if !translations.contains_key(key) {
+                    missing.push(format!("{tag}: {key}"));
+                }
+            }
+        }
+        missing.retain(|entry| {
+            let tag = entry.split(':').next().unwrap_or("");
+            full_coverage.contains(&tag)
+        });
+        assert!(
+            missing.is_empty(),
+            "i18n keys referenced in source but missing from embedded locales:\n{}",
+            missing.join("\n")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

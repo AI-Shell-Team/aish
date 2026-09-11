@@ -18,6 +18,7 @@
 //! collision chance, so a tag match is necessary but not sufficient — stale
 //! detection is a safety net, never a guarantee.
 
+use super::atomic_write::atomic_write;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,38 @@ use std::time::SystemTime;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SnapshotTag(u16);
 
+/// FNV-1a 64-bit constants shared by the batch and streaming tag hashes.
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+/// Incremental FNV-1a 64-bit hasher over arbitrarily large byte streams so a
+/// multi-gigabyte file can be hashed without materializing it in memory.
+pub struct StreamingTagHasher {
+    hash: u64,
+}
+impl StreamingTagHasher {
+    pub fn new() -> Self {
+        Self {
+            hash: FNV_OFFSET_BASIS,
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.hash ^= byte as u64;
+            self.hash = self.hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+
+    pub fn finalize(self) -> SnapshotTag {
+        let mut hash = self.hash;
+        // Same avalanche finalizer as [`SnapshotTag::from_bytes`].
+        hash ^= hash >> 33;
+        hash = hash.wrapping_mul(0xff51afd7ed558ccd);
+        hash ^= hash >> 33;
+        SnapshotTag(hash as u16)
+    }
+}
 impl SnapshotTag {
     /// Compute a tag from text content (UTF-8). Delegates to [`from_bytes`].
     ///
@@ -43,10 +76,10 @@ impl SnapshotTag {
     /// Compute a tag from raw bytes. Works for binary files (non-UTF-8) so
     /// rollback tags stay stable regardless of content type.
     pub fn from_bytes(content: &[u8]) -> Self {
-        let mut hash: u64 = 0xcbf29ce484222325;
+        let mut hash: u64 = FNV_OFFSET_BASIS;
         for &byte in content {
             hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
+            hash = hash.wrapping_mul(FNV_PRIME);
         }
         // Avalanche finalizer (murmur3-style) so every bit reacts to small
         // input changes. Plain FNV-1a leaves high bits insensitive to single-
@@ -73,6 +106,9 @@ impl FromStr for SnapshotTag {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Accept an optional leading '#' (as it appears in the [path#TAG]
+        // header the model copies from read_file output).
+        let s = s.strip_prefix('#').unwrap_or(s);
         if s.len() != 4 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(format!("expected 4 hex chars, got {:?}", s));
         }
@@ -179,7 +215,7 @@ impl UndoResult {
     pub fn apply_to_disk(&self, tolerate_missing: bool) -> std::io::Result<ApplyOutcome> {
         match &self.content {
             Some(bytes) => {
-                std::fs::write(&self.path, bytes)?;
+                atomic_write(&self.path, bytes)?;
                 Ok(ApplyOutcome::Restored)
             }
             None => match std::fs::remove_file(&self.path) {
@@ -277,6 +313,24 @@ impl SnapshotStore {
         let tag = SnapshotTag::from_content(content);
         self.tags.insert(key, tag);
         tag
+    }
+
+    /// Remember a tag that was computed incrementally (e.g. by hashing a
+    /// large file in a streaming pass) and return it.
+    pub fn record_tag(&mut self, path: &Path, tag: SnapshotTag) -> SnapshotTag {
+        let key = normalize_path(path);
+        self.tags.insert(key, tag);
+        tag
+    }
+
+    /// Whether the precomputed tag of the on-disk content still matches the
+    /// tag last recorded for `path`. Streaming counterpart of [`Self::is_fresh`]
+    /// for files too large to load into a `String`.
+    pub fn is_fresh_tag(&self, path: &Path, disk_tag: SnapshotTag) -> bool {
+        match self.tags.get(&normalize_path(path)) {
+            Some(remembered) => disk_tag == *remembered,
+            None => true,
+        }
     }
 
     /// Latest tag remembered for a path (from a prior read/edit/write).

@@ -8,7 +8,12 @@ Usage:
 - Use offset and limit when you only need part of a larger file.
 - Offset is a 0-based index; results display 1-based line numbers.
 - Output begins with a [path#TAG] header; pass that TAG to edit_file's tag
-  param so edits are rejected if the file changed since you read it."#;
+  param so edits are rejected if the file changed since you read it.
+- Files larger than 256 KiB are NOT rejected. Instead, a bounded window of
+  lines is returned (default 500 lines from the start, or the range you
+  specify with offset/limit). The output notes the total line count and
+  how to read more with offset. Large-file output has NO tag — do not pass
+  a `tag` argument to edit_file for these files."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({
