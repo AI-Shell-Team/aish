@@ -4238,14 +4238,20 @@ impl AishShell {
         }
     }
 
-    /// `/export [md]` — export the current session (AI conversation + command
-    /// history) to a Markdown file for postmortem or sharing.
+    /// `/export [md] [--raw]` — export the current session (AI conversation
+    /// + command history) to a Markdown file for postmortem or sharing.
+    ///
+    /// Default behavior is safe-by-default: all content passes the Secret
+    /// Scanner before writing, a preview (path, message/command counts,
+    /// redaction hits) is shown and must be confirmed, and the artifact
+    /// embeds a machine-readable `redacted:` marker. `--raw` skips
+    /// redaction but always requires an explicit high-risk confirmation —
+    /// it cannot be pre-approved or remembered.
     fn handle_export_command(&self, parts: &[&str]) {
-        let format = parts.get(1).copied().unwrap_or("md");
-        if format != "md" && format != "markdown" {
+        let Some(opts) = parse_export_args(parts) else {
             eprintln!("{}", t("shell.export.usage"));
             return;
-        }
+        };
         let Some(store) = self.session_store.as_ref() else {
             eprintln!("{}", t("shell.export.store_unavailable"));
             return;
@@ -4287,8 +4293,83 @@ impl AishShell {
         };
         let snap = record.state_snapshot();
 
+        // Scan and (by default) redact every exportable chunk. `--raw`
+        // skips this, but only after the high-risk confirmation below.
+        let redact_enabled = !opts.raw;
+        let sections = build_redacted_export_sections(
+            &snap.context_messages_snapshot,
+            &history,
+            self.security_manager.secret_scanner(),
+            redact_enabled,
+        );
+
+        // High-risk confirmation for raw export. Deliberately uses the
+        // per-call confirm dialog so "remember this session/choice" paths
+        // can never pre-approve it (issue #467).
+        if opts.raw {
+            let warn = t_with_args("shell.export.raw_warning", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert(
+                    "msgs".to_string(),
+                    snap.context_messages_snapshot.len().to_string(),
+                );
+                args.insert("cmds".to_string(), history.len().to_string());
+                args
+            });
+            if !Self::confirm_action(&warn, &t("shell.export.raw_confirm")) {
+                eprintln!("{}", t("shell.export.cancelled"));
+                return;
+            }
+        }
+
+        // Preview before writing: target path, content counts, redaction
+        // hits, and embedded metadata. Anything sensitive refused → cancel.
+        let fname = format!("aish-session-{}.md", &uuid[..8.min(uuid.len())]);
+        let preview = t_with_args("shell.export.preview", &{
+            let mut args = std::collections::HashMap::new();
+            args.insert("file".to_string(), fname.clone());
+            args.insert(
+                "msgs".to_string(),
+                snap.context_messages_snapshot.len().to_string(),
+            );
+            args.insert("cmds".to_string(), history.len().to_string());
+            // Raw mode skips the scanner entirely, so a literal "0" would
+            // falsely imply the content was scanned and found clean.
+            args.insert(
+                "hits".to_string(),
+                if redact_enabled {
+                    sections.total_hits.to_string()
+                } else {
+                    t("shell.export.not_scanned")
+                },
+            );
+            args
+        });
+        let hits_note = if redact_enabled && sections.total_hits > 0 {
+            t_with_args("shell.export.preview_hits", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("hits".to_string(), sections.total_hits.to_string());
+                args
+            })
+        } else {
+            String::new()
+        };
+        eprintln!("{preview}");
+        if !hits_note.is_empty() {
+            eprintln!("{}", theme::warning(&hits_note));
+        }
+        let confirm_label = t("shell.export.confirm");
+        if !Self::confirm_action(&confirm_label, "") {
+            eprintln!("{}", t("shell.export.cancelled"));
+            return;
+        }
+
         let mut md = String::new();
         md.push_str(&format!("{}\n\n", t("shell.export.md_header")));
+        // Machine-readable marker so receivers can tell redacted exports
+        // from raw ones (issue #467).
+        md.push_str(&export_redaction_banner(redact_enabled));
+        md.push('\n');
         md.push_str(&format!(
             "{}\n",
             t_with_args("shell.export.session_label", &{
@@ -4341,48 +4422,32 @@ impl AishShell {
         }
 
         md.push_str(&format!("\n{}\n\n", t("shell.export.conversation_header")));
-        for msg in &snap.context_messages_snapshot {
-            let role = match msg.role.as_str() {
-                "user" => "User",
-                "assistant" => "Assistant",
-                "system" => "System",
-                other => other,
-            };
-            md.push_str(&format!("**{}**\n\n{}\n\n", role, msg.content));
-        }
+        md.push_str(&sections.conversation_md);
 
         md.push_str(&format!("\n{}\n\n", t("shell.export.history_header")));
-        md.push_str("| # | source | rc | command |\n|---|---|---|---|\n");
-        for (i, entry) in history.iter().enumerate() {
-            let cmd = entry
-                .command
-                .replace('|', "\\|")
-                .replace('\n', " ")
-                .replace('`', "\\`");
-            let rc = entry
-                .returncode
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".into());
-            md.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
-                i + 1,
-                entry.source,
-                rc,
-                cmd
-            ));
-        }
+        md.push_str(&sections.history_md);
 
-        let fname = format!("aish-session-{}.md", &uuid[..8.min(uuid.len())]);
-        match std::fs::write(&fname, &md) {
+        // Owner-only from the moment of creation: the archive contains the
+        // full conversation and command history, so the file must never be
+        // briefly world-readable between write and chmod (race window).
+        let write_result = {
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&fname)
+                    .and_then(|mut f| f.write_all(md.as_bytes()))
+            }
+            #[cfg(not(unix))]
+            std::fs::write(&fname, &md)
+        };
+        match write_result {
             Ok(_) => {
-                // Owner-only: the archive contains the full conversation and
-                // raw command history, so restrict it regardless of umask.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(&fname, std::fs::Permissions::from_mode(0o600));
-                }
                 println!(
                     "\x1b[32m{}\x1b[0m",
                     t_with_args("shell.export.exported", &{
@@ -12236,6 +12301,115 @@ fn format_age(secs: u64) -> String {
     }
 }
 
+/// Parsed `/export` invocation.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ExportOptions {
+    /// Raw mode: skip redaction (requires explicit confirmation at runtime).
+    pub raw: bool,
+}
+
+/// Strict `/export` argument parser.
+///
+/// Returns `Ok(None)` when usage help should be printed (`--help`, `-h`, or
+/// any invalid input). `--raw` opts out of secret redaction and must never
+/// be enabled implicitly.
+pub(crate) fn parse_export_args(parts: &[&str]) -> Option<ExportOptions> {
+    let mut opts = ExportOptions { raw: false };
+    for &arg in parts.iter().skip(1) {
+        match arg {
+            "--help" | "-h" => return None,
+            "--raw" => opts.raw = true,
+            "md" | "markdown" => {}
+            _ => return None,
+        }
+    }
+    Some(opts)
+}
+
+/// Result of redacting every exportable chunk of the current session.
+pub(crate) struct RedactedExportContent {
+    pub conversation_md: String,
+    pub history_md: String,
+    pub total_hits: usize,
+}
+
+/// Build the redacted conversation and command-history Markdown sections.
+///
+/// This is the pure core of `handle_export_command`, kept free of I/O so
+/// unit tests can assert redaction behavior without a session store.
+pub(crate) fn build_redacted_export_sections(
+    context_messages: &[aish_session::SessionContextMessage],
+    history: &[aish_session::HistoryEntry],
+    scanner: &aish_security::secret::SecretScanner,
+    redacted: bool,
+) -> RedactedExportContent {
+    let redact = |text: &str| -> (String, usize) {
+        if redacted {
+            aish_security::secret::redact_secrets_with_hits(text, scanner)
+        } else {
+            (text.to_string(), 0)
+        }
+    };
+
+    let mut conversation_md = String::new();
+    let mut total_hits = 0usize;
+    for msg in context_messages {
+        let role = match msg.role.as_str() {
+            "user" => "User",
+            "assistant" => "Assistant",
+            "system" => "System",
+            other => other,
+        };
+        let (content, hits) = redact(&msg.content);
+        total_hits += hits;
+        conversation_md.push_str(&format!("**{role}**\n\n{content}\n\n"));
+    }
+
+    let mut history_md = String::new();
+    history_md.push_str("| # | source | rc | command |\n|---|---|---|---|\n");
+    for (i, entry) in history.iter().enumerate() {
+        let (cmd, hits) = redact(
+            &entry
+                .command
+                .replace('|', "\\|")
+                .replace('\n', " ")
+                .replace('`', "\\`"),
+        );
+        total_hits += hits;
+        let rc = entry
+            .returncode
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".into());
+        history_md.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            i + 1,
+            entry.source,
+            rc,
+            cmd
+        ));
+    }
+
+    RedactedExportContent {
+        conversation_md,
+        history_md,
+        total_hits,
+    }
+}
+
+/// Machine-readable redaction banner lines embedded right after the export
+/// header so receivers can programmatically tell a redacted export from a
+/// raw one.
+pub(crate) fn export_redaction_banner(redacted: bool) -> String {
+    if redacted {
+        format!(
+            "redacted: true\nredaction_rules: aish-secret-scanner {}\n",
+            aish_security::secret::REDACTION_RULES_VERSION
+        )
+    } else {
+        "redacted: false\n".to_string()
+    }
+}
+
 /// Strict argument parser shared by `/audit` and `/audit export`.
 ///
 /// `start` is the index of the first flag token (1 for `/audit`, 2 for
@@ -13179,5 +13353,134 @@ mod audit_args_tests {
         }
         // The summary must contain the count placeholder.
         assert!(mgr.t("shell.audit.summary").contains("{count}"));
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::{build_redacted_export_sections, export_redaction_banner, parse_export_args};
+    use aish_security::secret::SecretScanner;
+
+    fn session_entry(command: &str) -> aish_session::HistoryEntry {
+        aish_session::HistoryEntry {
+            id: None,
+            session_uuid: "u".into(),
+            command: command.into(),
+            source: "user".into(),
+            returncode: Some(0),
+            stdout: None,
+            stderr: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_args() {
+        assert!(parse_export_args(&["/export"]).is_some());
+        assert!(parse_export_args(&["/export", "md"]).is_some());
+        assert!(parse_export_args(&["/export", "markdown"]).is_some());
+        assert!(parse_export_args(&["/export", "json"]).is_none());
+        assert!(parse_export_args(&["/export", "--rawx"]).is_none());
+        assert!(parse_export_args(&["/export", "--help"]).is_none());
+    }
+
+    #[test]
+    fn parse_raw_flag() {
+        assert!(parse_export_args(&["/export", "--raw"]).unwrap().raw);
+        assert!(!parse_export_args(&["/export"]).unwrap().raw);
+    }
+
+    #[test]
+    fn redaction_replaces_secrets_in_conversation_and_history() {
+        let scanner = SecretScanner::new(&[]);
+        let msg = aish_session::SessionContextMessage {
+            role: "user".into(),
+            content: "my key is sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            memory_type: aish_core::MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
+        };
+        let history = vec![session_entry(
+            "curl -H 'Authorization: Bearer sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+        )];
+        let sections = build_redacted_export_sections(&[msg], &history, &scanner, true);
+        assert!(!sections.conversation_md.contains("sk-aaaa"));
+        assert!(sections.conversation_md.contains("[REDACTED:"));
+        assert!(!sections.history_md.contains("sk-aaaa"));
+        assert!(sections.history_md.contains("[REDACTED:"));
+        assert_eq!(sections.total_hits, 2);
+    }
+
+    #[test]
+    fn raw_mode_keeps_content_verbatim() {
+        let scanner = SecretScanner::new(&[]);
+        let secret = "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let history = vec![session_entry(&format!("echo {secret}"))];
+        let sections = build_redacted_export_sections(&[], &history, &scanner, false);
+        assert!(sections.history_md.contains(secret));
+        assert_eq!(sections.total_hits, 0);
+    }
+
+    #[test]
+    fn clean_content_reports_zero_hits() {
+        let scanner = SecretScanner::new(&[]);
+        let history = vec![session_entry("ls -la /tmp")];
+        let sections = build_redacted_export_sections(&[], &history, &scanner, true);
+        assert_eq!(sections.total_hits, 0);
+        assert!(sections.history_md.contains("ls -la /tmp"));
+    }
+
+    #[test]
+    fn banner_marks_redacted_exports_with_rules_version() {
+        let redacted = export_redaction_banner(true);
+        assert!(redacted.contains("redacted: true"));
+        assert!(redacted.contains("aish-secret-scanner v"));
+        assert_eq!(export_redaction_banner(false), "redacted: false\n");
+    }
+
+    #[test]
+    fn export_i18n_keys_exist_in_all_embedded_locales() {
+        // Regression guard in the spirit of #469: every user-visible /export
+        // string must be translated in every embedded locale, not fall back
+        // to the raw dotted key.
+        let keys = [
+            "shell.export.md_header",
+            "shell.export.session_label",
+            "shell.export.model_label",
+            "shell.export.api_base_label",
+            "shell.export.created_label",
+            "shell.export.working_dir",
+            "shell.export.conversation_header",
+            "shell.export.history_header",
+            "shell.export.exported",
+            "shell.export.write_failed",
+            "shell.export.usage",
+            "shell.export.store_unavailable",
+            "shell.export.not_found",
+            "shell.export.load_failed",
+            "shell.export.raw_warning",
+            "shell.export.raw_confirm",
+            "shell.export.preview",
+            "shell.export.preview_hits",
+            "shell.export.not_scanned",
+            "shell.export.confirm",
+            "shell.export.cancelled",
+        ];
+        for tag in ["en-US", "zh-CN", "ja-JP", "de-DE", "es-ES", "fr-FR"] {
+            let mgr = aish_i18n::I18nManager::new_with_locale(tag);
+            for key in keys {
+                let val = mgr.t(key);
+                assert_ne!(val, key, "locale {tag} is missing key {key}");
+            }
+        }
+        // Placeholders the shell interpolates must survive translation.
+        assert!(mgr_placeholder_check("shell.export.preview", "hits"));
+    }
+
+    fn mgr_placeholder_check(key: &str, placeholder: &str) -> bool {
+        let mgr = aish_i18n::I18nManager::new_with_locale("en-US");
+        mgr.t(key).contains(&format!("{{{placeholder}}}"))
     }
 }
