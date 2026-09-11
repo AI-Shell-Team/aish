@@ -70,9 +70,14 @@ impl Tool for WriteFileTool {
             return PreflightResult::Allow;
         }
         let unundoable = store_missing
-            || match std::fs::read(path) {
+            || match std::fs::metadata(path) {
                 Err(_) => true,
-                Ok(bytes) => bytes.len() > SNAPSHOT_MAX_BYTES,
+                Ok(md) => {
+                    md.len() > SNAPSHOT_MAX_BYTES as u64
+                        // Within budget: verify readability without loading
+                        // the whole prior into memory.
+                        || std::fs::File::open(path).is_err()
+                }
             };
         if !unundoable {
             return PreflightResult::Allow;
@@ -166,8 +171,10 @@ impl Tool for WriteFileTool {
                     // and /rollback cannot bring the old content back.
                     if skip_rollback {
                         format!(
-                            "\n[{}#{}] (not undoable: prior content unavailable)",
-                            path, new_tag
+                            "\n[{}#{}]{}",
+                            path,
+                            new_tag,
+                            aish_i18n::t("tools.fs.write_file.not_undoable_suffix")
                         )
                     } else {
                         format!("\n[{}#{}]", path, new_tag)

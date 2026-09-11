@@ -1,8 +1,12 @@
 use aish_i18n;
-use aish_llm::{Tool, ToolResult};
+use aish_llm::{PreflightResult, Tool, ToolResult};
 
 use super::prompt;
-use crate::fs::{atomic_write, SharedSnapshotStore, SnapshotOp, SnapshotTag};
+use crate::fs::{
+    atomic_write, atomic_write_splice, read_window, SharedSnapshotStore, SnapshotOp, SnapshotTag,
+    StreamingTagHasher,
+};
+use std::io::Read;
 use std::path::Path;
 
 /// Upper bound on file size for the full-file edit path. Larger files are
@@ -50,6 +54,40 @@ impl Tool for EditFileTool {
 
     fn prompt(&self) -> &str {
         prompt::PROMPT
+    }
+
+    /// Editing a file whose prior content cannot be snapshotted (store
+    /// missing, unreadable prior, or prior larger than the rollback memory
+    /// cap) is NOT undoable. Require explicit user confirmation BEFORE the
+    /// edit happens, mirroring write_file (issue #454). Files within the
+    /// snapshot budget keep silent undoable edits.
+    fn preflight(&self, args: &serde_json::Value) -> PreflightResult {
+        // Without a snapshot store there is no rollback layer at all, so
+        // every edit is best-effort; confirm those too.
+        if self.store.is_none() {
+            return Self::not_undoable_confirm(args);
+        }
+        let path = match args.get("path").and_then(|p| p.as_str()) {
+            Some(p) => p,
+            None => return PreflightResult::Allow,
+        };
+        if !Path::new(path).exists() {
+            return PreflightResult::Allow;
+        }
+        let unundoable = match std::fs::metadata(path) {
+            Err(_) => true,
+            Ok(md) => {
+                md.len() > SNAPSHOT_MAX_BYTES as u64
+                    // Within budget: verify readability without loading the
+                    // whole prior into memory.
+                    || std::fs::File::open(path).is_err()
+            }
+        };
+        if unundoable {
+            Self::not_undoable_confirm(args)
+        } else {
+            PreflightResult::Allow
+        }
     }
 
     fn execute(&self, args: serde_json::Value) -> ToolResult {
@@ -185,12 +223,19 @@ impl Tool for EditFileTool {
 }
 
 impl EditFileTool {
-    /// Line-range edit: confine the `old_string` replacement to lines
-    /// `start..=end` (1-based, inclusive) and splice the result back into
-    /// the full file content. The window is located by byte offsets in the
-    /// original text, so line endings (LF or CRLF) and the final trailing
-    /// newline are preserved exactly, and the full prior content stays
-    /// available for both drift detection and /undo.
+    fn not_undoable_confirm(args: &serde_json::Value) -> PreflightResult {
+        let path = args
+            .get("path")
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
+        let mut args_map = std::collections::HashMap::new();
+        args_map.insert("path".to_string(), path.to_string());
+        PreflightResult::Confirm {
+            message: aish_i18n::t_with_args("tools.fs.edit_file.not_undoable_confirm", &args_map),
+            security: None,
+        }
+    }
+
     fn edit_line_range(
         &self,
         path: &str,
@@ -211,8 +256,103 @@ impl EditFileTool {
             ));
         }
 
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
+        // Pass 1: stream the file once, tracking line terminator offsets,
+        // the total line count and the content hash. The window spans
+        // [window_start, window_end) with terminators excluded, so the
+        // spliced result never touches line endings or the final newline.
+        let mut hasher = StreamingTagHasher::new();
+        let mut nl_offsets: Vec<u64> = Vec::new();
+        let mut file_len = 0u64;
+        {
+            let mut src = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(e) => {
+                    let mut args_map = std::collections::HashMap::new();
+                    args_map.insert("path".to_string(), path.to_string());
+                    args_map.insert("error".to_string(), e.to_string());
+                    return ToolResult::error(aish_i18n::t_with_args(
+                        "tools.fs.edit_file.edit_read_failed",
+                        &args_map,
+                    ));
+                }
+            };
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                match src.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        hasher.update(&buf[..n]);
+                        for (i, b) in buf[..n].iter().enumerate() {
+                            if *b == b'\n' {
+                                nl_offsets.push(file_len + i as u64);
+                            }
+                        }
+                        file_len += n as u64;
+                    }
+                    Err(e) => {
+                        let mut args_map = std::collections::HashMap::new();
+                        args_map.insert("path".to_string(), path.to_string());
+                        args_map.insert("error".to_string(), e.to_string());
+                        return ToolResult::error(aish_i18n::t_with_args(
+                            "tools.fs.edit_file.edit_read_failed",
+                            &args_map,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let ends_with_newline = file_len > 0 && nl_offsets.last() == Some(&(file_len - 1));
+        let total_lines = if file_len == 0 {
+            0
+        } else if ends_with_newline {
+            nl_offsets.len() as u64
+        } else {
+            nl_offsets.len() as u64 + 1
+        };
+        if start > total_lines {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("start".to_string(), start.to_string());
+            args_map.insert("lines".to_string(), total_lines.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.fs.edit_file.line_range_out_of_bounds",
+                &args_map,
+            ));
+        }
+
+        let end_idx = end.min(total_lines);
+        let window_start = if start == 1 {
+            0
+        } else {
+            nl_offsets[(start - 2) as usize] + 1
+        };
+        let window_end = if end_idx >= total_lines {
+            // Last line: exclude its terminator when the file ends with
+            // '\n' so the final newline is never touched by the edit.
+            if ends_with_newline {
+                nl_offsets[(total_lines - 1) as usize]
+            } else {
+                file_len
+            }
+        } else {
+            nl_offsets[(end_idx - 1) as usize]
+        };
+
+        // Read only the window (bounded by the replacement, not the file).
+        let window = match read_window(Path::new(path), window_start, window_end) {
+            Ok(w) => w,
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                return ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.edit_read_failed",
+                    &args_map,
+                ));
+            }
+        };
+        let window = match String::from_utf8(window) {
+            Ok(s) => s,
             Err(e) => {
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("path".to_string(), path.to_string());
@@ -224,49 +364,7 @@ impl EditFileTool {
             }
         };
 
-        // Byte offsets of every '\n' terminator. Line k (1-based) spans
-        // [start_k, end_k) where start_k = previous terminator + 1 and
-        // end_k = position of its own terminator (or EOF for the last line
-        // when the file does not end with '\n').
-        let nl: Vec<usize> = content.match_indices('\n').map(|(i, _)| i).collect();
-        let total_lines = if content.is_empty() {
-            0
-        } else if content.ends_with('\n') {
-            nl.len()
-        } else {
-            nl.len() + 1
-        };
-        if start as usize > total_lines {
-            let mut args_map = std::collections::HashMap::new();
-            args_map.insert("start".to_string(), start.to_string());
-            args_map.insert("lines".to_string(), total_lines.to_string());
-            return ToolResult::error(aish_i18n::t_with_args(
-                "tools.fs.edit_file.line_range_out_of_bounds",
-                &args_map,
-            ));
-        }
-
-        let start_idx = start as usize;
-        let end_idx = (end as usize).min(total_lines);
-        let window_start = if start_idx == 1 {
-            0
-        } else {
-            nl[start_idx - 2] + 1
-        };
-        let window_end = if end_idx >= total_lines {
-            // Last line: exclude its terminator when the file ends with
-            // '\n' so the final newline is never touched by the edit.
-            if content.ends_with('\n') {
-                nl[total_lines - 1]
-            } else {
-                content.len()
-            }
-        } else {
-            nl[end_idx - 1]
-        };
-
         // Apply the replacement within the window only.
-        let window = &content[window_start..window_end];
         let count = window.matches(old).count();
         if count == 0 {
             let mut args_map = std::collections::HashMap::new();
@@ -290,22 +388,17 @@ impl EditFileTool {
         } else {
             window.replacen(old, new, 1)
         };
-        let new_content = format!(
-            "{}{}{}",
-            &content[..window_start],
-            new_window,
-            &content[window_end..]
-        );
 
         // Drift enforcement (same as the full-file path): if this file was
-        // observed before, the on-disk content must still match the
+        // observed before, the streamed content hash must still match the
         // remembered tag; a mismatch means it drifted since the model last
         // saw it, so reject and force a re-read.
+        let disk_tag = hasher.finalize();
         if let Some(store) = &self.store {
             let fresh = store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .is_fresh(Path::new(path), &content);
+                .is_fresh_tag(Path::new(path), disk_tag);
             if !fresh {
                 let mut args_map = std::collections::HashMap::new();
                 args_map.insert("path".to_string(), path.to_string());
@@ -329,12 +422,74 @@ impl EditFileTool {
             }
         }
 
-        self.write_and_record(path, content, new_content)
+        // Capture the full prior content for /undo when the file is small
+        // enough for the snapshot budget. Must happen before the splice
+        // write replaces the file on disk.
+        let prior_within_budget = file_len <= SNAPSHOT_MAX_BYTES as u64;
+        let prior_bytes: Option<Vec<u8>> = if self.store.is_some() && prior_within_budget {
+            read_window(Path::new(path), 0, file_len).ok()
+        } else {
+            None
+        };
+        let skip = prior_bytes.is_none();
+
+        // Pass 2: splice — untouched head and tail stream straight from the
+        // source file; only the replacement window is materialized.
+        match atomic_write_splice(
+            Path::new(path),
+            window_start,
+            new_window.as_bytes(),
+            window_end,
+        ) {
+            Ok(()) => {
+                let tag_suffix = if let Some(store) = &self.store {
+                    let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
+                    // The new content = head + new_window + tail. When the
+                    // file fits the snapshot budget it is fully loaded in
+                    // prior_bytes anyway; otherwise refresh the tag from the
+                    // splice components.
+                    let new_tag = SnapshotTag::from_content(&new_window);
+                    if skip {
+                        // Prior too large for rollback memory; refresh tag only.
+                        g.record_tag(Path::new(path), new_tag);
+                        format!(
+                            "\n[{}#{}]{}",
+                            path,
+                            new_tag,
+                            aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
+                        )
+                    } else {
+                        g.record_mutation(
+                            Path::new(path),
+                            prior_bytes,
+                            &new_window,
+                            SnapshotOp::Edit,
+                        );
+                        format!("\n[{}#{}]", path, new_tag)
+                    }
+                } else {
+                    String::new()
+                };
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                ToolResult::success(format!(
+                    "{}{}",
+                    aish_i18n::t_with_args("tools.fs.edit_file.edit_success", &args_map),
+                    tag_suffix
+                ))
+            }
+            Err(e) => {
+                let mut args_map = std::collections::HashMap::new();
+                args_map.insert("path".to_string(), path.to_string());
+                args_map.insert("error".to_string(), e.to_string());
+                ToolResult::error(aish_i18n::t_with_args(
+                    "tools.fs.edit_file.edit_write_failed",
+                    &args_map,
+                ))
+            }
+        }
     }
 
-    /// Write `new_content` to `path` atomically and record the mutation for
-    /// rollback. `prior_content` is the full pre-edit content; it is stored
-    /// for /undo when within the snapshot budget.
     fn write_and_record(
         &self,
         path: &str,
@@ -360,8 +515,10 @@ impl EditFileTool {
                     let new_tag = SnapshotTag::from_content(&new_content);
                     if skip {
                         format!(
-                            "\n[{}#{}] (not undoable: prior content too large)",
-                            path, new_tag
+                            "\n[{}#{}]{}",
+                            path,
+                            new_tag,
+                            aish_i18n::t("tools.fs.edit_file.not_undoable_suffix")
                         )
                     } else {
                         format!("\n[{}#{}]", path, new_tag)
@@ -741,5 +898,55 @@ mod tests {
             .expect("undo entry must exist");
         undo.apply_to_disk(false).expect("undo must apply");
         assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
+    }
+
+    #[test]
+    fn test_edit_file_preflight_confirms_oversized_prior() {
+        // Consistent with write_file: editing a file whose prior content
+        // exceeds the snapshot budget is not undoable and must be confirmed
+        // before it happens.
+        let dir = temp_dir();
+        let file_path = dir.path().join("big.txt");
+        fs::write(&file_path, "x".repeat(SNAPSHOT_MAX_BYTES + 1)).unwrap();
+
+        let tool = EditFileTool::with_store(Arc::new(Mutex::new(SnapshotStore::new())));
+        let result = tool.preflight(&serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "x",
+            "new_string": "y"
+        }));
+        assert!(
+            matches!(result, PreflightResult::Confirm { .. }),
+            "oversized-prior edit must require confirmation"
+        );
+
+        // Within the budget: allowed without confirmation.
+        let small = dir.path().join("small.txt");
+        fs::write(&small, "tiny").unwrap();
+        let result = tool.preflight(&serde_json::json!({
+            "path": small.to_str().unwrap(),
+            "old_string": "tiny",
+            "new_string": "small"
+        }));
+        assert_eq!(result, PreflightResult::Allow);
+    }
+
+    #[test]
+    fn test_edit_file_line_range_not_found_reports_nothing_extra() {
+        // Pre-edit behavior guard: windowed old_string stays window-scoped.
+        let dir = temp_dir();
+        let file_path = dir.path().join("f.txt");
+        fs::write(&file_path, "alpha\nbeta\ngamma\n").unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "alpha",
+            "new_string": "ALPHA",
+            "start_line": 2,
+            "end_line": 3
+        }));
+
+        assert!(!result.ok);
     }
 }

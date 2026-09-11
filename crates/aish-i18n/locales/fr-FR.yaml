@@ -992,6 +992,7 @@ tools:
       offset_exceeds_length: "L'offset {offset} dépasse la longueur du fichier ({length})"
       access_denied: "Accès refusé : le chemin n'est pas dans le répertoire offload"
       large_file_truncated: "\n[... fichier {path} fait {size} octets / {lines} lignes ; affichage de {shown} lignes depuis l'offset {offset}. Utilisez offset/limit pour lire plus ...]"
+      large_file_no_tag: "fichier volumineux : lecture partielle, aucune balise d'instantané disponible"
     edit_file:
       missing_path: "Paramètre 'path' manquant"
       missing_old_string: "Paramètre 'old_string' manquant"
@@ -1006,6 +1007,7 @@ tools:
       invalid_tag: "Étiquette d'instantané '{tag}' invalide pour {path}"
       invalid_line_range: "Plage de lignes invalide : start_line={start}, end_line={end}. start_line doit être >= 1 et end_line >= start_line."
       line_range_out_of_bounds: "Le début de plage {start} dépasse la longueur du fichier ({lines} lignes). Utilisez un start_line dans le fichier."
+      not_undoable_suffix: " (irréversible : le contenu précédent est trop volumineux)"
     write_file:
       missing_path: "Paramètre 'path' manquant"
       missing_content: "Paramètre 'content' manquant"
@@ -1014,6 +1016,7 @@ tools:
       write_success: "{bytes} octets écrits dans {path}"
       write_failed: "Échec d'écriture de {path} : {error}"
       not_undoable_confirm: "Écraser {path} : impossible de sauvegarder le contenu précédent, cette modification est IRREVERSIBLE (/undo ne pourra pas la restaurer). Continuer ?"
+      not_undoable_suffix: " (irréversible : le contenu précédent n'a pas pu être sauvegardé)"
     undo_edit:
       nothing_to_undo: "Aucune modification de fichier à annuler."
       restored: "{path} restauré à son contenu précédent."

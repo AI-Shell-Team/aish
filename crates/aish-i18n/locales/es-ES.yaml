@@ -992,6 +992,7 @@ tools:
       offset_exceeds_length: "El offset {offset} excede la longitud del archivo ({length})"
       access_denied: "Acceso denegado: la ruta no está dentro del directorio offload"
       large_file_truncated: "\n[... archivo {path} es {size} bytes / {lines} líneas; mostrando {shown} líneas desde offset {offset}. Use offset/limit para leer más ...]"
+      large_file_no_tag: "archivo grande: lectura parcial, sin etiqueta de instantánea disponible"
     edit_file:
       missing_path: "Falta el parámetro 'path'"
       missing_old_string: "Falta el parámetro 'old_string'"
@@ -1006,6 +1007,7 @@ tools:
       invalid_tag: "Etiqueta de instantánea '{tag}' no válida para {path}"
       invalid_line_range: "Rango de líneas inválido: start_line={start}, end_line={end}. start_line debe ser >= 1 y end_line >= start_line."
       line_range_out_of_bounds: "El inicio del rango {start} excede la longitud del archivo ({lines} líneas). Use un start_line dentro del archivo."
+      not_undoable_suffix: " (no deshacible: el contenido previo es demasiado grande)"
     write_file:
       missing_path: "Falta el parámetro 'path'"
       missing_content: "Falta el parámetro 'content'"
@@ -1014,6 +1016,7 @@ tools:
       write_success: "{bytes} bytes escritos en {path}"
       write_failed: "Error al escribir {path}: {error}"
       not_undoable_confirm: "Sobrescribir {path}: no se puede crear una instantánea del contenido previo, por lo que este cambio NO es deshacible (/undo no podrá restaurarlo). ¿Continuar?"
+      not_undoable_suffix: " (no deshacible: el contenido previo no pudo guardarse)"
     undo_edit:
       nothing_to_undo: "No hay cambios de archivos para deshacer."
       restored: "{path} restaurado a su contenido previo."

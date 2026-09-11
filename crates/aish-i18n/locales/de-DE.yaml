@@ -993,6 +993,7 @@ tools:
       offset_exceeds_length: "Offset {offset} überschreitet Dateilänge ({length})"
       access_denied: "Zugriff verweigert: Pfad liegt nicht im Offload-Verzeichnis"
       large_file_truncated: "\n[... Datei {path} ist {size} Bytes / {lines} Zeilen; zeige {shown} Zeilen ab Offset {offset}. Verwende offset/limit für mehr ...]"
+      large_file_no_tag: "große Datei: partielles Lesen, kein Snapshot-Tag verfügbar"
     edit_file:
       missing_path: "Fehlender 'path' Parameter"
       missing_old_string: "Fehlender 'old_string' Parameter"
@@ -1007,6 +1008,7 @@ tools:
       invalid_tag: "Ungültiger Snapshot-Tag '{tag}' für {path}"
       invalid_line_range: "Ungültiger Zeilenbereich: start_line={start}, end_line={end}. start_line muss >= 1 und end_line >= start_line sein."
       line_range_out_of_bounds: "Zeilenbereich-Start {start} überschreitet Dateilänge ({lines} Zeilen). Verwenden Sie ein start_line innerhalb der Datei."
+      not_undoable_suffix: " (nicht rückgängig machbar: vorheriger Inhalt zu groß)"
     write_file:
       missing_path: "Fehlender 'path' Parameter"
       missing_content: "Fehlender 'content' Parameter"
@@ -1015,6 +1017,7 @@ tools:
       write_success: "{bytes} Bytes in {path} geschrieben"
       write_failed: "Schreiben von {path} fehlgeschlagen: {error}"
       not_undoable_confirm: "Überschreiben von {path}: Vorheriger Inhalt kann nicht gesichert werden, diese Änderung ist NICHT rückgängig machbar (/undo stellt sie nicht wieder her). Fortfahren?"
+      not_undoable_suffix: " (nicht rückgängig machbar: vorheriger Inhalt konnte nicht gesichert werden)"
     undo_edit:
       nothing_to_undo: "Keine Dateiänderungen zum Rückgängigmachen."
       restored: "{path} auf vorherigen Inhalt zurückgesetzt."

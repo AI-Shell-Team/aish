@@ -15,6 +15,11 @@ const MAX_READ_BYTES: usize = 256 * 1024;
 /// while still returning a useful window of content.
 const DEFAULT_TRUNCATE_LINES: usize = 500;
 
+/// Upper bound on a single materialized line in the large-file path. A line
+/// longer than this is clipped in the output; without the cap one pathological
+/// line (e.g. a multi-gigabyte single-line log) would exhaust memory.
+const MAX_LINE_BYTES: usize = 16 * 1024;
+
 /// Read file content tool.
 pub struct ReadFileTool {
     store: Option<SharedSnapshotStore>,
@@ -152,9 +157,9 @@ impl Tool for ReadFileTool {
 }
 
 impl ReadFileTool {
-    /// Read a large file by streaming only the requested line range, without
-    /// loading the entire file into memory. Uses `BufReader` + line iteration
-    /// so only the window the model asked for is materialized.
+    /// Read a large file by streaming only the requested line range. Memory
+    /// is bounded per line: a single line longer than `MAX_LINE_BYTES` is
+    /// truncated in the output instead of being materialized whole.
     fn read_large_file(
         &self,
         path: &str,
@@ -162,7 +167,7 @@ impl ReadFileTool {
         offset: usize,
         limit: Option<usize>,
     ) -> ToolResult {
-        use std::io::BufRead;
+        use std::io::{BufRead, BufReader};
 
         let file = match std::fs::File::open(path) {
             Ok(f) => f,
@@ -177,26 +182,19 @@ impl ReadFileTool {
             }
         };
 
-        let reader = std::io::BufReader::new(file);
+        let mut reader = BufReader::new(file);
         let effective_limit = limit.unwrap_or(DEFAULT_TRUNCATE_LINES);
 
-        // Skip `offset` lines, then collect up to `effective_limit` lines.
+        // Skip `offset` lines, then collect up to `effective_limit` lines,
+        // capping each materialized line at MAX_LINE_BYTES.
         let mut collected: Vec<String> = Vec::with_capacity(effective_limit);
-        let mut line_no = 0usize;
+        let mut line_no = 0usize; // 0-based index of the current line
         let mut total_lines = 0usize;
-
-        for line_result in reader.lines() {
-            total_lines += 1;
-            if line_no < offset {
-                line_no += 1;
-                continue;
-            }
-            if collected.len() >= effective_limit {
-                // Keep counting lines so we know the total for the notice.
-                continue;
-            }
-            match line_result {
-                Ok(line) => collected.push(format!("{:>6}\t{}", line_no + 1, line)),
+        loop {
+            let mut raw = Vec::with_capacity(128);
+            let bytes_read = match reader.read_until(b'\n', &mut raw) {
+                Ok(0) => break,
+                Ok(n) => n,
                 Err(e) => {
                     let mut args_map = std::collections::HashMap::new();
                     args_map.insert("path".to_string(), path.to_string());
@@ -205,6 +203,48 @@ impl ReadFileTool {
                         "tools.fs.read_file.decode_failed",
                         &args_map,
                     ));
+                }
+            };
+            let _ = bytes_read;
+            total_lines += 1;
+            if raw.last() == Some(&b'\n') {
+                raw.pop();
+                if raw.last() == Some(&b'\r') {
+                    raw.pop();
+                }
+            }
+            let in_window = line_no >= offset && collected.len() < effective_limit;
+            if in_window {
+                // Truncate oversized lines so one pathological line cannot
+                // exhaust memory; the model can page with offset/limit but a
+                // single line is still capped.
+                let mut line_bytes = raw;
+                let mut clipped = false;
+                if line_bytes.len() > MAX_LINE_BYTES {
+                    line_bytes.truncate(MAX_LINE_BYTES);
+                    clipped = true;
+                }
+                let line = match String::from_utf8(line_bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let mut args_map = std::collections::HashMap::new();
+                        args_map.insert("path".to_string(), path.to_string());
+                        args_map.insert("error".to_string(), e.to_string());
+                        return ToolResult::error(aish_i18n::t_with_args(
+                            "tools.fs.read_file.decode_failed",
+                            &args_map,
+                        ));
+                    }
+                };
+                if clipped {
+                    collected.push(format!(
+                        "{:>6}\t{} [... line truncated at {} bytes ...]",
+                        line_no + 1,
+                        line,
+                        MAX_LINE_BYTES
+                    ));
+                } else {
+                    collected.push(format!("{:>6}\t{}", line_no + 1, line));
                 }
             }
             line_no += 1;
@@ -236,15 +276,16 @@ impl ReadFileTool {
             String::new()
         };
 
-        // Large-file reads are partial windows; a tag computed on the
-        // window would never match the full disk content, making every
-        // subsequent edit_file's is_fresh check fail. Skip tagging (like
-        // omp which omits the header for files > 4 MiB) — the model must
-        // re-read before editing.
+        // Large-file reads are partial windows; a tag computed on the window
+        // would never match the full disk content. Emit a tagless header and
+        // say so: the model must not pass a `tag` to edit_file for this file
+        // (edit_file rejects malformed tags and line-range edits skip the
+        // tag entirely).
         let tag_suffix = if self.store.is_some() {
-            // Do not record_read for partial content — it would create a
-            // false tag baseline. Just emit a plain header without a tag.
-            format!("[{}]\n", path)
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("path".to_string(), path.to_string());
+            let no_tag = aish_i18n::t_with_args("tools.fs.read_file.large_file_no_tag", &args_map);
+            format!("[{}] {}\n", path, no_tag)
         } else {
             String::new()
         };

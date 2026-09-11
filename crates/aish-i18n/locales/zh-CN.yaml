@@ -1304,6 +1304,7 @@ tools:
       offset_exceeds_length: "偏移量 {offset} 超过了文件长度({length})"
       access_denied: "拒绝访问: 路径不在 offload 目录内"
       large_file_truncated: "\n[... 文件 {path} 为 {size} 字节 / 共 {lines} 行；显示从偏移 {offset} 开始的 {shown} 行。使用 offset/limit 读取更多 ...]"
+      large_file_no_tag: "大文件：部分读取，无快照标签"
     write_file:
       missing_path: "缺少 'path' 参数"
       missing_content: "缺少 'content' 参数"
@@ -1312,6 +1313,7 @@ tools:
       write_success: "已写入 {bytes} 字节到 {path}"
       write_failed: "写入 {path} 失败: {error}"
       not_undoable_confirm: "覆盖 {path}：无法为原内容建立快照，此修改不可撤销（/undo 无法恢复）。是否继续？"
+      not_undoable_suffix: "（不可撤销：原内容无法快照）"
     edit_file:
       missing_path: "缺少 'path' 参数"
       missing_old_string: "缺少 'old_string' 参数"
@@ -1324,6 +1326,7 @@ tools:
       edit_write_failed: "写入 {path} 失败: {error}"
       invalid_tag: "{path} 的快照标签 '{tag}' 无效"
       stale_tag: "文件 {path} 自上次读取后已被改动 — 请先重新读取再编辑。"
+      not_undoable_suffix: "（不可撤销：原内容过大）"
       invalid_line_range: "无效的行范围：start_line={start}, end_line={end}。start_line 必须 >= 1 且 end_line >= start_line。"
       line_range_out_of_bounds: "起始行 {start} 超过文件总行数（{lines} 行）。请使用文件内的 start_line。"
     undo_edit:

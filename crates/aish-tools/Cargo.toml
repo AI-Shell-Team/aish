@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 regex.workspace = true
+libc.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 tokio.workspace = true

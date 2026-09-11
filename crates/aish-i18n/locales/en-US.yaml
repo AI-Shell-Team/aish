@@ -1305,6 +1305,7 @@ tools:
       offset_exceeds_length: "Offset {offset} exceeds file length ({length})"
       access_denied: "Access denied: path is not inside offload directory"
       large_file_truncated: "\n[... file {path} is {size} bytes / {lines} lines; showing {shown} lines from offset {offset}. Use offset/limit to read more ...]"
+      large_file_no_tag: "large file: partial read, no snapshot tag available"
     write_file:
       missing_path: "Missing 'path' parameter"
       missing_content: "Missing 'content' parameter"
@@ -1313,6 +1314,7 @@ tools:
       write_success: "Wrote {bytes} bytes to {path}"
       write_failed: "Failed to write {path}: {error}"
       not_undoable_confirm: "Overwriting {path}: prior content cannot be snapshotted, so this change is NOT undoable (/undo cannot restore it). Continue?"
+      not_undoable_suffix: " (not undoable: prior content unavailable)"
     edit_file:
       missing_path: "Missing 'path' parameter"
       missing_old_string: "Missing 'old_string' parameter"
@@ -1325,6 +1327,7 @@ tools:
       edit_write_failed: "Failed to write {path}: {error}"
       invalid_tag: "Invalid snapshot tag '{tag}' for {path}"
       stale_tag: "File {path} changed since it was last read — re-read it before editing."
+      not_undoable_suffix: " (not undoable: prior content too large)"
       invalid_line_range: "Invalid line range: start_line={start}, end_line={end}. start_line must be >= 1 and end_line >= start_line."
       line_range_out_of_bounds: "Line range start {start} exceeds file length ({lines} lines). Use a start_line within the file."
     undo_edit:

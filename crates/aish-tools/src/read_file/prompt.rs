@@ -12,7 +12,8 @@ Usage:
 - Files larger than 256 KiB are NOT rejected. Instead, a bounded window of
   lines is returned (default 500 lines from the start, or the range you
   specify with offset/limit). The output notes the total line count and
-  how to read more with offset."#;
+  how to read more with offset. Large-file output has NO tag — do not pass
+  a `tag` argument to edit_file for these files."#;
 
 pub(crate) fn parameters() -> serde_json::Value {
     serde_json::json!({
