@@ -133,6 +133,9 @@ status:
   na: "N/A"
 
 shell:
+  interrupted: "Interrompu"
+  ctrl_c_again: "Ctrl+C à nouveau dans 1s pour quitter"
+  exiting: "Fermeture du shell..."
   confirm_dialog_title: "Exécution d'outil"
   confirm_dialog_tool: "Outil :"
   confirm_dialog_command: "Commande :"
@@ -328,6 +331,9 @@ shell:
   nl_detection:
     confirm_ask_ai: "Cela ressemble à une question en langage naturel. Demander à l'IA ? (Y/n)"
   error:
+    load_script_failed: "Échec du chargement du script '{script}' : {error}"
+    pty_error: "Erreur PTY : {error}"
+    restart_bash_failed: "Échec du redémarrage de bash : {error}"
     execution_error: "❌ Erreur pendant l'execution : {error}"
     pty_decode_error: "Erreur de decodage de sortie PTY detectee : {error}"
     potential_error: "🚀 Probleme potentiel detecte : {reason}, tentative de resolution..."
@@ -1003,6 +1009,7 @@ tools:
       old_string_ambiguous: "'old_string' apparaît {count} fois dans {path} - utilisez replace_all=true ou plus de contexte"
       edit_success: "{path} modifié"
       edit_write_failed: "Échec d'écriture de {path} : {error}"
+      not_undoable_confirm: "Modifier {path} : impossible de sauvegarder le contenu précédent, cette modification est IRREVERSIBLE (/undo ne pourra pas la restaurer). Continuer ?"
       stale_tag: "Le fichier {path} a changé depuis la dernière lecture — relisez-le avant de modifier"
       invalid_tag: "Étiquette d'instantané '{tag}' invalide pour {path}"
       invalid_line_range: "Plage de lignes invalide : start_line={start}, end_line={end}. start_line doit être >= 1 et end_line >= start_line."
@@ -1068,6 +1075,7 @@ tools:
     no_logs_found: "Aucun journal ou aucune information correspondante trouve(e)."
 
   bash:
+    invalid_timeout: "Délai invalide : doit être un nombre entier positif de secondes"
     security_handling_required: "la commande bash nécessite un traitement de sécurité de niveau {level}"
 
   memory:

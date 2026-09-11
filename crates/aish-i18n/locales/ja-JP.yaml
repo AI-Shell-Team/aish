@@ -133,6 +133,9 @@ status:
   na: "なし"
 
 shell:
+  interrupted: "割り込みました"
+  ctrl_c_again: "1秒以内にもう一度 Ctrl+C で終了します"
+  exiting: "シェルを終了しています..."
   confirm_dialog_title: "ツール実行"
   confirm_dialog_tool: "ツール:"
   confirm_dialog_command: "コマンド:"
@@ -328,6 +331,9 @@ shell:
   nl_detection:
     confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
   error:
+    load_script_failed: "スクリプト '{script}' の読み込みに失敗: {error}"
+    pty_error: "PTY エラー: {error}"
+    restart_bash_failed: "bash の再起動に失敗: {error}"
     execution_error: "❌ 実行中にエラーが発生しました: {error}"
     pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
     potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
@@ -1004,6 +1010,7 @@ tools:
       old_string_ambiguous: "'old_string' が {path} に {count} 回出現します - replace_all=true を使うか、より多くのコンテキストを提供してください"
       edit_success: "{path} を編集しました"
       edit_write_failed: "{path} の書き込みに失敗: {error}"
+      not_undoable_confirm: "{path} を編集します：既存の内容のスナップショットを作成できないため、この変更は取り消せません（/undo では復元できません）。続行しますか？"
       stale_tag: "ファイル {path} は最後の読み取り以降に変更されました — 編集前に再読み込みしてください"
       invalid_tag: "{path} のスナップショットタグ '{tag}' が無効です"
       invalid_line_range: "無効な行範囲: start_line={start}, end_line={end}。start_line は >= 1、end_line は start_line 以上である必要があります。"
@@ -1098,6 +1105,7 @@ tools:
     no_logs_found: "ログまたは一致する情報は見つかりませんでした。"
 
   bash:
+    invalid_timeout: "無効なタイムアウト：正の整数秒を指定してください"
     security_handling_required: "bash コマンドには {level} レベルのセキュリティ処理が必要です"
 
 help:

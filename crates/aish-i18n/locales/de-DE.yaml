@@ -133,6 +133,9 @@ status:
   na: "k.A."
 
 shell:
+  interrupted: "Unterbrochen"
+  ctrl_c_again: "Erneut Strg+C innerhalb 1s zum Beenden"
+  exiting: "Shell wird beendet..."
   confirm_dialog_title: "Tool-Ausführung"
   confirm_dialog_tool: "Tool:"
   confirm_dialog_command: "Befehl:"
@@ -328,6 +331,9 @@ shell:
   nl_detection:
     confirm_ask_ai: "Das sieht nach einer natürlichen Sprachfrage aus. KI fragen? (Y/n)"
   error:
+    load_script_failed: "Skript '{script}' konnte nicht geladen werden: {error}"
+    pty_error: "PTY-Fehler: {error}"
+    restart_bash_failed: "bash-Neustart fehlgeschlagen: {error}"
     execution_error: "❌ Fehler während der Ausführung: {error}"
     pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"
     potential_error: "🚀 Mögliches Problem erkannt: {reason}, Lösung wird versucht..."
@@ -1004,6 +1010,7 @@ tools:
       old_string_ambiguous: "'old_string' erscheint {count} mal in {path} - verwenden Sie replace_all=true oder mehr Kontext"
       edit_success: "{path} bearbeitet"
       edit_write_failed: "Schreiben von {path} fehlgeschlagen: {error}"
+      not_undoable_confirm: "Bearbeiten von {path}: Vorheriger Inhalt kann nicht gesichert werden, diese Änderung ist NICHT rückgängig machbar (/undo stellt sie nicht wieder her). Fortfahren?"
       stale_tag: "Datei {path} wurde seit dem letzten Lesen geändert — neu lesen vor dem Bearbeiten"
       invalid_tag: "Ungültiger Snapshot-Tag '{tag}' für {path}"
       invalid_line_range: "Ungültiger Zeilenbereich: start_line={start}, end_line={end}. start_line muss >= 1 und end_line >= start_line sein."
@@ -1069,6 +1076,7 @@ tools:
     no_logs_found: "Keine Protokolle oder passenden Informationen gefunden."
 
   bash:
+    invalid_timeout: "Ungültiges Timeout: muss eine positive ganze Zahl von Sekunden sein"
     security_handling_required: "der Bash-Befehl erfordert eine Sicherheitsbehandlung der Stufe {level}"
 
   memory:

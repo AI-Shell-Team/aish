@@ -1285,6 +1285,7 @@ tools:
     no_logs_found: "未找到任何日志或匹配信息。"
 
   bash:
+    invalid_timeout: "无效的 timeout：必须是正整数秒数"
     security_handling_required: "bash 命令需要 {level} 级安全处理"
     missing_command: "缺少 'command' 参数"
     execute_failed: "执行失败: {error}"
@@ -1325,6 +1326,7 @@ tools:
       edit_success: "已编辑 {path}"
       edit_write_failed: "写入 {path} 失败: {error}"
       invalid_tag: "{path} 的快照标签 '{tag}' 无效"
+      not_undoable_confirm: "编辑 {path}：无法为原内容建立快照，此修改不可撤销（/undo 无法恢复）。是否继续？"
       stale_tag: "文件 {path} 自上次读取后已被改动 — 请先重新读取再编辑。"
       not_undoable_suffix: "（不可撤销：原内容过大）"
       invalid_line_range: "无效的行范围：start_line={start}, end_line={end}。start_line 必须 >= 1 且 end_line >= start_line。"

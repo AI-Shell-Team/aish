@@ -133,6 +133,9 @@ status:
   na: "N/D"
 
 shell:
+  interrupted: "Interrumpido"
+  ctrl_c_again: "Pulsa Ctrl+C de nuevo en 1s para salir"
+  exiting: "Saliendo del shell..."
   confirm_dialog_title: "Ejecución de herramienta"
   confirm_dialog_tool: "Herramienta:"
   confirm_dialog_command: "Comando:"
@@ -328,6 +331,9 @@ shell:
   nl_detection:
     confirm_ask_ai: "Esto parece una pregunta en lenguaje natural. ¿Preguntar a IA? (Y/n)"
   error:
+    load_script_failed: "No se pudo cargar el script '{script}': {error}"
+    pty_error: "Error de PTY: {error}"
+    restart_bash_failed: "No se pudo reiniciar bash: {error}"
     execution_error: "❌ Error durante la ejecución: {error}"
     pty_decode_error: "Error al decodificar la salida PTY: {error}"
     potential_error: "🚀 Posible problema detectado: {reason}; intentando resolverlo..."
@@ -1003,6 +1009,7 @@ tools:
       old_string_ambiguous: "'old_string' aparece {count} veces en {path} - use replace_all=true o más contexto"
       edit_success: "{path} editado"
       edit_write_failed: "Error al escribir {path}: {error}"
+      not_undoable_confirm: "Editar {path}: no se puede crear una instantánea del contenido previo, por lo que este cambio NO es deshacible (/undo no podrá restaurarlo). ¿Continuar?"
       stale_tag: "El archivo {path} cambió desde la última lectura — reléelo antes de editar"
       invalid_tag: "Etiqueta de instantánea '{tag}' no válida para {path}"
       invalid_line_range: "Rango de líneas inválido: start_line={start}, end_line={end}. start_line debe ser >= 1 y end_line >= start_line."
@@ -1068,6 +1075,7 @@ tools:
     no_logs_found: "No se encontraron registros ni información coincidente."
 
   bash:
+    invalid_timeout: "Tiempo de espera no válido: debe ser un número entero positivo de segundos"
     security_handling_required: "el comando bash requiere manejo de seguridad de nivel {level}"
 
   memory:

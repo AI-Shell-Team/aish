@@ -1288,6 +1288,7 @@ tools:
   bash:
     security_handling_required: "bash command requires {level} security handling"
     missing_command: "Missing 'command' parameter"
+    invalid_timeout: "Invalid timeout: must be a positive integer number of seconds"
     execute_failed: "Failed to execute: {error}"
     output_truncated: "[...{bytes} bytes truncated...]\n{tail}"
     truncated_notice: "[...{bytes} bytes truncated...]"
@@ -1326,6 +1327,7 @@ tools:
       edit_success: "Edited {path}"
       edit_write_failed: "Failed to write {path}: {error}"
       invalid_tag: "Invalid snapshot tag '{tag}' for {path}"
+      not_undoable_confirm: "Editing {path}: prior content cannot be snapshotted, so this change is NOT undoable (/undo cannot restore it). Continue?"
       stale_tag: "File {path} changed since it was last read — re-read it before editing."
       not_undoable_suffix: " (not undoable: prior content too large)"
       invalid_line_range: "Invalid line range: start_line={start}, end_line={end}. start_line must be >= 1 and end_line >= start_line."
