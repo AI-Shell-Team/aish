@@ -133,6 +133,9 @@ status:
   na: "なし"
 
 shell:
+  interrupted: "割り込みました"
+  ctrl_c_again: "1秒以内にもう一度 Ctrl+C で終了します"
+  exiting: "シェルを終了しています..."
   confirm_dialog_title: "ツール実行"
   confirm_dialog_tool: "ツール:"
   confirm_dialog_command: "コマンド:"
@@ -328,6 +331,9 @@ shell:
   nl_detection:
     confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
   error:
+    load_script_failed: "スクリプト '{script}' の読み込みに失敗: {error}"
+    pty_error: "PTY エラー: {error}"
+    restart_bash_failed: "bash の再起動に失敗: {error}"
     execution_error: "❌ 実行中にエラーが発生しました: {error}"
     pty_decode_error: "PTY 出力のデコードエラーを検出しました: {error}"
     potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
@@ -984,9 +990,41 @@ security:
 
 tools:
   fs:
+    read_file:
+      missing_path: "'path' パラメータがありません"
+      read_failed: "{path} の読み取りに失敗: {error}"
+      file_too_large: "ファイル {path} は {size} バイトで、{limit} バイトの制限を超えています。edit_file の start_line/end_line で行範囲編集してください。"
+      decode_failed: "{path} の UTF-8 デコードに失敗: {error}"
+      empty_file: "(空のファイル)"
+      offset_exceeds_length: "オフセット {offset} がファイル長({length})を超えています"
+      access_denied: "アクセス拒否: パスが offload ディレクトリ内にありません"
+      large_file_truncated: "\n[... ファイル {path} は {size} バイト / {lines} 行；オフセット {offset} から {shown} 行を表示。offset/limit で続きを読んでください ...]"
+      large_file_no_tag: "大きなファイル: 部分読み取りのためスナップショットタグは利用できません"
     edit_file:
+      missing_path: "'path' パラメータがありません"
+      missing_old_string: "'old_string' パラメータがありません"
+      missing_new_string: "'new_string' パラメータがありません"
+      edit_read_failed: "{path} の読み取りに失敗: {error}"
+      file_too_large: "ファイル {path} は {size} バイトで、{limit} バイトの制限を超えています。start_line/end_line で行範囲編集してください。"
+      old_string_not_found: "{path} に 'old_string' が見つかりません"
+      old_string_ambiguous: "'old_string' が {path} に {count} 回出現します - replace_all=true を使うか、より多くのコンテキストを提供してください"
+      edit_success: "{path} を編集しました"
+      edit_write_failed: "{path} の書き込みに失敗: {error}"
+      not_undoable_confirm: "{path} を編集します：既存の内容のスナップショットを作成できないため、この変更は取り消せません（/undo では復元できません）。続行しますか？"
       stale_tag: "ファイル {path} は最後の読み取り以降に変更されました — 編集前に再読み込みしてください"
       invalid_tag: "{path} のスナップショットタグ '{tag}' が無効です"
+      invalid_line_range: "無効な行範囲: start_line={start}, end_line={end}。start_line は >= 1、end_line は start_line 以上である必要があります。"
+      line_range_out_of_bounds: "行範囲の開始 {start} がファイル長({lines} 行)を超えています。ファイル内の start_line を使用してください。"
+      not_undoable_suffix: "（元に戻せません：以前の内容が大きすぎます）"
+    write_file:
+      missing_path: "'path' パラメータがありません"
+      missing_content: "'content' パラメータがありません"
+      content_too_large: "{path} のコンテンツは {size} バイトで、{limit} バイトの制限を超えています"
+      create_dirs_failed: "親ディレクトリの作成に失敗: {error}"
+      write_success: "{bytes} バイトを {path} に書き込みました"
+      write_failed: "{path} の書き込みに失敗: {error}"
+      not_undoable_confirm: "{path} を上書きします：既存の内容のスナップショットを作成できないため、この変更は取り消せません（/undo では復元できません）。続行しますか？"
+      not_undoable_suffix: "（元に戻せません：以前の内容を保存できませんでした）"
     undo_edit:
       nothing_to_undo: "元に戻すファイル変更がありません。"
       restored: "{path} を以前の内容に復元しました。"
@@ -1067,6 +1105,7 @@ tools:
     no_logs_found: "ログまたは一致する情報は見つかりませんでした。"
 
   bash:
+    invalid_timeout: "無効なタイムアウト：正の整数秒を指定してください"
     security_handling_required: "bash コマンドには {level} レベルのセキュリティ処理が必要です"
 
 help:

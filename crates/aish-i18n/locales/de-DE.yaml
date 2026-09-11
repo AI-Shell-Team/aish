@@ -133,6 +133,9 @@ status:
   na: "k.A."
 
 shell:
+  interrupted: "Unterbrochen"
+  ctrl_c_again: "Erneut Strg+C innerhalb 1s zum Beenden"
+  exiting: "Shell wird beendet..."
   confirm_dialog_title: "Tool-Ausführung"
   confirm_dialog_tool: "Tool:"
   confirm_dialog_command: "Befehl:"
@@ -328,6 +331,9 @@ shell:
   nl_detection:
     confirm_ask_ai: "Das sieht nach einer natürlichen Sprachfrage aus. KI fragen? (Y/n)"
   error:
+    load_script_failed: "Skript '{script}' konnte nicht geladen werden: {error}"
+    pty_error: "PTY-Fehler: {error}"
+    restart_bash_failed: "bash-Neustart fehlgeschlagen: {error}"
     execution_error: "❌ Fehler während der Ausführung: {error}"
     pty_decode_error: "PTY-Ausgabedekodierungsfehler abgefangen: {error}"
     potential_error: "🚀 Mögliches Problem erkannt: {reason}, Lösung wird versucht..."
@@ -984,9 +990,41 @@ security:
 
 tools:
   fs:
+    read_file:
+      missing_path: "Fehlender 'path' Parameter"
+      read_failed: "Lesen von {path} fehlgeschlagen: {error}"
+      file_too_large: "Datei {path} ist {size} Bytes, überschreitet das Limit von {limit} Bytes. Verwenden Sie edit_file mit start_line/end_line für Bereichsbearbeitung."
+      decode_failed: "Dekodieren von {path} als UTF-8 fehlgeschlagen: {error}"
+      empty_file: "(leere Datei)"
+      offset_exceeds_length: "Offset {offset} überschreitet Dateilänge ({length})"
+      access_denied: "Zugriff verweigert: Pfad liegt nicht im Offload-Verzeichnis"
+      large_file_truncated: "\n[... Datei {path} ist {size} Bytes / {lines} Zeilen; zeige {shown} Zeilen ab Offset {offset}. Verwende offset/limit für mehr ...]"
+      large_file_no_tag: "große Datei: partielles Lesen, kein Snapshot-Tag verfügbar"
     edit_file:
+      missing_path: "Fehlender 'path' Parameter"
+      missing_old_string: "Fehlender 'old_string' Parameter"
+      missing_new_string: "Fehlender 'new_string' Parameter"
+      edit_read_failed: "Lesen von {path} fehlgeschlagen: {error}"
+      file_too_large: "Datei {path} ist {size} Bytes, überschreitet das Limit von {limit} Bytes. Verwenden Sie start_line/end_line für Bereichsbearbeitung."
+      old_string_not_found: "'old_string' nicht gefunden in {path}"
+      old_string_ambiguous: "'old_string' erscheint {count} mal in {path} - verwenden Sie replace_all=true oder mehr Kontext"
+      edit_success: "{path} bearbeitet"
+      edit_write_failed: "Schreiben von {path} fehlgeschlagen: {error}"
+      not_undoable_confirm: "Bearbeiten von {path}: Vorheriger Inhalt kann nicht gesichert werden, diese Änderung ist NICHT rückgängig machbar (/undo stellt sie nicht wieder her). Fortfahren?"
       stale_tag: "Datei {path} wurde seit dem letzten Lesen geändert — neu lesen vor dem Bearbeiten"
       invalid_tag: "Ungültiger Snapshot-Tag '{tag}' für {path}"
+      invalid_line_range: "Ungültiger Zeilenbereich: start_line={start}, end_line={end}. start_line muss >= 1 und end_line >= start_line sein."
+      line_range_out_of_bounds: "Zeilenbereich-Start {start} überschreitet Dateilänge ({lines} Zeilen). Verwenden Sie ein start_line innerhalb der Datei."
+      not_undoable_suffix: " (nicht rückgängig machbar: vorheriger Inhalt zu groß)"
+    write_file:
+      missing_path: "Fehlender 'path' Parameter"
+      missing_content: "Fehlender 'content' Parameter"
+      content_too_large: "Inhalt für {path} ist {size} Bytes, überschreitet das Limit von {limit} Bytes"
+      create_dirs_failed: "Erstellen von übergeordneten Verzeichnissen fehlgeschlagen: {error}"
+      write_success: "{bytes} Bytes in {path} geschrieben"
+      write_failed: "Schreiben von {path} fehlgeschlagen: {error}"
+      not_undoable_confirm: "Überschreiben von {path}: Vorheriger Inhalt kann nicht gesichert werden, diese Änderung ist NICHT rückgängig machbar (/undo stellt sie nicht wieder her). Fortfahren?"
+      not_undoable_suffix: " (nicht rückgängig machbar: vorheriger Inhalt konnte nicht gesichert werden)"
     undo_edit:
       nothing_to_undo: "Keine Dateiänderungen zum Rückgängigmachen."
       restored: "{path} auf vorherigen Inhalt zurückgesetzt."
@@ -1038,6 +1076,7 @@ tools:
     no_logs_found: "Keine Protokolle oder passenden Informationen gefunden."
 
   bash:
+    invalid_timeout: "Ungültiges Timeout: muss eine positive ganze Zahl von Sekunden sein"
     security_handling_required: "der Bash-Befehl erfordert eine Sicherheitsbehandlung der Stufe {level}"
 
   memory:
