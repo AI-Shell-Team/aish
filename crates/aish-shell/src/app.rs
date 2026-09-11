@@ -4333,18 +4333,17 @@ impl AishShell {
                 snap.context_messages_snapshot.len().to_string(),
             );
             args.insert("cmds".to_string(), history.len().to_string());
-            // Raw mode skips the scanner entirely, so a literal "0" would
-            // falsely imply the content was scanned and found clean.
-            args.insert(
-                "hits".to_string(),
-                if redact_enabled {
-                    sections.total_hits.to_string()
-                } else {
-                    t("shell.export.not_scanned")
-                },
-            );
+            // `{hits}` stays numeric in both modes; raw mode appends a
+            // separate status clause below so "not scanned" never lands
+            // inside the count slot.
+            args.insert("hits".to_string(), sections.total_hits.to_string());
             args
         });
+        let preview = if redact_enabled {
+            preview
+        } else {
+            format!("{preview} — {}", t("shell.export.not_scanned"))
+        };
         let hits_note = if redact_enabled && sections.total_hits > 0 {
             t_with_args("shell.export.preview_hits", &{
                 let mut args = std::collections::HashMap::new();
@@ -4434,14 +4433,21 @@ impl AishShell {
             #[cfg(unix)]
             {
                 use std::io::Write;
-                use std::os::unix::fs::OpenOptionsExt;
+                use std::os::unix::fs::PermissionsExt;
                 std::fs::OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(true)
-                    .mode(0o600)
                     .open(&fname)
-                    .and_then(|mut f| f.write_all(md.as_bytes()))
+                    .and_then(|mut f| {
+                        // `OpenOptions::mode()` only applies when this call
+                        // creates the file; the export path is deterministic
+                        // per session, so a pre-existing file with loosened
+                        // permissions must be forced back to owner-only
+                        // before any content is written into it.
+                        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                        f.write_all(md.as_bytes())
+                    })
             }
             #[cfg(not(unix))]
             std::fs::write(&fname, &md)
@@ -12396,17 +12402,19 @@ pub(crate) fn build_redacted_export_sections(
     }
 }
 
-/// Machine-readable redaction banner lines embedded right after the export
-/// header so receivers can programmatically tell a redacted export from a
-/// raw one.
 pub(crate) fn export_redaction_banner(redacted: bool) -> String {
+    // Both modes carry the rules version: receivers need to know which
+    // rule set declares an export redacted — or explicitly raw.
     if redacted {
         format!(
             "redacted: true\nredaction_rules: aish-secret-scanner {}\n",
             aish_security::secret::REDACTION_RULES_VERSION
         )
     } else {
-        "redacted: false\n".to_string()
+        format!(
+            "redacted: false\nredaction_rules: aish-secret-scanner {}\n",
+            aish_security::secret::REDACTION_RULES_VERSION
+        )
     }
 }
 
@@ -13437,7 +13445,10 @@ mod export_tests {
         let redacted = export_redaction_banner(true);
         assert!(redacted.contains("redacted: true"));
         assert!(redacted.contains("aish-secret-scanner v"));
-        assert_eq!(export_redaction_banner(false), "redacted: false\n");
+        // Raw exports must also declare which rule set declares them raw.
+        let raw = export_redaction_banner(false);
+        assert!(raw.contains("redacted: false"));
+        assert!(raw.contains("aish-secret-scanner v"));
     }
 
     #[test]
