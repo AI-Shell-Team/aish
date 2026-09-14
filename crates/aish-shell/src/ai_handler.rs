@@ -345,6 +345,12 @@ impl AiHandler {
         self.llm_session.update_model(model, api_base, api_key);
     }
 
+    /// Update the session UUID recorded in audit events after a session
+    /// switch (/resume, /sessions, /fork).
+    pub fn set_audit_session_uuid(&mut self, session_uuid: String) {
+        self.llm_session.set_audit_session_uuid(session_uuid);
+    }
+
     pub fn apply_rotation_state(&mut self, state: Option<aish_llm::RotationState>) {
         match state {
             Some(s) => self.llm_session.set_rotation(s),

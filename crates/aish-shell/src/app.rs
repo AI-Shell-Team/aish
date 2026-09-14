@@ -6975,6 +6975,8 @@ impl AishShell {
             });
 
         self.session_uuid = session.session_uuid.clone();
+        self.ai_handler
+            .set_audit_session_uuid(session.session_uuid.clone());
         if target_cwd != self.state.cwd {
             self.state.prev_cwd = Some(self.state.cwd.clone());
             self.state.cwd = target_cwd.clone();
