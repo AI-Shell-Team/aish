@@ -1013,6 +1013,7 @@ tools:
       edit_read_failed: "Échec de lecture de {path} : {error}"
       file_too_large: "Le fichier {path} fait {size} octets, dépassant la limite de {limit} octets. Utilisez start_line/end_line pour éditer par plage."
       old_string_not_found: "'old_string' introuvable dans {path}"
+      old_string_not_found_prefix_hint: "'old_string' introuvable dans {path}, mais son préfixe '{prefix}' apparaît {count} fois — probable suffixe incorrect"
       old_string_ambiguous: "'old_string' apparaît {count} fois dans {path} - utilisez replace_all=true ou plus de contexte"
       edit_success: "{path} modifié"
       edit_write_failed: "Échec d'écriture de {path} : {error}"
