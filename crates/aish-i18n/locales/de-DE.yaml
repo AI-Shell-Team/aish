@@ -1014,6 +1014,7 @@ tools:
       edit_read_failed: "Lesen von {path} fehlgeschlagen: {error}"
       file_too_large: "Datei {path} ist {size} Bytes, überschreitet das Limit von {limit} Bytes. Verwenden Sie start_line/end_line für Bereichsbearbeitung."
       old_string_not_found: "'old_string' nicht gefunden in {path}"
+      old_string_not_found_prefix_hint: "'old_string' nicht gefunden in {path}, aber das Präfix '{prefix}' erscheint {count} mal — wahrscheinlich Suffix-Abweichung"
       old_string_ambiguous: "'old_string' erscheint {count} mal in {path} - verwenden Sie replace_all=true oder mehr Kontext"
       edit_success: "{path} bearbeitet"
       edit_write_failed: "Schreiben von {path} fehlgeschlagen: {error}"

@@ -1014,6 +1014,7 @@ tools:
       edit_read_failed: "{path} の読み取りに失敗: {error}"
       file_too_large: "ファイル {path} は {size} バイトで、{limit} バイトの制限を超えています。start_line/end_line で行範囲編集してください。"
       old_string_not_found: "{path} に 'old_string' が見つかりません"
+      old_string_not_found_prefix_hint: "{path} に 'old_string' が見つかりませんが、その接頭辞 '{prefix}' は {count} 回出現します — 接尾辞の不一致の可能性"
       old_string_ambiguous: "'old_string' が {path} に {count} 回出現します - replace_all=true を使うか、より多くのコンテキストを提供してください"
       edit_success: "{path} を編集しました"
       edit_write_failed: "{path} の書き込みに失敗: {error}"

@@ -1329,6 +1329,7 @@ tools:
       edit_read_failed: "读取 {path} 失败: {error}"
       file_too_large: "文件 {path} 为 {size} 字节，超过 {limit} 字节限制。请使用 start_line/end_line 按行范围编辑。"
       old_string_not_found: "在 {path} 中未找到 'old_string'"
+      old_string_not_found_prefix_hint: "在 {path} 中未找到 'old_string'，但其前缀 '{prefix}' 出现了 {count} 次 — 可能是后缀不匹配"
       old_string_ambiguous: "'old_string' 在 {path} 中出现了 {count} 次 - 使用 replace_all=true 或提供更多上下文"
       edit_success: "已编辑 {path}"
       edit_write_failed: "写入 {path} 失败: {error}"
