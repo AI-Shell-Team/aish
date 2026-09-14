@@ -1330,6 +1330,7 @@ tools:
       edit_read_failed: "Failed to read {path}: {error}"
       file_too_large: "File {path} is {size} bytes, exceeding the {limit} byte limit. Use start_line/end_line to edit by line range."
       old_string_not_found: "'old_string' not found in {path}"
+      old_string_not_found_prefix_hint: "'old_string' not found in {path}, but its prefix '{prefix}' appears {count} times — likely a suffix mismatch"
       old_string_ambiguous: "'old_string' appears {count} times in {path} - use replace_all=true or provide more context"
       edit_success: "Edited {path}"
       edit_write_failed: "Failed to write {path}: {error}"

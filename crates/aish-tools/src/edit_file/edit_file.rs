@@ -162,12 +162,7 @@ impl Tool for EditFileTool {
 
         let count = content.matches(old).count();
         if count == 0 {
-            let mut args_map = std::collections::HashMap::new();
-            args_map.insert("path".to_string(), path.to_string());
-            return ToolResult::error(aish_i18n::t_with_args(
-                "tools.fs.edit_file.old_string_not_found",
-                &args_map,
-            ));
+            return old_string_not_found_result(path, &content, old);
         }
 
         let new_content = if replace_all {
@@ -367,12 +362,7 @@ impl EditFileTool {
         // Apply the replacement within the window only.
         let count = window.matches(old).count();
         if count == 0 {
-            let mut args_map = std::collections::HashMap::new();
-            args_map.insert("path".to_string(), path.to_string());
-            return ToolResult::error(aish_i18n::t_with_args(
-                "tools.fs.edit_file.old_string_not_found",
-                &args_map,
-            ));
+            return old_string_not_found_result(path, &window, old);
         }
         if count > 1 && !replace_all {
             let mut args_map = std::collections::HashMap::new();
@@ -547,6 +537,43 @@ impl EditFileTool {
     }
 }
 
+fn longest_matching_whitespace_prefix<'a>(
+    haystack: &str,
+    old: &'a str,
+) -> Option<(&'a str, usize)> {
+    let mut rest = old;
+    loop {
+        let idx = rest.rfind(char::is_whitespace)?;
+        rest = rest[..idx].trim_end();
+        if rest.is_empty() {
+            return None;
+        }
+        let count = haystack.matches(rest).count();
+        if count > 0 {
+            return Some((rest, count));
+        }
+    }
+}
+
+fn old_string_not_found_result(path: &str, haystack: &str, old: &str) -> ToolResult {
+    if let Some((prefix, count)) = longest_matching_whitespace_prefix(haystack, old) {
+        let mut args_map = std::collections::HashMap::new();
+        args_map.insert("path".to_string(), path.to_string());
+        args_map.insert("prefix".to_string(), prefix.to_string());
+        args_map.insert("count".to_string(), count.to_string());
+        return ToolResult::error(aish_i18n::t_with_args(
+            "tools.fs.edit_file.old_string_not_found_prefix_hint",
+            &args_map,
+        ));
+    }
+    let mut args_map = std::collections::HashMap::new();
+    args_map.insert("path".to_string(), path.to_string());
+    ToolResult::error(aish_i18n::t_with_args(
+        "tools.fs.edit_file.old_string_not_found",
+        &args_map,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +624,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_not_found() {
+        aish_i18n::set_locale("en-US");
         let dir = temp_dir();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
@@ -609,10 +637,41 @@ mod tests {
         }));
 
         assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(result.output, format!("'old_string' not found in {path}"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_edit_file_not_found_reports_matching_prefix_and_count() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("bootstrap.log");
+        let pkg = "bsdutils_1%3a2.40.4-3deepin4_amd64.deb";
+        let prior = format!("{pkg}\n{pkg}\n{pkg}\n");
+        fs::write(&file_path, &prior).unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": format!("{pkg} [106348/106348]"),
+            "new_string": "replacement"
+        }));
+
+        assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(
+            result.output,
+            format!(
+                "'old_string' not found in {path}, but its prefix '{pkg}' appears 3 times — likely a suffix mismatch"
+            )
+        );
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
     }
 
     #[test]
     fn test_edit_file_ambiguous() {
+        aish_i18n::set_locale("en-US");
         let dir = temp_dir();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "foo\nfoo\nfoo").unwrap();
@@ -625,6 +684,13 @@ mod tests {
         }));
 
         assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(
+            result.output,
+            format!(
+                "'old_string' appears 3 times in {path} - use replace_all=true or provide more context"
+            )
+        );
     }
 
     #[test]
@@ -720,6 +786,7 @@ mod tests {
 
     #[test]
     fn test_edit_file_line_range_not_found() {
+        aish_i18n::set_locale("en-US");
         let dir = temp_dir();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "alpha\nbeta\ngamma\ndelta").unwrap();
@@ -734,6 +801,41 @@ mod tests {
         }));
 
         assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(result.output, format!("'old_string' not found in {path}"));
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "alpha\nbeta\ngamma\ndelta"
+        );
+    }
+
+    #[test]
+    fn test_edit_file_line_range_not_found_hint_uses_window_count() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("bootstrap.log");
+        let pkg = "bsdutils_1%3a2.40.4-3deepin4_amd64.deb";
+        let prior = format!("{pkg}\n{pkg}\nother\n{pkg}\n");
+        fs::write(&file_path, &prior).unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": format!("{pkg} [106348/106348]"),
+            "new_string": "replacement",
+            "start_line": 3,
+            "end_line": 4
+        }));
+
+        assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(
+            result.output,
+            format!(
+                "'old_string' not found in {path}, but its prefix '{pkg}' appears 1 times — likely a suffix mismatch"
+            )
+        );
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
     }
 
     #[test]
@@ -933,20 +1035,96 @@ mod tests {
 
     #[test]
     fn test_edit_file_line_range_not_found_reports_nothing_extra() {
-        // Pre-edit behavior guard: windowed old_string stays window-scoped.
+        // Prefix exists only outside the window: no hint, same not_found text.
+        aish_i18n::set_locale("en-US");
         let dir = temp_dir();
         let file_path = dir.path().join("f.txt");
-        fs::write(&file_path, "alpha\nbeta\ngamma\n").unwrap();
+        let prior = "alpha extra\nbeta\ngamma\n";
+        fs::write(&file_path, prior).unwrap();
 
         let tool = EditFileTool::new();
         let result = tool.execute(serde_json::json!({
             "path": file_path.to_str().unwrap(),
-            "old_string": "alpha",
+            "old_string": "alpha extra [gone]",
             "new_string": "ALPHA",
             "start_line": 2,
             "end_line": 3
         }));
 
         assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(result.output, format!("'old_string' not found in {path}"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
+    }
+
+    #[test]
+    fn test_edit_file_not_found_uses_longest_matching_prefix() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("t.txt");
+        fs::write(&file_path, "hello world\n").unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello world extra tokens",
+            "new_string": "x"
+        }));
+
+        assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(
+            result.output,
+            format!(
+                "'old_string' not found in {path}, but its prefix 'hello world' appears 1 times — likely a suffix mismatch"
+            )
+        );
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "hello world\n");
+    }
+
+    #[test]
+    fn test_edit_file_not_found_truncates_on_tab() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("t.txt");
+        fs::write(&file_path, "hello\tworld\n").unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "hello\tworld\textra",
+            "new_string": "x"
+        }));
+
+        assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(
+            result.output,
+            format!(
+                "'old_string' not found in {path}, but its prefix 'hello\tworld' appears 1 times — likely a suffix mismatch"
+            )
+        );
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "hello\tworld\n");
+    }
+
+    #[test]
+    fn test_edit_file_not_found_whitespace_prefix_absent() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("t.txt");
+        let prior = "hello world\n";
+        fs::write(&file_path, prior).unwrap();
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "foo bar",
+            "new_string": "x"
+        }));
+
+        assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(result.output, format!("'old_string' not found in {path}"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
     }
 }
