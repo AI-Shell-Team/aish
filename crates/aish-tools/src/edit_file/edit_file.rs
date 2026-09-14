@@ -18,6 +18,10 @@ const MAX_FILE_SIZE: u64 = 256 * 1024; // 256 KiB
 /// edit whose content exceeds this is still applied but not snapshotted.
 const SNAPSHOT_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
+/// Cap how many whitespace-truncated prefixes we scan after an exact miss,
+/// so a long `old_string` cannot walk the haystack once per token.
+const PREFIX_HINT_MAX_CANDIDATES: usize = 32;
+
 /// Edit file tool (string replacement).
 pub struct EditFileTool {
     store: Option<SharedSnapshotStore>,
@@ -542,7 +546,7 @@ fn longest_matching_whitespace_prefix<'a>(
     old: &'a str,
 ) -> Option<(&'a str, usize)> {
     let mut rest = old;
-    loop {
+    for _ in 0..PREFIX_HINT_MAX_CANDIDATES {
         let idx = rest.rfind(char::is_whitespace)?;
         rest = rest[..idx].trim_end();
         if rest.is_empty() {
@@ -553,6 +557,7 @@ fn longest_matching_whitespace_prefix<'a>(
             return Some((rest, count));
         }
     }
+    None
 }
 
 fn old_string_not_found_result(path: &str, haystack: &str, old: &str) -> ToolResult {
@@ -1120,6 +1125,37 @@ mod tests {
             "path": file_path.to_str().unwrap(),
             "old_string": "foo bar",
             "new_string": "x"
+        }));
+
+        assert!(!result.ok);
+        let path = file_path.to_str().unwrap();
+        assert_eq!(result.output, format!("'old_string' not found in {path}"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), prior);
+    }
+
+    #[test]
+    fn test_edit_file_not_found_caps_prefix_candidates() {
+        aish_i18n::set_locale("en-US");
+        let dir = temp_dir();
+        let file_path = dir.path().join("t.txt");
+        let prior = "needle\n";
+        fs::write(&file_path, prior).unwrap();
+
+        // More whitespace tokens than PREFIX_HINT_MAX_CANDIDATES, with the
+        // only haystack hit at the far end. The search must stop and keep
+        // the generic not_found message.
+        let mut tokens = vec!["needle".to_string()];
+        tokens.extend(std::iter::repeat_n(
+            "x".to_string(),
+            PREFIX_HINT_MAX_CANDIDATES + 1,
+        ));
+        let old_string = tokens.join(" ");
+
+        let tool = EditFileTool::new();
+        let result = tool.execute(serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": old_string,
+            "new_string": "y"
         }));
 
         assert!(!result.ok);

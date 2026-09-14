@@ -1013,7 +1013,7 @@ tools:
       edit_read_failed: "Error al leer {path}: {error}"
       file_too_large: "El archivo {path} es de {size} bytes, excede el límite de {limit} bytes. Use start_line/end_line para editar por rango."
       old_string_not_found: "'old_string' no encontrado en {path}"
-      old_string_not_found_prefix_hint: "'old_string' no encontrado en {path}, pero su prefijo '{prefix}' aparece {count} veces — probable desajuste de sufijo"
+      old_string_not_found_prefix_hint: "'old_string' no encontrado en {path}, pero su prefijo '{prefix}' tiene {count} coincidencias — probable desajuste de sufijo"
       old_string_ambiguous: "'old_string' aparece {count} veces en {path} - use replace_all=true o más contexto"
       edit_success: "{path} editado"
       edit_write_failed: "Error al escribir {path}: {error}"
