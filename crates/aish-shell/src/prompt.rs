@@ -1176,10 +1176,11 @@ mod tests {
     // --- Startup changelog marker (consume/commit decoupling) ------------
 
     /// Serialize tests that mutate the process-global `XDG_CONFIG_HOME`.
+    ///
+    /// Shares the crate-wide env lock so unrelated tests touching `HOME` /
+    /// `XDG_*` cannot interleave with these.
     fn xdg_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
-            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-        &LOCK
+        crate::env_test_lock()
     }
 
     /// Restore `XDG_CONFIG_HOME` on drop (including panic unwind).

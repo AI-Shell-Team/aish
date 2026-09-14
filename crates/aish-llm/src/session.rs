@@ -283,6 +283,13 @@ impl LlmSession {
         self.audit_host = host;
     }
 
+    /// Update only the session UUID recorded in audit events. Called when
+    /// the shell switches sessions (/resume, /sessions, /fork) so subsequent
+    /// ai_tool / security_decision events attribute to the new session.
+    pub fn set_audit_session_uuid(&mut self, session_uuid: String) {
+        self.audit_session_uuid = Some(session_uuid);
+    }
+
     fn redact(&self, text: &str) -> String {
         match self.audit_redactor {
             Some(ref r) => r(text),
@@ -3557,5 +3564,62 @@ mod tests {
         let sanitized = sanitize_tool_pairs(messages);
         let roles: Vec<&str> = sanitized.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, vec!["user", "user"]);
+    }
+
+    #[tokio::test]
+    async fn audit_events_use_updated_session_uuid_after_switch() {
+        use std::sync::{Arc, Mutex as StdMutex};
+
+        #[derive(Default)]
+        struct RecordingSink(StdMutex<Vec<AuditEvent>>);
+
+        impl aish_core::AuditSink for RecordingSink {
+            fn record(&self, event: AuditEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let sink = Arc::new(RecordingSink::default());
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_audit_context(sink.clone(), None, "session-a".to_string(), None, None);
+        session.register_tool(Box::new(MockTool::new("allow_tool")));
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "allow_tool".into(),
+            arguments: serde_json::json!({}).to_string(),
+        };
+
+        // Baseline: before the switch, both emission paths attribute to the
+        // session captured at init.
+        session.execute_tool_external(&tool_call).await;
+
+        // Simulate a session switch: /resume, /sessions and /fork all land
+        // here via the shell, then continue emitting audit events.
+        session.set_audit_session_uuid("session-b".to_string());
+        session.execute_tool_external(&tool_call).await;
+
+        // security_decision + ai_tool per call, read from the real emission
+        // sites (run_tool_preflight and execute_tool). Both types must move
+        // with the switch: a shell-side change that forgets to sync the audit
+        // context leaves the second pair on "session-a".
+        let events = sink.0.lock().unwrap();
+        let attributed: Vec<(String, String)> = events
+            .iter()
+            .map(|event| {
+                (
+                    event.event_type.to_string(),
+                    event.session_uuid.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            attributed,
+            vec![
+                ("security_decision".to_string(), "session-a".to_string()),
+                ("ai_tool".to_string(), "session-a".to_string()),
+                ("security_decision".to_string(), "session-b".to_string()),
+                ("ai_tool".to_string(), "session-b".to_string()),
+            ]
+        );
     }
 }
