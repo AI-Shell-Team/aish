@@ -6,11 +6,16 @@ pub use patterns::{CustomPattern, SecretMatch, SecretPattern, SecretType};
 pub use scanner::SecretScanner;
 pub use vault::SecretVault;
 
-/// Replace all detected secrets in `text` with `[REDACTED:type]` markers.
-pub fn redact_secrets(text: &str, scanner: &SecretScanner) -> String {
+/// Version tag embedded in exported artifacts so receivers can tell which
+/// redaction rule set produced them.
+pub const REDACTION_RULES_VERSION: &str = "v1";
+
+/// [`redact_secrets`] variant that also reports how many secrets were
+/// replaced. Shared by every export path that needs a preview count.
+pub fn redact_secrets_with_hits(text: &str, scanner: &SecretScanner) -> (String, usize) {
     let matches = scanner.scan(text);
     if matches.is_empty() {
-        return text.to_string();
+        return (text.to_string(), 0);
     }
     let mut result = String::with_capacity(text.len());
     let mut last_end = 0;
@@ -26,7 +31,12 @@ pub fn redact_secrets(text: &str, scanner: &SecretScanner) -> String {
         last_end = m.end;
     }
     result.push_str(&text[last_end..]);
-    result
+    (result, matches.len())
+}
+
+/// Replace all detected secrets in `text` with `[REDACTED:type]` markers.
+pub fn redact_secrets(text: &str, scanner: &SecretScanner) -> String {
+    redact_secrets_with_hits(text, scanner).0
 }
 
 #[cfg(test)]
