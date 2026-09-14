@@ -65,3 +65,17 @@ pub fn needs_interactive_setup(config: &aish_config::ConfigModel) -> bool {
     }
     false
 }
+
+/// Serialize tests that mutate process-global environment variables.
+///
+/// Unit tests within this crate share one process and run concurrently, so any
+/// test that repoints `HOME`, `XDG_*` or `AISH_*` must hold this lock: several
+/// subsystems (`dirs::config_dir`, `dirs::data_local_dir`, policy discovery,
+/// skill roots) read those variables lazily, and an interleaved write from a
+/// sibling test would redirect them at a temporary directory.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+    &LOCK
+}

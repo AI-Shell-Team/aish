@@ -13502,3 +13502,221 @@ mod export_tests {
         mgr.t(key).contains(&format!("{{{placeholder}}}"))
     }
 }
+
+/// Session-switch audit attribution, exercised through the real resume path.
+///
+/// The LLM-level test covers `LlmSession::set_audit_session_uuid` in isolation;
+/// this one drives `AishShell::resume_session_with_options` end to end so a
+/// propagation call that is dropped or placed on the wrong object cannot pass
+/// silently.
+#[cfg(all(test, target_os = "linux"))]
+mod resume_audit_uuid_tests {
+    use super::*;
+    use aish_llm::{Tool, ToolCall, ToolResult};
+
+    /// Minimal tool whose default preflight returns `Allow`, so one execution
+    /// emits exactly two audit events: `security_decision` + `ai_tool`.
+    struct MockProbeTool;
+
+    impl Tool for MockProbeTool {
+        fn name(&self) -> &str {
+            "audit_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Probe tool for audit attribution tests"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::success("probe ok")
+        }
+    }
+
+    /// Repoints process-global env vars and restores them on drop.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn apply(vars: &[(&'static str, std::path::PathBuf)]) -> Self {
+            let mut saved = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                saved.push((*key, std::env::var_os(key)));
+                std::env::set_var(key, value);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in &self.saved {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    // The env lock must span the whole test because the shell reads `HOME` /
+    // `XDG_*` lazily across the awaited resume path. A `std::sync::Mutex` is
+    // safe here: `#[tokio::test]` runs a current-thread runtime, so nothing on
+    // this thread is needed to drive the futures, and sibling tests that want
+    // the lock are sync and simply block until this test finishes.
+    #[allow(clippy::await_holding_lock)]
+    async fn audit_events_follow_session_switch_through_resume() {
+        // `AishShell::new` resolves config/data/cache dirs and the security
+        // policy from process-global env vars, so this test must not overlap
+        // with any sibling test that repoints them.
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+        let data_dir = tmp.path().join("data");
+        let cache_dir = tmp.path().join("cache");
+        for dir in [&home, &config_dir, &data_dir, &cache_dir] {
+            std::fs::create_dir_all(dir).expect("create temp dir");
+        }
+
+        let _env = EnvGuard::apply(&[
+            ("HOME", home.clone()),
+            ("XDG_CONFIG_HOME", config_dir.clone()),
+            ("XDG_DATA_HOME", data_dir),
+            ("XDG_CACHE_HOME", cache_dir.clone()),
+            ("AISH_CONFIG_DIR", config_dir.join("aish")),
+            (
+                "AISH_BUILTIN_SKILLS_CACHE",
+                cache_dir.join("builtin-skills"),
+            ),
+            (
+                "AISH_SYSTEM_POLICY_PATH",
+                tmp.path().join("absent-system-policy.yaml"),
+            ),
+        ]);
+
+        // Audit must be on for the shell to open an audit store at all. The
+        // rest of the policy falls back to defaults.
+        let policy_dir = config_dir.join("aish");
+        std::fs::create_dir_all(&policy_dir).expect("create policy dir");
+        std::fs::write(
+            policy_dir.join("security_policy.yaml"),
+            "audit:\n  enabled: true\n",
+        )
+        .expect("write policy");
+
+        // Audit and sessions share one database so the query below sees the
+        // events the shell writes.
+        let db_path = tmp.path().join("aish").join("sessions.db");
+        std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("create db dir");
+
+        let config = ConfigModel {
+            model: "test-model".into(),
+            api_base: "http://127.0.0.1:1/v1".into(),
+            api_key: "test-key".into(),
+            session_db_path: Some(db_path.display().to_string()),
+            ..Default::default()
+        };
+
+        let mut shell = AishShell::new(config.clone()).expect("shell construction");
+        assert!(
+            shell.session_store.is_some(),
+            "temp session db should open (`session_db_path`)"
+        );
+        assert!(
+            shell.audit_store.is_some(),
+            "temp policy sets `audit.enabled: true`; audit store must open"
+        );
+
+        let original_uuid = shell.session_uuid.clone();
+        let other_uuid = shell
+            .session_store
+            .as_ref()
+            .expect("session store")
+            .create_session(&config.model, Some(&config.api_base))
+            .expect("create second session")
+            .session_uuid;
+        assert_ne!(original_uuid, other_uuid);
+
+        shell.ai_handler.register_tool(Box::new(MockProbeTool));
+        let tool_call = ToolCall {
+            id: "call-1".into(),
+            name: "audit_probe".into(),
+            arguments: "{}".into(),
+        };
+
+        let before = shell
+            .ai_handler
+            .llm_session_for_test()
+            .execute_tool_external(&tool_call)
+            .await;
+        assert!(before.ok, "pre-switch probe failed: {}", before.output);
+
+        shell
+            .resume_session_with_options(&other_uuid, false, false)
+            .expect("resume must succeed");
+        assert_eq!(shell.session_uuid, other_uuid, "shell session uuid");
+
+        // Idempotent re-registration keeps this assertion about audit
+        // attribution rather than tool availability.
+        shell.ai_handler.register_tool(Box::new(MockProbeTool));
+
+        let after = shell
+            .ai_handler
+            .llm_session_for_test()
+            .execute_tool_external(&tool_call)
+            .await;
+        assert!(after.ok, "post-switch probe failed: {}", after.output);
+
+        let events = shell
+            .audit_store
+            .as_ref()
+            .expect("audit store")
+            .query(&aish_session::AuditQuery {
+                limit: 100,
+                ..Default::default()
+            })
+            .expect("query audit events");
+
+        // `query_audit_events` orders by second-resolution `ts`, so both events
+        // of one execution may share a timestamp: compare sorted multisets.
+        let bucket = |uuid: &str| -> Vec<String> {
+            let mut types: Vec<String> = events
+                .iter()
+                .filter(|e| e.session_uuid.as_deref() == Some(uuid))
+                .map(|e| e.event_type.to_string())
+                .collect();
+            types.sort();
+            types
+        };
+
+        assert_eq!(
+            bucket(&original_uuid),
+            vec!["ai_tool", "security_decision"],
+            "pre-switch probe must attribute to the original session; all events: {:?}",
+            events
+                .iter()
+                .map(|e| (e.session_uuid.clone(), e.event_type.to_string()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            bucket(&other_uuid),
+            vec!["ai_tool", "security_decision"],
+            "post-switch probe must attribute to the resumed session"
+        );
+
+        let probe_events = events
+            .iter()
+            .filter(|e| e.ai_tool.as_deref() == Some("audit_probe"))
+            .count();
+        assert_eq!(probe_events, 2, "expected one ai_tool event per probe");
+    }
+}

@@ -351,6 +351,15 @@ impl AiHandler {
         self.llm_session.set_audit_session_uuid(session_uuid);
     }
 
+    /// Borrow the wrapped LLM session.
+    ///
+    /// Test-only: lets audit-propagation tests drive real tool executions
+    /// without exposing the field to production code.
+    #[cfg(test)]
+    pub fn llm_session_for_test(&self) -> &aish_llm::LlmSession {
+        &self.llm_session
+    }
+
     pub fn apply_rotation_state(&mut self, state: Option<aish_llm::RotationState>) {
         match state {
             Some(s) => self.llm_session.set_rotation(s),
