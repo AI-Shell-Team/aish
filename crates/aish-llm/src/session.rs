@@ -921,6 +921,13 @@ impl LlmSession {
                                             stream_prompt_tokens = u.prompt_tokens;
                                             stream_completion_tokens = u.completion_tokens;
                                         }
+                                        // Content is emitted before ToolCallDelta in
+                                        // the same parse batch, so look ahead: a
+                                        // same-frame tool call must still preview
+                                        // the assistant text.
+                                        let frame_has_tool_call = events.iter().any(|event| {
+                                            matches!(event, SseEvent::ToolCallDelta { .. })
+                                        });
                                         for event in events {
                                             match event {
                                                 SseEvent::ContentDelta(delta) => {
@@ -931,7 +938,7 @@ impl LlmSession {
                                                     // conversations the response is
                                                     // rendered by the caller after the
                                                     // operation completes.
-                                                    if tool_calls_seen {
+                                                    if tool_calls_seen || frame_has_tool_call {
                                                         if !content_preview_started {
                                                             content_preview_started = true;
                                                             self.emit_content_delta(
@@ -3726,5 +3733,49 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result.text, "all done");
+    }
+
+    #[tokio::test]
+    async fn streamed_same_frame_content_is_previewed_with_the_tool_call() {
+        use crate::agents::mock_text_response;
+
+        let previews = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let previews_cb = previews.clone();
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "bash",
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }));
+        session.set_event_callback(std::sync::Arc::new(move |event| {
+            if matches!(event.event_type, aish_core::LlmEventType::ContentDelta) {
+                if let Some(delta) = event.data.get("delta").and_then(|v| v.as_str()) {
+                    previews_cb.lock().unwrap().push(delta.to_string());
+                }
+            }
+            None
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_sse_response(&[
+                r#"data: {"choices":[{"delta":{"content":"准备执行检查","tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{}"}}]}}]}"#,
+                "\n\n",
+                "data: [DONE]\n\n",
+            ])),
+            Ok(mock_text_response("all done")),
+        ]);
+
+        session
+            .process_input(&ChatMessage::user("run bash"), &[], Some("sys"), true)
+            .await
+            .expect("named tool call must execute");
+
+        let seen = previews.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|d| d.contains("准备执行检查")),
+            "same-frame assistant text must be previewed, got {seen:?}"
+        );
     }
 }
