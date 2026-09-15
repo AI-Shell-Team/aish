@@ -819,7 +819,11 @@ impl AiHandler {
         let system_message = self.error_correction_system_message(command, exit_code, stderr);
 
         let user_msg = ChatMessage::user(&prompt);
-        let process_result = self
+        // Issue #452: error correction runs with the main tool set visible
+        // (PromptContext::MainChat), so a provider failure can still land
+        // mid-turn after tools executed. Commit the partial evidence the
+        // same way handle_question does before propagating the error.
+        let process_result = match self
             .llm_session
             .process_input(
                 &user_msg,
@@ -827,7 +831,14 @@ impl AiHandler {
                 system_message.as_deref(),
                 true,
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                self.commit_partial_turn(&prompt);
+                return Err(err);
+            }
+        };
         let response = process_result.text;
 
         // Persist token usage delta to disk

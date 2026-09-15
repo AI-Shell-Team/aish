@@ -3073,13 +3073,7 @@ impl AishShell {
                             // after tools ran, the partial evidence was just
                             // committed to the context — tell the user it
                             // survived and persist the snapshot to disk.
-                            let saved_steps = self.ai_handler.last_partial_turn_step_count();
-                            if saved_steps > 0 {
-                                let msg = t("shell.error.partial_turn_saved")
-                                    .replace("{steps}", &saved_steps.to_string());
-                                println!("{}", theme::warning(&msg));
-                                self.persist_session_snapshot();
-                            }
+                            self.report_partial_turn_saved();
                             self.record_history(input, 1);
                         }
                     }
@@ -3269,6 +3263,7 @@ impl AishShell {
                                                 .replace("{error}", &e.to_string());
                                             eprintln!("{}", theme::error(&msg));
                                         }
+                                        self.report_partial_turn_saved();
                                     }
                                 }
                                 continue;
@@ -3644,6 +3639,7 @@ impl AishShell {
                                 .replace("{error}", &e.to_string());
                             eprintln!("{}", theme::error(&msg));
                         }
+                        self.report_partial_turn_saved();
                     }
                 }
                 self.record_history(input, 0);
@@ -3714,6 +3710,23 @@ impl AishShell {
             let snapshot = self.session_state_snapshot(chrono::Utc::now());
             let _ = store.update_session_state(&self.session_uuid, &snapshot);
         }
+    }
+
+    /// Issue #452: after a mid-turn provider failure, if the handler just
+    /// committed partial-turn tool evidence, tell the user it survived and
+    /// persist the snapshot so `/resume` sees consistent evidence. Shared
+    /// by every `handle_question` / `handle_error_correction` error branch.
+    /// Returns `true` when evidence was found (callers may want to skip
+    /// double-persisting on paths that follow up anyway).
+    fn report_partial_turn_saved(&mut self) -> bool {
+        let saved_steps = self.ai_handler.last_partial_turn_step_count();
+        if saved_steps == 0 {
+            return false;
+        }
+        let msg = t("shell.error.partial_turn_saved").replace("{steps}", &saved_steps.to_string());
+        println!("{}", theme::warning(&msg));
+        self.persist_session_snapshot();
+        true
     }
 
     fn session_state_snapshot(
