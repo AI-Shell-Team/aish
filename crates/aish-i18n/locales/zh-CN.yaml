@@ -771,6 +771,7 @@ shell:
     potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
     llm_error_title: "❌ 大模型请求失败"
     llm_error_message: "错误: {error}"
+    partial_turn_saved: "已保存本轮已完成的工具执行记录（{steps} 步），失败前的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     llm_error_details_title: "调试详情"
     tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
     pty_error: "PTY 错误：{error}"
