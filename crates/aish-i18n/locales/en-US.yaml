@@ -774,6 +774,7 @@ shell:
     restart_bash_failed: "Failed to restart bash: {error}"
     load_script_failed: "Failed to load script '{script}': {error}"
     llm_error_message: "Error: {error}"
+    partial_turn_saved: "Saved the completed tool steps of this turn ({steps} steps). Work done before the failure is not lost; enter a new task or ;retry to continue from the saved point."
     llm_error_details_title: "Debug Details"
     tool_args_json_invalid_hint: "❌ Request failed, please retry."
 
