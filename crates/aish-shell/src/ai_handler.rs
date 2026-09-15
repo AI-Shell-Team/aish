@@ -590,7 +590,12 @@ impl AiHandler {
             .process_input(&user_msg, &context_messages, Some(&static_core), true)
             .await
         {
-            Ok(result) => result,
+            Ok(result) => {
+                // Clear the stale partial-turn count so a later error path
+                // never reports evidence from an already-completed turn.
+                self.last_partial_turn_steps = 0;
+                result
+            }
             Err(err) => {
                 // Issue #452: the provider died mid-turn (404/429/5xx after
                 // tools already ran). Persist the completed tool-call
@@ -833,7 +838,10 @@ impl AiHandler {
             )
             .await
         {
-            Ok(result) => result,
+            Ok(result) => {
+                self.last_partial_turn_steps = 0;
+                result
+            }
             Err(err) => {
                 self.commit_partial_turn(&prompt);
                 return Err(err);
