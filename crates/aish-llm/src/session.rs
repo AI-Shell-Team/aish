@@ -104,6 +104,12 @@ pub struct LlmSession {
     is_sub_agent: bool,
     /// Multi-account rotation + model fallback state. `None` when disabled.
     rotation: Option<std::sync::Mutex<RotationState>>,
+    /// Tool-loop messages (assistant tool_calls + tool results) completed
+    /// before a mid-turn provider failure. Populated by `process_input`
+    /// when the loop dies on an API error; drained by
+    /// `take_last_partial_turn` so the shell layer can persist the
+    /// evidence. Empty unless the previous turn failed mid-loop.
+    last_partial_turn: std::sync::Mutex<Vec<ChatMessage>>,
     /// Scripted chat completion responses for unit/integration tests (pop in order).
     #[cfg(test)]
     test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
@@ -164,9 +170,19 @@ impl LlmSession {
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
             rotation: None,
+            last_partial_turn: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             test_chat_responses: None,
         }
+    }
+
+    /// Drain the tool-loop messages completed before the last mid-turn
+    /// failure. Returns an empty vec when the previous turn succeeded (or
+    /// failed before any tool ran). The caller is expected to persist these
+    /// (assistant tool_calls + tool results) so partial-turn evidence
+    /// survives the failure (issue #452).
+    pub fn take_last_partial_turn(&self) -> Vec<ChatMessage> {
+        std::mem::take(&mut self.last_partial_turn.lock().unwrap())
     }
 
     pub fn tool_execution_policy(&self) -> crate::tool_context::ToolExecutionPolicy {
@@ -773,6 +789,19 @@ impl LlmSession {
             {
                 Ok(r) => r,
                 Err(e) => {
+                    // Preserve the tool-loop messages (assistant tool_calls
+                    // + tool results) completed before this failure so the
+                    // shell layer can persist partial-turn evidence and let
+                    // the user resume from the saved point (issue #452).
+                    // The user message is prepended so the persisted slice
+                    // is a self-contained, replayable turn prefix. When no
+                    // tool message exists yet (first request failed) there
+                    // is no evidence to preserve — keep the buffer empty.
+                    if messages.len() > initial_len {
+                        let mut partial: Vec<ChatMessage> = vec![user_msg.clone()];
+                        partial.extend(messages[initial_len..].iter().cloned());
+                        *self.last_partial_turn.lock().unwrap() = partial;
+                    }
                     self.emit_event(LlmEvent {
                         event_type: LlmEventType::Error,
                         data: serde_json::json!({"error": e.to_string()}),
@@ -1010,6 +1039,14 @@ impl LlmSession {
                                 stream_done = true;
                             }
                             Err(e) => {
+                                // Preserve partial-turn evidence the same way
+                                // as the non-streaming API-error path (issue
+                                // #452). Stream errors happen mid-request, so
+                                // everything before `initial_len` in this
+                                // iteration is already-completed tool work.
+                                let mut partial: Vec<ChatMessage> = vec![user_msg.clone()];
+                                partial.extend(messages[initial_len..].iter().cloned());
+                                *self.last_partial_turn.lock().unwrap() = partial;
                                 // Emit error event (matching Python's streaming error
                                 // pattern: emit error and break, don't panic).
                                 self.emit_event(LlmEvent {
@@ -1625,6 +1662,7 @@ impl LlmSession {
             max_context_tokens: self.max_context_tokens,
             context_budget_policy: self.context_budget_policy.clone(),
             rotation: None,
+            last_partial_turn: std::sync::Mutex::new(Vec::new()),
             turn_seq: std::sync::atomic::AtomicU32::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
@@ -3264,6 +3302,157 @@ mod tests {
         // Preflight still ran once (memory miss → confirm → reply).
         assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
+    // Issue #452 regression: a provider failure injected after N executed
+    // tools must leave the completed tool call/result pairs retrievable via
+    // take_last_partial_turn, prefixed by the user message. A successful
+    // turn must leave the buffer empty.
+    struct PartialTurnProbeTool {
+        name: String,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Tool for PartialTurnProbeTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "mock"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+            self.log.lock().unwrap().push(self.name.clone());
+            crate::types::ToolResult::success(format!("{} executed", self.name))
+        }
+    }
+
+    fn partial_turn_session(
+        responses: Vec<Result<crate::client::LlmResponse, AishError>>,
+        log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> LlmSession {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.set_test_chat_responses(responses);
+        session.register_tool(Box::new(PartialTurnProbeTool {
+            name: "grep".into(),
+            log: log.clone(),
+        }));
+        session.register_tool(Box::new(PartialTurnProbeTool {
+            name: "bash".into(),
+            log,
+        }));
+        session
+    }
+
+    #[tokio::test]
+    async fn partial_turn_saved_when_provider_fails_after_two_tools() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let session = partial_turn_session(
+            vec![
+                Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                Ok(mock_tool_call_response(&[(
+                    "c2",
+                    "bash",
+                    r#"{"command":"mv x y"}"#,
+                )])),
+                Err(AishError::Llm("API error 404: Model not found.".into())),
+            ],
+            log.clone(),
+        );
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(result.is_err(), "the injected 404 must surface as Err");
+
+        // Both tools really executed before the failure (side effect included).
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["grep".to_string(), "bash".to_string()]
+        );
+
+        let partial = session.take_last_partial_turn();
+        assert_eq!(partial.first().map(|m| m.role.as_str()), Some("user"));
+        let roles: Vec<&str> = partial.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "tool", "assistant", "tool"],
+            "partial turn must carry user + both completed tool call/result pairs"
+        );
+        // Assistant messages reference executed tools; tool results pair back.
+        let called_ids: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .flat_map(|m| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+            .collect();
+        let answered_ids: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        assert_eq!(called_ids, vec!["c1".to_string(), "c2".to_string()]);
+        assert_eq!(called_ids, answered_ids, "no dangling tool_call_id");
+        // Draining empties the buffer.
+        assert!(session.take_last_partial_turn().is_empty());
+    }
+
+    #[tokio::test]
+    async fn partial_turn_saved_when_second_request_fails_mid_loop() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let session = partial_turn_session(
+            vec![
+                Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                Err(AishError::Llm("Stream error: connection reset".into())),
+            ],
+            log.clone(),
+        );
+        // Second scripted response fails through the non-streaming JSON
+        // error branch — the same handler that covers HTTP 404/429/5xx.
+        // (The in-stream SSE error branch shares the identical save logic.)
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(result.is_err());
+        let partial = session.take_last_partial_turn();
+        let roles: Vec<&str> = partial.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+        assert_eq!(*log.lock().unwrap(), vec!["grep".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn no_partial_turn_after_successful_turn_or_first_request_failure() {
+        use crate::agents::mock_text_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Success: buffer stays empty.
+        let session = partial_turn_session(vec![Ok(mock_text_response("done"))], log.clone());
+        session
+            .process_input(&ChatMessage::user("hi"), &[], Some("core"), false)
+            .await
+            .expect("successful turn");
+        assert!(session.take_last_partial_turn().is_empty());
+
+        // Failure on the FIRST request (no tool ran): buffer stays empty
+        // because there is no completed tool evidence to preserve.
+        let session = partial_turn_session(
+            vec![Err(AishError::Llm("API error 500".into()))],
+            log.clone(),
+        );
+        assert!(session
+            .process_input(&ChatMessage::user("hi"), &[], Some("core"), false)
+            .await
+            .is_err());
+        assert!(session.take_last_partial_turn().is_empty());
+    }
+
     /// Tool that echoes a `tag` from its args so parallel calls can be told
     /// apart and matched back to their originating call id.
     struct ArgsEchoTool;

@@ -180,6 +180,9 @@ pub struct AiHandler {
     /// Optional secret redactor applied to tool outputs before they enter
     /// the persistent context (memory + session snapshot).
     secret_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
+    /// Tool-message count committed by the most recent `commit_partial_turn`
+    /// (0 when the last turn succeeded or failed before any tool ran).
+    last_partial_turn_steps: usize,
 }
 
 impl AiHandler {
@@ -213,6 +216,7 @@ impl AiHandler {
             ),
             auto_search,
             secret_redactor: None,
+            last_partial_turn_steps: 0,
         }
     }
 
@@ -581,10 +585,22 @@ impl AiHandler {
         } else {
             ChatMessage::user_with_images(extracted.cleaned_text, extracted.image_urls)
         };
-        let process_result = self
+        let process_result = match self
             .llm_session
             .process_input(&user_msg, &context_messages, Some(&static_core), true)
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                // Issue #452: the provider died mid-turn (404/429/5xx after
+                // tools already ran). Persist the completed tool-call
+                // evidence before propagating the error so the next turn —
+                // and a resumed session — can see what was already done and
+                // must not blindly redo.
+                self.commit_partial_turn(&question_processed);
+                return Err(err);
+            }
+        };
         let response = process_result.text;
 
         // Surface the persistent-layer compaction mode to the UI (the send
@@ -621,6 +637,63 @@ impl AiHandler {
         self.persist_token_usage();
 
         Ok(response)
+    }
+
+    /// Persist a partial turn left by a mid-turn provider failure (issue
+    /// #452). Drains the tool-loop messages the LLM session retained before
+    /// the error and commits them to the context manager with the same
+    /// redaction/capping as a successful turn. The stored slice starts with
+    /// the user message (prepended by the session), so only the tool
+    /// messages are appended here — the user entry is committed explicitly
+    /// to keep ordering identical to the success path.
+    ///
+    /// After this runs the persisted context stays self-consistent: every
+    /// assistant tool_call has a matching tool_result, so the next request
+    /// (retry or model switch) replays the completed work and the provider
+    /// sees the evidence instead of dangling calls.
+    fn commit_partial_turn(&mut self, question_processed: &str) {
+        let partial = self.llm_session.take_last_partial_turn();
+        if partial.is_empty() {
+            self.last_partial_turn_steps = 0;
+            return;
+        }
+        // The session prepends the user message; the shell commits it here
+        // (same as the success path) and skips it in the message slice.
+        let tool_messages = if partial.first().is_some_and(|m| m.role == "user") {
+            &partial[1..]
+        } else {
+            &partial[..]
+        };
+        self.last_partial_turn_steps = tool_messages.len();
+        if tool_messages.is_empty() {
+            return;
+        }
+        self.context_manager
+            .add_message("user", question_processed, MemoryType::Llm);
+        for ctx_msg in self.redact_turn_messages(tool_messages) {
+            self.context_manager.add_memory(MemoryType::Llm, ctx_msg);
+        }
+        // No final assistant text exists (the turn failed), so nothing is
+        // appended after the tool messages. Mark the interruption with a
+        // synthetic assistant note so the next turn's model understands why
+        // the transcript stops mid-task.
+        self.context_manager.add_message(
+            "assistant",
+            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]",
+            MemoryType::Llm,
+        );
+        self.context_manager.trim();
+        tracing::info!(
+            messages = tool_messages.len(),
+            "Persisted partial-turn tool evidence after provider failure"
+        );
+    }
+
+    /// Number of tool-loop messages persisted by the most recent
+    /// `commit_partial_turn` call (0 when the last turn succeeded). Used by
+    /// the shell to tell the user what survived a mid-turn failure.
+    pub fn last_partial_turn_step_count(&self) -> usize {
+        self.last_partial_turn_steps
     }
 
     /// Convert a turn's intermediate ChatMessages into persistable
@@ -2554,5 +2627,64 @@ mod tests {
             replayed[0].reasoning_content.as_deref(),
             Some("用户想执行标记命令，我先调用 bash。")
         );
+    }
+    /// Issue #452: after a mid-turn provider failure, commit_partial_turn
+    /// must persist the user message, the completed tool call/result pairs
+    /// (redacted, self-consistent), and a synthetic interruption note —
+    /// so the next request replays the evidence instead of losing it.
+    #[test]
+    fn commit_partial_turn_persists_tool_evidence_after_failure() {
+        let mut handler = test_handler();
+        handler.set_secret_redactor(Arc::new(|text: &str| {
+            text.replace("SECRET_TOKEN", "[REDACTED]")
+        }));
+
+        // Simulate what process_input left behind: user msg + one completed
+        // tool round (assistant tool_call + tool result with a secret).
+        let partial = [
+            ChatMessage::user("run the marker command"),
+            {
+                let mut a = ChatMessage::assistant("");
+                a.content = None;
+                a.tool_calls = Some(vec![aish_llm::ToolCall {
+                    id: "call_p1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: r#"{"command":"echo SECRET_TOKEN"}"#.to_string(),
+                }]);
+                a
+            },
+            ChatMessage::tool_result("call_p1", "out SECRET_TOKEN"),
+        ];
+        // The commit method drains from the session; the session-side
+        // buffer round-trip is covered by aish-llm unit tests
+        // (partial_turn_saved_when_provider_fails_after_two_tools). Here we
+        // exercise the persistence/redaction logic directly against
+        // redact_turn_messages, mirroring the commit_partial_turn body.
+        let tool_messages = &partial[1..];
+        handler
+            .context_manager
+            .add_message("user", "run the marker command", MemoryType::Llm);
+        for msg in handler.redact_turn_messages(tool_messages) {
+            handler.context_manager.add_memory(MemoryType::Llm, msg);
+        }
+        handler.context_manager.add_message(
+            "assistant",
+            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]",
+            MemoryType::Llm,
+        );
+
+        let context = handler.build_context_messages();
+        let roles: Vec<&str> = context.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool", "assistant"]);
+        // Pairing is self-consistent: the tool_call has its result.
+        let calls = context[1].tool_calls.as_ref().expect("calls kept");
+        assert_eq!(calls[0].id, "call_p1");
+        assert_eq!(context[2].tool_call_id.as_deref(), Some("call_p1"));
+        // Redaction applied on the failure path too.
+        let tool_text = context[2].text_content().unwrap();
+        assert!(tool_text.contains("[REDACTED]"));
+        assert!(!tool_text.contains("SECRET_TOKEN"));
+        // The synthetic note explains the interruption.
+        assert!(context[3].text_content().unwrap().contains("interrupted"));
     }
 }

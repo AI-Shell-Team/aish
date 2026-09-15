@@ -3069,6 +3069,17 @@ impl AishShell {
                                     .replace("{error}", &e.to_string());
                                 eprintln!("{}", theme::error(&msg));
                             }
+                            // Issue #452: if the failure happened mid-turn
+                            // after tools ran, the partial evidence was just
+                            // committed to the context — tell the user it
+                            // survived and persist the snapshot to disk.
+                            let saved_steps = self.ai_handler.last_partial_turn_step_count();
+                            if saved_steps > 0 {
+                                let msg = t("shell.error.partial_turn_saved")
+                                    .replace("{steps}", &saved_steps.to_string());
+                                println!("{}", theme::warning(&msg));
+                                self.persist_session_snapshot();
+                            }
                             self.record_history(input, 1);
                         }
                     }
