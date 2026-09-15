@@ -82,7 +82,8 @@ impl StreamParser {
     /// Parse a single SSE chunk line and extract structured events.
     ///
     /// SSE format: `"data: {json}\n\n"` or `"data: [DONE]\n\n"`.
-    /// Returns a Vec because a single chunk may contain multiple tool call deltas.
+    /// One `delta` may yield content, reasoning, several tool-call deltas, and
+    /// finish together — field families are not mutually exclusive.
     pub fn parse_sse_chunk(line: &str) -> (Vec<SseEvent>, Option<TokenUsage>) {
         let line = line.trim();
         if !line.starts_with("data: ") {
@@ -124,7 +125,6 @@ impl StreamParser {
         if let Some(content) = extract_message_text(delta.and_then(|d| d.get("content"))) {
             if !content.is_empty() {
                 events.push(SseEvent::ContentDelta(content.to_string()));
-                return (events, extracted_usage);
             }
         }
 
@@ -135,7 +135,6 @@ impl StreamParser {
         {
             if !reasoning.is_empty() {
                 events.push(SseEvent::ReasoningDelta(reasoning.to_string()));
-                return (events, extracted_usage);
             }
         }
 
@@ -169,18 +168,14 @@ impl StreamParser {
                     arguments: args,
                 });
             }
-            if !events.is_empty() {
-                return (events, extracted_usage);
-            }
         }
 
         // Finish reason
         if let Some(reason) = choice.get("finish_reason").and_then(|r| r.as_str()) {
             events.push(SseEvent::Finish(reason.to_string()));
-            return (events, extracted_usage);
         }
 
-        (Vec::new(), extracted_usage)
+        (events, extracted_usage)
     }
 }
 
@@ -326,5 +321,110 @@ mod tests {
             SseEvent::Done => {}
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_sse_chunk_keeps_named_tool_call_when_content_is_in_same_delta() {
+        let line = r#"data: {"choices":[{"delta":{"content":"准备执行检查","tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":""}}]}}]}"#;
+        let (events, _) = StreamParser::parse_sse_chunk(line);
+        let has_content = events
+            .iter()
+            .any(|e| matches!(e, SseEvent::ContentDelta(t) if t == "准备执行检查"));
+        let has_named_tool = events.iter().any(|e| {
+            matches!(
+                e,
+                SseEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some(id),
+                    name: Some(name),
+                    ..
+                } if id == "call_1" && name == "bash"
+            )
+        });
+        assert!(has_content, "expected ContentDelta, got {events:?}");
+        assert!(
+            has_named_tool,
+            "expected ToolCallDelta with name, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn parse_sse_chunk_keeps_named_tool_call_when_reasoning_is_in_same_delta() {
+        let line = r#"data: {"choices":[{"delta":{"reasoning_content":"先调用工具","tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":""}}]}}]}"#;
+        let (events, _) = StreamParser::parse_sse_chunk(line);
+        let has_reasoning = events
+            .iter()
+            .any(|e| matches!(e, SseEvent::ReasoningDelta(t) if t == "先调用工具"));
+        let has_named_tool = events.iter().any(|e| {
+            matches!(
+                e,
+                SseEvent::ToolCallDelta {
+                    name: Some(name),
+                    ..
+                } if name == "bash"
+            )
+        });
+        assert!(has_reasoning, "expected ReasoningDelta, got {events:?}");
+        assert!(
+            has_named_tool,
+            "expected ToolCallDelta with name, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn parse_sse_chunk_emits_content_reasoning_tool_calls_and_finish_together() {
+        let line = r#"data: {"choices":[{"delta":{"content":"检查中","reasoning_content":"要用 bash","tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":""}}]},"finish_reason":"tool_calls"}]}"#;
+        let (events, _) = StreamParser::parse_sse_chunk(line);
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| match e {
+                SseEvent::ContentDelta(_) => "content",
+                SseEvent::ReasoningDelta(_) => "reasoning",
+                SseEvent::ToolCallDelta { .. } => "tool",
+                SseEvent::Finish(_) => "finish",
+                SseEvent::Done => "done",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["content", "reasoning", "tool", "finish"],
+            "expected all four families in that order, got {events:?}"
+        );
+        match &events[3] {
+            SseEvent::Finish(reason) => assert_eq!(reason, "tool_calls"),
+            other => panic!("expected Finish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_chunk_keeps_every_tool_call_in_the_same_delta() {
+        let line = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":""}},{"index":1,"id":"c2","function":{"name":"read_file","arguments":""}}]}}]}"#;
+        let (events, _) = StreamParser::parse_sse_chunk(line);
+        let names: Vec<Option<&str>> = events
+            .iter()
+            .map(|e| match e {
+                SseEvent::ToolCallDelta { name, .. } => name.as_deref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec![Some("bash"), Some("read_file")]);
+    }
+
+    #[test]
+    fn parse_sse_chunk_keeps_every_tool_call_when_content_is_in_same_delta() {
+        let line = r#"data: {"choices":[{"delta":{"content":"并行检查","tool_calls":[{"index":0,"id":"c1","function":{"name":"bash","arguments":""}},{"index":1,"id":"c2","function":{"name":"read_file","arguments":""}}]}}]}"#;
+        let (events, _) = StreamParser::parse_sse_chunk(line);
+        let names: Vec<Option<&str>> = events
+            .iter()
+            .filter_map(|e| match e {
+                SseEvent::ContentDelta(_) => None,
+                SseEvent::ToolCallDelta { name, .. } => Some(name.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, SseEvent::ContentDelta(t) if t == "并行检查")));
+        assert_eq!(names, vec![Some("bash"), Some("read_file")]);
     }
 }

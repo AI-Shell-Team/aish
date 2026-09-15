@@ -1158,25 +1158,20 @@ impl LlmSession {
                         });
                     }
 
-                    // If all tool calls were malformed, return accumulated content
+                    // If all tool calls were malformed, fail the turn. Returning
+                    // Ok(ProcessResult) lets the shell persist a completed turn
+                    // even though no tool ran.
                     if tool_calls.is_empty() {
-                        self.emit_event(LlmEvent {
-                            event_type: LlmEventType::GenerationEnd,
-                            data: serde_json::json!({}),
-                            timestamp: now_timestamp(),
-                            metadata: None,
-                        });
                         self.emit_event(LlmEvent {
                             event_type: LlmEventType::OpEnd,
                             data: serde_json::json!({"reason": "malformed_tool_calls"}),
                             timestamp: now_timestamp(),
                             metadata: None,
                         });
-                        let new_messages = messages[initial_len..].to_vec();
-                        return Ok(crate::types::ProcessResult {
-                            text: accumulated,
-                            new_messages,
-                        });
+                        return Err(AishError::Llm(format!(
+                            "tool_calls missing name at indexes: {:?}",
+                            missing_ids
+                        )));
                     }
 
                     // Add assistant message
@@ -3621,5 +3616,115 @@ mod tests {
                 ("ai_tool".to_string(), "session-b".to_string()),
             ]
         );
+    }
+
+    struct ExecuteCountingTool {
+        name: &'static str,
+        calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl Tool for ExecuteCountingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "counts execute calls"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::types::ToolResult::success("ok")
+        }
+    }
+
+    fn mock_sse_response(blocks: &[&str]) -> LlmResponse {
+        let chunks: Vec<Result<bytes::Bytes, AishError>> = blocks
+            .iter()
+            .map(|block| Ok(bytes::Bytes::from((*block).to_string())))
+            .collect();
+        LlmResponse::Stream(crate::llm_stream::LlmStream::from_translated(Box::pin(
+            futures::stream::iter(chunks),
+        )))
+    }
+
+    #[tokio::test]
+    async fn streamed_tool_calls_missing_every_name_fail_the_turn() {
+        use crate::agents::mock_text_response;
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "bash",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_sse_response(&[
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"arguments":"{}"}}]}}]}"#,
+                "\n\n",
+                "data: [DONE]\n\n",
+            ])),
+            Ok(mock_text_response("should not run")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run bash"), &[], Some("sys"), true)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "nameless tool calls must fail the turn, got {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("missing name"),
+            "expected missing-name error, got {err}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no tool should execute when every call is missing a name"
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_same_frame_content_and_name_still_run_the_tool() {
+        use crate::agents::mock_text_response;
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "bash",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_sse_response(&[
+                r#"data: {"choices":[{"delta":{"content":"准备执行检查","tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":""}}]}}]}"#,
+                "\n\n",
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}"#,
+                "\n\n",
+                "data: [DONE]\n\n",
+            ])),
+            Ok(mock_text_response("all done")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run bash"), &[], Some("sys"), true)
+            .await
+            .expect("named tool call assembled across frames must execute");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.text, "all done");
     }
 }
