@@ -510,15 +510,16 @@ impl AiHandler {
 
         // Step 5: Build context and system messages.
         // The static core goes as the main system_message (stable prefix).
-        // The dynamic env block (cwd) is appended as a persistent message
-        // at the natural turn position — right before this turn's user
-        // message — so it replays byte-identically next turn. Placing it
-        // in front of the history instead would bust the whole prefix
-        // whenever cwd changes.
+        // The dynamic env block (cwd + temporal context) is appended as a
+        // persistent message at the natural turn position — right before
+        // this turn's user message — so it replays byte-identically next
+        // turn. Placing it in front of the history instead would bust the
+        // whole prefix whenever cwd or the clock changes.
         let (static_core, env_block) = self.system_message_parts();
-        // Append-only with consecutive dedupe: skip when cwd is unchanged
-        // so history does not accumulate identical env blocks; a change
-        // appends a new block at the natural turn position.
+        // Append-only with consecutive dedupe: skip when the block is
+        // unchanged (same cwd, same minute) so history does not accumulate
+        // identical env blocks; a change appends a new block at the natural
+        // turn position.
         let last_env_unchanged = self
             .context_manager
             .messages_snapshot()
@@ -1247,21 +1248,6 @@ When a registry search IS warranted:\n\
             .collect()
     }
 
-    /// Return the system message split into (static_core, env_block).
-    /// The static core is stable across calls (enabling KV-cache prefix hits).
-    /// The env_block contains per-call dynamic info (cwd).
-    fn system_message_parts(&mut self) -> (String, String) {
-        let core = self.prompt_manager.render_static_core(
-            &uname_info(),
-            &whoami(),
-            &os_info(),
-            &basic_env_info(),
-            &output_language(),
-        );
-        let env = self.prompt_manager.render_env_block(&cwd());
-        (core, env)
-    }
-
     /// Return the system message for error correction mode.
     fn error_correction_system_message(
         &mut self,
@@ -1280,6 +1266,23 @@ When a registry search IS warranted:\n\
         vars.insert("exit_code".to_string(), exit_code.to_string());
         vars.insert("remote_env_info".to_string(), String::new());
         Some(self.prompt_manager.render("cmd_error", &vars))
+    }
+
+    /// Return the system message split into (static_core, env_block).
+    /// The static core is stable across calls (enabling KV-cache prefix hits).
+    /// The env_block contains per-call dynamic info (cwd + temporal context).
+    fn system_message_parts(&mut self) -> (String, String) {
+        let core = self.prompt_manager.render_static_core(
+            &uname_info(),
+            &whoami(),
+            &os_info(),
+            &basic_env_info(),
+            &output_language(),
+        );
+        let env = self
+            .prompt_manager
+            .render_env_block(&cwd(), Some(&temporal_context()));
+        (core, env)
     }
 }
 
@@ -1830,6 +1833,33 @@ fn cwd() -> String {
         .unwrap_or_else(|_| "/".to_string())
 }
 
+/// Build the temporal context from a given local timestamp.
+///
+/// Pure function of its argument so tests can inject a fixed clock (issue
+/// #494); the real path is `temporal_context()`. Time is truncated to minute
+/// granularity so two calls within the same minute render byte-identical
+/// env blocks (the caller dedupes on that) and blocks cannot accumulate one
+/// per turn. A missing IANA name degrades to `None` which the prompt layer
+/// renders as an explicit unknown; the UTC offset is still shown.
+fn temporal_context_at(now: chrono::DateTime<chrono::Local>) -> aish_prompts::TemporalContext {
+    let offset = now.format("%:z").to_string();
+    aish_prompts::TemporalContext {
+        local_date: now.format("%Y-%m-%d").to_string(),
+        local_time: now.format("%H:%M").to_string(),
+        tz_name: iana_time_zone::get_timezone().ok(),
+        utc_offset: format!("UTC{}", offset),
+        utc_time: now
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%MZ")
+            .to_string(),
+    }
+}
+
+/// Read the system clock and build the current temporal context.
+fn temporal_context() -> aish_prompts::TemporalContext {
+    temporal_context_at(chrono::Local::now())
+}
+
 /// Get uname info (kernel version, architecture, etc.).
 /// Result is cached for the process lifetime since it doesn't change.
 pub(crate) fn uname_info() -> String {
@@ -1924,6 +1954,42 @@ pub(crate) fn output_language() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporal_context_at_formats_fixed_clock() {
+        // Fixed clock: no dependence on the real date (issue #494 fake-clock
+        // requirement — CI must not depend on the day it runs).
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-31T16:20:00+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let ctx = temporal_context_at(now);
+        assert_eq!(ctx.local_date, "2026-08-31");
+        assert_eq!(ctx.local_time, "16:20");
+        assert_eq!(ctx.utc_offset, "UTC+08:00");
+        assert_eq!(ctx.utc_time, "2026-08-31T08:20Z");
+    }
+
+    #[test]
+    fn temporal_context_truncates_to_minute() {
+        // Two instants in the same minute must produce identical context so
+        // the env block dedupe stays byte-stable within a minute.
+        let a = chrono::DateTime::parse_from_rfc3339("2026-08-31T16:20:00+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        let b = chrono::DateTime::parse_from_rfc3339("2026-08-31T16:20:59+08:00")
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(temporal_context_at(a), temporal_context_at(b));
+    }
+
+    #[test]
+    fn system_message_parts_includes_temporal_context() {
+        let mut handler = test_handler();
+        let (_core, env) = handler.system_message_parts();
+        assert!(env.contains("Current local date: "));
+        assert!(env.contains("Time zone: "));
+        assert!(env.contains("Current UTC time: "));
+    }
 
     #[test]
     fn test_parse_json_code_block() {
