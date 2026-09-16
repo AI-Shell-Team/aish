@@ -186,7 +186,13 @@ mod tests {
         };
         assert_eq!(rc, 0, "openpty failed");
 
-        unsafe { libc::write(master, b"x".as_ptr() as *const _, 1) };
+        // Canonical mode (openpty default): the line discipline only makes
+        // data available once the line is terminated, so write a full line
+        // to exercise the POLLIN-without-hangup branch of probe_fd.
+        assert_eq!(
+            unsafe { libc::write(master, b"x\n".as_ptr() as *const _, 2) },
+            2
+        );
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(matches!(probe_fd(slave), TtyState::Alive));
 
