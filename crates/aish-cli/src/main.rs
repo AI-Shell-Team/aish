@@ -391,15 +391,20 @@ fn main() {
         // `aish` or `aish run`: start a fresh shell by default.
         // Use --continue/-c to attach to an existing live session.
         None | Some(Commands::Run) => {
-            tty_watchdog::arm_for_interactive();
             if cli.continue_session {
                 run_shell_continue(config);
             } else {
+                // Standalone shell only: the daemon-attach fallback inside
+                // run_shell_new must not run with a live watchdog, because
+                // exit(0) mid-attach would skip backend detach and termios
+                // restore.
+                tty_watchdog::arm_for_interactive();
                 run_shell_new(config);
             }
         }
         Some(Commands::Resume { session_id }) => {
-            tty_watchdog::arm_for_interactive();
+            // Resume may attach to a daemon session (run_pty_raw_attach);
+            // the standalone-shell fallback inside it re-arms the watchdog.
             run_shell_resume(config, &session_id);
         }
         Some(Commands::Kill { ids }) => kill_session_by_id(&ids),
@@ -758,6 +763,11 @@ fn index_from_value(value: &str, len: usize) -> Option<usize> {
 }
 /// Run the normal (non-daemon) AishShell.
 fn run_shell_normal(mut config: aish_config::ConfigModel) {
+    // Arm the terminal-death watchdog only for the standalone shell: this
+    // function is reached from the daemon-attach fallbacks, so arming here
+    // never covers run_pty_raw_attach (whose exit(0) mid-attach would skip
+    // backend detach and termios restore).
+    tty_watchdog::arm_for_interactive();
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
         if !run_setup(&mut config) {
@@ -1002,6 +1012,9 @@ fn run_shell_resume(config: aish_config::ConfigModel, session_id: &str) {
 }
 
 fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &str) {
+    // Standalone resume: same watchdog scoping as run_shell_normal — the
+    // daemon-attach path above (run_shell_resume) must stay unwatched.
+    tty_watchdog::arm_for_interactive();
     // Auto-trigger setup wizard on first run if config is incomplete
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
@@ -1432,6 +1445,17 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                     break;
                 }
             } else if n == 0 {
+                // EOF: terminal side is gone.
+                break;
+            } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                // EIO etc.: the pty master died (terminal closed). Without
+                // this branch the select loop would spin exactly like the
+                // crossterm bug this PR fixes. Detach through the normal
+                // break path so the backend and termios are restored.
+                eprintln!(
+                    "\r\n[aish] terminal I/O error: {}",
+                    std::io::Error::last_os_error()
+                );
                 break;
             }
         }
