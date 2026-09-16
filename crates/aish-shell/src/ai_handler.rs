@@ -1835,13 +1835,19 @@ fn cwd() -> String {
 
 /// Build the temporal context from a given local timestamp.
 ///
-/// Pure function of its argument so tests can inject a fixed clock (issue
-/// #494); the real path is `temporal_context()`. Time is truncated to minute
-/// granularity so two calls within the same minute render byte-identical
-/// env blocks (the caller dedupes on that) and blocks cannot accumulate one
-/// per turn. A missing IANA name degrades to `None` which the prompt layer
+/// Generic over the time zone: the real path passes `DateTime<Local>`
+/// (via `temporal_context()`), tests pass a `DateTime<FixedOffset>` so
+/// assertions never depend on the runner's TZ (CI runs in UTC). Pure
+/// function of its argument; time is truncated to minute granularity so
+/// two calls within the same minute render byte-identical env blocks
+/// (the caller dedupes on that) and blocks cannot accumulate one per
+/// turn. A missing IANA name degrades to `None` which the prompt layer
 /// renders as an explicit unknown; the UTC offset is still shown.
-fn temporal_context_at(now: chrono::DateTime<chrono::Local>) -> aish_prompts::TemporalContext {
+fn temporal_context_at<Z>(now: chrono::DateTime<Z>) -> aish_prompts::TemporalContext
+where
+    Z: chrono::TimeZone,
+    Z::Offset: std::fmt::Display,
+{
     let offset = now.format("%:z").to_string();
     aish_prompts::TemporalContext {
         local_date: now.format("%Y-%m-%d").to_string(),
@@ -1954,14 +1960,15 @@ pub(crate) fn output_language() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn temporal_context_at_formats_fixed_clock() {
-        // Fixed clock: no dependence on the real date (issue #494 fake-clock
-        // requirement — CI must not depend on the day it runs).
-        let now = chrono::DateTime::parse_from_rfc3339("2026-08-31T16:20:00+08:00")
-            .unwrap()
-            .with_timezone(&chrono::Local);
+        // Fixed offset directly (NOT the runner's local zone) so the
+        // assertion is TZ-independent — CI runs in UTC and would otherwise
+        // shift the local fields.
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let now = tz.with_ymd_and_hms(2026, 8, 31, 16, 20, 0).unwrap();
         let ctx = temporal_context_at(now);
         assert_eq!(ctx.local_date, "2026-08-31");
         assert_eq!(ctx.local_time, "16:20");
@@ -1972,13 +1979,11 @@ mod tests {
     #[test]
     fn temporal_context_truncates_to_minute() {
         // Two instants in the same minute must produce identical context so
-        // the env block dedupe stays byte-stable within a minute.
-        let a = chrono::DateTime::parse_from_rfc3339("2026-08-31T16:20:00+08:00")
-            .unwrap()
-            .with_timezone(&chrono::Local);
-        let b = chrono::DateTime::parse_from_rfc3339("2026-08-31T16:20:59+08:00")
-            .unwrap()
-            .with_timezone(&chrono::Local);
+        // the env block dedupe stays byte-stable within a minute. Fixed
+        // offset again: TZ-independent assertions.
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let a = tz.with_ymd_and_hms(2026, 8, 31, 16, 20, 0).unwrap();
+        let b = tz.with_ymd_and_hms(2026, 8, 31, 16, 20, 59).unwrap();
         assert_eq!(temporal_context_at(a), temporal_context_at(b));
     }
 
