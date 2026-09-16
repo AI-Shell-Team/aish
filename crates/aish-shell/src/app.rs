@@ -2553,7 +2553,14 @@ impl AishShell {
                 );
             }
             let input = match rl.read_line(&prompt_str) {
-                Ok(Some(line)) => line,
+                Ok(Some(line)) => {
+                    // Flush new readline entries to disk after every accepted
+                    // line: save() is a no-op when nothing is new, and this
+                    // keeps the history file current even if the process dies
+                    // abruptly (e.g. the terminal-death watchdog, #538).
+                    rl.save_history(&history_path);
+                    line
+                }
                 Ok(None) => break, // EOF (Ctrl-D)
                 Err(e) => {
                     // Check if Shift+Tab or F2 triggered the interrupt (mode toggle)
