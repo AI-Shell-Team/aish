@@ -84,13 +84,19 @@ enum TtyState {
 /// live terminal, so it is treated as alive; the crossterm loop will block
 /// again on the next iteration.
 fn probe_controlling_tty() -> TtyState {
+    probe_fd(std::io::stdin().as_raw_fd())
+}
+
+/// Poll a single fd for hangup-class events without reading from it.
+/// Shared by the watchdog thread and the pty-based unit test below.
+fn probe_fd(fd: libc::c_int) -> TtyState {
     const POLLIN: libc::c_short = 0x001;
     const POLLERR: libc::c_short = 0x008;
     const POLLHUP: libc::c_short = 0x010;
     const POLLNVAL: libc::c_short = 0x020;
 
     let mut fds = [libc::pollfd {
-        fd: std::io::stdin().as_raw_fd(),
+        fd,
         events: POLLIN,
         revents: 0,
     }];
@@ -130,5 +136,61 @@ mod tests {
         // The atomic guard is process-global; assert idempotence of the flag.
         disarm();
         assert!(STARTED.load(Ordering::SeqCst));
+    }
+
+    /// Regression test for the crossterm tty-death spin (#538): a live pty
+    /// slave must probe as Alive, and after the master closes (terminal
+    /// window shut) the same fd must probe as Dead — the signal that makes
+    /// the watchdog exit instead of spinning inside crossterm's read loop.
+    #[test]
+    fn probe_detects_dead_pty_after_master_close() {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed");
+
+        // Live pty: no hangup.
+        assert!(matches!(probe_fd(slave), TtyState::Alive));
+
+        // Closing the master = closing the terminal window.
+        unsafe { libc::close(master) };
+        // Give the kernel a moment to propagate the hangup.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(matches!(probe_fd(slave), TtyState::Dead(_)));
+
+        unsafe { libc::close(slave) };
+    }
+
+    /// A live pty with pending input must still probe Alive (POLLIN without
+    /// hangup bits), so the watchdog never kills a healthy interactive shell.
+    #[test]
+    fn probe_treats_readable_live_pty_as_alive() {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed");
+
+        unsafe { libc::write(master, b"x".as_ptr() as *const _, 1) };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(matches!(probe_fd(slave), TtyState::Alive));
+
+        unsafe { libc::close(master) };
+        unsafe { libc::close(slave) };
     }
 }
