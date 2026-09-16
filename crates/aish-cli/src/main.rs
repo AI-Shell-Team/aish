@@ -33,6 +33,7 @@ impl<'a> MakeWriter<'a> for AnimationAwareMakeWriter {
 mod install_channel;
 mod models_auth;
 mod skill_cmd;
+mod tty_watchdog;
 mod uninstall;
 mod update;
 
@@ -289,6 +290,7 @@ fn main() {
         .init();
 
     if cli.sandbox_daemon {
+        tty_watchdog::disarm();
         let socket_path = cli.sandbox_socket.as_deref().map(std::path::Path::new);
         if let Err(error) = aish_security::run_sandbox_daemon(socket_path) {
             eprintln!("sandbox daemon failed: {}", error);
@@ -298,6 +300,7 @@ fn main() {
     }
 
     if cli.sandbox_worker {
+        tty_watchdog::disarm();
         if let Err(error) = aish_security::run_sandbox_worker() {
             eprintln!("sandbox worker failed: {}", error);
             std::process::exit(1);
@@ -309,6 +312,7 @@ fn main() {
     // over a Unix socket. Survives client disconnects; replays scrollback
     // on reattach.
     if cli.pty_daemon {
+        tty_watchdog::disarm();
         let cwd = std::env::var("AISH_DAEMON_CWD").unwrap_or_else(|_| {
             std::env::current_dir()
                 .unwrap_or_default()
@@ -354,6 +358,7 @@ fn main() {
 
     // Hidden entry: raw terminal passthrough attach to an existing daemon.
     if let Some(socket_path) = &cli.pty_attach {
+        tty_watchdog::disarm();
         let session_id = cli
             .pty_session
             .clone()
@@ -362,7 +367,6 @@ fn main() {
         return;
     }
 
-    // Load configuration
     let config_path = cli.config.as_deref().map(std::path::Path::new);
     let mut config = match aish_config::ConfigLoader::load(config_path) {
         Ok(config) => config,
@@ -387,15 +391,19 @@ fn main() {
         // `aish` or `aish run`: start a fresh shell by default.
         // Use --continue/-c to attach to an existing live session.
         None | Some(Commands::Run) => {
+            tty_watchdog::arm_for_interactive();
             if cli.continue_session {
                 run_shell_continue(config);
             } else {
                 run_shell_new(config);
             }
         }
+        Some(Commands::Resume { session_id }) => {
+            tty_watchdog::arm_for_interactive();
+            run_shell_resume(config, &session_id);
+        }
         Some(Commands::Kill { ids }) => kill_session_by_id(&ids),
         Some(Commands::KillAll) => kill_session_by_id(&["all".to_string()]),
-        Some(Commands::Resume { session_id }) => run_shell_resume(config, &session_id),
         Some(Commands::Info) => show_info(&config),
         Some(Commands::Setup) => {
             if !run_setup(&mut config) {
