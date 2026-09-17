@@ -105,6 +105,7 @@ richrs = { version = "0.2", features = ["syntax", "markdown"] }
 
 # System info
 sysinfo = "0.33"
+iana-time-zone = "0.1"
 
 # YAML config
 dirs = "5"
