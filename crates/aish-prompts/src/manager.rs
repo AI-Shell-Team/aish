@@ -3,6 +3,26 @@ use std::path::PathBuf;
 
 use crate::template::render_template;
 
+/// Runtime temporal context injected with the per-turn environment block.
+///
+/// Fields are pre-formatted strings so `aish-prompts` stays free of any
+/// clock/timezone crate dependency; the caller (`aish-shell`) owns clock
+/// reading and fallbacks. `tz_name` is `None` when the IANA name cannot be
+/// resolved, which renders an explicit unknown instead of a silent guess.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporalContext {
+    /// Local calendar date, e.g. `2026-08-31`.
+    pub local_date: String,
+    /// Local time truncated to minutes, e.g. `16:20`.
+    pub local_time: String,
+    /// IANA time zone name, e.g. `Asia/Shanghai`; `None` when unavailable.
+    pub tz_name: Option<String>,
+    /// UTC offset, e.g. `UTC+08:00`.
+    pub utc_offset: String,
+    /// Current UTC time, e.g. `2026-08-31T08:20Z`.
+    pub utc_time: String,
+}
+
 /// Manages prompt templates loaded from disk with embedded fallbacks.
 ///
 /// Templates are stored as `.md` files in a configurable directory
@@ -82,10 +102,29 @@ impl PromptManager {
     }
 
     /// Format the dynamic environment block with per-call runtime info.
-    /// Only CWD changes between calls; appended after the static core so that
-    /// the core prefix stays cacheable.
-    pub fn render_env_block(&self, cwd: &str) -> String {
-        format!("\n**Environment Update:**\n- Current directory: {}", cwd)
+    /// Only CWD and the temporal context change between calls; appended after
+    /// the static core so that the core prefix stays cacheable. The temporal
+    /// context is truncated to minute granularity: identical minutes render
+    /// byte-identical blocks (the caller dedupes on that), and unknown clocks
+    /// render an explicit unknown state instead of silently omitting time.
+    pub fn render_env_block(&self, cwd: &str, temporal: Option<&TemporalContext>) -> String {
+        let temporal_lines = match temporal {
+            None => "Current date/time: unknown (system clock or timezone unavailable)".to_string(),
+            Some(t) => {
+                let tz = match &t.tz_name {
+                    Some(name) => format!("{} ({})", name, t.utc_offset),
+                    None => format!("unknown ({})", t.utc_offset),
+                };
+                format!(
+                    "Current local date: {}\n- Current local time: {}\n- Time zone: {}\n- Current UTC time: {}",
+                    t.local_date, t.local_time, tz, t.utc_time
+                )
+            }
+        };
+        format!(
+            "\n**Environment Update:**\n- Current directory: {}\n- {}",
+            cwd, temporal_lines
+        )
     }
 
     /// Load a single template from disk, falling back to embedded default.
@@ -183,6 +222,9 @@ You are allowed to be proactive, but only when the user asks you to do something
 ## Core Behavior
 You can run commands like a shell, but you monitor each command's stdout and stderr; that output becomes context for later turns. Use it to give accurate, concise, high-value feedback — for example, explain why a command failed and suggest a corrected command, or when the user asks in natural language, understand their intent and propose a solution. A previous tool result is only for judgment; do not reject the user's new request based on it.
 Tool results and user messages may include <system-reminder> or other tags. Tags contain information from the system. They bear no direct relation to the specific tool results or user messages in which they appear.
+
+## Relative time requests
+The environment block injected each turn carries the trusted current date, time, time zone, and UTC time from the OS clock. Treat it as the single source of truth for "now". Never guess the current date from your training data. When the user asks for a relative time range ("last two months", "today", "this week", "the last 60 days", "just now"), first convert it into explicit absolute start/end boundaries using the injected date, then use those boundaries with tools (web fetch, log or file search). If the environment block says date/time is unknown, state that the current date is unknown instead of assuming a year.
 
 ## Tool choice
 Follow each tool's description in the tool list for routing and delegation. Do not repeat or override those rules here.
@@ -424,8 +466,69 @@ mod tests {
     #[test]
     fn test_render_env_block_format() {
         let pm = PromptManager::new("/nonexistent");
-        let block = pm.render_env_block("/home/alice");
+        let block = pm.render_env_block(
+            "/home/alice",
+            Some(&TemporalContext {
+                local_date: "2026-08-31".into(),
+                local_time: "16:20".into(),
+                tz_name: Some("Asia/Shanghai".into()),
+                utc_offset: "UTC+08:00".into(),
+                utc_time: "2026-08-31T08:20Z".into(),
+            }),
+        );
         assert!(block.starts_with("\n**Environment Update:**"));
         assert!(block.contains("/home/alice"));
+        assert!(block.contains("Current local date: 2026-08-31"));
+        assert!(block.contains("Current local time: 16:20"));
+        assert!(block.contains("Time zone: Asia/Shanghai (UTC+08:00)"));
+        assert!(block.contains("Current UTC time: 2026-08-31T08:20Z"));
+    }
+
+    #[test]
+    fn test_render_env_block_unknown_tz_shows_offset() {
+        // A missing IANA name must render an explicit unknown, not a guess.
+        let pm = PromptManager::new("/nonexistent");
+        let block = pm.render_env_block(
+            "/w",
+            Some(&TemporalContext {
+                local_date: "2026-08-31".into(),
+                local_time: "16:20".into(),
+                tz_name: None,
+                utc_offset: "UTC+08:00".into(),
+                utc_time: "2026-08-31T08:20Z".into(),
+            }),
+        );
+        assert!(block.contains("Time zone: unknown (UTC+08:00)"));
+        assert!(block.contains("Current UTC time: 2026-08-31T08:20Z"));
+    }
+
+    #[test]
+    fn test_render_env_block_unavailable_clock_is_explicit() {
+        let pm = PromptManager::new("/nonexistent");
+        let block = pm.render_env_block("/w", None);
+        assert!(block.contains("unknown (system clock or timezone unavailable)"));
+        assert!(!block.contains("Current local date"));
+    }
+
+    #[test]
+    fn test_render_env_block_minute_granularity_is_stable() {
+        // Same minute (different seconds) must render byte-identical blocks;
+        // this is the property the caller's consecutive-dedupe relies on.
+        let pm = PromptManager::new("/nonexistent");
+        let ctx = |time: &str| TemporalContext {
+            local_date: "2026-08-31".into(),
+            local_time: time.into(),
+            tz_name: Some("Asia/Shanghai".into()),
+            utc_offset: "UTC+08:00".into(),
+            utc_time: "2026-08-31T08:20Z".into(),
+        };
+        assert_eq!(
+            pm.render_env_block("/w", Some(&ctx("16:20"))),
+            pm.render_env_block("/w", Some(&ctx("16:20")))
+        );
+        assert_ne!(
+            pm.render_env_block("/w", Some(&ctx("16:20"))),
+            pm.render_env_block("/w", Some(&ctx("16:21")))
+        );
     }
 }
