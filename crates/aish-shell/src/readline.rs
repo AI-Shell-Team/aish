@@ -186,6 +186,13 @@ pub const SLASH_COMMANDS: &[SlashCommandMeta] = &[
         enter: EnterPolicy::Execute,
     },
     SlashCommandMeta {
+        name: "/compact",
+        desc: "Compact the AI context now (optional focus text)",
+        group: SlashGroup::ModelSettings,
+        keywords: &["compact", "context", "summarize", "shrink"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
         name: "/skill",
         desc: "Browse, install, trust, verify skills; manage registries",
         group: SlashGroup::Skills,
@@ -1042,7 +1049,7 @@ mod tests {
                 cmd.name
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 24);
+        assert_eq!(SLASH_COMMANDS.len(), 25);
     }
 
     #[test]

@@ -595,8 +595,9 @@ impl LlmSession {
         messages: &[ContextMessage],
         plan_state: Option<&PlanModeState>,
         summary_max_tokens: usize,
+        focus: Option<&str>,
     ) -> Result<String, AishError> {
-        let prompt = build_context_summary_prompt(messages, plan_state, summary_max_tokens);
+        let prompt = build_context_summary_prompt(messages, plan_state, summary_max_tokens, focus);
         self.generate_compact_summary(prompt, summary_max_tokens)
             .await
     }
@@ -1928,11 +1929,11 @@ fn now_timestamp() -> f64 {
         .unwrap_or_default()
         .as_secs_f64()
 }
-
 fn build_context_summary_prompt(
     messages: &[ContextMessage],
     plan_state: Option<&PlanModeState>,
     summary_max_tokens: usize,
+    focus: Option<&str>,
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str("Summarize the older persistent AI Shell context below.\n");
@@ -1944,6 +1945,11 @@ fn build_context_summary_prompt(
         "Target summary budget: about {} tokens.\n\n",
         summary_max_tokens
     ));
+    if let Some(focus) = focus.map(str::trim).filter(|f| !f.is_empty()) {
+        prompt.push_str("User-specified must-keep focus (highest priority):\n");
+        prompt.push_str(focus);
+        prompt.push_str("\n\n");
+    }
     if let Some(state) = plan_state {
         if state.phase == PlanPhase::Planning {
             prompt.push_str("Current plan mode state:\n");
@@ -2663,6 +2669,38 @@ mod tests {
         assert!(formatted.starts_with("<conversation-summary"));
         assert!(formatted.contains("Diagnose nginx"));
         assert!(!formatted.contains("scratch"));
+    }
+
+    #[test]
+    fn test_summary_prompt_injects_focus_block() {
+        let messages = vec![ContextMessage {
+            role: "user".into(),
+            content: "deploy nginx".into(),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
+        }];
+        let with_focus = build_context_summary_prompt(
+            &messages,
+            None,
+            1000,
+            Some("keep the nginx rollback steps"),
+        );
+        assert!(with_focus.contains("User-specified must-keep focus"));
+        assert!(with_focus.contains("nginx rollback steps"));
+        assert!(
+            with_focus.find("User-specified must-keep focus").unwrap()
+                < with_focus.find("Older context messages:").unwrap()
+        );
+
+        // Whitespace-only focus must be dropped, not injected.
+        let blank = build_context_summary_prompt(&messages, None, 1000, Some("   \n\t "));
+        assert!(!blank.contains("User-specified must-keep focus"));
+
+        let none = build_context_summary_prompt(&messages, None, 1000, None);
+        assert!(!none.contains("User-specified must-keep focus"));
     }
 
     /// Send path no longer compacts an outgoing copy (that made wire bytes

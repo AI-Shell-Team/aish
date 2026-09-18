@@ -10,6 +10,7 @@
 //! this module is intentionally free of terminal I/O so it stays unit-testable.
 
 use aish_config::ConfigModel;
+use aish_context::DEFAULT_CONTEXT_WINDOW_TOKENS;
 use aish_security::{RiskLevel, SandboxOffAction, SecurityPolicy};
 
 // ---------------------------------------------------------------------------
@@ -722,7 +723,7 @@ pub fn current_raw(cfg: &ConfigModel, key: SettingKey) -> String {
             .context_auto_compact
             .context_window_tokens
             .map(|n| n.to_string())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| format!("{} (auto)", DEFAULT_CONTEXT_WINDOW_TOKENS)),
         SettingKey::CompactMicroKeepRecent => cfg
             .context_auto_compact
             .micro_keep_recent_messages
@@ -742,7 +743,12 @@ pub fn current_raw(cfg: &ConfigModel, key: SettingKey) -> String {
             .context_auto_compact
             .reserved_output_tokens
             .map(|n| n.to_string())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| {
+                format!(
+                    "{} (auto)",
+                    aish_context::ContextBudgetPolicy::default().reserved_output_tokens
+                )
+            }),
         SettingKey::HistorySize => cfg.history_size.to_string(),
         SettingKey::MaxShellMessages => cfg.max_shell_messages.to_string(),
         SettingKey::ContextTokenBudget => cfg
