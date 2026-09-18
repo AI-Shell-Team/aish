@@ -199,6 +199,7 @@ shell:
     rollback: "Revisar y revertir ediciones de archivo de la IA (edit_file/write_file) de esta sesión"
     undo: "Deshacer la última edición de archivo de la IA (edit_file/write_file)"
     memory: "Ver, verificar u olvidar memorias a largo plazo"
+    compact: "Compactar el contexto de la IA ahora (texto de enfoque opcional)"
 
   slash_group:
     diagnostics: "Diagnóstico"
@@ -590,7 +591,7 @@ shell:
         desc: "Activar el paso de compactación completa que resume turnos antiguos"
       compact_context_window_tokens:
         label: "Tokens de ventana de contexto"
-        desc: "Tamaño de ventana de contexto del modelo usado para el cálculo de compactación"
+        desc: "Ventana de contexto para la autocompactación (vacío = por defecto 262144 / 256k)"
       compact_micro_keep_recent:
         label: "Conservar recientes en micro-compactación"
         desc: "Turnos conservados literalmente durante la micro-compactación"
@@ -614,7 +615,7 @@ shell:
         desc: "Máximo de turnos de comandos del shell retenidos en el contexto de la IA"
       context_token_budget:
         label: "Presupuesto de tokens de contexto"
-        desc: "Límite duro opcional del total de tokens de contexto (vacío = ilimitado)"
+        desc: "Límite duro heredado que recorta mensajes antiguos (no es compresión); vacío = sin límite"
       enable_remote_git_prompt:
         label: "Prompt de git remoto"
         desc: "Mostrar la rama git en prompts remotos (SSH/telnet) de bash"
@@ -944,6 +945,12 @@ shell:
   compaction:
     completed: "Contexto comprimido"
     completed_with_tokens: "Contexto comprimido, se liberaron aproximadamente {tokens} tokens"
+
+  compact:
+    started: "Compactando contexto…"
+    completed: "Compacción completada. Tokens: {before} → {after} ({saved} ahorrados)"
+    cancelled: "Compacción cancelada; contexto sin cambios"
+    failed: "Compacción fallida: {error} (contexto sin cambios)"
   status:
     thinking: "Pensando"
     compacting_context: "Comprimiendo contexto"

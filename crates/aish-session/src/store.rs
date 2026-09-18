@@ -754,6 +754,66 @@ mod tests {
         assert_eq!(loaded_snapshot.context_messages_snapshot.len(), 1);
     }
 
+    /// A manual `/compact` persists a context whose leading messages contain
+    /// the `<conversation-summary>` block plus the retained recent tail; the
+    /// stored snapshot must round-trip both so `/resume` rebuilds the
+    /// compacted context exactly.
+    #[test]
+    fn compacted_context_snapshot_round_trips_summary_and_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        let record = store
+            .create_session("test-model", Some("http://localhost"))
+            .unwrap();
+
+        let summary_msg = SessionContextMessage {
+            role: "system".to_string(),
+            content: "<conversation-summary source=\"model_auto_compact\">\nRollback: systemctl revert nginx\n</conversation-summary>".to_string(),
+            memory_type: MemoryType::Knowledge,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
+        };
+        let tail_user = SessionContextMessage {
+            role: "user".to_string(),
+            content: "recent follow-up question".to_string(),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
+        };
+        let snapshot = SessionStateSnapshot {
+            cwd: Some("/srv".to_string()),
+            summary_preview: Some("Rollback: systemctl revert nginx".to_string()),
+            context_messages_snapshot: vec![summary_msg, tail_user],
+            updated_at: Some(Utc::now()),
+        };
+        store
+            .update_session_state(&record.session_uuid, &snapshot)
+            .unwrap();
+
+        let loaded = store.get_session(&record.session_uuid).unwrap().unwrap();
+        let loaded_snapshot = loaded.state_snapshot();
+        assert_eq!(loaded_snapshot.context_messages_snapshot.len(), 2);
+        assert!(
+            loaded_snapshot.context_messages_snapshot[0]
+                .content
+                .starts_with("<conversation-summary"),
+            "summary block must survive persistence"
+        );
+        assert_eq!(
+            loaded_snapshot.context_messages_snapshot[1].content,
+            "recent follow-up question"
+        );
+        assert_eq!(
+            loaded_snapshot.summary_preview.as_deref(),
+            Some("Rollback: systemctl revert nginx")
+        );
+    }
+
     #[test]
     fn list_sessions_orders_by_snapshot_update_time() {
         let temp = tempfile::tempdir().unwrap();
