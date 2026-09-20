@@ -1,5 +1,6 @@
-/// Default conservative context window used when no explicit budget is configured.
-pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 100_000;
+/// Default conservative context window used when no explicit budget is
+/// configured. 256k matches the common large-window model tier.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 262_144;
 const DEFAULT_RESERVED_OUTPUT_TOKENS: usize = 20_000;
 const DEFAULT_AUTO_COMPACT_BUFFER_TOKENS: usize = 13_000;
 const DEFAULT_WARNING_BUFFER_TOKENS: usize = 20_000;

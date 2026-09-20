@@ -373,6 +373,7 @@ shell:
     rollback: "Review and roll back AI file edits (edit_file/write_file) this session"
     undo: "Undo the most recent AI file edit (edit_file/write_file)"
     memory: "View, verify, or forget long-term memories"
+    compact: "Compact the AI context now (optional focus text)"
 
   slash_group:
     diagnostics: "Diagnostics"
@@ -1017,7 +1018,7 @@ shell:
         desc: "How many shell history entries to keep in AI context"
       context_token_budget:
         label: "Context Token Budget"
-        desc: "Hard cap on context tokens; blank = no limit"
+        desc: "Legacy hard cap that trims old messages (not compaction); blank = no limit"
       enable_remote_git_prompt:
         label: "Remote Git Prompt"
         desc: "Show git branch in the prompt during SSH/telnet sessions"
@@ -1080,7 +1081,7 @@ shell:
         desc: "Allow full summary compaction when micro-compact isn't enough"
       compact_context_window_tokens:
         label: "Context Window Tokens"
-        desc: "Override the model context window size (blank = auto)"
+        desc: "Context window for auto-compaction (blank = auto: model window > legacy budget > default 262144/256k)"
       compact_micro_keep_recent:
         label: "Micro-compact Keep Recent"
         desc: "Messages retained during a micro-compaction pass"
@@ -1228,6 +1229,12 @@ shell:
   compaction:
     completed: "Context compacted"
     completed_with_tokens: "Context compacted, reclaimed about {tokens} tokens"
+
+  compact:
+    started: "Compacting context…"
+    completed: "Compaction complete. Tokens: {before} -> {after} (saved {saved})"
+    cancelled: "Compaction cancelled; context unchanged"
+    failed: "Compaction failed: {error} (context unchanged)"
 
   status:
     thinking: "Thinking"

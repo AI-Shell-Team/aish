@@ -373,6 +373,7 @@ shell:
     rollback: "查看并回滚本次会话中 AI 的文件修改 (edit_file/write_file)"
     undo: "撤销 AI 最近一次文件修改（edit_file/write_file）"
     memory: "查看、验证或删除长期记忆"
+    compact: "立即压缩 AI 上下文（可附加重点说明）"
 
   slash_group:
     diagnostics: "诊断"
@@ -1017,7 +1018,7 @@ shell:
         desc: "AI 上下文中保留的 shell 历史条数"
       context_token_budget:
         label: "上下文 token 预算"
-        desc: "上下文 token 硬上限；留空=不限"
+        desc: "旧版硬上限，超限直接裁掉旧消息（非压缩）；留空=不限"
       enable_remote_git_prompt:
         label: "远程 Git 提示符"
         desc: "SSH/telnet 会话中在提示符显示 git 分支"
@@ -1080,7 +1081,7 @@ shell:
         desc: "微压缩不够时允许完整摘要压缩"
       compact_context_window_tokens:
         label: "上下文窗口 Tokens"
-        desc: "覆盖模型的上下文窗口大小（留空=自动）"
+        desc: "自动压缩依据的上下文窗口（留空=自动：模型窗口 > 旧版预算 > 默认 262144/256k）"
       compact_micro_keep_recent:
         label: "微压缩保留近况"
         desc: "微压缩时保留的最近消息数"
@@ -1228,6 +1229,12 @@ shell:
   compaction:
     completed: "上下文已压缩"
     completed_with_tokens: "上下文已压缩，约释放 {tokens} tokens"
+
+  compact:
+    started: "正在压缩上下文…"
+    completed: "压缩完成，tokens：{before} → {after}（节省 {saved}）"
+    cancelled: "已取消压缩，上下文保持不变"
+    failed: "压缩失败：{error}（上下文保持不变）"
 
   status:
     thinking: "思考中"

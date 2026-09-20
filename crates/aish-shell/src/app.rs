@@ -2920,20 +2920,29 @@ impl AishShell {
                                     let delta_out = stats
                                         .total_output
                                         .saturating_sub(token_stats_before.total_output);
-                                    let budget = self.ai_handler.context_budget_state();
-                                    let prompt_est = self.ai_handler.last_prompt_estimate();
-                                    let ctx_percent = if budget.effective_context_window > 0 {
-                                        (prompt_est * 100 / budget.effective_context_window as u64)
-                                            .min(100) as u8
+                                    // oh-my-pi anchors the status-line context% on
+                                    // the provider's real prompt-token count (actual
+                                    // wire consumption of this request); the local
+                                    // bytes/4 estimate is only the fallback.
+                                    let ctx_tokens = if stats.last_prompt_tokens > 0 {
+                                        stats.last_prompt_tokens
                                     } else {
-                                        0
+                                        self.ai_handler.last_prompt_estimate()
                                     };
+                                    let ctx_window = self.ai_handler.context_window_tokens() as u64;
+                                    let ctx_percent = ctx_tokens
+                                        .checked_mul(100)
+                                        .and_then(|v| v.checked_div(ctx_window))
+                                        .unwrap_or(0)
+                                        .min(100)
+                                        as u8;
                                     let compaction = self.ai_handler.last_turn_compaction();
                                     let footer = theme::response_footer(
                                         &self.config.model,
                                         delta_in,
                                         delta_out,
                                         ctx_percent,
+                                        ctx_window,
                                         compaction,
                                         Some(ai_elapsed),
                                     );
@@ -3772,6 +3781,7 @@ impl AishShell {
             Some("/setting") => self.handle_setting_command(),
             Some("/setup") => self.run_setup_wizard(),
             Some("/plan") => self.handle_plan_command(&parts),
+            Some("/compact") => self.handle_compact_command(&parts),
             Some("/token") => self.handle_token_command(),
             Some("/resume") => {
                 self.handle_resume_command(&parts);
@@ -8619,6 +8629,91 @@ impl AishShell {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// Handle `/compact [focus]` — manually compact the persistent AI context,
+    /// optionally steering the summary with focus instructions. Mirrors the
+    /// reference implementation's flow: pre-validate, run the compaction with
+    /// an ESC/cancel guard, then report tokens before -> after (saved N).
+    /// Any failure keeps the context untouched (rollback lives in
+    /// `AiHandler::compact_manual`).
+    fn handle_compact_command(&mut self, parts: &[&str]) {
+        let focus = parts.iter().skip(1).copied().collect::<Vec<_>>().join(" ");
+        let focus = focus.trim().to_string();
+        let focus = if focus.is_empty() { None } else { Some(focus) };
+
+        // Cancel any in-flight AI operation and block re-entry, mirroring the
+        // compaction-is-exclusive contract of the reference implementation.
+        self.ai_handler.cancel();
+        let old_sigint = self.install_ai_sigint_handler();
+        let mut esc_watcher = CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
+        let token_ptr = self.ai_handler.cancellation_token() as *const aish_llm::CancellationToken;
+
+        // Shimmer spinner with elapsed time while the summary request runs.
+        // Started here directly rather than through the event callback: the
+        // callback's generation guard rejects ContextCompactionStart because
+        // the manual path never emits OpStart to sync op_gen after the bump
+        // in install_ai_sigint_handler above.
+        self.animation.start(&t("shell.compact.started"));
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(err) => {
+                self.animation.stop();
+                esc_watcher.stop();
+                Self::restore_ai_sigint_handler(old_sigint);
+                eprintln!("{}", theme::error(&err.to_string()));
+                return;
+            }
+        };
+        let result = rt.block_on(async {
+            tokio::select! {
+                r = self.ai_handler.compact_manual(focus.as_deref()) => r,
+                _ = poll_cancelled(token_ptr) => {
+                    Err(aish_core::AishError::Cancelled)
+                }
+            }
+        });
+
+        esc_watcher.stop();
+        Self::restore_ai_sigint_handler(old_sigint);
+        self.animation.stop();
+        self.sub_agent_animation.stop();
+
+        match result {
+            Ok(report) => {
+                // The compaction events render the spinner/notice; the slash
+                // command itself reports the concrete token delta.
+                let mut args = std::collections::HashMap::new();
+                args.insert("before".to_string(), report.before_tokens.to_string());
+                args.insert("after".to_string(), report.after_tokens.to_string());
+                args.insert(
+                    "saved".to_string(),
+                    report
+                        .before_tokens
+                        .saturating_sub(report.after_tokens)
+                        .to_string(),
+                );
+                println!(
+                    "\x1b[32m{}\x1b[0m",
+                    t_with_args("shell.compact.completed", &args)
+                );
+                // Persist immediately so /resume sees the compacted context.
+                self.persist_session_snapshot();
+            }
+            Err(aish_core::AishError::Cancelled) => {
+                println!("{}", theme::warning(&t("shell.compact.cancelled")));
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    theme::error(&t_with_args("shell.compact.failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    }))
+                );
             }
         }
     }

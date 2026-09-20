@@ -395,6 +395,13 @@ impl AiHandler {
         self.llm_session.token_stats()
     }
 
+    /// Full context window (e.g. 256k) — the oh-my-pi style display base for
+    /// the footer context-usage rate. Compaction thresholds still use the
+    /// effective window (full window minus reserved output).
+    pub fn context_window_tokens(&self) -> usize {
+        self.context_manager.budget_policy().context_window_tokens
+    }
+
     /// Return locally estimated prompt tokens from the last API call.
     pub fn last_prompt_estimate(&self) -> u64 {
         self.llm_session.last_prompt_estimate()
@@ -909,6 +916,7 @@ impl AiHandler {
                             &candidates,
                             Some(plan_state),
                             policy.summary_max_tokens,
+                            None,
                         )
                         .await
                     {
@@ -963,6 +971,175 @@ impl AiHandler {
         report
     }
 
+    /// Manually compact the persistent context (`/compact [focus]`).
+    ///
+    /// Reuses the same compaction primitives as the automatic path
+    /// (microcompact + LLM summary + atomic summary rewrite) but bypasses the
+    /// pressure gate, the full-compact toggle, and the failure fuse: an
+    /// explicit user request must compact even when the automatic path would
+    /// refuse (e.g. the fuse opened after repeated provider failures).
+    ///
+    /// Failure safety: the context is snapshotted up front and restored
+    /// byte-identically when the summary request fails or is cancelled, so a
+    /// failed manual compact never rewrites the context. Cancels surface as
+    /// `AishError::Cancelled` so callers can discriminate cancel from failure
+    /// the way `CompactionCancelledError` does in the reference
+    /// implementation.
+    pub async fn compact_manual(
+        &mut self,
+        focus: Option<&str>,
+    ) -> aish_core::Result<ContextCompactReport> {
+        let plan_state = self.plan_state();
+        // Snapshot before any mutation: microcompact rewrites messages in
+        // place, so a later summary failure must be able to undo it too. The
+        // guard owns the snapshot and borrows the context exclusively for
+        // the compaction window; its Drop restores the snapshot on BOTH the
+        // explicit error path and a dropped future — when the caller's
+        // tokio::select! races an Esc against this request, the future is
+        // cancelled at the next await point and the guard's Drop still runs.
+        let mut guard = CompactionScope {
+            backup: Some(self.context_manager.messages_snapshot()),
+            context: &mut self.context_manager,
+        };
+        let (outcome, mut report) =
+            run_manual_compact(&mut guard, &self.llm_session, &plan_state, focus).await;
+        let succeeded = outcome.is_ok();
+        // Disarm on success (keep the compacted context); on failure the
+        // drop below restores the snapshot.
+        if succeeded {
+            guard.backup.take();
+        }
+        drop(guard);
+        outcome?;
+
+        if report.full_compact.is_some() {
+            self.context_manager.reset_compact_failures();
+        }
+        let after_state = self.context_manager.budget_state();
+        report.after_tokens = after_state.estimated_tokens;
+        report.pressure_after = Some(after_state.pressure);
+        Ok(report)
+    }
+}
+
+/// Borrowed compaction scope: owns the pre-compaction context snapshot and
+/// the exclusive context borrow for the compaction window. Its Drop restores
+/// the snapshot on BOTH the explicit error path and a dropped future — when
+/// the caller's tokio::select! races an Esc against the request, the future
+/// is cancelled at the next await point and this Drop still runs (mirroring
+/// the append-only model where a cancelled compaction is a structural no-op
+/// in the reference implementation).
+pub(crate) struct CompactionScope<'a> {
+    backup: Option<Vec<ContextMessage>>,
+    context: &'a mut ContextManager,
+}
+
+impl Drop for CompactionScope<'_> {
+    fn drop(&mut self) {
+        if let Some(backup) = self.backup.take() {
+            self.context.replace_messages(backup);
+        }
+    }
+}
+
+/// Core of the manual compaction: microcompact + LLM summary + atomic
+/// rewrite, wrapped by the scope so any failure or drop restores the context.
+/// Returns the report alongside the outcome so the caller can disarm the
+/// scope and finish the report on success.
+async fn run_manual_compact(
+    scope: &mut CompactionScope<'_>,
+    llm_session: &LlmSession,
+    plan_state: &PlanModeState,
+    focus: Option<&str>,
+) -> (aish_core::Result<()>, ContextCompactReport) {
+    // Reborrow the context through the scope so the snapshot restore in
+    // Drop keeps working while this function holds the mutable borrow.
+    let context = &mut *scope.context;
+    let before_state = context.budget_state();
+    let mut report = ContextCompactReport {
+        before_tokens: before_state.estimated_tokens,
+        pressure_before: Some(before_state.pressure),
+        ..ContextCompactReport::default()
+    };
+
+    llm_session.emit_context_compaction_start("persistent_context", "manual_compact");
+
+    // Deliberately NO microcompact here: it rewrites old tool outputs in
+    // place before the summary is generated, so the summarizer would only
+    // see "[old shell/tool output cleared...]" placeholders and produce a
+    // summary about the missing content instead of the content itself. The
+    // full compact rewrites the same messages anyway; the automatic path
+    // keeps its micro-first ordering because there the micro pass already
+    // reclaims enough space to avoid the LLM call entirely.
+
+    let candidates = context.full_compact_candidate_messages();
+    if candidates.is_empty() {
+        llm_session.emit_context_compaction_end(
+            "persistent_context",
+            "manual_compact",
+            report.before_tokens,
+            report.before_tokens,
+            false,
+        );
+        return (Ok(()), report);
+    }
+
+    let summary = match llm_session
+        .summarize_context_messages(
+            &candidates,
+            Some(plan_state),
+            context.budget_policy().summary_max_tokens,
+            focus,
+        )
+        .await
+    {
+        Ok(summary) => summary,
+        Err(err) => {
+            llm_session.emit_context_compaction_end(
+                "persistent_context",
+                "manual_compact",
+                report.before_tokens,
+                report.before_tokens,
+                false,
+            );
+            return (Err(err), report);
+        }
+    };
+
+    match context.apply_full_compact_summary(summary) {
+        Ok(full_report) => {
+            report.full_compact = Some(full_report);
+        }
+        Err(err) => {
+            llm_session.emit_context_compaction_end(
+                "persistent_context",
+                "manual_compact",
+                report.before_tokens,
+                report.before_tokens,
+                false,
+            );
+            return (
+                Err(aish_core::AishError::Llm(format!(
+                    "compact summary could not be applied: {err}"
+                ))),
+                report,
+            );
+        }
+    }
+
+    let after_state = context.budget_state();
+    let changed = report.microcompact.changed_messages > 0 || report.full_compact.is_some();
+    llm_session.emit_context_compaction_end(
+        "persistent_context",
+        "manual_compact",
+        report.before_tokens,
+        after_state.estimated_tokens,
+        changed,
+    );
+    (Ok(()), report)
+}
+
+impl AiHandler {
     /// Extract @skill_name references and inject skill prefix.
     /// Example: "@grep do this" → "use grep skill to do this.\n\ndo this"
     fn inject_skill_prefix(&self, text: &str) -> String {
@@ -980,26 +1157,23 @@ impl AiHandler {
 
         // Find all @word references
         let re = regex::Regex::new(r"@(\w+)").unwrap();
-        let mut refs: Vec<String> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut refs = std::collections::HashSet::new();
 
         for cap in re.captures_iter(text) {
             if let Some(name) = cap.get(1) {
                 let name_lower = name.as_str().to_lowercase();
-                if available.contains(&name_lower) && !seen.contains(&name_lower) {
-                    refs.push(name_lower.clone());
-                    seen.insert(name_lower);
+                if available.contains(&name_lower) {
+                    refs.insert(name_lower);
                 }
             }
         }
-
         if refs.is_empty() {
             return text.to_string();
         }
 
         let prefix: Vec<String> = refs
-            .iter()
-            .map(|name| format!("use {} skill to do this.", name))
+            .into_iter()
+            .map(|name| format!("use {name} skill to do this."))
             .collect();
         format!("{}\n\n{}", prefix.join(" "), text)
     }
@@ -1962,6 +2136,41 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    /// Regression: the HashSet refactor dropped the empty-refs early
+    /// return, so questions without any `@skill` reference got a stray
+    /// blank-line prefix prepended when at least one skill was installed.
+    #[test]
+    fn inject_skill_prefix_without_references_keeps_text_verbatim() {
+        let mut handler = test_handler();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: grep\ndescription: Grep skill\n---\nDo grep things\n",
+        )
+        .unwrap();
+        handler.skill_manager.reload_skill(&path).unwrap();
+
+        let question = "plain question with no @reference";
+        assert_eq!(handler.inject_skill_prefix(question), question);
+    }
+
+    #[test]
+    fn inject_skill_prefix_with_reference_adds_prefix_once() {
+        let mut handler = test_handler();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: grep\ndescription: Grep skill\n---\nDo grep things\n",
+        )
+        .unwrap();
+        handler.skill_manager.reload_skill(&path).unwrap();
+
+        let out = handler.inject_skill_prefix("@grep find the config");
+        assert_eq!(out, "use grep skill to do this.\n\n@grep find the config");
+    }
+
     #[test]
     fn temporal_context_at_formats_fixed_clock() {
         // Fixed offset directly (NOT the runner's local zone) so the
@@ -2776,5 +2985,422 @@ mod tests {
         assert!(!tool_text.contains("SECRET_TOKEN"));
         // The synthetic note explains the interruption.
         assert!(context[3].text_content().unwrap().contains("interrupted"));
+    }
+
+    /// Bind a loopback server that replies to POST /v1/chat/completions with
+    /// a canned OpenAI JSON completion (401 -> immediate, non-retryable
+    /// failure; used to drive the manual-compact failure path fast).
+    fn spawn_compact_mock(
+        status: u16,
+        body: String,
+    ) -> (String, Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !shutdown_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 8192];
+                        let _ = stream.read(&mut buf);
+                        let http = format!(
+                            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            status,
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(http.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (format!("http://{addr}/v1"), shutdown)
+    }
+
+    fn compact_test_handler() -> AiHandler {
+        let mut handler = test_handler();
+        handler
+            .context_manager
+            .set_budget_policy(ContextBudgetPolicy {
+                micro_keep_recent_messages: 2,
+                ..ContextBudgetPolicy::default()
+            });
+        handler
+    }
+
+    fn seed_context(handler: &mut AiHandler) {
+        // Long enough that the canned summary is strictly smaller than the
+        // seeded history, so `after_tokens < before_tokens` holds.
+        for i in 0..6 {
+            handler.context_manager.add_message(
+                "user",
+                &format!(
+                    "step {i}: deploy the nginx service on host alpha, check config at /etc/nginx/nginx.conf, \
+                     tail logs under /var/log/nginx, verify upstream health on port 8080 and 8081, \
+                     then compare the checksum of the deployed artifact with the release manifest"
+                ),
+                MemoryType::Llm,
+            );
+            handler.context_manager.add_message(
+                "assistant",
+                &format!(
+                    "step {i} acknowledged: I inspected the nginx config, rotated the upstream, \
+                     verified both health endpoints returned 200, and recorded the artifact checksum"
+                ),
+                MemoryType::Llm,
+            );
+        }
+        handler.context_manager.add_message(
+            "user",
+            "remember the rollback command is systemctl revert nginx",
+            MemoryType::Llm,
+        );
+        handler.context_manager.add_message(
+            "assistant",
+            "Noted. Rolling out now.",
+            MemoryType::Llm,
+        );
+    }
+
+    fn context_fingerprint(handler: &AiHandler) -> String {
+        serde_json::to_string(&handler.context_manager.as_messages()).unwrap()
+    }
+
+    fn summary_response(text: &str) -> String {
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": format!(
+                    "<conversation-summary source=\"model_auto_compact\">\n{text}\n</conversation-summary>"
+                )},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn manual_compact_success_rewrites_context_and_reports_tokens() {
+        let body = summary_response("Summary: deploy finished; rollback = systemctl revert nginx");
+        let (url, shutdown) = spawn_compact_mock(200, body);
+        let mut handler = AiHandler::new(
+            LlmSession::new(&url, "key", "model", None, None),
+            Arc::new(Mutex::new(None)),
+            SkillManager::new(),
+            MemoryConfig::default(),
+            50,
+            50,
+            None,
+            ContextBudgetPolicy {
+                micro_keep_recent_messages: 2,
+                ..ContextBudgetPolicy::default()
+            },
+            false,
+        );
+        seed_context(&mut handler);
+
+        let report = handler
+            .compact_manual(Some("keep the rollback command"))
+            .await
+            .unwrap();
+        assert!(report.full_compact.is_some(), "full compact must run");
+        assert!(
+            report.after_tokens < report.before_tokens,
+            "tokens must drop"
+        );
+        assert!(report.after_tokens > 0);
+        // Manual compact must NOT run microcompact first: the summarizer has
+        // to see the original content, not "[cleared]" placeholders.
+        assert_eq!(
+            report.microcompact.changed_messages, 0,
+            "manual compact skips microcompact"
+        );
+
+        let messages = handler.context_manager.messages_snapshot();
+        // Summary block injected, recent tail kept, and the focus text reached
+        // the summary the model produced (driven by the mock's canned text).
+        assert!(messages
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("systemctl revert nginx")));
+        // Tool-call pairing stays intact: no assistant tool_call without its
+        // tool result and vice versa (none here, but the boundary snap is
+        // covered by the aish-context tests).
+        let summary_count = messages
+            .iter()
+            .filter(|m| m.content.starts_with("<conversation-summary"))
+            .count();
+        assert_eq!(summary_count, 1);
+
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn manual_compact_failure_keeps_context_unchanged() {
+        let (_url, shutdown) =
+            spawn_compact_mock(401, "{\"error\": {\"message\": \"bad key\"}}".to_string());
+        let mut handler = compact_test_handler();
+        seed_context(&mut handler);
+        let before = context_fingerprint(&handler);
+
+        let err = handler.compact_manual(None).await.unwrap_err();
+        assert!(
+            matches!(err, aish_core::AishError::Llm(_)),
+            "unexpected: {err}"
+        );
+
+        // Byte-identical context after the failure: microcompact rewrote
+        // messages in place before the summary failed, and the rollback
+        // restored the snapshot.
+        assert_eq!(context_fingerprint(&handler), before);
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn manual_compact_cancel_keeps_context_unchanged() {
+        // The mock accepts the connection and never answers, so the summary
+        // request parks mid-flight; cancelling the token then aborts the
+        // request deterministically through the same path an Esc takes.
+        let (url, shutdown) = spawn_compact_mock_stall();
+        let mut handler = AiHandler::new(
+            LlmSession::new(&url, "key", "model", None, None),
+            Arc::new(Mutex::new(None)),
+            SkillManager::new(),
+            MemoryConfig::default(),
+            50,
+            50,
+            None,
+            ContextBudgetPolicy {
+                micro_keep_recent_messages: 2,
+                ..ContextBudgetPolicy::default()
+            },
+            false,
+        );
+        seed_context(&mut handler);
+        let before = context_fingerprint(&handler);
+
+        // Reproduce the production cancellation exactly: app.rs races the
+        // compaction against the cancellation token in a tokio::select! —
+        // the losing future is DROPPED at its await point, so the rollback
+        // must come from the scope's Drop impl, not from code after await.
+        // Pre-cancel the token so the poll branch wins immediately, exactly
+        // like an Esc arriving while the request is in flight.
+        handler.llm_session.cancellation_token().cancel();
+        let token = handler.llm_session.cancellation_token_arc();
+        let result = tokio::select! {
+            r = handler.compact_manual(None) => r,
+            _ = poll_cancelled_token(&token) => Err(aish_core::AishError::Cancelled),
+        };
+        match result {
+            Err(aish_core::AishError::Cancelled) => {}
+            other => panic!(
+                "expected Cancelled, got: {:?}",
+                other.as_ref().map(|r| r.before_tokens)
+            ),
+        }
+        // The dropped future must not leave a partially rewritten context.
+        assert_eq!(context_fingerprint(&handler), before);
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Capturing variant of [`spawn_compact_mock`]: records every request
+    /// body so tests can assert what the summarizer actually received.
+    fn spawn_compact_mock_capturing(
+        body: String,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = captured.clone();
+        let shutdown_clone = shutdown.clone();
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !shutdown_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = Vec::new();
+                        let mut chunk = [0u8; 16384];
+                        loop {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    buf.extend_from_slice(&chunk[..n]);
+                                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        // Read Content-Length-delimited body.
+                                        let text = String::from_utf8_lossy(&buf).to_string();
+                                        if let Some(cl) = text
+                                            .lines()
+                                            .find_map(|l| {
+                                                l.split_once(':').filter(|(k, _)| {
+                                                    k.eq_ignore_ascii_case("content-length")
+                                                })
+                                            })
+                                            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                                        {
+                                            let header_end = text.find("\r\n\r\n").unwrap() + 4;
+                                            if buf.len() >= header_end + cl {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&buf).to_string();
+                        if let Some(pos) = text.find("\r\n\r\n") {
+                            captured_clone
+                                .lock()
+                                .unwrap()
+                                .push(text[pos + 4..].to_string());
+                        }
+                        let http = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(http.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (format!("http://{addr}/v1"), shutdown, captured)
+    }
+
+    /// Regression for the manual `/compact` quality bug: microcompact used
+    /// to clear old low-value tool outputs BEFORE the summarizer ran, so the
+    /// summary described the missing content instead of the content. The
+    /// manual path must skip microcompact and let the summarizer see the
+    /// original tool output.
+    #[tokio::test]
+    async fn manual_compact_summarizer_sees_original_tool_output() {
+        let body = summary_response("Summary: canned");
+        let (url, shutdown, captured) = spawn_compact_mock_capturing(body);
+        let mut handler = AiHandler::new(
+            LlmSession::new(&url, "key", "model", None, None),
+            Arc::new(Mutex::new(None)),
+            SkillManager::new(),
+            MemoryConfig::default(),
+            50,
+            50,
+            None,
+            // Only the last 2 messages stay recent: everything before is a
+            // full-compact candidate, including the low-value tool output.
+            ContextBudgetPolicy {
+                micro_keep_recent_messages: 2,
+                ..ContextBudgetPolicy::default()
+            },
+            false,
+        );
+        let marker_cmd = "systemctl status nginx --no-pager";
+        for i in 0..3 {
+            handler.context_manager.add_message(
+                "user",
+                &format!("run check {i} on the nginx service"),
+                MemoryType::Llm,
+            );
+            let assistant = ContextMessage {
+                role: "assistant".into(),
+                content: String::new(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![aish_core::ContextToolCall {
+                    id: format!("call_{i}"),
+                    name: "bash".into(),
+                    arguments: format!(r#"{{"command":"{marker_cmd} round {i}"}}"#),
+                }]),
+            };
+            handler
+                .context_manager
+                .add_memory(MemoryType::Llm, assistant);
+            handler.context_manager.add_message(
+                "tool",
+                &format!(
+                    "<stdout>round {i}: nginx active running pid {i}000</stdout>\n<return_code>0</return_code>"
+                ),
+                MemoryType::Shell,
+            );
+        }
+
+        handler.compact_manual(None).await.unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert!(!requests.is_empty(), "summarizer request must be captured");
+        let prompt = requests
+            .iter()
+            .find(|r| r.contains("Summarize the older persistent AI Shell context"))
+            .expect("compact summary request");
+        // The summarizer saw the ORIGINAL tool output, not placeholders.
+        assert!(
+            prompt.contains("nginx active running pid"),
+            "summary prompt must contain the original tool output"
+        );
+        assert!(
+            !prompt.contains("[old shell/tool output cleared"),
+            "summary prompt must not contain microcompact placeholders"
+        );
+        assert!(
+            !prompt.contains("[cleared]"),
+            "summary prompt must not contain transient-system placeholders"
+        );
+        drop(requests);
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Test-local stand-in for app.rs's `poll_cancelled` (raw-pointer based
+    /// there); same polling semantics on an owned token handle.
+    async fn poll_cancelled_token(token: &aish_llm::CancellationToken) {
+        while !token.is_cancelled() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Same as [`spawn_compact_mock`] but the server accepts the connection,
+    /// returns response headers, and never sends a body: the client parks on
+    /// the read until the shutdown flag closes the socket.
+    fn spawn_compact_mock_stall() -> (String, Arc<std::sync::atomic::AtomicBool>) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !shutdown_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n",
+                        );
+                        let _ = stream.flush();
+                        while !shutdown_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (format!("http://{addr}/v1"), shutdown)
     }
 }
