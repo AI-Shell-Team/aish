@@ -410,52 +410,67 @@ pub fn context_bar(percent: u8) -> String {
 }
 
 /// Render a one-line response metadata footer:
-/// `◉ model │ 3.2k in 1.1k out │ 3.2s │ ctx [████████░░] 23%/256.0k`
+/// `◉ model │ 2.4M used · 96.5k out │ 3.2s │ ctx [████████░░] 23%/256.0k`
 ///
-/// The trailing segment is the context usage rate — the current request's
-/// token estimate as a share of the full model context window (percent and
-/// absolute window size, oh-my-pi style `21.3%/272K`). Compaction triggers
-/// use the effective window separately (full minus reserved output). Tool
-/// calls from prior turns are not persisted into the context manager, so a
-/// short follow-up after a tool-heavy turn legitimately shows a much smaller
-/// share. When `compaction` is `Some`, a trailing `⟳compacted` / `⟳micro`
-/// hint marks that the bar shrank because history was compacted this turn.
+/// The leading segment is Codex-style session-cumulative usage: total tokens
+/// across all requests (input + output) and the cumulative output share. The
+/// trailing segment is the context usage rate — the last request's prompt
+/// tokens as a share of the full model context window (percent and absolute
+/// window size, oh-my-pi style `21.3%/272K`). Compaction triggers use the
+/// effective window separately (full minus reserved output). Tool calls from
+/// prior turns are not persisted into the context manager, so a short
+/// follow-up after a tool-heavy turn legitimately shows a much smaller share.
+/// When `compaction` is `Some`, a trailing `⟳compacted` / `⟳micro` hint marks
+/// that the bar shrank because history was compacted this turn.
 pub fn response_footer(
     model: &str,
-    input_tokens: u64,
-    output_tokens: u64,
+    total_tokens: u64,
+    total_output_tokens: u64,
     ctx_percent: u8,
     context_window: u64,
     compaction: Option<&str>,
     elapsed_secs: Option<f64>,
 ) -> String {
     let sep = dim("│");
-    let time_part = match elapsed_secs {
-        Some(secs) => format!(" {} {} ", dim("·"), muted(&format!("{:.1}s", secs))),
-        None => " ".to_string(),
-    };
-    let compaction_part = match compaction {
-        Some("full_compact") => format!(" {}", dim("⟳compacted")),
-        Some("microcompact") => format!(" {}", dim("⟳micro")),
-        _ => String::new(),
-    };
-    let window_part = if context_window > 0 {
-        format!("/{}", format_tokens(context_window))
-    } else {
-        String::new()
-    };
+    let mut segments: Vec<String> = Vec::new();
+    // Session-cumulative usage (Codex-style). Total covers all requests so
+    // far; `out` is the cumulative completion share of that total. Hidden
+    // entirely before the first recorded request.
+    if total_tokens > 0 {
+        segments.push(format!(
+            "{} {} {}",
+            muted(&format!("{} used", format_tokens(total_tokens))),
+            dim("·"),
+            warning(&format!("{} out", format_tokens(total_output_tokens))),
+        ));
+    }
+    if let Some(secs) = elapsed_secs {
+        segments.push(muted(&format!("{:.1}s", secs)));
+    }
+    let mut ctx_seg = context_bar(ctx_percent);
+    if context_window > 0 {
+        ctx_seg.push_str(&format!("/{}", format_tokens(context_window)));
+    }
+    segments.push(format!("ctx {ctx_seg}"));
+    if let Some(mode) = compaction {
+        let label = match mode {
+            "full_compact" => "⟳compacted",
+            "microcompact" => "⟳micro",
+            // Unknown modes render nothing, matching the pre-refactor
+            // behavior (an empty segment would emit a doubled separator).
+            _ => "",
+        };
+        if !label.is_empty() {
+            segments.push(dim(label).to_string());
+        }
+    }
+    // `ctx` is pushed unconditionally, so `segments` is never empty here.
     format!(
-        "{} {} {} {} {}{}{} ctx {}{}{}",
+        "{} {} {} {}",
         gold("◉"),
         gold(model),
         sep,
-        success(&format!("{} in", format_tokens(input_tokens))),
-        warning(&format!("{} out", format_tokens(output_tokens))),
-        time_part,
-        sep,
-        context_bar(ctx_percent),
-        window_part,
-        compaction_part,
+        segments.join(&format!(" {} ", sep))
     )
 }
 
@@ -896,11 +911,45 @@ mod diff_tests {
     #[test]
     fn response_footer_without_elapsed_has_space_before_sep() {
         let footer = strip_ansi(&response_footer(
-            "gpt-4", 1000, 500, 23, 262_144, None, None,
+            "gpt-4", 1500, 500, 23, 262_144, None, None,
         ));
         assert!(
-            footer.contains("out │"),
+            footer.contains("1.5k used · 500 out │"),
             "separator must have space before it when elapsed is None: {footer:?}"
+        );
+        assert!(
+            footer.starts_with("◉ gpt-4 │"),
+            "model segment must be followed by a separator: {footer:?}"
+        );
+    }
+
+    #[test]
+    fn response_footer_hides_usage_before_first_request() {
+        let footer = strip_ansi(&response_footer("gpt-4", 0, 0, 0, 262_144, None, None));
+        assert!(
+            !footer.contains("used") && !footer.contains(" out"),
+            "usage segment must be hidden when no requests recorded: {footer:?}"
+        );
+        assert!(
+            footer.contains("ctx "),
+            "ctx bar must always render: {footer:?}"
+        );
+    }
+
+    #[test]
+    fn response_footer_shows_session_cumulative_usage() {
+        let footer = strip_ansi(&response_footer(
+            "gpt-4",
+            2_400_000,
+            96_500,
+            23,
+            262_144,
+            None,
+            Some(1.0),
+        ));
+        assert!(
+            footer.contains("2.4M used · 96.5k out"),
+            "session cumulative usage must render as <total> used · <output> out: {footer:?}"
         );
     }
 

@@ -13,7 +13,10 @@ mod spawn;
 mod tool_loop;
 mod tools;
 
-pub use mock_llm::{mock_text_response, mock_tool_call_response};
+pub use mock_llm::{
+    mock_text_response, mock_text_response_with_usage, mock_tool_call_response,
+    mock_tool_call_response_with_usage,
+};
 pub use outcome::{
     extract_spawn_outcome, OutcomeConfig, SpawnOutcome, TerminationKind, INCOMPLETE_PREFIX,
 };

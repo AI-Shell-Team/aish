@@ -41,6 +41,44 @@ pub fn mock_tool_call_response(calls: &[(&str, &str, &str)]) -> LlmResponse {
     }))
 }
 
+/// Build a non-streaming JSON response whose `usage` block reports the given
+/// prompt/completion tokens. Lets tests assert real accounting through
+/// `TokenStats` (recorded once per request, totals and last-prompt).
+pub fn mock_text_response_with_usage(
+    text: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> LlmResponse {
+    LlmResponse::Json(serde_json::json!({
+        "choices": [{
+            "message": {
+                "content": text,
+            }
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+    }))
+}
+
+/// [`mock_tool_call_response`] with a `usage` block attached, for tests that
+/// assert usage accounting across multi-turn tool loops.
+pub fn mock_tool_call_response_with_usage(
+    calls: &[(&str, &str, &str)],
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> LlmResponse {
+    let LlmResponse::Json(mut json) = mock_tool_call_response(calls) else {
+        unreachable!("mock_tool_call_response always returns Json");
+    };
+    json["usage"] = serde_json::json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+    });
+    LlmResponse::Json(json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
