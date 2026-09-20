@@ -114,6 +114,11 @@ where
             super::tool_loop::LoopOutcome::cancelled()
         }
     };
+    // Propagate the sub-session's cumulative usage into the parent so the
+    // shell footer shows the real token consumption (sub-agent turns are
+    // billed exactly like main-session turns). Totals only — see
+    // TokenStats::merge_totals for why last_prompt_tokens is skipped.
+    parent.merge_token_stats(&sub.token_stats());
 
     SpawnResult {
         text: outcome.text,
@@ -258,7 +263,8 @@ async fn forward_cancellation(
 mod tests {
     use super::*;
     use crate::agents::{
-        mock_text_response, mock_tool_call_response, AgentDefinition, AgentRegistry, ToolStrategy,
+        mock_text_response, mock_text_response_with_usage, mock_tool_call_response,
+        mock_tool_call_response_with_usage, AgentDefinition, AgentRegistry, ToolStrategy,
     };
     use crate::client::LlmResponse;
     use crate::types::Tool;
@@ -377,6 +383,45 @@ mod tests {
             .tool_specs()
             .iter()
             .any(|s| s.function.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_merges_subsession_usage_into_parent() {
+        // The sub-agent's billed usage must land in the parent's cumulative
+        // totals so the shell footer shows real consumption. Totals only:
+        // the sub-session's last prompt depth must NOT leak into the
+        // parent's context-window bar.
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        let before = parent.token_stats();
+
+        let registry = AgentRegistry::builtin();
+        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(
+                sub,
+                vec![
+                    // Turn 1 must carry a tool call, or the loop stops after
+                    // one request and the second scripted response is unused.
+                    Ok(mock_tool_call_response_with_usage(
+                        &[("c1", "grep", "{}")],
+                        500,
+                        40,
+                    )),
+                    Ok(mock_text_response_with_usage("done", 700, 60)),
+                ],
+            );
+        })
+        .await
+        .expect("spawn_builtin should succeed");
+
+        let after = parent.token_stats();
+        assert_eq!(after.total_input, before.total_input + 1200);
+        assert_eq!(after.total_output, before.total_output + 100);
+        assert_eq!(after.request_count, before.request_count + 2);
+        assert_eq!(
+            after.last_prompt_tokens, before.last_prompt_tokens,
+            "sub-session prompt depth must not overwrite parent's"
+        );
     }
 
     #[tokio::test]

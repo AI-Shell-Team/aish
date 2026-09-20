@@ -420,6 +420,13 @@ impl LlmSession {
         self.token_stats.lock().unwrap().clone()
     }
 
+    /// Merge cumulative usage totals from another session (sub-agent or
+    /// auxiliary session) into this one. Only totals propagate — see
+    /// [`crate::usage::TokenStats::merge_totals`].
+    pub fn merge_token_stats(&self, other: &crate::usage::TokenStats) {
+        self.token_stats.lock().unwrap().merge_totals(other);
+    }
+
     /// Record token usage from an API response.
     pub(crate) fn record_usage_public(&self, usage: crate::usage::TokenUsage) {
         self.record_usage(usage);

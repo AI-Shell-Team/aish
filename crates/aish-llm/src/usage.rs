@@ -60,6 +60,16 @@ impl TokenStats {
         self.request_count += 1;
     }
 
+    /// Merge another stats snapshot into this one. Only cumulative totals
+    /// propagate: `last_prompt_tokens` is intentionally NOT merged because a
+    /// child/aux session's final prompt depth says nothing about this
+    /// session's context window consumption.
+    pub fn merge_totals(&mut self, other: &TokenStats) {
+        self.total_input += other.total_input;
+        self.total_output += other.total_output;
+        self.request_count += other.request_count;
+    }
+
     /// Total tokens consumed (input + output).
     pub fn total_tokens(&self) -> u64 {
         self.total_input + self.total_output
