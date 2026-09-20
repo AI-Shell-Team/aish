@@ -639,6 +639,11 @@ pub struct AishShell {
     secret_check_closure:
         std::sync::Arc<dyn Fn(&str) -> Option<aish_pty::SshSecretCheckResult> + Send + Sync>,
     secret_vault: std::sync::Arc<std::sync::Mutex<aish_security::secret::SecretVault>>,
+    /// Cumulative usage reported by auxiliary LLM sessions (SSH followups,
+    /// remote queries). Folded into the footer's stats at read time.
+    auxiliary_usage: Arc<std::sync::Mutex<aish_llm::TokenStats>>,
+    /// Callback handed to auxiliary sessions to report their usage.
+    usage_merge_slot: Arc<dyn Fn(&aish_llm::TokenStats) + Send + Sync>,
     snapshot_store: aish_tools::fs::SharedSnapshotStore,
     pub session_store: Option<SessionStore>,
     audit_store: Option<std::sync::Arc<aish_session::AuditStore>>,
@@ -2159,6 +2164,21 @@ impl AishShell {
 
         llm_session.set_iteration_limit_callback(iteration_limit_callback);
 
+        // Shared accumulator for auxiliary sessions (SSH followups, remote
+        // queries). They cannot reach the main LlmSession (owned by AiHandler,
+        // not Sync), so each auxiliary session reports its cumulative totals
+        // here and `session_token_stats()` folds them in at read time.
+        let auxiliary_usage: Arc<std::sync::Mutex<aish_llm::TokenStats>> =
+            Arc::new(std::sync::Mutex::new(aish_llm::TokenStats::default()));
+        let usage_merge_slot: Arc<dyn Fn(&aish_llm::TokenStats) + Send + Sync> = {
+            let aux = auxiliary_usage.clone();
+            Arc::new(move |stats: &aish_llm::TokenStats| {
+                aux.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .merge_totals(stats);
+            })
+        };
+
         // Build AI handler with all subsystems
         let mut ai_handler = AiHandler::new(
             llm_session,
@@ -2301,6 +2321,8 @@ impl AishShell {
             input_guard,
             secret_check_closure,
             secret_vault,
+            auxiliary_usage,
+            usage_merge_slot,
             session_store,
             audit_store,
             audit_user,
@@ -2873,7 +2895,6 @@ impl AishShell {
                         CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
                     let token_ptr =
                         self.ai_handler.cancellation_token() as *const CancellationToken;
-                    let token_stats_before = self.ai_handler.session_token_stats();
                     let ai_start = std::time::Instant::now();
                     let result = runtime.block_on(async {
                         tokio::select! {
@@ -2911,48 +2932,50 @@ impl AishShell {
                                     // No additional output needed here.
                                 }
 
-                                // Print response metadata footer (tokens + context usage).
+                                // Fold auxiliary sessions' reported usage
+                                // (SSH followups / remote queries) into the
+                                // main totals so the footer shows real
+                                // consumption.
+                                let mut stats = self.ai_handler.session_token_stats();
                                 {
-                                    let stats = self.ai_handler.session_token_stats();
-                                    let delta_in = stats
-                                        .total_input
-                                        .saturating_sub(token_stats_before.total_input);
-                                    let delta_out = stats
-                                        .total_output
-                                        .saturating_sub(token_stats_before.total_output);
-                                    // oh-my-pi anchors the status-line context% on
-                                    // the provider's real prompt-token count (actual
-                                    // wire consumption of this request); the local
-                                    // bytes/4 estimate is only the fallback.
-                                    let ctx_tokens = if stats.last_prompt_tokens > 0 {
-                                        stats.last_prompt_tokens
-                                    } else {
-                                        self.ai_handler.last_prompt_estimate()
-                                    };
-                                    let ctx_window = self.ai_handler.context_window_tokens() as u64;
-                                    let ctx_percent = ctx_tokens
-                                        .checked_mul(100)
-                                        .and_then(|v| v.checked_div(ctx_window))
-                                        .unwrap_or(0)
-                                        .min(100)
-                                        as u8;
-                                    let compaction = self.ai_handler.last_turn_compaction();
-                                    let footer = theme::response_footer(
-                                        &self.config.model,
-                                        delta_in,
-                                        delta_out,
-                                        ctx_percent,
-                                        ctx_window,
-                                        compaction,
-                                        Some(ai_elapsed),
-                                    );
-                                    crate::recorder::shared_record_output(
-                                        &self.shared_recorder,
-                                        &format!("{}\n", footer),
-                                    );
-                                    println!("{}", footer);
-                                    let _ = std::io::stdout().flush();
+                                    let aux = self
+                                        .auxiliary_usage
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    stats.merge_totals(&aux);
                                 }
+                                // oh-my-pi anchors the status-line context% on
+                                // the provider's real prompt-token count (actual
+                                // wire consumption of this request); the local
+                                // bytes/4 estimate is only the fallback.
+                                let ctx_tokens = if stats.last_prompt_tokens > 0 {
+                                    stats.last_prompt_tokens
+                                } else {
+                                    self.ai_handler.last_prompt_estimate()
+                                };
+                                let ctx_window = self.ai_handler.context_window_tokens() as u64;
+                                let ctx_percent = ctx_tokens
+                                    .checked_mul(100)
+                                    .and_then(|v| v.checked_div(ctx_window))
+                                    .unwrap_or(0)
+                                    .min(100)
+                                    as u8;
+                                let compaction = self.ai_handler.last_turn_compaction();
+                                let footer = theme::response_footer(
+                                    &self.config.model,
+                                    stats.total_tokens(),
+                                    stats.total_output,
+                                    ctx_percent,
+                                    ctx_window,
+                                    compaction,
+                                    Some(ai_elapsed),
+                                );
+                                crate::recorder::shared_record_output(
+                                    &self.shared_recorder,
+                                    &format!("{}\n", footer),
+                                );
+                                println!("{}", footer);
+                                let _ = std::io::stdout().flush();
 
                                 self.persist_session_snapshot();
 
@@ -8859,6 +8882,7 @@ impl AishShell {
                 },
                 self.session_uuid.clone(),
                 self.audit_user.clone(),
+                Some(self.usage_merge_slot.clone()),
             );
             let on_output: Option<Box<dyn Fn(&str) + Send>> = if is_session {
                 let recorder = self.shared_recorder.clone();
@@ -9413,6 +9437,7 @@ impl AishShell {
         history: &Arc<Mutex<Vec<ChatMessage>>>,
         shared_host: Arc<Mutex<Option<String>>>,
         shared_recorder: crate::recorder::SharedRecorder,
+        usage_merge: Option<Arc<dyn Fn(&aish_llm::TokenStats) + Send + Sync>>,
     ) -> Box<aish_pty::FollowupCallback> {
         let api_base_f = api_base.to_string();
         let api_key_f = api_key.to_string();
@@ -9464,7 +9489,7 @@ impl AishShell {
                 anim_f.start(&t("shell.status.thinking"));
                 let history_snapshot = history_f.lock().unwrap().clone();
 
-                // Spawn LLM thread with ChannelAskUserTool
+                let usage_merge_th = usage_merge.clone();
                 let api_base_th = api_base_f.clone();
                 let codex_auth_path_th = codex_auth_path_f.clone();
                 let api_key_th = api_key_f.clone();
@@ -9737,6 +9762,12 @@ impl AishShell {
                             .process_input(&user_msg, &history_snapshot, Some(&system_msg_th), true)
                             .await
                     });
+                    // Report this auxiliary session's cumulative usage so the
+                    // main-session footer reflects the real consumption.
+                    let fu_stats = session.token_stats();
+                    if let Some(merge) = &usage_merge_th {
+                        merge(&fu_stats);
+                    }
                     let process_result = result.ok();
                     let text = process_result.as_ref().map(|r| r.text.clone());
 
@@ -9781,6 +9812,7 @@ impl AishShell {
                             &conversation_history_th,
                             shared_host_th_f.clone(),
                             shared_recorder_th.clone(),
+                            usage_merge_th.clone(),
                         );
                         Some(aish_pty::AiResponse {
                             command: next_cmd,
@@ -10172,6 +10204,7 @@ impl AishShell {
         audit_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
         audit_session_uuid: String,
         audit_user: Option<String>,
+        usage_merge: Option<Arc<dyn Fn(&aish_llm::TokenStats) + Send + Sync>>,
     ) -> Option<Box<aish_pty::AiCallback>> {
         let api_base = config.api_base.clone();
         let api_key = config.api_key.clone();
@@ -10185,7 +10218,7 @@ impl AishShell {
         let audit_redactor_cb = audit_redactor;
         let audit_session_uuid_cb = audit_session_uuid;
         let audit_user_cb = audit_user;
-
+        let usage_merge_cb = usage_merge;
         // Load skills snapshot for SSH sessions (same as local session).
         let ssh_skills_snapshot: std::sync::Arc<
             std::collections::HashMap<String, aish_tools::SkillInfo>,
@@ -10426,6 +10459,7 @@ impl AishShell {
             let audit_session_uuid_th = audit_session_uuid_cb.clone();
             let audit_user_th = audit_user_cb.clone();
             let audit_host_th = dossier_host.clone();
+            let usage_merge_th = usage_merge_cb.clone();
 
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().unwrap();
@@ -10732,9 +10766,16 @@ impl AishShell {
                     session.register_tool(Box::new(aish_tools::AgentTool::new()));
 
                     let user_msg_t = ChatMessage::user(&context_for_thread);
-                    session
+                    let result = session
                         .process_input(&user_msg_t, &context_messages_t, Some(&system_msg_t), true)
-                        .await
+                        .await;
+                    // Report this auxiliary session's cumulative usage so the
+                    // main-session footer reflects the real consumption.
+                    let aux_stats = session.token_stats();
+                    if let Some(merge) = &usage_merge_th {
+                        merge(&aux_stats);
+                    }
+                    result
                 });
                 if cancelled_t.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
@@ -10819,6 +10860,7 @@ impl AishShell {
                                 &conversation_history_th,
                                 shared_host_th.clone(),
                                 shared_recorder_th.clone(),
+                                usage_merge_th.clone(),
                             )
                         });
                         Some(aish_pty::AiResponse {

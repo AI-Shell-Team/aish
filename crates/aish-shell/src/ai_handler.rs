@@ -395,6 +395,13 @@ impl AiHandler {
         self.llm_session.token_stats()
     }
 
+    /// Merge cumulative usage from an auxiliary (SSH followup / remote query)
+    /// or sub-agent session into the main session so the footer shows real
+    /// consumption. Totals only — `last_prompt_tokens` is not merged.
+    pub fn merge_session_token_stats(&self, other: &aish_llm::TokenStats) {
+        self.llm_session.merge_token_stats(other);
+    }
+
     /// Full context window (e.g. 256k) — the oh-my-pi style display base for
     /// the footer context-usage rate. Compaction thresholds still use the
     /// effective window (full window minus reserved output).
