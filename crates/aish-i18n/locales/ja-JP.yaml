@@ -199,6 +199,7 @@ shell:
     rollback: "このセッションの AI によるファイル編集を確認・ロールバック (edit_file/write_file)"
     undo: "AIによる直近のファイル変更を取り消す (edit_file/write_file)"
     memory: "長期メモリの表示、検証、削除"
+    compact: "AIコンテキストを今すぐ圧縮（フォーカス指定は任意）"
 
   slash_group:
     diagnostics: "診断"
@@ -590,7 +591,7 @@ shell:
         desc: "古いターンを要約する完全圧縮パスを有効化"
       compact_context_window_tokens:
         label: "コンテキストウィンドウトークン数"
-        desc: "圧縮計算に使用するモデルのコンテキストウィンドウサイズ"
+        desc: "自動圧縮の基準となるコンテキストウィンドウ（空 = 自動：モデルウィンドウ > 旧予算 > デフォルト 262144/256k）"
       compact_micro_keep_recent:
         label: "マイクロ圧縮で保持する最近"
         desc: "マイクロ圧縮中にそのまま保持するターン数"
@@ -614,7 +615,7 @@ shell:
         desc: "AI コンテキストに保持するシェルコマンドターンの最大数"
       context_token_budget:
         label: "コンテキストトークン予算"
-        desc: "コンテキスト合計トークンの任意の上限（空欄 = 無制限）"
+        desc: "旧実装のハード上限。古いメッセージを直接切り詰めます（圧縮ではありません）。空 = 無制限"
       enable_remote_git_prompt:
         label: "リモート Git プロンプト"
         desc: "リモート (SSH/telnet) の bash プロンプトに git ブランチを表示"
@@ -945,6 +946,12 @@ shell:
   compaction:
     completed: "コンテキストを圧縮しました"
     completed_with_tokens: "コンテキストを圧縮し、約 {tokens} トークンを確保しました"
+
+  compact:
+    started: "コンテキストを圧縮中…"
+    completed: "圧縮が完了しました。トークン: {before} → {after}（{saved} 削減）"
+    cancelled: "圧縮をキャンセルしました。コンテキストは変更されていません"
+    failed: "圧縮に失敗しました: {error}（コンテキストは変更されていません）"
   status:
     thinking: "考え中"
     compacting_context: "コンテキストを圧縮中"

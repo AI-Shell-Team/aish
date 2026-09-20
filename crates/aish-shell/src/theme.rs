@@ -410,19 +410,22 @@ pub fn context_bar(percent: u8) -> String {
 }
 
 /// Render a one-line response metadata footer:
-/// `◉ model │ 3.2k in 1.1k out │ 3.2s │ req [████████░░] 23%`
+/// `◉ model │ 3.2k in 1.1k out │ 3.2s │ ctx [████████░░] 23%/256.0k`
 ///
-/// `req` is the current request's share of the context window — NOT the
-/// cumulative conversation size. Tool calls from prior turns are not
-/// persisted into the context manager, so a short follow-up after a
-/// tool-heavy turn legitimately shows a much smaller `req`. When
-/// `compaction` is `Some`, a trailing `⟳compacted` / `⟳micro` hint marks
-/// that the bar shrank because history was compacted this turn.
+/// The trailing segment is the context usage rate — the current request's
+/// token estimate as a share of the full model context window (percent and
+/// absolute window size, oh-my-pi style `21.3%/272K`). Compaction triggers
+/// use the effective window separately (full minus reserved output). Tool
+/// calls from prior turns are not persisted into the context manager, so a
+/// short follow-up after a tool-heavy turn legitimately shows a much smaller
+/// share. When `compaction` is `Some`, a trailing `⟳compacted` / `⟳micro`
+/// hint marks that the bar shrank because history was compacted this turn.
 pub fn response_footer(
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
     ctx_percent: u8,
+    context_window: u64,
     compaction: Option<&str>,
     elapsed_secs: Option<f64>,
 ) -> String {
@@ -436,8 +439,13 @@ pub fn response_footer(
         Some("microcompact") => format!(" {}", dim("⟳micro")),
         _ => String::new(),
     };
+    let window_part = if context_window > 0 {
+        format!("/{}", format_tokens(context_window))
+    } else {
+        String::new()
+    };
     format!(
-        "{} {} {} {} {}{}{} req {}{}",
+        "{} {} {} {} {}{}{} ctx {}{}{}",
         gold("◉"),
         gold(model),
         sep,
@@ -446,6 +454,7 @@ pub fn response_footer(
         time_part,
         sep,
         context_bar(ctx_percent),
+        window_part,
         compaction_part,
     )
 }
@@ -886,7 +895,9 @@ mod diff_tests {
 
     #[test]
     fn response_footer_without_elapsed_has_space_before_sep() {
-        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, None, None));
+        let footer = strip_ansi(&response_footer(
+            "gpt-4", 1000, 500, 23, 262_144, None, None,
+        ));
         assert!(
             footer.contains("out │"),
             "separator must have space before it when elapsed is None: {footer:?}"
@@ -895,10 +906,44 @@ mod diff_tests {
 
     #[test]
     fn response_footer_with_elapsed_has_time_segment() {
-        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, None, Some(1.5)));
+        let footer = strip_ansi(&response_footer(
+            "gpt-4",
+            1000,
+            500,
+            23,
+            262_144,
+            None,
+            Some(1.5),
+        ));
         assert!(
             footer.contains("1.5s"),
             "elapsed time must appear in footer: {footer:?}"
+        );
+    }
+
+    #[test]
+    fn response_footer_shows_context_usage_rate() {
+        let footer = strip_ansi(&response_footer(
+            "gpt-4",
+            1000,
+            500,
+            23,
+            262_144,
+            None,
+            Some(1.0),
+        ));
+        assert!(
+            footer.contains("ctx ") && footer.contains("23%/262.1k"),
+            "context usage must render as ctx <pct>%/<window>: {footer:?}"
+        );
+    }
+
+    #[test]
+    fn response_footer_omits_window_when_unknown() {
+        let footer = strip_ansi(&response_footer("gpt-4", 1000, 500, 23, 0, None, None));
+        assert!(
+            footer.contains("ctx ") && !footer.contains('/'),
+            "unknown window must omit the /window suffix: {footer:?}"
         );
     }
 

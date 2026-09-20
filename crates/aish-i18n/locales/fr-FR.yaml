@@ -199,6 +199,7 @@ shell:
     rollback: "Examiner et annuler les modifications de fichier de l'IA (edit_file/write_file) cette session"
     undo: "Annuler la dernière modification de fichier par l'IA (edit_file/write_file)"
     memory: "Visualiser, vérifier ou oublier les mémoires"
+    compact: "Compresser le contexte de l'IA maintenant (focus optionnel)"
 
   slash_group:
     diagnostics: "Diagnostic"
@@ -590,7 +591,7 @@ shell:
         desc: "Activer la passe de compactage complet qui résume les anciens tours"
       compact_context_window_tokens:
         label: "Tokens de fenêtre de contexte"
-        desc: "Taille de fenêtre de contexte du modèle utilisée pour le calcul de compactage"
+        desc: "Fenêtre de contexte pour l'auto-compaction (vide = auto : fenêtre du modèle > budget hérité > défaut 262144/256k)"
       compact_micro_keep_recent:
         label: "Conservation récent micro-compactage"
         desc: "Tours conservés tels quels pendant le micro-compactage"
@@ -614,7 +615,7 @@ shell:
         desc: "Tours de commandes shell maximum conservés dans le contexte IA"
       context_token_budget:
         label: "Budget de tokens du contexte"
-        desc: "Plafond strict optionnel sur le total des tokens de contexte (vide = illimité)"
+        desc: "Limite stricte héritée qui tronque les anciens messages (pas une compression) ; vide = illimité"
       enable_remote_git_prompt:
         label: "Invite git distante"
         desc: "Afficher la branche git dans les invites bash distantes (SSH/telnet)"
@@ -945,6 +946,12 @@ shell:
   compaction:
     completed: "Contexte compressé"
     completed_with_tokens: "Contexte compressé, environ {tokens} tokens récupérés"
+
+  compact:
+    started: "Compression du contexte…"
+    completed: "Compression terminée. Tokens : {before} → {after} ({saved} économisés)"
+    cancelled: "Compression annulée ; contexte inchangé"
+    failed: "Échec de la compression : {error} (contexte inchangé)"
   status:
     thinking: "Reflexion"
     compacting_context: "Compression du contexte"
