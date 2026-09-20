@@ -591,7 +591,7 @@ shell:
         desc: "Activer la passe de compactage complet qui résume les anciens tours"
       compact_context_window_tokens:
         label: "Tokens de fenêtre de contexte"
-        desc: "Fenêtre de contexte pour l'auto-compaction (vide = défaut 262144 / 256k)"
+        desc: "Fenêtre de contexte pour l'auto-compaction (vide = auto : fenêtre du modèle > budget hérité > défaut 262144/256k)"
       compact_micro_keep_recent:
         label: "Conservation récent micro-compactage"
         desc: "Tours conservés tels quels pendant le micro-compactage"

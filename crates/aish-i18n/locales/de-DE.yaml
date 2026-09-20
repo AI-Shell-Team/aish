@@ -591,7 +591,7 @@ shell:
         desc: "Vollständigen Compaction-Durchlauf aktivieren, der alte Turns zusammenfasst"
       compact_context_window_tokens:
         label: "Context-Window-Tokens"
-        desc: "Kontextfenster für die Auto-Komprimierung (leer = Standard 262144 / 256k)"
+        desc: "Kontextfenster für die Auto-Komprimierung (leer = automatisch: Modellfenster > Legacy-Budget > Standard 262144/256k)"
       compact_micro_keep_recent:
         label: "Micro-Compact Keep Recent"
         desc: "Wörtlich erhaltene Turns bei Micro-Compaction"

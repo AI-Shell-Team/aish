@@ -10,7 +10,6 @@
 //! this module is intentionally free of terminal I/O so it stays unit-testable.
 
 use aish_config::ConfigModel;
-use aish_context::DEFAULT_CONTEXT_WINDOW_TOKENS;
 use aish_security::{RiskLevel, SandboxOffAction, SecurityPolicy};
 
 // ---------------------------------------------------------------------------
@@ -719,11 +718,25 @@ pub fn current_raw(cfg: &ConfigModel, key: SettingKey) -> String {
             .unwrap_or_else(|| bool_str(true)),
         SettingKey::ContextAutoCompact => bool_str(cfg.context_auto_compact.enabled),
         SettingKey::CompactFullEnabled => bool_str(cfg.context_auto_compact.full_compact_enabled),
-        SettingKey::CompactContextWindowTokens => cfg
-            .context_auto_compact
-            .context_window_tokens
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| format!("{} (auto)", DEFAULT_CONTEXT_WINDOW_TOKENS)),
+        SettingKey::CompactContextWindowTokens => {
+            // Mirror the runtime resolution precedence (auto-compact override
+            // > model window > legacy budget > default) so the panel shows the
+            // value compaction will actually use, with its source.
+            match cfg.context_auto_compact.context_window_tokens {
+                Some(n) => n.to_string(),
+                None => {
+                    let resolved = aish_context::resolve_context_window_tokens(
+                        None,
+                        cfg.context_auto_compact
+                            .model_context_windows
+                            .get(&cfg.model)
+                            .copied(),
+                        cfg.context_token_budget,
+                    );
+                    format!("{} (auto: {})", resolved.tokens, resolved.source.as_str())
+                }
+            }
+        }
         SettingKey::CompactMicroKeepRecent => cfg
             .context_auto_compact
             .micro_keep_recent_messages
@@ -1053,6 +1066,37 @@ mod tests {
                 cat
             );
         }
+    }
+    #[test]
+    fn context_window_display_reflects_resolution_precedence() {
+        let mut cfg = default_cfg();
+
+        // Nothing set anywhere: shows the default with its source.
+        let display = current_raw(&cfg, SettingKey::CompactContextWindowTokens);
+        assert_eq!(display, "262144 (auto: default)");
+
+        // Model window set: the panel must show THAT value, not the default.
+        cfg.context_auto_compact
+            .model_context_windows
+            .insert("deepseek-v4.1-flash".to_string(), 131_072);
+        cfg.model = "deepseek-v4.1-flash".to_string();
+        let display = current_raw(&cfg, SettingKey::CompactContextWindowTokens);
+        assert_eq!(
+            display,
+            "131072 (auto: context_auto_compact.model_context_windows)"
+        );
+
+        // Legacy budget set (lower precedence than model window but present):
+        // still shows the resolved value, not the default.
+        cfg.context_auto_compact.model_context_windows.clear();
+        cfg.context_token_budget = Some(64_000);
+        let display = current_raw(&cfg, SettingKey::CompactContextWindowTokens);
+        assert_eq!(display, "64000 (auto: context_token_budget)");
+
+        // Explicit override: shown verbatim, no (auto) suffix.
+        cfg.context_auto_compact.context_window_tokens = Some(200_000);
+        let display = current_raw(&cfg, SettingKey::CompactContextWindowTokens);
+        assert_eq!(display, "200000");
     }
 
     #[test]

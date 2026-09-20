@@ -1081,7 +1081,7 @@ shell:
         desc: "微压缩不够时允许完整摘要压缩"
       compact_context_window_tokens:
         label: "上下文窗口 Tokens"
-        desc: "自动压缩依据的上下文窗口（留空=默认 262144，即 256k）"
+        desc: "自动压缩依据的上下文窗口（留空=自动：模型窗口 > 旧版预算 > 默认 262144/256k）"
       compact_micro_keep_recent:
         label: "微压缩保留近况"
         desc: "微压缩时保留的最近消息数"

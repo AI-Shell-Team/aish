@@ -591,7 +591,7 @@ shell:
         desc: "Activar el paso de compactación completa que resume turnos antiguos"
       compact_context_window_tokens:
         label: "Tokens de ventana de contexto"
-        desc: "Ventana de contexto para la autocompactación (vacío = por defecto 262144 / 256k)"
+        desc: "Ventana de contexto para la autocompactación (vacío = automático: ventana del modelo > presupuesto heredado > por defecto 262144/256k)"
       compact_micro_keep_recent:
         label: "Conservar recientes en micro-compactación"
         desc: "Turnos conservados literalmente durante la micro-compactación"
@@ -948,9 +948,9 @@ shell:
 
   compact:
     started: "Compactando contexto…"
-    completed: "Compacción completada. Tokens: {before} → {after} ({saved} ahorrados)"
-    cancelled: "Compacción cancelada; contexto sin cambios"
-    failed: "Compacción fallida: {error} (contexto sin cambios)"
+    completed: "Compactación completada. Tokens: {before} → {after} ({saved} ahorrados)"
+    cancelled: "Compactación cancelada; contexto sin cambios"
+    failed: "Compactación fallida: {error} (contexto sin cambios)"
   status:
     thinking: "Pensando"
     compacting_context: "Comprimiendo contexto"

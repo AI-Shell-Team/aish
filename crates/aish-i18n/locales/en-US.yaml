@@ -1081,7 +1081,7 @@ shell:
         desc: "Allow full summary compaction when micro-compact isn't enough"
       compact_context_window_tokens:
         label: "Context Window Tokens"
-        desc: "Context window for auto-compaction (blank = default 262144 / 256k)"
+        desc: "Context window for auto-compaction (blank = auto: model window > legacy budget > default 262144/256k)"
       compact_micro_keep_recent:
         label: "Micro-compact Keep Recent"
         desc: "Messages retained during a micro-compaction pass"

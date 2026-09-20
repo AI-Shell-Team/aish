@@ -8652,9 +8652,11 @@ impl AishShell {
         let token_ptr = self.ai_handler.cancellation_token() as *const aish_llm::CancellationToken;
 
         // Shimmer spinner with elapsed time while the summary request runs.
-        // The LlmEvent callback restarts this same animation on
-        // ContextCompactionStart; start it early so there is no silent
-        // window before that event arrives.
+        // Started here directly rather than through the event callback: the
+        // callback's generation guard rejects ContextCompactionStart because
+        // the manual path never emits OpStart to sync op_gen after the bump
+        // in install_ai_sigint_handler above.
+        self.animation.start(&t("shell.compact.started"));
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
             Err(err) => {
