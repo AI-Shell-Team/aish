@@ -822,52 +822,49 @@ impl AiHandler {
     }
 
     /// Handle error correction: analyze a failed command and suggest a fix.
+    ///
+    /// Runs as a read-only `command-diagnose` sub-agent (issue #545): the
+    /// correction analysis must never execute side-effecting commands
+    /// before the user confirms a fix. The suggested fix is returned to the
+    /// caller for display + explicit confirmation; only the user executes it.
     pub async fn handle_error_correction(
         &mut self,
         command: &str,
         exit_code: i32,
         stderr: &str,
     ) -> aish_core::Result<ErrorCorrectionResult> {
+        use aish_llm::{spawn_request, AgentDefinition, LoopStatus};
+
         let prompt = format!(
-            "<command_result>\nCommand: {}\nExit code: {}\n</command_result>\n\n\
-             Please analyze the error and suggest a fix. \
-             Check the shell history context above for the actual error output.",
-            command, exit_code
+            "Analyze this failed command and put the corrected-command JSON in your final message.\n\
+             Command: {command}\nExit code: {exit_code}\n\n\
+             The context messages below contain the shell history and the actual error output."
         );
-
-        let context_messages = self.build_context_messages();
-        let system_message = self.error_correction_system_message(command, exit_code, stderr);
-
-        let user_msg = ChatMessage::user(&prompt);
-        // Issue #452: error correction runs with the main tool set visible
-        // (PromptContext::MainChat), so a provider failure can still land
-        // mid-turn after tools executed. Commit the partial evidence the
-        // same way handle_question does before propagating the error.
-        let process_result = match self
-            .llm_session
-            .process_input(
-                &user_msg,
-                &context_messages,
-                system_message.as_deref(),
-                true,
-            )
-            .await
-        {
-            Ok(result) => {
-                self.last_partial_turn_steps = 0;
-                result
-            }
-            Err(err) => {
-                self.commit_partial_turn(&prompt);
-                return Err(err);
-            }
+        let stderr_trunc = if stderr.len() > 4096 {
+            &stderr[..floor_char_boundary(stderr, 4096)]
+        } else {
+            stderr
         };
-        let response = process_result.text;
+        let context_messages = self.build_context_messages();
+        let system_message = self.error_correction_system_message(command, exit_code, stderr_trunc);
+        let def = AgentDefinition::command_diagnose(system_message.unwrap_or_default());
+        let mut request = aish_llm::SpawnRequest::new(&def, &prompt);
+        request.context_messages = context_messages;
 
-        // Persist token usage delta to disk
+        let result = spawn_request(&self.llm_session, request, |_sub, _specs| {}).await;
+
         self.persist_token_usage();
 
-        Ok(parse_error_correction_response(&response))
+        match result.status {
+            LoopStatus::Cancelled => Err(aish_core::AishError::Cancelled),
+            LoopStatus::Fatal => Err(aish_core::AishError::Llm(format!(
+                "error correction failed: {}",
+                result.text
+            ))),
+            LoopStatus::Complete | LoopStatus::Incomplete => {
+                Ok(parse_error_correction_response(&result.text))
+            }
+        }
     }
 
     async fn compact_context_before_send(

@@ -286,6 +286,8 @@ You should be concise, direct, and to the point. Response in {{output_language}}
 ## Task
 Given a failed command (return code != 0) and its output, analyze why it failed and provide an accurate fix. If there is no suitable fix, return an empty command string.
 
+You are in **read-only diagnosis mode** (issue #545): use only read-only probes (grep, glob, read_file, `which`, `ls`, `cat`, `systemctl status`, etc.). **Never** execute the failed command again, and never run installs, writes, service changes, or any other state-mutating command — the suggested fix is executed by the user only after explicit confirmation.
+
 Command exit code: {{exit_code}}
 
 ### Output format
