@@ -92,12 +92,12 @@ impl FallbackRuleEngine {
     }
 
     fn parse_policy_command(&self, command: &str) -> Option<ParsedCommand> {
-        let (stripped_command, _sudo_detected, ok) = strip_sudo_prefix(command);
-        if !ok {
+        let stripped = strip_sudo_prefix(command);
+        if !stripped.ok {
             return None;
         }
 
-        let mut argv = split_shell_like(&stripped_command)?;
+        let mut argv = split_shell_like(&stripped.command)?;
         if argv.is_empty() {
             return None;
         }
@@ -166,12 +166,12 @@ impl FallbackRuleEngine {
 }
 
 pub(crate) fn extract_policy_command_name(command: &str) -> Option<String> {
-    let (stripped_command, _sudo_detected, ok) = strip_sudo_prefix(command);
-    if !ok {
+    let stripped = strip_sudo_prefix(command);
+    if !stripped.ok {
         return None;
     }
 
-    let mut argv = split_shell_like(&stripped_command)?;
+    let mut argv = split_shell_like(&stripped.command)?;
     if argv.is_empty() {
         return None;
     }

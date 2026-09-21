@@ -44,15 +44,7 @@ pub(crate) struct FsChange {
 pub(crate) struct SandboxResult {
     pub(crate) exit_code: i32,
     #[serde(default)]
-    pub(crate) stdout: String,
-    #[serde(default)]
-    pub(crate) stderr: String,
-    #[serde(default)]
     pub(crate) changes: Vec<FsChange>,
-    #[serde(default)]
-    pub(crate) stdout_truncated: bool,
-    #[serde(default)]
-    pub(crate) stderr_truncated: bool,
     #[serde(default)]
     pub(crate) changes_truncated: bool,
 }
@@ -233,14 +225,10 @@ mod tests {
     fn sandbox_result_defaults_truncation_flags_when_missing() {
         let value = json!({
             "exit_code": 0,
-            "stdout": "",
-            "stderr": "",
             "changes": [{"path": "/tmp/x", "kind": "created"}]
         });
 
         let result: SandboxResult = serde_json::from_value(value).unwrap();
-        assert!(!result.stdout_truncated);
-        assert!(!result.stderr_truncated);
         assert!(!result.changes_truncated);
         assert_eq!(result.changes[0].kind, FsChangeKind::Created);
     }

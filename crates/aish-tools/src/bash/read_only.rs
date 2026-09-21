@@ -34,11 +34,11 @@ pub fn classify(command: &str) -> ReadOnlyVerdict {
         if seg.is_empty() {
             continue;
         }
-        let (stripped, _sudo_detected, sudo_ok) = strip_sudo_prefix(seg);
-        if !sudo_ok {
+        let stripped = strip_sudo_prefix(seg);
+        if !stripped.ok {
             return ReadOnlyVerdict::Unparseable;
         }
-        let seg = stripped.trim();
+        let seg = stripped.command.trim();
         if seg.is_empty() {
             return ReadOnlyVerdict::Unparseable;
         }
