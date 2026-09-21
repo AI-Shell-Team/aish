@@ -337,7 +337,7 @@ def main() -> int:
         #             command, followed by a Y/n execute prompt.
         #    - FIXED: the same_as_failed warning is shown instead, or the
         #             title never offers the original command.
-        wait_for(
+        outcome = wait_for(
             lambda t: True
             if re.search(
                 r"Corrected command|纠正后的命令|same_as_failed|修复建议与失败命令相同|Execute|拒绝重复",
@@ -346,6 +346,10 @@ def main() -> int:
             else None,
             30, "correction outcome",
         )
+        if outcome is None:
+            # No outcome within the window means the correction turn never
+            # completed — verdicts below would silently pass. Hard-fail.
+            return 4
         drain(2.0)
         text = bytes(transcript).decode("utf-8", errors="replace")
         with open(TRANSCRIPT_LOG, "w") as f:

@@ -290,6 +290,11 @@ You are in **read-only diagnosis mode** (issue #545): use only read-only probes 
 
 Command exit code: {{exit_code}}
 
+Failed command output (may be empty; may be truncated):
+```
+{{command_output}}
+```
+
 ### Output format
 - Output **exactly one** JSON code block with no extra text (no explanation, prefix, suffix, or Markdown outside the block).
 - Wrap the full JSON in a ```json code fence.

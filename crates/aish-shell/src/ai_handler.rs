@@ -838,15 +838,11 @@ impl AiHandler {
         let prompt = format!(
             "Analyze this failed command and put the corrected-command JSON in your final message.\n\
              Command: {command}\nExit code: {exit_code}\n\n\
-             The context messages below contain the shell history and the actual error output."
+             The failed command's output is in the diagnosis prompt; the context \
+             messages below contain the shell history."
         );
-        let stderr_trunc = if stderr.len() > 4096 {
-            &stderr[..floor_char_boundary(stderr, 4096)]
-        } else {
-            stderr
-        };
         let context_messages = self.build_context_messages();
-        let system_message = self.error_correction_system_message(command, exit_code, stderr_trunc);
+        let system_message = self.error_correction_system_message(exit_code, stderr);
         let def = AgentDefinition::command_diagnose(system_message.unwrap_or_default());
         let mut request = aish_llm::SpawnRequest::new(&def, &prompt);
         request.context_messages = context_messages;
@@ -1426,13 +1422,17 @@ When a registry search IS warranted:\n\
             .collect()
     }
 
-    /// Return the system message for error correction mode.
-    fn error_correction_system_message(
-        &mut self,
-        _command: &str,
-        exit_code: i32,
-        _stderr: &str,
-    ) -> Option<String> {
+    /// Build the `cmd_error` system message. `output` is the failed
+    /// command's captured output (already redacted by the caller and
+    /// truncated here) — script failures never reach the shell context
+    /// (`execute_script` only updates `state.last_output`), so the prompt
+    /// must carry the evidence itself.
+    fn error_correction_system_message(&mut self, exit_code: i32, output: &str) -> Option<String> {
+        let output_trunc = if output.len() > 4096 {
+            &output[..floor_char_boundary(output, 4096)]
+        } else {
+            output
+        };
         let role_prompt = self.prompt_manager.get("role").to_string();
         let mut vars = HashMap::new();
         vars.insert("role_prompt".to_string(), role_prompt);
@@ -1442,6 +1442,7 @@ When a registry search IS warranted:\n\
         vars.insert("basic_env_info".to_string(), basic_env_info());
         vars.insert("output_language".to_string(), output_language());
         vars.insert("exit_code".to_string(), exit_code.to_string());
+        vars.insert("command_output".to_string(), output_trunc.to_string());
         vars.insert("remote_env_info".to_string(), String::new());
         Some(self.prompt_manager.render("cmd_error", &vars))
     }

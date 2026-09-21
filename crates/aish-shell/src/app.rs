@@ -2742,12 +2742,22 @@ impl AishShell {
                             );
                             let token_ptr =
                                 self.ai_handler.cancellation_token() as *const CancellationToken;
+                            // Redact secrets before the failed command and its
+                            // output enter the diagnosis prompt.
+                            let (safe_cmd, _) =
+                                self.secret_vault.lock().unwrap().redact_output(cmd);
+                            let (safe_output, _) = self
+                                .secret_vault
+                                .lock()
+                                .unwrap()
+                                .redact_output(&self.state.last_output);
+                            let exit_code = self.state.last_exit_code;
                             let result = runtime.block_on(async {
                                 tokio::select! {
                                     r = self.ai_handler.handle_error_correction(
-                                        cmd,
-                                        self.state.last_exit_code,
-                                        &self.state.last_output,
+                                        &safe_cmd,
+                                        exit_code,
+                                        &safe_output,
                                     ) => r,
                                     _ = poll_cancelled(token_ptr) => {
                                         Err(aish_core::AishError::Cancelled)
