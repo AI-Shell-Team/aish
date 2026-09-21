@@ -345,11 +345,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![change("/etc/aish/config.yaml", FsChangeKind::Deleted)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -392,11 +388,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![change("/etc/aish/123", FsChangeKind::Deleted)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -441,11 +433,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![change("/home/lixin/a.txt", FsChangeKind::Created)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -476,11 +464,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![change("/home/lixin/a.txt", FsChangeKind::Created)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -508,11 +492,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![change("/etc/aish/config.yaml", FsChangeKind::Deleted)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -562,11 +542,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![change("/tmp/note.txt", FsChangeKind::Modified)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: true,
         };
 
@@ -588,11 +564,7 @@ mod tests {
         };
         let sandbox = SandboxResult {
             exit_code: 2,
-            stdout: String::new(),
-            stderr: "missing file".to_string(),
             changes: Vec::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -623,11 +595,7 @@ mod tests {
         }]);
         let sandbox = SandboxResult {
             exit_code: 7,
-            stdout: String::new(),
-            stderr: "boom".to_string(),
             changes: vec![change("/etc/aish/config.yaml", FsChangeKind::Deleted)],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 

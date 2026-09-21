@@ -168,15 +168,11 @@ mod tests {
 
             let result = SandboxResult {
                 exit_code: 0,
-                stdout: "ok".to_string(),
-                stderr: String::new(),
                 changes: vec![FsChange {
                     path: "/tmp/repo/file.txt".to_string(),
                     kind: FsChangeKind::Created,
                     detail: None,
                 }],
-                stdout_truncated: false,
-                stderr_truncated: false,
                 changes_truncated: false,
             };
             let raw =
@@ -186,7 +182,7 @@ mod tests {
 
         let client = SandboxClient::new(&socket_path);
         let result = client.simulate(&request).unwrap();
-        assert_eq!(result.stdout, "ok");
+        assert_eq!(result.exit_code, 0);
         assert_eq!(result.changes[0].kind, FsChangeKind::Created);
 
         handle.join().unwrap();
@@ -266,7 +262,6 @@ mod tests {
         let client = SandboxClient::new(&socket_path);
         let result = client.simulate(&sample_request()).unwrap();
         assert_eq!(result.exit_code, 0);
-        assert!(result.stderr.contains("sandbox daemon skeleton: echo hi"));
 
         let served = handle.join().unwrap().unwrap();
         assert_eq!(served.request.command, "echo hi");

@@ -17,8 +17,10 @@ use crate::sandbox::runtime::overlay::{
     read_host_mount_points_under, setup_overlay_plan, OverlayPlan, OverlayPlanBuilder,
     OverlayStrategy,
 };
-use crate::sandbox::types::{PayloadIdentity, SandboxDeadline, SandboxResult, SandboxRunContext};
-use crate::sudo::strip_sudo_prefix;
+use crate::sandbox::types::{
+    PayloadIdentity, RequestIdentity, SandboxDeadline, SandboxResult, SandboxRunContext,
+};
+use crate::sudo::{strip_sudo_prefix, StrippedSudoCommand, SudoPayloadKind};
 
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const BASH_PATH: &str = "/usr/bin/bash";
@@ -62,7 +64,6 @@ struct TruncatedOutput {
 struct ProcessOutput {
     exit_status: ExitStatus,
     stdout: TruncatedOutput,
-    stderr: TruncatedOutput,
 }
 
 #[derive(Debug)]
@@ -184,11 +185,7 @@ pub(crate) fn execute_worker_context_with_runtime(
 
     Ok(SandboxResult {
         exit_code: output.exit_status.code().unwrap_or(-1),
-        stdout: output.stdout.text,
-        stderr: output.stderr.text,
         changes: collected.changes,
-        stdout_truncated: output.stdout.truncated,
-        stderr_truncated: output.stderr.truncated,
         changes_truncated: collected.truncated,
     })
 }
@@ -394,8 +391,8 @@ fn decode_worker_response(raw: &str) -> Result<SandboxResult, SandboxError> {
 fn resolve_payload_execution(
     context: &SandboxRunContext,
 ) -> Result<ResolvedPayloadExecution, SandboxError> {
-    let (stripped, sudo_detected, ok) = strip_sudo_prefix(&context.request.command);
-    if sudo_detected && !ok {
+    let stripped = strip_sudo_prefix(&context.request.command);
+    if stripped.sudo_detected && !stripped.ok {
         return Err(SandboxError::with_details(
             SandboxReason::SandboxExecuteFailed,
             "sudo_without_command",
@@ -411,18 +408,35 @@ fn resolve_payload_execution(
                     "missing_request_identity",
                 )
             })?;
-            PayloadIdentity::from_request_identity(request_identity, sudo_detected)
+            payload_identity_from_sudo(request_identity, &stripped)?
         }
     };
 
     Ok(ResolvedPayloadExecution {
-        command: if sudo_detected {
-            stripped
+        command: if stripped.sudo_detected {
+            stripped.command
         } else {
             context.request.command.clone()
         },
         payload_identity,
     })
+}
+
+fn payload_identity_from_sudo(
+    request_identity: RequestIdentity,
+    stripped: &StrippedSudoCommand,
+) -> Result<PayloadIdentity, SandboxError> {
+    match stripped
+        .payload_kind()
+        .map_err(|detail| SandboxError::with_details(SandboxReason::SandboxExecuteFailed, detail))?
+    {
+        SudoPayloadKind::NotSudo => Ok(PayloadIdentity::User {
+            uid: request_identity.uid,
+            gid: request_identity.gid,
+        }),
+        SudoPayloadKind::Root => Ok(PayloadIdentity::Root),
+        SudoPayloadKind::User { uid, gid } => Ok(PayloadIdentity::User { uid, gid }),
+    }
 }
 
 fn build_payload_command(
@@ -605,10 +619,12 @@ fn wait_for_child_output(
         thread::sleep(PROCESS_POLL_INTERVAL);
     };
 
+    let stdout = join_output_reader(stdout_reader)?;
+    let _ = join_output_reader(stderr_reader)?;
+
     Ok(ProcessOutput {
         exit_status,
-        stdout: join_output_reader(stdout_reader)?,
-        stderr: join_output_reader(stderr_reader)?,
+        stdout,
     })
 }
 
@@ -892,26 +908,75 @@ mod tests {
     }
 
     #[test]
-    fn execute_worker_context_uses_root_identity_for_sudo_and_truncates_output() {
+    fn execute_worker_context_uses_root_identity_for_sudo() {
         let seen_commands = Arc::new(Mutex::new(Vec::new()));
         let runtime = FakeRuntime {
             seen_commands: seen_commands.clone(),
             script: "printf 'abcdef'; printf 'xyz' >&2",
         };
-        let mut context = sample_context("sudo echo hi");
-        context.limits.stdout_bytes = 4;
-        context.limits.stderr_bytes = 2;
+        let context = sample_context("sudo echo hi");
 
         let result = execute_worker_context_with_runtime(&context, &runtime).unwrap();
 
-        assert_eq!(result.stdout, "abcd");
-        assert_eq!(result.stderr, "xy");
-        assert!(result.stdout_truncated);
-        assert!(result.stderr_truncated);
+        assert_eq!(result.exit_code, 0);
         let command = seen_commands.lock().unwrap().pop().unwrap();
         assert!(!command.args.iter().any(|arg| arg == SETPRIV_PATH));
         assert_root_payload_capability_whitelist(&command.args);
         assert_eq!(command.args.last().map(String::as_str), Some("echo hi"));
+    }
+
+    #[test]
+    fn execute_worker_context_uses_setpriv_for_sudo_user() {
+        let seen_commands = Arc::new(Mutex::new(Vec::new()));
+        let runtime = FakeRuntime {
+            seen_commands: seen_commands.clone(),
+            script: "printf ok",
+        };
+        let context = sample_context("sudo -u 65534 echo hi");
+
+        let result = execute_worker_context_with_runtime(&context, &runtime).unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let command = seen_commands.lock().unwrap().pop().unwrap();
+        assert!(command.args.iter().any(|arg| arg == SETPRIV_PATH));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|window| window[0] == "--reuid" && window[1] == "65534"));
+        assert!(!command.args.iter().any(|arg| arg == "--cap-drop"));
+        assert_eq!(command.args.last().map(String::as_str), Some("echo hi"));
+    }
+
+    #[test]
+    fn execute_worker_context_keeps_root_for_sudo_u_root() {
+        let seen_commands = Arc::new(Mutex::new(Vec::new()));
+        let runtime = FakeRuntime {
+            seen_commands: seen_commands.clone(),
+            script: "printf ok",
+        };
+        let context = sample_context("sudo -u root echo hi");
+
+        execute_worker_context_with_runtime(&context, &runtime).unwrap();
+
+        let command = seen_commands.lock().unwrap().pop().unwrap();
+        assert!(!command.args.iter().any(|arg| arg == SETPRIV_PATH));
+        assert_root_payload_capability_whitelist(&command.args);
+    }
+
+    #[test]
+    fn execute_worker_context_rejects_unknown_sudo_user() {
+        let runtime = FakeRuntime {
+            seen_commands: Arc::new(Mutex::new(Vec::new())),
+            script: "printf ok",
+        };
+        let error = execute_worker_context_with_runtime(
+            &sample_context("sudo -u aish-no-such-user-xyz echo hi"),
+            &runtime,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.reason(), SandboxReason::SandboxExecuteFailed);
+        assert_eq!(error.details(), Some("sudo_unknown_user"));
     }
 
     #[test]
@@ -952,7 +1017,7 @@ mod tests {
         let script_path = temp.path().join("fake-worker.sh");
         fs::write(
             &script_path,
-            "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"result\":{\"exit_code\":0,\"stdout\":\"worker\",\"stderr\":\"\",\"changes\":[]}}\n'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"result\":{\"exit_code\":0,\"changes\":[]}}\n'\n",
         )
         .unwrap();
         let mut perms = fs::metadata(&script_path).unwrap().permissions();
@@ -982,6 +1047,6 @@ mod tests {
         let result = result.expect("worker process should succeed");
 
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.stdout, "worker");
+        assert!(result.changes.is_empty());
     }
 }
