@@ -731,6 +731,7 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "Unable to determine correct command"
     retry_hint: "Type ';' for another quick fix, or '/diagnose' for diagnosis"
+    same_as_failed: "Suggested fix is identical to the failed command; refusing to repeat it"
 
   failure_diagnose:
     no_failure: "No failed command to diagnose. Run a command that fails, then type /diagnose."

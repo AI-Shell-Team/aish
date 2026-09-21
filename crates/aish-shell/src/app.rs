@@ -2375,18 +2375,28 @@ impl AishShell {
     /// session's cancellation flag. Returns the previous `SigAction`
     /// so it can be restored via `restore_ai_sigint_handler`.
     fn install_ai_sigint_handler(&self) -> Option<nix::sys::signal::SigAction> {
+        self.install_ai_sigint_handler_opts(true)
+    }
+
+    /// Install the AI SIGINT handler. `bump_generation=false` is for
+    /// spawn-only AI paths (`;` quick fix, `/diagnose`): the sub-agent tool
+    /// loop never emits a main-session OpStart, so bumping here would leave
+    /// `op_gen` unsynced and the event callback would reject every
+    /// sub-agent progress event (spinner and tool lines) for the whole turn.
+    fn install_ai_sigint_handler_opts(
+        &self,
+        bump_generation: bool,
+    ) -> Option<nix::sys::signal::SigAction> {
         use nix::sys::signal::{self, SigAction, SigHandler, SigSet, Signal};
 
         // Clear any leftover cancellation state from a previous operation.
         self.ai_handler.cancellation_token().reset();
         // Bump the operation generation so the event callback can reject
         // stale events from a prior (cancelled) operation.
-        self.ai_op_generation
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-        let token_ptr = self.ai_handler.cancellation_token() as *const CancellationToken;
-        CANCEL_TOKEN_PTR.store(token_ptr as *mut (), Ordering::SeqCst);
-
+        if bump_generation {
+            self.ai_op_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let action = SigAction::new(
             SigHandler::Handler(ai_sigint_handler),
             signal::SaFlags::empty(),
@@ -2723,18 +2733,31 @@ impl AishShell {
                     if question.is_empty() && self.state.can_correct_error {
                         crate::recorder::shared_record_input(&self.shared_recorder, ";\n");
                         if let Some(ref cmd) = self.state.last_command.clone() {
-                            let old_sigint = self.install_ai_sigint_handler();
+                            // Spawn-only turn: no main-session OpStart will
+                            // re-sync op_gen, so keep the generation unchanged
+                            // or every sub-agent progress event is rejected.
+                            let old_sigint = self.install_ai_sigint_handler_opts(false);
                             let mut esc_watcher = CrosstermEscWatcher::start(
                                 self.ai_handler.cancellation_token_arc(),
                             );
                             let token_ptr =
                                 self.ai_handler.cancellation_token() as *const CancellationToken;
+                            // Redact secrets before the failed command and its
+                            // output enter the diagnosis prompt.
+                            let (safe_cmd, _) =
+                                self.secret_vault.lock().unwrap().redact_output(cmd);
+                            let (safe_output, _) = self
+                                .secret_vault
+                                .lock()
+                                .unwrap()
+                                .redact_output(&self.state.last_output);
+                            let exit_code = self.state.last_exit_code;
                             let result = runtime.block_on(async {
                                 tokio::select! {
                                     r = self.ai_handler.handle_error_correction(
-                                        cmd,
-                                        self.state.last_exit_code,
-                                        &self.state.last_output,
+                                        &safe_cmd,
+                                        exit_code,
+                                        &safe_output,
                                     ) => r,
                                     _ = poll_cancelled(token_ptr) => {
                                         Err(aish_core::AishError::Cancelled)
@@ -2747,6 +2770,28 @@ impl AishShell {
                             match result {
                                 Ok(correction) => {
                                     match &correction.command {
+                                        Some(corrected) if corrected.trim() == safe_cmd.trim() => {
+                                            // Issue #545: the model echoed the
+                                            // original failed command back as the
+                                            // "fix". Re-running a command that
+                                            // just failed unchanged is never a fix.
+                                            // Compare against `safe_cmd` (the
+                                            // redacted form the AI actually saw)
+                                            // — otherwise a command containing a
+                                            // secret placeholder never matches and
+                                            // the guard silently fails for exactly
+                                            // the commands most likely to need it.
+                                            let warn_line = theme::warning(&format!(
+                                                "\u{26a0} {}",
+                                                t("shell.error_correction.same_as_failed")
+                                            ));
+                                            println!("{}", warn_line);
+                                            crate::recorder::shared_record_output(
+                                                &self.shared_recorder,
+                                                &format!("{}\r\n", warn_line),
+                                            );
+                                            self.state.can_correct_error = false;
+                                        }
                                         Some(corrected) => {
                                             // Display corrected command and description
                                             let corrected_line = format!(
@@ -6703,7 +6748,9 @@ impl AishShell {
         let (safe_command, _) = self.secret_vault.lock().unwrap().redact_output(&command);
         let (safe_output, _) = self.secret_vault.lock().unwrap().redact_output(&output);
 
-        let old_sigint = self.install_ai_sigint_handler();
+        // Spawn-only turn (command-diagnose sub-agent): no main-session
+        // OpStart re-syncs op_gen, so keep the generation unchanged.
+        let old_sigint = self.install_ai_sigint_handler_opts(false);
         let mut esc_watcher = CrosstermEscWatcher::start(self.ai_handler.cancellation_token_arc());
         let token_ptr = self.ai_handler.cancellation_token() as *const aish_llm::CancellationToken;
 
@@ -10800,7 +10847,19 @@ impl AishShell {
                 let ai_response = match text {
                     Some(ref t) if is_error_correction => {
                         // Render description
-                        let ec_result = crate::ai_handler::parse_error_correction_response(t);
+                        let mut ec_result = crate::ai_handler::parse_error_correction_response(t);
+                        // Issue #545: never offer the original failed command
+                        // back as the "fix" — re-running it unchanged is not a
+                        // correction. Drop it so the PTY layer has nothing to
+                        // confirm or execute.
+                        {
+                            let failed_cmd = extract_failed_command(&query.recent_output);
+                            if let Some(c) = &ec_result.command {
+                                if c.trim() == failed_cmd.trim() {
+                                    ec_result.command = None;
+                                }
+                            }
+                        }
                         if let Some(ref desc) = ec_result.description {
                             if !desc.trim().is_empty() {
                                 let _ = std::io::stdout().flush();
