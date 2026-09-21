@@ -2770,11 +2770,17 @@ impl AishShell {
                             match result {
                                 Ok(correction) => {
                                     match &correction.command {
-                                        Some(corrected) if corrected.trim() == cmd.trim() => {
+                                        Some(corrected) if corrected.trim() == safe_cmd.trim() => {
                                             // Issue #545: the model echoed the
                                             // original failed command back as the
                                             // "fix". Re-running a command that
                                             // just failed unchanged is never a fix.
+                                            // Compare against `safe_cmd` (the
+                                            // redacted form the AI actually saw)
+                                            // — otherwise a command containing a
+                                            // secret placeholder never matches and
+                                            // the guard silently fails for exactly
+                                            // the commands most likely to need it.
                                             let warn_line = theme::warning(&format!(
                                                 "\u{26a0} {}",
                                                 t("shell.error_correction.same_as_failed")
