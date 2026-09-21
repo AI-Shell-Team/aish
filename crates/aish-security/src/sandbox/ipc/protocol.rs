@@ -271,15 +271,11 @@ mod tests {
     fn decode_response_success_parses_typed_result() {
         let result = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![FsChange {
                 path: "/etc/aish/123".to_string(),
                 kind: FsChangeKind::Deleted,
                 detail: None,
             }],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 

@@ -340,15 +340,11 @@ mod tests {
     fn sandbox_result_with_change(path: &str, kind: FsChangeKind) -> SandboxResult {
         SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
             changes: vec![FsChange {
                 path: path.to_string(),
                 kind,
                 detail: None,
             }],
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         }
     }
@@ -586,11 +582,7 @@ mod tests {
     fn sandbox_non_zero_exit_with_no_changes_uses_assessed_result() {
         let runner = FakeSandboxRunner::success(crate::sandbox::types::SandboxResult {
             exit_code: 2,
-            stdout: String::new(),
-            stderr: "ls: cannot access '/tmp/missing': No such file or directory".to_string(),
             changes: Vec::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         });
         let manager = SecurityManager::new(SecurityPolicy {

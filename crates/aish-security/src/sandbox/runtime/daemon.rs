@@ -285,14 +285,10 @@ fn set_stream_timeouts(stream: &UnixStream, timeout: Duration) -> Result<(), San
     Ok(())
 }
 
-fn fake_result_for(request: &SandboxRunRequest) -> SandboxResult {
+fn fake_result_for(_request: &SandboxRunRequest) -> SandboxResult {
     SandboxResult {
         exit_code: 0,
-        stdout: String::new(),
-        stderr: format!("sandbox daemon skeleton: {}", request.command),
         changes: Vec::new(),
-        stdout_truncated: false,
-        stderr_truncated: false,
         changes_truncated: false,
     }
 }
@@ -399,10 +395,7 @@ fn format_request_succeeded_log(
         status_bits.push("changes_truncated=true".to_string());
     }
 
-    let mut extra_lines = Vec::new();
-    if !result.stderr.trim().is_empty() {
-        extra_lines.extend(format_multiline_block("STDERR", &result.stderr));
-    }
+    let extra_lines = Vec::new();
 
     format_daemon_log_message(
         format_daemon_log_header(
@@ -604,7 +597,8 @@ mod tests {
         assert_eq!(served.request.command, "echo hi");
         assert!(served.identity.pid > 0);
         assert!(buf.contains("\"ok\":true"));
-        assert!(buf.contains("sandbox daemon skeleton: echo hi"));
+        assert!(!buf.contains("stdout"));
+        assert!(!buf.contains("stderr"));
     }
 
     #[test]
@@ -693,7 +687,7 @@ mod tests {
         let worker_path = temp.path().join("fake-worker.sh");
         std::fs::write(
             &worker_path,
-            "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"result\":{\"exit_code\":0,\"stdout\":\"from-worker\",\"stderr\":\"\",\"changes\":[]}}\n'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '{\"ok\":true,\"result\":{\"exit_code\":0,\"changes\":[]}}\n'\n",
         )
         .unwrap();
         let mut perms = std::fs::metadata(&worker_path).unwrap().permissions();
@@ -722,7 +716,51 @@ mod tests {
         let served = handle.join().unwrap().unwrap();
         assert_eq!(served.request.id, "req-3");
         assert!(buf.contains("\"ok\":true"));
-        assert!(buf.contains("from-worker"));
+        assert!(!buf.contains("stdout"));
+        assert!(!buf.contains("stderr"));
+    }
+
+    #[test]
+    fn serve_connection_drops_worker_stdio_fields() {
+        let temp = tempdir().unwrap();
+        let worker_path = temp.path().join("leaky-worker.sh");
+        std::fs::write(
+            &worker_path,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"ok\":true,\"result\":{\"exit_code\":0,\"stdout\":\"root:!:secret\",\"stderr\":\"leak\",\"changes\":[{\"path\":\"/etc/aish-acceptance\",\"kind\":\"created\"}],\"stdout_truncated\":true,\"stderr_truncated\":true}}'\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&worker_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&worker_path, perms).unwrap();
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let options = SandboxDaemonOptions {
+            socket_path: temp.path().join("sandbox.sock"),
+            limits: SandboxLimits::default(),
+            worker_program: Some(worker_path),
+        };
+
+        let handle = thread::spawn(move || serve_connection(server, &options));
+
+        client
+            .write_all(
+                b"{\"id\":\"req-stdio\",\"command\":\"echo hi\",\"cwd\":\"/tmp\",\"repo_root\":\"/\",\"client_pid\":123,\"timeout_s\":12}\n",
+            )
+            .unwrap();
+        let _ = client.shutdown(std::net::Shutdown::Write);
+
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).unwrap();
+
+        let served = handle.join().unwrap().unwrap();
+        assert_eq!(served.request.id, "req-stdio");
+        assert!(buf.contains("\"ok\":true"));
+        assert!(buf.contains("\"exit_code\":0"));
+        assert!(buf.contains("/etc/aish-acceptance"));
+        assert!(!buf.contains("root:!:secret"));
+        assert!(!buf.contains("leak"));
+        assert!(!buf.contains("stdout"));
+        assert!(!buf.contains("stderr"));
     }
 
     #[test]
@@ -791,11 +829,7 @@ mod tests {
         let identity = RequestIdentity::from_peer_credentials(123, 1000, 1000);
         let result = SandboxResult {
             exit_code: 0,
-            stdout: String::new(),
-            stderr: "warning: sample stderr".to_string(),
             changes: Vec::new(),
-            stdout_truncated: false,
-            stderr_truncated: false,
             changes_truncated: false,
         };
 
@@ -808,7 +842,7 @@ mod tests {
         assert!(log.contains("  CWD: /tmp/repo"));
         assert!(log.contains("  RepoRoot: /"));
         assert!(log.contains("  Status: request_success | exit_code=0 | file_changes=0"));
-        assert!(log.contains("  STDERR:"));
-        assert!(log.contains("    > warning: sample stderr"));
+        assert!(!log.contains("STDERR"));
+        assert!(!log.contains("warning: sample stderr"));
     }
 }
