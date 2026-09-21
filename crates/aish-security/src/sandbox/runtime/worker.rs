@@ -461,6 +461,12 @@ fn build_payload_command(
             ]);
         }
         PayloadIdentity::Root => {
+            args.push("--cap-drop".to_string());
+            args.push("ALL".to_string());
+            for cap in ["CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_CHOWN", "CAP_FSETID"] {
+                args.push("--cap-add".to_string());
+                args.push(cap.to_string());
+            }
             args.extend([
                 BASH_PATH.to_string(),
                 "-lc".to_string(),
@@ -831,6 +837,47 @@ mod tests {
         assert_eq!(command.args.last().map(String::as_str), Some("echo hi"));
     }
 
+    fn payload_has_flag(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2)
+            .any(|window| window[0] == flag && window[1] == value)
+    }
+
+    fn assert_root_payload_capability_whitelist(args: &[String]) {
+        let drop_all = args
+            .windows(2)
+            .position(|window| window[0] == "--cap-drop" && window[1] == "ALL");
+        let first_add = args.windows(2).position(|window| window[0] == "--cap-add");
+        assert!(
+            matches!((drop_all, first_add), (Some(drop_idx), Some(add_idx)) if drop_idx < add_idx),
+            "--cap-drop ALL must precede --cap-add"
+        );
+        for cap in ["CAP_DAC_OVERRIDE", "CAP_FOWNER", "CAP_CHOWN", "CAP_FSETID"] {
+            assert!(
+                payload_has_flag(args, "--cap-add", cap),
+                "root payload must keep {cap}"
+            );
+        }
+        assert!(!payload_has_flag(args, "--cap-add", "CAP_SYS_ADMIN"));
+        assert!(!payload_has_flag(args, "--cap-add", "CAP_DAC_READ_SEARCH"));
+        assert!(!args.iter().any(|arg| arg == "--inh-caps=-all"));
+    }
+
+    #[test]
+    fn build_payload_command_whitelists_write_caps_for_root_payload() {
+        let temp = tempdir().unwrap();
+        let plan = crate::sandbox::runtime::overlay::OverlayPlanBuilder::new(
+            "/repo",
+            "/repo",
+            temp.path(),
+        )
+        .build()
+        .unwrap();
+
+        let command = build_payload_command(&plan, "echo hi", PayloadIdentity::Root);
+
+        assert_root_payload_capability_whitelist(&command.args);
+    }
+
     #[test]
     fn run_worker_from_reader_writer_returns_bad_request_for_invalid_json() {
         let mut input = "{bad json".as_bytes();
@@ -862,7 +909,8 @@ mod tests {
         assert!(result.stdout_truncated);
         assert!(result.stderr_truncated);
         let command = seen_commands.lock().unwrap().pop().unwrap();
-        assert!(!command.args.iter().any(|arg| arg == "setpriv"));
+        assert!(!command.args.iter().any(|arg| arg == SETPRIV_PATH));
+        assert_root_payload_capability_whitelist(&command.args);
         assert_eq!(command.args.last().map(String::as_str), Some("echo hi"));
     }
 
