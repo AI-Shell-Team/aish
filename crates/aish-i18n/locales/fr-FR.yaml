@@ -299,6 +299,7 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "Impossible de determiner la commande correcte"
     retry_hint: "Tapez ';' pour une autre correction rapide, ou '/diagnose' pour un diagnostic"
+    same_as_failed: "La correction suggeree est identique a la commande echouee; repetition refusee"
   failure_diagnose:
     no_failure: "Aucune commande echouee a diagnostiquer. Executez d'abord une commande en echec, puis /diagnose."
     report_title: "── Rapport de diagnostic ──"

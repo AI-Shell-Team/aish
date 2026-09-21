@@ -1699,18 +1699,23 @@ impl LlmSession {
 
         // Approval memory: if this command or tool target was previously
         // approved for the session, skip the whole preflight (including the
-        // sandbox pre-run).
+        // sandbox pre-run). Sub-agents never consult it: a remembered "yes"
+        // from the main chat must not bypass the sub-agent's read-only bash
+        // enforcement (issue #545 — the correction agent re-ran a
+        // user-approved sudo command with no prompt).
         let memory_command = args.get("command").and_then(|value| value.as_str());
         let memory_target = tool.approval_memory_key(args);
-        if memory_command.is_some_and(|command| {
-            self.approval_memory
-                .as_ref()
-                .is_some_and(|memory| memory.lock().is_allowed(command))
-        }) || memory_target.as_deref().is_some_and(|target| {
-            self.approval_memory
-                .as_ref()
-                .is_some_and(|memory| memory.lock().is_target_allowed(tool_name, target))
-        }) {
+        let memory_allowed = !self.is_sub_agent
+            && (memory_command.is_some_and(|command| {
+                self.approval_memory
+                    .as_ref()
+                    .is_some_and(|memory| memory.lock().is_allowed(command))
+            }) || memory_target.as_deref().is_some_and(|target| {
+                self.approval_memory
+                    .as_ref()
+                    .is_some_and(|memory| memory.lock().is_target_allowed(tool_name, target))
+            }));
+        if memory_allowed {
             self.emit_audit(AuditEvent::security_decision(
                 chrono::Utc::now(),
                 self.audit_session_uuid.clone(),

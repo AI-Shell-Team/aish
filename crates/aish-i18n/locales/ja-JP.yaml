@@ -299,6 +299,7 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "正しいコマンドを特定できませんでした"
     retry_hint: "';' で再度クイック修正、または '/diagnose' で診断"
+    same_as_failed: "修正候補が失敗コマンドと同一です。再実行を拒否します"
   failure_diagnose:
     no_failure: "診断できる失敗コマンドがありません。失敗するコマンドを実行してから /diagnose を入力してください。"
     report_title: "── 診断レポート ──"

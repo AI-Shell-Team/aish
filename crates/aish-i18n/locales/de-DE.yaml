@@ -299,6 +299,7 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "Korrekter Befehl konnte nicht ermittelt werden"
     retry_hint: "Geben Sie ';' für eine weitere Schnellreparatur oder '/diagnose' für Diagnose ein"
+    same_as_failed: "Der Korrekturvorschlag ist identisch mit dem fehlgeschlagenen Befehl; Wiederholung wird verweigert"
   failure_diagnose:
     no_failure: "Kein fehlgeschlagener Befehl zum Diagnostizieren. Führen Sie zuerst einen fehlgeschlagenen Befehl aus, dann /diagnose."
     report_title: "── Diagnosebericht ──"

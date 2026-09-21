@@ -731,6 +731,7 @@ shell:
     confirm_execute_suffix: "? (Y/n): "
     no_valid_command: "无法确定正确的命令"
     retry_hint: "输入 ';' 再次快速修复，或输入 '/diagnose' 进行诊断"
+    same_as_failed: "修复建议与失败命令相同；拒绝重复执行"
 
   failure_diagnose:
     no_failure: "当前没有可诊断的失败命令。请先执行一条命令，失败后再输入 /diagnose。"
