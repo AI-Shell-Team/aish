@@ -71,6 +71,15 @@ impl Tool for ChannelBashTool {
         // delay and slow remote command execution over SSH.
         let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(1800);
 
+        // Validate the timeout before dispatching: the schema has no upper
+        // bound and as_u64() accepts any non-negative JSON integer, so an
+        // absurd value would make Instant + Duration panic. checked_add
+        // rejects it up front (issue #551 review).
+        let deadline = Instant::now().checked_add(Duration::from_secs(timeout_secs));
+        let Some(deadline) = deadline else {
+            return ToolResult::error(aish_i18n::t("tools.bash.invalid_timeout"));
+        };
+
         let (output_tx, output_rx) = std::sync::mpsc::channel::<BashExecResult>();
 
         if self
@@ -86,7 +95,6 @@ impl Tool for ChannelBashTool {
 
         // Wait in slices, checking the cancel token between windows. A plain
         // recv_timeout blocks the whole timeout without observing Ctrl+C.
-        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
         let result = loop {
             if self
                 .cancellation_token
@@ -233,5 +241,20 @@ mod tests {
             result.meta.and_then(|m| m.get("reason").cloned()),
             Some(serde_json::json!("user_cancelled"))
         );
+    }
+
+    /// Issue #551 review: the schema has no upper bound on `timeout`, and
+    /// `Instant + Duration` panics when the result is not representable.
+    /// An absurd value must fail validation instead of panicking.
+    #[test]
+    fn absurd_timeout_errors_instead_of_panicking() {
+        let (tx, _rx) = std::sync::mpsc::channel::<AiEvent>();
+        let tool = ChannelBashTool::new(tx);
+        let result = tool.execute(serde_json::json!({
+            "command": "echo hi",
+            "timeout": 18446744073709551615u64
+        }));
+        assert!(!result.ok);
+        assert!(result.output.contains("timeout"), "out: {}", result.output);
     }
 }

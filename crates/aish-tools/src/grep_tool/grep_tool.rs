@@ -141,7 +141,16 @@ fn run_grep(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> Too
         cancelled: false,
         timed_out: false,
     };
-    let files = walk_files(&root);
+    // The walk itself is cancellable now: a stopped walk lands in the same
+    // partial-results path as a stopped scan loop.
+    let files = match walk_files(&root, should_stop.as_ref(), deadline) {
+        Some(f) => f,
+        None => {
+            stop.cancelled = should_stop();
+            stop.timed_out = !stop.cancelled && Instant::now() >= deadline;
+            Vec::new()
+        }
+    };
 
     'outer: for (visited, file_path) in files.into_iter().enumerate() {
         // Periodic stop check: cancel / wall-clock budget (issue #547).
@@ -251,26 +260,56 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 }
 
 /// Walk directory tree, collecting file paths (excluding default dirs).
-fn walk_files(root: &std::path::Path) -> Vec<PathBuf> {
+/// The walk itself is cancellable: `should_stop` is checked per directory
+/// and the deadline bounds slow/unresponsive filesystems (issue #551
+/// review — the previously collected list was built by an uncancellable
+/// traversal). Returns `None` when the walk stopped early.
+fn walk_files(
+    root: &std::path::Path,
+    should_stop: &dyn Fn() -> bool,
+    deadline: Instant,
+) -> Option<Vec<PathBuf>> {
     let mut result = Vec::new();
-    walk_dir_recursive(root, &mut result);
+    let complete = walk_dir_recursive(root, &mut result, should_stop, deadline, &mut 0);
+    if !complete {
+        return None;
+    }
     result.sort();
-    result
+    Some(result)
 }
 
-fn walk_dir_recursive(dir: &std::path::Path, result: &mut Vec<PathBuf>) {
+/// Returns `true` when the walk finished, `false` when stopped early.
+fn walk_dir_recursive(
+    dir: &std::path::Path,
+    result: &mut Vec<PathBuf>,
+    should_stop: &dyn Fn() -> bool,
+    deadline: Instant,
+    visited_dirs: &mut usize,
+) -> bool {
+    // Check per directory: a huge fan-out directory still yields entries
+    // quickly via readdir, so directory-granularity bounds the walk well
+    // enough while keeping the overhead negligible.
+    *visited_dirs += 1;
+    if (*visited_dirs).is_multiple_of(STOP_CHECK_INTERVAL)
+        && (should_stop() || Instant::now() >= deadline)
+    {
+        return false;
+    }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if !is_excluded_dir_name(&path) {
-                    walk_dir_recursive(&path, result);
+                if !is_excluded_dir_name(&path)
+                    && !walk_dir_recursive(&path, result, should_stop, deadline, visited_dirs)
+                {
+                    return false;
                 }
             } else if path.is_file() {
                 result.push(path);
             }
         }
     }
+    true
 }
 
 fn is_excluded_dir_name(path: &std::path::Path) -> bool {
@@ -355,6 +394,44 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "scan ignored cancellation: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            result.output.contains("cancelled"),
+            "out: {}",
+            result.output
+        );
+    }
+
+    /// Issue #551 review: the walk phase itself must be cancellable, not
+    /// just the per-file scan loop. A tree with many directories (where
+    /// readdir dominates) plus an already-cancelled token must return
+    /// immediately instead of walking to completion.
+    #[test]
+    fn walk_phase_honours_already_cancelled_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Deep tree so a full uncancellable walk would take measurable time;
+        // many directories so the per-directory check fires early.
+        let mut dir = tmp.path().to_path_buf();
+        for depth in 0..40 {
+            dir = dir.join(format!("lvl{depth}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for fan in 0..50 {
+                let sub = dir.join(format!("d{fan}"));
+                std::fs::create_dir_all(&sub).unwrap();
+                std::fs::write(sub.join("f.txt"), "x\n").unwrap();
+            }
+        }
+        let token = std::sync::Arc::new(CancellationToken::new());
+        token.cancel(); // cancelled before the walk even starts
+        let started = Instant::now();
+        let result = run_grep(
+            &serde_json::json!({"pattern": "zzz_unlikely", "root": tmp.path().to_str()}),
+            Some(&token),
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "walk phase ignored cancellation: {:?}",
             started.elapsed()
         );
         assert!(

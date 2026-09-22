@@ -342,9 +342,27 @@ mod tests {
     }
 
     #[test]
-    fn cancel_kills_child_quickly() {
-        // Child sleeps 60s; cancel fires after 300ms; the tool must return
-        // well under 5s with the cancelled note (issue #547 regression).
+    fn cancel_kills_child_and_descendants_quickly() {
+        // Issue #547 regression, strengthened per #551 review: the snippet
+        // forks a descendant that STAYS in the child's process group (no
+        // setsid — a detached daemon would be outside killpg's reach by
+        // POSIX contract). The liveness assert below would fail if the
+        // implementation killed only the direct child instead of the
+        // whole group.
+        let marker = format!("aish_descendant_{}", std::process::id());
+        let code = format!(
+            "import os, time, sys\n\
+             pid = os.fork()\n\
+             if pid == 0:\n\
+             \x20   with open('/tmp/{marker}', 'w') as f:\n\
+             \x20       f.write(str(os.getpid()))\n\
+             \x20   time.sleep(60)\n\
+             \x20   os._exit(0)\n\
+             time.sleep(60)\n\
+             print('done')"
+        );
+        let _ = std::fs::remove_file(format!("/tmp/{marker}"));
+
         let token = std::sync::Arc::new(CancellationToken::new());
         let jh = {
             let token = std::sync::Arc::clone(&token);
@@ -354,15 +372,28 @@ mod tests {
             })
         };
         let started = Instant::now();
-        let r = run_python(
-            &json!({"code": "import time\ntime.sleep(60)\nprint('done')"}),
-            Some(&token),
-        );
+        let r = run_python(&json!({"code": code}), Some(&token));
         jh.join().unwrap();
         let elapsed = started.elapsed();
         assert!(elapsed < Duration::from_secs(5), "took {elapsed:.1?}");
         assert!(r.ok);
         assert!(r.output.contains("cancelled"), "out: {}", r.output);
+
+        // The group member forked by the child must be gone too.
+        std::thread::sleep(Duration::from_millis(200));
+        let leak = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "test -f /tmp/{marker} && kill -0 $(cat /tmp/{marker}) 2>/dev/null && echo ALIVE || echo DEAD"
+            ))
+            .output()
+            .expect("run sh");
+        let status = String::from_utf8_lossy(&leak.stdout).trim().to_string();
+        let _ = std::fs::remove_file(format!("/tmp/{marker}"));
+        assert_eq!(
+            status, "DEAD",
+            "group-member descendant survived cancellation — killpg must reap the whole group"
+        );
     }
 
     #[test]
