@@ -47,7 +47,16 @@ impl TimeoutPolicy {
                 deadline: Some(DEFAULT_PYTHON_TIMEOUT),
             });
         };
-        let Some(secs) = raw.as_i64() else {
+        // serde_json: integers above i64::MAX parse as PosInt(u64) and
+        // as_i64() returns None for them — so check negatives via as_i64()
+        // first, then read the value as u64 so huge timeouts are clamped
+        // rather than rejected (issue #551 review round 3).
+        if raw.as_i64().is_some_and(|v| v < 0) {
+            return Err(ToolResult::error(aish_i18n::t(
+                "tools.python.invalid_timeout",
+            )));
+        }
+        let Some(secs) = raw.as_u64() else {
             return Err(ToolResult::error(aish_i18n::t(
                 "tools.python.invalid_timeout",
             )));
@@ -55,12 +64,7 @@ impl TimeoutPolicy {
         if secs == 0 {
             return Ok(Self { deadline: None });
         }
-        if secs < 0 {
-            return Err(ToolResult::error(aish_i18n::t(
-                "tools.python.invalid_timeout",
-            )));
-        }
-        let clamped = (secs as u64).min(MAX_PYTHON_TIMEOUT.as_secs());
+        let clamped = secs.min(MAX_PYTHON_TIMEOUT.as_secs());
         Ok(Self {
             deadline: Some(Duration::from_secs(clamped)),
         })
@@ -505,6 +509,12 @@ mod tests {
         assert_eq!(p.deadline, Some(Duration::from_secs(600)));
 
         let p = TimeoutPolicy::resolve(&json!({"timeout": 999_999})).unwrap();
+        assert_eq!(p.deadline, Some(Duration::from_secs(3600)));
+
+        // Above i64::MAX the JSON number is a PosInt(u64): as_i64() misses
+        // it, so it must still clamp (issue #551 review round 3) instead
+        // of erroring.
+        let p = TimeoutPolicy::resolve(&json!({"timeout": 18_446_744_073_709_551_615u64})).unwrap();
         assert_eq!(p.deadline, Some(Duration::from_secs(3600)));
 
         assert!(TimeoutPolicy::resolve(&json!({"timeout": -1})).is_err());
