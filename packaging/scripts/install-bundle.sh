@@ -21,7 +21,7 @@ Options:
 
 Environment:
 	AISH_INSTALL_ROOT   Install into a staging root instead of /
-	AISH_SKIP_SYSTEMD   Skip systemd checks and service enablement
+	AISH_SKIP_SYSTEMD   Skip systemd reload. The socket is never enabled by this installer.
 EOF
 }
 
@@ -154,16 +154,19 @@ install_systemd_unit() {
 
 enable_services() {
 	if [[ "$SKIP_SYSTEMD" == "1" ]]; then
-		echo "Skipping systemd enablement"
+		echo "Skipping systemd reload"
 		return
 	fi
-	systemctl daemon-reload
-	systemctl enable aish-sandbox.socket >/dev/null 2>&1 || true
-	if systemctl is-active --quiet aish-sandbox.socket || systemctl is-active --quiet aish-sandbox.service; then
-		systemctl restart aish-sandbox.socket
-	else
-		systemctl start aish-sandbox.socket
+	if ! command -v systemctl >/dev/null 2>&1; then
+		echo "systemctl not found; left aish-sandbox.socket disabled." >&2
+		return
 	fi
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	if systemctl is-active --quiet aish-sandbox.socket || systemctl is-active --quiet aish-sandbox.service; then
+		systemctl restart aish-sandbox.socket >/dev/null 2>&1 || true
+	fi
+	echo "aish-sandbox.socket is installed but not enabled." >&2
+	echo "To use sandbox pre-run: systemctl enable --now aish-sandbox.socket" >&2
 }
 
 while [[ $# -gt 0 ]]; do

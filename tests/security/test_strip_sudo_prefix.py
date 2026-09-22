@@ -1,28 +1,34 @@
 from __future__ import annotations
 
+import grp
+import pwd
 from pathlib import Path
 
+import pytest
+
 import aish.security.security_manager as sm
-from aish.security.sandbox import strip_sudo_prefix
+from aish.security.sandbox import SandboxUnavailableError, strip_sudo_prefix
 from aish.security.sandbox_types import SandboxResult, SandboxSecurityResult
 from aish.security.security_manager import SimpleSecurityManager
 
 
 def test_strip_sudo_prefix_preserves_shell_operators() -> None:
-    stripped, sudo_detected, ok = strip_sudo_prefix(
-        "sudo apt update && sudo apt install -y nginx"
-    )
-    assert sudo_detected is True
-    assert ok is True
-    assert stripped == "apt update && sudo apt install -y nginx"
+    stripped = strip_sudo_prefix("sudo apt update && sudo apt install -y nginx")
+    assert stripped.sudo_detected is True
+    assert stripped.ok is True
+    assert stripped.user is None
+    assert stripped.command == "apt update && sudo apt install -y nginx"
+    assert stripped.payload_kind().kind == "root"
 
 
 def test_strip_sudo_prefix_strips_options_and_preserves_quotes() -> None:
     cmd = "sudo -E -u root bash -lc 'echo hi && echo ok'"
-    stripped, sudo_detected, ok = strip_sudo_prefix(cmd)
-    assert sudo_detected is True
-    assert ok is True
-    assert stripped == "bash -lc 'echo hi && echo ok'"
+    stripped = strip_sudo_prefix(cmd)
+    assert stripped.sudo_detected is True
+    assert stripped.ok is True
+    assert stripped.user == "root"
+    assert stripped.command == "bash -lc 'echo hi && echo ok'"
+    assert stripped.payload_kind().kind == "root"
 
 
 def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(
@@ -38,9 +44,7 @@ def test_sandbox_execute_failed_does_not_show_global_unavailable_panel(
             return SandboxSecurityResult(
                 command=command,
                 cwd=(cwd or tmp_path),
-                sandbox=SandboxResult(
-                    exit_code=100, stdout="", stderr="E: fail", changes=[]
-                ),
+                sandbox=SandboxResult(exit_code=100, changes=[]),
             )
 
     manager = SimpleSecurityManager(
@@ -83,3 +87,45 @@ def test_policy_disabled_sudo_bash_lc_rm_hits_fallback_rule() -> None:
 
     assert decision.allow is False
     assert decision.analysis.get("fallback_rule_matched") is True
+
+
+def test_sudo_user_and_group_follow_the_target() -> None:
+    stripped = strip_sudo_prefix("sudo -u nobody -g nogroup id")
+    assert stripped.command == "id"
+    assert stripped.user == "nobody"
+    assert stripped.group == "nogroup"
+    kind = stripped.payload_kind()
+    assert kind.kind == "user"
+    assert kind.uid == pwd.getpwnam("nobody").pw_uid
+    assert kind.gid == grp.getgrnam("nogroup").gr_gid
+
+
+def test_sudo_attached_and_equals_user_flags() -> None:
+    attached = strip_sudo_prefix("sudo -unobody id")
+    assert attached.user == "nobody"
+    assert attached.command == "id"
+    equals = strip_sudo_prefix("sudo --user=nobody id")
+    assert equals.user == "nobody"
+    assert equals.command == "id"
+
+
+def test_numeric_sudo_user_resolves_without_becoming_root() -> None:
+    stripped = strip_sudo_prefix("sudo -u 65534 id")
+    kind = stripped.payload_kind()
+    assert kind.kind == "user"
+    assert kind.uid == 65534
+
+
+def test_unknown_sudo_user_is_rejected() -> None:
+    stripped = strip_sudo_prefix("sudo -u aish-no-such-user-xyz id")
+    with pytest.raises(SandboxUnavailableError) as exc:
+        stripped.payload_kind()
+    assert exc.value.details == "sudo_unknown_user"
+
+
+def test_sudo_without_command_is_rejected() -> None:
+    stripped = strip_sudo_prefix("sudo -E -u root")
+    assert stripped.ok is False
+    with pytest.raises(SandboxUnavailableError) as exc:
+        stripped.payload_kind()
+    assert exc.value.details == "sudo_without_command"

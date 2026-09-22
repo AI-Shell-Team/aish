@@ -24,10 +24,9 @@ PACKAGE_STAGING=$(CURDIR)/debian/aish
 	dh $@
 
 override_dh_installsystemd:
-	# Avoid deb-systemd-invoke calling systemctl in offline/chroot build/install envs,
-	# which can emit: "Could not execute systemctl ... deb-systemd-invoke line 148".
-	# We start the socket ourselves in postinst when systemd is actually available.
-	dh_installsystemd --no-start
+	# Do not enable or start the socket. debhelper still emits enable code at
+	# #DEBHELPER# unless both flags are set. The admin enables it explicitly.
+	dh_installsystemd --no-enable --no-start
 
 override_dh_auto_build:
 	$(MAKE) build-binary

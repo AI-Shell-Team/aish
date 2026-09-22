@@ -108,19 +108,11 @@ class SandboxIpcClient:
                     changes.append(FsChange(path=path, kind=kind))
 
         exit_code = result_obj.get("exit_code")
-        stdout = result_obj.get("stdout")
-        stderr = result_obj.get("stderr")
-        stdout_truncated = bool(result_obj.get("stdout_truncated", False))
-        stderr_truncated = bool(result_obj.get("stderr_truncated", False))
         changes_truncated = bool(result_obj.get("changes_truncated", False))
 
         return SandboxResult(
             exit_code=int(exit_code) if exit_code is not None else 1,
-            stdout=str(stdout) if stdout is not None else "",
-            stderr=str(stderr) if stderr is not None else "",
             changes=changes,
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
             changes_truncated=changes_truncated,
         )
 

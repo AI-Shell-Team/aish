@@ -236,7 +236,7 @@ def test_fallback_rule_does_not_affect_enabled_sandbox_flow(tmp_path: Path):
             return SandboxSecurityResult(
                 command=command,
                 cwd=(cwd or tmp_path),
-                sandbox=SandboxResult(exit_code=0, stdout="", stderr="", changes=[]),
+                sandbox=SandboxResult(exit_code=0, changes=[]),
             )
 
     policy = SecurityPolicy(
@@ -306,7 +306,7 @@ def test_sandbox_execute_failed_skips_fallback_rule_and_requires_confirmation(
             return SandboxSecurityResult(
                 command=command,
                 cwd=(cwd or tmp_path),
-                sandbox=SandboxResult(exit_code=7, stdout="", stderr="boom", changes=[]),
+                sandbox=SandboxResult(exit_code=7, changes=[]),
             )
 
     policy = SecurityPolicy(

@@ -67,8 +67,6 @@ def main() -> int:
             "ok": True,
             "result": {
                 "exit_code": int(result.exit_code),
-                "stdout": result.stdout or "",
-                "stderr": result.stderr or "",
                 "changes": [
                     {"path": c.path, "kind": c.kind} for c in (result.changes or [])
                 ],

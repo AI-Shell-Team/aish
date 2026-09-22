@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -68,8 +69,6 @@ def test_simulate_for_user_uses_unshare_worker(monkeypatch):
                     "ok": True,
                     "result": {
                         "exit_code": 0,
-                        "stdout": "ok",
-                        "stderr": "",
                         "changes": [{"path": "tmp/x", "kind": "modified"}],
                     },
                 },
@@ -90,7 +89,7 @@ def test_simulate_for_user_uses_unshare_worker(monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert result.stdout == "ok"
+    assert not hasattr(result, "stdout")
     assert result.changes and result.changes[0].path == "tmp/x"
 
 
@@ -126,3 +125,64 @@ def test_simulate_for_user_maps_worker_error(monkeypatch):
 
     assert exc_info.value.reason == "overlay_mount_failed"
     assert "lowerdir=/tmp" in str(exc_info.value)
+
+
+def test_simulate_for_user_sudo_without_user_is_root(monkeypatch):
+    daemon = _make_daemon()
+    seen = {}
+
+    def fake_run(cmd, input, text, capture_output, timeout):
+        seen["payload"] = json.loads(input)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {"ok": True, "result": {"exit_code": 0, "changes": []}},
+                ensure_ascii=False,
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    daemon._simulate_for_user(
+        command="sudo id",
+        cwd=Path("/"),
+        repo_root=Path("/"),
+        uid=1000,
+        gid=1000,
+        timeout_s=30.0,
+    )
+    assert seen["payload"]["command"] == "id"
+    assert seen["payload"]["sim_uid"] is None
+    assert seen["payload"]["sim_gid"] is None
+
+
+def test_simulate_for_user_sudo_user_is_not_root(monkeypatch):
+    daemon = _make_daemon()
+    seen = {}
+
+    def fake_run(cmd, input, text, capture_output, timeout):
+        seen["payload"] = json.loads(input)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=json.dumps(
+                {"ok": True, "result": {"exit_code": 0, "changes": []}},
+                ensure_ascii=False,
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    daemon._simulate_for_user(
+        command="sudo -u nobody id",
+        cwd=Path("/"),
+        repo_root=Path("/"),
+        uid=1000,
+        gid=1000,
+        timeout_s=30.0,
+    )
+    nobody = pwd.getpwnam("nobody")
+    assert seen["payload"]["command"] == "id"
+    assert seen["payload"]["sim_uid"] == nobody.pw_uid
+    assert seen["payload"]["sim_gid"] == nobody.pw_gid
