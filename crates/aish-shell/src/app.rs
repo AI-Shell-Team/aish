@@ -9580,6 +9580,7 @@ impl AishShell {
                     );
                     // Send cancellation token to main thread
                     let _ = token_tx.send(session.cancellation_token_arc());
+                    let channel_cancel_token = session.cancellation_token_arc();
                     let anim = anim_th.clone();
                     let reasoning_active = reasoning_active_cb.clone();
                     let reasoning_frame =
@@ -9794,9 +9795,10 @@ impl AishShell {
                         None
                     }));
                     // Register channel-based tools for SSH followup
-                    session.register_tool(Box::new(aish_tools::ChannelBashTool::new(
-                        event_tx.clone(),
-                    )));
+                    session.register_tool(Box::new(
+                        aish_tools::ChannelBashTool::new(event_tx.clone())
+                            .with_cancellation_token(std::sync::Arc::clone(&channel_cancel_token)),
+                    ));
                     session.register_tool(Box::new(aish_tools::ChannelAskUserTool::new(
                         event_tx.clone(),
                         answer_rx,
@@ -10534,6 +10536,7 @@ impl AishShell {
 
                     // Send cancellation token to main thread
                     let _ = token_tx.send(session.cancellation_token_arc());
+                    let channel_cancel_token = session.cancellation_token_arc();
                     // Streaming event callback: only show reasoning overlay,
                     // collect content for formatted rendering after completion
                     let anim = animation_t.clone();
@@ -10788,11 +10791,11 @@ impl AishShell {
                         }
                         None
                     }));
-
                     // Register channel-based tools for SSH sessions
-                    session.register_tool(Box::new(aish_tools::ChannelBashTool::new(
-                        event_tx.clone(),
-                    )));
+                    session.register_tool(Box::new(
+                        aish_tools::ChannelBashTool::new(event_tx.clone())
+                            .with_cancellation_token(std::sync::Arc::clone(&channel_cancel_token)),
+                    ));
                     session.register_tool(Box::new(aish_tools::ChannelAskUserTool::new(
                         event_tx.clone(),
                         answer_rx,
