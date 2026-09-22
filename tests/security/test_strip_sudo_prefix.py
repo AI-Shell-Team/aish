@@ -90,14 +90,16 @@ def test_policy_disabled_sudo_bash_lc_rm_hits_fallback_rule() -> None:
 
 
 def test_sudo_user_and_group_follow_the_target() -> None:
-    stripped = strip_sudo_prefix("sudo -u nobody -g nogroup id")
+    nobody = pwd.getpwnam("nobody")
+    group = grp.getgrgid(nobody.pw_gid)
+    stripped = strip_sudo_prefix(f"sudo -u nobody -g {group.gr_name} id")
     assert stripped.command == "id"
     assert stripped.user == "nobody"
-    assert stripped.group == "nogroup"
+    assert stripped.group == group.gr_name
     kind = stripped.payload_kind()
     assert kind.kind == "user"
-    assert kind.uid == pwd.getpwnam("nobody").pw_uid
-    assert kind.gid == grp.getgrnam("nogroup").gr_gid
+    assert kind.uid == nobody.pw_uid
+    assert kind.gid == group.gr_gid
 
 
 def test_sudo_attached_and_equals_user_flags() -> None:
