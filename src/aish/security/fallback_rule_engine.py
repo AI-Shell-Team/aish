@@ -87,11 +87,11 @@ class FallbackRuleEngine:
         )
 
     def _parse_delete_command(self, command: str) -> Optional[_ParsedDeleteCommand]:
-        stripped_command, _sudo_detected, ok = strip_sudo_prefix(command)
-        if not ok:
+        stripped = strip_sudo_prefix(command)
+        if not stripped.ok:
             return None
 
-        argv = self._split_shell_like(stripped_command)
+        argv = self._split_shell_like(stripped.command)
         if not argv:
             return None
 

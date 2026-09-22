@@ -4,7 +4,9 @@ Sandbox core: data types, executor and high-level wrapper.
 
 from __future__ import annotations
 
+import grp
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -21,17 +23,108 @@ _MOUNTINFO_ESC_RE = re.compile(r"\\([0-7]{3})")
 # 统一的 IPC socket 路径常量（供 daemon 与客户端引用）
 DEFAULT_SANDBOX_SOCKET_PATH = Path("/run/aish/sandbox.sock")
 
+# Root payload keeps only the caps needed to observe overlay writes.
+# --cap-drop ALL must be applied before these --cap-add flags.
+_ROOT_PAYLOAD_CAPS = (
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_CHOWN",
+    "CAP_FSETID",
+)
 
-def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
+
+@dataclass
+class StrippedSudoCommand:
+    """Leading sudo prefix removed from a command.
+
+    ``user`` / ``group`` are the raw ``-u`` / ``-g`` targets. Empty means unset.
+    ``ok`` is false when sudo was detected but no command remains.
+    """
+
+    command: str
+    sudo_detected: bool
+    ok: bool
+    user: Optional[str] = None
+    group: Optional[str] = None
+
+    def payload_kind(self) -> "SudoPayloadKind":
+        """Map this sudo invocation onto the identity the payload should run as."""
+
+        if not self.sudo_detected:
+            return SudoPayloadKind(kind="not_sudo")
+        if not self.ok:
+            raise SandboxUnavailableError(
+                "sandbox_execute_failed", details="sudo_without_command"
+            )
+
+        user = (self.user or "").strip()
+        if not user:
+            return SudoPayloadKind(kind="root")
+
+        uid, default_gid = _lookup_sudo_user(user)
+        if uid == 0:
+            return SudoPayloadKind(kind="root")
+
+        group = (self.group or "").strip()
+        gid = _lookup_sudo_group(group) if group else default_gid
+        return SudoPayloadKind(kind="user", uid=uid, gid=gid)
+
+
+@dataclass(frozen=True)
+class SudoPayloadKind:
+    """Payload identity after sudo parsing.
+
+    ``kind`` is ``not_sudo``, ``root``, or ``user``. ``uid`` / ``gid`` are set
+    only for ``user``.
+    """
+
+    kind: str
+    uid: Optional[int] = None
+    gid: Optional[int] = None
+
+
+def _lookup_sudo_user(spec: str) -> tuple[int, int]:
+    if spec.isdigit():
+        uid = int(spec)
+        try:
+            return uid, pwd.getpwuid(uid).pw_gid
+        except KeyError:
+            return uid, uid
+    try:
+        entry = pwd.getpwnam(spec)
+    except KeyError as exc:
+        raise SandboxUnavailableError(
+            "sandbox_execute_failed", details="sudo_unknown_user"
+        ) from exc
+    return entry.pw_uid, entry.pw_gid
+
+
+def _lookup_sudo_group(spec: str) -> int:
+    if spec.isdigit():
+        return int(spec)
+    try:
+        return grp.getgrnam(spec).gr_gid
+    except KeyError as exc:
+        raise SandboxUnavailableError(
+            "sandbox_execute_failed", details="sudo_unknown_group"
+        ) from exc
+
+
+def _unchanged_command(command: str) -> StrippedSudoCommand:
+    return StrippedSudoCommand(command=command, sudo_detected=False, ok=True)
+
+
+def strip_sudo_prefix(command: str) -> StrippedSudoCommand:
     """Strip leading sudo prefix and flags.
 
-    Returns (stripped_command, sudo_detected, ok).
+    The returned command keeps shell operators and quoting. ``-u`` / ``-g``
+    targets are kept so the daemon can run the payload as that identity.
     """
 
     raw = command or ""
     raw_l = raw.lstrip()
     if not raw_l.startswith("sudo ") and raw_l != "sudo":
-        return command, False, True
+        return _unchanged_command(command)
 
     def _is_space(ch: str) -> bool:
         return ch.isspace()
@@ -83,18 +176,30 @@ def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
     idx = 0
     token, idx2 = _read_token(raw_l, idx)
     if token != "sudo":
-        return command, False, True
+        return _unchanged_command(command)
     idx = idx2
 
+    user: Optional[str] = None
+    group: Optional[str] = None
     options_with_value = {"-u", "--user", "-g", "--group", "-h", "-p", "--prompt"}
+
+    def _sudo_result(stripped: str, ok: bool) -> StrippedSudoCommand:
+        return StrippedSudoCommand(
+            command=stripped,
+            sudo_detected=True,
+            ok=ok,
+            user=user,
+            group=group,
+        )
+
     while True:
         idx = _skip_ws(raw_l, idx)
         if idx >= len(raw_l):
-            return "", True, False
+            return _sudo_result("", False)
 
         opt, opt_end = _read_token(raw_l, idx)
         if opt == "":
-            return "", True, False
+            return _sudo_result("", False)
 
         if opt == "--":
             idx = opt_end
@@ -104,19 +209,29 @@ def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
             # Options with attached values: -uuser, -ggroup, --user=user, --group=group
             if opt in options_with_value:
                 idx = opt_end
-                _val, idx = _read_token(raw_l, idx)
+                val, idx = _read_token(raw_l, idx)
+                if opt in {"-u", "--user"}:
+                    user = val or None
+                elif opt in {"-g", "--group"}:
+                    group = val or None
                 continue
             if opt.startswith("-u") and opt != "-u":
+                user = opt[2:] or None
                 idx = opt_end
                 continue
             if opt.startswith("-g") and opt != "-g":
+                group = opt[2:] or None
                 idx = opt_end
                 continue
-            if (
-                opt.startswith("--user=")
-                or opt.startswith("--group=")
-                or opt.startswith("--prompt=")
-            ):
+            if opt.startswith("--user="):
+                user = opt[len("--user=") :] or None
+                idx = opt_end
+                continue
+            if opt.startswith("--group="):
+                group = opt[len("--group=") :] or None
+                idx = opt_end
+                continue
+            if opt.startswith("--prompt="):
                 idx = opt_end
                 continue
 
@@ -128,8 +243,8 @@ def strip_sudo_prefix(command: str) -> tuple[str, bool, bool]:
 
     stripped = raw_l[idx:].lstrip()
     if not stripped:
-        return "", True, False
-    return stripped, True, True
+        return _sudo_result("", False)
+    return _sudo_result(stripped, True)
 
 
 def _unescape_mountinfo_path(value: str) -> str:
@@ -737,6 +852,13 @@ class SandboxExecutor:
                 ]
             )
         else:
+            # Root payload: whitelist only the caps needed for overlay fidelity.
+            # Drop ALL first; bwrap applies these options in command-line order.
+            bwrap_cmd.append("--cap-drop")
+            bwrap_cmd.append("ALL")
+            for cap in _ROOT_PAYLOAD_CAPS:
+                bwrap_cmd.append("--cap-add")
+                bwrap_cmd.append(cap)
             bwrap_cmd.extend(["bash", "-lc", command])
 
         proc = (
@@ -902,8 +1024,6 @@ class SandboxExecutor:
 
                 return SandboxResult(
                     exit_code=proc.returncode,
-                    stdout=proc.stdout,
-                    stderr=proc.stderr,
                     changes=fs_changes,
                 )
             finally:

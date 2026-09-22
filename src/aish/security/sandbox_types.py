@@ -27,16 +27,12 @@ class FsChange:
 class SandboxResult:
     """沙箱执行结果摘要。
 
-    由 SandboxExecutor 产生，上层风险评估引擎只关心 exit_code 及文件系统
-    变更列表，不参与具体命令执行实现细节。
+    由 SandboxExecutor 产生。风险评估只消费 exit_code 与文件系统变更。
+    预跑的 stdout/stderr 不进入该结果，避免特权上下文的输出经 IPC 回传。
     """
 
     exit_code: int
-    stdout: str
-    stderr: str
     changes: List[FsChange]
-    stdout_truncated: bool = False
-    stderr_truncated: bool = False
     changes_truncated: bool = False
 
 

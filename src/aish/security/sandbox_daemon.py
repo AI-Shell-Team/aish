@@ -26,7 +26,6 @@ _SANDBOX_LOG_FILE = "sandbox.log"
 _SANDBOX_LOG_DIR = Path(".config") / "aish" / "logs"
 _PATH_MAX_LEN = 200
 _CHANGES_SAMPLE_MAX = 5
-_IPC_STDIO_MAX_BYTES = 2 * 1024 * 1024
 _IPC_CHANGES_MAX = 10_000
 _LOG_DETAIL_MAX_CHARS = 4096
 
@@ -213,14 +212,6 @@ def _format_log_message(
         lines.append("  Timing: " + " | ".join(timing_bits))
 
     return "\n".join(lines)
-
-
-def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
-    if value is None:
-        return "", False
-    if len(value) <= limit:
-        return value, False
-    return value[:limit], True
 
 
 def _get_systemd_listen_socket() -> Optional[socket.socket]:
@@ -446,36 +437,39 @@ class SandboxDaemon:
 
             run_as: Optional[str] = None
             simulate_start_ts = time.monotonic()
-            _, sudo_detected, ok = strip_sudo_prefix(command)
-            if sudo_detected:
-                if not ok:
-                    self._log_event(
-                        uid=uid,
-                        gid=gid,
-                        peer_pid=peer_pid,
-                        client_pid=client_pid,
-                        stage="build",
-                        status="fail",
-                        cmd=command,
-                        run_as="root",
-                        reason="sandbox_execute_failed",
-                        detail="missing_command",
-                        repo_root=repo_root,
-                        cwd=cwd,
-                        simulate_ms=_elapsed_ms(simulate_start_ts),
-                        duration_ms=_elapsed_ms(start_ts),
-                    )
-                    self._send_json(
-                        conn,
-                        {
-                            "id": req_id,
-                            "ok": False,
-                            "reason": "sandbox_execute_failed",
-                            "error": "missing_command",
-                        },
-                    )
-                    return
+            try:
+                kind = strip_sudo_prefix(command).payload_kind()
+            except SandboxUnavailableError as exc:
+                self._log_event(
+                    uid=uid,
+                    gid=gid,
+                    peer_pid=peer_pid,
+                    client_pid=client_pid,
+                    stage="build",
+                    status="fail",
+                    cmd=command,
+                    run_as=None,
+                    reason=exc.reason,
+                    detail=exc.details or str(exc),
+                    repo_root=repo_root,
+                    cwd=cwd,
+                    simulate_ms=_elapsed_ms(simulate_start_ts),
+                    duration_ms=_elapsed_ms(start_ts),
+                )
+                self._send_json(
+                    conn,
+                    {
+                        "id": req_id,
+                        "ok": False,
+                        "reason": exc.reason,
+                        "error": exc.details or str(exc),
+                    },
+                )
+                return
+            if kind.kind == "root":
                 run_as = "root"
+            elif kind.kind == "user":
+                run_as = f"{kind.uid}:{kind.gid}"
             else:
                 run_as = f"{uid}:{gid}"
 
@@ -547,9 +541,8 @@ class SandboxDaemon:
                 _summarize_changes(result.changes or [])
             )
             exit_code_int = int(result.exit_code)
-            stderr_full = result.stderr or ""
             reason = None if exit_code_int == 0 else "sandbox_execute_failed"
-            detail = None if exit_code_int == 0 else (stderr_full or None)
+            detail = None
 
             self._log_event(
                 uid=uid,
@@ -572,12 +565,6 @@ class SandboxDaemon:
                 duration_ms=_elapsed_ms(start_ts),
             )
 
-            stdout_limited, stdout_truncated = _truncate_text(
-                result.stdout or "", _IPC_STDIO_MAX_BYTES
-            )
-            stderr_limited, stderr_truncated = _truncate_text(
-                result.stderr or "", _IPC_STDIO_MAX_BYTES
-            )
             changes_raw = result.changes or []
             changes_truncated = len(changes_raw) > _IPC_CHANGES_MAX
             changes_limited = changes_raw[:_IPC_CHANGES_MAX]
@@ -589,10 +576,6 @@ class SandboxDaemon:
                     "ok": True,
                     "result": {
                         "exit_code": result.exit_code,
-                        "stdout": stdout_limited,
-                        "stderr": stderr_limited,
-                        "stdout_truncated": stdout_truncated,
-                        "stderr_truncated": stderr_truncated,
                         "changes_truncated": changes_truncated,
                         "changes": [
                             {"path": c.path, "kind": c.kind} for c in changes_limited
@@ -738,18 +721,17 @@ class SandboxDaemon:
         sim_uid: Optional[int] = uid if uid >= 0 else None
         sim_gid: Optional[int] = gid if gid >= 0 else None
 
-        # Sudo handling for simulation:
-        # - Strip leading sudo and flags while keeping command structure.
-        # - If sudo is detected, simulate as root to observe privileged side effects.
-        stripped_cmd, sudo_detected, ok = strip_sudo_prefix(command)
-        if sudo_detected:
-            if not ok:
-                raise SandboxUnavailableError(
-                    "sandbox_execute_failed", details="missing_command"
-                )
-            command = stripped_cmd
+        # Sudo identity follows -u/-g. No -u means root. Non-sudo stays the peer uid.
+        stripped = strip_sudo_prefix(command)
+        kind = stripped.payload_kind()
+        if kind.kind == "root":
+            command = stripped.command
             sim_uid = None
             sim_gid = None
+        elif kind.kind == "user":
+            command = stripped.command
+            sim_uid = kind.uid
+            sim_gid = kind.gid
 
         payload = {
             "command": command,
@@ -829,7 +811,5 @@ class SandboxDaemon:
 
         return SandboxResult(
             exit_code=int(result_obj.get("exit_code", 1)),
-            stdout=str(result_obj.get("stdout") or ""),
-            stderr=str(result_obj.get("stderr") or ""),
             changes=changes,
         )

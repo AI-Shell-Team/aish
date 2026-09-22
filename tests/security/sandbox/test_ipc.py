@@ -53,8 +53,6 @@ def test_sandbox_ipc_roundtrip(tmp_path: Path):
             "ok": True,
             "result": {
                 "exit_code": 0,
-                "stdout": "ok",
-                "stderr": "",
                 "changes": [{"path": "a.txt", "kind": "modified"}],
             },
         }
@@ -65,7 +63,7 @@ def test_sandbox_ipc_roundtrip(tmp_path: Path):
     result = client.simulate(command="echo ok", cwd=tmp_path, repo_root=tmp_path)
 
     assert result.exit_code == 0
-    assert "ok" in (result.stdout or "")
+    assert not hasattr(result, "stdout")
     assert result.changes and result.changes[0].path == "a.txt"
 
 
