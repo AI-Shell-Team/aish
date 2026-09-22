@@ -1449,6 +1449,7 @@ tools:
     not_installed: "Python 3 is not installed or not in PATH."
     execute_failed: "Failed to execute Python: {error}"
     no_output: "Python code executed successfully with no output."
+    invalid_timeout: "Invalid timeout: must be a non-negative integer number of seconds (0 disables the deadline)"
 
   grep:
     missing_pattern: "Missing 'pattern' parameter"

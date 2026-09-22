@@ -8,10 +8,13 @@ pub(crate) const PROMPT: &str = r#"Use this tool for Python snippets that are be
 Usage:
 - Print values that should be returned to the conversation.
 - Keep snippets focused and self-contained.
-- Snippets have a 120-second wall-clock budget. If the timeout hits, the
-  process is terminated and partial output is returned with a timeout note —
-  split the work into smaller steps or run it in the background via the
-  bash tool instead (e.g. `nohup python3 script.py >log 2>&1 &`).
+- Wall-clock budget: 120 seconds by default. Pass `timeout` (seconds) to
+  extend it for a legitimately long task (up to 3600), or `timeout: 0`
+  to disable the deadline entirely. On timeout the process group is
+  terminated and partial output is returned with a timeout note.
+- For unbounded or streaming work prefer the bash tool running the
+  script in the background (`nohup python3 script.py >log 2>&1 &`) and
+  poll the log, instead of holding this tool open.
 - Interactive programs that read stdin are not supported; stdin is closed.
 - NEVER read or write files through Python. Do not use open(), pathlib
   Path.write_text/write_bytes, shutil, or os file calls (rename, remove,
@@ -27,6 +30,11 @@ pub(crate) fn parameters() -> serde_json::Value {
             "code": {
                 "type": "string",
                 "description": "Python code to execute."
+            },
+            "timeout": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Wall-clock budget in seconds. Default 120. 0 disables the deadline (use for legitimately long tasks); positive values are capped at 3600."
             }
         },
         "required": ["code"]

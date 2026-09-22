@@ -15,12 +15,57 @@ use super::prompt;
 /// Maximum output length (matches main branch's 1000 chars).
 const MAX_OUTPUT_CHARS: usize = 1000;
 
-/// Wall-clock budget for one snippet. The prompt steers the model to short
-/// snippets; this only guards against a runaway loop holding the whole turn.
-const PYTHON_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default wall-clock budget for one snippet when the model omits
+/// `timeout`. Mirrors oh-my-pi's per-tool timeout policy: a default that
+/// bounds a stuck turn, a hard ceiling, and `0` = disabled (the model may
+/// opt out for legitimately long tasks).
+const DEFAULT_PYTHON_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Hard ceiling for an explicitly requested timeout, matching the bash
+/// tool's range so a long task never outlives the bash escape hatch.
+const MAX_PYTHON_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// How often the wait loop polls the child and the cancel token.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Resolved timeout policy for one call.
+#[derive(Debug, Clone, Copy)]
+struct TimeoutPolicy {
+    /// `None` = no deadline (`timeout: 0`).
+    deadline: Option<Duration>,
+}
+
+impl TimeoutPolicy {
+    /// Resolve from the optional `timeout` argument (seconds).
+    /// - absent → [`DEFAULT_PYTHON_TIMEOUT`]
+    /// - `0` → no deadline
+    /// - negative / non-integer → error
+    /// - positive → clamped to [`MAX_PYTHON_TIMEOUT`]
+    fn resolve(args: &serde_json::Value) -> Result<Self, ToolResult> {
+        let Some(raw) = args.get("timeout") else {
+            return Ok(Self {
+                deadline: Some(DEFAULT_PYTHON_TIMEOUT),
+            });
+        };
+        let Some(secs) = raw.as_i64() else {
+            return Err(ToolResult::error(aish_i18n::t(
+                "tools.python.invalid_timeout",
+            )));
+        };
+        if secs == 0 {
+            return Ok(Self { deadline: None });
+        }
+        if secs < 0 {
+            return Err(ToolResult::error(aish_i18n::t(
+                "tools.python.invalid_timeout",
+            )));
+        }
+        let clamped = (secs as u64).min(MAX_PYTHON_TIMEOUT.as_secs());
+        Ok(Self {
+            deadline: Some(Duration::from_secs(clamped)),
+        })
+    }
+}
 
 /// Tool for executing Python code.
 pub struct PythonTool;
@@ -91,11 +136,14 @@ impl Tool for PythonTool {
         .boxed()
     }
 }
-
 fn run_python(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> ToolResult {
     let code = match args.get("code").and_then(|c| c.as_str()) {
         Some(c) => c,
         None => return ToolResult::error(aish_i18n::t("tools.python.missing_code")),
+    };
+    let policy = match TimeoutPolicy::resolve(args) {
+        Ok(p) => p,
+        Err(err) => return err,
     };
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
@@ -135,15 +183,20 @@ fn run_python(args: &serde_json::Value, cancel: Option<&CancellationToken>) -> T
         }
     };
 
-    let outcome = wait_with_cancel(&mut child, cancel);
+    let outcome = wait_with_cancel(&mut child, cancel, policy);
     finish_result(child, outcome)
 }
 
 /// Poll the child every [`WAIT_POLL_INTERVAL`], forwarding stdout/stderr so
 /// pipes never fill up, until it exits, the cancel token fires, or the
-/// [`PYTHON_TIMEOUT`] budget elapses. Always reaps the child.
-fn wait_with_cancel(child: &mut Child, cancel: Option<&CancellationToken>) -> ChildOutcome {
+/// timeout policy's budget elapses. Always reaps the child.
+fn wait_with_cancel(
+    child: &mut Child,
+    cancel: Option<&CancellationToken>,
+    policy: TimeoutPolicy,
+) -> ChildOutcome {
     let started = Instant::now();
+    let deadline = policy.deadline.map(|d| started + d);
 
     // Reader threads keep the pipes drained; the wait loop owns the deadline.
     let (out_tx, out_rx) = mpsc::channel();
@@ -167,7 +220,7 @@ fn wait_with_cancel(child: &mut Child, cancel: Option<&CancellationToken>) -> Ch
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 let cancelled_now = cancel.is_some_and(|t| t.is_cancelled());
-                let expired = started.elapsed() >= PYTHON_TIMEOUT;
+                let expired = deadline.is_some_and(|d| Instant::now() >= d);
                 if cancelled_now || expired {
                     kill_process_group(child.id());
                     cancelled = cancelled_now;
@@ -270,8 +323,8 @@ fn finish_result(_child: Child, outcome: ChildOutcome) -> ToolResult {
             text.push_str(&stderr);
         }
         text.push_str(&format!(
-            "\n(timed out after {:.0}s, process terminated)",
-            PYTHON_TIMEOUT.as_secs()
+            "\n(timed out after {:.0}s, process terminated — pass a larger `timeout` or `timeout: 0` to disable, or run it in the background via the bash tool)",
+            outcome.elapsed.as_secs_f64()
         ));
         return ToolResult {
             ok: false,
@@ -417,13 +470,9 @@ mod tests {
 
     #[test]
     fn long_snippet_times_out() {
-        // 1s budget override is not exposed; use the real constant via a
-        // short snippet that outlives nothing — instead verify the timeout
-        // path indirectly through a busy loop that would exceed 120s only
-        // if the budget did not exist. To keep tests fast, this check runs
-        // the child against a tiny manually driven wait: spawn + immediate
-        // timeout is not reachable without injecting the deadline, so this
-        // test asserts the timed_out branch formatting via the helper.
+        // The timeout branch formats the real elapsed time and points the
+        // model at the escape hatches (issue #547; semantics per oh-my-pi's
+        // timeout policy).
         let outcome = ChildOutcome {
             stdout: b"partial".to_vec(),
             stderr: Vec::new(),
@@ -434,7 +483,59 @@ mod tests {
         };
         let r = finish_result(unused_child(), outcome);
         assert!(!r.ok);
-        assert!(r.output.contains("timed out"), "out: {}", r.output);
+        assert!(
+            r.output.contains("timed out after 120s"),
+            "out: {}",
+            r.output
+        );
+        assert!(r.output.contains("timeout: 0"), "out: {}", r.output);
+    }
+
+    #[test]
+    fn timeout_policy_resolution() {
+        // Absent → default budget. `0` disables. Positive clamps to the
+        // ceiling. Negative / non-integer error.
+        let p = TimeoutPolicy::resolve(&json!({"code": "x"})).unwrap();
+        assert_eq!(p.deadline, Some(Duration::from_secs(120)));
+
+        let p = TimeoutPolicy::resolve(&json!({"timeout": 0})).unwrap();
+        assert_eq!(p.deadline, None);
+
+        let p = TimeoutPolicy::resolve(&json!({"timeout": 600})).unwrap();
+        assert_eq!(p.deadline, Some(Duration::from_secs(600)));
+
+        let p = TimeoutPolicy::resolve(&json!({"timeout": 999_999})).unwrap();
+        assert_eq!(p.deadline, Some(Duration::from_secs(3600)));
+
+        assert!(TimeoutPolicy::resolve(&json!({"timeout": -1})).is_err());
+        assert!(TimeoutPolicy::resolve(&json!({"timeout": "x"})).is_err());
+    }
+
+    #[test]
+    fn disabled_deadline_lets_long_sleep_complete() {
+        // timeout: 0 must not kill a long task — the whole point of the
+        // escape hatch. A 3s sleep finishes well within the test budget.
+        let r = run_python(
+            &json!({"code": "import time; time.sleep(3); print('done')", "timeout": 0}),
+            None,
+        );
+        assert!(r.ok, "out: {}", r.output);
+        assert_eq!(r.output.trim(), "done");
+    }
+
+    #[test]
+    fn explicit_timeout_terminates_long_snippet() {
+        // A 60s snippet with timeout: 1 must die at ~1s, not run to
+        // completion (default-budget path exercised via explicit value).
+        let started = Instant::now();
+        let r = run_python(
+            &json!({"code": "import time; time.sleep(60); print('done')", "timeout": 1}),
+            None,
+        );
+        let elapsed = started.elapsed();
+        assert!(!r.ok);
+        assert!(elapsed < Duration::from_secs(10), "took {elapsed:.1?}");
+        assert!(r.output.contains("timed out after 1s"), "out: {}", r.output);
     }
 
     /// A finished `sleep 0` child for finish_result tests.
