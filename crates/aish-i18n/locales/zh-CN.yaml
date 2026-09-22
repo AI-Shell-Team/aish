@@ -1448,6 +1448,7 @@ tools:
     not_installed: "未安装 Python 3 或不在 PATH 中。"
     execute_failed: "执行 Python 失败: {error}"
     no_output: "Python 代码执行成功，无输出。"
+    invalid_timeout: "无效的 timeout：必须是非负整数秒数（0 表示不限制）"
 
   grep:
     missing_pattern: "缺少 'pattern' 参数"
