@@ -364,9 +364,25 @@ mod tests {
         let _ = std::fs::remove_file(format!("/tmp/{marker}"));
 
         let token = std::sync::Arc::new(CancellationToken::new());
+        let marker_path = std::path::PathBuf::from(format!("/tmp/{marker}"));
+
         let jh = {
             let token = std::sync::Arc::clone(&token);
+            let marker_path = marker_path.clone();
             std::thread::spawn(move || {
+                // Bound the race: cancel only after the descendant has
+                // actually written its PID marker, otherwise the liveness
+                // check below would vacuously pass on a missing marker
+                // (issue #551 review round 2). Fail fast if the snippet
+                // never even forked.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !marker_path.exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "descendant never wrote its PID marker"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
                 std::thread::sleep(Duration::from_millis(300));
                 token.cancel();
             })
@@ -378,20 +394,23 @@ mod tests {
         assert!(elapsed < Duration::from_secs(5), "took {elapsed:.1?}");
         assert!(r.ok);
         assert!(r.output.contains("cancelled"), "out: {}", r.output);
-
-        // The group member forked by the child must be gone too.
+        // The group member forked by the child must be gone too. Pure Rust
+        // liveness probe (no shell): `kill -0 <pid>` succeeds only while
+        // the process still exists.
         std::thread::sleep(Duration::from_millis(200));
-        let leak = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "test -f /tmp/{marker} && kill -0 $(cat /tmp/{marker}) 2>/dev/null && echo ALIVE || echo DEAD"
-            ))
-            .output()
-            .expect("run sh");
-        let status = String::from_utf8_lossy(&leak.stdout).trim().to_string();
-        let _ = std::fs::remove_file(format!("/tmp/{marker}"));
-        assert_eq!(
-            status, "DEAD",
+        let pid_str = std::fs::read_to_string(&marker_path).unwrap_or_default();
+        let descendant_alive = !pid_str.trim().is_empty()
+            && std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid_str.trim())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+        let _ = std::fs::remove_file(&marker_path);
+        assert!(
+            !descendant_alive,
             "group-member descendant survived cancellation — killpg must reap the whole group"
         );
     }
