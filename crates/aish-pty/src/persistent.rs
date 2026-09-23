@@ -811,6 +811,10 @@ pub struct PersistentPty {
     exec_mode: Arc<AtomicBool>,
     /// Monotonic id for tab-completion requests.
     next_completion_request_id: AtomicU64,
+    /// Pager-restore line queued by `send_command`, flushed by
+    /// `execute_command` after the command's terminal state (issue #541
+    /// review: never queue it in the tty input queue behind the command).
+    pending_pager_restore: Option<String>,
 }
 
 #[path = "aish_completion.rs"]
@@ -885,6 +889,7 @@ impl PersistentPty {
             exec_buffer: Arc::new(Mutex::new(Vec::new())),
             exec_mode: Arc::new(AtomicBool::new(false)),
             next_completion_request_id: AtomicU64::new(0),
+            pending_pager_restore: None,
         };
 
         // Wait for session_ready event.  Also returns whether the
@@ -925,28 +930,19 @@ impl PersistentPty {
             // Backend commands capture output programmatically, so never let
             // them block on an interactive pager (e.g. `systemctl status` or
             // `git log` invoking `less`). Temporarily force the pager env to
-            // `cat` while the command runs, restoring the originals afterward.
+            // `cat` while the command runs, restoring the originals
+            // afterward.
             //
-            // The env setup, the command and the restore are three separate
-            // *lines* (issue #541). Appending a `;`-led restore after the
-            // command corrupted syntax boundaries: `cmd &` became
-            // `cmd &; if ...` (parse error → command_seq:null → the wait
-            // loop ignored the terminal event and hung) and a heredoc
-            // terminator became `EOF; if ...` (PS2 hang, corrupted file
-            // content). Separate lines keep heredoc terminators alone on
-            // their line and `&` at end-of-line legal; bash runs them
-            // sequentially in the same interactive shell, so `cd` and other
-            // side effects still propagate.
+            // Line layout (issue #541): line 1 is the env prefix; line 2 is
+            // the seq/text bookkeeping + user command. Appending a `;`-led
+            // restore after the command corrupted syntax boundaries (`cmd &`
+            // → `cmd &;` parse error; heredoc terminator → `EOF;` PS2 hang),
+            // so the restore is NOT queued here. It is written by
+            // `execute_command` after the command's terminal event (or
+            // cancel/PS2 recovery), which also keeps it out of the tty input
+            // queue where a stdin-reading command would consume it as data
+            // or a `\x03` line-discipline flush would drop it.
             //
-            // The seq/text bookkeeping assignments lead the *command line*
-            // (not a separate line): each interactive line fires exactly one
-            // prompt_ready, so the event carrying our seq must be the
-            // command line itself for its exit code to propagate. Line 1
-            // (env prefix) and line 3 (restore) complete with null-seq
-            // events, which the wait loop skips.
-            let (pg_prefix, pg_suffix) = backend_pager_override();
-            payload.extend_from_slice(pg_prefix.as_bytes());
-            payload.push(b'\n');
             // The seq/text bookkeeping must share the command's line: each
             // interactive line fires one prompt_ready, so the event carrying
             // our seq is the command line itself and its exit code is the
@@ -954,6 +950,9 @@ impl PersistentPty {
             // seq-marked event with exit code 0, masking failures.) The
             // trailing `&` caveat does not apply: `a=1; b=2; cmd &` runs the
             // assignments synchronously and backgrounds only `cmd`.
+            let (pg_prefix, pg_suffix) = backend_pager_override();
+            payload.extend_from_slice(pg_prefix.as_bytes());
+            payload.push(b'\n');
             if let Some(s) = seq {
                 let quoted = shell_quote_escape(command);
                 payload.extend_from_slice(
@@ -965,13 +964,89 @@ impl PersistentPty {
             }
             payload.extend_from_slice(command.as_bytes());
             payload.push(b'\n');
-            payload.extend_from_slice(pg_suffix.as_bytes());
+            // Hold the restore for execute_command to write after the
+            // command's terminal state.
+            self.pending_pager_restore = Some(pg_suffix);
         } else {
             payload.extend_from_slice(command.as_bytes());
+            payload.push(b'\n');
+            return self.write_master(&payload);
         }
-        payload.push(b'\n');
 
         self.write_master(&payload)
+    }
+
+    /// Write the deferred pager-restore line (queued by [`Self::send_command`])
+    /// and wait briefly for its null-seq prompt_ready so neither the restore
+    /// echo nor its control event leaks into the next command.
+    fn flush_pending_pager_restore(&mut self) {
+        let Some(suffix) = self.pending_pager_restore.take() else {
+            return;
+        };
+        let mut line = b"\x15".to_vec();
+        line.extend_from_slice(suffix.as_bytes());
+        line.push(b'\n');
+        if self.write_master(&line).is_err() {
+            return;
+        }
+        // The restore line triggers one prompt_ready with command_seq null.
+        // Drain the control pipe briefly until it arrives (bounded) so the
+        // next execute_command does not see a stale event; also drain master
+        // output so the restore's (suppressed) echo never leaks.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let mut tmp = [0u8; 4096];
+            let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut fds);
+                libc::FD_SET(self.control_fd, &mut fds);
+                libc::FD_SET(self.master_fd, &mut fds);
+            }
+            let max_fd = self.control_fd.max(self.master_fd) + 1;
+            let mut tv = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 50_000,
+            };
+            let sel = unsafe {
+                libc::select(
+                    max_fd,
+                    &mut fds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tv,
+                )
+            };
+            if sel <= 0 {
+                continue;
+            }
+            if unsafe { libc::FD_ISSET(self.master_fd, &fds) } {
+                let _ = unsafe {
+                    libc::read(
+                        self.master_fd,
+                        tmp.as_mut_ptr() as *mut libc::c_void,
+                        tmp.len(),
+                    )
+                };
+            }
+            if unsafe { libc::FD_ISSET(self.control_fd, &fds) } {
+                let n = unsafe {
+                    libc::read(
+                        self.control_fd,
+                        tmp.as_mut_ptr() as *mut libc::c_void,
+                        tmp.len(),
+                    )
+                };
+                if n > 0 {
+                    let events = decode_control_chunk(&mut self.control_buffer, &tmp[..n as usize]);
+                    for event in &events {
+                        if let BackendControlEvent::PromptReady { .. } = event {
+                            // The restore's terminal event; discard it.
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a command and wait for completion with timeout.
@@ -1234,6 +1309,14 @@ impl PersistentPty {
             std::thread::sleep(Duration::from_millis(50));
             self.drain_master_to_exec_buffer();
         }
+
+        // Write the deferred pager-restore line now: the command's terminal
+        // state has settled (or cancel/PS2 recovery completed), so the
+        // restore can no longer be consumed as a stdin-reading command's
+        // input or dropped by a Ctrl+C line-discipline flush (issue #541
+        // review). Its null-seq prompt_ready is consumed here and never
+        // reaches the next command.
+        self.flush_pending_pager_restore();
 
         self.exec_mode.store(false, Ordering::SeqCst);
 
@@ -8690,23 +8773,32 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
         std::fs::create_dir_all(&cwd).expect("create cwd");
         let mut pty = start_test_pty(cwd.to_str().unwrap());
 
-        let cases: &[(&str, Box<dyn Fn(&str, i32) -> bool>)] = &[
-            // `true &` — plain background operator.
-            ("true &", Box::new(|_: &str, code: i32| code == 0)),
-            // `cmd1 && cmd2 &` — background after an && list.
-            ("true && true &", Box::new(|_: &str, code: i32| code == 0)),
-            // `(cmd) &` — subshell background.
-            ("(true) &", Box::new(|_: &str, code: i32| code == 0)),
-            // Background with redirection, the original report's shape.
-            ("true 2>&1 &", Box::new(|_: &str, code: i32| code == 0)),
-        ];
-        for (cmd, check) in cases {
+        // Each background case touches a unique marker inside the private
+        // cwd. Commands stay on ONE line (`cmd & wait`): the seq-marked
+        // prompt_ready fires only for the first payload line, so a
+        // multi-line payload would return before the later lines ran.
+        // `wait` makes the marker deterministic: the background job has
+        // finished by the time the command line completes.
+        for i in 0..4 {
+            let marker = cwd.join(format!("bg-marker-{i}"));
+            let quoted_marker = shell_quote_escape(&marker.display().to_string());
+            let cmd = match i {
+                // `true &` — plain background operator.
+                0 => format!("true & wait; touch {quoted_marker}"),
+                // `cmd1 && cmd2 &` — background after an && list.
+                1 => format!("true && touch {quoted_marker} & wait"),
+                // `(cmd) &` — subshell background.
+                2 => format!("(touch {quoted_marker}) & wait"),
+                // Background with redirection, the original report's shape.
+                _ => format!("touch {quoted_marker} 2>&1 & wait"),
+            };
             let (out, code, _) = pty
-                .execute_command(cmd, Duration::from_secs(10), None, false)
+                .execute_command(&cmd, Duration::from_secs(10), None, false)
                 .unwrap_or_else(|e| panic!("{cmd}: execute failed: {e}"));
+            assert_eq!(code, 0, "{cmd}: expected success, got out={out:?}");
             assert!(
-                check(&out, code),
-                "{cmd}: expected success, got exit={code} out={out:?}"
+                marker.exists(),
+                "{cmd}: background command must have created its marker, out={out:?}"
             );
         }
 
@@ -8763,6 +8855,58 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             .execute_command("false", Duration::from_secs(5), None, false)
             .expect("false must return");
         assert_eq!(code, 1, "exit code of false must propagate, out={out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// The pager restore must not be queued in the tty input behind the
+    /// command (issue #541 review): a stdin-reading command would consume it
+    /// as data and a Ctrl+C flush would drop it, leaving PAGER=cat leaked
+    /// into the session. The restore is written after the command's terminal
+    /// state; the next command must see the original pager env again.
+    #[test]
+    fn test_issue_541_pager_restore_not_consumed_by_stdin_reader() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-stdin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let inherited_pager = std::env::var("PAGER").unwrap_or_default();
+        // The prefix saves `${PAGER-__AISH_UNSET__}`: unset env → the
+        // sentinel, set env → the inherited value verbatim.
+        let expected_pv0 = if inherited_pager.is_empty() {
+            "__AISH_UNSET__".to_string()
+        } else {
+            inherited_pager
+        };
+
+        // A command that reads stdin: with the old queued-restore layout it
+        // swallowed the restore line as input. `read -t 1` returns on its
+        // own after 1s (nonzero exit on timeout) so the test stays bounded;
+        // the assertion target is the env restore, not read's exit code.
+        let _ = pty
+            .execute_command("read -t 1 line", Duration::from_secs(5), None, false)
+            .expect("read must return");
+
+        // The restore must have been applied. Every backend command re-arms
+        // the override and re-seeds `__AISH_PV0` from the *current* PAGER,
+        // so the probe's saved value equals the inherited env only if the
+        // previous restore ran. If `read` had consumed the restore line,
+        // PAGER would still be the override `cat` instead.
+        let (out, code, _) = pty
+            .execute_command(
+                "echo \"PV=$__AISH_PV0\"",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("env probe must return");
+        assert_eq!(code, 0, "probe out={out:?}");
+        assert_eq!(
+            out.trim().lines().last().unwrap_or(""),
+            format!("PV={expected_pv0}"),
+            "restore must restore the inherited PAGER value, got: {out:?}"
+        );
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&cwd);

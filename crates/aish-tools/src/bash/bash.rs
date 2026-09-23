@@ -476,9 +476,15 @@ impl BashTool {
         let interactive = needs_interactive(command);
         let cancel_token = Arc::new(CancelToken::new());
 
-        if let Some(timeout_secs) = timeout_secs {
+        // The effective deadline always arms a cancel timer (issue #541
+        // review): `execute_command`'s internal default only breaks its
+        // select loop at the deadline — it does not interrupt a live
+        // foreground process. Without the timer, a command running past the
+        // default kept the PTY busy and later payloads reached its stdin.
+        let effective_timeout_secs = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
+        {
             let timeout_token = Arc::clone(&cancel_token);
-            let timeout_duration = Duration::from_secs(timeout_secs);
+            let timeout_duration = Duration::from_secs(effective_timeout_secs);
             std::thread::spawn(move || {
                 std::thread::sleep(timeout_duration);
                 timeout_token.cancel();
@@ -502,13 +508,11 @@ impl BashTool {
             });
         }
 
+        // Same duration drives both the cancel timer above and the PTY
+        // select-loop deadline, so the timer fires exactly when the loop
+        // would time out (issue #541 review).
+        let command_timeout = Duration::from_secs(effective_timeout_secs);
         let mut pty = pty_arc.lock().unwrap();
-        // Bounded default wait (issue #541): a command whose terminal event
-        // never matches (parse failure, lost seq) must surface as a timeout
-        // instead of pinning the tool "Executing" for ~a year. Explicit
-        // cancellation still works at any moment before the deadline.
-        let command_timeout =
-            Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS));
         let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result =
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
@@ -524,6 +528,18 @@ impl BashTool {
 
         if let Some(cancelled) = self.outcome_if_cancelled(&cancel_token) {
             return cancelled;
+        }
+
+        // Deadline expiry: the cancel timer armed for the effective timeout
+        // fired without a user interrupt (issue #541 review). Report a
+        // timeout instead of surfacing exit_code -1 as a normal result.
+        if cancel_token.is_cancelled() {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("timeout".to_string(), effective_timeout_secs.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.bash.command_timeout",
+                &args_map,
+            ));
         }
 
         match result {
