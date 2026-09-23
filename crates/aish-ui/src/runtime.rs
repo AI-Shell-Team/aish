@@ -60,12 +60,31 @@ impl PanelRuntime {
         let height = component.desired_height(cols, rows).clamp(1, rows.max(1));
         let _guard = TerminalGuard::enter()?;
         let backend = CrosstermBackend::new(io::stdout());
-        let mut terminal = Terminal::with_options(
+        // `Viewport::Inline` asks the terminal for the cursor position
+        // (`ESC[6n`). Environments without a real answering terminal —
+        // expect/spawn PTYs in tests, some multiplexers, SSH with exotic
+        // clients — never respond, so `Terminal::with_options` fails after a
+        // 2s timeout and the panel silently never opens (Ctrl+O "cannot
+        // expand"). Fall back to a fixed viewport docked to the bottom rows,
+        // which needs no cursor query.
+        let area = Rect::new(0, rows.saturating_sub(height), cols, height);
+        let mut terminal = match Terminal::with_options(
             backend,
             TerminalOptions {
                 viewport: Viewport::Inline(height),
             },
-        )?;
+        ) {
+            Ok(terminal) => terminal,
+            Err(_) => {
+                let fallback_backend = CrosstermBackend::new(io::stdout());
+                Terminal::with_options(
+                    fallback_backend,
+                    TerminalOptions {
+                        viewport: Viewport::Fixed(area),
+                    },
+                )?
+            }
+        };
         drain_pending_events()?;
 
         let outcome = loop {

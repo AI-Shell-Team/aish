@@ -47,8 +47,15 @@ impl CrosstermEscWatcher {
                     }
 
                     // Yield stdin to interactive tools (ask_user, interactive
-                    // bash) that hold the InteractiveInputGuard.
-                    if interactive_input_active() {
+                    // bash) that hold the InteractiveInputGuard, and to
+                    // PersistentPty backend commands (aish_pty::pty_exec_active).
+                    // During a backend command the PTY exec loop reads stdin
+                    // itself: Ctrl+O must reach it to open the live-output
+                    // panel. If the watcher grabbed the key here instead, the
+                    // browse handler would no-op (expand history is only
+                    // populated at ToolExecutionEnd) and the panel would
+                    // never open.
+                    if interactive_input_active() || aish_pty::pty_exec_active() {
                         std::thread::sleep(Duration::from_millis(50));
                         continue;
                     }

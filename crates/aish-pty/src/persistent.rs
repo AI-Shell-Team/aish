@@ -790,6 +790,18 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
     haystack.windows(needle.len()).position(|w| w == needle)
 }
+/// True while [`PersistentPty::execute_command`] owns stdin. The AI-stream
+/// ESC watcher (shell layer) checks this and stops polling stdin, so key
+/// presses during a backend command reach the PTY exec loop's own select —
+/// Ctrl+O opens the live-output panel instead of being swallowed by the
+/// watcher (which would silently no-op: expand history is only populated
+/// at ToolExecutionEnd, after the command finishes).
+static PTY_EXEC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether a PersistentPty backend command currently owns stdin.
+pub fn pty_exec_active() -> bool {
+    PTY_EXEC_ACTIVE.load(Ordering::Acquire)
+}
 
 /// Persistent PTY session managing a single long-lived bash process.
 pub struct PersistentPty {
@@ -1063,6 +1075,10 @@ impl PersistentPty {
     ) -> aish_core::Result<(String, i32, String)> {
         let seq = self.allocate_backend_seq();
 
+        // Claim stdin for the duration of the exec loop so the shell's
+        // ESC watcher stops polling it (see PTY_EXEC_ACTIVE).
+        PTY_EXEC_ACTIVE.store(true, Ordering::Release);
+
         // Enter exec mode: buffer output.
         self.exec_buffer.lock().unwrap().clear();
         self.exec_mode.store(true, Ordering::SeqCst);
@@ -1319,6 +1335,7 @@ impl PersistentPty {
         self.flush_pending_pager_restore();
 
         self.exec_mode.store(false, Ordering::SeqCst);
+        PTY_EXEC_ACTIVE.store(false, Ordering::Release);
 
         // Flush stale input so escape sequences don't confuse the next prompt.
         unsafe {
