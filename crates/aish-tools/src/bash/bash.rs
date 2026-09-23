@@ -21,6 +21,13 @@ use super::read_only::{self, preflight_enforce, ReadOnlyVerdict};
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
 const CAPTURE_KEEP_BYTES: usize = 10 * 1024 * 1024; // 10MB
 
+/// Default wait for a backend command when the caller passes no explicit
+/// `timeout` (issue #541). Long enough for builds and package installs,
+/// short enough that a lost terminal event surfaces as a timeout instead
+/// of the tool appearing stuck indefinitely. The model can still pass a
+/// larger explicit `timeout` for legitimately long tasks.
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 3600;
+
 /// Commands that need a real terminal for interactive use.
 const INTERACTIVE_COMMANDS: &[&str] = &[
     "vim", "vi", "nano", "emacs", "ssh", "telnet", "mosh", "htop", "top", "btop", "iotop", "less",
@@ -496,7 +503,12 @@ impl BashTool {
         }
 
         let mut pty = pty_arc.lock().unwrap();
-        let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
+        // Bounded default wait (issue #541): a command whose terminal event
+        // never matches (parse failure, lost seq) must surface as a timeout
+        // instead of pinning the tool "Executing" for ~a year. Explicit
+        // cancellation still works at any moment before the deadline.
+        let command_timeout =
+            Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS));
         let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result =
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
@@ -979,7 +991,7 @@ mod tests {
         assert!(timeout.get("default").is_none());
         assert_eq!(
             timeout["description"].as_str(),
-            Some("Timeout in seconds. If omitted, the command runs until completion or cancellation.")
+            Some("Timeout in seconds. If omitted, the command is bounded by an internal default (3600s) and can be cancelled anytime.")
         );
     }
 
