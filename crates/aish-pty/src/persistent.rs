@@ -979,7 +979,7 @@ impl PersistentPty {
     /// Write the deferred pager-restore line (queued by [`Self::send_command`])
     /// and wait briefly for its null-seq prompt_ready so neither the restore
     /// echo nor its control event leaks into the next command.
-    fn flush_pending_pager_restore(&mut self) {
+    pub(crate) fn flush_pending_pager_restore(&mut self) {
         let Some(suffix) = self.pending_pager_restore.take() else {
             return;
         };

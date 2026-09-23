@@ -99,6 +99,12 @@ impl PersistentPty {
             }
         }
 
+        // send_command queued a pager-restore line for this backend payload
+        // (issue #541): write it now — the completion command's terminal
+        // event has settled, so the restore can no longer be consumed by a
+        // stdin-reading command or dropped by a Ctrl+C flush. Its null-seq
+        // prompt_ready is consumed inside, never reaching the next command.
+        self.flush_pending_pager_restore();
         self.drain_master_to_exec_buffer();
         self.exec_mode.store(false, Ordering::SeqCst);
         Ok(completion.unwrap_or_else(CompletionResponse::empty))
