@@ -7,6 +7,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.14] - 2026-09-23
+
+### Added
+
+- Manual `/compact [focus]` compacts the current context on demand, rolls the context back if the summary fails or is cancelled, and reports tokens before and after. The optional focus is used only as retention criteria.
+- Context usage footer: a `ctx` bar shows the last request's prompt tokens against the full window (default window is now 256k). Session-cumulative `used` and `out` tokens include sub-agent, SSH follow-up, and remote-query usage.
+- Each turn's environment block includes the local date, time, timezone, and UTC offset from the OS clock, so relative ranges such as "today" or "last two months" are not guessed from training data.
+- Large-file tools: `read_file` returns a bounded line window above 256 KiB; `edit_file` can edit by line range without loading the whole file; `write_file` replaces the file atomically. Overwriting a file that cannot be snapshotted asks for confirmation first.
+- When `edit_file`'s `old_string` misses, the error includes the longest matching prefix so a suffix mismatch does not need another full guess.
+- The slash-command panel is searchable, grouped by scenario, and shows whether a command is available (including undo counts and the current plan state). Commands that only fill the input line require a second confirmation.
+- After an upgrade, the welcome panel header shows the version range and renders Removed, Deprecated, and Security badges together with Added, Changed, and Fixed.
+
+### Changed
+
+- `/export` redacts secrets by default, shows a preview of the path, counts, and hit count, and asks before writing. `--raw` skips redaction but always requires a separate high-risk confirmation. The file records whether it was redacted and which scanner rules were used, and is forced to owner-only `0600` even when it already exists.
+- `python_exec` uses a 120-second default deadline that can be raised up to 3600 seconds or disabled with `timeout: 0`. Cancellation still stops the whole process group.
+- `aish check-tool-support` verifies a full tool-calling loop (probe call, local execution, and a final answer that cites the result) instead of treating one streamed chunk as success.
+- Skill search is reserved for explicit skill requests. Ordinary package install, upgrade, and query tasks stay on the OS package manager. `skill_search` reports failure only when every registry failed.
+
+### Fixed
+
+- Sandbox sudo payloads start with no capabilities and receive only the write capabilities needed to assess overlay changes, so a root payload cannot leave the mount namespace. `sudo -u` or `-g` targeting a non-root user is no longer treated as root.
+- `python_exec`, `grep`, and SSH channel bash honor cancellation and a wall-clock budget, so one stuck tool no longer blocks the agent turn. Cancelled runs return the output collected so far.
+- Quick-fix (`;`) error correction runs as a read-only diagnose sub-agent and will not offer the original failed command again, including when that command contained a redacted secret.
+- Closing the terminal no longer leaves `aish` spinning at full CPU. Interactive sessions exit when the TTY is gone, and command history is saved after each accepted line.
+- If the provider fails after tools have already run, those tool calls and results are kept and the turn is marked interrupted, so the next turn does not repeat the finished side effects.
+- Same-frame streamed responses keep tool names and text together. A stream that yields only nameless tool calls fails the turn instead of looking complete.
+- Prefix-hint scans after an `edit_file` miss are bounded, and the Spanish hint no longer assumes a plural count.
+- Audit tool and security-decision events follow the live session after `/resume`, `/sessions`, `/fork`, or `aish resume`.
+- `/audit` output is localized. Unknown flags, bad limits, invalid timestamps, and unknown event types are rejected with usage instead of silently using the default query.
+- `/undo` and `/rollback` detect files that changed on disk since the snapshot, show a diff, and ask before restoring. `--force` still requires that confirmation. A change that appears while the prompt is open blocks the restore.
+- Attaching to a PTY that replays no output falls back to the standalone shell and welcome panel instead of a blank screen.
+- Tool completion rows include the tool name. Parallel sub-agents are tagged so their start and end lines can be paired.
+
 ## [0.3.13] - 2026-09-04
 
 ### Removed
