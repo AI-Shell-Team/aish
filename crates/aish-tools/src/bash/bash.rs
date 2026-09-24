@@ -482,14 +482,23 @@ impl BashTool {
         // foreground process. Without the timer, a command running past the
         // default kept the PTY busy and later payloads reached its stdin.
         let effective_timeout_secs = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
-        {
+        // The timer thread parks on a channel instead of sleeping detached:
+        // `timeout_stop_tx.send` at command completion wakes it immediately
+        // (issue #541 review), so short commands don't leave a thread
+        // sleeping for up to an hour.
+        let (timeout_stop_tx, timeout_stop_rx) = std::sync::mpsc::channel::<()>();
+        let timeout_handle = {
             let timeout_token = Arc::clone(&cancel_token);
             let timeout_duration = Duration::from_secs(effective_timeout_secs);
             std::thread::spawn(move || {
-                std::thread::sleep(timeout_duration);
-                timeout_token.cancel();
-            });
-        }
+                if matches!(
+                    timeout_stop_rx.recv_timeout(timeout_duration),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    timeout_token.cancel();
+                }
+            })
+        };
 
         // Bridge: AI handler cancellation -> tool cancel token.
         let done = Arc::new(AtomicBool::new(false));
@@ -517,6 +526,8 @@ impl BashTool {
         let result =
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
         done.store(true, Ordering::SeqCst);
+        let _ = timeout_stop_tx.send(());
+        let _ = timeout_handle.join();
 
         // Sync cwd even on cancel — e.g. `cd /tmp; sleep 90` then Ctrl+C must
         // leave the process (and later shell sync) on /tmp, not the old cwd.

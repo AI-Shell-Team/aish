@@ -1051,9 +1051,16 @@ impl PersistentPty {
                 if n > 0 {
                     let events = decode_control_chunk(&mut self.control_buffer, &tmp[..n as usize]);
                     for event in &events {
-                        if let BackendControlEvent::PromptReady { .. } = event {
-                            // The restore's terminal event; discard it.
-                            return;
+                        // Only the restore's own null-seq prompt_ready
+                        // terminates the drain (issue #541 review): a
+                        // seq-marked event here belongs to a command whose
+                        // result is still pending and must stay queued for
+                        // its waiter, not be silently discarded.
+                        if let BackendControlEvent::PromptReady { command_seq, .. } = event {
+                            if command_seq.is_none() {
+                                // The restore's terminal event; discard it.
+                                return;
+                            }
                         }
                     }
                 }
@@ -1083,7 +1090,15 @@ impl PersistentPty {
         self.exec_buffer.lock().unwrap().clear();
         self.exec_mode.store(true, Ordering::SeqCst);
 
-        self.send_command(command, Some(seq))?;
+        if let Err(err) = self.send_command(command, Some(seq)) {
+            // Release exec state before propagating (issue #541 review):
+            // PTY_EXEC_ACTIVE gates the ESC watcher's stdin polling; a leak
+            // here would leave stdin dead until another execution path
+            // clears it.
+            self.exec_mode.store(false, Ordering::SeqCst);
+            PTY_EXEC_ACTIVE.store(false, Ordering::Release);
+            return Err(err);
+        }
 
         // Save and set terminal to non-canonical mode so we can read
         // individual bytes (Ctrl+Z = 0x1a, Ctrl+C = 0x03) without the
@@ -1108,6 +1123,10 @@ impl PersistentPty {
         let mut result_exit_code: i32 = -1;
         let mut result_cwd = String::new();
         let mut cancelled = false;
+        // True only when the loop exited via our seq-marked terminal event.
+        // Distinguishes "command finished right at the deadline" from
+        // "deadline expired with the command still running" below.
+        let mut command_finished = false;
         // Select-based I/O loop.
         'select_loop: while std::time::Instant::now() < deadline {
             // Check external cancellation.
@@ -1266,6 +1285,7 @@ impl PersistentPty {
                                 // PS2 recovery below.
                                 if r.command_seq == Some(seq) {
                                     result_exit_code = r.exit_code;
+                                    command_finished = true;
                                     break 'select_loop;
                                 }
                             }
@@ -1278,6 +1298,16 @@ impl PersistentPty {
                     _ => {}
                 }
             }
+        }
+
+        // Deadline expiry with the command still running (issue #541 review):
+        // the loop exits without setting `cancelled`, so without this the
+        // foreground process keeps owning the PTY and later flushes or
+        // payloads would reach its stdin. Treat it like a user cancel:
+        // interrupt the foreground process, then run the same cleanup path.
+        if !cancelled && !command_finished && std::time::Instant::now() >= deadline {
+            let _ = self.write_master(b"\x03");
+            cancelled = true;
         }
 
         // Recover the shell from a stuck PS2 continuation prompt (unclosed
@@ -1318,11 +1348,26 @@ impl PersistentPty {
         // long-lived session survives for the next command.
         if cancelled {
             force_cancel_pty_foreground(self.master_fd, self.child_pid);
-            // Give bash a moment to reclaim the foreground after the pager
-            // dies, then drain residual output (job-terminated notices, the
-            // restored prompt) into the exec buffer so it is captured rather
-            // than leaking into the next command.
-            std::thread::sleep(Duration::from_millis(50));
+            // Wait (bounded) for bash to reclaim the PTY foreground before
+            // anything writes to it again (issue #541 review): a fixed delay
+            // did not establish that the killed pager exited, so the restore
+            // line could still reach a dying stdin reader. Recovery is
+            // confirmed when the foreground group is bash's own or the
+            // ioctl reports none.
+            let recover_deadline = std::time::Instant::now() + Duration::from_millis(1000);
+            loop {
+                let fg = pty_foreground_pgrp(self.master_fd);
+                if fg.is_none() || fg == Some(self.child_pid) {
+                    break;
+                }
+                if std::time::Instant::now() >= recover_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Drain residual output (job-terminated notices, the restored
+            // prompt) into the exec buffer so it is captured rather than
+            // leaking into the next command.
             self.drain_master_to_exec_buffer();
         }
 
@@ -8924,6 +8969,40 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             format!("PV={expected_pv0}"),
             "restore must restore the inherited PAGER value, got: {out:?}"
         );
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// An unterminated heredoc leaves bash at the PS2 continuation prompt;
+    /// a short timeout must return bounded (not hang), report failure, and
+    /// the PS2 recovery must leave the session usable for the next command
+    /// (issue #541 review).
+    #[test]
+    fn test_issue_541_ps2_timeout_recovers_session() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-ps2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let started = std::time::Instant::now();
+        let (out, code, _) = pty
+            .execute_command("cat <<'EOF'", Duration::from_millis(500), None, false)
+            .expect("unterminated heredoc must return");
+        assert_eq!(
+            code, -1,
+            "timed-out heredoc must not report success, out={out:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "PS2 recovery must remain bounded, took {:?}",
+            started.elapsed()
+        );
+
+        let (out, code, _) = pty
+            .execute_command("echo session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(code, 0, "follow-up command must succeed: {out:?}");
+        assert!(out.contains("session_ok"), "got: {out:?}");
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&cwd);
