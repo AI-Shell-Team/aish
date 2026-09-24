@@ -711,6 +711,7 @@ shell:
     preview: "Export-Vorschau → {file}  ({msgs} Nachrichten, {cmds} Befehle, {hits} Geheimnis-Treffer)"
     preview_hits: "{hits} Geheimnis(se) werden durch [REDACTED:…]-Markierungen ersetzt."
     not_scanned: "nicht gescannt (Raw-Modus)"
+    incomplete_warning: "Warnung: {failed} Transkript-Schreibvorgänge fehlgeschlagen; im Export könnten aktuelle Nachrichten fehlen."
     confirm: "Export-Datei schreiben?"
     cancelled: "Export abgebrochen"
   audit:

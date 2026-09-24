@@ -47,6 +47,29 @@ pub struct ContextCompactReport {
     pub skipped_full_compact_due_to_fuse: bool,
 }
 
+/// Observer notified on every message appended to the persistent context.
+///
+/// The shell wires this to the session store's append-only AI transcript
+/// (issue #530): the transcript must capture the conversation exactly as it
+/// happened, so the callback fires ONLY on the append path (`add_memory`).
+/// Compaction (micro/full), snapshot restores, and re-writes never call the
+/// recorder — the log stays the original, un-compacted conversation.
+pub trait TranscriptRecorder: Send + Sync {
+    fn record(&self, memory_type: &MemoryType, message: &ContextMessage);
+
+    /// Number of appends this recorder failed to persist, if it tracks
+    /// them. `None` = unknown/not tracked. Used by `/export` to warn about
+    /// a possibly incomplete transcript.
+    fn failed_appends(&self) -> Option<usize> {
+        None
+    }
+
+    /// One-time import of a legacy session's context snapshot, as context
+    /// messages. Only the session-store-backed recorder implements this;
+    /// the default is a no-op.
+    fn seed_from_snapshot(&self, _snapshot: &[ContextMessage]) {}
+}
+
 /// Manages the conversation context window with per-type message limits and
 /// optional token budget.
 pub struct ContextManager {
@@ -59,6 +82,9 @@ pub struct ContextManager {
     knowledge_cache: HashMap<String, String>,
     budget_policy: ContextBudgetPolicy,
     compact_consecutive_failures: usize,
+    /// Optional observer for the append-only AI transcript. `None` in most
+    /// unit tests; appends then stay in-memory only.
+    recorder: Option<std::sync::Arc<dyn TranscriptRecorder>>,
 }
 
 impl Default for ContextManager {
@@ -83,6 +109,7 @@ impl ContextManager {
             knowledge_cache: HashMap::new(),
             budget_policy: ContextBudgetPolicy::default(),
             compact_consecutive_failures: 0,
+            recorder: None,
         }
     }
 
@@ -98,10 +125,15 @@ impl ContextManager {
             knowledge_cache: HashMap::new(),
             budget_policy: ContextBudgetPolicy::default(),
             compact_consecutive_failures: 0,
+            recorder: None,
         }
     }
 
     /// Add a pre-built context message.
+    ///
+    /// The only mutation that grows the conversation: the transcript
+    /// recorder (when installed) observes exactly these appends, never the
+    /// compaction/restore rewrites.
     pub fn add_memory(&mut self, memory_type: MemoryType, msg: ContextMessage) {
         debug!(
             role = %msg.role,
@@ -109,7 +141,30 @@ impl ContextManager {
             len = msg.content.len(),
             "adding context message"
         );
+        if let Some(recorder) = &self.recorder {
+            recorder.record(&memory_type, &msg);
+        }
         self.messages.push(msg);
+    }
+
+    /// Install the append-only transcript observer (issue #530).
+    pub fn set_transcript_recorder(&mut self, recorder: std::sync::Arc<dyn TranscriptRecorder>) {
+        self.recorder = Some(recorder);
+    }
+
+    /// Failed-append count from the installed recorder, if it tracks them.
+    pub fn transcript_failed_appends(&self) -> Option<usize> {
+        self.recorder.as_ref().and_then(|r| r.failed_appends())
+    }
+
+    /// Seed the transcript from a legacy session snapshot (issue #530).
+    ///
+    /// The caller passes the restored context messages; the recorder
+    /// converts them to its storage format and imports them once.
+    pub fn seed_transcript_from_snapshot(&self, snapshot: &[ContextMessage]) {
+        if let Some(recorder) = &self.recorder {
+            recorder.seed_from_snapshot(snapshot);
+        }
     }
 
     /// Convenience helper: create and append a message in one call.
@@ -1455,5 +1510,83 @@ mod tests {
         assert_eq!(report.changed_messages, 1);
         assert!(cm.messages[0].content.contains("warm old output"));
         assert!(cm.messages[9].content.contains("cleared"));
+    }
+    // --- Transcript recorder (issue #530) --------------------------------
+
+    struct RecordingSpy {
+        messages: std::sync::Mutex<Vec<(MemoryType, String, String)>>,
+    }
+
+    impl RecordingSpy {
+        fn new() -> Self {
+            Self {
+                messages: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn roles(&self) -> Vec<String> {
+            self.messages
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, role, _)| role.clone())
+                .collect()
+        }
+    }
+
+    impl TranscriptRecorder for RecordingSpy {
+        fn record(&self, memory_type: &MemoryType, message: &ContextMessage) {
+            self.messages.lock().unwrap().push((
+                memory_type.clone(),
+                message.role.clone(),
+                message.content.clone(),
+            ));
+        }
+    }
+
+    #[test]
+    fn recorder_observes_every_append() {
+        let spy = std::sync::Arc::new(RecordingSpy::new());
+        let mut cm = ContextManager::new();
+        cm.set_transcript_recorder(spy.clone());
+
+        cm.add_message("user", "q1", MemoryType::Llm);
+        cm.add_message("assistant", "a1", MemoryType::Llm);
+        cm.add_message("user", "shell output", MemoryType::Shell);
+
+        let recorded = spy.messages.lock().unwrap();
+        assert_eq!(recorded.len(), 3);
+        assert_eq!(recorded[0].1, "user");
+        assert_eq!(recorded[0].0, MemoryType::Llm);
+        assert_eq!(recorded[1].1, "assistant");
+        assert_eq!(recorded[2].0, MemoryType::Shell);
+    }
+
+    #[test]
+    fn recorder_not_invoked_by_compaction_or_restore() {
+        let spy = std::sync::Arc::new(RecordingSpy::new());
+        let mut cm = ContextManager::new();
+        cm.set_budget_policy(ContextBudgetPolicy {
+            enabled: true,
+            context_window_tokens: 2_000,
+            ..ContextBudgetPolicy::default()
+        });
+        cm.set_transcript_recorder(spy.clone());
+
+        for i in 0..8 {
+            cm.add_message("user", &format!("question {i}"), MemoryType::Llm);
+            cm.add_message("assistant", &format!("answer {i}"), MemoryType::Llm);
+        }
+        let appended = spy.roles().len();
+        assert_eq!(appended, 16);
+
+        // Compaction rewrites/removes in-place: the transcript must not see it.
+        let _ = cm.compact_for_send(None);
+        let _ = cm.microcompact();
+        assert_eq!(spy.roles().len(), appended);
+
+        // Snapshot restore (the /resume path) replaces wholesale: not an append.
+        cm.replace_messages(vec![]);
+        assert_eq!(spy.roles().len(), appended);
     }
 }

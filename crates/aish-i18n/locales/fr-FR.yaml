@@ -711,6 +711,7 @@ shell:
     preview: "Aperçu de l'export → {file}  ({msgs} messages, {cmds} commandes, {hits} secret(s) détecté(s))"
     preview_hits: "{hits} secret(s) seront remplacés par des marqueurs [REDACTED:…]."
     not_scanned: "non analysé (mode brut)"
+    incomplete_warning: "avertissement : {failed} écriture(s) de transcription en échec ; l'export peut manquer des messages récents."
     confirm: "Écrire le fichier d'export ?"
     cancelled: "export annulé"
   audit:

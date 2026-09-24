@@ -260,6 +260,24 @@ impl AiHandler {
         self.context_manager.messages_snapshot()
     }
 
+    /// Mutable access to the persistent context manager (transcript
+    /// recorder installation, issue #530).
+    pub fn context_manager_mut(&mut self) -> &mut ContextManager {
+        &mut self.context_manager
+    }
+
+    /// Failed transcript append count from the installed recorder, if it
+    /// exposes one (`None` when no recorder is installed).
+    pub fn transcript_failed_appends(&self) -> Option<usize> {
+        self.context_manager.transcript_failed_appends()
+    }
+
+    /// Forward a legacy snapshot to the transcript recorder for one-time
+    /// seeding (issue #530). A no-op when no recorder is installed.
+    pub fn seed_transcript_from_snapshot(&self, snapshot: &[ContextMessage]) {
+        self.context_manager.seed_transcript_from_snapshot(snapshot);
+    }
+
     pub fn restore_context_messages(&mut self, messages: Vec<ContextMessage>) {
         self.context_manager.replace_messages(messages);
         self.context_manager.trim();
