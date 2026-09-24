@@ -1305,6 +1305,7 @@ tools:
     security_handling_required: "bash command requires {level} security handling"
     missing_command: "Missing 'command' parameter"
     invalid_timeout: "Invalid timeout: must be a positive integer number of seconds"
+    command_timeout: "Command timed out after {timeout}s and was terminated. It may be incomplete."
     execute_failed: "Failed to execute: {error}"
     output_truncated: "[...{bytes} bytes truncated...]\n{tail}"
     truncated_notice: "[...{bytes} bytes truncated...]"

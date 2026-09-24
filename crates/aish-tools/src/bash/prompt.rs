@@ -32,7 +32,7 @@ pub(crate) fn parameters() -> serde_json::Value {
             "timeout": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Timeout in seconds. If omitted, the command runs until completion or cancellation."
+                "description": "Timeout in seconds. If omitted, the command is bounded by an internal default (3600s) and can be cancelled anytime."
             }
         },
         "required": ["command"]

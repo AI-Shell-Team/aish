@@ -1092,6 +1092,7 @@ tools:
 
   bash:
     invalid_timeout: "Délai invalide : doit être un nombre entier positif de secondes"
+    command_timeout: "Commande interrompue après {timeout}s (délai dépassé). Le résultat est peut-être incomplet."
     security_handling_required: "la commande bash nécessite un traitement de sécurité de niveau {level}"
 
   memory:

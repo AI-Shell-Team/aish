@@ -1093,6 +1093,7 @@ tools:
 
   bash:
     invalid_timeout: "Ungültiges Timeout: muss eine positive ganze Zahl von Sekunden sein"
+    command_timeout: "Befehl nach {timeout}s wegen Timeout abgebrochen. Ergebnis möglicherweise unvollständig."
     security_handling_required: "der Bash-Befehl erfordert eine Sicherheitsbehandlung der Stufe {level}"
 
   memory:

@@ -1122,6 +1122,7 @@ tools:
 
   bash:
     invalid_timeout: "無効なタイムアウト：正の整数秒を指定してください"
+    command_timeout: "コマンドが{timeout}sでタイムアウトし、終了されました。結果は不完全な可能性があります。"
     security_handling_required: "bash コマンドには {level} レベルのセキュリティ処理が必要です"
 
 help:
