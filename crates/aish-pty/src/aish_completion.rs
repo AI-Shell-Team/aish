@@ -43,6 +43,12 @@ impl PersistentPty {
 
         let deadline = Instant::now() + timeout;
         let mut completion = None;
+        // True only when the completion command's own seq-marked
+        // prompt_ready arrived. The CompletionResult event can precede it
+        // (issue #541 review): breaking on the result alone would let
+        // flush_pending_pager_restore below consume the command's seq
+        // event, leaving a stale terminal state for the next command.
+        let mut command_finished = false;
 
         'wait: while Instant::now() < deadline {
             let mut fds = zero_fd_set();
@@ -84,11 +90,12 @@ impl PersistentPty {
                                 word_start: *word_start,
                                 candidates: candidates.clone(),
                             });
-                            break 'wait;
                         }
                     }
                     if let Some(r) = self.command_state.handle_event(event) {
                         if r.command_seq == Some(seq) {
+                            // The command's authoritative terminal event.
+                            command_finished = true;
                             break 'wait;
                         }
                     }
@@ -99,6 +106,53 @@ impl PersistentPty {
             }
         }
 
+        // Timeout without the command's seq event (issue #541 review): the
+        // completion command may still be running and would otherwise eat
+        // the pager-restore line written below. Interrupt it and let bash
+        // settle before flushing.
+        if !command_finished {
+            let _ = self.write_master_pub(b"\x03");
+            let recover_deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < recover_deadline {
+                let mut fds = zero_fd_set();
+                set_fd(&mut fds, self.master_fd);
+                set_fd(&mut fds, self.control_fd);
+                let max_fd = self.master_fd.max(self.control_fd) + 1;
+                if select_fds(
+                    max_fd,
+                    &mut fds,
+                    select_tv(recover_deadline, Duration::from_millis(50)),
+                ) <= 0
+                {
+                    break;
+                }
+                if fd_isset(self.master_fd, &fds)
+                    && matches!(self.read_master_into_exec(), ReadMaster::Eof)
+                {
+                    break;
+                }
+                if fd_isset(self.control_fd, &fds) {
+                    let events = self.read_control_chunk();
+                    for event in &events {
+                        if let Some(r) = self.command_state.handle_event(event) {
+                            if r.command_seq == Some(seq) {
+                                command_finished = true;
+                            }
+                        }
+                    }
+                    if command_finished {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // send_command queued a pager-restore line for this backend payload
+        // (issue #541): write it now — the completion command's terminal
+        // event has settled, so the restore can no longer be consumed by a
+        // stdin-reading command or dropped by a Ctrl+C flush. Its null-seq
+        // prompt_ready is consumed inside, never reaching the next command.
+        self.flush_pending_pager_restore();
         self.drain_master_to_exec_buffer();
         self.exec_mode.store(false, Ordering::SeqCst);
         Ok(completion.unwrap_or_else(CompletionResponse::empty))

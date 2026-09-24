@@ -62,7 +62,7 @@ pub use offload::{
     OffloadState, PtyOutputOffload,
 };
 pub use output_buffer::OutputBuffer;
-pub use persistent::{is_interactive_command, shell_quote_escape, PersistentPty};
+pub use persistent::{is_interactive_command, pty_exec_active, shell_quote_escape, PersistentPty};
 pub use readline_tab::{should_complete_path_locally, ReadlineTabResult};
 pub use resource::{
     descendant_pids, kill_process_tree, sample_groups, sample_sessions_with_cpu, GroupResources,

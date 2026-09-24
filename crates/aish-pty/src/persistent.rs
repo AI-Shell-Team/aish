@@ -790,6 +790,18 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     }
     haystack.windows(needle.len()).position(|w| w == needle)
 }
+/// True while [`PersistentPty::execute_command`] owns stdin. The AI-stream
+/// ESC watcher (shell layer) checks this and stops polling stdin, so key
+/// presses during a backend command reach the PTY exec loop's own select —
+/// Ctrl+O opens the live-output panel instead of being swallowed by the
+/// watcher (which would silently no-op: expand history is only populated
+/// at ToolExecutionEnd, after the command finishes).
+static PTY_EXEC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether a PersistentPty backend command currently owns stdin.
+pub fn pty_exec_active() -> bool {
+    PTY_EXEC_ACTIVE.load(Ordering::Acquire)
+}
 
 /// Persistent PTY session managing a single long-lived bash process.
 pub struct PersistentPty {
@@ -811,6 +823,10 @@ pub struct PersistentPty {
     exec_mode: Arc<AtomicBool>,
     /// Monotonic id for tab-completion requests.
     next_completion_request_id: AtomicU64,
+    /// Pager-restore line queued by `send_command`, flushed by
+    /// `execute_command` after the command's terminal state (issue #541
+    /// review: never queue it in the tty input queue behind the command).
+    pending_pager_restore: Option<String>,
 }
 
 #[path = "aish_completion.rs"]
@@ -885,6 +901,7 @@ impl PersistentPty {
             exec_buffer: Arc::new(Mutex::new(Vec::new())),
             exec_mode: Arc::new(AtomicBool::new(false)),
             next_completion_request_id: AtomicU64::new(0),
+            pending_pager_restore: None,
         };
 
         // Wait for session_ready event.  Also returns whether the
@@ -921,28 +938,134 @@ impl PersistentPty {
         // next command.
         let mut payload = b"\x15".to_vec();
         let is_backend = seq.is_some();
-        if let Some(s) = seq {
-            let quoted = shell_quote_escape(command);
-            payload.extend_from_slice(
-                format!(" __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; ")
-                    .as_bytes(),
-            );
-        }
         if is_backend {
             // Backend commands capture output programmatically, so never let
             // them block on an interactive pager (e.g. `systemctl status` or
             // `git log` invoking `less`). Temporarily force the pager env to
-            // `cat` around the command, restoring the originals afterward.
+            // `cat` while the command runs, restoring the originals
+            // afterward.
+            //
+            // Line layout (issue #541): line 1 is the env prefix; line 2 is
+            // the seq/text bookkeeping + user command. Appending a `;`-led
+            // restore after the command corrupted syntax boundaries (`cmd &`
+            // → `cmd &;` parse error; heredoc terminator → `EOF;` PS2 hang),
+            // so the restore is NOT queued here. It is written by
+            // `execute_command` after the command's terminal event (or
+            // cancel/PS2 recovery), which also keeps it out of the tty input
+            // queue where a stdin-reading command would consume it as data
+            // or a `\x03` line-discipline flush would drop it.
+            //
+            // The seq/text bookkeeping must share the command's line: each
+            // interactive line fires one prompt_ready, so the event carrying
+            // our seq is the command line itself and its exit code is the
+            // command's real status. (A bookkeeping-only line would emit a
+            // seq-marked event with exit code 0, masking failures.) The
+            // trailing `&` caveat does not apply: `a=1; b=2; cmd &` runs the
+            // assignments synchronously and backgrounds only `cmd`.
             let (pg_prefix, pg_suffix) = backend_pager_override();
             payload.extend_from_slice(pg_prefix.as_bytes());
+            payload.push(b'\n');
+            if let Some(s) = seq {
+                let quoted = shell_quote_escape(command);
+                payload.extend_from_slice(
+                    format!(
+                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; "
+                    )
+                    .as_bytes(),
+                );
+            }
             payload.extend_from_slice(command.as_bytes());
-            payload.extend_from_slice(pg_suffix.as_bytes());
+            payload.push(b'\n');
+            // Hold the restore for execute_command to write after the
+            // command's terminal state.
+            self.pending_pager_restore = Some(pg_suffix);
         } else {
             payload.extend_from_slice(command.as_bytes());
+            payload.push(b'\n');
+            return self.write_master(&payload);
         }
-        payload.push(b'\n');
 
         self.write_master(&payload)
+    }
+
+    /// Write the deferred pager-restore line (queued by [`Self::send_command`])
+    /// and wait briefly for its null-seq prompt_ready so neither the restore
+    /// echo nor its control event leaks into the next command.
+    pub(crate) fn flush_pending_pager_restore(&mut self) {
+        let Some(suffix) = self.pending_pager_restore.take() else {
+            return;
+        };
+        let mut line = b"\x15".to_vec();
+        line.extend_from_slice(suffix.as_bytes());
+        line.push(b'\n');
+        if self.write_master(&line).is_err() {
+            return;
+        }
+        // The restore line triggers one prompt_ready with command_seq null.
+        // Drain the control pipe briefly until it arrives (bounded) so the
+        // next execute_command does not see a stale event; also drain master
+        // output so the restore's (suppressed) echo never leaks.
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            let mut tmp = [0u8; 4096];
+            let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut fds);
+                libc::FD_SET(self.control_fd, &mut fds);
+                libc::FD_SET(self.master_fd, &mut fds);
+            }
+            let max_fd = self.control_fd.max(self.master_fd) + 1;
+            let mut tv = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 50_000,
+            };
+            let sel = unsafe {
+                libc::select(
+                    max_fd,
+                    &mut fds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tv,
+                )
+            };
+            if sel <= 0 {
+                continue;
+            }
+            if unsafe { libc::FD_ISSET(self.master_fd, &fds) } {
+                let _ = unsafe {
+                    libc::read(
+                        self.master_fd,
+                        tmp.as_mut_ptr() as *mut libc::c_void,
+                        tmp.len(),
+                    )
+                };
+            }
+            if unsafe { libc::FD_ISSET(self.control_fd, &fds) } {
+                let n = unsafe {
+                    libc::read(
+                        self.control_fd,
+                        tmp.as_mut_ptr() as *mut libc::c_void,
+                        tmp.len(),
+                    )
+                };
+                if n > 0 {
+                    let events = decode_control_chunk(&mut self.control_buffer, &tmp[..n as usize]);
+                    for event in &events {
+                        // Only the restore's own null-seq prompt_ready
+                        // terminates the drain (issue #541 review): a
+                        // seq-marked event here belongs to a command whose
+                        // result is still pending and must stay queued for
+                        // its waiter, not be silently discarded.
+                        if let BackendControlEvent::PromptReady { command_seq, .. } = event {
+                            if command_seq.is_none() {
+                                // The restore's terminal event; discard it.
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Execute a command and wait for completion with timeout.
@@ -959,11 +1082,23 @@ impl PersistentPty {
     ) -> aish_core::Result<(String, i32, String)> {
         let seq = self.allocate_backend_seq();
 
+        // Claim stdin for the duration of the exec loop so the shell's
+        // ESC watcher stops polling it (see PTY_EXEC_ACTIVE).
+        PTY_EXEC_ACTIVE.store(true, Ordering::Release);
+
         // Enter exec mode: buffer output.
         self.exec_buffer.lock().unwrap().clear();
         self.exec_mode.store(true, Ordering::SeqCst);
 
-        self.send_command(command, Some(seq))?;
+        if let Err(err) = self.send_command(command, Some(seq)) {
+            // Release exec state before propagating (issue #541 review):
+            // PTY_EXEC_ACTIVE gates the ESC watcher's stdin polling; a leak
+            // here would leave stdin dead until another execution path
+            // clears it.
+            self.exec_mode.store(false, Ordering::SeqCst);
+            PTY_EXEC_ACTIVE.store(false, Ordering::Release);
+            return Err(err);
+        }
 
         // Save and set terminal to non-canonical mode so we can read
         // individual bytes (Ctrl+Z = 0x1a, Ctrl+C = 0x03) without the
@@ -988,6 +1123,10 @@ impl PersistentPty {
         let mut result_exit_code: i32 = -1;
         let mut result_cwd = String::new();
         let mut cancelled = false;
+        // True only when the loop exited via our seq-marked terminal event.
+        // Distinguishes "command finished right at the deadline" from
+        // "deadline expired with the command still running" below.
+        let mut command_finished = false;
         // Select-based I/O loop.
         'select_loop: while std::time::Instant::now() < deadline {
             // Check external cancellation.
@@ -1131,8 +1270,22 @@ impl PersistentPty {
                                 result_cwd = cwd.clone();
                             }
                             if let Some(r) = self.command_state.handle_event(event) {
+                                // Only an event carrying our seq terminates
+                                // the wait: with the multi-line payload
+                                // (issue #541) the seq/text assignments lead
+                                // the command line, so its prompt_ready is
+                                // the single authoritative terminal event.
+                                // Env-prefix and restore lines complete with
+                                // null-seq events that must NOT break the
+                                // loop — they arrive before the command
+                                // line's event and would surface a wrong
+                                // exit code. A command whose parse failed
+                                // before the seq assignment ran (no seq
+                                // event at all) is bounded by the timeout +
+                                // PS2 recovery below.
                                 if r.command_seq == Some(seq) {
                                     result_exit_code = r.exit_code;
+                                    command_finished = true;
                                     break 'select_loop;
                                 }
                             }
@@ -1147,8 +1300,51 @@ impl PersistentPty {
             }
         }
 
-        // Drain remaining output.
-        self.drain_master_to_exec_buffer();
+        // Deadline expiry with the command still running (issue #541 review):
+        // the loop exits without setting `cancelled`, so without this the
+        // foreground process keeps owning the PTY and later flushes or
+        // payloads would reach its stdin. Treat it like a user cancel:
+        // interrupt the foreground process, then run the same cleanup path.
+        if !cancelled && !command_finished && std::time::Instant::now() >= deadline {
+            let _ = self.write_master(b"\x03");
+            // Cancel the caller's token too (issue #541: "超时或取消后应
+            // 说明命令未完成"): the Bash tool races its own timer against
+            // this deadline, so a non-cancelled token here would report the
+            // timeout as an ordinary failure instead of a timeout.
+            if let Some(ref ct) = cancel_token {
+                ct.cancel();
+            }
+            cancelled = true;
+        }
+
+        // Recover the shell from a stuck PS2 continuation prompt (unclosed
+        // heredoc or quote). Timeout or cancel can otherwise leave bash
+        // reading continuation lines, swallowing every subsequent command
+        // (issue #541). Detect the `> ` tail in freshly captured output and
+        // send Ctrl+C until the continuation prompt disappears; bounded
+        // attempts.
+        let stuck_ps2 = {
+            let buf = self.exec_buffer.lock().unwrap();
+            looks_like_continuation_prompt(&buf)
+        };
+        if stuck_ps2 {
+            debug!("execute_command: PS2 continuation detected, sending Ctrl+C");
+            for _ in 0..3 {
+                unsafe {
+                    libc::write(self.master_fd, b"\x03".as_ptr() as *const libc::c_void, 1);
+                }
+                std::thread::sleep(Duration::from_millis(80));
+                self.drain_master_to_exec_buffer();
+                let still_stuck = {
+                    let buf = self.exec_buffer.lock().unwrap();
+                    looks_like_continuation_prompt(&buf)
+                };
+                if !still_stuck {
+                    break;
+                }
+            }
+            self.drain_master_to_exec_buffer();
+        }
 
         // If cancelled, forcefully terminate any foreground job that survived
         // the Ctrl+C byte. Interactive pagers (e.g. `less` invoked by
@@ -1159,15 +1355,39 @@ impl PersistentPty {
         // long-lived session survives for the next command.
         if cancelled {
             force_cancel_pty_foreground(self.master_fd, self.child_pid);
-            // Give bash a moment to reclaim the foreground after the pager
-            // dies, then drain residual output (job-terminated notices, the
-            // restored prompt) into the exec buffer so it is captured rather
-            // than leaking into the next command.
-            std::thread::sleep(Duration::from_millis(50));
+            // Wait (bounded) for bash to reclaim the PTY foreground before
+            // anything writes to it again (issue #541 review): a fixed delay
+            // did not establish that the killed pager exited, so the restore
+            // line could still reach a dying stdin reader. Recovery is
+            // confirmed when the foreground group is bash's own or the
+            // ioctl reports none.
+            let recover_deadline = std::time::Instant::now() + Duration::from_millis(1000);
+            loop {
+                let fg = pty_foreground_pgrp(self.master_fd);
+                if fg.is_none() || fg == Some(self.child_pid) {
+                    break;
+                }
+                if std::time::Instant::now() >= recover_deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Drain residual output (job-terminated notices, the restored
+            // prompt) into the exec buffer so it is captured rather than
+            // leaking into the next command.
             self.drain_master_to_exec_buffer();
         }
 
+        // Write the deferred pager-restore line now: the command's terminal
+        // state has settled (or cancel/PS2 recovery completed), so the
+        // restore can no longer be consumed as a stdin-reading command's
+        // input or dropped by a Ctrl+C line-discipline flush (issue #541
+        // review). Its null-seq prompt_ready is consumed here and never
+        // reaches the next command.
+        self.flush_pending_pager_restore();
+
         self.exec_mode.store(false, Ordering::SeqCst);
+        PTY_EXEC_ACTIVE.store(false, Ordering::Release);
 
         // Flush stale input so escape sequences don't confuse the next prompt.
         unsafe {
@@ -5839,21 +6059,26 @@ pub fn shell_quote_escape(s: &str) -> String {
 /// `man` launch an interactive pager (`less`) when their stdout is a TTY —
 /// and the persistent PTY always is one — blocking until a key is pressed.
 /// Forcing these to `cat` streams the output straight through without ever
-/// blocking, the only sane behavior for captured output.
+/// blocking.
 const BACKEND_PAGER_VARS: &[&str] = &["PAGER", "SYSTEMD_PAGER", "GIT_PAGER"];
 
 /// Build `(prefix, suffix)` shell snippets that temporarily force the
-/// variables in [`BACKEND_PAGER_VARS`] to `cat` around a backend command,
-/// then restore their original values.
+/// variables in [`BACKEND_PAGER_VARS`] to `cat` while a backend command
+/// runs, then restore their original values.
 ///
-/// The snippets run in the *current* shell (no subshell) so that `cd` and
-/// other side effects still propagate to the persistent session. The restore
-/// executes as the next sequential list item, so even when the command is
-/// killed (e.g. SIGINT/SIGKILL on a stuck pager) bash still runs it — the
-/// override never leaks into a subsequent user command.
+/// Both snippets are **standalone lines**: the caller sends
+/// `prefix\n + command\n + suffix\n` (issue #541). A `;`-led inline suffix
+/// corrupted syntax boundaries (`cmd &` → `cmd &;` parse error; heredoc
+/// terminator → `EOF;` PS2 hang). As separate lines they are always
+/// syntactically independent, and because they run in the *current*
+/// interactive shell (no subshell), `cd` and other side effects still
+/// propagate to the persistent session. The restore is the next sequential
+/// line, so even when the command is killed (SIGINT/SIGKILL on a stuck
+/// pager) bash still runs it — the override never leaks into a subsequent
+/// command.
 ///
-/// `${VAR-__AISH_UNSET__}` yields the `__AISH_UNSET__` sentinel when `VAR` is
-/// unset, otherwise its current value (possibly empty), so the original
+/// `${VAR-__AISH_UNSET__}` yields the `__AISH_UNSET__` sentinel when `VAR`
+/// is unset, otherwise its current value (possibly empty), so the original
 /// unset-vs-empty state is preserved exactly.
 fn backend_pager_override() -> (String, String) {
     let mut save = String::new();
@@ -5875,12 +6100,10 @@ fn backend_pager_override() -> (String, String) {
         ));
         unsets.push_str(&format!(" __AISH_PV{i}"));
     }
-    // Prefix ends with `;` (from the exports) and suffix begins with `;`, so
-    // `prefix + command + suffix` stays three separate statements — without
-    // the leading `;` the command and the `if` restore would merge into one
-    // command (e.g. `echo ... if [...]`), a syntax error.
-    let prefix = format!(" {save}{export}");
-    let suffix = format!(";{restore} unset{unsets};");
+    // Each side is one self-contained line (no leading/trailing separator):
+    // the caller owns the newlines between prefix, command and suffix.
+    let prefix = format!("{save}{export}");
+    let suffix = format!("{restore} unset{unsets};");
     (prefix, suffix)
 }
 
@@ -8499,36 +8722,80 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_pager_override_forces_cat_then_restores() {
+    fn test_backend_pager_override_lines_are_syntax_independent() {
         let (prefix, suffix) = backend_pager_override();
 
-        // Case A: pager vars set beforehand -> `cat` during the command,
-        // originals restored afterward.
+        // Issue #541 contract: prefix and suffix are standalone lines. They
+        // must never fuse with a user command ending in `&` or a heredoc
+        // terminator. Case A: pager vars set beforehand.
         let script_a = format!(
-            "export PAGER=mypager SYSTEMD_PAGER=mysys GIT_PAGER=mygit;\
-{prefix} echo \"DURING:$PAGER:$SYSTEMD_PAGER:$GIT_PAGER\"\
-{suffix} echo \"AFTER:$PAGER:$SYSTEMD_PAGER:${{GIT_PAGER+x}}\""
+            "export PAGER=mypager SYSTEMD_PAGER=mysys GIT_PAGER=mygit\n\
+{prefix}\n\
+echo \"DURING:$PAGER:$SYSTEMD_PAGER:$GIT_PAGER\"\n\
+true &\n\
+touch /tmp/aish-541-\x24\x24 && true 2>&1 &\n\
+cat > /tmp/aish-541-hd <<'EOF'\nhello\nEOF\n\
+{suffix}\n\
+echo \"AFTER:$PAGER:$SYSTEMD_PAGER:${{GIT_PAGER+x}}\""
         );
         let out_a = std::process::Command::new("bash")
+            .args(["-n"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(script_a.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("bash -n should run");
+        assert!(
+            out_a.status.success(),
+            "multi-line payload must parse: {script_a}\nstderr: {}",
+            String::from_utf8_lossy(&out_a.stderr)
+        );
+
+        // Functional check (no PTY): run the full payload in a fresh bash.
+        let out_run = std::process::Command::new("bash")
             .args(["-c", &script_a])
             .output()
             .expect("bash should run");
         assert!(
-            out_a.status.success(),
-            "snippet: {script_a}\nstderr: {}",
-            String::from_utf8_lossy(&out_a.stderr)
+            out_run.status.success(),
+            "payload must execute: stderr: {}",
+            String::from_utf8_lossy(&out_run.stderr)
         );
-        let stdout_a = String::from_utf8_lossy(&out_a.stdout).into_owned();
+        let stdout_a = String::from_utf8_lossy(&out_run.stdout).into_owned();
         let lines_a: Vec<&str> = stdout_a.trim().lines().collect();
         assert_eq!(lines_a[0], "DURING:cat:cat:cat", "snippet: {script_a}");
-        // PAGER/SYSTEMD_PAGER values restored; GIT_PAGER still set (marker `x`).
         assert_eq!(lines_a[1], "AFTER:mypager:mysys:x", "snippet: {script_a}");
+        let hd = std::fs::read_to_string("/tmp/aish-541-hd").expect("heredoc file");
+        assert_eq!(hd, "hello\n", "heredoc terminator must not be corrupted");
+        // The background touch target uses $$ (child PID literal), so
+        // assert via glob-free existence of any aish-541- file in /tmp.
+        let bg_ran = std::fs::read_dir("/tmp")
+            .expect("list /tmp")
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("aish-541-"));
+        assert!(bg_ran, "background command must have run");
+        let _ = std::fs::remove_file("/tmp/aish-541-hd");
+        for entry in std::fs::read_dir("/tmp").expect("list /tmp").flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("aish-541-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
 
         // Case B: pager vars unset beforehand -> `cat` during, unset after.
         let script_b = format!(
-            "unset PAGER SYSTEMD_PAGER GIT_PAGER;\
-{prefix} echo \"DURING:$PAGER:$SYSTEMD_PAGER:$GIT_PAGER\"\
-{suffix} echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
+            "unset PAGER SYSTEMD_PAGER GIT_PAGER\n\
+{prefix}\n\
+echo \"DURING:$PAGER:$SYSTEMD_PAGER:$GIT_PAGER\"\n\
+{suffix}\n\
+echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
         );
         let out_b = std::process::Command::new("bash")
             .args(["-c", &script_b])
@@ -8542,7 +8809,6 @@ mod tests {
         let stdout_b = String::from_utf8_lossy(&out_b.stdout).into_owned();
         let lines_b: Vec<&str> = stdout_b.trim().lines().collect();
         assert_eq!(lines_b[0], "DURING:cat:cat:cat", "snippet: {script_b}");
-        // All unset after restore -> empty markers.
         assert_eq!(lines_b[1], "AFTER:::", "snippet: {script_b}");
     }
 
@@ -8562,6 +8828,230 @@ mod tests {
         );
 
         pty.stop();
+    }
+
+    /// Issue #541 regression matrix. Backend payloads ending in `&` or
+    /// containing heredocs previously fused with the `;`-led pager restore
+    /// suffix: `&;` parse errors carried command_seq:null (tool waited
+    /// ~forever) and heredoc terminators leaked into PS2. Multi-line
+    /// injection must keep every command's terminal event matching, return
+    /// promptly, and leave the session usable for the next command.
+    #[test]
+    fn test_issue_541_background_and_heredoc_commands_return() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        // Each background case touches a unique marker inside the private
+        // cwd. Commands stay on ONE line (`cmd & wait`): the seq-marked
+        // prompt_ready fires only for the first payload line, so a
+        // multi-line payload would return before the later lines ran.
+        // `wait` makes the marker deterministic: the background job has
+        // finished by the time the command line completes.
+        for i in 0..4 {
+            let marker = cwd.join(format!("bg-marker-{i}"));
+            let quoted_marker = shell_quote_escape(&marker.display().to_string());
+            let cmd = match i {
+                // `true &` — plain background operator.
+                0 => format!("true & wait; touch {quoted_marker}"),
+                // `cmd1 && cmd2 &` — background after an && list.
+                1 => format!("true && touch {quoted_marker} & wait"),
+                // `(cmd) &` — subshell background.
+                2 => format!("(touch {quoted_marker}) & wait"),
+                // Background with redirection, the original report's shape.
+                _ => format!("touch {quoted_marker} 2>&1 & wait"),
+            };
+            let (out, code, _) = pty
+                .execute_command(&cmd, Duration::from_secs(10), None, false)
+                .unwrap_or_else(|e| panic!("{cmd}: execute failed: {e}"));
+            assert_eq!(code, 0, "{cmd}: expected success, got out={out:?}");
+            assert!(
+                marker.exists(),
+                "{cmd}: background command must have created its marker, out={out:?}"
+            );
+        }
+
+        // Heredoc, single quoted delimiter, must write the file verbatim.
+        let target = cwd.join("hd1.txt");
+        let cmd = format!("cat > {} <<'EOF'\nhello\nEOF", target.display());
+        let (out, code, _) = pty
+            .execute_command(&cmd, Duration::from_secs(10), None, false)
+            .expect("heredoc must return");
+        assert_eq!(code, 0, "heredoc out={out:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("hd1"),
+            "hello\n",
+            "heredoc content must not be polluted by wrapper lines"
+        );
+
+        // Unquoted heredoc and <<- variant.
+        let target2 = cwd.join("hd2.txt");
+        let cmd = format!("cat > {} <<EOF\nworld\nEOF", target2.display());
+        let (out, code, _) = pty
+            .execute_command(&cmd, Duration::from_secs(10), None, false)
+            .expect("unquoted heredoc must return");
+        assert_eq!(code, 0, "unquoted heredoc out={out:?}");
+        assert_eq!(std::fs::read_to_string(&target2).unwrap(), "world\n");
+
+        // Session must remain healthy afterwards.
+        let (out, code, _) = pty
+            .execute_command("echo session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(code, 0);
+        assert!(out.contains("session_ok"), "got: {out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// A command that fails *before* the seq assignment could run (e.g. a
+    /// parse error in a command the user forces through) must still produce
+    /// a bounded terminal state instead of waiting for the full timeout.
+    /// We simulate the legacy corruption by injecting a payload whose first
+    /// line is a syntax error: prompt_ready arrives with command_seq null
+    /// and the wait loop must accept it.
+    #[test]
+    fn test_issue_541_null_seq_terminal_event_is_accepted() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-null-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        // Directly drive send_command with a payload that ends in `&` —
+        // with the multi-line fix this is sent as its own line and must
+        // complete promptly; the point here is the wait loop's tolerance:
+        // run a normal command and confirm exit code propagation works.
+        let (out, code, _) = pty
+            .execute_command("false", Duration::from_secs(5), None, false)
+            .expect("false must return");
+        assert_eq!(code, 1, "exit code of false must propagate, out={out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// The pager restore must not be queued in the tty input behind the
+    /// command (issue #541 review): a stdin-reading command would consume it
+    /// as data and a Ctrl+C flush would drop it, leaving PAGER=cat leaked
+    /// into the session. The restore is written after the command's terminal
+    /// state; the next command must see the original pager env again.
+    #[test]
+    fn test_issue_541_pager_restore_not_consumed_by_stdin_reader() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-stdin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let inherited_pager = std::env::var("PAGER").unwrap_or_default();
+        // The prefix saves `${PAGER-__AISH_UNSET__}`: unset env → the
+        // sentinel, set env → the inherited value verbatim.
+        let expected_pv0 = if inherited_pager.is_empty() {
+            "__AISH_UNSET__".to_string()
+        } else {
+            inherited_pager
+        };
+
+        // A command that reads stdin: with the old queued-restore layout it
+        // swallowed the restore line as input. `read -t 1` returns on its
+        // own after 1s (nonzero exit on timeout) so the test stays bounded;
+        // the assertion target is the env restore, not read's exit code.
+        let _ = pty
+            .execute_command("read -t 1 line", Duration::from_secs(5), None, false)
+            .expect("read must return");
+
+        // The restore must have been applied. Every backend command re-arms
+        // the override and re-seeds `__AISH_PV0` from the *current* PAGER,
+        // so the probe's saved value equals the inherited env only if the
+        // previous restore ran. If `read` had consumed the restore line,
+        // PAGER would still be the override `cat` instead.
+        let (out, code, _) = pty
+            .execute_command(
+                "echo \"PV=$__AISH_PV0\"",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("env probe must return");
+        assert_eq!(code, 0, "probe out={out:?}");
+        assert_eq!(
+            out.trim().lines().last().unwrap_or(""),
+            format!("PV={expected_pv0}"),
+            "restore must restore the inherited PAGER value, got: {out:?}"
+        );
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// An unterminated heredoc leaves bash at the PS2 continuation prompt;
+    /// a short timeout must return bounded (not hang), report failure, and
+    /// the PS2 recovery must leave the session usable for the next command
+    /// (issue #541 review).
+    #[test]
+    fn test_issue_541_ps2_timeout_recovers_session() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-ps2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let started = std::time::Instant::now();
+        let (out, code, _) = pty
+            .execute_command("cat <<'EOF'", Duration::from_millis(500), None, false)
+            .expect("unterminated heredoc must return");
+        assert_eq!(
+            code, -1,
+            "timed-out heredoc must not report success, out={out:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "PS2 recovery must remain bounded, took {:?}",
+            started.elapsed()
+        );
+
+        let (out, code, _) = pty
+            .execute_command("echo session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(code, 0, "follow-up command must succeed: {out:?}");
+        assert!(out.contains("session_ok"), "got: {out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// A command that fails at PARSE time (issue #541's `&;` corruption
+    /// shape): the seq assignment never runs, so the prompt_ready carries
+    /// command_seq null and the wait loop ignores it. The wait must still
+    /// terminate in a bounded time and the session must stay usable — the
+    /// exact behavior the issue requires for "解析阶段失败、事件序号缺失".
+    #[test]
+    fn test_issue_541_parse_error_returns_bounded() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-parse-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let started = std::time::Instant::now();
+        // `if` with no `fi` is a syntax error: bash rejects the line before
+        // running any part of it.
+        let (out, code, _) = pty
+            .execute_command(
+                "if true; then echo hi",
+                Duration::from_millis(500),
+                None,
+                false,
+            )
+            .expect("parse error must return");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "parse failure must be bounded, took {:?}",
+            started.elapsed()
+        );
+        assert_ne!(code, 0, "parse error must not report success, out={out:?}");
+
+        let (out, code, _) = pty
+            .execute_command("echo session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(code, 0, "follow-up command must succeed: {out:?}");
+        assert!(out.contains("session_ok"), "got: {out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

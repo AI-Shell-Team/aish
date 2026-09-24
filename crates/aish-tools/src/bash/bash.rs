@@ -21,6 +21,13 @@ use super::read_only::{self, preflight_enforce, ReadOnlyVerdict};
 /// The BashOutputOffload will handle threshold-based truncation and disk offload.
 const CAPTURE_KEEP_BYTES: usize = 10 * 1024 * 1024; // 10MB
 
+/// Default wait for a backend command when the caller passes no explicit
+/// `timeout` (issue #541). Long enough for builds and package installs,
+/// short enough that a lost terminal event surfaces as a timeout instead
+/// of the tool appearing stuck indefinitely. The model can still pass a
+/// larger explicit `timeout` for legitimately long tasks.
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 3600;
+
 /// Commands that need a real terminal for interactive use.
 const INTERACTIVE_COMMANDS: &[&str] = &[
     "vim", "vi", "nano", "emacs", "ssh", "telnet", "mosh", "htop", "top", "btop", "iotop", "less",
@@ -469,14 +476,29 @@ impl BashTool {
         let interactive = needs_interactive(command);
         let cancel_token = Arc::new(CancelToken::new());
 
-        if let Some(timeout_secs) = timeout_secs {
+        // The effective deadline always arms a cancel timer (issue #541
+        // review): `execute_command`'s internal default only breaks its
+        // select loop at the deadline — it does not interrupt a live
+        // foreground process. Without the timer, a command running past the
+        // default kept the PTY busy and later payloads reached its stdin.
+        let effective_timeout_secs = timeout_secs.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
+        // The timer thread parks on a channel instead of sleeping detached:
+        // `timeout_stop_tx.send` at command completion wakes it immediately
+        // (issue #541 review), so short commands don't leave a thread
+        // sleeping for up to an hour.
+        let (timeout_stop_tx, timeout_stop_rx) = std::sync::mpsc::channel::<()>();
+        let timeout_handle = {
             let timeout_token = Arc::clone(&cancel_token);
-            let timeout_duration = Duration::from_secs(timeout_secs);
+            let timeout_duration = Duration::from_secs(effective_timeout_secs);
             std::thread::spawn(move || {
-                std::thread::sleep(timeout_duration);
-                timeout_token.cancel();
-            });
-        }
+                if matches!(
+                    timeout_stop_rx.recv_timeout(timeout_duration),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    timeout_token.cancel();
+                }
+            })
+        };
 
         // Bridge: AI handler cancellation -> tool cancel token.
         let done = Arc::new(AtomicBool::new(false));
@@ -495,12 +517,17 @@ impl BashTool {
             });
         }
 
+        // Same duration drives both the cancel timer above and the PTY
+        // select-loop deadline, so the timer fires exactly when the loop
+        // would time out (issue #541 review).
+        let command_timeout = Duration::from_secs(effective_timeout_secs);
         let mut pty = pty_arc.lock().unwrap();
-        let command_timeout = Duration::from_secs(timeout_secs.unwrap_or(365 * 24 * 60 * 60));
         let _interactive_guard = interactive.then(InteractiveInputGuard::acquire);
         let result =
             pty.execute_command(command, command_timeout, Some(&cancel_token), interactive);
         done.store(true, Ordering::SeqCst);
+        let _ = timeout_stop_tx.send(());
+        let _ = timeout_handle.join();
 
         // Sync cwd even on cancel — e.g. `cd /tmp; sleep 90` then Ctrl+C must
         // leave the process (and later shell sync) on /tmp, not the old cwd.
@@ -512,6 +539,18 @@ impl BashTool {
 
         if let Some(cancelled) = self.outcome_if_cancelled(&cancel_token) {
             return cancelled;
+        }
+
+        // Deadline expiry: the cancel timer armed for the effective timeout
+        // fired without a user interrupt (issue #541 review). Report a
+        // timeout instead of surfacing exit_code -1 as a normal result.
+        if cancel_token.is_cancelled() {
+            let mut args_map = std::collections::HashMap::new();
+            args_map.insert("timeout".to_string(), effective_timeout_secs.to_string());
+            return ToolResult::error(aish_i18n::t_with_args(
+                "tools.bash.command_timeout",
+                &args_map,
+            ));
         }
 
         match result {
@@ -979,7 +1018,7 @@ mod tests {
         assert!(timeout.get("default").is_none());
         assert_eq!(
             timeout["description"].as_str(),
-            Some("Timeout in seconds. If omitted, the command runs until completion or cancellation.")
+            Some("Timeout in seconds. If omitted, the command is bounded by an internal default (3600s) and can be cancelled anytime.")
         );
     }
 

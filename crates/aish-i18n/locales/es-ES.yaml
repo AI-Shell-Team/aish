@@ -1092,6 +1092,7 @@ tools:
 
   bash:
     invalid_timeout: "Tiempo de espera no válido: debe ser un número entero positivo de segundos"
+    command_timeout: "Comando cancelado por tiempo de espera tras {timeout}s. El resultado puede estar incompleto."
     security_handling_required: "el comando bash requiere manejo de seguridad de nivel {level}"
 
   memory:

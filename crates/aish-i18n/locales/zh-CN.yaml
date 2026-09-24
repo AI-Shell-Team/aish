@@ -1304,6 +1304,7 @@ tools:
     invalid_timeout: "无效的 timeout：必须是正整数秒数"
     security_handling_required: "bash 命令需要 {level} 级安全处理"
     missing_command: "缺少 'command' 参数"
+    command_timeout: "命令在 {timeout}s 后超时并被终止，结果可能不完整。"
     execute_failed: "执行失败: {error}"
     output_truncated: "[...截断了 {bytes} 字节...]\n{tail}"
     truncated_notice: "[...截断了 {bytes} 字节...]"
