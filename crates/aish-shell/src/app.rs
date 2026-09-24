@@ -7127,7 +7127,9 @@ impl AishShell {
         // exported message — seed the snapshot into the transcript once.
         let transcript_is_empty =
             matches!(store.get_ai_messages(&session.session_uuid), Ok(m) if m.is_empty());
-
+        if transcript_is_empty {
+            self.resumed_snapshot_for_seed = Some(restored_context.clone());
+        }
         if self.config.model != session.model
             || session.api_base.as_deref() != Some(&self.config.api_base)
         {
