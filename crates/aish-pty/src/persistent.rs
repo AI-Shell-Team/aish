@@ -1307,6 +1307,13 @@ impl PersistentPty {
         // interrupt the foreground process, then run the same cleanup path.
         if !cancelled && !command_finished && std::time::Instant::now() >= deadline {
             let _ = self.write_master(b"\x03");
+            // Cancel the caller's token too (issue #541: "超时或取消后应
+            // 说明命令未完成"): the Bash tool races its own timer against
+            // this deadline, so a non-cancelled token here would report the
+            // timeout as an ordinary failure instead of a timeout.
+            if let Some(ref ct) = cancel_token {
+                ct.cancel();
+            }
             cancelled = true;
         }
 
@@ -8997,6 +9004,45 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             "PS2 recovery must remain bounded, took {:?}",
             started.elapsed()
         );
+
+        let (out, code, _) = pty
+            .execute_command("echo session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(code, 0, "follow-up command must succeed: {out:?}");
+        assert!(out.contains("session_ok"), "got: {out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// A command that fails at PARSE time (issue #541's `&;` corruption
+    /// shape): the seq assignment never runs, so the prompt_ready carries
+    /// command_seq null and the wait loop ignores it. The wait must still
+    /// terminate in a bounded time and the session must stay usable — the
+    /// exact behavior the issue requires for "解析阶段失败、事件序号缺失".
+    #[test]
+    fn test_issue_541_parse_error_returns_bounded() {
+        let cwd = std::env::temp_dir().join(format!("aish-541-parse-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let started = std::time::Instant::now();
+        // `if` with no `fi` is a syntax error: bash rejects the line before
+        // running any part of it.
+        let (out, code, _) = pty
+            .execute_command(
+                "if true; then echo hi",
+                Duration::from_millis(500),
+                None,
+                false,
+            )
+            .expect("parse error must return");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "parse failure must be bounded, took {:?}",
+            started.elapsed()
+        );
+        assert_ne!(code, 0, "parse error must not report success, out={out:?}");
 
         let (out, code, _) = pty
             .execute_command("echo session_ok", Duration::from_secs(5), None, false)
