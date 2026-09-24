@@ -299,35 +299,36 @@ impl SessionStore {
         let now_str = now.to_rfc3339();
         let state_str = serde_json::to_string(&parent.state)?;
 
-        self.conn
-            .execute(
-                "INSERT INTO sessions
-                    (session_uuid, created_at, model, api_base, run_user, state,
-                     parent_session_uuid, branch_point_message_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    new_uuid,
-                    now_str,
-                    parent.model,
-                    parent.api_base,
-                    parent.run_user,
-                    state_str,
-                    parent_uuid,
-                    branch_point_message_id,
-                ],
-            )
-            .map_err(|e| AishError::Session(format!("failed to fork session: {e}")))?;
-
-        // Issue #530: the fork must export the conversation up to its
-        // branch point, so copy the parent's append-only AI transcript too.
-        if let Err(error) = self.copy_ai_messages(parent_uuid, new_uuid) {
-            tracing::warn!(
-                parent = %parent_uuid,
-                fork = %new_uuid,
-                %error,
-                "session forked but failed to copy AI transcript"
-            );
-        }
+        // Insert the child and copy its transcript in one transaction: a
+        // fork that silently lost its transcript would make `/export` fall
+        // back to the compacted snapshot and drop earlier turns (issue #530).
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| AishError::Session(format!("failed to start fork transaction: {e}")))?;
+        tx.execute(
+            "INSERT INTO sessions
+                (session_uuid, created_at, model, api_base, run_user, state,
+                 parent_session_uuid, branch_point_message_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                new_uuid,
+                now_str,
+                parent.model,
+                parent.api_base,
+                parent.run_user,
+                state_str,
+                parent_uuid,
+                branch_point_message_id,
+            ],
+        )
+        .map_err(|e| AishError::Session(format!("failed to fork session: {e}")))?;
+        // The fork must export the conversation up to its branch point, so
+        // copy the parent's append-only AI transcript too.
+        self.copy_ai_messages_tx(&tx, parent_uuid, new_uuid)
+            .map_err(|e| AishError::Session(format!("failed to copy fork transcript: {e}")))?;
+        tx.commit()
+            .map_err(|e| AishError::Session(format!("failed to commit fork: {e}")))?;
         Ok(SessionRecord {
             session_uuid: new_uuid.to_string(),
             created_at: now,
@@ -557,14 +558,25 @@ impl SessionStore {
     /// Copy the parent's AI transcript into a forked session (issue #530:
     /// a fork must export the conversation up to its branch point).
     pub fn copy_ai_messages(&self, from_session: &str, to_session: &str) -> Result<usize> {
-        let updated = self
-            .conn
+        self.copy_ai_messages_tx(&self.conn, from_session, to_session)
+    }
+
+    /// Transaction-aware core of [`Self::copy_ai_messages`]; `&Connection`
+    /// derefs from both the raw connection and an in-progress transaction,
+    /// so fork can run the copy in the same transaction as the child insert.
+    fn copy_ai_messages_tx<T: rusqlite::types::ToSql>(
+        &self,
+        conn: &rusqlite::Connection,
+        from_session: T,
+        to_session: T,
+    ) -> Result<usize> {
+        let updated = conn
             .execute(
                 "INSERT INTO ai_messages
                     (session_uuid, role, content, memory_type, extra, created_at)
                  SELECT ?2, role, content, memory_type, extra, created_at
                    FROM ai_messages WHERE session_uuid = ?1",
-                params![from_session, to_session],
+                rusqlite::params![from_session, to_session],
             )
             .map_err(|e| AishError::Session(format!("failed to copy ai messages: {e}")))?;
         Ok(updated)

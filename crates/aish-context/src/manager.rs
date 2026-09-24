@@ -56,6 +56,18 @@ pub struct ContextCompactReport {
 /// recorder — the log stays the original, un-compacted conversation.
 pub trait TranscriptRecorder: Send + Sync {
     fn record(&self, memory_type: &MemoryType, message: &ContextMessage);
+
+    /// Number of appends this recorder failed to persist, if it tracks
+    /// them. `None` = unknown/not tracked. Used by `/export` to warn about
+    /// a possibly incomplete transcript.
+    fn failed_appends(&self) -> Option<usize> {
+        None
+    }
+
+    /// One-time import of a legacy session's context snapshot, as context
+    /// messages. Only the session-store-backed recorder implements this;
+    /// the default is a no-op.
+    fn seed_from_snapshot(&self, _snapshot: &[ContextMessage]) {}
 }
 
 /// Manages the conversation context window with per-type message limits and
@@ -138,6 +150,21 @@ impl ContextManager {
     /// Install the append-only transcript observer (issue #530).
     pub fn set_transcript_recorder(&mut self, recorder: std::sync::Arc<dyn TranscriptRecorder>) {
         self.recorder = Some(recorder);
+    }
+
+    /// Failed-append count from the installed recorder, if it tracks them.
+    pub fn transcript_failed_appends(&self) -> Option<usize> {
+        self.recorder.as_ref().and_then(|r| r.failed_appends())
+    }
+
+    /// Seed the transcript from a legacy session snapshot (issue #530).
+    ///
+    /// The caller passes the restored context messages; the recorder
+    /// converts them to its storage format and imports them once.
+    pub fn seed_transcript_from_snapshot(&self, snapshot: &[ContextMessage]) {
+        if let Some(recorder) = &self.recorder {
+            recorder.seed_from_snapshot(snapshot);
+        }
     }
 
     /// Convenience helper: create and append a message in one call.

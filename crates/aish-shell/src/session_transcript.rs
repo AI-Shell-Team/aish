@@ -16,6 +16,7 @@
 //! (`/resume`, `/fork`) can retarget the log without rebuilding the
 //! recorder installed inside `AiHandler`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aish_context::TranscriptRecorder;
@@ -45,7 +46,16 @@ impl TranscriptSessionHandle {
 /// Records every context append into the `ai_messages` table.
 pub struct SessionTranscriptRecorder {
     session: TranscriptSessionHandle,
-    store: Mutex<SessionStore>,
+    /// `None` when the session database could not be opened: the recorder
+    /// then drops appends (logging each one) instead of writing conversation
+    /// content to a fixed shared fallback path such as `/tmp`, where another
+    /// local user could pre-create a world-writable file.
+    store: Option<Mutex<SessionStore>>,
+    /// Appends that could not be written (store unavailable or SQLite
+    /// error). `/export` surfaces this as an incompleteness warning — the
+    /// transcript is authoritative once non-empty, so silent gaps would be
+    /// permanent.
+    failed_appends: AtomicUsize,
 }
 
 impl SessionTranscriptRecorder {
@@ -54,21 +64,78 @@ impl SessionTranscriptRecorder {
     /// bad path) degrades to a recorder that logs and drops appends, never
     /// one that breaks the conversation.
     pub fn open(path: Option<&std::path::Path>, session: TranscriptSessionHandle) -> Self {
-        let store = SessionStore::open(path).unwrap_or_else(|error| {
-            tracing::warn!(
-                %error,
-                "transcript recorder could not open session db; appends will be dropped"
-            );
-            // /tmp fallback keeps the recorder usable; the real store stays
-            // authoritative for sessions/history.
-            SessionStore::open(Some(std::path::Path::new(
-                "/tmp/aish-transcript-fallback.db",
-            )))
-            .expect("fallback transcript store must open")
-        });
+        let store = match SessionStore::open(path) {
+            Ok(store) => Some(Mutex::new(store)),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "transcript recorder could not open session db; appends will be dropped"
+                );
+                None
+            }
+        };
         Self {
             session,
-            store: Mutex::new(store),
+            store,
+            failed_appends: AtomicUsize::new(0),
+        }
+    }
+
+    /// Seed the transcript from a legacy session's context snapshot.
+    ///
+    /// Sessions persisted by older builds have a (possibly compacted)
+    /// snapshot but no transcript rows. If such a session is resumed and the
+    /// user then says something new, the transcript becomes non-empty and
+    /// `/export` would show only that one new turn, dropping the snapshot's
+    /// older messages entirely. Importing the snapshot once (only when the
+    /// transcript is still empty) keeps the best available history.
+    fn seed_from_snapshot(&self, snapshot: &[aish_context::ContextMessage]) {
+        if snapshot.is_empty() {
+            return;
+        }
+        let Some(store) = self.store.as_ref() else {
+            self.failed_appends
+                .fetch_add(snapshot.len(), Ordering::Relaxed);
+            return;
+        };
+        let session_uuid = self.session.get();
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
+        // Re-check under the lock: a concurrent turn may have appended the
+        // first real message between our caller's check and now.
+        match store.get_ai_messages(&session_uuid) {
+            Ok(existing) if !existing.is_empty() => return,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    session_uuid = %session_uuid,
+                    "could not read transcript before seeding; skipping snapshot import"
+                );
+                return;
+            }
+            Ok(_) => {}
+        }
+        let mut failed = 0usize;
+        for message in snapshot {
+            let entry = SessionContextMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                memory_type: message.memory_type.clone(),
+                name: message.name.clone(),
+                tool_call_id: message.tool_call_id.clone(),
+                tool_calls: message.tool_calls.clone(),
+                reasoning_content: message.reasoning_content.clone(),
+            };
+            if let Err(error) = store.append_ai_message(&session_uuid, &entry) {
+                failed += 1;
+                tracing::warn!(
+                    %error,
+                    session_uuid = %session_uuid,
+                    "failed to seed AI transcript from snapshot"
+                );
+            }
+        }
+        if failed > 0 {
+            self.failed_appends.fetch_add(failed, Ordering::Relaxed);
         }
     }
 
@@ -92,14 +159,27 @@ impl TranscriptRecorder for SessionTranscriptRecorder {
             reasoning_content: message.reasoning_content.clone(),
         };
         let session_uuid = self.session.get();
-        let store = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(store) = self.store.as_ref() else {
+            self.failed_appends.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let store = store.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = store.append_ai_message(&session_uuid, &entry) {
+            self.failed_appends.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 %error,
                 session_uuid = %session_uuid,
                 "failed to append AI transcript message"
             );
         }
+    }
+
+    fn seed_from_snapshot(&self, snapshot: &[aish_context::ContextMessage]) {
+        SessionTranscriptRecorder::seed_from_snapshot(self, snapshot)
+    }
+
+    fn failed_appends(&self) -> Option<usize> {
+        Some(self.failed_appends.load(Ordering::Relaxed))
     }
 }
 
@@ -201,5 +281,75 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "codeword APPLE-001");
         assert_eq!(messages[1].content, "noted APPLE-001");
+    }
+
+    #[test]
+    fn seeding_legacy_snapshot_survives_the_first_new_turn() {
+        // Review finding on PR #556: a legacy session (snapshot rows, no
+        // transcript) resumed and continued must keep its snapshot history
+        // in the export — seeding once must not be undone by later appends.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let handle = TranscriptSessionHandle::new("legacy".to_string());
+        let recorder = Arc::new(SessionTranscriptRecorder::open(Some(&db_path), handle));
+
+        let legacy_snapshot = vec![
+            aish_context::ContextMessage {
+                role: "user".to_string(),
+                content: "old question".to_string(),
+                memory_type: aish_core::MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
+            },
+            aish_context::ContextMessage {
+                role: "assistant".to_string(),
+                content: "old answer".to_string(),
+                memory_type: aish_core::MemoryType::Llm,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        ];
+
+        recorder.seed_from_snapshot(&legacy_snapshot);
+
+        let mut cm = ContextManager::new();
+        cm.set_transcript_recorder(recorder.clone());
+        cm.add_memory(aish_core::MemoryType::Llm, ctx_msg("user", "new turn"));
+
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        let messages = store.get_ai_messages("legacy").unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].content, "old answer");
+        assert_eq!(messages[2].content, "new turn");
+
+        // Seeding twice must not duplicate history.
+        recorder.seed_from_snapshot(&legacy_snapshot);
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        assert_eq!(store.get_ai_messages("legacy").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn seeding_is_skipped_when_transcript_already_has_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let handle = TranscriptSessionHandle::new("sess-f".to_string());
+        let recorder = SessionTranscriptRecorder::open(Some(&db_path), handle);
+        assert_eq!(recorder.failed_appends(), Some(0));
+
+        let mut cm = ContextManager::new();
+        cm.set_transcript_recorder(Arc::new(recorder));
+        cm.add_memory(aish_core::MemoryType::Llm, ctx_msg("user", "tracked"));
+        // Snapshot seed after a real turn: the transcript is non-empty, so
+        // the seed must be a no-op (the snapshot would duplicate history).
+        cm.seed_transcript_from_snapshot(&[ctx_msg("user", "seeded")]);
+
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+        let messages = store.get_ai_messages("sess-f").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "tracked");
     }
 }

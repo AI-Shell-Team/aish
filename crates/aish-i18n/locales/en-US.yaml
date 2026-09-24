@@ -595,6 +595,7 @@ shell:
     preview: "Export preview → {file}  ({msgs} messages, {cmds} commands, {hits} secret hit(s))"
     preview_hits: "{hits} secret(s) will be replaced with [REDACTED:…] markers."
     not_scanned: "not scanned (raw mode)"
+    incomplete_warning: "warning: {failed} transcript write(s) failed; the export may be missing recent messages."
     confirm: "Write the export file?"
     cancelled: "export cancelled"
   audit:
