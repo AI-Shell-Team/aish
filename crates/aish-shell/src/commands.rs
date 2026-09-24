@@ -67,9 +67,50 @@ pub fn is_state_modifying(cmd: &str) -> bool {
     STATE_MODIFYING_COMMANDS.contains(&cmd)
 }
 
+/// Basename of a command token (`/usr/bin/sudo` → `sudo`).
+pub fn command_basename(token: &str) -> &str {
+    token.rsplit('/').next().unwrap_or(token)
+}
+
+/// True when `token` is `su` or `sudo`, including an absolute path.
+pub fn is_privilege_command_token(token: &str) -> bool {
+    PTY_REQUIRING_COMMANDS.contains(&command_basename(token))
+}
+
 /// Check whether a command requires a PTY (interactive terminal).
 pub fn is_pty_requiring(cmd: &str) -> bool {
-    PTY_REQUIRING_COMMANDS.contains(&cmd)
+    is_privilege_command_token(cmd)
+}
+
+/// Text shown at the security confirmation and the text submitted to the PTY.
+///
+/// Both fields are the original line. Privilege commands are not rebuilt
+/// from whitespace tokens, so quotes, escaped spaces, and newlines survive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivilegeCommandPlan {
+    pub confirm_text: String,
+    pub execute_text: String,
+}
+
+/// Plan a `sudo` / `su` submission. `None` when the first token is not one.
+pub fn plan_privilege_command(line: &str) -> Option<PrivilegeCommandPlan> {
+    let trimmed = line.trim();
+    let first = trimmed.split_whitespace().next()?;
+    if !is_privilege_command_token(first) {
+        return None;
+    }
+    let text = trimmed.to_string();
+    Some(PrivilegeCommandPlan {
+        confirm_text: text.clone(),
+        execute_text: text,
+    })
+}
+
+/// SHA-256 hex digest of a command line, used to compare confirm and execute text.
+pub fn command_text_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Check whether a command should be rejected (intercepted).
@@ -78,6 +119,28 @@ pub fn is_rejected(cmd: &str) -> bool {
 }
 
 impl ShellState {
+    /// Dispatch one submitted line.
+    ///
+    /// `sudo` / `su` keep the original text in `pty_command`. Other builtins
+    /// still parse arguments with whitespace splitting.
+    pub fn handle_builtin_line(&mut self, line: &str) -> BuiltinResult {
+        let trimmed = line.trim();
+        if let Some(plan) = plan_privilege_command(trimmed) {
+            return BuiltinResult {
+                handled: false,
+                output: None,
+                should_exit: false,
+                route_to_pty: true,
+                pty_command: Some(plan.execute_text),
+            };
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        match parts.first().copied() {
+            Some(cmd) => self.handle_builtin(cmd, &parts[1..]),
+            None => BuiltinResult::not_handled(),
+        }
+    }
+
     /// Dispatch a built-in command by name.
     pub fn handle_builtin(&mut self, cmd: &str, args: &[&str]) -> BuiltinResult {
         match cmd {
@@ -91,7 +154,6 @@ impl ShellState {
             "help" => self.handle_help(args),
             "clear" => self.handle_clear(),
             "exit" | "quit" => self.handle_exit(),
-            "su" | "sudo" => self.handle_pty_command(cmd, args),
             "setup" => self.handle_setup(args),
             _ => BuiltinResult::not_handled(),
         }
@@ -519,18 +581,6 @@ impl ShellState {
         }
     }
 
-    // -- PTY routing for su/sudo ---------------------------------------------
-
-    fn handle_pty_command(&self, cmd: &str, args: &[&str]) -> BuiltinResult {
-        BuiltinResult {
-            handled: false,
-            output: None,
-            should_exit: false,
-            route_to_pty: true,
-            pty_command: Some(format!("{} {}", cmd, args.join(" "))),
-        }
-    }
-
     // -- setup ----------------------------------------------------------------
 
     fn handle_setup(&mut self, _args: &[&str]) -> BuiltinResult {
@@ -563,6 +613,8 @@ mod tests {
     fn test_is_pty_requiring() {
         assert!(is_pty_requiring("sudo"));
         assert!(is_pty_requiring("su"));
+        assert!(is_pty_requiring("/usr/bin/sudo"));
+        assert!(is_pty_requiring("/bin/su"));
         assert!(!is_pty_requiring("ls"));
     }
 
@@ -623,25 +675,84 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_pty_command_sudo() {
-        let state = ShellState::new();
-        let result = state.handle_pty_command("sudo", &["ls", "-la"]);
-        assert!(!result.handled);
-        assert_eq!(result.output, None);
-        assert!(!result.should_exit);
-        assert!(result.route_to_pty);
-        assert_eq!(result.pty_command, Some("sudo ls -la".to_string()));
+    fn privilege_plan_keeps_quoted_runs_of_spaces() {
+        let line = "sudo printf '%s\\n' 'a  b'";
+        let plan = plan_privilege_command(line).expect("sudo line");
+        assert_eq!(plan.execute_text, line);
+        assert_eq!(plan.confirm_text, line);
+        assert_eq!(plan.confirm_text.len(), line.len());
+        let digest = command_text_digest(line);
+        assert_eq!(command_text_digest(&plan.confirm_text), digest);
+        assert_eq!(command_text_digest(&plan.execute_text), digest);
     }
 
     #[test]
-    fn test_handle_pty_command_su() {
-        let state = ShellState::new();
-        let result = state.handle_pty_command("su", &["-"]);
-        assert!(!result.handled);
-        assert_eq!(result.output, None);
-        assert!(!result.should_exit);
+    fn privilege_plan_keeps_escaped_spaces() {
+        let line = "sudo echo a\\ \\ b";
+        let plan = plan_privilege_command(line).expect("sudo line");
+        assert_eq!(plan.execute_text, "sudo echo a\\ \\ b");
+        assert_eq!(plan.confirm_text, plan.execute_text);
+    }
+
+    #[test]
+    fn privilege_plan_keeps_sh_c_script() {
+        let line = "sudo sh -c 'printf \"%s\" \"a  b\"'";
+        let plan = plan_privilege_command(line).expect("sudo line");
+        assert_eq!(plan.execute_text, line);
+        assert_eq!(plan.confirm_text, plan.execute_text);
+    }
+
+    #[test]
+    fn privilege_plan_keeps_embedded_newline() {
+        let line = "sudo printf '%s' 'a\n\nb'";
+        let plan = plan_privilege_command(line).expect("sudo line");
+        assert_eq!(plan.execute_text, line);
+        assert!(plan.execute_text.contains('\n'));
+    }
+
+    #[test]
+    fn absolute_sudo_uses_the_original_line() {
+        let line = "/usr/bin/sudo id";
+        let plan = plan_privilege_command(line).expect("absolute sudo");
+        assert_eq!(plan.execute_text, line);
+        assert_eq!(plan.confirm_text, line);
+        assert_eq!(
+            command_text_digest(&plan.confirm_text),
+            command_text_digest(&plan.execute_text)
+        );
+    }
+
+    #[test]
+    fn su_plan_keeps_quoted_argument() {
+        let line = "su -c 'echo a  b'";
+        let plan = plan_privilege_command(line).expect("su line");
+        assert_eq!(plan.execute_text, line);
+        assert_eq!(plan.confirm_text, plan.execute_text);
+    }
+
+    #[test]
+    fn non_privilege_line_has_no_plan() {
+        assert!(plan_privilege_command("ls -la").is_none());
+        assert!(plan_privilege_command("echo sudo ls").is_none());
+    }
+
+    #[test]
+    fn builtin_line_routes_original_sudo_text() {
+        let mut state = ShellState::new();
+        let line = "sudo printf '%s\\n' 'a  b'";
+        let result = state.handle_builtin_line(line);
         assert!(result.route_to_pty);
-        assert_eq!(result.pty_command, Some("su -".to_string()));
+        assert_eq!(result.pty_command.as_deref(), Some(line));
+        assert!(!result.should_exit);
+    }
+
+    #[test]
+    fn builtin_line_routes_original_su_text() {
+        let mut state = ShellState::new();
+        let line = "su -c 'echo a  b'";
+        let result = state.handle_builtin_line(line);
+        assert!(result.route_to_pty);
+        assert_eq!(result.pty_command.as_deref(), Some(line));
     }
 
     #[test]
