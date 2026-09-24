@@ -3552,9 +3552,9 @@ impl AishShell {
         if crate::commands::is_state_modifying(first) && !crate::commands::is_rejected(first) {
             if !self.screen_shell_command(input) {
                 // Destructive payload blocked — skip the sync so bash never
-                // sees it. State in Rust is already updated by handle_builtin
-                // above, but the destructive payload never reaches bash.
-                self.record_history(input, 0);
+                // sees it. `screen_shell_command` already recorded exit 1.
+                // Rust state was updated by handle_builtin above; do not
+                // record a second history row as success.
                 return false;
             }
             self.sync_command_to_pty(input);
@@ -14033,6 +14033,28 @@ mod privilege_dispatch_tests {
             !mentioned,
             "a blocked privilege command must not be injected as a completed shell turn"
         );
+
+        // A blocked state-modifying builtin must not gain a success row.
+        // `screen_shell_command` records exit 1; the dispatcher must not
+        // append exit 0 afterwards.
+        let blocked_export = "export FOO=$(rm -rf /)";
+        assert!(!shell.process_readline_submission(blocked_export));
+        let history = shell
+            .session_store
+            .as_ref()
+            .expect("session store")
+            .get_history(&shell.session_uuid, 10)
+            .expect("history");
+        let export_rows: Vec<_> = history
+            .iter()
+            .filter(|e| e.command == blocked_export)
+            .collect();
+        assert_eq!(
+            export_rows.len(),
+            1,
+            "blocked export recorded once: {history:?}"
+        );
+        assert_eq!(export_rows[0].returncode, Some(1));
     }
 
     #[test]
