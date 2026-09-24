@@ -661,6 +661,10 @@ pub struct AishShell {
     pty: Arc<Mutex<aish_pty::PersistentPty>>,
     /// UUID for the current session, used to associate history entries.
     session_uuid: String,
+    /// Retarget handle for the append-only AI transcript (issue #530):
+    /// updated on `/resume` and `/fork` so later appends follow the active
+    /// session.
+    transcript_session: crate::session_transcript::TranscriptSessionHandle,
     /// Live-session resource monitor: warns when other detached sessions
     /// exceed CPU/RSS thresholds.
     resource_monitor: crate::resource_monitor::Monitor,
@@ -2201,6 +2205,20 @@ impl AishShell {
             }));
         }
 
+        // Issue #530: record every context append into the append-only AI
+        // transcript so `/export` survives compaction. Shares the session
+        // db path (own connection; WAL allows multiple).
+        let transcript_session =
+            crate::session_transcript::TranscriptSessionHandle::new(session_uuid.clone());
+        crate::session_transcript::SessionTranscriptRecorder::open(
+            config
+                .session_db_path
+                .as_ref()
+                .map(|s| std::path::Path::new(s)),
+            transcript_session.clone(),
+        )
+        .install(&mut ai_handler);
+
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
         let version = env!("CARGO_PKG_VERSION").to_string();
         // After an upgrade, show the Keep-a-Changelog range once (omp-style),
@@ -2335,6 +2353,7 @@ impl AishShell {
             operation_in_progress: false,
             pty,
             session_uuid,
+            transcript_session: transcript_session.clone(),
             streamed_content,
             phase: ShellPhase::Booting,
             interruption: InterruptionState::default(),
@@ -4402,11 +4421,31 @@ impl AishShell {
         };
         let snap = record.state_snapshot();
 
+        // Issue #530: prefer the append-only AI transcript, which keeps the
+        // full conversation even after micro/full compaction rewrote the
+        // context snapshot. Sessions persisted by older builds have no
+        // transcript rows yet — fall back to the (compacted) snapshot there.
+        let ai_messages = match store.get_ai_messages(uuid) {
+            Ok(messages) if !messages.is_empty() => messages,
+            Ok(_) => snap.context_messages_snapshot.clone(),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+
         // Scan and (by default) redact every exportable chunk. `--raw`
         // skips this, but only after the high-risk confirmation below.
         let redact_enabled = !opts.raw;
         let sections = build_redacted_export_sections(
-            &snap.context_messages_snapshot,
+            &ai_messages,
             &history,
             self.security_manager.secret_scanner(),
             redact_enabled,
@@ -4418,10 +4457,7 @@ impl AishShell {
         if opts.raw {
             let warn = t_with_args("shell.export.raw_warning", &{
                 let mut args = std::collections::HashMap::new();
-                args.insert(
-                    "msgs".to_string(),
-                    snap.context_messages_snapshot.len().to_string(),
-                );
+                args.insert("msgs".to_string(), ai_messages.len().to_string());
                 args.insert("cmds".to_string(), history.len().to_string());
                 args
             });
@@ -4437,10 +4473,7 @@ impl AishShell {
         let preview = t_with_args("shell.export.preview", &{
             let mut args = std::collections::HashMap::new();
             args.insert("file".to_string(), fname.clone());
-            args.insert(
-                "msgs".to_string(),
-                snap.context_messages_snapshot.len().to_string(),
-            );
+            args.insert("msgs".to_string(), ai_messages.len().to_string());
             args.insert("cmds".to_string(), history.len().to_string());
             // `{hits}` stays numeric in both modes; raw mode appends a
             // separate status clause below so "not scanned" never lands
@@ -4573,10 +4606,7 @@ impl AishShell {
                     t_with_args("shell.export.exported", &{
                         let mut args = std::collections::HashMap::new();
                         args.insert("file".to_string(), fname);
-                        args.insert(
-                            "msgs".to_string(),
-                            snap.context_messages_snapshot.len().to_string(),
-                        );
+                        args.insert("msgs".to_string(), ai_messages.len().to_string());
                         args.insert("cmds".to_string(), history.len().to_string());
                         args
                     })
@@ -7088,6 +7118,7 @@ impl AishShell {
         self.session_uuid = session.session_uuid.clone();
         self.ai_handler
             .set_audit_session_uuid(session.session_uuid.clone());
+        self.transcript_session.set(session.session_uuid.clone());
         if target_cwd != self.state.cwd {
             self.state.prev_cwd = Some(self.state.cwd.clone());
             self.state.cwd = target_cwd.clone();

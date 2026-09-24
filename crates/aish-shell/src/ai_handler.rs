@@ -260,6 +260,12 @@ impl AiHandler {
         self.context_manager.messages_snapshot()
     }
 
+    /// Mutable access to the persistent context manager (transcript
+    /// recorder installation, issue #530).
+    pub fn context_manager_mut(&mut self) -> &mut ContextManager {
+        &mut self.context_manager
+    }
+
     pub fn restore_context_messages(&mut self, messages: Vec<ContextMessage>) {
         self.context_manager.replace_messages(messages);
         self.context_manager.trim();
