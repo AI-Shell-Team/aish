@@ -5,10 +5,11 @@ use rusqlite::params;
 use tracing::debug;
 use uuid::Uuid;
 
-use aish_core::{AishError, AuditEvent, AuditEventType, AuditSink, Result};
+use aish_core::{AishError, AuditEvent, AuditEventType, AuditSink, MemoryType, Result};
 
 use crate::models::{
-    AuditEventRecord, AuditQuery, HistoryEntry, SessionRecord, SessionStateSnapshot,
+    AuditEventRecord, AuditQuery, HistoryEntry, SessionContextMessage, SessionRecord,
+    SessionStateSnapshot,
 };
 
 const SCHEMA: &str = r#"
@@ -36,6 +37,22 @@ CREATE TABLE IF NOT EXISTS history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_session ON history(session_uuid);
+
+CREATE TABLE IF NOT EXISTS ai_messages (
+    seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_uuid  TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    memory_type   TEXT NOT NULL DEFAULT 'llm',
+    extra         TEXT,
+    created_at    TEXT NOT NULL
+);
+-- No FOREIGN KEY on session_uuid: the transcript is an append-only safety
+-- net written by a separate SQLite connection before the session row may
+-- exist; a rejected append would permanently lose that turn from /export.
+-- Referential cleanup stays explicit in delete_session().
+
+CREATE INDEX IF NOT EXISTS idx_ai_messages_session ON ai_messages(session_uuid, seq);
 CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at);
 
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -185,6 +202,11 @@ impl SessionStore {
 
         tx.execute("DELETE FROM history WHERE session_uuid = ?1", params![uuid])
             .map_err(|e| AishError::Session(format!("failed to delete session history: {e}")))?;
+        tx.execute(
+            "DELETE FROM ai_messages WHERE session_uuid = ?1",
+            params![uuid],
+        )
+        .map_err(|e| AishError::Session(format!("failed to delete session ai messages: {e}")))?;
         // Reparent any children so deleting a forked parent does not orphan
         // them out of session_roots()/list_children(); they resurface as roots.
         // Clear branch_point_message_id too — it references the parent's now-
@@ -277,25 +299,36 @@ impl SessionStore {
         let now_str = now.to_rfc3339();
         let state_str = serde_json::to_string(&parent.state)?;
 
-        self.conn
-            .execute(
-                "INSERT INTO sessions
-                    (session_uuid, created_at, model, api_base, run_user, state,
-                     parent_session_uuid, branch_point_message_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    new_uuid,
-                    now_str,
-                    parent.model,
-                    parent.api_base,
-                    parent.run_user,
-                    state_str,
-                    parent_uuid,
-                    branch_point_message_id,
-                ],
-            )
-            .map_err(|e| AishError::Session(format!("failed to fork session: {e}")))?;
-
+        // Insert the child and copy its transcript in one transaction: a
+        // fork that silently lost its transcript would make `/export` fall
+        // back to the compacted snapshot and drop earlier turns (issue #530).
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| AishError::Session(format!("failed to start fork transaction: {e}")))?;
+        tx.execute(
+            "INSERT INTO sessions
+                (session_uuid, created_at, model, api_base, run_user, state,
+                 parent_session_uuid, branch_point_message_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                new_uuid,
+                now_str,
+                parent.model,
+                parent.api_base,
+                parent.run_user,
+                state_str,
+                parent_uuid,
+                branch_point_message_id,
+            ],
+        )
+        .map_err(|e| AishError::Session(format!("failed to fork session: {e}")))?;
+        // The fork must export the conversation up to its branch point, so
+        // copy the parent's append-only AI transcript too.
+        self.copy_ai_messages_tx(&tx, parent_uuid, new_uuid)
+            .map_err(|e| AishError::Session(format!("failed to copy fork transcript: {e}")))?;
+        tx.commit()
+            .map_err(|e| AishError::Session(format!("failed to commit fork: {e}")))?;
         Ok(SessionRecord {
             session_uuid: new_uuid.to_string(),
             created_at: now,
@@ -432,6 +465,121 @@ impl SessionStore {
         }
 
         Ok(entries)
+    }
+
+    // -----------------------------------------------------------------
+    // Append-only AI transcript (issue #530)
+    // -----------------------------------------------------------------
+
+    /// Append one message to a session's append-only AI transcript.
+    ///
+    /// Unlike `update_session_state`, which overwrites the compacted
+    /// context snapshot, rows here are never rewritten — compaction and
+    /// context trimming must not affect this log, so `/export` can always
+    /// recover the full conversation.
+    ///
+    /// `extra` carries the optional round-trip fields (`name`,
+    /// `tool_call_id`, `tool_calls`, `reasoning_content`) as a JSON object;
+    /// pass `None` for plain user/assistant turns.
+    pub fn append_ai_message(
+        &self,
+        session_uuid: &str,
+        message: &SessionContextMessage,
+    ) -> Result<i64> {
+        let extra = serialize_ai_extra(message)?;
+        self.conn
+            .execute(
+                "INSERT INTO ai_messages
+                    (session_uuid, role, content, memory_type, extra, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    session_uuid,
+                    message.role,
+                    message.content,
+                    memory_type_str(&message.memory_type),
+                    extra,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|e| AishError::Session(format!("failed to append ai message: {e}")))?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Read a session's full AI transcript in append order (oldest first).
+    pub fn get_ai_messages(&self, session_uuid: &str) -> Result<Vec<SessionContextMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT role, content, memory_type, extra
+                 FROM ai_messages WHERE session_uuid = ?1 ORDER BY seq ASC",
+            )
+            .map_err(|e| AishError::Session(format!("failed to prepare get_ai_messages: {e}")))?;
+
+        let rows = stmt
+            .query_map(params![session_uuid], |row| {
+                let extra_json: Option<String> = row.get(3)?;
+                let extra: serde_json::Value = extra_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::Value::Null);
+                Ok(SessionContextMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                    memory_type: parse_memory_type(&row.get::<_, String>(2)?),
+                    name: extra
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from),
+                    tool_call_id: extra
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from),
+                    tool_calls: extra
+                        .get("tool_calls")
+                        .cloned()
+                        .and_then(|v| serde_json::from_value(v).ok()),
+                    reasoning_content: extra
+                        .get("reasoning_content")
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from),
+                })
+            })
+            .map_err(|e| AishError::Session(format!("failed to query ai messages: {e}")))?;
+
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(
+                row.map_err(|e| AishError::Session(format!("failed to read ai message row: {e}")))?,
+            );
+        }
+        Ok(messages)
+    }
+
+    /// Copy the parent's AI transcript into a forked session (issue #530:
+    /// a fork must export the conversation up to its branch point).
+    pub fn copy_ai_messages(&self, from_session: &str, to_session: &str) -> Result<usize> {
+        self.copy_ai_messages_tx(&self.conn, from_session, to_session)
+    }
+
+    /// Transaction-aware core of [`Self::copy_ai_messages`]; `&Connection`
+    /// derefs from both the raw connection and an in-progress transaction,
+    /// so fork can run the copy in the same transaction as the child insert.
+    fn copy_ai_messages_tx<T: rusqlite::types::ToSql>(
+        &self,
+        conn: &rusqlite::Connection,
+        from_session: T,
+        to_session: T,
+    ) -> Result<usize> {
+        let updated = conn
+            .execute(
+                "INSERT INTO ai_messages
+                    (session_uuid, role, content, memory_type, extra, created_at)
+                 SELECT ?2, role, content, memory_type, extra, created_at
+                   FROM ai_messages WHERE session_uuid = ?1",
+                rusqlite::params![from_session, to_session],
+            )
+            .map_err(|e| AishError::Session(format!("failed to copy ai messages: {e}")))?;
+        Ok(updated)
     }
 
     /// Close the database connection gracefully.
@@ -593,6 +741,47 @@ impl AuditSink for AuditStore {
             tracing::warn!(%e, "failed to write audit event");
         }
     }
+}
+/// Serialize a `MemoryType` to the stable lowercase tag stored in the
+/// `ai_messages.memory_type` column.
+fn memory_type_str(memory_type: &MemoryType) -> &'static str {
+    match memory_type {
+        MemoryType::Llm => "llm",
+        MemoryType::Shell => "shell",
+        MemoryType::Knowledge => "knowledge",
+    }
+}
+
+/// Parse the lowercase tag stored in the `ai_messages.memory_type` column,
+/// defaulting to `llm` for rows written by older builds.
+fn parse_memory_type(tag: &str) -> MemoryType {
+    match tag {
+        "shell" => MemoryType::Shell,
+        "knowledge" => MemoryType::Knowledge,
+        _ => MemoryType::Llm,
+    }
+}
+
+/// Serialize the optional round-trip fields of an AI transcript message
+/// (`name`, `tool_call_id`, `tool_calls`, `reasoning_content`) into the
+/// `extra` JSON column. Returns `None` when the message carries none.
+fn serialize_ai_extra(message: &SessionContextMessage) -> Result<Option<String>> {
+    let has_any = message.name.is_some()
+        || message.tool_call_id.is_some()
+        || message.tool_calls.is_some()
+        || message.reasoning_content.is_some();
+    if !has_any {
+        return Ok(None);
+    }
+    let value = serde_json::json!({
+        "name": message.name,
+        "tool_call_id": message.tool_call_id,
+        "tool_calls": message.tool_calls,
+        "reasoning_content": message.reasoning_content,
+    });
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|e| AishError::Session(format!("failed to serialize ai message extra: {e}")))
 }
 
 /// Build a [`SessionRecord`] from a query row in the canonical column order:
@@ -1015,6 +1204,119 @@ mod tests {
         let db_path = temp.path().join("sessions.db");
         let store = SessionStore::open(Some(&db_path)).unwrap();
         (temp, store)
+    }
+
+    fn ai_msg(role: &str, content: &str) -> SessionContextMessage {
+        SessionContextMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn ai_messages_round_trip_with_extra_fields() {
+        let (_temp, store) = temp_store();
+        let session = store.create_session("m", None).unwrap();
+        let uuid = &session.session_uuid;
+
+        store
+            .append_ai_message(uuid, &ai_msg("user", "记住暗号 APPLE-001"))
+            .unwrap();
+        let mut assistant = ai_msg("assistant", "");
+        assistant.tool_calls = Some(vec![aish_core::ContextToolCall {
+            id: "call-1".to_string(),
+            name: "memory_store".to_string(),
+            arguments: "{}".to_string(),
+        }]);
+        store.append_ai_message(uuid, &assistant).unwrap();
+        let mut tool = ai_msg("tool", "<stdout>ok</stdout>");
+        tool.tool_call_id = Some("call-1".to_string());
+        tool.reasoning_content = Some("chain of thought".to_string());
+        store.append_ai_message(uuid, &tool).unwrap();
+
+        let messages = store.get_ai_messages(uuid).unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "记住暗号 APPLE-001");
+        assert_eq!(messages[1].tool_calls.as_ref().unwrap()[0].id, "call-1");
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(
+            messages[2].reasoning_content.as_deref(),
+            Some("chain of thought")
+        );
+        assert!(messages[0].tool_calls.is_none());
+        assert!(messages[0].reasoning_content.is_none());
+    }
+
+    #[test]
+    fn ai_messages_survive_state_overwrite() {
+        // Issue #530 core invariant: overwriting the compacted context
+        // snapshot must not touch the append-only transcript.
+        let (_temp, store) = temp_store();
+        let session = store.create_session("m", None).unwrap();
+        let uuid = &session.session_uuid;
+        store
+            .append_ai_message(uuid, &ai_msg("user", "original turn"))
+            .unwrap();
+
+        let record = store.get_session(uuid).unwrap().unwrap();
+        let mut snapshot = record.state_snapshot();
+        snapshot.context_messages_snapshot = vec![ai_msg(
+            "system",
+            "<conversation-summary>x</conversation-summary>",
+        )];
+        store.update_session_state(uuid, &snapshot).unwrap();
+
+        let messages = store.get_ai_messages(uuid).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "original turn");
+    }
+
+    #[test]
+    fn fork_session_copies_ai_transcript() {
+        let (_temp, store) = temp_store();
+        let parent = store.create_session("m", None).unwrap();
+        store
+            .append_ai_message(&parent.session_uuid, &ai_msg("user", "before fork"))
+            .unwrap();
+
+        store
+            .fork_session(&parent.session_uuid, None, "fork-1")
+            .unwrap();
+
+        let forked = store.get_ai_messages("fork-1").unwrap();
+        assert_eq!(forked.len(), 1);
+        assert_eq!(forked[0].content, "before fork");
+    }
+
+    #[test]
+    fn delete_session_removes_ai_messages() {
+        let (_temp, store) = temp_store();
+        let session = store.create_session("m", None).unwrap();
+        let uuid = session.session_uuid.clone();
+        store
+            .append_ai_message(&uuid, &ai_msg("user", "to be removed"))
+            .unwrap();
+
+        store.delete_session(&uuid).unwrap();
+        assert!(store.get_ai_messages(&uuid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ai_messages_are_isolated_per_session() {
+        let (_temp, store) = temp_store();
+        let a = store.create_session("m", None).unwrap();
+        let b = store.create_session("m", None).unwrap();
+        store
+            .append_ai_message(&a.session_uuid, &ai_msg("user", "in a"))
+            .unwrap();
+
+        assert!(store.get_ai_messages(&b.session_uuid).unwrap().is_empty());
     }
 
     #[test]

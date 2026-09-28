@@ -711,6 +711,7 @@ shell:
     preview: "Vista previa de exportación → {file}  ({msgs} mensajes, {cmds} comandos, {hits} secreto(s) detectado(s))"
     preview_hits: "Se reemplazarán {hits} secreto(s) con marcadores [REDACTED:…]."
     not_scanned: "no escaneado (modo raw)"
+    incomplete_warning: "advertencia: {failed} escritura(s) del historial fallaron; la exportación puede carecer de mensajes recientes."
     confirm: "¿Escribir el archivo de exportación?"
     cancelled: "exportación cancelada"
   audit:

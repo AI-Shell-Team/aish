@@ -595,6 +595,7 @@ shell:
     preview: "导出预览 → {file}（{msgs} 条消息，{cmds} 条命令，命中 {hits} 处敏感信息）"
     preview_hits: "将把 {hits} 处敏感信息替换为 [REDACTED:…] 标记。"
     not_scanned: "未扫描（raw 模式）"
+    incomplete_warning: "警告：{failed} 条对话记录写入失败，导出可能缺少最近的消息。"
     confirm: "确认写入导出文件？"
     cancelled: "已取消导出"
   audit:
