@@ -26,5 +26,6 @@ pub use budget::{
 };
 pub use manager::{
     ContextCompactReport, ContextManager, ContextStats, FullCompactReport, MicrocompactReport,
+    TranscriptRecorder,
 };
 pub use types::ContextMessage;

@@ -40,6 +40,7 @@ pub mod renderer;
 pub mod resource_monitor;
 pub mod resume_selector;
 pub mod security_panel;
+pub mod session_transcript;
 pub mod settings_panel;
 pub mod status;
 pub mod theme;

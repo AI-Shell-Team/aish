@@ -661,6 +661,13 @@ pub struct AishShell {
     pty: Arc<Mutex<aish_pty::PersistentPty>>,
     /// UUID for the current session, used to associate history entries.
     session_uuid: String,
+    /// Retarget handle for the append-only AI transcript (issue #530):
+    /// updated on `/resume` and `/fork` so later appends follow the active
+    /// session.
+    transcript_session: crate::session_transcript::TranscriptSessionHandle,
+    /// Snapshot restored by the most recent `/resume`, consumed once to
+    /// seed a legacy session's transcript (issue #530).
+    resumed_snapshot_for_seed: Option<Vec<aish_context::ContextMessage>>,
     /// Live-session resource monitor: warns when other detached sessions
     /// exceed CPU/RSS thresholds.
     resource_monitor: crate::resource_monitor::Monitor,
@@ -2201,6 +2208,20 @@ impl AishShell {
             }));
         }
 
+        // Issue #530: record every context append into the append-only AI
+        // transcript so `/export` survives compaction. Shares the session
+        // db path (own connection; WAL allows multiple).
+        let transcript_session =
+            crate::session_transcript::TranscriptSessionHandle::new(session_uuid.clone());
+        crate::session_transcript::SessionTranscriptRecorder::open(
+            config
+                .session_db_path
+                .as_ref()
+                .map(|s| std::path::Path::new(s)),
+            transcript_session.clone(),
+        )
+        .install(&mut ai_handler);
+
         // Note: event_callback is already set on the LlmSession before AiHandler takes ownership
         let version = env!("CARGO_PKG_VERSION").to_string();
         // After an upgrade, show the Keep-a-Changelog range once (omp-style),
@@ -2335,6 +2356,8 @@ impl AishShell {
             operation_in_progress: false,
             pty,
             session_uuid,
+            transcript_session: transcript_session.clone(),
+            resumed_snapshot_for_seed: None,
             streamed_content,
             phase: ShellPhase::Booting,
             interruption: InterruptionState::default(),
@@ -4402,11 +4425,46 @@ impl AishShell {
         };
         let snap = record.state_snapshot();
 
+        // Issue #530: prefer the append-only AI transcript, which keeps the
+        // full conversation even after micro/full compaction rewrote the
+        // context snapshot. Sessions persisted by older builds have no
+        // transcript rows yet — fall back to the (compacted) snapshot there.
+        let ai_messages = match store.get_ai_messages(uuid) {
+            Ok(messages) if !messages.is_empty() => messages,
+            Ok(_) => snap.context_messages_snapshot.clone(),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return;
+            }
+        };
+        // Surface transcript write failures: once the transcript is
+        // non-empty it is the export source, so failed appends are silent
+        // permanent gaps unless warned about here (issue #530 review).
+        if let Some(failed) = self.ai_handler.transcript_failed_appends() {
+            if failed > 0 {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.export.incomplete_warning", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("failed".to_string(), failed.to_string());
+                        args
+                    })
+                );
+            }
+        }
+
         // Scan and (by default) redact every exportable chunk. `--raw`
         // skips this, but only after the high-risk confirmation below.
         let redact_enabled = !opts.raw;
         let sections = build_redacted_export_sections(
-            &snap.context_messages_snapshot,
+            &ai_messages,
             &history,
             self.security_manager.secret_scanner(),
             redact_enabled,
@@ -4418,10 +4476,7 @@ impl AishShell {
         if opts.raw {
             let warn = t_with_args("shell.export.raw_warning", &{
                 let mut args = std::collections::HashMap::new();
-                args.insert(
-                    "msgs".to_string(),
-                    snap.context_messages_snapshot.len().to_string(),
-                );
+                args.insert("msgs".to_string(), ai_messages.len().to_string());
                 args.insert("cmds".to_string(), history.len().to_string());
                 args
             });
@@ -4437,10 +4492,7 @@ impl AishShell {
         let preview = t_with_args("shell.export.preview", &{
             let mut args = std::collections::HashMap::new();
             args.insert("file".to_string(), fname.clone());
-            args.insert(
-                "msgs".to_string(),
-                snap.context_messages_snapshot.len().to_string(),
-            );
+            args.insert("msgs".to_string(), ai_messages.len().to_string());
             args.insert("cmds".to_string(), history.len().to_string());
             // `{hits}` stays numeric in both modes; raw mode appends a
             // separate status clause below so "not scanned" never lands
@@ -4573,10 +4625,7 @@ impl AishShell {
                     t_with_args("shell.export.exported", &{
                         let mut args = std::collections::HashMap::new();
                         args.insert("file".to_string(), fname);
-                        args.insert(
-                            "msgs".to_string(),
-                            snap.context_messages_snapshot.len().to_string(),
-                        );
+                        args.insert("msgs".to_string(), ai_messages.len().to_string());
                         args.insert("cmds".to_string(), history.len().to_string());
                         args
                     })
@@ -7028,10 +7077,13 @@ impl AishShell {
             self.persist_session_snapshot();
         }
 
-        let Some(store) = self.session_store.as_ref() else {
-            return Err(aish_core::AishError::Session(t(
-                "shell.resume.session_store_unavailable",
-            )));
+        let store = match self.session_store.as_ref() {
+            Some(s) => s,
+            None => {
+                return Err(aish_core::AishError::Session(t(
+                    "shell.resume.session_store_unavailable",
+                )));
+            }
         };
 
         let session = match store.get_session(session_id) {
@@ -7051,9 +7103,33 @@ impl AishShell {
 
         let snapshot = session.state_snapshot();
         let saved_cwd = snapshot.cwd.clone();
+        // Issue #530: kept for the transcript seed below — the recorder
+        // wants the snapshot as context messages, the restore path wants
+        // the session-model variant.
+        let restored_context = snapshot
+            .context_messages_snapshot
+            .iter()
+            .map(|message| aish_context::ContextMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                memory_type: message.memory_type.clone(),
+                name: message.name.clone(),
+                tool_call_id: message.tool_call_id.clone(),
+                tool_calls: message.tool_calls.clone(),
+                reasoning_content: message.reasoning_content.clone(),
+            })
+            .collect::<Vec<_>>();
         self.ai_handler
-            .restore_session_context_snapshot(snapshot.context_messages_snapshot);
+            .restore_context_messages(restored_context.clone());
 
+        // Issue #530: a legacy session (snapshot but no transcript rows)
+        // resumed here must not let its first new turn become the only
+        // exported message — seed the snapshot into the transcript once.
+        let transcript_is_empty =
+            matches!(store.get_ai_messages(&session.session_uuid), Ok(m) if m.is_empty());
+        if transcript_is_empty {
+            self.resumed_snapshot_for_seed = Some(restored_context.clone());
+        }
         if self.config.model != session.model
             || session.api_base.as_deref() != Some(&self.config.api_base)
         {
@@ -7088,6 +7164,13 @@ impl AishShell {
         self.session_uuid = session.session_uuid.clone();
         self.ai_handler
             .set_audit_session_uuid(session.session_uuid.clone());
+        self.transcript_session.set(session.session_uuid.clone());
+        if transcript_is_empty {
+            if let Some(snapshot_messages) = self.resumed_snapshot_for_seed.take() {
+                self.ai_handler
+                    .seed_transcript_from_snapshot(&snapshot_messages);
+            }
+        }
         if target_cwd != self.state.cwd {
             self.state.prev_cwd = Some(self.state.cwd.clone());
             self.state.cwd = target_cwd.clone();

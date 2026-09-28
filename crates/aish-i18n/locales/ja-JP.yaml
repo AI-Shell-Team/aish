@@ -711,6 +711,7 @@ shell:
     preview: "エクスポート プレビュー → {file}（{msgs} メッセージ、{cmds} コマンド、機密情報 {hits} 件検出）"
     preview_hits: "{hits} 件の機密情報が [REDACTED:…] マーカーに置き換えられます。"
     not_scanned: "未スキャン（raw モード）"
+    incomplete_warning: "警告：トランスクリプトの書き込みが {failed} 回失敗しました。エクスポートに最近のメッセージが欠けている可能性があります。"
     confirm: "エクスポートファイルを書き込みますか？"
     cancelled: "エクスポートをキャンセルしました"
   audit:
