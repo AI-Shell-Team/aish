@@ -16,7 +16,7 @@
 //! (`/resume`, `/fork`) can retarget the log without rebuilding the
 //! recorder installed inside `AiHandler`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aish_context::TranscriptRecorder;
@@ -52,10 +52,12 @@ pub struct SessionTranscriptRecorder {
     /// local user could pre-create a world-writable file.
     store: Option<Mutex<SessionStore>>,
     /// Appends that could not be written (store unavailable or SQLite
-    /// error). `/export` surfaces this as an incompleteness warning — the
-    /// transcript is authoritative once non-empty, so silent gaps would be
-    /// permanent.
-    failed_appends: AtomicUsize,
+    /// error), tracked per session: `/resume` and `/fork` retarget the
+    /// recorder, and `/export` must warn about the *active* session's gaps
+    /// only, never carry a previous session's failures over. Guarded by the
+    /// same lock pattern as the store; contention is irrelevant (one add
+    /// per turn).
+    failed_appends: Mutex<HashMap<String, usize>>,
 }
 
 impl SessionTranscriptRecorder {
@@ -77,7 +79,7 @@ impl SessionTranscriptRecorder {
         Self {
             session,
             store,
-            failed_appends: AtomicUsize::new(0),
+            failed_appends: Mutex::new(HashMap::new()),
         }
     }
 
@@ -94,8 +96,7 @@ impl SessionTranscriptRecorder {
             return;
         }
         let Some(store) = self.store.as_ref() else {
-            self.failed_appends
-                .fetch_add(snapshot.len(), Ordering::Relaxed);
+            self.record_failed_appends(snapshot.len());
             return;
         };
         let session_uuid = self.session.get();
@@ -135,8 +136,30 @@ impl SessionTranscriptRecorder {
             }
         }
         if failed > 0 {
-            self.failed_appends.fetch_add(failed, Ordering::Relaxed);
+            self.record_failed_appends(failed);
         }
+    }
+
+    /// Count failed appends against the currently active session so a
+    /// session switch (`/resume`, `/fork`) leaves other sessions' counts
+    /// untouched.
+    fn record_failed_appends(&self, count: usize) {
+        let session_uuid = self.session.get();
+        let mut map = self
+            .failed_appends
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *map.entry(session_uuid).or_insert(0) += count;
+    }
+
+    /// Per-session failed-append counts. The active session's count is
+    /// what [`Self::failed_appends`] reports; the full map is exposed for
+    /// diagnostics.
+    pub fn failed_appends_map(&self) -> HashMap<String, usize> {
+        self.failed_appends
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Install this recorder into the handler's context manager.
@@ -160,12 +183,12 @@ impl TranscriptRecorder for SessionTranscriptRecorder {
         };
         let session_uuid = self.session.get();
         let Some(store) = self.store.as_ref() else {
-            self.failed_appends.fetch_add(1, Ordering::Relaxed);
+            self.record_failed_appends(1);
             return;
         };
         let store = store.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = store.append_ai_message(&session_uuid, &entry) {
-            self.failed_appends.fetch_add(1, Ordering::Relaxed);
+            self.record_failed_appends(1);
             tracing::warn!(
                 %error,
                 session_uuid = %session_uuid,
@@ -179,7 +202,12 @@ impl TranscriptRecorder for SessionTranscriptRecorder {
     }
 
     fn failed_appends(&self) -> Option<usize> {
-        Some(self.failed_appends.load(Ordering::Relaxed))
+        let session_uuid = self.session.get();
+        let map = self
+            .failed_appends
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Some(*map.get(&session_uuid).unwrap_or(&0))
     }
 }
 
@@ -351,5 +379,38 @@ mod tests {
         let messages = store.get_ai_messages("sess-f").unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "tracked");
+    }
+
+    #[test]
+    fn failed_appends_do_not_carry_across_session_switch() {
+        // PR 556 review: the counter must be scoped to the active session —
+        // session B's /export must not warn about session A's failures.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("sessions.db");
+        let handle = TranscriptSessionHandle::new("sess-a".to_string());
+        let recorder = Arc::new(SessionTranscriptRecorder::open(
+            Some(&db_path),
+            handle.clone(),
+        ));
+        assert_eq!(recorder.failed_appends(), Some(0));
+
+        let mut cm = ContextManager::new();
+        cm.set_transcript_recorder(recorder.clone());
+        cm.add_memory(aish_core::MemoryType::Llm, ctx_msg("user", "turn in A"));
+
+        handle.set("sess-b".to_string());
+        cm.add_memory(aish_core::MemoryType::Llm, ctx_msg("user", "turn in B"));
+
+        // Session B's counter is its own: no carry-over from session A
+        // (both appends above succeeded; a carry-over would surface here).
+        assert_eq!(recorder.failed_appends(), Some(0));
+        assert_eq!(
+            recorder
+                .failed_appends_map()
+                .get("sess-a")
+                .copied()
+                .unwrap_or(0),
+            0
+        );
     }
 }
