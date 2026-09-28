@@ -122,13 +122,12 @@ pub fn canonical_url_key(url: &str) -> String {
         Some(idx) => &trimmed[idx + 3..],
         None => trimmed,
     };
-    // Lowercase first so `WWW.` and mixed-case hosts normalize identically,
-    // then strip the `www.` prefix, fragment, and trailing slash.
-    let lowered = after_scheme.to_lowercase();
-    let lowered = lowered.split('#').next().unwrap_or(&lowered).to_string();
-    let (host, path_query) = match lowered.find('/') {
-        Some(idx) => (lowered[..idx].to_string(), lowered[idx..].to_string()),
-        None => (lowered, String::new()),
+    // Lowercase only the host so case-sensitive paths and queries stay
+    // distinct; strip fragment, www. prefix, and trailing slash.
+    let no_frag = after_scheme.split('#').next().unwrap_or(after_scheme);
+    let (host, path_query) = match no_frag.find('/') {
+        Some(idx) => (no_frag[..idx].to_lowercase(), no_frag[idx..].to_string()),
+        None => (no_frag.to_lowercase(), String::new()),
     };
     let host_no_www = host
         .strip_prefix("www.")
@@ -170,6 +169,11 @@ mod tests {
         assert_ne!(
             canonical_url_key("https://e.com/a?x=1"),
             canonical_url_key("https://e.com/a?x=2")
+        );
+        // Case-sensitive paths stay distinct (only host is lowercased).
+        assert_ne!(
+            canonical_url_key("https://github.com/Foo/Bar"),
+            canonical_url_key("https://github.com/foo/bar")
         );
     }
 

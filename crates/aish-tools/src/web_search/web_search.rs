@@ -21,6 +21,12 @@ const TOOL_NAME: &str = "WebSearch";
 /// parity: 240 chars per snippet).
 const SNIPPET_MAX_CHARS: usize = 240;
 
+/// Maximum query length in chars (issue #566: explicit query limit).
+const MAX_QUERY_CHARS: usize = 1_000;
+
+/// Hard byte cap for the LLM-facing text block (issue #566: bounded output).
+const MAX_OUTPUT_BYTES: usize = 4 * 1024;
+
 /// Orchestrates one web query across an ordered provider chain with
 /// sequential fallback (omp `executeSearch` parity): the first provider that
 /// returns a renderable response wins; every failure advances the chain.
@@ -122,10 +128,19 @@ impl WebSearchTool {
                     ));
                 }
             }
+            // Stop early if we have already exceeded the byte budget; the
+            // untrusted hint is still appended below within the cap.
+            if out.len() >= MAX_OUTPUT_BYTES {
+                break;
+            }
         }
 
         out.push('\n');
         out.push_str(&aish_i18n::t("tools.web_search.untrusted_hint"));
+        // Enforce the hard byte cap on the final rendered output.
+        if out.len() > MAX_OUTPUT_BYTES {
+            truncate_bytes(&mut out, MAX_OUTPUT_BYTES);
+        }
         out
     }
 }
@@ -136,6 +151,18 @@ fn truncate_chars(text: &str, max: usize) -> String {
     }
     let cut: String = text.chars().take(max).collect();
     format!("{cut}…")
+}
+
+/// Truncate `s` to at most `max_bytes` on a UTF-8 char boundary.
+fn truncate_bytes(s: &mut String, max_bytes: usize) {
+    if s.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
 }
 
 impl Tool for WebSearchTool {
@@ -158,7 +185,11 @@ impl Tool for WebSearchTool {
     fn preflight(&self, args: &serde_json::Value) -> PreflightResult {
         let query = args.get("query").and_then(|value| value.as_str());
         match query {
-            Some(query) if !query.trim().is_empty() => PreflightResult::Allow,
+            Some(query)
+                if !query.trim().is_empty() && query.trim().chars().count() <= MAX_QUERY_CHARS =>
+            {
+                PreflightResult::Allow
+            }
             _ => {
                 let message = aish_i18n::t("tools.web_search.missing_query").to_string();
                 PreflightResult::Block {
@@ -236,6 +267,9 @@ impl WebSearchTool {
         else {
             return ToolResult::error(aish_i18n::t("tools.web_search.missing_query"));
         };
+        if query.chars().count() > MAX_QUERY_CHARS {
+            return ToolResult::error(aish_i18n::t("tools.web_search.query_too_long"));
+        }
         let limit = args
             .get("limit")
             .and_then(|value| value.as_u64())
