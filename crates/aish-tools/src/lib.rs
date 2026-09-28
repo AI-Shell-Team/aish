@@ -161,6 +161,20 @@ pub mod web_fetch {
 
     pub use self::web_fetch::*;
 }
+pub mod web_search {
+    mod bing;
+    mod duckduckgo;
+    mod engines;
+    mod prompt;
+    mod provider;
+    mod types;
+    mod web_search;
+    mod web_search_config;
+
+    pub use self::types::{SearchProviderError, SearchResponse, SearchResult};
+    pub use self::web_search::WebSearchTool;
+    pub use self::web_search_config::WebSearchConfig;
+}
 
 pub mod write_file {
     mod prompt;
@@ -185,3 +199,8 @@ pub use secure_bash::SecureBashTool;
 pub use skill_registry::{SkillInstallTool, SkillSearchTool, SkillTrustTool};
 pub use skill_tool::{SkillInfo, SkillSpawnFn, SkillSpawnRequest, SkillTool};
 pub use web_fetch::WebFetchTool;
+pub use web_search::SearchProviderError;
+pub use web_search::SearchResponse;
+pub use web_search::SearchResult;
+pub use web_search::WebSearchConfig;
+pub use web_search::WebSearchTool;

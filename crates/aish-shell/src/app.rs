@@ -1125,6 +1125,9 @@ impl AishShell {
             Some(config.temperature),
             config.max_tokens,
         )));
+        tool_registry.register(Box::new(aish_tools::WebSearchTool::from_config(
+            &aish_tools::WebSearchConfig::from_env(),
+        )));
         tool_registry.register(Box::new(aish_tools::EnterPlanModeTool::new()));
         tool_registry.register(Box::new(aish_tools::ExitPlanModeTool::new()));
         // AgentTool is registered after skill loading so the parent session already
@@ -7201,6 +7204,10 @@ impl AishShell {
                 &self.config.model,
                 Some(self.config.temperature),
                 self.config.max_tokens,
+            )));
+        self.ai_handler
+            .register_tool(Box::new(aish_tools::WebSearchTool::from_config(
+                &aish_tools::WebSearchConfig::from_env(),
             )));
     }
 
