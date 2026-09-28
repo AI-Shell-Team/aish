@@ -5,7 +5,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::provider::{
-    build_search_client, epoch_now, status_error, transport_error, user_agent, SearchProvider,
+    build_search_client, epoch_now, read_response_json, status_error, transport_error, user_agent,
+    SearchProvider,
 };
 use super::types::{SearchProviderError, SearchResponse, SearchResult};
 
@@ -84,9 +85,9 @@ impl SearchProvider for BraveProvider {
             if !status.is_success() {
                 return SearchResponse::failed("brave", status_error(status));
             }
-            let payload: BraveApiResponse = match response.json().await {
+            let payload: BraveApiResponse = match read_response_json(response).await {
                 Ok(payload) => payload,
-                Err(err) => return SearchResponse::failed("brave", transport_error(&err)),
+                Err(err) => return SearchResponse::failed("brave", err),
             };
 
             let fetched_at = epoch_now();
@@ -182,9 +183,9 @@ impl SearchProvider for TavilyProvider {
             if !status.is_success() {
                 return SearchResponse::failed("tavily", status_error(status));
             }
-            let payload: TavilyApiResponse = match response.json().await {
+            let payload: TavilyApiResponse = match read_response_json(response).await {
                 Ok(payload) => payload,
-                Err(err) => return SearchResponse::failed("tavily", transport_error(&err)),
+                Err(err) => return SearchResponse::failed("tavily", err),
             };
 
             let fetched_at = epoch_now();
@@ -284,9 +285,9 @@ impl SearchProvider for SearxngProvider {
             if !status.is_success() {
                 return SearchResponse::failed("searxng", status_error(status));
             }
-            let payload: SearxngApiResponse = match response.json().await {
+            let payload: SearxngApiResponse = match read_response_json(response).await {
                 Ok(payload) => payload,
-                Err(err) => return SearchResponse::failed("searxng", transport_error(&err)),
+                Err(err) => return SearchResponse::failed("searxng", err),
             };
 
             let fetched_at = epoch_now();

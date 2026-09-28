@@ -2,6 +2,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
+
 use super::types::{SearchProviderError, SearchResponse};
 
 /// One search backend. Implementations translate an upstream payload into a
@@ -81,6 +83,38 @@ pub(crate) fn status_error(status: reqwest::StatusCode) -> SearchProviderError {
         503 => SearchProviderError::RateLimited,
         _ => SearchProviderError::Network(format!("HTTP {}", status.as_u16())),
     }
+}
+
+/// Shared body size limit for all provider responses (2 MiB).
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Read a response body incrementally, failing fast once it exceeds
+/// [`MAX_BODY_BYTES`] instead of buffering an unbounded payload in memory.
+pub(crate) async fn read_response_body(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, SearchProviderError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| transport_error(&err))?
+    {
+        if chunk.len() > MAX_BODY_BYTES - body.len() {
+            return Err(SearchProviderError::Network(
+                "response body too large".to_string(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// Read a bounded body and decode it as JSON (issue #566: bounded content).
+pub(crate) async fn read_response_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, SearchProviderError> {
+    let body = read_response_body(response).await?;
+    serde_json::from_slice(&body).map_err(|err| SearchProviderError::Network(err.to_string()))
 }
 
 #[cfg(test)]

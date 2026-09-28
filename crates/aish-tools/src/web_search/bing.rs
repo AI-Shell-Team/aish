@@ -3,7 +3,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use super::provider::{
-    build_search_client, epoch_now, status_error, transport_error, user_agent, SearchProvider,
+    build_search_client, epoch_now, read_response_body, status_error, transport_error, user_agent,
+    SearchProvider,
 };
 use super::types::{SearchProviderError, SearchResponse, SearchResult};
 
@@ -57,18 +58,9 @@ impl SearchProvider for BingProvider {
                 return SearchResponse::failed(PROVIDER_ID, status_error(status));
             }
             // Bound the body read (omp/DoS defense parity with the DDG adapter).
-            const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
-            let body = match response.bytes().await {
-                Ok(bytes) if bytes.len() <= MAX_BODY_BYTES => {
-                    String::from_utf8_lossy(&bytes).into_owned()
-                }
-                Ok(_) => {
-                    return SearchResponse::failed(
-                        PROVIDER_ID,
-                        SearchProviderError::Network("response body too large".to_string()),
-                    )
-                }
-                Err(err) => return SearchResponse::failed(PROVIDER_ID, transport_error(&err)),
+            let body = match read_response_body(response).await {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(err) => return SearchResponse::failed(PROVIDER_ID, err),
             };
 
             let entries = parse_serp(&body);
