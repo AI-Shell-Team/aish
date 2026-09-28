@@ -125,7 +125,7 @@ pub fn canonical_url_key(url: &str) -> String {
     // Lowercase only the host so case-sensitive paths and queries stay
     // distinct; strip fragment, www. prefix, and trailing slash.
     let no_frag = after_scheme.split('#').next().unwrap_or(after_scheme);
-    let (host, path_query) = match no_frag.find('/') {
+    let (host, path_query) = match no_frag.find(['/', '?']) {
         Some(idx) => (no_frag[..idx].to_lowercase(), no_frag[idx..].to_string()),
         None => (no_frag.to_lowercase(), String::new()),
     };
@@ -174,6 +174,11 @@ mod tests {
         assert_ne!(
             canonical_url_key("https://github.com/Foo/Bar"),
             canonical_url_key("https://github.com/foo/bar")
+        );
+        // Query-only URLs: case-sensitive query stays distinct too.
+        assert_ne!(
+            canonical_url_key("https://example.com?key=A"),
+            canonical_url_key("https://example.com?key=a")
         );
     }
 

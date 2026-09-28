@@ -93,8 +93,14 @@ impl WebSearchTool {
         ));
         out.push('\n');
 
+        // Reserve room for the trailing untrusted hint so it always survives
+        // the byte budget — truncation must never cut it or a source URL.
+        let hint = aish_i18n::t("tools.web_search.untrusted_hint").to_string();
+        let budget = MAX_OUTPUT_BYTES.saturating_sub(hint.len() + 2);
+
         // Defensive: callers guard via `is_renderable`, but never index blind.
         let Some(first) = response.results.first() else {
+            out.push_str(&hint);
             return out;
         };
         out.push_str(&format!(
@@ -104,16 +110,20 @@ impl WebSearchTool {
 
         out.push('\n');
         for (index, result) in response.results.iter().enumerate() {
+            // Render one complete entry (title + URL + snippet) per pass;
+            // append it only if the whole entry fits the budget, so no URL
+            // or snippet is ever left partially truncated.
+            let mut entry = String::new();
             let date = result.published.as_deref().unwrap_or("");
             if date.is_empty() {
-                out.push_str(&format!(
+                entry.push_str(&format!(
                     "[{}] {}\n    {}\n",
                     index + 1,
                     result.title,
                     result.url
                 ));
             } else {
-                out.push_str(&format!(
+                entry.push_str(&format!(
                     "[{}] ({date}) {}\n    {}\n",
                     index + 1,
                     result.title,
@@ -122,25 +132,20 @@ impl WebSearchTool {
             }
             if let Some(snippet) = result.snippet.as_deref() {
                 if !snippet.is_empty() {
-                    out.push_str(&format!(
+                    entry.push_str(&format!(
                         "    {}\n",
                         truncate_chars(snippet, SNIPPET_MAX_CHARS)
                     ));
                 }
             }
-            // Stop early if we have already exceeded the byte budget; the
-            // untrusted hint is still appended below within the cap.
-            if out.len() >= MAX_OUTPUT_BYTES {
+            if out.len() + entry.len() > budget {
                 break;
             }
+            out.push_str(&entry);
         }
 
         out.push('\n');
-        out.push_str(&aish_i18n::t("tools.web_search.untrusted_hint"));
-        // Enforce the hard byte cap on the final rendered output.
-        if out.len() > MAX_OUTPUT_BYTES {
-            truncate_bytes(&mut out, MAX_OUTPUT_BYTES);
-        }
+        out.push_str(&hint);
         out
     }
 }
@@ -151,18 +156,6 @@ fn truncate_chars(text: &str, max: usize) -> String {
     }
     let cut: String = text.chars().take(max).collect();
     format!("{cut}…")
-}
-
-/// Truncate `s` to at most `max_bytes` on a UTF-8 char boundary.
-fn truncate_bytes(s: &mut String, max_bytes: usize) {
-    if s.len() <= max_bytes {
-        return;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s.truncate(end);
 }
 
 impl Tool for WebSearchTool {
@@ -191,7 +184,12 @@ impl Tool for WebSearchTool {
                 PreflightResult::Allow
             }
             _ => {
-                let message = aish_i18n::t("tools.web_search.missing_query").to_string();
+                let key = if query.is_some_and(|q| !q.trim().is_empty()) {
+                    "tools.web_search.query_too_long"
+                } else {
+                    "tools.web_search.missing_query"
+                };
+                let message = aish_i18n::t(key).to_string();
                 PreflightResult::Block {
                     message: message.clone(),
                     security: Some(aish_llm::PreflightSecurityContext::fallback(
@@ -636,5 +634,42 @@ mod tests {
             tool.preflight(&serde_json::json!({ "query": "rust tokio" })),
             PreflightResult::Allow
         ));
+    }
+
+    #[test]
+    fn preflight_reports_too_long_query_distinctly() {
+        let config = WebSearchConfig::default();
+        let tool = WebSearchTool::from_config(&config);
+        let long = "q".repeat(MAX_QUERY_CHARS + 1);
+        match tool.preflight(&serde_json::json!({ "query": long })) {
+            PreflightResult::Block { message, .. } => {
+                assert_eq!(message, aish_i18n::t("tools.web_search.query_too_long"));
+            }
+            _ => panic!("overlong query must be blocked"),
+        }
+    }
+
+    #[test]
+    fn output_budget_never_truncates_url_or_hint() {
+        // Long titles/URLs: each entry must be appended whole or skipped;
+        // the untrusted hint must always be present and complete.
+        let big = |i: usize| {
+            let mut r = entry(&format!("https://example.com/{i}/{}", "p".repeat(300)));
+            r.title = "T".repeat(300);
+            r
+        };
+        let response = SearchResponse::ok("t", (0..20).map(big).collect());
+        let text = WebSearchTool::format_for_llm(&response);
+        assert!(text.len() <= MAX_OUTPUT_BYTES);
+        assert!(text.ends_with(&aish_i18n::t("tools.web_search.untrusted_hint")));
+        // Every URL that appears must appear completely (as a full line).
+        for line in text.lines() {
+            if line.trim_start().starts_with("http") {
+                assert!(
+                    line.trim().ends_with(&"p".repeat(300)),
+                    "URL line truncated"
+                );
+            }
+        }
     }
 }
