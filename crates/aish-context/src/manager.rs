@@ -425,8 +425,11 @@ impl ContextManager {
         }
         let before_tokens = suffix_tokens[0];
         let warm_threshold = self.budget_policy.cache_warm_suffix_tokens;
-        let cache_warm =
-            |idx: usize| suffix_tokens.get(idx + 1).copied().unwrap_or(0) > warm_threshold;
+        // A zero threshold disables the warm guard (documented contract):
+        // every message is treated as cold and microcompact keeps reclaiming.
+        let cache_warm = |idx: usize| {
+            warm_threshold > 0 && suffix_tokens.get(idx + 1).copied().unwrap_or(0) > warm_threshold
+        };
 
         let shell_indices: Vec<usize> = self
             .messages
@@ -616,11 +619,14 @@ impl ContextManager {
         let warm_threshold = self.budget_policy.cache_warm_suffix_tokens;
         // A group is warm when the context from its start to the end of the
         // transcript exceeds the warm budget — evicting it would drop a big
-        // warm chunk and bust the provider's prompt-cache prefix.
+        // warm chunk and bust the provider's prompt-cache prefix. A zero
+        // threshold disables the guard (documented contract), so the
+        // count-based pass keeps enforcing its cap.
         let is_warm_group = |g: &[usize]| {
-            g.first().is_some_and(|&first| {
-                suffix_tokens.get(first).copied().unwrap_or(0) > warm_threshold
-            })
+            warm_threshold > 0
+                && g.first().is_some_and(|&first| {
+                    suffix_tokens.get(first).copied().unwrap_or(0) > warm_threshold
+                })
         };
 
         let to_remove = count - limit;
@@ -1153,6 +1159,64 @@ mod tests {
             3,
             "all-warm candidates must not be evicted by the count-based pass"
         );
+    }
+
+    /// A zero `cache_warm_suffix_tokens` disables the warm guard (documented
+    /// contract): the count cap keeps being enforced instead of being
+    /// silently bypassed by "everything is warm".
+    #[test]
+    fn trim_by_type_zero_warm_threshold_disables_guard() {
+        let mut mgr = ContextManager::with_limits(2, 20, 2);
+        mgr.set_budget_policy(ContextBudgetPolicy {
+            enable_token_estimation: false,
+            cache_warm_suffix_tokens: 0,
+            ..Default::default()
+        });
+        let a = ContextMessage {
+            role: "assistant".to_string(),
+            content: "calling tool".to_string(),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![aish_core::ContextToolCall {
+                id: "c1".to_string(),
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            reasoning_content: None,
+        };
+        mgr.add_memory(MemoryType::Llm, a);
+        mgr.add_memory(
+            MemoryType::Llm,
+            ContextMessage {
+                role: "tool".to_string(),
+                content: "result".to_string(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: Some("c1".to_string()),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        );
+        mgr.add_message(
+            "user",
+            &format!("q {}", "y".repeat(36_000)),
+            MemoryType::Llm,
+        );
+
+        // Without the guard, the count cap (2) must evict the oldest group
+        // (the assistant+tool pair) even though the suffix is large.
+        mgr.trim();
+        assert_eq!(
+            mgr.get_context_size(),
+            1,
+            "zero warm threshold must not bypass the count cap"
+        );
+        let tool_alive = mgr
+            .messages
+            .iter()
+            .any(|m| m.role == "tool" && m.tool_call_id.as_deref() == Some("c1"));
+        assert!(!tool_alive, "the oldest group must be evicted");
     }
 
     #[test]
