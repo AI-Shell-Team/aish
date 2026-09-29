@@ -42,6 +42,9 @@ pub enum AishError {
     #[error("operation cancelled")]
     Cancelled,
 
+    #[error("tool loop stopped at the iteration limit")]
+    IterationLimit,
+
     #[error("operation timed out")]
     Timeout,
 }
@@ -69,8 +72,9 @@ impl AishError {
             AishError::Tool(_) => "tool",
             AishError::I18n(_) => "i18n",
             AishError::Shell(_) => "shell",
-            AishError::Parse(_) => "parse",
             AishError::Cancelled => "cancelled",
+            AishError::IterationLimit => "iteration_limit",
+            AishError::Parse(_) => "parse",
             AishError::Timeout => "timeout",
         }
     }

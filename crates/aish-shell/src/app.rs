@@ -2927,7 +2927,11 @@ impl AishShell {
                                     // Errors are already displayed via the LlmEventType::Error
                                     // event callback — avoid printing twice. Only handle
                                     // non-LLM errors that bypass the event system.
-                                    if !matches!(e, aish_core::AishError::Llm(_)) {
+                                    if !matches!(
+                                        e,
+                                        aish_core::AishError::Llm(_)
+                                            | aish_core::AishError::IterationLimit
+                                    ) {
                                         let msg = t("shell.error.llm_error_message")
                                             .replace("{error}", &e.to_string());
                                         eprintln!("{}", theme::error(&msg));
@@ -3172,9 +3176,10 @@ impl AishShell {
                             println!("{}", theme::warning(&t("shell.interrupted")));
                         }
                         Err(e) => {
-                            // Errors are already displayed via the LlmEventType::Error
-                            // event callback — avoid printing twice.
-                            if !matches!(e, aish_core::AishError::Llm(_)) {
+                            if !matches!(
+                                e,
+                                aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                            ) {
                                 let msg = t("shell.error.llm_error_message")
                                     .replace("{error}", &e.to_string());
                                 eprintln!("{}", theme::error(&msg));
@@ -3368,7 +3373,11 @@ impl AishShell {
                                         println!("{}", theme::warning(&t("shell.interrupted")));
                                     }
                                     Err(e) => {
-                                        if !matches!(e, aish_core::AishError::Llm(_)) {
+                                        if !matches!(
+                                            e,
+                                            aish_core::AishError::Llm(_)
+                                                | aish_core::AishError::IterationLimit
+                                        ) {
                                             let msg = t("shell.error.llm_error_message")
                                                 .replace("{error}", &e.to_string());
                                             eprintln!("{}", theme::error(&msg));
@@ -3744,7 +3753,10 @@ impl AishShell {
                         println!("{}", theme::warning(&t("shell.interrupted")));
                     }
                     Err(e) => {
-                        if !matches!(e, aish_core::AishError::Llm(_)) {
+                        if !matches!(
+                            e,
+                            aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                        ) {
                             let msg = t("shell.error.llm_error_message")
                                 .replace("{error}", &e.to_string());
                             eprintln!("{}", theme::error(&msg));
@@ -3833,7 +3845,14 @@ impl AishShell {
         if saved_steps == 0 {
             return false;
         }
-        let msg = t("shell.error.partial_turn_saved").replace("{steps}", &saved_steps.to_string());
+        // Issue #572: a deliberate iteration-limit stop is not a failure;
+        // use the matching hint so the saved evidence is not misdescribed.
+        let key = if self.ai_handler.last_partial_turn_stopped_at_limit() {
+            "shell.error.partial_turn_saved_limit"
+        } else {
+            "shell.error.partial_turn_saved"
+        };
+        let msg = t(key).replace("{steps}", &saved_steps.to_string());
         println!("{}", theme::warning(&msg));
         self.persist_session_snapshot();
         true
