@@ -580,9 +580,16 @@ impl ContextManager {
     /// within the specified limit.
     ///
     /// Assistant tool-call messages and their tool results form atomic
-    /// groups: removing either side would leave a dangling tool_call_id or
-    /// an orphan tool result, both rejected by provider APIs. Groups are
-    /// counted and removed as a unit.
+    /// groups (never split). Count-based eviction of whole oldest groups
+    /// keeps provider tool-call pairing valid.
+    /// Groups sitting inside the provider's warm prompt-cache prefix (their
+    /// trailing suffix exceeds `cache_warm_suffix_tokens`) are never evicted
+    /// by this count-based pass — evicting them would bust the prefix cache
+    /// and drop cumulative agent context that the token-pressure path
+    /// (microcompact + full compact with a model summary) is designed to
+    /// reclaim properly. When every candidate group is warm and the limit is
+    /// still exceeded, this pass does nothing; the before-send compaction
+    /// handles the pressure instead.
     fn trim_by_type(&mut self, memory_type: MemoryType, limit: usize) {
         let groups = tool_call_groups(&self.messages);
         let count: usize = groups
@@ -599,12 +606,32 @@ impl ContextManager {
             return;
         }
 
+        // Cache-warm suffix: messages whose trailing suffix exceeds the warm
+        // budget are inside the provider's prompt-cache prefix.
+        let mut suffix_tokens = vec![0usize; self.messages.len() + 1];
+        for idx in (0..self.messages.len()).rev() {
+            suffix_tokens[idx] =
+                suffix_tokens[idx + 1] + self.estimate_message_tokens(&self.messages[idx]);
+        }
+        let warm_threshold = self.budget_policy.cache_warm_suffix_tokens;
+        // A group is warm when the context from its start to the end of the
+        // transcript exceeds the warm budget — evicting it would drop a big
+        // warm chunk and bust the provider's prompt-cache prefix.
+        let is_warm_group = |g: &[usize]| {
+            g.first().is_some_and(|&first| {
+                suffix_tokens.get(first).copied().unwrap_or(0) > warm_threshold
+            })
+        };
+
         let to_remove = count - limit;
         let mut removed = 0usize;
         let mut remove_indices: Vec<usize> = Vec::new();
         for group in &groups {
             if removed >= to_remove {
                 break;
+            }
+            if is_warm_group(group) {
+                continue;
             }
             if group.iter().any(|&i| {
                 self.messages[i].memory_type == memory_type && self.messages[i].role != "system"
@@ -1027,6 +1054,105 @@ mod tests {
             .filter(|m| m.memory_type == MemoryType::Llm)
             .count();
         assert_eq!(llm_count, 2);
+    }
+
+    /// Count-based eviction must respect the provider's warm prompt-cache
+    /// prefix: groups whose trailing suffix exceeds the warm budget stay
+    /// (evicting them busts the cache and drops cumulative agent context).
+    /// Only cold-tail groups are evicted. Mirrors the microcompact guard.
+    #[test]
+    fn trim_by_type_skips_warm_groups_and_evicts_cold_tail() {
+        let mut mgr = ContextManager::with_limits(4, 20, 2);
+        mgr.set_budget_policy(ContextBudgetPolicy {
+            enable_token_estimation: false,
+            ..Default::default()
+        });
+        // Warm prefix: two old exchanges followed by a big suffix (>8k
+        // tokens of content after them).
+        mgr.add_message("user", "old question 1", MemoryType::Llm);
+        mgr.add_message("assistant", "old answer 1", MemoryType::Llm);
+        mgr.add_message("user", "old question 2", MemoryType::Llm);
+        mgr.add_message("assistant", "old answer 2", MemoryType::Llm);
+        // Big warm tail: 4 turns x ~4k tokens each ≈ 16k tokens of suffix.
+        for i in 0..4 {
+            mgr.add_message(
+                "user",
+                &format!("recent q-{i} {}", "x".repeat(8_000)),
+                MemoryType::Llm,
+            );
+            mgr.add_message("assistant", &format!("recent a-{i}"), MemoryType::Llm);
+        }
+
+        // 12 Llm messages, limit 4 → 8 to evict by count. Without the warm
+        // guard the two oldest exchanges would go; with it they are warm
+        // (suffix > 8k tokens) and must stay.
+        mgr.trim();
+        let first_two_alive = mgr
+            .messages
+            .iter()
+            .filter(|m| m.content == "old question 1" || m.content == "old answer 1")
+            .count();
+        assert_eq!(
+            first_two_alive, 2,
+            "warm prefix groups must not be evicted by the count-based pass"
+        );
+    }
+
+    /// When every candidate group is warm and the limit is still exceeded,
+    /// the count-based pass does nothing: the token-pressure path
+    /// (microcompact / full compact with a summary) reclaims properly
+    /// before send instead of busting the cache.
+    #[test]
+    fn trim_by_type_does_nothing_when_all_candidates_are_warm() {
+        let mut mgr = ContextManager::with_limits(2, 20, 2);
+        mgr.set_budget_policy(ContextBudgetPolicy {
+            enable_token_estimation: false,
+            ..Default::default()
+        });
+        // A single small tool-call round followed by a big suffix.
+        let a = ContextMessage {
+            role: "assistant".to_string(),
+            content: "calling tool".to_string(),
+            memory_type: MemoryType::Llm,
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![aish_core::ContextToolCall {
+                id: "c1".to_string(),
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            }]),
+            reasoning_content: None,
+        };
+        mgr.add_memory(MemoryType::Llm, a);
+        mgr.add_memory(
+            MemoryType::Llm,
+            ContextMessage {
+                role: "tool".to_string(),
+                content: "result".to_string(),
+                memory_type: MemoryType::Llm,
+                name: None,
+                tool_call_id: Some("c1".to_string()),
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        );
+        // Big warm tail: a single user message heavy enough (rough estimate
+        // len/4 > 8k tokens) that every group's suffix-from-start exceeds
+        // the warm budget — the whole transcript is warm.
+        mgr.add_message(
+            "user",
+            &format!("q-0 {}", "y".repeat(36_000)),
+            MemoryType::Llm,
+        );
+
+        mgr.trim();
+        // The count cap (2) is exceeded but every candidate group is warm:
+        // nothing may be evicted by this pass.
+        assert_eq!(
+            mgr.get_context_size(),
+            3,
+            "all-warm candidates must not be evicted by the count-based pass"
+        );
     }
 
     #[test]
