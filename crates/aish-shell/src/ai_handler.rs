@@ -183,6 +183,9 @@ pub struct AiHandler {
     /// Tool-message count committed by the most recent `commit_partial_turn`
     /// (0 when the last turn succeeded or failed before any tool ran).
     last_partial_turn_steps: usize,
+    /// Whether the most recent partial turn was stopped at the iteration
+    /// limit (as opposed to a provider failure); selects the user hint.
+    last_partial_turn_limit: bool,
 }
 
 impl AiHandler {
@@ -217,6 +220,7 @@ impl AiHandler {
             auto_search,
             secret_redactor: None,
             last_partial_turn_steps: 0,
+            last_partial_turn_limit: false,
         }
     }
 
@@ -627,15 +631,21 @@ impl AiHandler {
                 // Clear the stale partial-turn count so a later error path
                 // never reports evidence from an already-completed turn.
                 self.last_partial_turn_steps = 0;
+                self.last_partial_turn_limit = false;
                 result
             }
             Err(err) => {
                 // Issue #452: the provider died mid-turn (404/429/5xx after
-                // tools already ran). Persist the completed tool-call
-                // evidence before propagating the error so the next turn —
-                // and a resumed session — can see what was already done and
-                // must not blindly redo.
-                self.commit_partial_turn(&question_processed);
+                // tools already ran). Issue #572: the user chose to stop at
+                // the tool-call iteration limit. Persist the completed
+                // tool-call evidence before propagating the error so the
+                // next turn — and a resumed session — can see what was
+                // already done and must not blindly redo.
+                if matches!(err, aish_core::AishError::IterationLimit) {
+                    self.commit_partial_turn_stopped_at_limit(&question_processed);
+                } else {
+                    self.commit_partial_turn(&question_processed);
+                }
                 return Err(err);
             }
         };
@@ -678,10 +688,11 @@ impl AiHandler {
     }
 
     /// Persist a partial turn left by a mid-turn provider failure (issue
-    /// #452). Drains the tool-loop messages the LLM session retained before
-    /// the error and commits them to the context manager with the same
-    /// redaction/capping as a successful turn. The stored slice starts with
-    /// the user message (prepended by the session), so only the tool
+    /// #452) or by the user stopping at the tool-call iteration limit
+    /// (issue #572). Drains the tool-loop messages the LLM session retained
+    /// before the error and commits them to the context manager with the
+    /// same redaction/capping as a successful turn. The stored slice starts
+    /// with the user message (prepended by the session), so only the tool
     /// messages are appended here — the user entry is committed explicitly
     /// to keep ordering identical to the success path.
     ///
@@ -691,8 +702,32 @@ impl AiHandler {
     /// sees the evidence instead of dangling calls.
     fn commit_partial_turn(&mut self, question_processed: &str) {
         let partial = self.llm_session.take_last_partial_turn();
+        let stopped_by_limit = false;
+        self.commit_partial_messages(question_processed, &partial, stopped_by_limit);
+    }
+
+    /// Issue #572 variant: commit a partial turn that ended because the
+    /// user chose to stop at the tool-call iteration limit. The synthetic
+    /// note and the user hint differ from the provider-failure case so the
+    /// persisted record is not misdescribed as a provider error.
+    fn commit_partial_turn_stopped_at_limit(&mut self, question_processed: &str) {
+        let partial = self.llm_session.take_last_partial_turn();
+        self.commit_partial_messages(question_processed, &partial, true);
+    }
+
+    /// Shared commit path: append the user message, the completed
+    /// tool-call/tool-result pairs (redacted), and a synthetic assistant
+    /// note describing why the turn stopped. `stopped_by_limit` selects the
+    /// note text and the user-hint state exposed to the shell.
+    fn commit_partial_messages(
+        &mut self,
+        question_processed: &str,
+        partial: &[ChatMessage],
+        stopped_by_limit: bool,
+    ) {
         if partial.is_empty() {
             self.last_partial_turn_steps = 0;
+            self.last_partial_turn_limit = false;
             return;
         }
         // The session prepends the user message; the shell commits it here
@@ -700,9 +735,11 @@ impl AiHandler {
         let tool_messages = if partial.first().is_some_and(|m| m.role == "user") {
             &partial[1..]
         } else {
-            &partial[..]
+            partial
         };
         self.last_partial_turn_steps = tool_messages.len();
+        self.last_partial_turn_limit = stopped_by_limit;
+
         if tool_messages.is_empty() {
             return;
         }
@@ -711,19 +748,28 @@ impl AiHandler {
         for ctx_msg in self.redact_turn_messages(tool_messages) {
             self.context_manager.add_memory(MemoryType::Llm, ctx_msg);
         }
-        // No final assistant text exists (the turn failed), so nothing is
+        // No final assistant text exists (the turn stopped), so nothing is
         // appended after the tool messages. Mark the interruption with a
         // synthetic assistant note so the next turn's model understands why
-        // the transcript stops mid-task.
-        self.context_manager.add_message(
-            "assistant",
-            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]",
-            MemoryType::Llm,
-        );
+        // the transcript stops mid-task — and that the evidence above was
+        // already executed, provider failure or deliberate stop alike.
+        let note = if stopped_by_limit {
+            "[turn stopped by the user at the tool-call iteration limit; the tool results above are completed evidence — do not re-run completed side effects]"
+        } else {
+            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]"
+        };
+        self.context_manager
+            .add_message("assistant", note, MemoryType::Llm);
         self.context_manager.trim();
+        let reason = if stopped_by_limit {
+            "iteration-limit stop"
+        } else {
+            "provider failure"
+        };
         tracing::info!(
             messages = tool_messages.len(),
-            "Persisted partial-turn tool evidence after provider failure"
+            reason,
+            "Persisted partial-turn tool evidence"
         );
     }
 
@@ -732,6 +778,13 @@ impl AiHandler {
     /// the shell to tell the user what survived a mid-turn failure.
     pub fn last_partial_turn_step_count(&self) -> usize {
         self.last_partial_turn_steps
+    }
+
+    /// Whether the most recent partial turn was stopped at the iteration
+    /// limit (issue #572) rather than by a provider failure; used by the
+    /// shell to pick the matching user hint.
+    pub fn last_partial_turn_stopped_at_limit(&self) -> bool {
+        self.last_partial_turn_limit
     }
 
     /// Convert a turn's intermediate ChatMessages into persistable
@@ -2159,6 +2212,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
 
+    // Execution counter shared by CountingProbeTool (see the #572 e2e test).
+    static EXECUTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     /// Regression: the HashSet refactor dropped the empty-refs early
     /// return, so questions without any `@skill` reference got a stray
     /// blank-line prefix prepended when at least one skill was installed.
@@ -3010,6 +3066,81 @@ mod tests {
         assert!(context[3].text_content().unwrap().contains("interrupted"));
     }
 
+    /// Issue #572: committing a partial turn that stopped at the iteration
+    /// limit must use the limit-specific synthetic note (not the
+    /// provider-error wording) and record the stopped-at-limit state for
+    /// the shell hint. `commit_partial_messages` is exercised directly —
+    /// the session-side buffer round-trip is covered by aish-llm unit
+    /// tests (partial_turn_saved_when_iteration_limit_stops).
+    #[test]
+    fn commit_partial_messages_uses_limit_note_when_stopped_by_limit() {
+        let mut handler = test_handler();
+
+        // One completed tool round, as the session would have retained it.
+        let partial = [
+            ChatMessage::user("do the task"),
+            {
+                let mut a = ChatMessage::assistant("");
+                a.content = None;
+                a.tool_calls = Some(vec![aish_llm::ToolCall {
+                    id: "call_l1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: r#"{"command":"make build"}"#.to_string(),
+                }]);
+                a
+            },
+            ChatMessage::tool_result("call_l1", "build finished"),
+        ];
+
+        handler.commit_partial_messages("do the task", &partial, true);
+
+        // The flag the shell hint reads is set.
+        assert!(handler.last_partial_turn_stopped_at_limit());
+        assert_eq!(handler.last_partial_turn_step_count(), 2);
+
+        let context = handler.build_context_messages();
+        let roles: Vec<&str> = context.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool", "assistant"]);
+        // The note describes a deliberate stop, not a provider error.
+        let note = context[3].text_content().unwrap();
+        assert!(note.contains("iteration limit"), "{note}");
+        assert!(!note.contains("provider error"), "{note}");
+        // Pairing stayed self-consistent.
+        assert_eq!(context[2].tool_call_id.as_deref(), Some("call_l1"));
+    }
+
+    /// The provider-failure path keeps its original wording and clears the
+    /// limit flag, so a later stop-hint cannot leak into a failure turn.
+    #[test]
+    fn commit_partial_messages_keeps_provider_note_on_failure() {
+        let mut handler = test_handler();
+
+        let partial = [
+            ChatMessage::user("do the task"),
+            {
+                let mut a = ChatMessage::assistant("");
+                a.content = None;
+                a.tool_calls = Some(vec![aish_llm::ToolCall {
+                    id: "call_f1".to_string(),
+                    name: "grep".to_string(),
+                    arguments: "{}".to_string(),
+                }]);
+                a
+            },
+            ChatMessage::tool_result("call_f1", "match found"),
+        ];
+
+        handler.commit_partial_messages("do the task", &partial, false);
+
+        assert!(!handler.last_partial_turn_stopped_at_limit());
+        let context = handler.build_context_messages();
+        let note = context
+            .last()
+            .and_then(|m| m.text_content())
+            .unwrap_or_default();
+        assert!(note.contains("provider error"), "{note}");
+    }
+
     /// Bind a loopback server that replies to POST /v1/chat/completions with
     /// a canned OpenAI JSON completion (401 -> immediate, non-retryable
     /// failure; used to drive the manual-compact failure path fast).
@@ -3425,5 +3556,171 @@ mod tests {
             }
         });
         (format!("http://{addr}/v1"), shutdown)
+    }
+
+    /// Issue #572 end-to-end over real HTTP: a scripted OpenAI-compatible
+    /// server returns 20 tool-call rounds, the user (no callback wired →
+    /// default stop) declines to continue, and handle_question's error path
+    /// must leave the completed user+assistant/tool evidence in the
+    /// persistent context, with the iteration-limit note — not the
+    /// provider-error note — describing the stop.
+    #[tokio::test]
+    async fn handle_question_iteration_limit_stop_persists_evidence_end_to_end() {
+        use std::io::{Read, Write};
+
+        // Scripted server (SSE, matching the real streaming path that
+        // handle_question always takes): 20 tool-call deltas, then a
+        // plain-text delta for turn 2.
+        fn sse(body: serde_json::Value) -> String {
+            format!("data: {}\n\ndata: [DONE]\n\n", body)
+        }
+        fn tool_call_chunk(id: &str) -> String {
+            sse(serde_json::json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": id,
+                            "type": "function",
+                            "function": {"name": "grep", "arguments": "{}"},
+                        }],
+                    },
+                    "finish_reason": null,
+                }],
+            }))
+        }
+        let bodies: Vec<String> = (0..20)
+            .map(|i| tool_call_chunk(&format!("c{}", i)))
+            .collect();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served_c = served.clone();
+        let bodies_c = bodies.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_c = shutdown.clone();
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !shutdown_c.load(std::sync::atomic::Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 65536];
+                        let _ = stream.read(&mut buf);
+                        let n = served_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let body = bodies_c.get(n).cloned().unwrap_or_else(|| {
+                            // Turn 2: a content delta, then the stream ends.
+                            sse(serde_json::json!({
+                                "choices": [{"index": 0, "delta": {
+                                    "content": "done"
+                                }, "finish_reason": "stop"}],
+                            }))
+                        });
+                        let http = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(http.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut handler = AiHandler::new(
+            LlmSession::new(&format!("http://{addr}/v1"), "key", "model", None, None),
+            Arc::new(Mutex::new(None)),
+            SkillManager::new(),
+            MemoryConfig::default(),
+            400,
+            400,
+            None,
+            ContextBudgetPolicy {
+                enabled: false,
+                ..Default::default()
+            },
+            false,
+        );
+        // Real tool: a probe that logs execution so we can prove turn 2 does
+        // not re-run it.
+        handler.register_tool(Box::new(CountingProbeTool));
+
+        // Turn 1: 20 rounds complete, then the stop branch fires.
+        let result = handler.handle_question("do the task").await;
+        assert!(
+            matches!(result, Err(aish_core::AishError::IterationLimit)),
+            "expected IterationLimit, got {:?}",
+            result.err()
+        );
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            20,
+            "20 scripted rounds served"
+        );
+
+        // Evidence must be in the persistent context now.
+        let context = handler.build_context_messages();
+        let tool_msgs = context.iter().filter(|m| m.role == "tool").count();
+        assert_eq!(tool_msgs, 20, "20 completed tool results persisted");
+        let note = context
+            .iter()
+            .rfind(|m| m.role == "assistant")
+            .and_then(|m| m.text_content())
+            .unwrap_or_default();
+        assert!(
+            note.contains("iteration limit"),
+            "stop note must describe the deliberate stop, got: {note}"
+        );
+        assert!(
+            !note.contains("provider error"),
+            "stop note must not claim a provider error, got: {note}"
+        );
+
+        // Turn 2: the next request replays the evidence; the model answers
+        // from it and no tool re-executes.
+        let second = handler.handle_question("continue").await;
+        assert_eq!(second.expect("turn 2 must succeed"), "done");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            21,
+            "exactly one more request on turn 2"
+        );
+        assert_eq!(
+            CountingProbeTool::executions(),
+            20,
+            "no tool re-executed when the evidence was replayed"
+        );
+
+        shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Shared probe used by the #572 end-to-end test: counts executions in
+    /// a process-wide static so turn 2 can be proven not to re-run tools.
+    struct CountingProbeTool;
+
+    impl CountingProbeTool {
+        fn executions() -> usize {
+            EXECUTIONS.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Tool for CountingProbeTool {
+        fn name(&self) -> &str {
+            "grep"
+        }
+        fn description(&self) -> &str {
+            "counting probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, _args: serde_json::Value) -> aish_llm::ToolResult {
+            EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            aish_llm::ToolResult::success("probe ran")
+        }
     }
 }
