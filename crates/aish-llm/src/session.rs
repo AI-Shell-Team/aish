@@ -109,7 +109,7 @@ pub struct LlmSession {
     /// when the loop dies on an API error; drained by
     /// `take_last_partial_turn` so the shell layer can persist the
     /// evidence. Empty unless the previous turn failed mid-loop.
-    last_partial_turn: std::sync::Mutex<Vec<ChatMessage>>,
+    last_partial_turn: parking_lot::Mutex<Vec<ChatMessage>>,
     /// Scripted chat completion responses for unit/integration tests (pop in order).
     #[cfg(test)]
     test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
@@ -170,7 +170,7 @@ impl LlmSession {
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
             rotation: None,
-            last_partial_turn: std::sync::Mutex::new(Vec::new()),
+            last_partial_turn: parking_lot::Mutex::new(Vec::new()),
             #[cfg(test)]
             test_chat_responses: None,
         }
@@ -182,7 +182,7 @@ impl LlmSession {
     /// (assistant tool_calls + tool results) so partial-turn evidence
     /// survives the failure (issue #452).
     pub fn take_last_partial_turn(&self) -> Vec<ChatMessage> {
-        std::mem::take(&mut self.last_partial_turn.lock().unwrap())
+        std::mem::take(&mut self.last_partial_turn.lock())
     }
 
     pub fn tool_execution_policy(&self) -> crate::tool_context::ToolExecutionPolicy {
@@ -746,6 +746,17 @@ impl LlmSession {
                     );
                     iterations = 0;
                 } else {
+                    // Preserve completed tool-call evidence before stopping
+                    // (issue #572). Same slice contract as the API-error
+                    // path (#452): user message prefix + the post-initial
+                    // loop messages with call/result pairing intact, so the
+                    // shell layer can persist them and later turns see the
+                    // completed work instead of re-running tools.
+                    if messages.len() > initial_len {
+                        let mut partial: Vec<ChatMessage> = vec![user_msg.clone()];
+                        partial.extend(messages[initial_len..].iter().cloned());
+                        *self.last_partial_turn.lock() = partial;
+                    }
                     self.emit_event(LlmEvent {
                         event_type: LlmEventType::Error,
                         data: serde_json::json!({"error": "Max tool call iterations reached"}),
@@ -758,7 +769,7 @@ impl LlmSession {
                         timestamp: now_timestamp(),
                         metadata: None,
                     });
-                    return Err(AishError::Llm("Max tool call iterations reached".into()));
+                    return Err(AishError::IterationLimit);
                 }
             }
             iterations += 1;
@@ -808,7 +819,7 @@ impl LlmSession {
                     if messages.len() > initial_len {
                         let mut partial: Vec<ChatMessage> = vec![user_msg.clone()];
                         partial.extend(messages[initial_len..].iter().cloned());
-                        *self.last_partial_turn.lock().unwrap() = partial;
+                        *self.last_partial_turn.lock() = partial;
                     }
                     self.emit_event(LlmEvent {
                         event_type: LlmEventType::Error,
@@ -1061,7 +1072,7 @@ impl LlmSession {
                                 // iteration is already-completed tool work.
                                 let mut partial: Vec<ChatMessage> = vec![user_msg.clone()];
                                 partial.extend(messages[initial_len..].iter().cloned());
-                                *self.last_partial_turn.lock().unwrap() = partial;
+                                *self.last_partial_turn.lock() = partial;
                                 // Emit error event (matching Python's streaming error
                                 // pattern: emit error and break, don't panic).
                                 self.emit_event(LlmEvent {
@@ -1672,7 +1683,7 @@ impl LlmSession {
             max_context_tokens: self.max_context_tokens,
             context_budget_policy: self.context_budget_policy.clone(),
             rotation: None,
-            last_partial_turn: std::sync::Mutex::new(Vec::new()),
+            last_partial_turn: parking_lot::Mutex::new(Vec::new()),
             turn_seq: std::sync::atomic::AtomicU32::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
@@ -3559,6 +3570,177 @@ mod tests {
         assert!(session.take_last_partial_turn().is_empty());
     }
 
+    /// Issue #572 regression: stopping at the iteration limit after every
+    /// round completed must preserve the user message and all paired
+    /// tool-call/tool-result evidence, and surface AishError::IterationLimit.
+    #[tokio::test]
+    async fn partial_turn_saved_when_iteration_limit_stops() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // 20 scripted tool-call rounds (the max), then the stop branch.
+        let ids: Vec<String> = (0..20).map(|i| format!("c{}", i)).collect();
+        let responses: Vec<Result<crate::client::LlmResponse, AishError>> = ids
+            .iter()
+            .map(|id| Ok(mock_tool_call_response(&[(id.as_str(), "grep", "{}")])))
+            .collect();
+        let mut session = partial_turn_session(responses, log.clone());
+        session.set_iteration_limit_callback(Arc::new(|_| false));
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(
+            matches!(result, Err(AishError::IterationLimit)),
+            "stop branch must surface IterationLimit, got {:?}",
+            result.err()
+        );
+        assert_eq!(
+            log.lock().unwrap().len(),
+            20,
+            "every scripted round really executed"
+        );
+
+        let partial = session.take_last_partial_turn();
+        assert_eq!(partial.first().map(|m| m.role.as_str()), Some("user"));
+        let roles: Vec<&str> = partial.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(roles.len(), 41, "user + 20 assistant/tool pairs");
+        assert_eq!(roles[0], "user");
+        // All 20 rounds present, pairing intact and in order.
+        let called_ids: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .flat_map(|m| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+            .collect();
+        let answered_ids: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        let expected: Vec<String> = (0..20).map(|i| format!("c{}", i)).collect();
+        assert_eq!(called_ids, expected);
+        assert_eq!(called_ids, answered_ids, "no dangling tool_call_id");
+        // Draining empties the buffer.
+        assert!(session.take_last_partial_turn().is_empty());
+    }
+
+    /// Issue #572: continuing past the limit once and stopping the second
+    /// time must preserve the evidence from BOTH segments (the persisted
+    /// slice spans the whole loop, not just the last continuation). The
+    /// counter resets on continue, so a second stop needs another 20 rounds.
+    #[tokio::test]
+    async fn partial_turn_saved_after_continue_then_stop() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // 20 rounds, continue, then 20 more rounds and stop.
+        let ids: Vec<String> = (0..40).map(|i| format!("c{}", i)).collect();
+        let responses: Vec<Result<crate::client::LlmResponse, AishError>> = ids
+            .iter()
+            .map(|id| Ok(mock_tool_call_response(&[(id.as_str(), "bash", "{}")])))
+            .collect();
+        let mut session = partial_turn_session(responses, log.clone());
+        let continue_votes = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let votes = continue_votes.clone();
+        session.set_iteration_limit_callback(Arc::new(move |_| {
+            votes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+        }));
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(matches!(result, Err(AishError::IterationLimit)));
+        assert_eq!(
+            log.lock().unwrap().len(),
+            40,
+            "both segments really executed"
+        );
+
+        let partial = session.take_last_partial_turn();
+        let answered_ids: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        let expected: Vec<String> = (0..40).map(|i| format!("c{}", i)).collect();
+        assert_eq!(
+            answered_ids, expected,
+            "evidence from both the pre- and post-continue segments must be saved"
+        );
+    }
+
+    /// Issue #572: a single round with multiple parallel tool calls must
+    /// keep every call/result pair in order without duplication.
+    #[tokio::test]
+    async fn partial_turn_keeps_parallel_calls_in_one_round() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // 19 single-call rounds to fill the budget, then one round with
+        // three parallel calls; the next limit check stops the loop.
+        let ids: Vec<String> = (0..19).map(|i| format!("s{}", i)).collect();
+        let mut responses: Vec<Result<crate::client::LlmResponse, AishError>> = ids
+            .iter()
+            .map(|id| Ok(mock_tool_call_response(&[(id.as_str(), "grep", "{}")])))
+            .collect();
+        responses.push(Ok(mock_tool_call_response(&[
+            ("c1", "grep", "{}"),
+            ("c2", "bash", "{}"),
+            ("c3", "grep", "{}"),
+        ])));
+        let mut session = partial_turn_session(responses, log.clone());
+        session.set_iteration_limit_callback(Arc::new(|_| false));
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(matches!(result, Err(AishError::IterationLimit)));
+
+        let partial = session.take_last_partial_turn();
+        // 20 rounds total: 19 single-call pairs + the parallel round
+        // (one assistant message + three tool results) at the tail.
+        assert_eq!(partial.first().map(|m| m.role.as_str()), Some("user"));
+        assert_eq!(
+            partial.iter().filter(|m| m.role == "tool").count(),
+            19 + 3,
+            "19 single results + 3 parallel results"
+        );
+        let tail_roles: Vec<&str> = partial[partial.len() - 4..]
+            .iter()
+            .map(|m| m.role.as_str())
+            .collect();
+        assert_eq!(
+            tail_roles,
+            vec!["assistant", "tool", "tool", "tool"],
+            "the parallel round is one assistant message + three ordered tool results"
+        );
+        // The last assistant message carries all three calls, in order.
+        let assistant = partial
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .unwrap();
+        let calls: Vec<String> = assistant
+            .tool_calls
+            .as_ref()
+            .expect("calls present")
+            .iter()
+            .map(|tc| tc.id.clone())
+            .collect();
+        assert_eq!(calls, vec!["c1", "c2", "c3"]);
+        let answered: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        assert_eq!(
+            &answered[19..],
+            ["c1", "c2", "c3"],
+            "parallel results ordered, no duplicates"
+        );
+        assert_eq!(log.lock().unwrap().len(), 19 + 3);
+    }
+
     /// Tool that echoes a `tag` from its args so parallel calls can be told
     /// apart and matched back to their originating call id.
     struct ArgsEchoTool;
@@ -4070,5 +4252,85 @@ mod tests {
             seen.iter().any(|d| d.contains("准备执行检查")),
             "same-frame assistant text must be previewed, got {seen:?}"
         );
+    }
+
+    /// Issue #572 end-to-end evidence chain: after the user stops at the
+    /// iteration limit, the drained partial turn — user message plus all
+    /// completed tool-call/tool-result pairs — must be replayable as the
+    /// prefix of the NEXT request, so the model sees the completed work and
+    /// no tool re-executes. This mirrors what AiHandler::commit_partial_turn
+    /// does with the buffer in production (persist into the context and
+    /// send it back on the next turn).
+    #[tokio::test]
+    async fn iteration_limit_stop_evidence_replays_as_next_turn_prefix() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Turn 1: 20 tool rounds then stop.
+        let ids: Vec<String> = (0..20).map(|i| format!("c{}", i)).collect();
+        let mut responses: Vec<Result<crate::client::LlmResponse, AishError>> = ids
+            .iter()
+            .map(|id| Ok(mock_tool_call_response(&[(id.as_str(), "grep", "{}")])))
+            .collect();
+        // Turn 2: the model, having seen the evidence, answers with text.
+        responses.push(Ok(mock_text_response("evidence received, done")));
+        let mut session = partial_turn_session(responses, log.clone());
+        session.set_iteration_limit_callback(Arc::new(|_| false));
+
+        // --- Turn 1: stop at the limit ---
+        let first = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(matches!(first, Err(AishError::IterationLimit)));
+        let evidence = session.take_last_partial_turn();
+        assert_eq!(
+            evidence.first().map(|m| m.role.as_str()),
+            Some("user"),
+            "evidence slice starts with the user message"
+        );
+        assert_eq!(evidence.len(), 1 + 20 * 2, "user + 20 paired rounds");
+        let tools_run_in_turn1 = log.lock().unwrap().len();
+        assert_eq!(tools_run_in_turn1, 20);
+
+        // --- Commit phase (AiHandler::commit_partial_turn equivalent):
+        // the evidence becomes the persistent context for the next turn ---
+        let context: Vec<ChatMessage> = evidence.clone();
+
+        // --- Turn 2: next request carries the evidence as its prefix ---
+        let second = session
+            .process_input(
+                &ChatMessage::user("continue"),
+                &context,
+                Some("core"),
+                false,
+            )
+            .await
+            .expect("next turn must succeed on the saved evidence");
+        assert_eq!(second.text, "evidence received, done");
+
+        // No tool re-executed on the replay turn.
+        assert_eq!(
+            log.lock().unwrap().len(),
+            tools_run_in_turn1,
+            "tools must not re-run when the evidence is replayed"
+        );
+
+        // The evidence we hand to the next turn IS the outgoing request
+        // prefix (process_input prepends context_messages to the request),
+        // so asserting on `evidence` proves the model receives every
+        // completed call id — the shell's commit path stores exactly this
+        // slice into the persistent context.
+        let called_ids: Vec<String> = evidence
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .flat_map(|m| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+            .collect();
+        let answered_ids: Vec<String> = evidence
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.clone())
+            .collect();
+        assert_eq!(called_ids, ids, "all completed call ids in order");
+        assert_eq!(called_ids, answered_ids, "no dangling tool_call_id");
     }
 }
