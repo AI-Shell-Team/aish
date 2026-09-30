@@ -18,6 +18,6 @@ pub mod store;
 
 pub use models::{
     AuditEventRecord, AuditQuery, HistoryEntry, SessionContextMessage, SessionRecord,
-    SessionStateSnapshot,
+    SessionStateSnapshot, TaskBudgetSnapshot,
 };
 pub use store::{AuditStore, SessionStore};

@@ -332,6 +332,15 @@ shell:
     no_evidence: "（未提供）"
   nl_detection:
     confirm_ask_ai: "自然言語の質問のようです。AIに聞きますか？(Y/n)"
+  budget:
+    exhausted_title: "⛔ タスク予算が尽きました"
+    exhausted_detail: "次元: {dimension} · 使用: {used} · 上限: {limit}"
+    exhausted_options: "予算を調整して続行しますか？調整は監査ログに記録されます（y=調整 / n=停止）"
+    stopped_by_user: "予算により停止。完了したツール実行記録は保存されています。保存ポイントから再開できます。"
+    new_limit_prompt: "この次元の新しい上限を入力してください:"
+    raised: "予算を調整しました: {dimension} -> {value}。タスクを再度実行して続行できます。"
+    invalid_limit: "無効な値（使用量を超える必要）。予算は変更されません。"
+
   error:
     load_script_failed: "スクリプト '{script}' の読み込みに失敗: {error}"
     pty_error: "PTY エラー: {error}"
@@ -343,6 +352,7 @@ shell:
     llm_error_message: "エラー: {error}"
     partial_turn_saved: "このターンで完了したツール実行ステップを保存しました（{steps} ステップ）。失敗前の作業は失われません。新しいタスクを入力するか ;retry で保存ポイントから続行できます。"
     partial_turn_saved_limit: "イテレーション上限で停止する前に、このターンで完了したツール実行ステップを保存しました（{steps} ステップ）。完了した作業は失われません。新しいタスクを入力するか ;retry で保存ポイントから続行できます。"
+    partial_turn_saved_budget: "タスク予算上限で停止する前に、このターンで完了したツール実行ステップを保存しました（{steps} ステップ）。完了した作業は失われません。新しいタスクを入力するか ;retry で保存ポイントから続行できます。"
     llm_error_details_title: "デバッグ詳細"
     tool_args_json_invalid_hint: "❌ リクエストに失敗しました。再試行してください。"
   prompt:
@@ -446,6 +456,13 @@ shell:
     output_tokens: "出力 tokens"
     total: "合計"
     api_calls: "API 呼び出し回数"
+    budget_title: "タスク予算"
+    budget_rounds: "ラウンド（使用/上限）:"
+    budget_tool_calls: "ツール呼び出し（使用/上限）:"
+    budget_tokens: "Token（使用/上限）:"
+    budget_duration: "アクティブ秒数（使用/上限）:"
+    budget_cost: "費用:"
+    budget_cost_unavailable: "利用不可（プロバイダは価格を報告しません）"
   setup:
     no_config_manager: "再設定できません: 設定マネージャーを利用できません"
     cancelled: "セットアップをキャンセルしました。現在の設定を維持します"
@@ -559,6 +576,9 @@ shell:
       inline_enforce_json:
         label: "インライン JSON 強制"
         desc: "インライン補完で厳密な JSON を返すよう強制"
+      task_budget_max_rounds:
+        label: "タスク予算ラウンド上限"
+        desc: "タスクごとの累積ツールループ上限。空欄 = 無制限（続行ではリセットされません）"
       max_llm_messages:
         label: "最大 LLM メッセージ数"
         desc: "LLM 履歴に保持する最大会話ターン数"

@@ -16,6 +16,7 @@
 pub mod agents;
 pub mod api;
 pub mod approval_memory;
+pub mod budget;
 pub mod client;
 pub mod langfuse;
 pub mod llm_stream;

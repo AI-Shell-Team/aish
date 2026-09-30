@@ -186,6 +186,9 @@ pub struct AiHandler {
     /// Whether the most recent partial turn was stopped at the iteration
     /// limit (as opposed to a provider failure); selects the user hint.
     last_partial_turn_limit: bool,
+    /// Whether the most recent partial turn was stopped by task-budget
+    /// exhaustion (issue #569); selects the user hint.
+    last_partial_turn_budget: bool,
 }
 
 impl AiHandler {
@@ -221,6 +224,7 @@ impl AiHandler {
             secret_redactor: None,
             last_partial_turn_steps: 0,
             last_partial_turn_limit: false,
+            last_partial_turn_budget: false,
         }
     }
 
@@ -632,6 +636,7 @@ impl AiHandler {
                 // never reports evidence from an already-completed turn.
                 self.last_partial_turn_steps = 0;
                 self.last_partial_turn_limit = false;
+                self.last_partial_turn_budget = false;
                 result
             }
             Err(err) => {
@@ -643,6 +648,11 @@ impl AiHandler {
                 // already done and must not blindly redo.
                 if matches!(err, aish_core::AishError::IterationLimit) {
                     self.commit_partial_turn_stopped_at_limit(&question_processed);
+                } else if matches!(err, aish_core::AishError::BudgetExhausted(_)) {
+                    // Issue #569: task budget exhausted — same evidence
+                    // contract, but the stop note must say budget, not
+                    // provider failure or iteration limit.
+                    self.commit_partial_turn_stopped_at_budget(&question_processed);
                 } else {
                     self.commit_partial_turn(&question_processed);
                 }
@@ -715,6 +725,103 @@ impl AiHandler {
         self.commit_partial_messages(question_processed, &partial, true);
     }
 
+    /// Issue #569 variant: commit a partial turn that ended because the
+    /// task-level cumulative budget was exhausted. Same evidence contract;
+    /// the note must say budget, not provider failure.
+    fn commit_partial_turn_stopped_at_budget(&mut self, question_processed: &str) {
+        let partial = self.llm_session.take_last_partial_turn();
+        self.commit_partial_messages(question_processed, &partial, true);
+        self.last_partial_turn_budget = true;
+    }
+
+    /// Whether the most recent partial turn was stopped by task-budget
+    /// exhaustion (issue #569); used by the shell to pick the user hint.
+    pub fn last_partial_turn_stopped_at_budget(&self) -> bool {
+        self.last_partial_turn_budget
+    }
+    /// Read-only access to the task budget state for /token and the footer.
+    pub fn llm_budget_state(&self) -> aish_llm::budget::TaskBudgetState {
+        self.llm_session.task_budget_state()
+    }
+
+    /// Update the task budget bounds at runtime (explicit adjustment only).
+    pub fn set_llm_budget_limit(&self, limit: aish_llm::budget::TaskBudgetLimit) {
+        self.llm_session.set_task_budget_limit(limit);
+    }
+
+    /// Install limits from `config.yaml llm.task_budget` (issue #569).
+    /// Absent dimensions stay unlimited; counters still accrue for display.
+    pub fn apply_task_budget_config(&self, config: &aish_config::TaskBudgetConfig) {
+        self.llm_session
+            .set_task_budget_limit(aish_llm::budget::TaskBudgetLimit {
+                max_rounds: config.max_rounds,
+                max_tool_calls: config.max_tool_calls,
+                max_tokens: config.max_tokens,
+                max_duration_secs: config.max_duration_secs,
+            });
+    }
+
+    /// Re-arm the near-threshold advisory after an explicit budget raise.
+    pub fn rearm_budget_advisory(&self) {
+        self.llm_session.rearm_near_threshold();
+    }
+
+    /// Read-only access to the task budget limits for /token and the footer.
+    pub fn llm_budget_limit(&self) -> aish_llm::budget::TaskBudgetLimit {
+        self.llm_session.task_budget_limit()
+    }
+
+    /// Issue #569: serializable budget counters + limits for the session
+    /// snapshot. `None` when the process never bounded or accrued anything
+    /// (fresh session, no config limits) — keeps legacy snapshots identical.
+    pub fn task_budget_snapshot(&self) -> Option<aish_session::TaskBudgetSnapshot> {
+        let state = self.llm_session.task_budget_state();
+        let limit = self.llm_session.task_budget_limit();
+        if !limit.is_bounded() && state.task_rounds == 0 && state.tool_calls == 0 {
+            return None;
+        }
+        Some(aish_session::TaskBudgetSnapshot {
+            task_rounds: state.task_rounds,
+            tool_calls: state.tool_calls,
+            active_secs: state.active_secs,
+            total_input: state.token_usage.total_input,
+            total_output: state.token_usage.total_output,
+            total_cache_read: state.token_usage.total_cache_read,
+            total_cache_write: state.token_usage.total_cache_write,
+            request_count: state.token_usage.request_count,
+            max_rounds: limit.max_rounds,
+            max_tool_calls: limit.max_tool_calls,
+            max_tokens: limit.max_tokens,
+            max_duration_secs: limit.max_duration_secs,
+        })
+    }
+
+    /// Issue #569: restore budget counters + limits from a session snapshot
+    /// on resume so the task keeps accruing against the same budget.
+    pub fn seed_task_budget(&self, snapshot: aish_session::TaskBudgetSnapshot) {
+        use aish_llm::usage::TokenStats;
+        let mut state = aish_llm::budget::TaskBudgetState::default();
+        state.task_rounds = snapshot.task_rounds;
+        state.tool_calls = snapshot.tool_calls;
+        state.active_secs = snapshot.active_secs;
+        state.token_usage = TokenStats {
+            total_input: snapshot.total_input,
+            total_output: snapshot.total_output,
+            total_cache_read: snapshot.total_cache_read,
+            total_cache_write: snapshot.total_cache_write,
+            request_count: snapshot.request_count,
+            last_prompt_tokens: 0,
+        };
+        self.llm_session.seed_task_budget_state(state);
+        self.llm_session
+            .set_task_budget_limit(aish_llm::budget::TaskBudgetLimit {
+                max_rounds: snapshot.max_rounds,
+                max_tool_calls: snapshot.max_tool_calls,
+                max_tokens: snapshot.max_tokens,
+                max_duration_secs: snapshot.max_duration_secs,
+            });
+    }
+
     /// Shared commit path: append the user message, the completed
     /// tool-call/tool-result pairs (redacted), and a synthetic assistant
     /// note describing why the turn stopped. `stopped_by_limit` selects the
@@ -728,6 +835,7 @@ impl AiHandler {
         if partial.is_empty() {
             self.last_partial_turn_steps = 0;
             self.last_partial_turn_limit = false;
+            self.last_partial_turn_budget = false;
             return;
         }
         // The session prepends the user message; the shell commits it here
@@ -3722,5 +3830,59 @@ mod tests {
             EXECUTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             aish_llm::ToolResult::success("probe ran")
         }
+    }
+
+    /// Issue #569 acceptance 5: seeding the budget from a snapshot restores
+    /// both the cumulative counters and the limits, and drops the process-
+    /// local wall-clock anchor so a resumed session never inherits a stale
+    /// Instant.
+    #[test]
+    fn seed_task_budget_restores_counters_and_limits() {
+        use aish_llm::budget::TaskBudgetLimit;
+        use aish_session::TaskBudgetSnapshot;
+
+        let handler = test_handler();
+        handler.seed_task_budget(TaskBudgetSnapshot {
+            task_rounds: 25,
+            tool_calls: 31,
+            active_secs: 95,
+            total_input: 12_345,
+            total_output: 6_789,
+            total_cache_read: 999,
+            total_cache_write: 111,
+            request_count: 25,
+            max_rounds: Some(200),
+            max_tool_calls: None,
+            max_tokens: Some(2_000_000),
+            max_duration_secs: Some(3_600),
+        });
+
+        let state = handler.llm_session.task_budget_state();
+        assert_eq!(state.task_rounds, 25);
+        assert_eq!(state.tool_calls, 31);
+        assert_eq!(state.active_secs, 95);
+        assert_eq!(state.token_usage.total_input, 12_345);
+        assert_eq!(state.token_usage.total_cache_read, 999);
+        assert!(state.last_accounted.is_none(), "anchor must not be seeded");
+
+        let limit = handler.llm_session.task_budget_limit();
+        assert_eq!(limit.max_rounds, Some(200));
+        assert_eq!(limit.max_tokens, Some(2_000_000));
+        assert_eq!(limit.max_duration_secs, Some(3_600));
+        assert!(!TaskBudgetLimit::default().is_bounded());
+        assert!(limit.is_bounded());
+
+        // The snapshot serializer round-trips the restored state.
+        let snapshot = handler.task_budget_snapshot().expect("bounded task");
+        assert_eq!(snapshot.task_rounds, 25);
+        assert_eq!(snapshot.max_rounds, Some(200));
+    }
+
+    /// A fresh, unbounded handler yields no snapshot payload — legacy
+    /// sessions stay byte-identical.
+    #[test]
+    fn task_budget_snapshot_is_none_for_fresh_unbounded_session() {
+        let handler = test_handler();
+        assert!(handler.task_budget_snapshot().is_none());
     }
 }

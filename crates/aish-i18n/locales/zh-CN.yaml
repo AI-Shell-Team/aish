@@ -768,6 +768,15 @@ shell:
   nl_detection:
     confirm_ask_ai: "这看起来像自然语言问题，是否让 AI 解答？(Y/n)"
 
+  budget:
+    exhausted_title: "⛔ 任务预算已耗尽"
+    exhausted_detail: "维度: {dimension} · 已用: {used} · 上限: {limit}"
+    exhausted_options: "是否调整预算并继续? 调整将被记录到审计日志 (y=调整 / n=停止)"
+    stopped_by_user: "已按预算停止。已完成的工具执行记录已保存，可稍后从保存点继续。"
+    new_limit_prompt: "请输入该维度的新上限数值:"
+    raised: "预算已调整: {dimension} -> {value}。重新发起任务以从保存点继续。"
+    invalid_limit: "无效数值（必须大于已用量），预算保持不变。"
+
   error:
     execution_error: "❌ 执行过程中出错: {error}"
     pty_decode_error: "捕获 pty 输出解码错误: {error}"
@@ -776,6 +785,7 @@ shell:
     llm_error_message: "错误: {error}"
     partial_turn_saved: "已保存本轮已完成的工具执行记录（{steps} 步），失败前的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     partial_turn_saved_limit: "已在达到轮次上限停止前保存本轮已完成的工具执行记录（{steps} 步），已完成的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
+    partial_turn_saved_budget: "已在达到任务预算上限停止前保存本轮已完成的工具执行记录（{steps} 步），已完成的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     llm_error_details_title: "调试详情"
     tool_args_json_invalid_hint: "❌ 请求失败，请重试。"
     pty_error: "PTY 错误：{error}"
@@ -888,6 +898,13 @@ shell:
     output_tokens: "输出 tokens"
     total: "总计"
     api_calls: "API 调用次数"
+    budget_title: "任务预算"
+    budget_rounds: "轮次（已用/上限）:"
+    budget_tool_calls: "工具调用（已用/上限）:"
+    budget_tokens: "Token（已用/上限）:"
+    budget_duration: "活跃时长秒（已用/上限）:"
+    budget_cost: "费用:"
+    budget_cost_unavailable: "不可用（提供商未回报价格数据）"
 
   setup:
     no_config_manager: "无法重新配置：配置管理器不可用"
@@ -983,6 +1000,9 @@ shell:
       inline_completion:
         label: "行内 AI 补全"
         desc: "输入 AI 提示时显示灰色幽灵文本建议"
+      task_budget_max_rounds:
+        label: "任务预算轮次上限"
+        desc: "单个任务累计工具循环轮次上限，留空为不限（继续不重置）"
       max_llm_messages:
         label: "AI 最大消息数"
         desc: "上下文中保留的 AI 对话轮数"

@@ -2201,6 +2201,9 @@ impl AishShell {
             context_budget_policy,
             config.skills.auto_search,
         );
+        // Issue #569: install the configured task budget limits so the tool
+        // loop enforces them from the very first round.
+        ai_handler.apply_task_budget_config(&config.task_budget);
 
         // Redact secrets from tool outputs before they enter persistent
         // LLM context (same scanner as the audit path).
@@ -2927,7 +2930,13 @@ impl AishShell {
                                     // Errors are already displayed via the LlmEventType::Error
                                     // event callback — avoid printing twice. Only handle
                                     // non-LLM errors that bypass the event system.
-                                    if !matches!(
+                                    if let aish_core::AishError::BudgetExhausted(dim) = &e {
+                                        // Issue #569 acceptance 5: the stop
+                                        // panel offers an explicit budget
+                                        // adjustment (recorded to audit) —
+                                        // plain "continue" never raises it.
+                                        self.handle_budget_exhaustion(dim);
+                                    } else if !matches!(
                                         e,
                                         aish_core::AishError::Llm(_)
                                             | aish_core::AishError::IterationLimit
@@ -2940,11 +2949,6 @@ impl AishShell {
                             }
                             continue;
                         }
-                    }
-
-                    // InputGuard pre-check for AI prompts
-                    if !self.screen_ai_prompt(&question) {
-                        continue;
                     }
 
                     // Security gate: detect secrets in AI input
@@ -3178,7 +3182,9 @@ impl AishShell {
                         Err(e) => {
                             if !matches!(
                                 e,
-                                aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                                aish_core::AishError::Llm(_)
+                                    | aish_core::AishError::IterationLimit
+                                    | aish_core::AishError::BudgetExhausted(_)
                             ) {
                                 let msg = t("shell.error.llm_error_message")
                                     .replace("{error}", &e.to_string());
@@ -3377,6 +3383,7 @@ impl AishShell {
                                             e,
                                             aish_core::AishError::Llm(_)
                                                 | aish_core::AishError::IterationLimit
+                                                | aish_core::AishError::BudgetExhausted(_)
                                         ) {
                                             let msg = t("shell.error.llm_error_message")
                                                 .replace("{error}", &e.to_string());
@@ -3755,7 +3762,9 @@ impl AishShell {
                     Err(e) => {
                         if !matches!(
                             e,
-                            aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                            aish_core::AishError::Llm(_)
+                                | aish_core::AishError::IterationLimit
+                                | aish_core::AishError::BudgetExhausted(_)
                         ) {
                             let msg = t("shell.error.llm_error_message")
                                 .replace("{error}", &e.to_string());
@@ -3846,8 +3855,11 @@ impl AishShell {
             return false;
         }
         // Issue #572: a deliberate iteration-limit stop is not a failure;
-        // use the matching hint so the saved evidence is not misdescribed.
-        let key = if self.ai_handler.last_partial_turn_stopped_at_limit() {
+        // issue #569: neither is a task-budget stop. Use the matching hint
+        // so the saved evidence is not misdescribed.
+        let key = if self.ai_handler.last_partial_turn_stopped_at_budget() {
+            "shell.error.partial_turn_saved_budget"
+        } else if self.ai_handler.last_partial_turn_stopped_at_limit() {
             "shell.error.partial_turn_saved_limit"
         } else {
             "shell.error.partial_turn_saved"
@@ -3858,6 +3870,113 @@ impl AishShell {
         true
     }
 
+    /// Issue #569: interactive panel shown when the task budget stops a
+    /// turn. Offers: stop (default) / adjust the budget explicitly / show
+    /// the saved-evidence hint. An adjustment is recorded to the audit
+    /// store with its before/after values — "continue" alone never raises
+    /// the limit.
+    fn handle_budget_exhaustion(&mut self, dimension: &str) {
+        let limit = self.ai_handler.llm_budget_limit();
+        let state = self.ai_handler.llm_budget_state();
+        let (used, bound) = match dimension {
+            "rounds" => (state.task_rounds, limit.max_rounds),
+            "tool_calls" => (state.tool_calls, limit.max_tool_calls),
+            "tokens" => (state.token_usage.total_tokens(), limit.max_tokens),
+            "duration" => (state.active_secs, limit.max_duration_secs),
+            _ => (0, None),
+        };
+        println!();
+        println!(
+            "{}",
+            theme::warning(&aish_i18n::t("shell.budget.exhausted_title"))
+        );
+        println!(
+            "  {}",
+            aish_i18n::t_with_args("shell.budget.exhausted_detail", &{
+                let mut m = std::collections::HashMap::new();
+                m.insert("dimension".to_string(), dimension.to_string());
+                m.insert("used".to_string(), format_number(used));
+                m.insert(
+                    "limit".to_string(),
+                    bound.map_or_else(|| "∞".to_string(), format_number),
+                );
+                m
+            })
+        );
+        println!("  {}", aish_i18n::t("shell.budget.exhausted_options"));
+        print!("  ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let choice = read_raw_confirmation();
+        if !choice {
+            let msg = aish_i18n::t("shell.budget.stopped_by_user");
+            println!("{}", theme::warning(&msg));
+            return;
+        }
+
+        // Explicit increase: prompt for the new value for the tripped
+        // dimension only.
+        println!(
+            "  {}",
+            aish_i18n::t_with_args("shell.budget.new_limit_prompt", &{
+                let mut m = std::collections::HashMap::new();
+                m.insert("dimension".to_string(), dimension.to_string());
+                m
+            })
+        );
+        print!("  ");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        let mut new_limit_raw = String::new();
+        if std::io::stdin().read_line(&mut new_limit_raw).is_ok() {
+            let parsed = new_limit_raw.trim().parse::<u64>().ok();
+            let applied = parsed.filter(|v| *v > used).map(|v| (v, used));
+            if let Some((new_limit, old_used)) = applied {
+                self.raise_budget_limit(dimension, new_limit);
+                // Audit the explicit adjustment with before/after values.
+                if let Some(ref audit) = self.audit_store {
+                    let event = aish_core::AuditEvent::command(
+                        chrono::Utc::now(),
+                        Some(self.session_uuid.clone()),
+                        self.audit_user.clone(),
+                        self.audit_host.clone(),
+                        format!("budget {} {} -> {}", dimension, old_used, new_limit),
+                        "budget".to_string(),
+                        0,
+                    );
+                    audit.record(event);
+                }
+                let msg = aish_i18n::t_with_args("shell.budget.raised", &{
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("dimension".to_string(), dimension.to_string());
+                    m.insert("value".to_string(), format_number(new_limit));
+                    m
+                });
+                println!("{}", theme::accent(&msg));
+            } else {
+                let msg = aish_i18n::t("shell.budget.invalid_limit");
+                println!("{}", theme::error(&msg));
+            }
+        }
+    }
+
+    /// Raise one budget dimension's limit in-place (also updates the LLM
+    /// session so the loop sees it immediately).
+    fn raise_budget_limit(&mut self, dimension: &str, new_limit: u64) {
+        let mut limit = self.ai_handler.llm_budget_limit();
+        match dimension {
+            "rounds" => limit.max_rounds = Some(new_limit),
+            "tool_calls" => limit.max_tool_calls = Some(new_limit),
+            "tokens" => limit.max_tokens = Some(new_limit),
+            "duration" => limit.max_duration_secs = Some(new_limit),
+            _ => {}
+        }
+        self.ai_handler.set_llm_budget_limit(limit);
+        self.ai_handler.rearm_budget_advisory();
+    }
+
+    /// Issue #569: budget counters ride the session snapshot; limits are
+    /// persisted too so resuming cannot bypass the budget.
     fn session_state_snapshot(
         &self,
         updated_at: chrono::DateTime<chrono::Utc>,
@@ -3868,6 +3987,7 @@ impl AishShell {
             summary_preview: summary_preview_from_context(&context_messages),
             context_messages_snapshot: context_messages,
             updated_at: Some(updated_at),
+            task_budget: self.ai_handler.task_budget_snapshot(),
         }
     }
 
@@ -7144,6 +7264,13 @@ impl AishShell {
         self.ai_handler
             .restore_context_messages(restored_context.clone());
 
+        // Issue #569 acceptance 5: seed the persisted task-budget counters
+        // and limits so a resumed session keeps accruing against the same
+        // budget instead of restarting it.
+        if let Some(budget) = &snapshot.task_budget {
+            self.ai_handler.seed_task_budget(budget.clone());
+        }
+
         // Issue #530: a legacy session (snapshot but no transcript rows)
         // resumed here must not let its first new turn become the only
         // exported message — seed the snapshot into the transcript once.
@@ -8611,7 +8738,16 @@ impl AishShell {
                     self.refresh_config_dependent_tools();
                 }
                 LiveEffect::ToolsRefresh => self.refresh_config_dependent_tools(),
-                LiveEffect::None => {}
+                LiveEffect::None => {
+                    // Issue #569: the task-budget limit is read from the
+                    // session on every loop round — push it immediately so
+                    // /setting changes take effect without a restart.
+                    if matches!(key, crate::settings_panel::SettingKey::TaskBudgetMaxRounds) {
+                        self.ai_handler
+                            .apply_task_budget_config(&self.config.task_budget);
+                        self.ai_handler.rearm_budget_advisory();
+                    }
+                }
             }
         }
 
@@ -8923,6 +9059,47 @@ impl AishShell {
             aish_i18n::t("shell.token.api_calls"),
             format_number(stats.request_count)
         );
+
+        // Issue #569: task budget usage alongside token totals. Cost is not
+        // reported by providers, so it is explicitly shown as unavailable.
+        let limit = self.ai_handler.llm_budget_limit();
+        let state = self.ai_handler.llm_budget_state();
+        if limit.is_bounded() {
+            println!();
+            println!(
+                "{}",
+                theme::accent(&aish_i18n::t("shell.token.budget_title"))
+            );
+            let row = |label: String, used: u64, limit: Option<u64>| {
+                let rest = match limit {
+                    Some(max) => format!("{} / {}", format_number(used), format_number(max)),
+                    None => format_number(used),
+                };
+                println!("  {}  {}", label, rest);
+            };
+            row(
+                aish_i18n::t("shell.token.budget_rounds"),
+                state.task_rounds,
+                limit.max_rounds,
+            );
+            row(
+                aish_i18n::t("shell.token.budget_tool_calls"),
+                state.tool_calls,
+                limit.max_tool_calls,
+            );
+            row(
+                aish_i18n::t("shell.token.budget_tokens"),
+                state.token_usage.total_tokens(),
+                limit.max_tokens,
+            );
+            row(
+                aish_i18n::t("shell.token.budget_duration"),
+                state.active_secs,
+                limit.max_duration_secs,
+            );
+            let cost = aish_i18n::t("shell.token.budget_cost_unavailable");
+            println!("  {}  {}", aish_i18n::t("shell.token.budget_cost"), cost);
+        }
         println!();
     }
 

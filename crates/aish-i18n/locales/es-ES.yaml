@@ -332,6 +332,15 @@ shell:
     no_evidence: "(no proporcionada)"
   nl_detection:
     confirm_ask_ai: "Esto parece una pregunta en lenguaje natural. ¿Preguntar a IA? (Y/n)"
+  budget:
+    exhausted_title: "⛔ Presupuesto de tarea agotado"
+    exhausted_detail: "Dimensión: {dimension} · Usado: {used} · Límite: {limit}"
+    exhausted_options: "¿Ajustar el presupuesto y continuar? Los ajustes se registran en la auditoría (y=ajustar / n=detener)"
+    stopped_by_user: "Detenido por presupuesto. La evidencia de herramientas completadas está guardada; reanude desde el punto guardado."
+    new_limit_prompt: "Introduzca el nuevo límite para esta dimensión:"
+    raised: "Presupuesto ajustado: {dimension} -> {value}. Emita la tarea de nuevo para continuar."
+    invalid_limit: "Valor inválido (debe superar el uso); presupuesto sin cambios."
+
   error:
     load_script_failed: "No se pudo cargar el script '{script}': {error}"
     pty_error: "Error de PTY: {error}"
@@ -343,6 +352,7 @@ shell:
     llm_error_message: "Error: {error}"
     partial_turn_saved: "Se guardaron los pasos de herramienta completados de este turno ({steps} pasos). El trabajo previo al error no se pierde; escriba una nueva tarea o ;retry para continuar desde el punto guardado."
     partial_turn_saved_limit: "Se guardaron los pasos de herramienta completados de este turno ({steps} pasos) antes de detenerse en el límite de iteraciones. El trabajo se conserva; escriba una nueva tarea o ;retry para continuar desde el punto guardado."
+    partial_turn_saved_budget: "Se guardaron los pasos de herramientas completados de este turno ({steps} pasos) antes de detenerse en el límite de presupuesto de la tarea. El trabajo se conserva; escriba una nueva tarea o ;retry para continuar desde el punto guardado."
     llm_error_details_title: "Detalles de depuración"
     tool_args_json_invalid_hint: "❌ La solicitud falló; inténtalo de nuevo."
   prompt:
@@ -446,6 +456,13 @@ shell:
     output_tokens: "Tokens de salida"
     total: "Total"
     api_calls: "Llamadas API"
+    budget_title: "Presupuesto de tarea"
+    budget_rounds: "Rondas (usado/límite):"
+    budget_tool_calls: "Llamadas de herramientas (usado/límite):"
+    budget_tokens: "Tokens (usado/límite):"
+    budget_duration: "Segundos activos (usado/límite):"
+    budget_cost: "Costo:"
+    budget_cost_unavailable: "no disponible (los proveedores no informan precios)"
   setup:
     no_config_manager: "No se puede reconfigurar: el gestor de configuración no está disponible"
     cancelled: "Configuración cancelada; se conservan los ajustes actuales"
@@ -559,6 +576,9 @@ shell:
       inline_enforce_json:
         label: "Forzar JSON en línea"
         desc: "Forzar que el completado en línea devuelva JSON estricto"
+      task_budget_max_rounds:
+        label: "Límite de rondas del presupuesto"
+        desc: "Rondas acumuladas del bucle de herramientas por tarea; vacío = ilimitado (continuar nunca lo restablece)"
       max_llm_messages:
         label: "Mensajes LLM máx."
         desc: "Máximo de turnos de conversación conservados en el historial del LLM"

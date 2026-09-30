@@ -110,7 +110,19 @@ pub struct LlmSession {
     /// `take_last_partial_turn` so the shell layer can persist the
     /// evidence. Empty unless the previous turn failed mid-loop.
     last_partial_turn: parking_lot::Mutex<Vec<ChatMessage>>,
-    /// Scripted chat completion responses for unit/integration tests (pop in order).
+    /// Task-level cumulative budget counters (issue #569). Accumulates
+    /// across continues, compactions, and sub-agent merges; never reset by
+    /// "continue". Guarded by a mutex because `execute_tool` (called from
+    /// async contexts) updates `tool_calls` mid-loop.
+    task_budget_state: parking_lot::Mutex<crate::budget::TaskBudgetState>,
+    /// Upper bounds for the task budget. `None`-dimension = unlimited.
+    task_budget_limit: parking_lot::Mutex<crate::budget::TaskBudgetLimit>,
+    /// Set when the loop stopped because a budget dimension was exhausted;
+    /// holds the dimension key for the shell's stop-note wording.
+    budget_exhausted_dimension: parking_lot::Mutex<Option<String>>,
+    /// Near-threshold advisory state: fires the "approaching budget" hint
+    /// once per cycle; re-armed by an explicit budget adjustment.
+    near_threshold_state: parking_lot::Mutex<crate::budget::NearThresholdState>,
     #[cfg(test)]
     test_chat_responses: Option<Arc<std::sync::Mutex<Vec<Result<LlmResponse, AishError>>>>>,
 }
@@ -171,9 +183,65 @@ impl LlmSession {
             is_sub_agent: false,
             rotation: None,
             last_partial_turn: parking_lot::Mutex::new(Vec::new()),
+            task_budget_state: parking_lot::Mutex::new(crate::budget::TaskBudgetState::default()),
+            task_budget_limit: parking_lot::Mutex::new(crate::budget::TaskBudgetLimit::default()),
+            budget_exhausted_dimension: parking_lot::Mutex::new(None),
+            near_threshold_state: parking_lot::Mutex::new(
+                crate::budget::NearThresholdState::default(),
+            ),
             #[cfg(test)]
             test_chat_responses: None,
         }
+    }
+
+    /// Set the task budget bounds (from `config.yaml llm.task_budget`).
+    pub fn set_task_budget_limit(&self, limit: crate::budget::TaskBudgetLimit) {
+        *self.task_budget_limit.lock() = limit;
+    }
+
+    /// Fold a completed sub-agent's cumulative budget counters into this
+    /// session's task (issue #569 acceptance 3). Called once per sub-agent
+    /// completion; wall-clock anchors stay process-local and unmerged.
+    pub fn merge_task_budget(&self, other: &crate::budget::TaskBudgetState) {
+        self.task_budget_state.lock().merge_task(other);
+    }
+
+    /// Snapshot the configured task budget bounds.
+    pub fn task_budget_limit(&self) -> crate::budget::TaskBudgetLimit {
+        self.task_budget_limit.lock().clone()
+    }
+
+    /// Snapshot the cumulative task budget counters.
+    pub fn task_budget_state(&self) -> crate::budget::TaskBudgetState {
+        self.task_budget_state.lock().clone()
+    }
+
+    /// Flush pending wall-clock seconds into the budget counters. Public
+    /// so the spawn path can settle a sub-session before folding it into
+    /// the parent task.
+    pub fn flush_task_budget_wall_clock(&self) {
+        self.task_budget_state.lock().end_turn();
+    }
+
+    /// Internal mutable access for loop accounting (tool_loop / spawn).
+    pub(crate) fn task_budget_state_mut(
+        &self,
+    ) -> parking_lot::MutexGuard<'_, crate::budget::TaskBudgetState> {
+        self.task_budget_state.lock()
+    }
+
+    /// Seed cumulative counters on resume (issue #569 acceptance 5: budget
+    /// state must survive session restore so it cannot be bypassed by
+    /// restarting the process). Wall-clock anchor is never seeded — it is
+    /// process-local and starts with the next turn.
+    pub fn seed_task_budget_state(&self, mut state: crate::budget::TaskBudgetState) {
+        state.end_turn(); // drop any cross-process Instant anchor
+        *self.task_budget_state.lock() = state;
+    }
+
+    /// Take the budget dimension that stopped the last turn, if any.
+    pub fn take_budget_exhausted_dimension(&self) -> Option<String> {
+        self.budget_exhausted_dimension.lock().take()
     }
 
     /// Drain the tool-loop messages completed before the last mid-turn
@@ -441,6 +509,12 @@ impl LlmSession {
     }
 
     fn record_usage(&self, usage: crate::usage::TokenUsage) {
+        // Mirror into the task budget counters first (issue #569): budget
+        // math must see the same usage the session footer reports.
+        self.task_budget_state
+            .lock()
+            .token_usage
+            .record(usage.clone());
         self.token_stats.lock().unwrap().record(usage);
     }
 
@@ -772,6 +846,56 @@ impl LlmSession {
                     return Err(AishError::IterationLimit);
                 }
             }
+
+            // Task-level cumulative budget check (issue #569): evaluated at
+            // the loop top, BEFORE any model request, so an exhausted budget
+            // never fires another call. The previous round's tools have all
+            // completed by now (rounds are serial), so the partial-turn
+            // evidence below is complete and consistent.
+            {
+                let (limit, state_snapshot) = {
+                    let state = self.task_budget_state.lock();
+                    (self.task_budget_limit.lock().clone(), state.clone())
+                };
+                let check = limit.check(&state_snapshot);
+                if let Some(dim) = check.exhausted {
+                    // Preserve the same evidence contract as the iteration
+                    // limit / API error paths (#572/#452): user message
+                    // prefix + the post-initial loop messages, call/result
+                    // pairing intact.
+                    if messages.len() > initial_len {
+                        let mut partial: Vec<ChatMessage> = vec![user_msg.clone()];
+                        partial.extend(messages[initial_len..].iter().cloned());
+                        *self.last_partial_turn.lock() = partial;
+                    }
+                    let dim_key = dim.key().to_string();
+                    *self.budget_exhausted_dimension.lock() = Some(dim_key.clone());
+                    self.emit_event(LlmEvent {
+                        event_type: LlmEventType::Error,
+                        data: serde_json::json!({
+                            "error": "task budget exhausted",
+                            "dimension": dim_key,
+                        }),
+                        timestamp: now_timestamp(),
+                        metadata: None,
+                    });
+                    self.emit_event(LlmEvent {
+                        event_type: LlmEventType::OpEnd,
+                        data: serde_json::json!({"reason": "budget_exhausted"}),
+                        timestamp: now_timestamp(),
+                        metadata: None,
+                    });
+                    return Err(AishError::BudgetExhausted(dim_key));
+                }
+            }
+
+            // Start wall-clock accounting for this round, count the round,
+            // then proceed with the model request.
+            {
+                let mut state = self.task_budget_state.lock();
+                state.start_turn();
+                state.task_rounds += 1;
+            }
             iterations += 1;
 
             messages = self.prepare_messages_for_send(messages).await;
@@ -790,6 +914,7 @@ impl LlmSession {
                 event_type: LlmEventType::GenerationStart,
                 data: serde_json::json!({
                     "iteration": iterations,
+                    "task_rounds": self.task_budget_state().task_rounds,
                     "has_tools": has_tools,
                 }),
                 timestamp: now_timestamp(),
@@ -947,6 +1072,8 @@ impl LlmSession {
                     // Accumulate token usage from SSE chunks
                     let mut stream_prompt_tokens: u64 = 0;
                     let mut stream_completion_tokens: u64 = 0;
+                    let mut stream_cache_read_tokens: u64 = 0;
+                    let mut stream_cache_write_tokens: u64 = 0;
 
                     while !stream_done {
                         if self.cancellation_token.is_cancelled() {
@@ -968,6 +1095,8 @@ impl LlmSession {
                                         if let Some(u) = chunk_usage {
                                             stream_prompt_tokens = u.prompt_tokens;
                                             stream_completion_tokens = u.completion_tokens;
+                                            stream_cache_read_tokens = u.cache_read_tokens;
+                                            stream_cache_write_tokens = u.cache_write_tokens;
                                         }
                                         // Content is emitted before ToolCallDelta in
                                         // the same parse batch, so look ahead: a
@@ -1106,6 +1235,8 @@ impl LlmSession {
                         self.record_usage(crate::usage::TokenUsage {
                             prompt_tokens: stream_prompt_tokens,
                             completion_tokens: stream_completion_tokens,
+                            cache_read_tokens: stream_cache_read_tokens,
+                            cache_write_tokens: stream_cache_write_tokens,
                         });
                     }
 
@@ -1260,10 +1391,17 @@ impl LlmSession {
                         )
                         .await
                     {
+                        // Round finished — flush pending whole seconds of
+                        // active wall-clock into the task budget (#569).
+                        let mut state = self.task_budget_state.lock();
+                        state.end_turn();
+                        let check = self.task_budget_limit.lock().check(&state);
+                        if self.near_threshold_state.lock().should_report(&check) {
+                            self.emit_budget_near_threshold(&check);
+                        }
                         return Ok(pr);
                     }
 
-                    // Smart-trim old tool outputs to prevent unbounded growth
                     smart_trim_tool_loop(&mut messages, initial_len);
                 }
             }
@@ -1313,6 +1451,9 @@ impl LlmSession {
     /// - Retries once on execution failure (matching Python's robustness).
     /// - Emits structured TOOL_EXECUTION_START / TOOL_EXECUTION_END events.
     async fn execute_tool(&self, tool_call: &ToolCall) -> ToolResult {
+        // Count every tool execution against the task budget (issue #569):
+        // parallel calls within one round each count.
+        self.task_budget_state.lock().tool_calls += 1;
         let args: serde_json::Value =
             serde_json::from_str(&tool_call.arguments).unwrap_or(serde_json::Value::Null);
 
@@ -1684,6 +1825,12 @@ impl LlmSession {
             context_budget_policy: self.context_budget_policy.clone(),
             rotation: None,
             last_partial_turn: parking_lot::Mutex::new(Vec::new()),
+            task_budget_state: parking_lot::Mutex::new(crate::budget::TaskBudgetState::default()),
+            task_budget_limit: parking_lot::Mutex::new(crate::budget::TaskBudgetLimit::default()),
+            budget_exhausted_dimension: parking_lot::Mutex::new(None),
+            near_threshold_state: parking_lot::Mutex::new(
+                crate::budget::NearThresholdState::default(),
+            ),
             turn_seq: std::sync::atomic::AtomicU32::new(0),
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
@@ -1856,6 +2003,27 @@ impl LlmSession {
             timestamp: now_timestamp(),
             metadata: None,
         });
+    }
+
+    /// Issue #569: emit a one-shot advisory when cumulative usage crosses
+    /// the near-threshold percentage of any bounded dimension. Re-armed by
+    /// an explicit budget adjustment (`rearm_near_threshold`).
+    fn emit_budget_near_threshold(&self, check: &crate::budget::BudgetCheck) {
+        self.emit_event(LlmEvent {
+            event_type: LlmEventType::Error,
+            data: serde_json::json!({
+                "error": "task budget near threshold",
+                "nearest_percent": check.nearest_percent,
+                "warning": true,
+            }),
+            timestamp: now_timestamp(),
+            metadata: None,
+        });
+    }
+
+    /// Re-arm the near-threshold advisory after an explicit budget raise.
+    pub fn rearm_near_threshold(&self) {
+        self.near_threshold_state.lock().rearm();
     }
 
     pub fn emit_context_compaction_start(&self, scope: &str, mode: &str) {
@@ -4332,5 +4500,177 @@ mod tests {
             .collect();
         assert_eq!(called_ids, ids, "all completed call ids in order");
         assert_eq!(called_ids, answered_ids, "no dangling tool_call_id");
+    }
+
+    /// Issue #569: a token-only task budget stops the loop BEFORE the model
+    /// request that would exceed it, preserves the #572 evidence contract,
+    /// and reports the exhausted dimension.
+    #[tokio::test]
+    async fn task_budget_token_exhaustion_stops_loop_and_saves_evidence() {
+        use crate::agents::mock_tool_call_response_with_usage;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Three scripted rounds; each round burns 60 prompt + 40 output
+        // tokens. The 150-token budget must stop before round 3's request.
+        let responses: Vec<Result<crate::client::LlmResponse, AishError>> = (0..3)
+            .map(|i| {
+                Ok(mock_tool_call_response_with_usage(
+                    &[(format!("c{}", i).as_str(), "grep", "{}")],
+                    60,
+                    40,
+                ))
+            })
+            .collect();
+        let session = partial_turn_session(responses, log.clone());
+        session.set_task_budget_limit(crate::budget::TaskBudgetLimit {
+            max_tokens: Some(150),
+            ..Default::default()
+        });
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        let err = result.expect_err("budget exhaustion must fail the turn");
+        assert!(
+            matches!(&err, AishError::BudgetExhausted(d) if d == "tokens"),
+            "must surface BudgetExhausted(tokens), got {err:?}"
+        );
+        assert_eq!(
+            session.take_budget_exhausted_dimension().as_deref(),
+            Some("tokens")
+        );
+        // Rounds 1 and 2 ran (2×100=200 ≥ 150 after round 2); round 3 never
+        // sent a request, so the log shows exactly two tool executions.
+        assert_eq!(log.lock().unwrap().len(), 2, "round 3 must not run");
+        let state = session.task_budget_state();
+        assert_eq!(state.task_rounds, 2);
+        assert_eq!(state.tool_calls, 2);
+        assert_eq!(state.token_usage.total_tokens(), 200);
+
+        // Evidence contract: user prefix + both completed call/result pairs.
+        let partial = session.take_last_partial_turn();
+        let roles: Vec<&str> = partial.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "tool", "assistant", "tool"]
+        );
+        let called_ids: Vec<String> = partial
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .flat_map(|m| m.tool_calls.iter().flatten().map(|tc| tc.id.clone()))
+            .collect();
+        assert_eq!(called_ids, vec!["c0".to_string(), "c1".to_string()]);
+    }
+
+    /// Issue #569: rounds-dimension exhaustion stops before the round that
+    /// would exceed it and reports the rounds dimension.
+    #[tokio::test]
+    async fn task_budget_rounds_exhaustion_stops_with_dimension() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let responses: Vec<Result<crate::client::LlmResponse, AishError>> = (0..5)
+            .map(|i| {
+                Ok(mock_tool_call_response(&[(
+                    format!("c{}", i).as_str(),
+                    "grep",
+                    "{}",
+                )]))
+            })
+            .collect();
+        let session = partial_turn_session(responses, log.clone());
+        session.set_task_budget_limit(crate::budget::TaskBudgetLimit {
+            max_rounds: Some(3),
+            ..Default::default()
+        });
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        let err = result.expect_err("rounds exhaustion must fail the turn");
+        assert!(
+            matches!(&err, AishError::BudgetExhausted(d) if d == "rounds"),
+            "must surface BudgetExhausted(rounds), got {err:?}"
+        );
+        assert_eq!(log.lock().unwrap().len(), 3, "round 4 must not run");
+        assert_eq!(session.task_budget_state().task_rounds, 3);
+        // Evidence: user prefix + 3 completed call/result pairs.
+        let partial = session.take_last_partial_turn();
+        let assistants = partial.iter().filter(|m| m.role == "assistant").count();
+        let tools = partial.iter().filter(|m| m.role == "tool").count();
+        assert_eq!(assistants, 3);
+        assert_eq!(tools, 3);
+    }
+
+    /// Issue #569: a bounded-but-unreached budget never stops the loop and
+    /// a completed turn keeps the partial buffer empty.
+    #[tokio::test]
+    async fn task_budget_within_bounds_completes_normally() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let session = partial_turn_session(
+            vec![
+                Ok(mock_tool_call_response(&[("c1", "grep", "{}")])),
+                Ok(crate::agents::mock_text_response("done")),
+            ],
+            log.clone(),
+        );
+        session.set_task_budget_limit(crate::budget::TaskBudgetLimit {
+            max_rounds: Some(100),
+            max_tool_calls: Some(100),
+            max_tokens: Some(1_000_000),
+            max_duration_secs: Some(3_600),
+        });
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(result.is_ok(), "within-bounds turn must succeed");
+        assert!(session.take_last_partial_turn().is_empty());
+        assert_eq!(session.task_budget_state().task_rounds, 2);
+        assert_eq!(session.task_budget_state().tool_calls, 1);
+    }
+
+    /// Issue #569 acceptance 2: "continue" resets only the segment counter,
+    /// never the cumulative task rounds.
+    #[tokio::test]
+    async fn task_rounds_accumulate_across_continue() {
+        use crate::agents::mock_tool_call_response;
+
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Segment 1: 20 rounds then continue (segment counter resets), segment
+        // 2: 20 more rounds then stop. 40 rounds execute; the 41st scripted
+        // response is never consumed because the stop branch fires at the top
+        // of round 41 before any request.
+        let mut responses: Vec<Result<crate::client::LlmResponse, AishError>> = Vec::new();
+        for i in 0..41 {
+            responses.push(Ok(mock_tool_call_response(&[(
+                format!("c{}", i).as_str(),
+                "grep",
+                "{}",
+            )])));
+        }
+        let mut session = partial_turn_session(responses, log.clone());
+        let first_vote = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let vote = first_vote.clone();
+        session.set_iteration_limit_callback(Arc::new(move |_| {
+            vote.swap(false, std::sync::atomic::Ordering::SeqCst)
+        }));
+
+        let result = session
+            .process_input(&ChatMessage::user("do the task"), &[], Some("core"), false)
+            .await;
+        assert!(matches!(result, Err(AishError::IterationLimit)));
+
+        // The task-level counter accumulated across the continue: 40 rounds.
+        assert_eq!(
+            session.task_budget_state().task_rounds,
+            40,
+            "task rounds must accumulate across continues"
+        );
+        assert_eq!(log.lock().unwrap().len(), 40);
+        // But the budget dimension was NOT the stopper.
+        assert!(session.take_budget_exhausted_dimension().is_none());
     }
 }

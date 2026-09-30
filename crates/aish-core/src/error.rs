@@ -45,6 +45,11 @@ pub enum AishError {
     #[error("tool loop stopped at the iteration limit")]
     IterationLimit,
 
+    /// Task-level cumulative budget exhausted (issue #569). The field names
+    /// the dimension that tripped (rounds / tool_calls / tokens / duration).
+    #[error("task budget exhausted: {0}")]
+    BudgetExhausted(String),
+
     #[error("operation timed out")]
     Timeout,
 }
@@ -74,6 +79,7 @@ impl AishError {
             AishError::Shell(_) => "shell",
             AishError::Cancelled => "cancelled",
             AishError::IterationLimit => "iteration_limit",
+            AishError::BudgetExhausted(_) => "budget_exhausted",
             AishError::Parse(_) => "parse",
             AishError::Timeout => "timeout",
         }

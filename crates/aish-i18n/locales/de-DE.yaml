@@ -332,6 +332,15 @@ shell:
     no_evidence: "(nicht angegeben)"
   nl_detection:
     confirm_ask_ai: "Das sieht nach einer natürlichen Sprachfrage aus. KI fragen? (Y/n)"
+  budget:
+    exhausted_title: "⛔ Aufgabenbudget erschoepft"
+    exhausted_detail: "Dimension: {dimension} · Genutzt: {used} · Limit: {limit}"
+    exhausted_options: "Budget anpassen und fortfahren? Anpassungen werden auditiert (y=anpassen / n=stoppen)"
+    stopped_by_user: "Durch Budget gestoppt. Abgeschlossene Werkzeugschritte sind gespeichert; fortsetzen vom gespeicherten Punkt."
+    new_limit_prompt: "Neues Limit fuer diese Dimension eingeben:"
+    raised: "Budget angepasst: {dimension} -> {value}. Aufgabe erneut ausgeben, um fortzufahren."
+    invalid_limit: "Ungueltiger Wert (muss ueber der Nutzung liegen); Budget unveraendert."
+
   error:
     load_script_failed: "Skript '{script}' konnte nicht geladen werden: {error}"
     pty_error: "PTY-Fehler: {error}"
@@ -343,6 +352,7 @@ shell:
     llm_error_message: "Fehler: {error}"
     partial_turn_saved: "Die abgeschlossenen Werkzeugschritte dieses Durchgangs wurden gespeichert ({steps} Schritte). Die Arbeit vor dem Fehler geht nicht verloren; geben Sie eine neue Aufgabe ein oder ;retry, um ab dem gespeicherten Punkt fortzufahren."
     partial_turn_saved_limit: "Die abgeschlossenen Werkzeugschritte dieses Durchgangs wurden vor dem Stopp am Iterationslimit gespeichert ({steps} Schritte). Die Arbeit bleibt erhalten; geben Sie eine neue Aufgabe ein oder ;retry, um ab dem gespeicherten Punkt fortzufahren."
+    partial_turn_saved_budget: "Die abgeschlossenen Werkzeugschritte dieses Durchgangs wurden vor dem Stopp am Aufgabenbudgetlimit gespeichert ({steps} Schritte). Die Arbeit bleibt erhalten; geben Sie eine neue Aufgabe ein oder ;retry, um vom gespeicherten Punkt fortzufahren."
     llm_error_details_title: "Debug-Details"
     tool_args_json_invalid_hint: "❌ Anfrage fehlgeschlagen, bitte erneut versuchen."
   prompt:
@@ -446,6 +456,13 @@ shell:
     output_tokens: "Ausgabe-Tokens"
     total: "Gesamt"
     api_calls: "API-Aufrufe"
+    budget_title: "Aufgabenbudget"
+    budget_rounds: "Runden (genutzt/Limit):"
+    budget_tool_calls: "Werkzeugaufrufe (genutzt/Limit):"
+    budget_tokens: "Token (genutzt/Limit):"
+    budget_duration: "Aktive Sekunden (genutzt/Limit):"
+    budget_cost: "Kosten:"
+    budget_cost_unavailable: "nicht verfuegbar (Anbieter melden keine Preise)"
   setup:
     no_config_manager: "Neukonfiguration nicht möglich: Konfigurationsmanager nicht verfügbar"
     cancelled: "Einrichtung abgebrochen; aktuelle Einstellungen werden beibehalten"
@@ -559,6 +576,9 @@ shell:
       inline_enforce_json:
         label: "Inline Enforce JSON"
         desc: "Inline-Completion zwingen, striktes JSON zurückzugeben"
+      task_budget_max_rounds:
+        label: "Aufgabenbudget-Rundenlimit"
+        desc: "Kumulierte Werkzugschleifen-Runden pro Aufgabe; leer = unbegrenzt (Weitermachen setzt nicht zurueck)"
       max_llm_messages:
         label: "Max LLM-Messages"
         desc: "Maximale Konversations-Turns im LLM-Verlauf"

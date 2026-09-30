@@ -768,6 +768,15 @@ shell:
   nl_detection:
     confirm_ask_ai: "This looks like a natural language question. Ask AI? (Y/n)"
 
+  budget:
+    exhausted_title: "⛔ Task budget exhausted"
+    exhausted_detail: "Dimension: {dimension} · Used: {used} · Limit: {limit}"
+    exhausted_options: "Adjust the budget and continue? Adjustments are audit-logged (y=adjust / n=stop)"
+    stopped_by_user: "Stopped by budget. Completed tool evidence is saved; resume from the saved point later."
+    new_limit_prompt: "Enter the new limit for this dimension:"
+    raised: "Budget adjusted: {dimension} -> {value}. Re-issue the task to continue from the saved point."
+    invalid_limit: "Invalid value (must exceed usage); budget unchanged."
+
   error:
     execution_error: "❌ Error during execution: {error}"
     pty_decode_error: "Caught PTY output decode error: {error}"
@@ -779,6 +788,7 @@ shell:
     llm_error_message: "Error: {error}"
     partial_turn_saved: "Saved the completed tool steps of this turn ({steps} steps). Work done before the failure is not lost; enter a new task or ;retry to continue from the saved point."
     partial_turn_saved_limit: "Saved the completed tool steps of this turn ({steps} steps) before stopping at the iteration limit. The work is kept; enter a new task or ;retry to continue from the saved point."
+    partial_turn_saved_budget: "Saved the completed tool steps of this turn ({steps} steps) before stopping at the task budget limit. The work is kept; enter a new task or ;retry to continue from the saved point."
     llm_error_details_title: "Debug Details"
     tool_args_json_invalid_hint: "❌ Request failed, please retry."
 
@@ -888,6 +898,13 @@ shell:
     output_tokens: "Output tokens"
     total: "Total"
     api_calls: "API calls"
+    budget_title: "Task budget"
+    budget_rounds: "Rounds (used/limit):"
+    budget_tool_calls: "Tool calls (used/limit):"
+    budget_tokens: "Tokens (used/limit):"
+    budget_duration: "Active seconds (used/limit):"
+    budget_cost: "Cost:"
+    budget_cost_unavailable: "unavailable (providers do not report pricing)"
 
   setup:
     no_config_manager: "Cannot reconfigure: configuration manager unavailable"
@@ -983,6 +1000,9 @@ shell:
       inline_completion:
         label: "Inline AI Completion"
         desc: "Gray ghost-text AI suggestions while typing an AI prompt"
+      task_budget_max_rounds:
+        label: "Task Budget Round Limit"
+        desc: "Cumulative tool-loop rounds per task; blank = unlimited (continues never reset it)"
       max_llm_messages:
         label: "Max AI Messages"
         desc: "How many AI conversation turns to keep in context"

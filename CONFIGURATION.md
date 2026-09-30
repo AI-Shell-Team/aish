@@ -70,6 +70,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `context_token_budget` | integer/null | `null` | 可选的上下文 token 预算限制 | 如：4000，为 null 则仅使用消息数量限制 |
 | `enable_token_estimation` | boolean | `true` | 启用基于 tiktoken 的 token 估算 | true/false |
 | `context_auto_compact` | object | 见下方 | 自动上下文压缩配置，面向 shell/tool 输出控量 | 可选 |
+| `task_budget` | object | 见下方 | 任务级累计预算（issue #569），任一维度达到上限即停止循环并提示（继续不会重置；调整预算需显式确认并写入审计） | 各维度 integer/null |
 
 ### 工具输出配置
 
@@ -203,6 +204,14 @@ max_llm_messages: 50
 max_shell_messages: 20
 context_token_budget: null
 enable_token_estimation: true
+
+# 任务级累计预算（可选；缺省不限，仅计数）
+task_budget:
+  max_rounds: null        # 累计工具循环轮次
+  max_tool_calls: null    # 累计工具调用次数
+  max_tokens: null        # 累计 token（输入+输出，不含缓存命中）
+  max_duration_secs: null # 累计活跃时长（秒）
+
 context_auto_compact:
   enabled: true
   full_compact_enabled: true

@@ -119,6 +119,12 @@ where
     // billed exactly like main-session turns). Totals only — see
     // TokenStats::merge_totals for why last_prompt_tokens is skipped.
     parent.merge_token_stats(&sub.token_stats());
+    // Issue #569 acceptance 3: fold the sub-agent's budget counters
+    // (rounds, tool calls, wall-clock seconds, tokens) into the parent
+    // task exactly once on completion — no double counting on retries,
+    // because the merge runs in the single completion path here.
+    sub.flush_task_budget_wall_clock();
+    parent.merge_task_budget(&sub.task_budget_state());
 
     SpawnResult {
         text: outcome.text,
@@ -383,6 +389,41 @@ mod tests {
             .tool_specs()
             .iter()
             .any(|s| s.function.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_folds_subsession_budget_into_parent_task() {
+        // Issue #569 acceptance 3: sub-agent rounds/tool-calls/tokens fold
+        // into the parent's task-level counters exactly once.
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        let rounds_before = parent.task_budget_state().task_rounds;
+        let calls_before = parent.task_budget_state().tool_calls;
+
+        let registry = AgentRegistry::builtin();
+        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(
+                sub,
+                vec![
+                    Ok(mock_tool_call_response_with_usage(
+                        &[("c1", "grep", "{}")],
+                        500,
+                        40,
+                    )),
+                    Ok(mock_text_response_with_usage("done", 700, 60)),
+                ],
+            );
+        })
+        .await
+        .expect("spawn_builtin should succeed");
+
+        let budget = parent.task_budget_state();
+        // The sub-agent ran 2 loop rounds and 1 tool call; the parent's own
+        // loop did not run, so the totals are exactly the sub's.
+        assert_eq!(budget.task_rounds, rounds_before + 2);
+        assert_eq!(budget.tool_calls, calls_before + 1);
+        assert_eq!(budget.token_usage.total_input, 1200);
+        assert_eq!(budget.token_usage.total_output, 100);
     }
 
     #[tokio::test]

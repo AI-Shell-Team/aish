@@ -195,6 +195,37 @@ impl Default for ContextAutoCompactConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Task budget sub-config (issue #569)
+// ---------------------------------------------------------------------------
+
+/// Task-level cumulative budget bounds. All dimensions are optional and
+/// default to unlimited; the runtime still accrues counters for display.
+/// A tripped budget stops the loop with `BudgetExhausted`; raising a limit
+/// is an explicit, audit-logged action — never implied by "continue".
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default)]
+pub struct TaskBudgetConfig {
+    /// Cumulative tool-loop rounds for the whole task.
+    pub max_rounds: Option<u64>,
+    /// Cumulative tool executions (parallel calls each count).
+    pub max_tool_calls: Option<u64>,
+    /// Cumulative fresh tokens (input + output; cached reads excluded).
+    pub max_tokens: Option<u64>,
+    /// Cumulative active wall-clock seconds (turn time only, no idle).
+    pub max_duration_secs: Option<u64>,
+}
+
+impl TaskBudgetConfig {
+    /// True when any dimension is bounded.
+    pub fn is_bounded(&self) -> bool {
+        self.max_rounds.is_some()
+            || self.max_tool_calls.is_some()
+            || self.max_tokens.is_some()
+            || self.max_duration_secs.is_some()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Inline AI completion sub-config
 // ---------------------------------------------------------------------------
 
@@ -483,6 +514,11 @@ pub struct ConfigModel {
     #[serde(default)]
     pub context_token_budget: Option<usize>,
 
+    /// Task-level cumulative budget (issue #569). Every dimension is
+    /// optional; absent = unlimited (counters still accrue for /token).
+    #[serde(default)]
+    pub task_budget: TaskBudgetConfig,
+
     /// Enable tiktoken-based token estimation for context trimming
     #[serde(default = "default_true")]
     pub enable_token_estimation: bool,
@@ -582,6 +618,7 @@ impl Default for ConfigModel {
             context_token_budget: None,
             enable_token_estimation: default_true(),
             context_auto_compact: ContextAutoCompactConfig::default(),
+            task_budget: TaskBudgetConfig::default(),
             enable_scripts: default_true(),
             history_size: default_history_size(),
             terminal_resize_mode: default_terminal_resize_mode(),
@@ -1017,5 +1054,28 @@ inline_completion:
         assert!(m.inline_completion.enabled);
         assert_eq!(m.inline_completion.debounce_ms, 400);
         assert_eq!(m.inline_completion.max_tokens, 512);
+    }
+
+    #[test]
+    fn task_budget_config_parses_from_yaml() {
+        let yaml = r#"
+max_llm_messages: 30
+task_budget:
+  max_rounds: 200
+  max_tokens: 2000000
+"#;
+        let config: ConfigModel = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.task_budget.is_bounded());
+        assert_eq!(config.task_budget.max_rounds, Some(200));
+        assert_eq!(config.task_budget.max_tokens, Some(2_000_000));
+        assert_eq!(config.task_budget.max_tool_calls, None);
+        assert_eq!(config.task_budget.max_duration_secs, None);
+    }
+
+    #[test]
+    fn task_budget_config_defaults_to_unbounded() {
+        let config = ConfigModel::default();
+        assert!(!config.task_budget.is_bounded());
+        assert_eq!(config.task_budget.max_rounds, None);
     }
 }

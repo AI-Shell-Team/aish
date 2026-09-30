@@ -930,6 +930,7 @@ mod tests {
                 reasoning_content: None,
             }],
             updated_at: Some(Utc::now()),
+            task_budget: None,
         };
 
         store
@@ -979,6 +980,7 @@ mod tests {
             summary_preview: Some("Rollback: systemctl revert nginx".to_string()),
             context_messages_snapshot: vec![summary_msg, tail_user],
             updated_at: Some(Utc::now()),
+            task_budget: None,
         };
         store
             .update_session_state(&record.session_uuid, &snapshot)
@@ -1338,6 +1340,7 @@ mod tests {
                 reasoning_content: None,
             }],
             updated_at: Some(Utc::now()),
+            task_budget: None,
         };
         store
             .update_session_state(&parent.session_uuid, &snapshot)

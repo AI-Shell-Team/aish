@@ -127,6 +127,14 @@ pub async fn run_tool_loop_until_done(
             return LoopOutcome::from_spawn_outcome(outcome, loop_messages, None);
         }
         iterations += 1;
+        // Task budget accounting (issue #569): sub-agent loops accrue the
+        // same counters as the main loop so a spawn folds real consumption
+        // into the parent task.
+        {
+            let mut state = session.task_budget_state_mut();
+            state.start_turn();
+            state.task_rounds += 1;
+        }
 
         messages = session.prepare_messages_for_send(messages).await;
 

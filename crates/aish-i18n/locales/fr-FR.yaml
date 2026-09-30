@@ -332,6 +332,15 @@ shell:
     no_evidence: "(non fournie)"
   nl_detection:
     confirm_ask_ai: "Cela ressemble à une question en langage naturel. Demander à l'IA ? (Y/n)"
+  budget:
+    exhausted_title: "⛔ Budget de tache epuise"
+    exhausted_detail: "Dimension : {dimension} · Utilise : {used} · Limite : {limit}"
+    exhausted_options: "Ajuster le budget et continuer ? Les ajustements sont journalises (y=ajuster / n=arreter)"
+    stopped_by_user: "Arrete par budget. Les preuves d'outils completes sont sauvegardees ; reprenez depuis le point sauvegarde."
+    new_limit_prompt: "Saisissez la nouvelle limite pour cette dimension :"
+    raised: "Budget ajuste : {dimension} -> {value}. Relancez la tache pour continuer."
+    invalid_limit: "Valeur invalide (doit depasser l'utilisation) ; budget inchange."
+
   error:
     load_script_failed: "Échec du chargement du script '{script}' : {error}"
     pty_error: "Erreur PTY : {error}"
@@ -343,6 +352,7 @@ shell:
     llm_error_message: "Erreur : {error}"
     partial_turn_saved: "Les etapes d'outils completees de ce tour ont ete sauvegardees ({steps} etapes). Le travail precedent l'erreur n'est pas perdu ; saisissez une nouvelle tache ou ;retry pour reprendre depuis le point sauvegarde."
     partial_turn_saved_limit: "Les etapes d'outils completees de ce tour ont ete sauvegardees ({steps} etapes) avant l'arret a la limite d'iterations. Le travail est conserve ; saisissez une nouvelle tache ou ;retry pour reprendre depuis le point sauvegarde."
+    partial_turn_saved_budget: "Les etapes d'outils completees de ce tour ont ete sauvegardees ({steps} etapes) avant l'arret a la limite de budget de la tache. Le travail est conserve ; saisissez une nouvelle tache ou ;retry pour continuer depuis le point sauvegarde."
     llm_error_details_title: "Details de debogage"
     tool_args_json_invalid_hint: "❌ La requete a echoue, veuillez reessayer."
   prompt:
@@ -446,6 +456,13 @@ shell:
     output_tokens: "Tokens de sortie"
     total: "Total"
     api_calls: "Appels API"
+    budget_title: "Budget de tache"
+    budget_rounds: "Tours (utilise/limite):"
+    budget_tool_calls: "Appels d'outils (utilise/limite):"
+    budget_tokens: "Tokens (utilise/limite):"
+    budget_duration: "Secondes actives (utilise/limite):"
+    budget_cost: "Cout:"
+    budget_cost_unavailable: "indisponible (les fournisseurs ne rapportent pas de prix)"
   setup:
     no_config_manager: "Reconfiguration impossible : gestionnaire de configuration indisponible"
     cancelled: "Configuration annulee, les parametres actuels sont conserves"
@@ -559,6 +576,9 @@ shell:
       inline_enforce_json:
         label: "Forcer JSON en ligne"
         desc: "Forcer la complétion en ligne à renvoyer du JSON strict"
+      task_budget_max_rounds:
+        label: "Limite de tours du budget"
+        desc: "Tours cumules de la boucle d'outils par tache ; vide = illimite (continuer ne reinitialise jamais)"
       max_llm_messages:
         label: "Messages LLM max"
         desc: "Tours de conversation maximum conservés dans l'historique LLM"

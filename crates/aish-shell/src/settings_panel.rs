@@ -138,6 +138,7 @@ pub enum SettingKey {
     InlineDisableThinking,
     InlineEnforceJson,
     MaxLlmMessages,
+    TaskBudgetMaxRounds,
     EnableTokenEstimation,
     // Security
     InputGuardEnabled,
@@ -200,6 +201,7 @@ impl SettingKey {
             SettingKey::InlineDisableThinking => "inline_disable_thinking",
             SettingKey::InlineEnforceJson => "inline_enforce_json",
             SettingKey::MaxLlmMessages => "max_llm_messages",
+            SettingKey::TaskBudgetMaxRounds => "task_budget_max_rounds",
             SettingKey::EnableTokenEstimation => "enable_token_estimation",
             SettingKey::InputGuardEnabled => "input_guard_enabled",
             SettingKey::EnableSandbox => "enable_sandbox",
@@ -342,6 +344,11 @@ pub const SETTINGS: &[SettingDef] = &[
     },
     SettingDef {
         key: SettingKey::MaxLlmMessages,
+        category: SettingCategory::Ai,
+        kind: SettingKind::Int,
+    },
+    SettingDef {
+        key: SettingKey::TaskBudgetMaxRounds,
         category: SettingCategory::Ai,
         kind: SettingKind::Int,
     },
@@ -698,6 +705,11 @@ pub fn current_raw(cfg: &ConfigModel, key: SettingKey) -> String {
         SettingKey::InlineDisableThinking => bool_str(cfg.inline_completion.disable_thinking),
         SettingKey::InlineEnforceJson => bool_str(cfg.inline_completion.enforce_json),
         SettingKey::MaxLlmMessages => cfg.max_llm_messages.to_string(),
+        SettingKey::TaskBudgetMaxRounds => cfg
+            .task_budget
+            .max_rounds
+            .map(|n| n.to_string())
+            .unwrap_or_default(),
         SettingKey::EnableTokenEstimation => bool_str(cfg.enable_token_estimation),
         SettingKey::InputGuardEnabled
         | SettingKey::EnableSandbox
@@ -855,6 +867,13 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
             cfg.inline_completion.enforce_json = parse_bool(value)?;
         }
         SettingKey::MaxLlmMessages => cfg.max_llm_messages = parse_usize(value)?,
+        SettingKey::TaskBudgetMaxRounds => {
+            cfg.task_budget.max_rounds = if value.is_empty() {
+                None
+            } else {
+                Some(parse_usize(value)? as u64)
+            };
+        }
         SettingKey::EnableTokenEstimation => cfg.enable_token_estimation = parse_bool(value)?,
         SettingKey::InputGuardEnabled
         | SettingKey::EnableSandbox
@@ -1120,6 +1139,7 @@ mod tests {
             SettingKey::InlineDisableThinking,
             SettingKey::InlineEnforceJson,
             SettingKey::MaxLlmMessages,
+            SettingKey::TaskBudgetMaxRounds,
             SettingKey::EnableTokenEstimation,
             SettingKey::InputGuardEnabled,
             SettingKey::EnableSandbox,
@@ -1161,6 +1181,24 @@ mod tests {
         for k in all_keys {
             assert_eq!(find(k).key, k);
         }
+    }
+
+    #[test]
+    fn task_budget_max_rounds_round_trips() {
+        // Unset renders as "" and blank input clears; a number applies.
+        let mut cfg = default_cfg();
+        assert_eq!(current_raw(&cfg, SettingKey::TaskBudgetMaxRounds), "");
+
+        apply(&mut cfg, SettingKey::TaskBudgetMaxRounds, "200").unwrap();
+        assert_eq!(cfg.task_budget.max_rounds, Some(200));
+        assert_eq!(current_raw(&cfg, SettingKey::TaskBudgetMaxRounds), "200");
+
+        apply(&mut cfg, SettingKey::TaskBudgetMaxRounds, "").unwrap();
+        assert_eq!(cfg.task_budget.max_rounds, None);
+
+        // Rejects non-numeric input without mutating the live value.
+        assert!(apply(&mut cfg, SettingKey::TaskBudgetMaxRounds, "abc").is_err());
+        assert_eq!(cfg.task_budget.max_rounds, None);
     }
 
     #[test]
