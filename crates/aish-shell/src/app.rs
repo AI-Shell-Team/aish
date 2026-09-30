@@ -8913,6 +8913,13 @@ impl AishShell {
             aish_i18n::t("shell.token.output_tokens"),
             format_number(stats.total_output)
         );
+        if stats.cached_input > 0 {
+            println!(
+                "  {} {}",
+                aish_i18n::t("shell.token.cached"),
+                format_number(stats.cached_input)
+            );
+        }
         println!(
             "  {}     {}",
             aish_i18n::t("shell.token.total"),

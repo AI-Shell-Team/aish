@@ -445,6 +445,7 @@ shell:
     input_tokens: "Tokens d'entrée"
     output_tokens: "Tokens de sortie"
     total: "Total"
+    cached: "Accès au cache"
     api_calls: "Appels API"
   setup:
     no_config_manager: "Reconfiguration impossible : gestionnaire de configuration indisponible"

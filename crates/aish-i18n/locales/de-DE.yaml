@@ -445,6 +445,7 @@ shell:
     input_tokens: "Eingabe-Tokens"
     output_tokens: "Ausgabe-Tokens"
     total: "Gesamt"
+    cached: "Cache-Treffer"
     api_calls: "API-Aufrufe"
   setup:
     no_config_manager: "Neukonfiguration nicht möglich: Konfigurationsmanager nicht verfügbar"
