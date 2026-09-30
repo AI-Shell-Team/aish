@@ -887,6 +887,7 @@ shell:
     input_tokens: "输入 tokens"
     output_tokens: "输出 tokens"
     total: "总计"
+    cached: "缓存命中"
     api_calls: "API 调用次数"
 
   setup:

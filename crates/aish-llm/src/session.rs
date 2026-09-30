@@ -1106,6 +1106,7 @@ impl LlmSession {
                         self.record_usage(crate::usage::TokenUsage {
                             prompt_tokens: stream_prompt_tokens,
                             completion_tokens: stream_completion_tokens,
+                            cached_tokens: 0,
                         });
                     }
 
@@ -1503,17 +1504,18 @@ impl LlmSession {
             messages.push(ChatMessage::tool_result(&tc.id, output.clone()));
             // Sub-agent cancel is shown by the shell as `shell.interrupted`
             // (same as Ctrl+C); do not return the tool string as AI body.
-            let suppress_body = result.meta.as_ref().is_some_and(|meta| {
-                matches!(
-                    meta.get("reason").and_then(|v| v.as_str()),
-                    Some("sub_agent_cancelled") | Some("user_cancelled")
-                )
-            });
-            let text = if self.security_notice_callback.is_some() || suppress_body {
-                String::new()
-            } else {
-                output
-            };
+            // Sub-agent fatal, however, carries a user-facing failure summary
+            // (error category + completed tool steps) that MUST be surfaced —
+            // suppressing it leaves the terminal silent (#579). Only cancel /
+            // user-cancel reasons suppress the body; `security_notice_callback`
+            // being set must not blanket-suppress fatal summaries.
+            let reason = result
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("reason"))
+                .and_then(|v| v.as_str());
+            let suppress_body = matches!(reason, Some("sub_agent_cancelled" | "user_cancelled"));
+            let text = if suppress_body { String::new() } else { output };
             let new_messages = messages[initial_len..].to_vec();
             return Some(crate::types::ProcessResult { text, new_messages });
         }
@@ -3991,6 +3993,113 @@ mod tests {
         assert_eq!(
             expected, answered,
             "every tool_call_id must have a tool_result"
+        );
+    }
+
+    /// Agent tool that short-circuits with `sub_agent_fatal`, carrying a
+    /// structured failure summary (error category + completed tool steps) in
+    /// its `output`. Mirrors the real `AgentTool::fatal_tool_result` shape so
+    /// the suppress-logic regression (#579) is exercised end-to-end through
+    /// `process_tool_call_result`.
+    struct FatalAgent;
+
+    impl Tool for FatalAgent {
+        fn name(&self) -> &str {
+            "Agent"
+        }
+        fn description(&self) -> &str {
+            "fatal probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+            crate::types::ToolResult {
+                ok: false,
+                output: "Sub-agent failed (api_error): 401 Unauthorized\n\nCompleted before failure:\n  0. grep: found 3 matches".into(),
+                meta: Some(serde_json::json!({
+                    "dispatch_status": "short_circuit",
+                    "reason": "sub_agent_fatal",
+                    "error_category": "api_error",
+                    "completed_tools": ["grep"],
+                })),
+            }
+        }
+    }
+
+    /// Regression for #579: when a sub-agent enters Fatal, the parent loop
+    /// short-circuits but MUST surface the failure summary (error category +
+    /// completed tool steps) in `ProcessResult.text`. Previously
+    /// `security_notice_callback` being set blanket-suppressed every
+    /// short-circuit `text` to empty, leaving the terminal silent.
+    #[tokio::test]
+    async fn sub_agent_fatal_text_not_suppressed_with_security_notice_callback() {
+        use crate::agents::mock_tool_call_response;
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        // Mirror the real shell: a registered security_notice_callback must
+        // NOT cause fatal summaries to be blanked out.
+        session.set_security_notice_callback(Arc::new(|_ctx| {}));
+        session
+            .set_test_chat_responses(vec![Ok(mock_tool_call_response(&[("c1", "Agent", "{}")]))]);
+        session.register_tool(Box::new(FatalAgent));
+
+        let result = session
+            .process_input(&ChatMessage::user("run sub-agent"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        // The failure category must reach the caller (terminal display).
+        assert!(
+            result.text.contains("Sub-agent failed (api_error)"),
+            "fatal text must contain the error category, got: {:?}",
+            result.text
+        );
+        // The completed-tool summary must also survive.
+        assert!(
+            result.text.contains("Completed before failure"),
+            "fatal text must list completed work, got: {:?}",
+            result.text
+        );
+        assert!(
+            result.text.contains("grep"),
+            "fatal text must name the completed tool, got: {:?}",
+            result.text
+        );
+    }
+
+    /// Cancellation (sub_agent_cancelled) MUST still suppress the body text —
+    /// the #579 fix only relaxes suppression for `sub_agent_fatal`, not cancel.
+    #[tokio::test]
+    async fn sub_agent_cancelled_text_still_suppressed() {
+        use crate::agents::mock_tool_call_response;
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.set_security_notice_callback(Arc::new(|_ctx| {}));
+        session.set_test_chat_responses(vec![Ok(mock_tool_call_response(&[(
+            "c1",
+            "Agent",
+            r#"{"cancel":true}"#,
+        )]))]);
+        session.register_tool(Box::new(ShortCircuitAgent));
+
+        let result = session
+            .process_input(&ChatMessage::user("run sub-agent"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        assert!(
+            result.text.is_empty(),
+            "cancelled short-circuit text must be suppressed, got: {:?}",
+            result.text
         );
     }
 
