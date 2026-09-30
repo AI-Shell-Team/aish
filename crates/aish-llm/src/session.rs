@@ -947,6 +947,7 @@ impl LlmSession {
                     // Accumulate token usage from SSE chunks
                     let mut stream_prompt_tokens: u64 = 0;
                     let mut stream_completion_tokens: u64 = 0;
+                    let mut stream_cached_tokens: u64 = 0;
 
                     while !stream_done {
                         if self.cancellation_token.is_cancelled() {
@@ -968,6 +969,7 @@ impl LlmSession {
                                         if let Some(u) = chunk_usage {
                                             stream_prompt_tokens = u.prompt_tokens;
                                             stream_completion_tokens = u.completion_tokens;
+                                            stream_cached_tokens = u.cached_tokens;
                                         }
                                         // Content is emitted before ToolCallDelta in
                                         // the same parse batch, so look ahead: a
@@ -1106,7 +1108,7 @@ impl LlmSession {
                         self.record_usage(crate::usage::TokenUsage {
                             prompt_tokens: stream_prompt_tokens,
                             completion_tokens: stream_completion_tokens,
-                            cached_tokens: 0,
+                            cached_tokens: stream_cached_tokens,
                         });
                     }
 
