@@ -445,6 +445,7 @@ shell:
     input_tokens: "入力 tokens"
     output_tokens: "出力 tokens"
     total: "合計"
+    cached: "キャッシュヒット"
     api_calls: "API 呼び出し回数"
   setup:
     no_config_manager: "再設定できません: 設定マネージャーを利用できません"
