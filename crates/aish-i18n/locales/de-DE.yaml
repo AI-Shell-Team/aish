@@ -578,7 +578,7 @@ shell:
         desc: "Inline-Completion zwingen, striktes JSON zurückzugeben"
       task_budget_max_rounds:
         label: "Aufgabenbudget-Rundenlimit"
-        desc: "Kumulierte Werkzugschleifen-Runden pro Aufgabe; leer = unbegrenzt (Weitermachen setzt nicht zurueck)"
+        desc: "Kumulierte Werkzeugschleifen-Runden pro Aufgabe; leer = unbegrenzt (Weitermachen setzt nicht zurueck)"
       max_llm_messages:
         label: "Max LLM-Messages"
         desc: "Maximale Konversations-Turns im LLM-Verlauf"

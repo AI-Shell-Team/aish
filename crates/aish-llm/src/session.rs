@@ -721,6 +721,21 @@ impl LlmSession {
     ) -> Result<crate::types::ProcessResult, AishError> {
         self.cancellation_token.reset();
         self.last_turn_compaction.lock().unwrap().take();
+
+        // Wall-clock settle guard (issue #569): every exit path of this
+        // function — success, error, cancel, iteration limit, budget stop —
+        // must flush pending wall-clock seconds and stop accounting, or the
+        // next round's start_turn() would reset the anchor and lose the
+        // elapsed time of the aborted round.
+        struct _WallClockGuard<'a>(&'a parking_lot::Mutex<crate::budget::TaskBudgetState>);
+        impl Drop for _WallClockGuard<'_> {
+            fn drop(&mut self) {
+                self.0.lock().end_turn();
+            }
+        }
+        self.task_budget_state.lock().start_turn();
+        let _wall_clock_guard = _WallClockGuard(&self.task_budget_state);
+
         let turn_seq = self
             .turn_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -854,7 +869,10 @@ impl LlmSession {
             // evidence below is complete and consistent.
             {
                 let (limit, state_snapshot) = {
-                    let state = self.task_budget_state.lock();
+                    let mut state = self.task_budget_state.lock();
+                    // Settle the previous round's wall-clock time BEFORE the
+                    // check so duration exhaustion sees complete data.
+                    state.flush_wall_clock();
                     (self.task_budget_limit.lock().clone(), state.clone())
                 };
                 let check = limit.check(&state_snapshot);
@@ -888,14 +906,11 @@ impl LlmSession {
                     return Err(AishError::BudgetExhausted(dim_key));
                 }
             }
-
-            // Start wall-clock accounting for this round, count the round,
-            // then proceed with the model request.
-            {
-                let mut state = self.task_budget_state.lock();
-                state.start_turn();
-                state.task_rounds += 1;
-            }
+            // Count this round. Wall-clock accounting is already running
+            // (started by the entry guard and flushed below before the
+            // budget check), so do NOT restart the anchor here — restarting
+            // it would discard the previous round's elapsed time.
+            self.task_budget_state.lock().task_rounds += 1;
             iterations += 1;
 
             messages = self.prepare_messages_for_send(messages).await;

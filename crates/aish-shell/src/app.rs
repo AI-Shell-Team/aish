@@ -3180,11 +3180,13 @@ impl AishShell {
                             println!("{}", theme::warning(&t("shell.interrupted")));
                         }
                         Err(e) => {
-                            if !matches!(
+                            if let aish_core::AishError::BudgetExhausted(dim) = &e {
+                                // Issue #569 review C4: the main path must
+                                // also offer the audited adjustment panel.
+                                self.handle_budget_exhaustion(dim);
+                            } else if !matches!(
                                 e,
-                                aish_core::AishError::Llm(_)
-                                    | aish_core::AishError::IterationLimit
-                                    | aish_core::AishError::BudgetExhausted(_)
+                                aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
                             ) {
                                 let msg = t("shell.error.llm_error_message")
                                     .replace("{error}", &e.to_string());
@@ -3379,11 +3381,13 @@ impl AishShell {
                                         println!("{}", theme::warning(&t("shell.interrupted")));
                                     }
                                     Err(e) => {
-                                        if !matches!(
+                                        if let aish_core::AishError::BudgetExhausted(dim) = &e {
+                                            // Issue #569 review C4.
+                                            self.handle_budget_exhaustion(dim);
+                                        } else if !matches!(
                                             e,
                                             aish_core::AishError::Llm(_)
                                                 | aish_core::AishError::IterationLimit
-                                                | aish_core::AishError::BudgetExhausted(_)
                                         ) {
                                             let msg = t("shell.error.llm_error_message")
                                                 .replace("{error}", &e.to_string());
@@ -3760,11 +3764,12 @@ impl AishShell {
                         println!("{}", theme::warning(&t("shell.interrupted")));
                     }
                     Err(e) => {
-                        if !matches!(
+                        if let aish_core::AishError::BudgetExhausted(dim) = &e {
+                            // Issue #569 review C4.
+                            self.handle_budget_exhaustion(dim);
+                        } else if !matches!(
                             e,
-                            aish_core::AishError::Llm(_)
-                                | aish_core::AishError::IterationLimit
-                                | aish_core::AishError::BudgetExhausted(_)
+                            aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
                         ) {
                             let msg = t("shell.error.llm_error_message")
                                 .replace("{error}", &e.to_string());
@@ -3854,15 +3859,18 @@ impl AishShell {
         if saved_steps == 0 {
             return false;
         }
-        // Issue #572: a deliberate iteration-limit stop is not a failure;
-        // issue #569: neither is a task-budget stop. Use the matching hint
-        // so the saved evidence is not misdescribed.
-        let key = if self.ai_handler.last_partial_turn_stopped_at_budget() {
-            "shell.error.partial_turn_saved_budget"
-        } else if self.ai_handler.last_partial_turn_stopped_at_limit() {
-            "shell.error.partial_turn_saved_limit"
-        } else {
-            "shell.error.partial_turn_saved"
+        // Issue #572/#569: deliberate stops are not failures; use the
+        // matching hint so the saved evidence is not misdescribed.
+        let key = match self.ai_handler.last_partial_turn_reason() {
+            crate::ai_handler::PartialTurnStopReason::BudgetExhausted => {
+                "shell.error.partial_turn_saved_budget"
+            }
+            crate::ai_handler::PartialTurnStopReason::IterationLimit => {
+                "shell.error.partial_turn_saved_limit"
+            }
+            crate::ai_handler::PartialTurnStopReason::ProviderError => {
+                "shell.error.partial_turn_saved"
+            }
         };
         let msg = t(key).replace("{steps}", &saved_steps.to_string());
         println!("{}", theme::warning(&msg));
@@ -3930,8 +3938,11 @@ impl AishShell {
         let mut new_limit_raw = String::new();
         if std::io::stdin().read_line(&mut new_limit_raw).is_ok() {
             let parsed = new_limit_raw.trim().parse::<u64>().ok();
-            let applied = parsed.filter(|v| *v > used).map(|v| (v, used));
-            if let Some((new_limit, old_used)) = applied {
+            let applied = parsed.filter(|v| *v > used);
+            if let Some(new_limit) = applied {
+                // Review C5: the audit record must capture the LIMIT's
+                // before/after values, not the usage.
+                let old_limit = bound.map_or_else(|| "unbounded".to_string(), |b| b.to_string());
                 self.raise_budget_limit(dimension, new_limit);
                 // Audit the explicit adjustment with before/after values.
                 if let Some(ref audit) = self.audit_store {
@@ -3940,7 +3951,10 @@ impl AishShell {
                         Some(self.session_uuid.clone()),
                         self.audit_user.clone(),
                         self.audit_host.clone(),
-                        format!("budget {} {} -> {}", dimension, old_used, new_limit),
+                        format!(
+                            "budget {} limit {} -> {} (used {})",
+                            dimension, old_limit, new_limit, used
+                        ),
                         "budget".to_string(),
                         0,
                     );

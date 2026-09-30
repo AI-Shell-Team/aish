@@ -97,6 +97,12 @@ pub async fn run_tool_loop_until_done(
     config: &ToolLoopConfig,
 ) -> LoopOutcome {
     let base_system = config.system_message.as_deref().unwrap_or("");
+    // Wall-clock accounting for the whole spawn (issue #569): start once,
+    // flush every round before the parent merges the counters. The spawn
+    // path calls flush_task_budget_wall_clock() before merging, so no drop
+    // guard is needed here — the loop's own exits all leave the anchor in
+    // place for that flush.
+    session.task_budget_state_mut().start_turn();
     let bundle = PromptAssembly::build(session, config.prompt_context.clone(), base_system);
     let mut messages: Vec<ChatMessage> = Vec::new();
     if config.system_message.is_some() {
@@ -128,13 +134,9 @@ pub async fn run_tool_loop_until_done(
         }
         iterations += 1;
         // Task budget accounting (issue #569): sub-agent loops accrue the
-        // same counters as the main loop so a spawn folds real consumption
-        // into the parent task.
-        {
-            let mut state = session.task_budget_state_mut();
-            state.start_turn();
-            state.task_rounds += 1;
-        }
+        // same counters as the main loop. Wall-clock stays anchored from
+        // loop start; the spawn path flushes it before merging.
+        session.task_budget_state_mut().task_rounds += 1;
 
         messages = session.prepare_messages_for_send(messages).await;
 

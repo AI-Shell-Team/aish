@@ -183,12 +183,23 @@ pub struct AiHandler {
     /// Tool-message count committed by the most recent `commit_partial_turn`
     /// (0 when the last turn succeeded or failed before any tool ran).
     last_partial_turn_steps: usize,
-    /// Whether the most recent partial turn was stopped at the iteration
-    /// limit (as opposed to a provider failure); selects the user hint.
-    last_partial_turn_limit: bool,
-    /// Whether the most recent partial turn was stopped by task-budget
-    /// exhaustion (issue #569); selects the user hint.
-    last_partial_turn_budget: bool,
+    /// Why the most recent partial turn stopped; selects the user hint and
+    /// the synthetic note written into the persisted context.
+    last_partial_turn_reason: PartialTurnStopReason,
+}
+
+/// Why a partial turn stopped (issue #569 review: replaces the
+/// `stopped_by_limit` / `stopped_by_budget` boolean pair, whose stale-flag
+/// interactions made the persisted note and user hint diverge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PartialTurnStopReason {
+    /// Provider died mid-turn (#452) — partial evidence.
+    #[default]
+    ProviderError,
+    /// User chose to stop at the 20-round iteration limit (#572).
+    IterationLimit,
+    /// Task-level cumulative budget exhausted (#569).
+    BudgetExhausted,
 }
 
 impl AiHandler {
@@ -223,8 +234,7 @@ impl AiHandler {
             auto_search,
             secret_redactor: None,
             last_partial_turn_steps: 0,
-            last_partial_turn_limit: false,
-            last_partial_turn_budget: false,
+            last_partial_turn_reason: PartialTurnStopReason::ProviderError,
         }
     }
 
@@ -635,8 +645,7 @@ impl AiHandler {
                 // Clear the stale partial-turn count so a later error path
                 // never reports evidence from an already-completed turn.
                 self.last_partial_turn_steps = 0;
-                self.last_partial_turn_limit = false;
-                self.last_partial_turn_budget = false;
+                self.last_partial_turn_reason = PartialTurnStopReason::ProviderError;
                 result
             }
             Err(err) => {
@@ -712,32 +721,39 @@ impl AiHandler {
     /// sees the evidence instead of dangling calls.
     fn commit_partial_turn(&mut self, question_processed: &str) {
         let partial = self.llm_session.take_last_partial_turn();
-        let stopped_by_limit = false;
-        self.commit_partial_messages(question_processed, &partial, stopped_by_limit);
+        self.commit_partial_messages(
+            question_processed,
+            &partial,
+            PartialTurnStopReason::ProviderError,
+        );
     }
 
     /// Issue #572 variant: commit a partial turn that ended because the
-    /// user chose to stop at the tool-call iteration limit. The synthetic
-    /// note and the user hint differ from the provider-failure case so the
-    /// persisted record is not misdescribed as a provider error.
+    /// user chose to stop at the tool-call iteration limit.
     fn commit_partial_turn_stopped_at_limit(&mut self, question_processed: &str) {
         let partial = self.llm_session.take_last_partial_turn();
-        self.commit_partial_messages(question_processed, &partial, true);
+        self.commit_partial_messages(
+            question_processed,
+            &partial,
+            PartialTurnStopReason::IterationLimit,
+        );
     }
 
     /// Issue #569 variant: commit a partial turn that ended because the
-    /// task-level cumulative budget was exhausted. Same evidence contract;
-    /// the note must say budget, not provider failure.
+    /// task-level cumulative budget was exhausted.
     fn commit_partial_turn_stopped_at_budget(&mut self, question_processed: &str) {
         let partial = self.llm_session.take_last_partial_turn();
-        self.commit_partial_messages(question_processed, &partial, true);
-        self.last_partial_turn_budget = true;
+        self.commit_partial_messages(
+            question_processed,
+            &partial,
+            PartialTurnStopReason::BudgetExhausted,
+        );
     }
 
-    /// Whether the most recent partial turn was stopped by task-budget
-    /// exhaustion (issue #569); used by the shell to pick the user hint.
-    pub fn last_partial_turn_stopped_at_budget(&self) -> bool {
-        self.last_partial_turn_budget
+    /// Why the most recent partial turn stopped; used by the shell to pick
+    /// the user hint.
+    pub fn last_partial_turn_reason(&self) -> PartialTurnStopReason {
+        self.last_partial_turn_reason
     }
     /// Read-only access to the task budget state for /token and the footer.
     pub fn llm_budget_state(&self) -> aish_llm::budget::TaskBudgetState {
@@ -824,18 +840,19 @@ impl AiHandler {
 
     /// Shared commit path: append the user message, the completed
     /// tool-call/tool-result pairs (redacted), and a synthetic assistant
-    /// note describing why the turn stopped. `stopped_by_limit` selects the
-    /// note text and the user-hint state exposed to the shell.
+    /// note describing why the turn stopped. `reason` selects the note text
+    /// and the user-hint state exposed to the shell. The reason is recorded
+    /// unconditionally — including the empty-partial case — so the flag can
+    /// never go stale.
     fn commit_partial_messages(
         &mut self,
         question_processed: &str,
         partial: &[ChatMessage],
-        stopped_by_limit: bool,
+        reason: PartialTurnStopReason,
     ) {
+        self.last_partial_turn_reason = reason;
         if partial.is_empty() {
             self.last_partial_turn_steps = 0;
-            self.last_partial_turn_limit = false;
-            self.last_partial_turn_budget = false;
             return;
         }
         // The session prepends the user message; the shell commits it here
@@ -846,7 +863,6 @@ impl AiHandler {
             partial
         };
         self.last_partial_turn_steps = tool_messages.len();
-        self.last_partial_turn_limit = stopped_by_limit;
 
         if tool_messages.is_empty() {
             return;
@@ -861,22 +877,28 @@ impl AiHandler {
         // synthetic assistant note so the next turn's model understands why
         // the transcript stops mid-task — and that the evidence above was
         // already executed, provider failure or deliberate stop alike.
-        let note = if stopped_by_limit {
-            "[turn stopped by the user at the tool-call iteration limit; the tool results above are completed evidence — do not re-run completed side effects]"
-        } else {
-            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]"
+        let note = match reason {
+            PartialTurnStopReason::IterationLimit => {
+                "[turn stopped by the user at the tool-call iteration limit; the tool results above are completed evidence — do not re-run completed side effects]"
+            }
+            PartialTurnStopReason::BudgetExhausted => {
+                "[turn stopped because the task budget was exhausted; the tool results above are completed evidence — do not re-run completed side effects]"
+            }
+            PartialTurnStopReason::ProviderError => {
+                "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]"
+            }
         };
         self.context_manager
             .add_message("assistant", note, MemoryType::Llm);
         self.context_manager.trim();
-        let reason = if stopped_by_limit {
-            "iteration-limit stop"
-        } else {
-            "provider failure"
+        let reason_str = match reason {
+            PartialTurnStopReason::IterationLimit => "iteration-limit stop",
+            PartialTurnStopReason::BudgetExhausted => "budget-exhausted stop",
+            PartialTurnStopReason::ProviderError => "provider failure",
         };
         tracing::info!(
             messages = tool_messages.len(),
-            reason,
+            reason = reason_str,
             "Persisted partial-turn tool evidence"
         );
     }
@@ -886,13 +908,6 @@ impl AiHandler {
     /// the shell to tell the user what survived a mid-turn failure.
     pub fn last_partial_turn_step_count(&self) -> usize {
         self.last_partial_turn_steps
-    }
-
-    /// Whether the most recent partial turn was stopped at the iteration
-    /// limit (issue #572) rather than by a provider failure; used by the
-    /// shell to pick the matching user hint.
-    pub fn last_partial_turn_stopped_at_limit(&self) -> bool {
-        self.last_partial_turn_limit
     }
 
     /// Convert a turn's intermediate ChatMessages into persistable
@@ -3200,10 +3215,17 @@ mod tests {
             ChatMessage::tool_result("call_l1", "build finished"),
         ];
 
-        handler.commit_partial_messages("do the task", &partial, true);
+        handler.commit_partial_messages(
+            "do the task",
+            &partial,
+            PartialTurnStopReason::IterationLimit,
+        );
 
-        // The flag the shell hint reads is set.
-        assert!(handler.last_partial_turn_stopped_at_limit());
+        // The reason the shell hint reads is recorded.
+        assert_eq!(
+            handler.last_partial_turn_reason(),
+            PartialTurnStopReason::IterationLimit
+        );
         assert_eq!(handler.last_partial_turn_step_count(), 2);
 
         let context = handler.build_context_messages();
@@ -3238,15 +3260,77 @@ mod tests {
             ChatMessage::tool_result("call_f1", "match found"),
         ];
 
-        handler.commit_partial_messages("do the task", &partial, false);
+        handler.commit_partial_messages(
+            "do the task",
+            &partial,
+            PartialTurnStopReason::ProviderError,
+        );
 
-        assert!(!handler.last_partial_turn_stopped_at_limit());
+        assert_eq!(
+            handler.last_partial_turn_reason(),
+            PartialTurnStopReason::ProviderError
+        );
         let context = handler.build_context_messages();
         let note = context
             .last()
             .and_then(|m| m.text_content())
             .unwrap_or_default();
         assert!(note.contains("provider error"), "{note}");
+    }
+
+    /// Issue #569 review C3: a budget-exhausted stop must write the
+    /// budget-specific note into the persisted context — never the
+    /// iteration-limit wording.
+    #[test]
+    fn commit_partial_messages_uses_budget_note_on_budget_stop() {
+        let mut handler = test_handler();
+
+        let partial = [
+            ChatMessage::user("do the task"),
+            {
+                let mut a = ChatMessage::assistant("");
+                a.content = None;
+                a.tool_calls = Some(vec![aish_llm::ToolCall {
+                    id: "call_b1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: "{}".to_string(),
+                }]);
+                a
+            },
+            ChatMessage::tool_result("call_b1", "done"),
+        ];
+
+        handler.commit_partial_messages(
+            "do the task",
+            &partial,
+            PartialTurnStopReason::BudgetExhausted,
+        );
+
+        assert_eq!(
+            handler.last_partial_turn_reason(),
+            PartialTurnStopReason::BudgetExhausted
+        );
+        let context = handler.build_context_messages();
+        let note = context
+            .last()
+            .and_then(|m| m.text_content())
+            .unwrap_or_default();
+        assert!(note.contains("task budget was exhausted"), "{note}");
+        assert!(!note.contains("iteration limit"), "{note}");
+        assert!(!note.contains("provider error"), "{note}");
+    }
+
+    /// Review C3: an empty partial must still record the stop reason
+    /// (steps reset to 0), so the shell hint never goes stale.
+    #[test]
+    fn commit_partial_messages_records_reason_even_when_partial_is_empty() {
+        let mut handler = test_handler();
+        handler.commit_partial_messages("do the task", &[], PartialTurnStopReason::BudgetExhausted);
+        assert_eq!(
+            handler.last_partial_turn_reason(),
+            PartialTurnStopReason::BudgetExhausted
+        );
+        assert_eq!(handler.last_partial_turn_step_count(), 0);
     }
 
     /// Bind a loopback server that replies to POST /v1/chat/completions with
