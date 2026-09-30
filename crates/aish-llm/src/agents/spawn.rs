@@ -93,7 +93,38 @@ pub async fn spawn<F>(
 where
     F: FnOnce(&mut LlmSession),
 {
+    // Issue #569 review C6: pause the parent's wall-clock while the child
+    // runs. The child accrues its own active_secs (merged below); leaving
+    // the parent anchor running would double-count the child interval.
+    let parent_clock_active = parent.task_budget_state().last_accounted.is_some();
+    if parent_clock_active {
+        parent.flush_task_budget_wall_clock(); // settle parent time so far
+        parent.task_budget_state_mut().last_accounted = None;
+    }
+
+    // Issue #569 review C7: the child inherits the parent's REMAINING
+    // budget. Its counters stay zero-based — the merge below folds the
+    // delta into the parent — but the limits travel with it, so a spawned
+    // loop cannot burn past what the parent's task still allows.
+    let parent_limit = parent.task_budget_limit();
+    let parent_state = parent.task_budget_state();
+    let remaining_limits = crate::budget::TaskBudgetLimit {
+        max_rounds: parent_limit
+            .max_rounds
+            .map(|max| max.saturating_sub(parent_state.task_rounds)),
+        max_tool_calls: parent_limit
+            .max_tool_calls
+            .map(|max| max.saturating_sub(parent_state.tool_calls)),
+        max_tokens: parent_limit
+            .max_tokens
+            .map(|max| max.saturating_sub(parent_state.token_usage.total_tokens())),
+        max_duration_secs: parent_limit
+            .max_duration_secs
+            .map(|max| max.saturating_sub(parent_state.active_secs)),
+    };
+
     let mut sub = parent.create_subsession();
+    sub.set_task_budget_limit(remaining_limits);
     configure(&mut sub);
 
     let parent_cancel = parent.cancellation_token_arc();
@@ -125,7 +156,11 @@ where
     // because the merge runs in the single completion path here.
     sub.flush_task_budget_wall_clock();
     parent.merge_task_budget(&sub.task_budget_state());
-
+    // Review C6: resume the parent clock so its own post-spawn rounds
+    // keep accruing.
+    if parent_clock_active {
+        parent.task_budget_state_mut().start_turn();
+    }
     SpawnResult {
         text: outcome.text,
         status: outcome.status,
@@ -389,6 +424,63 @@ mod tests {
             .tool_specs()
             .iter()
             .any(|s| s.function.name == "read_file"));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_child_inherits_remaining_budget() {
+        // Review C7: the child loop must see the parent's REMAINING limits
+        // (max minus used), so a near-exhausted task cannot burn past its
+        // cap through a spawned agent. The configure hook runs after the
+        // inheritance, so it observes the propagated limits.
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.set_task_budget_limit(crate::budget::TaskBudgetLimit {
+            max_rounds: Some(10),
+            max_tool_calls: Some(20),
+            max_tokens: None,
+            max_duration_secs: None,
+        });
+        parent.merge_task_budget(&crate::budget::TaskBudgetState {
+            task_rounds: 3,
+            tool_calls: 8,
+            ..Default::default()
+        });
+
+        let registry = AgentRegistry::builtin();
+        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(sub, vec![Ok(mock_text_response("ok"))]);
+            let limit = sub.task_budget_limit();
+            assert_eq!(limit.max_rounds, Some(7), "remaining rounds (10 - 3)");
+            assert_eq!(limit.max_tool_calls, Some(12), "remaining calls (20 - 8)");
+        })
+        .await
+        .expect("spawn_builtin should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_spawn_pauses_and_resumes_parent_clock() {
+        // Review C6: the parent clock pauses while the child runs (no
+        // double counting) and resumes after the merge.
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        parent.task_budget_state_mut().start_turn();
+
+        let registry = AgentRegistry::builtin();
+        let _ = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(sub, vec![Ok(mock_text_response("ok"))]);
+            assert!(
+                sub.task_budget_state().last_accounted.is_none(),
+                "child clock must not start before its loop begins"
+            );
+        })
+        .await
+        .expect("spawn_builtin should succeed");
+
+        let state = parent.task_budget_state();
+        assert!(
+            state.last_accounted.is_some(),
+            "parent clock must resume after the merge"
+        );
     }
 
     #[tokio::test]
