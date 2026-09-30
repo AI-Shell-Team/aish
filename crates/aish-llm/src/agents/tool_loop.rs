@@ -132,6 +132,26 @@ pub async fn run_tool_loop_until_done(
             );
             return LoopOutcome::from_spawn_outcome(outcome, loop_messages, None);
         }
+
+        // Task budget admission check (issue #569 review): the child loop
+        // enforces the inherited remaining limits BEFORE any model request
+        // — same contract as process_input. Exhaustion returns a fatal
+        // outcome carrying BudgetExhausted so the parent's merge folds the
+        // usage and the parent can stop cleanly.
+        {
+            let limit = session.task_budget_limit();
+            let state = {
+                let mut state = session.task_budget_state_mut();
+                // Settle the previous round's wall-clock before the check.
+                state.flush_wall_clock();
+                state.clone()
+            };
+            if let Some(dim) = limit.check(&state).exhausted {
+                let err = AishError::BudgetExhausted(dim.key().to_string());
+                return LoopOutcome::fatal_with_messages(err, loop_messages);
+            }
+        }
+
         iterations += 1;
         // Task budget accounting (issue #569): sub-agent loops accrue the
         // same counters as the main loop. Wall-clock stays anchored from

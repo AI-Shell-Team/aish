@@ -427,6 +427,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_spawn_child_budget_exhaustion_returns_before_request() {
+        // Review C8: the child loop must enforce the inherited remaining
+        // budget BEFORE any model request; exhaustion surfaces as a fatal
+        // outcome carrying BudgetExhausted, and the parent merges the
+        // usage without issuing further requests.
+        let mut parent = LlmSession::new("http://localhost", "key", "model", None, None);
+        parent.register_tool(Box::new(MockTool::new("grep")));
+        // Parent already consumed its whole remaining budget: the child
+        // inherits 0 remaining rounds and must stop immediately.
+        parent.set_task_budget_limit(crate::budget::TaskBudgetLimit {
+            max_rounds: Some(2),
+            max_tool_calls: None,
+            max_tokens: None,
+            max_duration_secs: None,
+        });
+        parent.merge_task_budget(&crate::budget::TaskBudgetState {
+            task_rounds: 2,
+            ..Default::default()
+        });
+
+        let registry = AgentRegistry::builtin();
+        let result = spawn_builtin(&parent, &registry, "explore", "task", |sub, _specs| {
+            configure_spawn_test(sub, vec![Ok(mock_text_response("never reached"))]);
+        })
+        .await
+        .expect("spawn_builtin returns a result, not an error");
+
+        assert_eq!(result.status, LoopStatus::Fatal);
+        assert_eq!(
+            result.error_category.as_deref(),
+            Some("budget_exhausted"),
+            "child exhaustion must surface as BudgetExhausted"
+        );
+    }
+
+    #[tokio::test]
     async fn test_spawn_child_inherits_remaining_budget() {
         // Review C7: the child loop must see the parent's REMAINING limits
         // (max minus used), so a near-exhausted task cannot burn past its
