@@ -30,9 +30,14 @@ pub fn classify_input(input: &str) -> InputIntent {
     }
 
     let cmd = trimmed.split_whitespace().next().unwrap_or("");
+    // `sudo` and `/usr/bin/sudo` share one dispatcher. Basename only;
+    // the rest of the line is not tokenized here.
+    if crate::commands::is_privilege_command_token(cmd) {
+        return InputIntent::BuiltinCommand;
+    }
     match cmd {
         "cd" | "pwd" | "export" | "unset" | "pushd" | "popd" | "dirs" | "clear" | "exit"
-        | "quit" | "su" | "sudo" => InputIntent::BuiltinCommand,
+        | "quit" => InputIntent::BuiltinCommand,
         _ => {
             // Check if the first word looks like a .aish script
             if cmd.ends_with(".aish") {
@@ -129,6 +134,17 @@ mod tests {
     fn test_classify_command() {
         assert_eq!(classify_input("ls -la"), InputIntent::Command);
         assert_eq!(classify_input("git status"), InputIntent::Command);
+    }
+
+    #[test]
+    fn absolute_sudo_is_the_same_builtin_as_sudo() {
+        assert_eq!(classify_input("sudo id"), InputIntent::BuiltinCommand);
+        assert_eq!(
+            classify_input("/usr/bin/sudo id"),
+            InputIntent::BuiltinCommand
+        );
+        assert_eq!(classify_input("su -"), InputIntent::BuiltinCommand);
+        assert_eq!(classify_input("/bin/su -"), InputIntent::BuiltinCommand);
     }
 
     #[test]
