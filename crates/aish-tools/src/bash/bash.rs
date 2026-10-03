@@ -583,7 +583,7 @@ impl BashTool {
                 }
 
                 ToolResult {
-                    ok: true,
+                    ok: exit_code == 0,
                     output: output_text,
                     meta: Some(meta),
                 }
@@ -678,7 +678,7 @@ impl BashTool {
                     );
                 }
                 ToolResult {
-                    ok: true,
+                    ok: result.exit_code == 0,
                     output,
                     meta: Some(meta),
                 }
@@ -984,10 +984,13 @@ mod tests {
         let result = tool.execute(serde_json::json!({
             "command": "exit 42"
         }));
-        // Tool succeeds even with non-zero exit — LLM reads <return_code> to decide.
+        // A non-zero exit code is a structured failure: the bash tool ran
+        // successfully (ok=false), and the LLM (and downstream consumers)
+        // must rely on the real exit code instead of an unconditional
+        // success flag.
         assert!(
-            result.ok,
-            "tool execution should succeed regardless of exit code"
+            !result.ok,
+            "tool execution should report ok=false for non-zero exit code"
         );
         assert!(
             result.output.contains("<return_code>\n42\n</return_code>"),
@@ -1003,10 +1006,10 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         }));
-        // Tool succeeds even when command is killed by timeout.
+        // A timeout is a structured failure, not a successful run.
         assert!(
-            result.ok,
-            "tool execution should succeed even after timeout kill"
+            !result.ok,
+            "tool execution should report ok=false when the command is killed by timeout"
         );
     }
     #[test]
