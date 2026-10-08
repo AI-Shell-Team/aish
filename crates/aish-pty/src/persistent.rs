@@ -1002,10 +1002,28 @@ impl PersistentPty {
             return;
         }
         // The restore line triggers one prompt_ready with command_seq null.
-        // Drain the control pipe briefly until it arrives (bounded) so the
-        // next execute_command does not see a stale event; also drain master
-        // output so the restore's (suppressed) echo never leaks.
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        // Drain it so the next execute_command does not see a stale event.
+        let _ = self.wait_for_null_seq_prompt(Duration::from_millis(500));
+    }
+
+    /// Run one line with no backend pager wrapper and return its exit code.
+    ///
+    /// `execute_command` writes a pager prefix before the caller's script, so
+    /// it cannot observe the previous `$?`. This path is the one that can.
+    pub fn run_unwrapped_line(&mut self, line: &str) -> aish_core::Result<i32> {
+        let mut payload = b"\x15".to_vec();
+        payload.extend_from_slice(line.as_bytes());
+        payload.push(b'\n');
+        self.write_master(&payload)?;
+        self.wait_for_null_seq_prompt(Duration::from_secs(8))
+            .ok_or(aish_core::AishError::Timeout)
+    }
+
+    /// Wait until a prompt event with no command seq arrives.
+    ///
+    /// A seq-marked prompt is not this line's result, so the wait continues.
+    fn wait_for_null_seq_prompt(&mut self, timeout: Duration) -> Option<i32> {
+        let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
             let mut tmp = [0u8; 4096];
             let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
@@ -1051,21 +1069,21 @@ impl PersistentPty {
                 if n > 0 {
                     let events = decode_control_chunk(&mut self.control_buffer, &tmp[..n as usize]);
                     for event in &events {
-                        // Only the restore's own null-seq prompt_ready
-                        // terminates the drain (issue #541 review): a
-                        // seq-marked event here belongs to a command whose
-                        // result is still pending and must stay queued for
-                        // its waiter, not be silently discarded.
-                        if let BackendControlEvent::PromptReady { command_seq, .. } = event {
+                        if let BackendControlEvent::PromptReady {
+                            command_seq,
+                            exit_code,
+                            ..
+                        } = event
+                        {
                             if command_seq.is_none() {
-                                // The restore's terminal event; discard it.
-                                return;
+                                return Some(*exit_code);
                             }
                         }
                     }
                 }
             }
         }
+        None
     }
 
     /// Execute a command and wait for completion with timeout.
