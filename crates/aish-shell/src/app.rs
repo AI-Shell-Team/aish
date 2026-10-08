@@ -9143,6 +9143,20 @@ impl AishShell {
         }
         self.ai_handler.add_shell_context(&entry);
 
+        if crate::shell_session::needs_full_shell_state(command) {
+            let probed = {
+                let mut pty = self.lock_pty();
+                if pty.is_running() {
+                    crate::shell_session::probe(&mut pty)
+                } else {
+                    None
+                }
+            };
+            if let Some(probed) = probed {
+                crate::shell_session::adopt(&mut self.state, probed);
+            }
+        }
+
         // Check if PTY is still running, restart if not
         if !self.lock_pty().is_running() {
             self.restart_pty();

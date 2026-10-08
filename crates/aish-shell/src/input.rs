@@ -37,7 +37,7 @@ pub fn classify_input(input: &str) -> InputIntent {
     }
     match cmd {
         "cd" | "pwd" | "export" | "unset" | "pushd" | "popd" | "dirs" | "clear" | "exit"
-        | "quit" => InputIntent::BuiltinCommand,
+        | "quit" | "logout" => InputIntent::BuiltinCommand,
         _ => {
             // Check if the first word looks like a .aish script
             if cmd.ends_with(".aish") {

@@ -92,6 +92,58 @@ pub struct PrivilegeCommandPlan {
     pub execute_text: String,
 }
 
+/// True when `line` contains shell syntax that bash would act on.
+///
+/// Quoted text is not syntax: `export MSG='a && b'` is one assignment.
+/// `$` and backticks still count inside double quotes (`export FOO="$(date)"`).
+/// Issue #574: without this check, `cd /tmp && pwd` is whitespace-split and
+/// `pwd` becomes the `cd` target.
+pub fn has_unquoted_shell_syntax(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    while let Some(ch) = chars.next() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if ch == '\\' {
+            let escaped = chars.peek().copied();
+            if in_double {
+                if matches!(escaped, Some('$' | '`' | '"' | '\\' | '\n')) {
+                    chars.next();
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = true;
+            continue;
+        }
+        if ch == '"' {
+            in_double = !in_double;
+            continue;
+        }
+        if in_double {
+            if ch == '$' || ch == '`' {
+                return true;
+            }
+            continue;
+        }
+        if matches!(
+            ch,
+            ';' | '&' | '|' | '<' | '>' | '(' | ')' | '`' | '$' | '\n'
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Plan a `sudo` / `su` submission. `None` when the first token is not one.
 pub fn plan_privilege_command(line: &str) -> Option<PrivilegeCommandPlan> {
     let trimmed = line.trim();
@@ -121,8 +173,9 @@ pub fn is_rejected(cmd: &str) -> bool {
 impl ShellState {
     /// Dispatch one submitted line.
     ///
-    /// `sudo` / `su` keep the original text in `pty_command`. Other builtins
-    /// still parse arguments with whitespace splitting.
+    /// `sudo` / `su` keep the original text. Other lines the shell session
+    /// must parse (`cd`, `export`, `pwd`, compound commands) do too.
+    /// `exit` / `help` / `setup` with no shell syntax stay here.
     pub fn handle_builtin_line(&mut self, line: &str) -> BuiltinResult {
         let trimmed = line.trim();
         if let Some(plan) = plan_privilege_command(trimmed) {
@@ -132,6 +185,15 @@ impl ShellState {
                 should_exit: false,
                 route_to_pty: true,
                 pty_command: Some(plan.execute_text),
+            };
+        }
+        if !crate::shell_session::aish_handles_line(trimmed) {
+            return BuiltinResult {
+                handled: false,
+                output: None,
+                should_exit: false,
+                route_to_pty: true,
+                pty_command: Some(trimmed.to_string()),
             };
         }
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -153,7 +215,7 @@ impl ShellState {
             "dirs" => self.handle_dirs(args),
             "help" => self.handle_help(args),
             "clear" => self.handle_clear(),
-            "exit" | "quit" => self.handle_exit(),
+            "exit" | "quit" | "logout" => self.handle_exit(),
             "setup" => self.handle_setup(args),
             _ => BuiltinResult::not_handled(),
         }
@@ -753,6 +815,82 @@ mod tests {
         let result = state.handle_builtin_line(line);
         assert!(result.route_to_pty);
         assert_eq!(result.pty_command.as_deref(), Some(line));
+    }
+
+    #[test]
+    fn shell_syntax_ignores_quoted_operators() {
+        assert!(!has_unquoted_shell_syntax("cd /tmp"));
+        assert!(!has_unquoted_shell_syntax("export FOO=bar"));
+        assert!(!has_unquoted_shell_syntax("export MSG='a && b'"));
+        assert!(!has_unquoted_shell_syntax("export MSG=\"a && b\""));
+        assert!(!has_unquoted_shell_syntax("unset FOO"));
+        assert!(has_unquoted_shell_syntax("cd && pwd"));
+        assert!(has_unquoted_shell_syntax("cd /tmp; pwd"));
+        assert!(has_unquoted_shell_syntax("cd /tmp | pwd"));
+        assert!(has_unquoted_shell_syntax("cd /tmp || pwd"));
+        assert!(has_unquoted_shell_syntax("cd /tmp > /dev/null"));
+        assert!(has_unquoted_shell_syntax("unset ; -z"));
+        assert!(has_unquoted_shell_syntax("export A=1 && echo hi"));
+        assert!(has_unquoted_shell_syntax("export FOO=$(date)"));
+        assert!(has_unquoted_shell_syntax("export FOO=\"$(date)\""));
+    }
+
+    /// Issue #574, minimised: `cd && pwd` was reported as
+    /// `cd: pwd: No such file or directory`. The reported line is the same failure.
+    #[test]
+    fn compound_cd_is_handed_to_the_shell() {
+        for line in ["cd && pwd", "cd /tmp && pwd"] {
+            let mut state = ShellState::new();
+            let cwd = state.cwd.clone();
+            let result = state.handle_builtin_line(line);
+            let output = result.output.unwrap_or_default();
+            assert!(result.route_to_pty, "line {line:?} symptom: {output}");
+            assert_eq!(result.pty_command.as_deref(), Some(line));
+            assert!(
+                !output.contains("No such file or directory"),
+                "line {line:?} symptom: {output}"
+            );
+            assert_eq!(state.cwd, cwd);
+        }
+    }
+
+    /// Issue #574, minimised: `unset ; -z` was reported as
+    /// `unset: invalid option -- 'z'`.
+    #[test]
+    fn compound_unset_is_handed_to_the_shell() {
+        let reported = "unset AISH_AUDIT_VAR; test -z \"$AISH_AUDIT_VAR\" && printf UNSET_OK";
+        for line in ["unset ; -z", reported] {
+            let mut state = ShellState::new();
+            let result = state.handle_builtin_line(line);
+            let output = result.output.unwrap_or_default();
+            assert!(result.route_to_pty, "line {line:?} symptom: {output}");
+            assert_eq!(result.pty_command.as_deref(), Some(line));
+            assert!(!output.contains("invalid option"), "symptom: {output}");
+        }
+    }
+
+    /// Same splitter, silent success: the assignment was applied and the
+    /// rest of the line was dropped.
+    #[test]
+    fn compound_export_does_not_apply_partially() {
+        let mut state = ShellState::new();
+        let key = "AISH_ISSUE_574";
+        let before = state.env_vars.get(key).cloned();
+        let line = format!("export {key}=1 && echo hi");
+        let result = state.handle_builtin_line(&line);
+        assert!(result.route_to_pty);
+        assert_eq!(result.pty_command.as_deref(), Some(line.as_str()));
+        assert_eq!(state.env_vars.get(key), before.as_ref());
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn pwd_is_handed_to_the_session() {
+        let mut state = ShellState::new();
+        let result = state.handle_builtin_line("pwd");
+        assert!(result.route_to_pty);
+        assert_eq!(result.pty_command.as_deref(), Some("pwd"));
+        assert!(result.output.is_none());
     }
 
     #[test]
