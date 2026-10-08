@@ -42,6 +42,7 @@ pub mod resume_selector;
 pub mod security_panel;
 pub mod session_transcript;
 pub mod settings_panel;
+pub mod shell_session;
 pub mod status;
 pub mod theme;
 pub mod token_store;
