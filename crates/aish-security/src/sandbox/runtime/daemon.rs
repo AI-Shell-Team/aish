@@ -239,6 +239,7 @@ fn read_request(
     loop {
         let read = match stream.read(&mut chunk) {
             Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
                 return Err(SandboxError::with_details(
                     SandboxReason::SandboxIpcTimeout,

@@ -59,6 +59,10 @@ impl SandboxClient {
         loop {
             let read = match stream.read(&mut chunk) {
                 Ok(read) => read,
+                // With SO_RCVTIMEO set, Linux reports a signal during the wait
+                // as EINTR instead of restarting the read. Retry; the timeout
+                // still applies to the next call.
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 Err(error)
                     if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
                 {
@@ -116,8 +120,8 @@ impl SandboxRunner for SandboxClient {
 mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -200,12 +204,14 @@ mod tests {
         let temp = tempdir().unwrap();
         let socket_path = temp.path().join("sandbox.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
+        let (release_tx, release_rx) = mpsc::channel();
 
         let handle = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
-            // Sleep well beyond the clamped timeout (1s minimum) so the
-            // client read reliably times out regardless of CI scheduling.
-            thread::sleep(Duration::from_secs(3));
+            // Hold the socket until the client returns. Dropping it while the
+            // request is still unread makes Linux return ECONNRESET, which
+            // the client reports as SandboxIpcFailed.
+            let _ = release_rx.recv();
         });
 
         let request = SandboxRunRequest {
@@ -214,9 +220,9 @@ mod tests {
         };
         let client = SandboxClient::new(&socket_path);
         let error = client.simulate(&request).unwrap_err();
-        assert_eq!(error.reason(), SandboxReason::SandboxIpcTimeout);
-
+        let _ = release_tx.send(());
         handle.join().unwrap();
+        assert_eq!(error.reason(), SandboxReason::SandboxIpcTimeout, "{error}");
     }
 
     #[test]
