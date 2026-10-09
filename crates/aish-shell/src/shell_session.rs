@@ -156,6 +156,17 @@ pub fn adopt(state: &mut ShellState, probed: ProbedShellState) {
                 _ => std::env::set_var(key, value),
             }
         }
+        // A startup variable the session no longer exports was unset there.
+        // Drop it only when the process still has the startup value. A value
+        // the process changed after startup stays.
+        for (key, original) in &baseline {
+            if probed.env.contains_key(key) || !is_env_name(key) {
+                continue;
+            }
+            if std::env::var(key).ok().as_deref() == Some(original.as_str()) {
+                std::env::remove_var(key);
+            }
+        }
     } else {
         for key in state.env_vars.keys() {
             if !probed.env.contains_key(key) {
@@ -623,6 +634,37 @@ mod tests {
         assert!(std::env::var("AISH_FROM_SESSION").is_err());
         assert_eq!(std::env::var("AISH_RUST_ONLY").unwrap(), "kept");
         assert_eq!(std::env::var("PATH").unwrap(), format!("{path}-rust"));
+    }
+
+    #[test]
+    fn first_read_drops_a_baseline_var_the_session_unset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_env: HashMap<String, String> = std::env::vars().collect();
+        let _restore = EnvRestore {
+            cwd: None,
+            env: saved_env,
+        };
+        std::env::set_var("AISH_SESSION_UNSET", "orig");
+        std::env::set_var("AISH_RUST_CHANGED", "orig");
+        let mut state = ShellState::new();
+        std::env::set_var("AISH_RUST_CHANGED", "changed");
+
+        let mut probed = state.env_baseline.clone().expect("baseline");
+        probed.remove("AISH_SESSION_UNSET");
+        probed.remove("AISH_RUST_CHANGED");
+        let cwd = state.cwd.clone();
+        adopt(
+            &mut state,
+            ProbedShellState {
+                cwd,
+                dir_stack: Vec::new(),
+                env: probed,
+            },
+        );
+        assert!(std::env::var("AISH_SESSION_UNSET").is_err());
+        assert_eq!(std::env::var("AISH_RUST_CHANGED").unwrap(), "changed");
+        assert!(!state.env_vars.contains_key("AISH_SESSION_UNSET"));
+        assert!(!state.env_vars.contains_key("AISH_RUST_CHANGED"));
     }
 
     fn start_pty(cwd: &str) -> PersistentPty {
