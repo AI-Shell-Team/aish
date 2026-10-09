@@ -166,11 +166,11 @@ impl LlmSession {
             plan_state: Arc::new(Mutex::new(PlanModeState::default())),
             token_stats: std::sync::Mutex::new(crate::usage::TokenStats::default()),
             last_prompt_estimate: std::sync::atomic::AtomicU64::new(0),
+            last_partial_turn: parking_lot::Mutex::new(Vec::new()),
             last_turn_compaction: std::sync::Mutex::new(None),
             tool_execution_policy: crate::tool_context::ToolExecutionPolicy::default(),
             is_sub_agent: false,
             rotation: None,
-            last_partial_turn: parking_lot::Mutex::new(Vec::new()),
             #[cfg(test)]
             test_chat_responses: None,
         }
@@ -1899,7 +1899,7 @@ impl LlmSession {
 
     pub(crate) async fn prepare_messages_for_send(
         &self,
-        messages: Vec<ChatMessage>,
+        mut messages: Vec<ChatMessage>,
     ) -> Vec<ChatMessage> {
         // No copy-level compaction here. The persistent context layer
         // (ContextManager via compact_context_before_send) is the single
@@ -1909,6 +1909,16 @@ impl LlmSession {
         // prefix cache. This path only enforces the hard budget with a
         // head-preserving trim (equivalent to a compaction boundary) and
         // repairs tool-call pairing.
+
+        // Strip reasoning_content from replayed assistant messages before
+        // they go on the wire: OpenAI-compat providers (DeepSeek reasoner
+        // et al.) forbid echoing reasoning back, and the field makes the
+        // replayed bytes diverge from what the provider cached.
+        for msg in &mut messages {
+            if msg.role == "assistant" {
+                msg.reasoning_content = None;
+            }
+        }
         let policy = &self.context_budget_policy;
         sanitize_tool_pairs(trim_messages(
             messages,

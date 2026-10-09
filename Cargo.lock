@@ -162,6 +162,8 @@ name = "aish-prompts"
 version = "0.3.14"
 dependencies = [
  "dirs 5.0.1",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

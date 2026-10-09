@@ -533,6 +533,27 @@ impl ContextManager {
         });
     }
 
+    /// Append a `system` message unless the last system message containing
+    /// `marker` is already byte-identical to `content`. Append-only with
+    /// consecutive dedupe: identical blocks are not re-appended (keeps
+    /// history clean); a changed block appends a new message at the natural
+    /// turn position so the provider prefix cache survives (prior messages
+    /// stay untouched).
+    pub fn append_dedupe_system(&mut self, marker: &str, content: &str) {
+        if content.is_empty() {
+            return;
+        }
+        let unchanged = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "system" && m.content.contains(marker))
+            .is_some_and(|m| m.content == content);
+        if !unchanged {
+            self.add_message("system", content, MemoryType::Llm);
+        }
+    }
+
     /// Set the model name (used for future tokeniser selection).
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();
@@ -850,9 +871,11 @@ fn is_low_value_output(content: &str) -> bool {
 
 /// Per-turn transient system blocks. They ride at the natural turn position
 /// for cache stability but must not survive full compaction — the current
-/// turn's env/recall is re-appended every turn anyway.
+/// turn's env/recall/instructions are re-appended every turn anyway.
 fn is_transient_system(content: &str) -> bool {
-    content.contains("**Environment Update:**") || content.contains("<long-term-memory")
+    content.contains("**Environment Update:**")
+        || content.contains("<long-term-memory")
+        || content.contains("<project-instructions>")
 }
 
 fn compact_shell_content(content: &str) -> Option<String> {

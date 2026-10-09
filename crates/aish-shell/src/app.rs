@@ -2202,6 +2202,21 @@ impl AishShell {
             config.skills.auto_search,
         );
 
+        // Project instruction loading (issue #562): config-driven limits and
+        // enable switch; content passes the secret redactor before entering
+        // the AI context (same scanner as the audit path).
+        ai_handler.set_project_instructions_config(aish_prompts::ProjectInstructionsLimits {
+            enabled: config.project_instructions.enabled,
+            max_file_bytes: config.project_instructions.max_file_bytes,
+            max_total_bytes: config.project_instructions.max_total_bytes,
+        });
+        {
+            let scanner = security_manager.secret_scanner().clone();
+            ai_handler.set_project_instructions_redactor(Arc::new(move |text: &str| {
+                aish_security::secret::redact_secrets(text, &scanner)
+            }));
+        }
+
         // Redact secrets from tool outputs before they enter persistent
         // LLM context (same scanner as the audit path).
         {
@@ -6968,6 +6983,12 @@ impl AishShell {
             live_id.as_deref(),
             &self.config.model,
         );
+        crate::status::render_project_instructions(
+            self.ai_handler.project_instructions_state(),
+            self.config.project_instructions.enabled,
+        )
+        .into_iter()
+        .for_each(|l| println!("{}", l));
     }
 
     fn select_recent_session(&mut self) {
@@ -6994,12 +7015,10 @@ impl AishShell {
                 return;
             }
         };
-
         let items: Vec<ResumeSessionItem> = sessions
             .iter()
             .map(|session| ResumeSessionItem::from_record(session, &self.session_uuid))
             .collect();
-
         match select_resume_session(&items) {
             Ok(Some(session_id)) => self.resume_session(&session_id),
             Ok(None) => {}

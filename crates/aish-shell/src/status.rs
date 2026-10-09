@@ -182,6 +182,51 @@ fn render(
     }
 }
 
+/// Render the project-instruction (`AGENTS.md`) summary lines.
+///
+/// Shows which files are loaded (scope + basename + size), truncation and
+/// warning flags — never the instruction content itself, since the file may
+/// contain sensitive text that must not leak into terminal scrollback.
+pub fn render_project_instructions(
+    state: &aish_prompts::ProjectInstructionsState,
+    enabled: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !enabled {
+        lines.push(format!(
+            "{}: {}",
+            theme::accent("instructions"),
+            theme::faint("disabled"),
+        ));
+        return lines;
+    }
+    if state.files.is_empty() {
+        lines.push(format!(
+            "{}: {}",
+            theme::accent("instructions"),
+            theme::faint("none loaded"),
+        ));
+        return lines;
+    }
+    for f in &state.files {
+        let mut note = format!(
+            "{} [{}] {}",
+            f.path.display(),
+            f.scope.label(),
+            format_bytes(f.content.len() as u64),
+        );
+        if f.truncated {
+            note.push(' ');
+            note.push_str(&theme::warning("truncated"));
+        }
+        if let Some(w) = &f.warning {
+            note.push_str(&format!(" {}", theme::warning(w)));
+        }
+        lines.push(format!("{}: {}", theme::accent("instructions"), note));
+    }
+    lines
+}
+
 /// Callback for remote /status. Returns rendered output string.
 pub fn run_status_remote(
     exec: &mut dyn FnMut(&str) -> String,
