@@ -606,9 +606,28 @@ impl AiHandler {
         // message after the system on any AGENTS.md change or cross-project
         // cd. As an appended message, a change costs only the new block +
         // the new question; all prior history stays hit.
+        //
+        // Empty rendered block: when instructions WERE loaded earlier
+        // (leaving a project, deleting every AGENTS.md), append the
+        // explicit no-instructions notice so stale rules from the previous
+        // project do not stay the newest block in history. When nothing
+        // was ever loaded, append nothing (pure noise otherwise).
         let pi_block = self.project_instructions.rendered();
+        let block = if pi_block.is_empty() {
+            let had_instructions = self.context_manager.messages_snapshot().iter().any(|m| {
+                m.role == "system"
+                    && (m.content.contains("<repo-rules>") || m.content.contains("<dir-context>"))
+            });
+            if had_instructions {
+                aish_prompts::NO_INSTRUCTIONS_NOTICE
+            } else {
+                ""
+            }
+        } else {
+            &pi_block
+        };
         self.context_manager
-            .append_dedupe_system("<project-instructions>", &pi_block);
+            .append_dedupe_system("<project-instructions>", block);
         let context_messages = self.build_context_messages();
 
         // Step 6: Extract images from the question text
@@ -2791,6 +2810,19 @@ mod tests {
     /// in the context), mirroring the inline logic in `process_question`.
     fn send_append_pi(handler: &mut AiHandler) {
         let block = pi_block(handler);
+        let block = if block.is_empty() {
+            let had_instructions = handler.context_manager.messages_snapshot().iter().any(|m| {
+                m.role == "system"
+                    && (m.content.contains("<repo-rules>") || m.content.contains("<dir-context>"))
+            });
+            if had_instructions {
+                aish_prompts::NO_INSTRUCTIONS_NOTICE.to_string()
+            } else {
+                return;
+            }
+        } else {
+            block
+        };
         handler
             .context_manager
             .append_dedupe_system("<project-instructions>", &block);
@@ -2961,15 +2993,40 @@ mod tests {
         std::env::set_current_dir(&repo).unwrap();
         handler.inject_project_instructions();
         assert!(pi_block(&handler).contains("project rules"));
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 1);
 
-        // cd outside the repo: state resets, the next system prompt no
-        // longer carries the block.
+        // cd outside the repo: state resets and the send path appends the
+        // explicit no-instructions notice so stale rules from the old
+        // project do not stay the newest block in history.
         std::env::set_current_dir(&outside).unwrap();
         handler.inject_project_instructions();
         assert!(handler.project_instructions.files.is_empty());
         assert!(
             !pi_block(&handler).contains("<project-instructions>"),
             "leaving the project must drop the block for new turns"
+        );
+        send_append_pi(&mut handler);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("No project instruction files apply")),
+            "leaving a loaded project must append the no-instructions notice"
+        );
+        assert_eq!(pi_msg_count(&handler), 2);
+
+        // cd back into the repo: the real block replaces the notice (the
+        // dedupe compares against the last PI message, which is the notice).
+        std::env::set_current_dir(&repo).unwrap();
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 3);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(
+            msgs.iter()
+                .last()
+                .is_some_and(|m| m.content.contains("project rules")),
+            "re-entering the project must re-append the real block"
         );
 
         std::env::remove_var("AISH_CONFIG_DIR");

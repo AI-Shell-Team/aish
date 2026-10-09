@@ -1911,12 +1911,22 @@ impl LlmSession {
         // repairs tool-call pairing.
 
         // Strip reasoning_content from replayed assistant messages before
-        // they go on the wire: OpenAI-compat providers (DeepSeek reasoner
-        // et al.) forbid echoing reasoning back, and the field makes the
-        // replayed bytes diverge from what the provider cached.
-        for msg in &mut messages {
-            if msg.role == "assistant" {
-                msg.reasoning_content = None;
+        // they go on the wire — EXCEPT for DeepSeek: its thinking mode
+        // requires replaying reasoning_content on tool-call follow-ups and
+        // errors without it (api-docs.deepseek.com, thinking_mode guide).
+        // Generic OpenAI-compat providers reject or ignore the field, so
+        // the default stays stripped.
+        let is_deepseek = {
+            let model = self.stream_ctx.model.to_lowercase();
+            model.starts_with("deepseek")
+                || model.contains("deepseek")
+                || self.stream_ctx.api_base.to_lowercase().contains("deepseek")
+        };
+        if !is_deepseek {
+            for msg in &mut messages {
+                if msg.role == "assistant" {
+                    msg.reasoning_content = None;
+                }
             }
         }
         let policy = &self.context_budget_policy;
@@ -2832,6 +2842,52 @@ mod tests {
         let expected = serde_json::to_string(&msgs).unwrap();
         let prepared = session.prepare_messages_for_send(msgs).await;
         assert_eq!(serde_json::to_string(&prepared).unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_strips_reasoning_for_generic_provider() {
+        let session = LlmSession::new("http://localhost", "key", "gpt-4o", None, None);
+        let mut assistant = ChatMessage::assistant("working");
+        assistant.reasoning_content = Some("internal chain of thought".into());
+        let prepared = session.prepare_messages_for_send(vec![assistant]).await;
+        assert!(prepared[0].reasoning_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_preserves_reasoning_for_deepseek() {
+        // DeepSeek thinking mode requires replaying reasoning_content on
+        // tool-call follow-ups (api-docs.deepseek.com thinking_mode guide).
+        let session = LlmSession::new(
+            "https://api.deepseek.com",
+            "key",
+            "deepseek-reasoner",
+            None,
+            None,
+        );
+        let mut assistant = ChatMessage::assistant("working");
+        assistant.reasoning_content = Some("internal chain of thought".into());
+        let prepared = session.prepare_messages_for_send(vec![assistant]).await;
+        assert_eq!(
+            prepared[0].reasoning_content.as_deref(),
+            Some("internal chain of thought")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_preserves_reasoning_for_deepseek_via_api_base() {
+        // Third-party relays serving DeepSeek models through a deepseek base
+        // URL must also keep reasoning replay intact.
+        let session = LlmSession::new(
+            "https://api.deepseek.com/v1",
+            "key",
+            "some-model",
+            None,
+            None,
+        );
+        let mut assistant = ChatMessage::assistant("working");
+        assistant.reasoning_content = Some("thinking".into());
+        let prepared = session.prepare_messages_for_send(vec![assistant]).await;
+        assert_eq!(prepared[0].reasoning_content.as_deref(), Some("thinking"));
     }
 
     #[test]

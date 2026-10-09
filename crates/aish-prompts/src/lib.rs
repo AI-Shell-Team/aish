@@ -21,6 +21,6 @@ pub use manager::{PromptManager, TemporalContext};
 pub use project_instructions::{
     discover, probe_chain, render_instructions, user_instructions_path, ProjectInstructionFile,
     ProjectInstructionScope, ProjectInstructionsLimits, ProjectInstructionsState,
-    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_TOTAL_BYTES,
+    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_TOTAL_BYTES, NO_INSTRUCTIONS_NOTICE,
 };
 pub use template::render_template;

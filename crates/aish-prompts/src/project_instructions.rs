@@ -304,6 +304,13 @@ pub fn probe_chain(cwd: &Path) -> String {
     for path in candidate_paths(cwd, &boundary) {
         probe(&path);
     }
+    // Directory pointers (sibling/subdir AGENTS.md candidates) participate
+    // as explicit path entries: a pointer appearing or disappearing flips
+    // the signature even though it is not on the cwd ancestor chain, so
+    // `discover_dir_context` output refreshes without a cwd round-trip.
+    for path in discover_dir_context(cwd, &boundary) {
+        probe(&path);
+    }
     sig
 }
 
@@ -336,10 +343,19 @@ pub fn discover(cwd: &Path, limits: &ProjectInstructionsLimits) -> ProjectInstru
         );
         // Byte-identical collapse: keep only the copy nearest the cwd. The
         // candidates are far-to-near, so a later duplicate shadows the
-        // earlier one: drop previously loaded identical content.
+        // earlier one: drop previously loaded identical content and return
+        // its bytes to the total budget so the removed copy does not count
+        // twice against max_total_bytes.
         if file.warning.is_none() && !file.content.is_empty() {
             if seen_contents.contains(&file.content) {
-                loaded.retain(|f| f.content != file.content);
+                let dropped = file.content.len();
+                loaded.retain(|f| {
+                    let drop = f.content == file.content;
+                    if drop {
+                        total_bytes = total_bytes.saturating_sub(dropped);
+                    }
+                    !drop
+                });
             } else {
                 seen_contents.insert(file.content.clone());
             }
@@ -389,8 +405,13 @@ pub fn discover(cwd: &Path, limits: &ProjectInstructionsLimits) -> ProjectInstru
 ///
 /// Scoped to the discovery boundary (repo root) so unrelated trees never
 /// leak in; dot directories are skipped. Pointers only — content never
-/// loaded here.
+/// loaded here. Returns empty when the boundary is the filesystem-root
+/// fallback (cwd outside any repo and outside home): pointers into
+/// arbitrary directories of the machine are noise there, not context.
 fn discover_dir_context(cwd: &Path, boundary: &Path) -> Vec<PathBuf> {
+    if boundary == Path::new("/") && repo_root(cwd).is_none() {
+        return Vec::new();
+    }
     let mut pointers = Vec::new();
 
     /// Scan `dir` for non-dot subdirectories containing `AGENTS.md`,
@@ -429,10 +450,11 @@ fn discover_dir_context(cwd: &Path, boundary: &Path) -> Vec<PathBuf> {
         }
     }
     // Siblings of the cwd under the same parent (bounded by the boundary:
-    // skip when the parent is at or above the boundary unless the boundary
-    // IS the parent — i.e. only scan when parent sits inside the repo).
+    // scan only when the parent sits inside the repository tree, i.e. the
+    // parent is at-or-below the boundary. The old check was inverted and
+    // could scan above the repo root).
     if let Some(parent) = cwd.parent() {
-        let parent_in_scope = boundary.starts_with(parent) || parent == boundary;
+        let parent_in_scope = parent.starts_with(boundary);
         if parent_in_scope {
             for p in scan_subdirs(parent, Some(cwd)) {
                 if !pointers.contains(&p) {
@@ -443,6 +465,15 @@ fn discover_dir_context(cwd: &Path, boundary: &Path) -> Vec<PathBuf> {
     }
     pointers
 }
+
+/// Explicit block appended when the working directory leaves every project
+/// (or all AGENTS.md files are deleted). Without it, the last loaded
+/// `<project-instructions>` block from the previous project stays the newest
+/// one in history and the model keeps following stale rules.
+pub const NO_INSTRUCTIONS_NOTICE: &str = "<project-instructions>\n\
+No project instruction files apply in the current working directory. Rules \
+from earlier project-instructions blocks no longer apply.\n\
+</project-instructions>";
 
 /// Render discovered files into the stable context block. Files arrive
 /// far-to-near; the nearest scope is therefore closest to the end of the
@@ -506,6 +537,12 @@ content (build, release, CI) that does not apply.\n",
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{LazyLock, Mutex};
+
+    /// Serialize tests that touch `AISH_CONFIG_DIR`: the env var is
+    /// process-global and parallel `discover()` calls would read each
+    /// other's config dirs.
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
         let path = dir.join(name);
@@ -523,6 +560,7 @@ mod tests {
 
     #[test]
     fn discovers_root_file_from_nested_dir() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         fs::create_dir_all(root.join("packages/api")).unwrap();
@@ -539,6 +577,7 @@ mod tests {
 
     #[test]
     fn nested_layers_both_loaded_far_to_near() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         let sub = root.join("crates/core");
@@ -559,7 +598,50 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_collapse_refunds_total_budget() {
+        // Identical content at root + subdir collapses to the nearer copy;
+        // the dropped copy's bytes must return to the total budget so the
+        // user-level file still loads within max_total_bytes. Without the
+        // refund, the two duplicates alone consume the whole budget and the
+        // user layer is dropped.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        let sub = root.join("pkg");
+        fs::create_dir_all(&sub).unwrap();
+        make_repo(&root);
+        let dup = "x".repeat(50);
+        write(&root, "AGENTS.md", &dup);
+        write(&sub, "AGENTS.md", &dup);
+
+        // Isolated user-level file with distinct content. Serialized via
+        // ENV_LOCK: other discover() tests must not observe this config
+        // dir while it is set.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+        write(cfg.path(), "AGENTS.md", "y".repeat(50).as_str());
+
+        let mut lim = limits();
+        // Budget exactly fits ONE 50-byte copy + the 50-byte user file,
+        // but NOT two copies + the user file.
+        lim.max_total_bytes = 100;
+        let state = discover(&sub, &lim);
+        let contents: Vec<&str> = state.files.iter().map(|f| f.content.as_str()).collect();
+        assert!(
+            contents.contains(&dup.as_str()),
+            "the nearest duplicate copy must be kept"
+        );
+        assert!(
+            contents.iter().any(|c| c.chars().all(|ch| ch == 'y')),
+            "the user-level file must load: the dropped duplicate refunded its bytes"
+        );
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+    }
+
+    #[test]
     fn identical_files_collapse_to_nearest() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         let sub = root.join("pkg");
@@ -575,6 +657,7 @@ mod tests {
 
     #[test]
     fn dot_directories_are_skipped() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         let hidden = root.join(".hidden");
@@ -590,6 +673,7 @@ mod tests {
 
     #[test]
     fn oversized_file_is_truncated_not_fatal() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
@@ -608,6 +692,7 @@ mod tests {
 
     #[test]
     fn total_budget_exhaustion_skips_later_files() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         let sub = root.join("pkg");
@@ -629,6 +714,7 @@ mod tests {
 
     #[test]
     fn missing_file_yields_empty_state() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
@@ -641,6 +727,7 @@ mod tests {
 
     #[test]
     fn disabled_limits_yield_empty_state() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
@@ -655,6 +742,7 @@ mod tests {
 
     #[test]
     fn non_utf8_file_degrades_lossily() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
@@ -669,6 +757,7 @@ mod tests {
 
     #[test]
     fn walk_stops_at_repo_root_even_with_outer_repo_markers() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // The repo root is the inclusive boundary: an AGENTS.md above the
         // repo root must not load even when present.
         let tmp = tempfile::tempdir().expect("tmp");
@@ -687,6 +776,7 @@ mod tests {
 
     #[test]
     fn outside_home_and_repo_uses_fs_root_boundary() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Not a repo, not under home: boundary is "/", so every non-dot
         // ancestor up to "/" is scanned. tempdir roots are dot-prefixed
         // (skipped by design), so place the fixture in a normal subdir and
@@ -698,6 +788,33 @@ mod tests {
         let state = discover(&work, &limits());
         assert_eq!(state.files.len(), 1);
         assert_eq!(state.files[0].content, "tmp rules");
+    }
+
+    #[test]
+    fn probe_chain_flips_when_pointer_appears() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A sibling AGENTS.md is NOT on the cwd ancestor chain; the probe
+        // must still flip when one appears so dir_context refreshes
+        // without a cwd round-trip.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        let cwd = repo.join("pkg-a");
+        let sibling = repo.join("pkg-b");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let before = probe_chain(&cwd);
+        write(&sibling, "AGENTS.md", "sibling rules");
+        let after = probe_chain(&cwd);
+        assert_ne!(before, after, "pointer creation must flip the probe");
+
+        std::fs::remove_file(sibling.join("AGENTS.md")).unwrap();
+        assert_eq!(
+            probe_chain(&cwd),
+            before,
+            "pointer removal must restore the original probe"
+        );
     }
 
     #[test]
@@ -721,7 +838,33 @@ mod tests {
     }
 
     #[test]
+    fn sibling_scan_never_escapes_repo_boundary() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A sibling AGENTS.md OUTSIDE the repo (above the boundary) must
+        // not leak into dir_context even though the parent directory of
+        // the cwd contains it.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let outer = tmp.path().join("outer");
+        let root = outer.join("repo");
+        let cwd = root.join("pkg");
+        fs::create_dir_all(&cwd).unwrap();
+        make_repo(&root);
+        write(&outer, "AGENTS.md", "outer rules");
+
+        let boundary = super::discovery_boundary(&cwd, dirs::home_dir().as_deref());
+        let pointers = discover_dir_context(&cwd, &boundary);
+        assert!(
+            !pointers
+                .iter()
+                .any(|p| p.to_string_lossy().contains("outer/AGENTS.md")),
+            "pointers outside the repo boundary must never appear: {:?}",
+            pointers
+        );
+    }
+
+    #[test]
     fn dir_context_discovers_siblings_and_subdirs() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tmp");
         let repo = tmp.path().join("repo");
         let cwd = repo.join("pkg-a");
