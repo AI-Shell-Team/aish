@@ -443,9 +443,21 @@ fn discover_dir_context(cwd: &Path, boundary: &Path) -> Vec<PathBuf> {
         found
     }
 
+    // True when `path` is inside the repository boundary after resolving
+    // symlinks. Component-level `starts_with` passes when the cwd sits
+    // behind a symlink pointing outside the repo; canonicalization closes
+    // that escape hatch.
+    let within_boundary = |path: &Path| -> bool {
+        match (path.canonicalize(), boundary.canonicalize()) {
+            (Ok(resolved), Ok(root)) => resolved.starts_with(root),
+            // Unresolvable paths cannot be proven in-bounds: drop them.
+            _ => false,
+        }
+    };
+
     // Direct subdirectories of the cwd.
     for p in scan_subdirs(cwd, None) {
-        if !pointers.contains(&p) {
+        if within_boundary(&p) && !pointers.contains(&p) {
             pointers.push(p);
         }
     }
@@ -454,8 +466,7 @@ fn discover_dir_context(cwd: &Path, boundary: &Path) -> Vec<PathBuf> {
     // parent is at-or-below the boundary. The old check was inverted and
     // could scan above the repo root).
     if let Some(parent) = cwd.parent() {
-        let parent_in_scope = parent.starts_with(boundary);
-        if parent_in_scope {
+        if within_boundary(parent) {
             for p in scan_subdirs(parent, Some(cwd)) {
                 if !pointers.contains(&p) {
                     pointers.push(p);
@@ -858,6 +869,34 @@ mod tests {
                 .iter()
                 .any(|p| p.to_string_lossy().contains("outer/AGENTS.md")),
             "pointers outside the repo boundary must never appear: {:?}",
+            pointers
+        );
+    }
+
+    #[test]
+    fn symlinked_cwd_does_not_leak_outside_pointers() {
+        // cwd behind a symlink pointing outside the repo: sibling scans
+        // resolve paths canonically before containment, so AGENTS.md files
+        // outside the real repo never leak in as pointers.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let real_repo = tmp.path().join("real-repo");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&real_repo).unwrap();
+        make_repo(&real_repo);
+        fs::create_dir_all(&outside).unwrap();
+        write(&outside, "AGENTS.md", "outside rules");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real_repo, &link).expect("symlink");
+        let cwd = link.join("work");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let boundary = super::discovery_boundary(&cwd, dirs::home_dir().as_deref());
+        let pointers = discover_dir_context(&cwd, &boundary);
+        assert!(
+            !pointers
+                .iter()
+                .any(|p| p.to_string_lossy().contains("outside/AGENTS.md")),
+            "pointers resolved outside the repo must never appear: {:?}",
             pointers
         );
     }
