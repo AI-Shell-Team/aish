@@ -40,7 +40,13 @@ pub struct ShellState {
     pub cwd: String,
     pub prev_cwd: Option<String>,
     pub dir_stack: Vec<String>,
+    /// Exported environment last read from the shell session.
+    /// Empty until that read succeeds.
     pub env_vars: std::collections::HashMap<String, String>,
+    /// Process environment at startup. The first read from the shell session
+    /// uses it so variables the session did not change stay as the process
+    /// left them. `None` after that read.
+    pub env_baseline: Option<std::collections::HashMap<String, String>>,
     pub should_exit: bool,
     pub history: Vec<String>,
     /// Last executed command (for error correction).
@@ -58,12 +64,13 @@ impl ShellState {
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "/".to_string());
-        let env_vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let env_baseline = std::env::vars().collect();
         Self {
             cwd,
             prev_cwd: None,
             dir_stack: Vec::new(),
-            env_vars,
+            env_vars: std::collections::HashMap::new(),
+            env_baseline: Some(env_baseline),
             should_exit: false,
             history: Vec::new(),
             last_command: None,

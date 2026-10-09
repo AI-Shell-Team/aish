@@ -3579,30 +3579,12 @@ impl AishShell {
             self.reset_interruption();
             return false;
         }
-        // State-modifying commands (cd, pushd, popd, export, unset) also
-        // need to be sent to the PTY bash process so that the persistent
-        // bash session stays in sync. InputGuard MUST screen here too: bash
-        // will execute any command-substitution payloads embedded in the
-        // arguments (e.g. `export FOO=$(rm -rf /etc)`).
-        if crate::commands::is_state_modifying(first) && !crate::commands::is_rejected(first) {
-            if !self.screen_shell_command(input) {
-                // Destructive payload blocked — skip the sync so bash never
-                // sees it. `screen_shell_command` already recorded exit 1.
-                // Rust state was updated by handle_builtin above; do not
-                // record a second history row as success.
-                return false;
-            }
-            self.sync_command_to_pty(input);
-        }
 
         let builtin_output = result.output.clone().unwrap_or_default();
-        let mut entry = format!(
+        let entry = format!(
             "[Shell] {}\n<returncode>0</returncode>\n<output>{}</output>",
             input, builtin_output
         );
-        if crate::commands::is_state_modifying(first) && !crate::commands::is_rejected(first) {
-            entry.push_str(&format!("\n<cwd>{}</cwd>", self.state.cwd));
-        }
         self.ai_handler.add_shell_context(&entry);
         self.record_history(input, 0);
         false
@@ -9163,21 +9145,6 @@ impl AishShell {
         }
 
         exit_code
-    }
-
-    /// Silently sync a state-modifying command (cd, export, etc.) to the
-    /// persistent PTY bash process so that bash's CWD and env stay in sync
-    /// with the Rust shell's tracking. Output is discarded.
-    fn sync_command_to_pty(&mut self, command: &str) {
-        if !self.lock_pty().is_running() {
-            return;
-        }
-        let _ = self.pty.lock().unwrap().execute_command(
-            command,
-            std::time::Duration::from_secs(5),
-            None,
-            false,
-        );
     }
 
     fn sync_state_from_pty_cwd(&mut self) {
