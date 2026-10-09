@@ -468,7 +468,11 @@ fn discover_dir_context(cwd: &Path, boundary: &Path) -> Vec<PathBuf> {
     if let Some(parent) = cwd.parent() {
         if within_boundary(parent) {
             for p in scan_subdirs(parent, Some(cwd)) {
-                if !pointers.contains(&p) {
+                // The parent check alone is not enough: a sibling inside
+                // the repo can be a symlink to a directory outside it.
+                // Verify each pointer's own resolved path, matching the
+                // direct-child branch above.
+                if within_boundary(&p) && !pointers.contains(&p) {
                     pointers.push(p);
                 }
             }
@@ -897,6 +901,33 @@ mod tests {
                 .iter()
                 .any(|p| p.to_string_lossy().contains("outside/AGENTS.md")),
             "pointers resolved outside the repo must never appear: {:?}",
+            pointers
+        );
+    }
+
+    #[test]
+    fn symlinked_sibling_does_not_leak_outside_pointers() {
+        // A sibling INSIDE the repo that is a symlink to a directory
+        // outside it: the parent-boundary check passes, but the pointer's
+        // own resolved path must also be contained before it is surfaced.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("repo");
+        let cwd = root.join("pkg-a");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        make_repo(&root);
+        std::os::unix::fs::symlink(&outside, root.join("pkg-b")).expect("symlink");
+        fs::write(outside.join("AGENTS.md"), "outside rules").unwrap();
+        fs::write(root.join("pkg-b-link-check"), "marker").unwrap();
+
+        let boundary = super::discovery_boundary(&cwd, dirs::home_dir().as_deref());
+        let pointers = discover_dir_context(&cwd, &boundary);
+        assert!(
+            !pointers
+                .iter()
+                .any(|p| p.to_string_lossy().contains("outside/AGENTS.md")),
+            "symlinked sibling must not surface pointers outside the repo: {:?}",
             pointers
         );
     }
