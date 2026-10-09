@@ -204,6 +204,7 @@ shell:
     undo: "Deshacer la última edición de archivo de la IA (edit_file/write_file)"
     memory: "Ver, verificar u olvidar memorias a largo plazo"
     compact: "Compactar el contexto de la IA ahora (texto de enfoque opcional)"
+    instructions: "Alternar la carga de instrucciones AGENTS.md del proyecto (on/off/status; esta sesión)"
 
   slash_group:
     diagnostics: "Diagnóstico"

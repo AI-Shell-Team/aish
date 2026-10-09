@@ -204,6 +204,7 @@ shell:
     undo: "Letzte KI-Dateiänderung rückgängig machen (edit_file/write_file)"
     memory: "Langfristige Erinnerungen anzeigen, verifizieren oder löschen"
     compact: "KI-Kontext jetzt komprimieren (optionaler Fokus)"
+    instructions: "Projekt-AGENTS.md-Anweisungsladen umschalten (on/off/status; nur diese Sitzung)"
 
   slash_group:
     diagnostics: "Diagnose"

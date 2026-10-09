@@ -377,6 +377,7 @@ shell:
     undo: "撤销 AI 最近一次文件修改（edit_file/write_file）"
     memory: "查看、验证或删除长期记忆"
     compact: "立即压缩 AI 上下文（可附加重点说明）"
+    instructions: "切换项目 AGENTS.md 指令加载（on/off/status；仅本会话）"
 
   slash_group:
     diagnostics: "诊断"

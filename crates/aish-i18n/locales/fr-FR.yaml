@@ -204,6 +204,7 @@ shell:
     undo: "Annuler la dernière modification de fichier par l'IA (edit_file/write_file)"
     memory: "Visualiser, vérifier ou oublier les mémoires"
     compact: "Compresser le contexte de l'IA maintenant (focus optionnel)"
+    instructions: "Basculer le chargement des instructions AGENTS.md du projet (on/off/status ; cette session)"
 
   slash_group:
     diagnostics: "Diagnostic"

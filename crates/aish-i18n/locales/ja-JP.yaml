@@ -204,6 +204,7 @@ shell:
     undo: "AIによる直近のファイル変更を取り消す (edit_file/write_file)"
     memory: "長期メモリの表示、検証、削除"
     compact: "AIコンテキストを今すぐ圧縮（フォーカス指定は任意）"
+    instructions: "プロジェクト AGENTS.md 命令の読み込みを切り替え（on/off/status；このセッションのみ）"
 
   slash_group:
     diagnostics: "診断"

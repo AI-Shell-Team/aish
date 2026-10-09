@@ -1056,7 +1056,7 @@ mod tests {
                 cmd.name
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 25);
+        assert_eq!(SLASH_COMMANDS.len(), 26);
     }
 
     #[test]

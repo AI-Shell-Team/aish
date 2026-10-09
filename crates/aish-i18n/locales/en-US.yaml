@@ -377,6 +377,7 @@ shell:
     undo: "Undo the most recent AI file edit (edit_file/write_file)"
     memory: "View, verify, or forget long-term memories"
     compact: "Compact the AI context now (optional focus text)"
+    instructions: "Toggle project AGENTS.md instruction loading (on/off/status; this session)"
 
   slash_group:
     diagnostics: "Diagnostics"
