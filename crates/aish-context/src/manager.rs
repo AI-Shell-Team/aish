@@ -554,6 +554,15 @@ impl ContextManager {
         }
     }
 
+    /// Remove every `system` message whose content contains `marker`.
+    /// Used by the session-level instruction switch: disabling must clear
+    /// the context, not just the discovery state, so no stale rules stay
+    /// active mid-conversation.
+    pub fn clear_system_blocks(&mut self, marker: &str) {
+        self.messages
+            .retain(|m| !(m.role == "system" && m.content.contains(marker)));
+    }
+
     /// Set the model name (used for future tokeniser selection).
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_string();

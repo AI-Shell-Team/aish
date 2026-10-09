@@ -259,6 +259,29 @@ impl AiHandler {
         &self.project_instructions
     }
 
+    /// Session-level on/off switch for project instruction loading
+    /// (issue #562, for troubleshooting). Independent of the config file:
+    /// disabling here clears the discovered state AND removes every
+    /// project-instruction block from the persistent context, so no stale
+    /// rules stay active. Re-enabling re-discovers on the next turn.
+    /// Returns the new enabled state.
+    pub fn set_project_instructions_session_enabled(&mut self, enabled: bool) -> bool {
+        self.project_instructions_limits.enabled = enabled;
+        if !enabled {
+            self.project_instructions = ProjectInstructionsState::default();
+            self.project_instructions_probe.clear();
+            self.context_manager
+                .clear_system_blocks("<project-instructions>");
+        }
+        enabled
+    }
+
+    /// Whether project instruction loading is currently enabled (config
+    /// AND session switch).
+    pub fn project_instructions_enabled(&self) -> bool {
+        self.project_instructions_limits.enabled
+    }
+
     /// Set the secret redactor used before persisting tool outputs.
     pub fn set_secret_redactor(&mut self, redactor: Arc<dyn Fn(&str) -> String + Send + Sync>) {
         self.secret_redactor = Some(redactor);
@@ -3028,6 +3051,55 @@ mod tests {
                 .is_some_and(|m| m.content.contains("project rules")),
             "re-entering the project must re-append the real block"
         );
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn project_instructions_session_switch_disables_clears_and_reenables() {
+        // Issue #562: the session-level switch must disable loading, clear
+        // the discovered state AND every PI block from the context, and
+        // re-enable with re-discovery on the next turn.
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "project rules").unwrap();
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        std::env::set_current_dir(&repo).unwrap();
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 1);
+        assert!(handler.project_instructions_enabled());
+
+        // Disable for the session: state cleared, every PI block removed
+        // from the context, loading gated off.
+        assert!(!handler.set_project_instructions_session_enabled(false));
+        assert!(handler.project_instructions.files.is_empty());
+        assert!(handler.project_instructions.discovery_cwd.is_empty());
+        assert_eq!(
+            pi_msg_count(&handler),
+            0,
+            "disabling must clear every PI block from the context"
+        );
+        // The gate holds: reconcile does nothing while disabled.
+        handler.inject_project_instructions();
+        assert!(handler.project_instructions.files.is_empty());
+
+        // Re-enable: the next turn re-discovers and the send path appends
+        // the block again.
+        assert!(handler.set_project_instructions_session_enabled(true));
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 1);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(msgs.iter().any(|m| m.content.contains("project rules")));
 
         std::env::remove_var("AISH_CONFIG_DIR");
         std::env::set_current_dir(tmp.path()).unwrap();

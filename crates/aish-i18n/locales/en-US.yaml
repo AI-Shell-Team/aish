@@ -304,6 +304,9 @@ status:
   errors_today: "errors today"
   na: "N/A"
 
+  instructions: "instructions"
+  instructions_none: "none loaded"
+  instructions_loaded: "{count} file(s) loaded"
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -475,6 +478,7 @@ shell:
   confirm_choice_reply: "Reply to AI (try another way)"
   confirm_choice_deny: "Deny"
   forget_approvals_cleared: "Cleared {count} remembered approval(s) for this session"
+  instructions_toggled: "Project AGENTS.md instruction loading for this session: {state}"
 
   # Prompt
   prompt_prefix: "Execute"

@@ -132,6 +132,9 @@ status:
   errors_today: "errores hoy"
   na: "N/D"
 
+  instructions: "instrucciones"
+  instructions_none: "ninguna cargada"
+  instructions_loaded: "{count} archivo(s) cargado(s)"
 shell:
   interrupted: "Interrumpido"
   ctrl_c_again: "Pulsa Ctrl+C de nuevo en 1s para salir"
@@ -146,6 +149,7 @@ shell:
   confirm_choice_reply: "Pedir a la IA otra opción"
   confirm_choice_deny: "Denegar"
   forget_approvals_cleared: "Se borraron {count} autorización(es) recordadas de esta sesión"
+  instructions_toggled: "Carga de instrucciones AGENTS.md del proyecto para esta sesión: {state}"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(escribe /model para cambiar)"

@@ -304,6 +304,9 @@ status:
   errors_today: "今日错误"
   na: "无"
 
+  instructions: "指令"
+  instructions_none: "未加载"
+  instructions_loaded: "已加载 {count} 个文件"
 shell:
   welcome2:
     header: ">_ AI Shell {version}"
@@ -475,6 +478,7 @@ shell:
   confirm_choice_reply: "回复 AI 换方案"
   confirm_choice_deny: "拒绝"
   forget_approvals_cleared: "已清除本会话的命令审批记忆（{count} 项）"
+  instructions_toggled: "本会话的项目 AGENTS.md 指令加载：{state}"
 
   # 提示符
   prompt_prefix: "执行"

@@ -4188,6 +4188,7 @@ impl AishShell {
                 }
             }
             Some("/forget-approvals") => self.handle_forget_approvals(),
+            Some("/instructions") => self.handle_instructions_command(&parts),
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/memory") => self.handle_memory_command(&parts),
             Some("/skill") => self.handle_skill_command(&parts),
@@ -4220,6 +4221,63 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
+    }
+
+    /// `/instructions` — session-level toggle for project `AGENTS.md`
+    /// instruction loading (issue #562, for troubleshooting).
+    ///
+    /// Subcommands:
+    /// - `/instructions` or `/instructions status` — show the current state
+    /// - `/instructions off` — disable for THIS session: clears the
+    ///   discovered state AND every project-instruction block from the
+    ///   context so no stale rules stay active
+    /// - `/instructions on` — re-enable; the next AI turn re-discovers
+    fn handle_instructions_command(&mut self, parts: &[&str]) {
+        let sub = parts.get(1).copied().unwrap_or("status");
+        match sub {
+            "on" | "off" => {
+                let enabled = self
+                    .ai_handler
+                    .set_project_instructions_session_enabled(sub == "on");
+                let state_str = if enabled {
+                    t("shell.setting.on")
+                } else {
+                    t("shell.setting.off")
+                };
+                let mut args = std::collections::HashMap::new();
+                args.insert("state".to_string(), state_str);
+                println!(
+                    "{}",
+                    theme::accent(&t_with_args("shell.instructions_toggled", &args))
+                );
+            }
+            "status" => {
+                let enabled = self.ai_handler.project_instructions_enabled();
+                let state = self.ai_handler.project_instructions_state();
+                let loaded = state.files.len();
+                let status = if !enabled {
+                    t("shell.setting.off")
+                } else if loaded == 0 {
+                    t("status.instructions_none")
+                } else {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("count".to_string(), loaded.to_string());
+                    t_with_args("status.instructions_loaded", &args)
+                };
+                println!("{}: {}", theme::accent(&t("status.instructions")), status);
+                crate::status::render_project_instructions(state, enabled)
+                    .into_iter()
+                    .for_each(|l| println!("{}", l));
+            }
+            // Unknown subcommands fall through to the status display.
+            _ => {
+                let enabled = self.ai_handler.project_instructions_enabled();
+                let state = self.ai_handler.project_instructions_state();
+                crate::status::render_project_instructions(state, enabled)
+                    .into_iter()
+                    .for_each(|l| println!("{}", l));
+            }
+        }
     }
 
     /// `/memory` — view, verify, or forget long-term memories.

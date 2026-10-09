@@ -132,6 +132,9 @@ status:
   errors_today: "今日のエラー"
   na: "なし"
 
+  instructions: "命令"
+  instructions_none: "読み込みなし"
+  instructions_loaded: "{count} 件のファイルを読み込み"
 shell:
   interrupted: "割り込みました"
   ctrl_c_again: "1秒以内にもう一度 Ctrl+C で終了します"
@@ -146,6 +149,7 @@ shell:
   confirm_choice_reply: "AIに別案を相談"
   confirm_choice_deny: "拒否"
   forget_approvals_cleared: "このセッションの記憶された承認 {count} 件を削除しました"
+  instructions_toggled: "このセッションのプロジェクト AGENTS.md 命令の読み込み: {state}"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(/model で切り替え)"
