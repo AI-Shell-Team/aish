@@ -1,13 +1,17 @@
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::sandbox::error::{SandboxError, SandboxReason};
 use crate::sandbox::ipc::protocol::{decode_response_line, encode_request_line, SandboxIpcRequest};
 use crate::sandbox::types::{SandboxLimits, SandboxResult, SandboxRunRequest};
 
 const DEFAULT_READ_BUFFER_BYTES: usize = 64 * 1024;
+/// The daemon writes the result line after the command has stopped. The read
+/// stays open this much longer than the command budget so that line is received
+/// instead of being reported as an IPC timeout.
+const RESULT_WRITE_SLACK: Duration = Duration::from_secs(2);
 
 pub(crate) trait SandboxRunner: Send + Sync {
     fn simulate(&self, request: &SandboxRunRequest) -> Result<SandboxResult, SandboxError>;
@@ -36,12 +40,11 @@ impl SandboxClient {
         &self.socket_path
     }
 
-    fn connect(&self, request: &SandboxRunRequest) -> Result<UnixStream, SandboxError> {
+    fn connect(&self, timeout: Duration) -> Result<UnixStream, SandboxError> {
         let stream = UnixStream::connect(&self.socket_path).map_err(|error| {
             SandboxError::with_details(SandboxReason::SandboxIpcUnavailable, error.to_string())
         })?;
 
-        let timeout = Duration::from_secs_f64(self.limits.clamp_timeout_s(request.timeout_s));
         stream.set_read_timeout(Some(timeout)).map_err(|error| {
             SandboxError::with_details(SandboxReason::SandboxIpcFailed, error.to_string())
         })?;
@@ -52,32 +55,17 @@ impl SandboxClient {
         Ok(stream)
     }
 
-    fn read_response(&self, stream: &mut UnixStream) -> Result<Vec<u8>, SandboxError> {
+    fn read_response(
+        &self,
+        stream: &mut UnixStream,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, SandboxError> {
+        let deadline = Instant::now() + timeout + RESULT_WRITE_SLACK;
         let mut buf = Vec::new();
         let mut chunk = [0_u8; DEFAULT_READ_BUFFER_BYTES];
 
         loop {
-            let read = match stream.read(&mut chunk) {
-                Ok(read) => read,
-                // With SO_RCVTIMEO set, Linux reports a signal during the wait
-                // as EINTR instead of restarting the read. Retry; the timeout
-                // still applies to the next call.
-                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
-                {
-                    return Err(SandboxError::with_details(
-                        SandboxReason::SandboxIpcTimeout,
-                        error.to_string(),
-                    ));
-                }
-                Err(error) => {
-                    return Err(SandboxError::with_details(
-                        SandboxReason::SandboxIpcFailed,
-                        error.to_string(),
-                    ));
-                }
-            };
+            let read = super::read_within_deadline(stream, &mut chunk, deadline)?;
 
             if read == 0 {
                 break;
@@ -101,7 +89,8 @@ impl SandboxClient {
 
 impl SandboxRunner for SandboxClient {
     fn simulate(&self, request: &SandboxRunRequest) -> Result<SandboxResult, SandboxError> {
-        let mut stream = self.connect(request)?;
+        let timeout = Duration::from_secs_f64(self.limits.clamp_timeout_s(request.timeout_s));
+        let mut stream = self.connect(timeout)?;
         let raw = encode_request_line(&SandboxIpcRequest::from(request.clone()), self.limits)?;
 
         stream.write_all(&raw).map_err(|error| match error.kind() {
@@ -111,7 +100,7 @@ impl SandboxRunner for SandboxClient {
             _ => SandboxError::with_details(SandboxReason::SandboxIpcFailed, error.to_string()),
         })?;
 
-        let response = self.read_response(&mut stream)?;
+        let response = self.read_response(&mut stream, timeout)?;
         decode_response_line(&response, &request.id, self.limits)
     }
 }
@@ -122,6 +111,7 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
     use std::thread;
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -189,6 +179,44 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.changes[0].kind, FsChangeKind::Created);
 
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn simulate_reads_a_result_written_after_the_command_starts() {
+        let temp = tempdir().unwrap();
+        let socket_path = temp.path().join("sandbox.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let request = sample_request();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..read]);
+                if buf.contains(&b'\n') {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+            let result = SandboxResult {
+                exit_code: 7,
+                changes: Vec::new(),
+                changes_truncated: false,
+            };
+            let raw =
+                encode_success_response_line("req-1", &result, SandboxLimits::default()).unwrap();
+            stream.write_all(&raw).unwrap();
+        });
+
+        let client = SandboxClient::new(&socket_path);
+        let result = client.simulate(&request).unwrap();
+        assert_eq!(result.exit_code, 7);
         handle.join().unwrap();
     }
 
