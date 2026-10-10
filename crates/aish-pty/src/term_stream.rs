@@ -21,10 +21,26 @@
 //! layers is translated twice (the terminal receives `\r\r\n`).
 
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 /// Longest incomplete escape sequence held back while filtering stdin.
 /// Report sequences are short; anything longer is not a report.
 const MAX_REPORT_PREFIX: usize = 32;
+
+/// Tail of child output kept for TUI fingerprint detection. A setup sequence can
+/// straddle two reads (`ESC[?25` + `l`), so detection looks at the previous tail
+/// plus the head of the new chunk; 32 bytes covers the longest needle.
+const TUI_DETECT_TAIL: usize = 32;
+
+/// Longest a possible report prefix may be withheld before it is handed to the
+/// child anyway.
+///
+/// Real terminal reports are relayed back-to-back (microseconds, at most a few
+/// milliseconds through a multiplexer), so this only ever fires for input that
+/// is *not* a report — a lone Escape keypress, or a paste whose tail happens to
+/// look like a report prefix. Bounding it keeps such input from being withheld
+/// until the next read.
+pub(crate) const HELD_PREFIX_MAX_HOLD: Duration = Duration::from_millis(500);
 
 /// Private-mode setups and queries (`ESC [ ? …`): full-screen programs turn
 /// these on to take over the screen or ask the terminal what it supports.
@@ -158,6 +174,11 @@ fn is_report_prefix(seq: &[u8]) -> bool {
 pub(crate) struct TerminalStreamFilter {
     drop_reports: bool,
     pending: Vec<u8>,
+    /// When `pending` started, for [`Self::release_expired`].
+    held_since: Option<Instant>,
+    /// Trailing child-output bytes, for fingerprints split across reads.
+    detect_tail: [u8; TUI_DETECT_TAIL],
+    detect_tail_len: usize,
 }
 
 impl TerminalStreamFilter {
@@ -165,6 +186,9 @@ impl TerminalStreamFilter {
         Self {
             drop_reports: true,
             pending: Vec::new(),
+            held_since: None,
+            detect_tail: [0; TUI_DETECT_TAIL],
+            detect_tail_len: 0,
         }
     }
 
@@ -174,14 +198,41 @@ impl TerminalStreamFilter {
         Self {
             drop_reports: false,
             pending: Vec::new(),
+            held_since: None,
+            detect_tail: [0; TUI_DETECT_TAIL],
+            detect_tail_len: 0,
         }
     }
 
     /// Feed child output so the filter can disarm for full-screen programs.
+    ///
+    /// A sequence can straddle two reads, so the previous tail is checked
+    /// together with the head of this chunk as well as the chunk itself.
     pub(crate) fn observe_child_output(&mut self, data: &[u8]) {
-        if self.drop_reports && looks_like_tui_output(data) {
-            self.drop_reports = false;
+        if !self.drop_reports || data.is_empty() {
+            return;
         }
+        if looks_like_tui_output(data) || self.boundary_matches(data) {
+            self.drop_reports = false;
+            self.detect_tail_len = 0;
+            return;
+        }
+        let keep = data.len().min(TUI_DETECT_TAIL);
+        self.detect_tail[..keep].copy_from_slice(&data[data.len() - keep..]);
+        self.detect_tail_len = keep;
+    }
+
+    /// True when a TUI fingerprint spans the previous tail and this chunk's head.
+    fn boundary_matches(&self, data: &[u8]) -> bool {
+        if self.detect_tail_len == 0 {
+            return false;
+        }
+        let head_len = data.len().min(TUI_DETECT_TAIL);
+        let mut window = [0u8; 2 * TUI_DETECT_TAIL];
+        window[..self.detect_tail_len].copy_from_slice(&self.detect_tail[..self.detect_tail_len]);
+        window[self.detect_tail_len..self.detect_tail_len + head_len]
+            .copy_from_slice(&data[..head_len]);
+        looks_like_tui_output(&window[..self.detect_tail_len + head_len])
     }
 
     /// Filter one stdin chunk, returning the bytes to forward to the child.
@@ -190,6 +241,7 @@ impl TerminalStreamFilter {
             return Vec::new();
         }
         if !self.drop_reports {
+            self.held_since = None;
             if self.pending.is_empty() {
                 return data.to_vec();
             }
@@ -207,15 +259,31 @@ impl TerminalStreamFilter {
         self.scan(&scan_input)
     }
 
-    /// Release bytes held as a possible incomplete report (call when the
-    /// command finishes so nothing is lost).
+    /// Hand held bytes to the child once they have been withheld for longer
+    /// than `max_hold`: a report that has not completed by then is not a report
+    /// (see [`HELD_PREFIX_MAX_HOLD`]). Returns the bytes to forward, if any.
+    pub(crate) fn release_expired(&mut self, max_hold: Duration) -> Vec<u8> {
+        let expired = self
+            .held_since
+            .is_some_and(|since| since.elapsed() >= max_hold);
+        if !expired {
+            return Vec::new();
+        }
+        self.held_since = None;
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Drop bytes still held when the command ends: injecting a report-shaped
+    /// prefix into the shell prompt would be worse than losing it.
     pub(crate) fn flush(&mut self) -> Vec<u8> {
+        self.held_since = None;
         std::mem::take(&mut self.pending)
     }
 
     fn scan(&mut self, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(data.len());
         let mut i = 0;
+        self.held_since = None;
         while i < data.len() {
             if data[i] == 0x1b {
                 let rest = &data[i..];
@@ -232,6 +300,9 @@ impl TerminalStreamFilter {
                 let holdable =
                     rest.len() == 1 || (is_report_prefix(rest) && rest.len() <= MAX_REPORT_PREFIX);
                 if holdable {
+                    if self.pending.is_empty() {
+                        self.held_since = Some(Instant::now());
+                    }
                     self.pending.extend_from_slice(rest);
                     return out;
                 }
@@ -359,6 +430,46 @@ mod tests {
         let mut f = TerminalStreamFilter::new();
         f.observe_child_output(b"\x1b[?25l");
         assert_eq!(f.filter(b"\x1b"), b"\x1b");
+    }
+
+    #[test]
+    fn held_prefix_is_released_after_the_hold_bound() {
+        let mut f = TerminalStreamFilter::new();
+        assert_eq!(f.filter(b"\x1b"), Vec::<u8>::new());
+        // Not yet expired.
+        assert_eq!(f.release_expired(Duration::from_secs(60)), Vec::<u8>::new());
+        // Expired: the byte goes to the child instead of waiting for a read.
+        assert_eq!(f.release_expired(Duration::ZERO), b"\x1b");
+        assert_eq!(f.release_expired(Duration::ZERO), Vec::<u8>::new());
+        // Later input is forwarded normally.
+        assert_eq!(f.filter(b"x"), b"x");
+    }
+
+    #[test]
+    fn held_prefix_release_does_not_fire_while_a_report_is_completing() {
+        let mut f = TerminalStreamFilter::new();
+        assert_eq!(f.filter(b"a\x1b[12;"), b"a");
+        // The continuation arrives before the bound: the report is still dropped.
+        assert_eq!(f.release_expired(Duration::from_secs(60)), Vec::<u8>::new());
+        assert_eq!(f.filter(b"40R"), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn tui_detection_handles_a_sequence_split_across_reads() {
+        let mut f = TerminalStreamFilter::new();
+        f.observe_child_output(b"\x1b[?25");
+        assert_eq!(f.filter(b"\x1b[12;40R"), Vec::<u8>::new());
+        f.observe_child_output(b"l");
+        // Now disarmed: the child is a full-screen program and needs its answers.
+        assert_eq!(f.filter(b"\x1b[12;40R"), b"\x1b[12;40R");
+    }
+
+    #[test]
+    fn tui_detection_tail_does_not_match_unrelated_output() {
+        let mut f = TerminalStreamFilter::new();
+        f.observe_child_output(b"plain line one\n");
+        f.observe_child_output(b"plain line two\n");
+        assert_eq!(f.filter(b"\x1b[12;40R"), Vec::<u8>::new());
     }
 
     #[test]

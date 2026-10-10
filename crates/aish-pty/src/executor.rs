@@ -445,6 +445,13 @@ impl PtyExecutor {
                     std::time::Instant::now() + std::time::Duration::from_millis(100);
                 crate::persistent::follow_terminal_resize(master_fd, &mut last_terminal_size);
             }
+
+            // A prefix held for a possible terminal report must not withhold
+            // genuine input from the child for longer than the hold bound.
+            let released = stream_filter.release_expired(crate::term_stream::HELD_PREFIX_MAX_HOLD);
+            if !released.is_empty() {
+                write_buf.extend_from_slice(&released);
+            }
             if cancel_token.is_cancelled() {
                 // Send SIGTERM to the child process group.
                 let _ = kill_pg(child_pid, Signal::SIGTERM);
@@ -613,6 +620,10 @@ impl PtyExecutor {
                 } {
                     n if n > 0 => {
                         let data = &tmp[..n as usize];
+                        // stderr is relayed to the terminal too, so a TUI that
+                        // writes its setup or queries there must disarm the
+                        // stdin filter just like master output does.
+                        stream_filter.observe_child_output(data);
                         // SAFETY: STDOUT_FILENO is a valid open fd, data points
                         // to valid readable bytes from the stderr pipe read.
                         let _ = unsafe {

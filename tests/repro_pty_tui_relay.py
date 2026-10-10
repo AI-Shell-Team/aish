@@ -18,6 +18,10 @@ output inside aish:
    line-oriented child (it would echo/execute them), but must reach a child that
    shows full-screen behaviour.
 
+The session runs with an isolated config (`terminal_resize_mode: full`,
+`pty_daemon_enabled: false`), so results do not depend on the user's settings and
+no daemon is left behind.
+
 Usage:
     AISH_BIN=target/debug/aish python3 tests/repro_pty_tui_relay.py
 """
@@ -34,7 +38,9 @@ import tempfile
 import termios
 import time
 
-PROMPT_RE = re.compile(rb"aish .{0,80}->")
+# The prompt marker (U+25C6) only appears in the prompt itself; the trailing
+# arrow depends on the user's prompt style, so it is not matched.
+PROMPT_RE = re.compile(b"\xe2\x97\x86 aish ")
 REPORT = b"\x1b[1;17R"
 
 
@@ -59,10 +65,25 @@ class AishSession:
 
     def __init__(self, aish_bin: str, rows: int = 30, cols: int = 100):
         self.tmp_config = tempfile.mkdtemp(prefix="aish-repro-pty-")
-        real_config = os.path.join(os.path.expanduser("~/.config"), "aish")
-        dst = os.path.join(self.tmp_config, "aish")
-        if not os.path.exists(dst):
-            os.symlink(real_config, dst)
+        # Hermetic config. Copying (or symlinking) the user's config would make
+        # the resize check depend on their `terminal_resize_mode`, and a real
+        # config would copy their API keys into a temp directory. A dummy
+        # model/key keeps the first-run setup wizard away; daemon sessions are
+        # disabled so a killed run cannot leave one behind (the relay code under
+        # test is the same in both modes).
+        config_dir = os.path.join(self.tmp_config, "aish")
+        os.makedirs(config_dir, exist_ok=True)
+        with open(
+            os.path.join(config_dir, "config.yaml"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                "model: test-model\n"
+                "api_key: test-key\n"
+                "api_base: https://example.invalid/v1\n"
+                "terminal_resize_mode: full\n"
+                "pty_daemon_enabled: false\n"
+                "check_update_on_startup: false\n"
+            )
 
         env = os.environ.copy()
         env["XDG_CONFIG_HOME"] = self.tmp_config
@@ -208,13 +229,24 @@ def check_resize_followed(aish_bin: str) -> bool:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# Command whose *output* contains `PLAIN_MARKER` but whose echoed command line
+# does not, so waiting for the marker proves the child is already running and the
+# forged report is injected while the child (not the prompt) owns stdin.
+PLAIN_MARKER = b"plain-marker"
+PLAIN_COMMAND = "printf 'p%s\\n' lain-marker; sleep 2"
+
+
 def _report_probe(
-    aish_bin: str, command: str, await_bytes: bytes, chunks: tuple = (REPORT,)
+    aish_bin: str,
+    command: str,
+    await_bytes: bytes,
+    chunks: tuple = (REPORT,),
+    settle: float = 0.3,
 ) -> bytes:
     """Run `command`, inject forged report chunks once its output started.
 
-    `chunks` are written 0.2 s apart, which reproduces a terminal (or a
-    multiplexer) relaying one report in several writes.
+    `chunks` are written `settle` seconds apart, which reproduces a terminal (or
+    a multiplexer) relaying one report in several writes.
     """
     s = AishSession(aish_bin)
     try:
@@ -224,11 +256,19 @@ def _report_probe(
         os.write(s.master, (command + "\n").encode())
         out = b""
         pending = list(chunks)
-        end = time.time() + 5.0
+        seen_at = None
+        end = time.time() + 7.0
         while time.time() < end:
             out += s.drain(0.2)
-            if pending and await_bytes in out:
+            if not pending:
+                continue
+            if seen_at is None:
+                if await_bytes in out:
+                    seen_at = time.time()
+                continue
+            if time.time() - seen_at >= settle:
                 os.write(s.master, pending.pop(0))
+                seen_at = time.time()
         return out
     finally:
         s.close()
@@ -242,16 +282,12 @@ def check_report_filter(aish_bin: str) -> bool:
     """
     echoed = (b"\x1b[1;17R", b"^[[1;17R")
 
-    plain = _report_probe(
-        aish_bin, "printf 'plain-marker\\n'; sleep 1", b"plain-marker"
-    )
+    plain = _report_probe(aish_bin, PLAIN_COMMAND, PLAIN_MARKER)
     if any(seq in plain for seq in echoed):
-        print("  ! line-oriented child received a leaked report")
+        print(f"  ! line-oriented child received a leaked report: {plain[-200:]!r}")
         return False
 
-    tui = _report_probe(
-        aish_bin, "printf '\\033[?25l'; sleep 1", b"\x1b[?25l"
-    )
+    tui = _report_probe(aish_bin, "printf '\\033[?25l'; sleep 2", b"\x1b[?25l")
     if not any(seq in tui for seq in echoed):
         print(f"  ! full-screen child never received the report: {tui[-160:]!r}")
         return False
@@ -266,8 +302,8 @@ def check_split_report_dropped(aish_bin: str) -> bool:
     """
     out = _report_probe(
         aish_bin,
-        "printf 'plain-marker\\n'; sleep 1",
-        b"plain-marker",
+        PLAIN_COMMAND,
+        PLAIN_MARKER,
         chunks=(b"\x1b", b"[1;17R"),
     )
     if any(seq in out for seq in (b"\x1b[1;17R", b"^[[1;17R", b"[1;17R")):

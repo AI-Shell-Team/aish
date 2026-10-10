@@ -1142,6 +1142,13 @@ impl PersistentPty {
                 follow_terminal_resize(self.master_fd, &mut last_terminal_size);
             }
 
+            // A prefix held for a possible terminal report must not withhold
+            // genuine input from the child for longer than the hold bound.
+            let released = stream_filter.release_expired(crate::term_stream::HELD_PREFIX_MAX_HOLD);
+            if !released.is_empty() {
+                let _ = self.write_master(&released);
+            }
+
             let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
             unsafe {
                 libc::FD_ZERO(&mut read_fds);
@@ -1706,6 +1713,18 @@ impl PersistentPty {
             if !draining && self.follow_resize && Instant::now() >= next_resize_check {
                 next_resize_check = Instant::now() + Duration::from_millis(100);
                 follow_terminal_resize(self.master_fd, &mut last_terminal_size);
+            }
+
+            // A prefix held for a possible terminal report must not withhold
+            // genuine input from the child for longer than the hold bound. Skip
+            // the drain phase (the command is over, so released bytes would land
+            // in the shell prompt); sessions never hold anything.
+            if !draining && !is_session {
+                let released =
+                    stream_filter.release_expired(crate::term_stream::HELD_PREFIX_MAX_HOLD);
+                if !released.is_empty() {
+                    write_buf.extend_from_slice(&released);
+                }
             }
             // Build fd sets.
             let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
