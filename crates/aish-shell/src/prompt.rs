@@ -112,9 +112,15 @@ fn is_git_dirty(cwd: &str) -> bool {
         }
         _ => {
             // Stale or missing: return the best-known value now and
-            // schedule a single background refresh.
+            // schedule a single background refresh. A cached value for a
+            // DIFFERENT cwd (post-cd) is stale state, not a fallback:
+            // returning it would show the previous repository's dirty dot
+            // until the refresh lands, so only same-cwd values apply.
             spawn_git_dirty_refresh(cwd.to_string());
-            cached.map(|(_, _, dirty)| dirty).unwrap_or(false)
+            cached
+                .filter(|(_, c, _)| c == cwd)
+                .map(|(_, _, dirty)| dirty)
+                .unwrap_or(false)
         }
     }
 }
