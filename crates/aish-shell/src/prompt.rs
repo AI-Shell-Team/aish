@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -73,40 +74,76 @@ pub fn read_git_branch(cwd: &str) -> Option<String> {
 /// Prevents spawning `git status` on every prompt render — without this,
 /// each prompt (every Enter keypress) blocks ~50ms+ while git scans the
 /// worktree (worse on NFS-mounted repos).
+///
+/// Refresh model: the prompt render NEVER blocks on git. A cache hit
+/// returns immediately; a miss or stale entry returns the stale value
+/// (or `false` on first visit) and schedules ONE background refresh.
+/// The in-flight flag collapses concurrent renders to a single git spawn;
+/// completed refreshes update the cache for the next render.
 static GIT_DIRTY_CACHE: Mutex<Option<(Instant, String, bool)>> = Mutex::new(None);
+
+/// Set while a background `git status` refresh is running, so concurrent
+/// prompt renders don't spawn one git process each.
+static GIT_DIRTY_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 /// How long a cached dirty result remains valid.
 const DIRTY_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Check if the git working tree has uncommitted changes.
 ///
-/// Cached per-cwd with a 2-second TTL so repeated prompts within the same
-/// repo don't re-spawn `git status`.
+/// Non-blocking: returns the cached value immediately and refreshes stale
+/// entries in a background thread, so large-worktree / NFS repos never
+/// stall the prompt.
 fn is_git_dirty(cwd: &str) -> bool {
     let now = Instant::now();
 
-    // Fast path: return cached result if still fresh for this cwd.
-    if let Ok(cache) = GIT_DIRTY_CACHE.lock() {
-        if let Some((checked_at, cached_cwd, dirty)) = cache.as_ref() {
-            if *cached_cwd == cwd && now.duration_since(*checked_at) < DIRTY_CACHE_TTL {
-                return *dirty;
-            }
+    let cached = GIT_DIRTY_CACHE.lock().ok().and_then(|cache| {
+        cache
+            .as_ref()
+            .map(|(at, c, dirty)| (*at, c.clone(), *dirty))
+    });
+
+    match cached {
+        Some((checked_at, cached_cwd, dirty))
+            if cached_cwd == cwd && now.duration_since(checked_at) < DIRTY_CACHE_TTL =>
+        {
+            // Fresh: nothing to do.
+            dirty
+        }
+        _ => {
+            // Stale or missing: return the best-known value now and
+            // schedule a single background refresh.
+            spawn_git_dirty_refresh(cwd.to_string());
+            cached.map(|(_, _, dirty)| dirty).unwrap_or(false)
         }
     }
+}
 
-    // Cache miss: spawn git status for the authoritative answer.
-    let dirty = std::process::Command::new("git")
-        .args(["--no-optional-locks", "status", "--porcelain"])
-        .current_dir(cwd)
-        .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
-
-    if let Ok(mut cache) = GIT_DIRTY_CACHE.lock() {
-        *cache = Some((now, cwd.to_string(), dirty));
+/// Run one `git status --porcelain` in a background thread and store the
+/// result in the cache. Collapsed by `GIT_DIRTY_REFRESHING` so a burst of
+/// prompt renders schedules at most one git process.
+fn spawn_git_dirty_refresh(cwd: String) {
+    if GIT_DIRTY_REFRESHING.swap(true, Ordering::SeqCst) {
+        return;
     }
-
-    dirty
+    let spawned = std::thread::Builder::new()
+        .name("aish-git-dirty".into())
+        .spawn(move || {
+            let dirty = std::process::Command::new("git")
+                .args(["--no-optional-locks", "status", "--porcelain"])
+                .current_dir(&cwd)
+                .output()
+                .map(|o| !o.stdout.is_empty())
+                .unwrap_or(false);
+            if let Ok(mut cache) = GIT_DIRTY_CACHE.lock() {
+                *cache = Some((Instant::now(), cwd, dirty));
+            }
+            GIT_DIRTY_REFRESHING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        // Thread spawn failed: release the flag so later renders can retry.
+        GIT_DIRTY_REFRESHING.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Abbreviate a path by keeping `~` and the last component intact,
