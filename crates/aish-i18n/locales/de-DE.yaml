@@ -132,6 +132,9 @@ status:
   errors_today: "Fehler heute"
   na: "k.A."
 
+  instructions: "Anweisungen"
+  instructions_none: "keine geladen"
+  instructions_loaded: "{count} Datei(en) geladen"
 shell:
   interrupted: "Unterbrochen"
   ctrl_c_again: "Erneut Strg+C innerhalb 1s zum Beenden"
@@ -146,6 +149,7 @@ shell:
   confirm_choice_reply: "KI um anderen Weg bitten"
   confirm_choice_deny: "Ablehnen"
   forget_approvals_cleared: "{count} gespeicherte Genehmigung(en) für diese Sitzung gelöscht"
+  instructions_toggled: "Projekt-AGENTS.md-Anweisungen für diese Sitzung: {state}"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(mit /model wechseln)"
@@ -200,6 +204,7 @@ shell:
     undo: "Letzte KI-Dateiänderung rückgängig machen (edit_file/write_file)"
     memory: "Langfristige Erinnerungen anzeigen, verifizieren oder löschen"
     compact: "KI-Kontext jetzt komprimieren (optionaler Fokus)"
+    instructions: "Projekt-AGENTS.md-Anweisungsladen umschalten (on/off/status; nur diese Sitzung)"
 
   slash_group:
     diagnostics: "Diagnose"

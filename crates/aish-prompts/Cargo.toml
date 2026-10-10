@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dirs.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

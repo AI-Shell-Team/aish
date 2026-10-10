@@ -182,6 +182,47 @@ fn render(
     }
 }
 
+/// Render the project-instruction (`AGENTS.md`) summary lines.
+///
+/// One line per loaded file (path + scope + size, truncation and warning
+/// flags) — never the instruction content itself, since the file may
+/// contain sensitive text that must not leak into terminal scrollback.
+/// Empty and disabled states return an empty vec: the caller owns the
+/// localized status line ("disabled" / "none loaded" / "N files loaded"),
+/// so emitting a second header here would duplicate it under
+/// `/instructions status`.
+pub fn render_project_instructions(
+    state: &aish_prompts::ProjectInstructionsState,
+    enabled: bool,
+) -> Vec<String> {
+    use aish_i18n::t;
+    if !enabled || state.files.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for f in &state.files {
+        let mut note = format!(
+            "{} [{}] {}",
+            f.path.display(),
+            f.scope.label(),
+            format_bytes(f.content.len() as u64),
+        );
+        if f.truncated {
+            note.push(' ');
+            note.push_str(&theme::warning("truncated"));
+        }
+        if let Some(w) = &f.warning {
+            note.push_str(&format!(" {}", theme::warning(w)));
+        }
+        lines.push(format!(
+            "{}: {}",
+            theme::accent(&t("status.instructions")),
+            note
+        ));
+    }
+    lines
+}
+
 /// Callback for remote /status. Returns rendered output string.
 pub fn run_status_remote(
     exec: &mut dyn FnMut(&str) -> String,

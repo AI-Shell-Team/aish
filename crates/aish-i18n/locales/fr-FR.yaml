@@ -132,6 +132,9 @@ status:
   errors_today: "erreurs aujourd'hui"
   na: "N/A"
 
+  instructions: "instructions"
+  instructions_none: "aucune chargée"
+  instructions_loaded: "{count} fichier(s) chargé(s)"
 shell:
   interrupted: "Interrompu"
   ctrl_c_again: "Ctrl+C à nouveau dans 1s pour quitter"
@@ -146,6 +149,7 @@ shell:
   confirm_choice_reply: "Demander à l'IA une autre approche"
   confirm_choice_deny: "Refuser"
   forget_approvals_cleared: "{count} autorisation(s) mémorisée(s) effacée(s) pour cette session"
+  instructions_toggled: "Chargement des instructions AGENTS.md du projet pour cette session : {state}"
   welcome2:
     header: ">_ AI Shell {version}"
     model_hint: "(tapez /model pour changer)"
@@ -200,6 +204,7 @@ shell:
     undo: "Annuler la dernière modification de fichier par l'IA (edit_file/write_file)"
     memory: "Visualiser, vérifier ou oublier les mémoires"
     compact: "Compresser le contexte de l'IA maintenant (focus optionnel)"
+    instructions: "Basculer le chargement des instructions AGENTS.md du projet (on/off/status ; cette session)"
 
   slash_group:
     diagnostics: "Diagnostic"
