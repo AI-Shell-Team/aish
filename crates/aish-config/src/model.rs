@@ -352,6 +352,33 @@ impl Default for SkillsConfig {
         }
     }
 }
+/// Project-level `AGENTS.md` instruction loading configuration.
+///
+/// Controls automatic discovery of layered project instruction files
+/// (standalone `AGENTS.md` between the repository root and the cwd, plus a
+/// user-level default in the aish config dir).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProjectInstructionsConfig {
+    /// Enable automatic loading of project instruction files. Default: true.
+    pub enabled: bool,
+    /// Per-file size cap in bytes. Larger files are truncated, never fatal.
+    /// Default: 65536 (64 KiB).
+    pub max_file_bytes: usize,
+    /// Total size cap across all loaded files in bytes. Files beyond the
+    /// budget are skipped. Default: 196608 (192 KiB).
+    pub max_total_bytes: usize,
+}
+impl Default for ProjectInstructionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // Keep in sync with aish_prompts::DEFAULT_MAX_FILE_BYTES / DEFAULT_MAX_TOTAL_BYTES.
+            max_file_bytes: 64 * 1024,
+            max_total_bytes: 192 * 1024,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level config model
@@ -375,8 +402,6 @@ pub struct ConfigModel {
     pub bash_output_offload: Option<OutputOffloadConfig>,
     pub pty_output_keep_bytes: usize,
     pub memory: Option<MemoryConfig>,
-    pub session_db_path: Option<String>,
-
     /// Interval between live-session resource checks in the REPL. 0 disables
     /// the background check entirely (the `/live_sessions` panel still shows
     /// resources when opened). Default: 30.
@@ -405,6 +430,8 @@ pub struct ConfigModel {
     /// no container/kube segments. Default: true.
     #[serde(default = "default_true")]
     pub remote_rich_prompt: bool,
+
+    pub session_db_path: Option<String>,
 
     /// Hostname regex patterns that escalate the PS1 marker to Danger
     /// color.
@@ -538,6 +565,10 @@ pub struct ConfigModel {
     /// Default: true.
     #[serde(default = "default_true")]
     pub check_update_on_startup: bool,
+    /// Project-level `AGENTS.md` instruction loading (discovery limits and
+    /// enable switch).
+    #[serde(default)]
+    pub project_instructions: ProjectInstructionsConfig,
 }
 
 impl Default for ConfigModel {
@@ -593,6 +624,7 @@ impl Default for ConfigModel {
             recent_models: vec![],
             fallback_revert_on_cooldown: default_true(),
             check_update_on_startup: default_true(),
+            project_instructions: ProjectInstructionsConfig::default(),
         }
     }
 }

@@ -235,6 +235,13 @@ pub const SLASH_COMMANDS: &[SlashCommandMeta] = &[
         enter: EnterPolicy::Execute,
     },
     SlashCommandMeta {
+        name: "/instructions",
+        desc: "Toggle project AGENTS.md instruction loading (on/off/status; this session)",
+        group: SlashGroup::FilesMemory,
+        keywords: &["instructions", "agents", "toggle"],
+        enter: EnterPolicy::Fill,
+    },
+    SlashCommandMeta {
         name: "/feedback",
         desc: "Submit feedback",
         group: SlashGroup::RecordShare,
@@ -1049,7 +1056,7 @@ mod tests {
                 cmd.name
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 25);
+        assert_eq!(SLASH_COMMANDS.len(), 26);
     }
 
     #[test]
