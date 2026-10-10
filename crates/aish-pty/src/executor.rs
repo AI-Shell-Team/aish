@@ -429,7 +429,22 @@ impl PtyExecutor {
         let tmp_buf_size: usize = 8192;
         let stdin_fd = libc::STDIN_FILENO;
 
+        // Forward terminal resizes to the child while it runs, and keep
+        // terminal reports out of the child's stdin until it shows TUI
+        // behaviour (see crate::term_stream and
+        // crate::persistent::follow_terminal_resize).
+        let mut stream_filter = crate::term_stream::TerminalStreamFilter::new();
+        // Seeded empty: the first poll syncs the one-shot PTY to the terminal's
+        // current size instead of trusting whatever it was created with.
+        let mut last_terminal_size: Option<(u16, u16)> = None;
+        let mut next_resize_check = std::time::Instant::now();
+
         while !child_exited {
+            if self.display_output && std::time::Instant::now() >= next_resize_check {
+                next_resize_check =
+                    std::time::Instant::now() + std::time::Duration::from_millis(100);
+                crate::persistent::follow_terminal_resize(master_fd, &mut last_terminal_size);
+            }
             if cancel_token.is_cancelled() {
                 // Send SIGTERM to the child process group.
                 let _ = kill_pg(child_pid, Signal::SIGTERM);
@@ -515,7 +530,13 @@ impl PtyExecutor {
                             cancel_token.cancel_as_user_interrupt();
                             let _ = kill_pg(child_pid, Signal::SIGINT);
                         }
-                        write_buf.extend_from_slice(data);
+                        // Drop terminal reports that leaked back from the real
+                        // terminal while the child is not a full-screen program
+                        // (see crate::term_stream).
+                        let forward = stream_filter.filter(data);
+                        if !forward.is_empty() {
+                            write_buf.extend_from_slice(&forward);
+                        }
                     }
                     0 => {
                         debug!("EOF on stdin");
@@ -556,6 +577,7 @@ impl PtyExecutor {
                 } {
                     n if n > 0 => {
                         let data = &tmp[..n as usize];
+                        stream_filter.observe_child_output(data);
                         // Write to real stdout.
                         // SAFETY: STDOUT_FILENO is a valid open fd, data points
                         // to valid readable bytes from the read above.
@@ -616,6 +638,10 @@ impl PtyExecutor {
         // Final wait to reap the child.
         let (_status, final_exit_code) = reap_child(child_pid, exit_code);
         exit_code = final_exit_code;
+
+        // A held-back report prefix never completed; drop it rather than leaving
+        // it for the next command's stdin.
+        let _ = stream_filter.flush();
 
         // Trim buffers to keep_bytes tail.
         let stdout_tail = tail_bytes(&stdout_buf, self.keep_bytes);

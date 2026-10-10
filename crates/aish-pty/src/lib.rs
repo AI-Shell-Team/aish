@@ -31,6 +31,7 @@ pub mod readline_tab;
 pub mod resource;
 pub mod scrollback;
 pub mod session_interceptor;
+pub mod term_stream;
 pub mod types;
 
 /// Result returned by the SSH secret-check closure.

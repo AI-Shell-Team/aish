@@ -7,6 +7,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Running commands now follow terminal window resizes. The child PTY was only sized before the command started, so a full-screen program (omp, vim, htop, …) kept drawing for the old width after a resize and its frames wrapped into duplicated lines on the real terminal. Sizes are checked every 100 ms while the command runs and the child's foreground group is signalled. `terminal_resize_mode` is now honored on this path: `off` also skips the pre-command sync so the geometry stays frozen.
+- Terminal device queries (`ESC[6n`, `ESC[c`, `ESC[>c`, `ESC[…$p`, …) are no longer deleted from a command's output. Full-screen programs measure the surface, anchor their live region and detect host-side resizes from the terminal's answers; stripping the requests made them fall back to degraded repaint modes (`TSP: terminal did not confirm the surface`, `resize anchor … cpr=timeout`).
+- A command's newline is no longer translated twice on its way to the terminal (`printf 'A\nB\n'` used to display as `A\r\r\nB\r\r\n`). Both the child PTY's slave and the real terminal applied `OPOST|ONLCR`; the relay now compensates for the second translation.
+- Answers to terminal device queries are still kept out of line-oriented commands, but the filter moved from the output side to stdin: reports are dropped until a command shows full-screen behaviour (alternate screen, hidden cursor, mouse tracking, bracketed paste, synchronized output, APC) and then forwarded, so TUIs receive their answers while `cat`/`read`/pagers never see them echoed or executed.
+
 ## [0.3.14] - 2026-09-23
 
 ### Added

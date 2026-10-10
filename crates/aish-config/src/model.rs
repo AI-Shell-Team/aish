@@ -381,6 +381,43 @@ impl Default for ProjectInstructionsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Terminal resize mode
+// ---------------------------------------------------------------------------
+
+/// How the shell follows terminal window resizes.
+///
+/// See `CONFIGURATION.md` (`terminal_resize_mode`) for the user-facing contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerminalResizeMode {
+    /// Follow resizes for PTY commands and built-in UI (default).
+    #[default]
+    Full,
+    /// Follow resizes for PTY commands only.
+    PtyOnly,
+    /// Never follow resizes (escape hatch for debugging).
+    Off,
+}
+
+impl TerminalResizeMode {
+    /// Parse the config string; unknown values fall back to [`Self::Full`].
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "pty_only" => Self::PtyOnly,
+            "off" => Self::Off,
+            _ => Self::Full,
+        }
+    }
+
+    /// Whether a running PTY command should be resized when the window changes.
+    ///
+    /// A TUI that keeps drawing for a stale geometry wraps its own output on the
+    /// real terminal, so `off` is the only mode that skips this.
+    pub fn follows_pty_commands(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level config model
 // ---------------------------------------------------------------------------
 
@@ -875,6 +912,25 @@ api_key: sk-test
         assert!(config.enable_scripts);
         assert_eq!(config.history_size, 1000);
         assert_eq!(config.terminal_resize_mode, "full");
+    }
+
+    #[test]
+    fn test_terminal_resize_mode_parse_and_predicates() {
+        assert_eq!(TerminalResizeMode::parse("full"), TerminalResizeMode::Full);
+        assert_eq!(
+            TerminalResizeMode::parse(" PTY_ONLY "),
+            TerminalResizeMode::PtyOnly
+        );
+        assert_eq!(TerminalResizeMode::parse("off"), TerminalResizeMode::Off);
+        // Unknown values fall back to the documented default.
+        assert_eq!(
+            TerminalResizeMode::parse("nonsense"),
+            TerminalResizeMode::Full
+        );
+
+        assert!(TerminalResizeMode::Full.follows_pty_commands());
+        assert!(TerminalResizeMode::PtyOnly.follows_pty_commands());
+        assert!(!TerminalResizeMode::Off.follows_pty_commands());
     }
 
     #[test]
