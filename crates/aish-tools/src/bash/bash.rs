@@ -583,7 +583,7 @@ impl BashTool {
                 }
 
                 ToolResult {
-                    ok: true,
+                    ok: exit_code == 0,
                     output: output_text,
                     meta: Some(meta),
                 }
@@ -678,7 +678,7 @@ impl BashTool {
                     );
                 }
                 ToolResult {
-                    ok: true,
+                    ok: result.exit_code == 0,
                     output,
                     meta: Some(meta),
                 }
@@ -749,11 +749,10 @@ impl Tool for BashTool {
             self.execute_via_pty_executor(&command, timeout_secs)
         };
 
-        // Redact secret values from output before returning to AI.
-        if result.ok {
-            let (redacted, _) = self.redact_output(&result.output);
-            result.output = redacted;
-        }
+        // Redact secret values from output before returning to AI, regardless
+        // of exit status: a failed command can still print secret values.
+        let (redacted, _) = self.redact_output(&result.output);
+        result.output = redacted;
 
         result
     }
@@ -984,10 +983,13 @@ mod tests {
         let result = tool.execute(serde_json::json!({
             "command": "exit 42"
         }));
-        // Tool succeeds even with non-zero exit — LLM reads <return_code> to decide.
+        // A non-zero exit code is a structured failure: the bash tool ran
+        // successfully (ok=false), and the LLM (and downstream consumers)
+        // must rely on the real exit code instead of an unconditional
+        // success flag.
         assert!(
-            result.ok,
-            "tool execution should succeed regardless of exit code"
+            !result.ok,
+            "tool execution should report ok=false for non-zero exit code"
         );
         assert!(
             result.output.contains("<return_code>\n42\n</return_code>"),
@@ -1003,10 +1005,44 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         }));
-        // Tool succeeds even when command is killed by timeout.
+        // A timeout is a structured failure, not a successful run.
         assert!(
-            result.ok,
-            "tool execution should succeed even after timeout kill"
+            !result.ok,
+            "tool execution should report ok=false when the command is killed by timeout"
+        );
+    }
+
+    #[test]
+    fn test_bash_tool_redacts_output_on_nonzero_exit() {
+        // A non-zero exit sets ok=false; the redaction wrapper in execute()
+        // must still scrub secret values from the returned output.
+        let secret = "sk-ant-api03-0123456789abcdef0123456789abcdef";
+        let mut vault = SecretVault::new();
+        vault.redact(
+            &[aish_security::secret::SecretMatch {
+                pattern_name: "Anthropic API Key".to_string(),
+                start: 0,
+                end: secret.len(),
+                secret_type: aish_security::secret::SecretType::ApiKey,
+            }],
+            secret,
+        );
+        let mut tool = BashTool::new();
+        tool.set_secret_vault(Arc::new(Mutex::new(Some(Arc::new(Mutex::new(vault))))));
+
+        let result = tool.execute(serde_json::json!({
+            "command": format!("echo {secret}; exit 3")
+        }));
+        assert!(!result.ok, "exit 3 must report ok=false");
+        assert!(
+            !result.output.contains(secret),
+            "secret must be redacted from failed command output, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("$SECRET_"),
+            "redacted output should contain the placeholder, got: {}",
+            result.output
         );
     }
     #[test]
