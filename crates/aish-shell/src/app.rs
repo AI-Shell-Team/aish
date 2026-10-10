@@ -7730,6 +7730,12 @@ impl AishShell {
                             self.switch_endpoint_model(base, &key, model);
                         }
                     }
+                    // Enter finishes the picker and hands the keyboard back to
+                    // the shell, whether the model actually changed or the user
+                    // re-picked the current one. Only `a` (add account) and
+                    // `m` (manage) return to the list, so the re-fetched entries
+                    // are visible right away.
+                    break;
                 }
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
                     self.accounts_add_interactive();
