@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::pty::openpty;
@@ -55,93 +55,20 @@ where
     true
 }
 
-/// Count of active TUI/remote programs running inside the PTY. While > 0,
-/// `write_stdout_all` forwards bytes verbatim (no query stripping) so they
-/// can get their device-query answers from the real terminal. A counter
-/// (not a bool) keeps nested/concurrent commands correct: the outer guard
-/// stays armed until every inner guard has dropped.
-static RAW_OUTPUT_PASSTHROUGH: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// RAII guard that arms [`RAW_OUTPUT_PASSTHROUGH`] for its lifetime so TUI
-/// programs receive their terminal-query responses through the real terminal.
-/// Nestable: each `enter_if(true)` increments the counter, each drop
-/// decrements it.
-struct RawOutputPassthroughGuard(bool);
-
-impl RawOutputPassthroughGuard {
-    fn enter_if(tui: bool) -> Self {
-        if tui {
-            RAW_OUTPUT_PASSTHROUGH.fetch_add(1, std::sync::atomic::Ordering::Release);
-        }
-        Self(tui)
-    }
-}
-
-impl Drop for RawOutputPassthroughGuard {
-    fn drop(&mut self) {
-        if self.0 {
-            RAW_OUTPUT_PASSTHROUGH.fetch_sub(1, std::sync::atomic::Ordering::Release);
-        }
-    }
-}
-
-/// Remove terminal device-query *request* sequences from `buf` so the real
-/// terminal is never asked to respond. Its response would otherwise be echoed
-/// as garbled text (`ESC[…R`, `ESC[…c`) while the shell sits in cooked mode
-/// between prompts.
+/// Write child output to the real terminal verbatim (plus the CRLF fixup in
+/// [`crate::term_stream::normalize_crlf`]).
 ///
-/// Stripped: CPR/DSR requests `ESC[…n`, and device-attribute requests
-/// `ESC[…c` reached via the `>`/`=` private markers or no marker (DA1/DA2/DA3
-/// requests). DA1 *responses* keep the `?` marker, which this scan does not
-/// treat as a private marker, so they pass through unchanged (harmless to
-/// forward). Stateless per call; query sequences are short and rarely span
-/// the 8 KB read boundary.
-fn strip_device_queries(buf: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    if !buf.contains(&0x1b) {
-        return std::borrow::Cow::Borrowed(buf);
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(buf.len());
-    let mut i = 0;
-    while i < buf.len() {
-        // Match CSI query requests: ESC [ (private '>' | '=')? digits (n | c).
-        if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'[' {
-            let mut j = i + 2;
-            if j < buf.len() && matches!(buf[j], b'>' | b'=') {
-                j += 1;
-            }
-            while j < buf.len() && buf[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j < buf.len() && matches!(buf[j], b'n' | b'c') {
-                // Complete query request: drop the whole sequence.
-                i = j + 1;
-                continue;
-            }
-            // Not a query — copy ESC and rescan from the next byte.
-        }
-        out.push(buf[i]);
-        i += 1;
-    }
-    if out.len() == buf.len() {
-        std::borrow::Cow::Borrowed(buf)
-    } else {
-        std::borrow::Cow::Owned(out)
-    }
-}
-
+/// aish used to delete terminal device-query *requests* here for commands that
+/// were not on the interactive whitelist. That broke full-screen programs: the
+/// real terminal never saw the query, so it never answered, and TUI layout /
+/// resize anchoring degraded (see `term_stream` module docs). Leaked answers to
+/// a line-oriented command are instead filtered out of stdin by
+/// [`crate::term_stream::TerminalStreamFilter`], which keeps the same
+/// protection without editing the child's byte stream.
 fn write_stdout_all(buf: &[u8]) {
-    // Strip terminal device-query requests unless a real TUI/remote program is
-    // running and needs the real terminal to answer them. Forwarded prompt-tool
-    // queries (CPR/DA) would otherwise make the real terminal respond, and that
-    // response echoes as garbled text while the shell is in cooked mode.
-    let filtered = if RAW_OUTPUT_PASSTHROUGH.load(std::sync::atomic::Ordering::Acquire) > 0 {
-        std::borrow::Cow::Borrowed(buf)
-    } else {
-        strip_device_queries(buf)
-    };
+    let normalized = crate::term_stream::normalize_crlf(buf);
     // Return value intentionally ignored: callers fire-and-forget stdout writes.
-    let _ = write_all_with_retry(&filtered, |remaining| {
+    let _ = write_all_with_retry(&normalized, |remaining| {
         let rc = unsafe {
             libc::write(
                 libc::STDOUT_FILENO,
@@ -157,6 +84,36 @@ fn write_stdout_all(buf: &[u8]) {
             Ok(rc as usize)
         }
     });
+}
+
+/// Forward a terminal window-size change to the child PTY while a command runs.
+///
+/// `last` carries the size seen on the previous poll. When the real terminal
+/// changed, the child PTY is resized and its foreground process group gets
+/// SIGWINCH, so TUIs re-layout instead of drawing for the stale geometry (which
+/// wraps their frames on the real terminal). Returns true when a resize was
+/// forwarded.
+pub(crate) fn follow_terminal_resize(master_fd: RawFd, last: &mut Option<(u16, u16)>) -> bool {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    if rc < 0 || ws.ws_row == 0 || ws.ws_col == 0 {
+        return false;
+    }
+    let current = (ws.ws_row, ws.ws_col);
+    if *last == Some(current) {
+        return false;
+    }
+    *last = Some(current);
+    unsafe {
+        libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
+    }
+    // The kernel usually signals the PTY's foreground group on TIOCSWINSZ, but
+    // only for the tty the ioctl targeted; signal explicitly so the running
+    // program is guaranteed to see it.
+    if let Some(fg) = pty_foreground_pgrp(master_fd) {
+        let _ = kill_pg(fg, Signal::SIGWINCH);
+    }
+    true
 }
 
 /// Strip ANSI escape sequences from a byte slice, returning the visible
@@ -827,6 +784,10 @@ pub struct PersistentPty {
     /// `execute_command` after the command's terminal state (issue #541
     /// review: never queue it in the tty input queue behind the command).
     pending_pager_restore: Option<String>,
+    /// Forward window-size changes to the child PTY while a command runs
+    /// (driven by `terminal_resize_mode`). Enabled by default; see
+    /// `follow_terminal_resize` for why it matters to TUIs.
+    follow_resize: bool,
 }
 
 #[path = "aish_completion.rs"]
@@ -902,6 +863,7 @@ impl PersistentPty {
             exec_mode: Arc::new(AtomicBool::new(false)),
             next_completion_request_id: AtomicU64::new(0),
             pending_pager_restore: None,
+            follow_resize: true,
         };
 
         // Wait for session_ready event.  Also returns whether the
@@ -1133,6 +1095,13 @@ impl PersistentPty {
             raw.control_flags |= ControlFlags::CS8;
             raw.control_chars[libc::VMIN] = 1;
             raw.control_chars[libc::VTIME] = 0;
+            // Keep LF→CRLF translation on the real terminal: write_stdout_all
+            // writes child output as bare `\n` (normalize_crlf) and relies on
+            // that single translation, exactly like a directly attached child.
+            if display_output {
+                raw.output_flags |=
+                    nix::sys::termios::OutputFlags::OPOST | nix::sys::termios::OutputFlags::ONLCR;
+            }
             let _ = tcsetattr(stdin_borrowed, SetArg::TCSANOW, &raw);
             raw
         });
@@ -1145,6 +1114,18 @@ impl PersistentPty {
         // Distinguishes "command finished right at the deadline" from
         // "deadline expired with the command still running" below.
         let mut command_finished = false;
+        // Forward terminal resizes to the PTY while the command runs (same
+        // reason as in send_command_interactive: TUIs must not draw for a stale
+        // geometry). Only meaningful when the output reaches a real terminal.
+        // Seeded empty so the first poll pushes the terminal's current size to
+        // the PTY unconditionally: the pre-command sync in the shell races with a
+        // resize, and callers that never pre-sync (the bash tool's
+        // execute_command) would otherwise start with a stale geometry.
+        let mut last_terminal_size: Option<(u16, u16)> = None;
+        let mut next_resize_check = Instant::now();
+        // Drops terminal reports that leak into stdin while the command is not a
+        // full-screen program (see term_stream).
+        let mut stream_filter = crate::term_stream::TerminalStreamFilter::new();
         // Select-based I/O loop.
         'select_loop: while std::time::Instant::now() < deadline {
             // Check external cancellation.
@@ -1154,6 +1135,18 @@ impl PersistentPty {
                     cancelled = true;
                     break;
                 }
+            }
+
+            if display_output && self.follow_resize && Instant::now() >= next_resize_check {
+                next_resize_check = Instant::now() + Duration::from_millis(100);
+                follow_terminal_resize(self.master_fd, &mut last_terminal_size);
+            }
+
+            // A prefix held for a possible terminal report must not withhold
+            // genuine input from the child for longer than the hold bound.
+            let released = stream_filter.release_expired(crate::term_stream::HELD_PREFIX_MAX_HOLD);
+            if !released.is_empty() {
+                let _ = self.write_master(&released);
             }
 
             let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
@@ -1231,8 +1224,13 @@ impl PersistentPty {
                             }
                         } else {
                             // Forward everything else (including Ctrl+Z = 0x1a)
-                            // to the PTY so bash handles it natively.
-                            let _ = self.write_master(data);
+                            // to the PTY so bash handles it natively, minus
+                            // terminal reports that leaked back from the real
+                            // terminal (see term_stream).
+                            let forward = stream_filter.filter(data);
+                            if !forward.is_empty() {
+                                let _ = self.write_master(&forward);
+                            }
                         }
                     }
                     _ => {}
@@ -1250,6 +1248,7 @@ impl PersistentPty {
                     )
                 } {
                     n if n > 0 && self.exec_mode.load(Ordering::SeqCst) => {
+                        stream_filter.observe_child_output(&tmp[..n as usize]);
                         if display_output {
                             write_stdout_all(&tmp[..n as usize]);
                         }
@@ -1316,6 +1315,12 @@ impl PersistentPty {
                     _ => {}
                 }
             }
+        }
+
+        // A held-back report prefix never completed; drop it rather than feeding
+        // it to bash as if the user had typed it.
+        if !stream_filter.flush().is_empty() {
+            debug!("execute_command: discarded incomplete terminal report from stdin");
         }
 
         // Deadline expiry with the command still running (issue #541 review):
@@ -1458,11 +1463,21 @@ impl PersistentPty {
         remote_show_kube: bool,
     ) -> aish_core::Result<(i32, String, String)> {
         let is_session = is_session_command(command);
-        // Real TUI/remote programs (vim/less/ssh/...) need the real terminal
-        // to answer their device queries; let their output through verbatim.
-        // Everything else has prompt-tool queries stripped (see write_stdout_all).
-        let _raw_output_guard =
-            RawOutputPassthroughGuard::enter_if(is_interactive_command(command) || is_session);
+        // Interactive sessions (ssh/telnet/...) forward every stdin byte: their
+        // child is by definition waiting for the terminal's answers. Plain
+        // commands start with terminal-report filtering armed and disarm as soon
+        // as the child shows full-screen behaviour (see term_stream).
+        let mut stream_filter = if is_session {
+            crate::term_stream::TerminalStreamFilter::passthrough()
+        } else {
+            crate::term_stream::TerminalStreamFilter::new()
+        };
+        // Seeded empty so the first poll pushes the terminal's current size to
+        // the PTY unconditionally: the pre-command sync in the shell races with a
+        // resize, and callers that never pre-sync (the bash tool's
+        // execute_command) would otherwise start with a stale geometry.
+        let mut last_terminal_size: Option<(u16, u16)> = None;
+        let mut next_resize_check = Instant::now();
         debug!(
             "send_command_interactive ENTER: cmd={:?}, is_session={}, master_fd={}, control_fd={}",
             command, is_session, self.master_fd, self.control_fd
@@ -1691,6 +1706,26 @@ impl PersistentPty {
         };
 
         while !done {
+            // Follow terminal resizes while the command runs. A TUI that keeps
+            // drawing for a stale geometry wraps its frames on the real terminal
+            // (see follow_terminal_resize); polling instead of relying on
+            // SIGWINCH also covers host-driven resizes (web terminals, tmux).
+            if !draining && self.follow_resize && Instant::now() >= next_resize_check {
+                next_resize_check = Instant::now() + Duration::from_millis(100);
+                follow_terminal_resize(self.master_fd, &mut last_terminal_size);
+            }
+
+            // A prefix held for a possible terminal report must not withhold
+            // genuine input from the child for longer than the hold bound. Skip
+            // the drain phase (the command is over, so released bytes would land
+            // in the shell prompt); sessions never hold anything.
+            if !draining && !is_session {
+                let released =
+                    stream_filter.release_expired(crate::term_stream::HELD_PREFIX_MAX_HOLD);
+                if !released.is_empty() {
+                    write_buf.extend_from_slice(&released);
+                }
+            }
             // Build fd sets.
             let mut read_fds: libc::fd_set = unsafe { std::mem::zeroed() };
             let mut write_fds: libc::fd_set = unsafe { std::mem::zeroed() };
@@ -2225,15 +2260,22 @@ impl PersistentPty {
                         let data = &tmp[..n as usize];
                         idle_poll_count = 0;
 
-                        // Non-session: original passthrough behavior
+                        // Non-session: forward the bytes, minus terminal reports
+                        // that leaked back from the real terminal. A line-oriented
+                        // child that never asked for them would echo/execute them;
+                        // the filter disarms once the child shows TUI behaviour
+                        // (see term_stream). Ctrl+C is forwarded verbatim so the
+                        // PTY line discipline delivers SIGINT to the *foreground*
+                        // job — do not `kill_pg(self.child_pid)`, that signals
+                        // bash's own process group and makes bash emit a blank
+                        // line before the next aish prompt (see
+                        // force_cancel_pty_foreground / execute_command which
+                        // intentionally never signal bash).
                         if !is_session {
-                            // Ctrl+C: only forward 0x03 so the PTY line discipline
-                            // delivers SIGINT to the *foreground* job. Do not
-                            // `kill_pg(self.child_pid)` — that signals bash's own
-                            // process group and makes bash emit a blank line before
-                            // the next aish prompt (see force_cancel_pty_foreground
-                            // / execute_command which intentionally never signal bash).
-                            write_buf.extend_from_slice(data);
+                            let forward = stream_filter.filter(data);
+                            if !forward.is_empty() {
+                                write_buf.extend_from_slice(&forward);
+                            }
                             continue;
                         }
 
@@ -3088,6 +3130,10 @@ impl PersistentPty {
                         let data: &[u8] = &cleaned_data;
                         if !data.is_empty() {
                             output_buf.extend_from_slice(data);
+                            // A full-screen child is waiting for the real
+                            // terminal's answers: stop dropping reports from
+                            // stdin from here on (see term_stream).
+                            stream_filter.observe_child_output(data);
                             // Clear session command grace period once we receive output.
                             // The remote has responded (password prompt, shell prompt,
                             // or other output) - no need to delay probe injection further.
@@ -4121,6 +4167,12 @@ impl PersistentPty {
             let _ = tcsetattr(stdin_borrowed, SetArg::TCSANOW, saved);
         }
 
+        // A held-back report prefix never completed. Do not inject it into the
+        // next prompt as if the user had typed it.
+        if !stream_filter.flush().is_empty() {
+            debug!("discarded incomplete terminal report from stdin at command end");
+        }
+
         // Decode captured output, stripping ANSI escape sequences for a clean
         // text representation suitable for LLM context.
         let raw_output = String::from_utf8_lossy(&output_buf).to_string();
@@ -4140,6 +4192,17 @@ impl PersistentPty {
         unsafe {
             libc::ioctl(self.master_fd, libc::TIOCSWINSZ, &ws);
         }
+    }
+
+    /// Enable or disable following window-size changes while a command runs
+    /// (wired to `terminal_resize_mode`; `off` disables it).
+    pub fn set_follow_resize(&mut self, follow: bool) {
+        self.follow_resize = follow;
+    }
+
+    /// Whether window-size changes are followed for this PTY.
+    pub fn follows_resize(&self) -> bool {
+        self.follow_resize
     }
 
     /// Stop the bash session.
@@ -7453,62 +7516,6 @@ mod tests {
         assert!(is_interactive_command("htop"));
         assert!(!is_interactive_command("ls -la"));
         assert!(!is_interactive_command("echo hello"));
-    }
-
-    #[test]
-    fn strip_device_queries_removes_cpr_and_da_requests() {
-        // CPR request ESC[6n and DA2 request ESC[>c removed; visible text kept.
-        let out = strip_device_queries(b"hi\x1b[6n\x1b[>cbye");
-        assert_eq!(&out[..], b"hibye");
-    }
-
-    #[test]
-    fn strip_device_queries_removes_da1_variants() {
-        assert_eq!(&strip_device_queries(b"\x1b[c")[..], b"");
-        assert_eq!(&strip_device_queries(b"\x1b[0c")[..], b"");
-        assert_eq!(&strip_device_queries(b"x\x1b[0cy")[..], b"xy");
-    }
-
-    #[test]
-    fn strip_device_queries_removes_da3_and_dsr() {
-        assert_eq!(&strip_device_queries(b"\x1b[=c")[..], b"");
-        assert_eq!(&strip_device_queries(b"\x1b[5n")[..], b"");
-    }
-
-    #[test]
-    fn strip_device_queries_preserves_da_responses() {
-        // DA1 response keeps '?' -> not a request -> forwarded unchanged.
-        assert_eq!(&strip_device_queries(b"\x1b[?64;1c")[..], b"\x1b[?64;1c");
-        // DA2 response has ';' (params beyond digits) -> preserved.
-        assert_eq!(
-            &strip_device_queries(b"\x1b[>0;115;0c")[..],
-            b"\x1b[>0;115;0c"
-        );
-    }
-
-    #[test]
-    fn strip_device_queries_preserves_other_csi() {
-        // SGR colors, cursor moves, clear-line must survive.
-        assert_eq!(
-            &strip_device_queries(b"\x1b[31mtext\x1b[0m\x1b[2K\x1b[1;1H")[..],
-            b"\x1b[31mtext\x1b[0m\x1b[2K\x1b[1;1H"
-        );
-    }
-
-    #[test]
-    fn strip_device_queries_fast_path_no_esc() {
-        // No ESC byte -> borrowed, zero alloc.
-        match strip_device_queries(b"plain text no escapes") {
-            std::borrow::Cow::Borrowed(_) => {}
-            other => panic!("expected borrowed, got owned: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn strip_device_queries_realistic_prompt_burst() {
-        // A prompt-tool burst (two CPR + DA2) embedded in prompt output.
-        let input = b"before\x1b[6n\x1b[6n\x1b[>cafter";
-        assert_eq!(&strip_device_queries(input)[..], b"beforeafter");
     }
 
     #[test]

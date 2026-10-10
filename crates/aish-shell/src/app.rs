@@ -2312,7 +2312,7 @@ impl AishShell {
 
         // Initialize persistent PTY session
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let pty = aish_pty::PersistentPty::start(&state.cwd, rows, cols).map_err(|e| {
+        let mut pty = aish_pty::PersistentPty::start(&state.cwd, rows, cols).map_err(|e| {
             let mut args = std::collections::HashMap::new();
             args.insert(
                 "error".to_string(),
@@ -2320,6 +2320,10 @@ impl AishShell {
             );
             aish_core::AishError::Pty(t_with_args("shell.general_error", &args))
         })?;
+        pty.set_follow_resize(
+            aish_config::TerminalResizeMode::parse(&config.terminal_resize_mode)
+                .follows_pty_commands(),
+        );
         let pty = Arc::new(Mutex::new(pty));
 
         // Inject PersistentPty into the bash tool slot.
@@ -9013,9 +9017,13 @@ impl AishShell {
         // Record user command input before execution
         crate::recorder::shared_record_input(&self.shared_recorder, &format!("{}\n", command));
 
-        // Sync terminal size before each command
-        if let Ok((cols, rows)) = crossterm::terminal::size() {
-            self.lock_pty().resize(rows, cols);
+        // Sync terminal size before each command. Skipped when resize following
+        // is disabled (`terminal_resize_mode: off`), which freezes the geometry
+        // for troubleshooting; the per-command loop keeps following from there.
+        if self.lock_pty().follows_resize() {
+            if let Ok((cols, rows)) = crossterm::terminal::size() {
+                self.lock_pty().resize(rows, cols);
+            }
         }
 
         // Ensure the PTY is alive before sending a command.
@@ -9259,7 +9267,11 @@ impl AishShell {
     fn restart_pty_with_notice(&mut self, show_notice: bool) -> aish_core::Result<()> {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         match aish_pty::PersistentPty::start(&self.state.cwd, rows, cols) {
-            Ok(new_pty) => {
+            Ok(mut new_pty) => {
+                new_pty.set_follow_resize(
+                    aish_config::TerminalResizeMode::parse(&self.config.terminal_resize_mode)
+                        .follows_pty_commands(),
+                );
                 *self.lock_pty() = new_pty;
                 if show_notice {
                     println!("{}", theme::warning("bash session restarted"));

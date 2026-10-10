@@ -171,9 +171,9 @@ context_auto_compact:
 
 ## terminal_resize_mode 说明
 
-- `full`：PTY 命令、ask_user 弹层、Live 渲染都跟随终端 resize（默认）
-- `pty_only`：仅 PTY 命令跟随 resize，内置 UI 不做主动刷新
-- `off`：关闭 resize 跟随逻辑（用于快速回退/排障）
+- `full`：PTY 命令跟随终端 resize（命令运行中每 100 ms 检测一次，命令开始前也会同步）。默认值。
+- `pty_only`：仅 PTY 命令跟随 resize。当前在 PTY 命令路径上与 `full` 等价（打开的面板不会在 resize 时主动重绘）。
+- `off`：关闭 resize 跟随，命令沿用 PTY 启动时的尺寸（快速回退/排障用）。该开关作用于常驻会话的 PTY 命令；AI bash 工具的一次性 PTY 回退路径不受它控制。
 
 非法值会自动回退为 `full`。
 
