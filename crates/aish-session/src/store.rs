@@ -141,6 +141,50 @@ impl SessionStore {
         Ok(Self { conn })
     }
 
+    /// Create a session with a caller-provided UUID (used by daemon-mode
+    /// shells so the persisted row matches the PTY session id). If the UUID
+    /// already exists (e.g. nested shells sharing an inherited id), a fresh
+    /// random UUID is generated instead so transcript rows are not merged
+    /// into a foreign session.
+    pub fn create_session_with_uuid(
+        &self,
+        uuid: &str,
+        model: &str,
+        api_base: Option<&str>,
+    ) -> Result<SessionRecord> {
+        if self.get_session(uuid)?.is_some() {
+            return self.create_session(model, api_base);
+        }
+
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let state = serde_json::to_value(SessionStateSnapshot {
+            updated_at: Some(now),
+            ..SessionStateSnapshot::default()
+        })?;
+        let state_str = serde_json::to_string(&state)?;
+        let user = std::env::var("USER").ok();
+
+        self.conn
+            .execute(
+                "INSERT INTO sessions (session_uuid, created_at, model, api_base, run_user, state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![uuid, now_str, model, api_base, user, state_str],
+            )
+            .map_err(|e| AishError::Session(format!("failed to insert session: {e}")))?;
+
+        Ok(SessionRecord {
+            session_uuid: uuid.to_string(),
+            created_at: now,
+            model: model.to_string(),
+            api_base: api_base.map(|s| s.to_string()),
+            run_user: user,
+            state,
+            parent_session_uuid: None,
+            branch_point_message_id: None,
+        })
+    }
+
     /// Create a new session and persist it.
     pub fn create_session(&self, model: &str, api_base: Option<&str>) -> Result<SessionRecord> {
         let uuid = Uuid::new_v4().to_string();
@@ -1527,5 +1571,27 @@ mod tests {
         let _store = SessionStore::open(Some(&db_path)).unwrap();
         let mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "existing loose db must be tightened");
+    }
+
+    #[test]
+    fn create_session_with_uuid_reuses_id_when_free() {
+        let (_temp, store) = temp_store();
+        let record = store
+            .create_session_with_uuid("pty-uuid-1", "m", None)
+            .unwrap();
+        assert_eq!(record.session_uuid, "pty-uuid-1");
+        assert!(store.get_session("pty-uuid-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn create_session_with_uuid_falls_back_when_taken() {
+        let (_temp, store) = temp_store();
+        let existing = store.create_session("m", None).unwrap();
+
+        let record = store
+            .create_session_with_uuid(&existing.session_uuid, "m", None)
+            .unwrap();
+        // Must not hijack the existing row: a fresh UUID is generated.
+        assert_ne!(record.session_uuid, existing.session_uuid);
     }
 }
