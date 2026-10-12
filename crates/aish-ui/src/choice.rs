@@ -242,7 +242,11 @@ impl PanelComponent for ChoicePanel {
         let visible_rows = self.entries_len().min(self.max_visible_items).max(1) as u16
             * self.estimated_entry_height();
         let reserved_lines = RESERVED_LINES + u16::from(self.question.is_some());
-        (visible_rows + reserved_lines).clamp(MIN_PANEL_HEIGHT, terminal_height.max(1))
+        // Apply the upper bound first, then the minimum. A plain
+        // `clamp(MIN_PANEL_HEIGHT, max_h)` panics when max_h < MIN_PANEL_HEIGHT
+        // (tiny terminals), since u16::clamp requires min <= max.
+        let max_h = terminal_height.max(1);
+        (visible_rows + reserved_lines).max(MIN_PANEL_HEIGHT).min(max_h)
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
@@ -628,5 +632,20 @@ mod tests {
         panel.handle_event(key(KeyCode::Char('h')));
 
         assert_eq!(panel.handle_event(key(KeyCode::Esc)), PanelEvent::Cancel);
+    }
+
+    #[test]
+    fn desired_height_never_panics_on_tiny_terminal() {
+        // Regression for the u16 clamp panic: terminal heights below
+        // MIN_PANEL_HEIGHT made `clamp(MIN_PANEL_HEIGHT, max_h)` panic with
+        // min > max. The max/min ordering keeps all heights safe.
+        let panel = ChoicePanel::new(
+            "Question",
+            "Pick one",
+            vec![SearchSelectItem::new("a", "A")],
+        );
+        for h in 1u16..=16 {
+            let _ = panel.desired_height(80, h);
+        }
     }
 }

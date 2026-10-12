@@ -648,6 +648,7 @@ fn run_shell_continue(config: aish_config::ConfigModel) {
                 let short = &s.session_id[..8.min(s.session_id.len())];
                 eprintln!("\x1b[32m[aish] Attaching to session {short}\x1b[0m");
                 if run_pty_raw_attach(&s.socket_path.to_string_lossy(), &s.session_id) {
+                    save_last_attached_session(&s.session_id);
                     return;
                 }
                 eprintln!("\x1b[33m[aish] Attach failed.\x1b[0m");
@@ -717,11 +718,20 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
             })
             .collect();
 
-        // "Create new" is the last item and the default selection.
+        // "Create new" is the last item; the default selection is the last
+        // session the user attached to (if still live), so repeated `aish -c`
+        // runs land on the same session without re-picking.
         items.push(SearchSelectItem::new(
             "new",
             aish_i18n::t("shell.live_sessions.create_new"),
         ));
+
+        let last = read_last_attached_session()
+            .filter(|id| sessions.iter().any(|s| s.session_id == *id))
+            .map(|id| {
+                let idx = sessions.iter().position(|s| s.session_id == id).unwrap_or(0);
+                format!("session:{idx}")
+            });
 
         let panel = SearchSelectPanel::new(
             aish_i18n::t("shell.live_sessions.panel_title"),
@@ -729,7 +739,7 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
             items,
         )
         .with_footer(aish_i18n::t("shell.live_sessions.panel_footer"))
-        .with_selected_value(Some("new"));
+        .with_selected_value(last.as_deref().or(Some("new")));
 
         match PanelRuntime::new().run(panel) {
             Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => {
@@ -761,6 +771,29 @@ fn index_from_value(value: &str, len: usize) -> Option<usize> {
     let idx: usize = idx_str.parse().ok()?;
     (idx < len).then_some(idx)
 }
+
+/// Cache file holding the session id of the last successful attach, so
+/// repeated `aish -c` runs preselect the same session.
+fn last_attached_path() -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|d| d.join("aish").join("last-attach-session"))
+}
+
+fn read_last_attached_session() -> Option<String> {
+    let path = last_attached_path()?;
+    let id = std::fs::read_to_string(path).ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+fn save_last_attached_session(session_id: &str) {
+    if let Some(path) = last_attached_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, session_id);
+    }
+}
+
 /// Run the normal (non-daemon) AishShell.
 fn run_shell_normal(mut config: aish_config::ConfigModel) {
     // Arm the terminal-death watchdog only for the standalone shell: this

@@ -1137,11 +1137,28 @@ impl AishShell {
         // registration so the session UUID and host are available to the
         // memory store callback as provenance metadata.
         let session_store = match &config.session_db_path {
-            Some(path) => SessionStore::open(Some(std::path::Path::new(path))).ok(),
+            Some(path) => SessionStore::open(Some(std::path::Path::new(&shellexpand::tilde(
+                path,
+            )
+            .into_owned())))
+            .ok(),
             None => SessionStore::open(None).ok(),
         };
         let session_uuid = if let Some(ref store) = session_store {
-            match store.create_session(&config.model, Some(&config.api_base)) {
+            // Daemon-mode children inherit the PTY session id via
+            // AISH_SESSION_ID; reusing it as the persisted session UUID lets
+            // `aish -c` correlate live sessions with their history counts.
+            // Standalone shells have no such var, and nested shells (aish
+            // launched inside a daemon PTY) hit a taken row, both of which
+            // fall back to a fresh UUID so no foreign session is hijacked.
+            let daemon_session_id = std::env::var("AISH_SESSION_ID")
+                .ok()
+                .filter(|id| !id.is_empty());
+            match store.create_session_with_uuid(
+                daemon_session_id.as_deref().unwrap_or_default(),
+                &config.model,
+                Some(&config.api_base),
+            ) {
                 Ok(record) => record.session_uuid,
                 Err(_) => uuid::Uuid::new_v4().to_string(),
             }

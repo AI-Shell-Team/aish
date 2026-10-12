@@ -355,7 +355,11 @@ impl PanelComponent for SearchSelectPanel {
         let max_visible = self.effective_max_visible_items(terminal_height);
         let visible_count = self.items.len().min(max_visible).max(1);
         let list_height = visible_count as u16 * self.estimated_entry_height();
-        (list_height + self.chrome_lines()).clamp(MIN_PANEL_HEIGHT, terminal_height.max(1))
+        // Apply the upper bound first, then the minimum. A plain
+        // `clamp(MIN_PANEL_HEIGHT, max_h)` panics when max_h < MIN_PANEL_HEIGHT
+        // (tiny terminals), since u16::clamp requires min <= max.
+        let max_h = terminal_height.max(1);
+        (list_height + self.chrome_lines()).max(MIN_PANEL_HEIGHT).min(max_h)
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
@@ -1007,5 +1011,16 @@ mod tests {
         assert_eq!(spans.len(), 3);
         // Empty input → no spans.
         assert!(shimmer_spans("", 500).is_empty());
+    }
+
+    #[test]
+    fn desired_height_never_panics_on_tiny_terminal() {
+        // Regression for the u16 clamp panic: terminal heights below
+        // MIN_PANEL_HEIGHT made `clamp(MIN_PANEL_HEIGHT, max_h)` panic with
+        // min > max. The max/min ordering keeps all heights safe.
+        let panel = SearchSelectPanel::new("t", "search", vec![item("a", "A", "a")]);
+        for h in 1u16..=16 {
+            let _ = panel.desired_height(80, h);
+        }
     }
 }
