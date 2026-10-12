@@ -359,7 +359,9 @@ impl PanelComponent for SearchSelectPanel {
         // `clamp(MIN_PANEL_HEIGHT, max_h)` panics when max_h < MIN_PANEL_HEIGHT
         // (tiny terminals), since u16::clamp requires min <= max.
         let max_h = terminal_height.max(1);
-        (list_height + self.chrome_lines()).max(MIN_PANEL_HEIGHT).min(max_h)
+        (list_height + self.chrome_lines())
+            .max(MIN_PANEL_HEIGHT)
+            .min(max_h)
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {

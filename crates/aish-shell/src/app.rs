@@ -1137,10 +1137,9 @@ impl AishShell {
         // registration so the session UUID and host are available to the
         // memory store callback as provenance metadata.
         let session_store = match &config.session_db_path {
-            Some(path) => SessionStore::open(Some(std::path::Path::new(&shellexpand::tilde(
-                path,
-            )
-            .into_owned())))
+            Some(path) => SessionStore::open(Some(std::path::Path::new(
+                &shellexpand::tilde(path).into_owned(),
+            )))
             .ok(),
             None => SessionStore::open(None).ok(),
         };

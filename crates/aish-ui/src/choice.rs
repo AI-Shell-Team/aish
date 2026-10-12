@@ -246,7 +246,9 @@ impl PanelComponent for ChoicePanel {
         // `clamp(MIN_PANEL_HEIGHT, max_h)` panics when max_h < MIN_PANEL_HEIGHT
         // (tiny terminals), since u16::clamp requires min <= max.
         let max_h = terminal_height.max(1);
-        (visible_rows + reserved_lines).max(MIN_PANEL_HEIGHT).min(max_h)
+        (visible_rows + reserved_lines)
+            .max(MIN_PANEL_HEIGHT)
+            .min(max_h)
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {

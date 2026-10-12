@@ -729,7 +729,10 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
         let last = read_last_attached_session()
             .filter(|id| sessions.iter().any(|s| s.session_id == *id))
             .map(|id| {
-                let idx = sessions.iter().position(|s| s.session_id == id).unwrap_or(0);
+                let idx = sessions
+                    .iter()
+                    .position(|s| s.session_id == id)
+                    .unwrap_or(0);
                 format!("session:{idx}")
             });
 
