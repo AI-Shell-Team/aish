@@ -757,7 +757,11 @@ impl PanelComponent for SettingsPanel {
         // Estimate: up to 10 visible rows (2 lines each) + chrome.
         let rows = self.items.len().clamp(MIN_LIST_ROWS, 10);
         let h = (rows as u16) * 2 + self.chrome_lines();
-        h.clamp(MIN_PANEL_HEIGHT, terminal_height.max(1))
+        // Apply the upper bound first, then the minimum. A plain
+        // `clamp(MIN_PANEL_HEIGHT, max_h)` panics when max_h < MIN_PANEL_HEIGHT
+        // (tiny terminals), since u16::clamp requires min <= max.
+        let max_h = terminal_height.max(1);
+        h.max(MIN_PANEL_HEIGHT).min(max_h)
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
@@ -1180,5 +1184,16 @@ mod tests {
         assert!(item.changed);
         let item2 = bool_item("b", "B", "false");
         assert!(!item2.changed);
+    }
+
+    #[test]
+    fn desired_height_never_panics_on_tiny_terminal() {
+        // Regression for the u16 clamp panic: terminal heights below
+        // MIN_PANEL_HEIGHT made `clamp(MIN_PANEL_HEIGHT, max_h)` panic with
+        // min > max. The max/min ordering keeps all heights safe.
+        let panel = SettingsPanel::new("t", Vec::new(), Vec::new());
+        for h in 1u16..=16 {
+            let _ = panel.desired_height(80, h);
+        }
     }
 }
