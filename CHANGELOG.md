@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `aish update` and the startup update notice read the latest version from `https://www.aishell.ai/repo/latest` instead of `cdn.aishell.ai`. Release bundles download from GitHub Releases, then from the official site. CDN `/latest` was still serving 0.3.13 after 0.3.14 shipped (#561).
 - `aish -c` preselects the last session the user attached to instead of always defaulting to "create new session". The attach success is remembered in `~/.cache/aish/last-attach-session`; repeated `aish -c` runs land on the same session without re-picking, and the default falls back to "create new" when that session is gone or no attach was recorded.
 - TUI panels no longer panic on terminals shorter than 7 rows. `ChoicePanel`, `SearchSelectPanel`, and `SettingsPanel` clamped `(MIN_PANEL_HEIGHT, terminal_height)` with min > max, which panics; the upper bound is now applied before the minimum (same fix `SkillPanel` already had). Found while testing `aish -c` under expect.
 - `/model` closes its picker after Enter instead of reopening it. The switching branch kept looping back into the panel, so the switch message was followed by a fresh list that kept consuming keystrokes (searching, `No matches`) until Esc. Enter now ends the picker for both a real switch and a re-pick of the current model; `a` (add account) and `m` (manage) still return to the list, and Esc still cancels without changing the model.
