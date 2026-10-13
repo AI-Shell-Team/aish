@@ -91,8 +91,8 @@ pub fn create_stdio_transport(
     let mut process = Command::new(command);
     process
         .args(&settings.args)
-        // The child env is the full parent environment plus the configured
-        // overlay, so `PATH`/`HOME` survive while the overlay wins.
+        // The child gets only the inherited allowlist plus the configured
+        // overlay, never the full parent environment (see `child_env`).
         .env_clear()
         .envs(settings.child_env())
         .stdin(Stdio::piped())

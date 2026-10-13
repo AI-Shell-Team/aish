@@ -177,6 +177,8 @@ impl PromptCache {
 }
 
 impl McpGatewayTool {
+    /// Build the gateway tool of one server; the tool name
+    /// (`mcp__<server>`) and description are derived from the settings.
     pub fn new(runtime: Arc<dyn McpRuntime>, settings: ServerSettings) -> Self {
         let name = gateway_tool_name(&settings.name);
         let description = prompt::DESCRIPTION
@@ -411,6 +413,9 @@ pub struct McpDirectTool {
 }
 
 impl McpDirectTool {
+    /// Build the direct tool of one remote tool; the name is
+    /// `mcp__<server>_<tool>` and the description comes from the server's
+    /// definition.
     pub fn new(
         runtime: Arc<dyn McpRuntime>,
         settings: ServerSettings,
@@ -439,9 +444,10 @@ impl McpDirectTool {
 
     /// Side effects the server currently reports for this tool.
     ///
-    /// The registration snapshot is only used as a fallback: a server can
-    /// change its annotations, and a stale catalogue is *unknown* evidence, so
-    /// policy never relies on a frozen view. Unknown side effects always ask.
+    /// Policy never uses the registration snapshot: a server can change its
+    /// annotations, and both a stale catalogue and a tool that is missing from
+    /// the live catalogue (still reconnecting, or dropped by the server) are
+    /// *unknown* evidence. Unknown side effects always ask.
     fn reported_side_effects(&self) -> Option<SideEffects> {
         let server = &self.settings.name;
         if self.runtime.tools_are_stale(server) {
@@ -453,7 +459,7 @@ impl McpDirectTool {
                 .find(|candidate| candidate.name == self.definition.name)
         }) {
             Some(live) => trust::reported_side_effects(&live.annotations),
-            None => trust::reported_side_effects(&self.definition.annotations),
+            None => Some(SideEffects::Unknown),
         }
     }
 }
@@ -1256,6 +1262,9 @@ mod tests {
             (TrustLevel::Ask, SideEffects::Read, read_only, false),
             (TrustLevel::Allow, SideEffects::Read, destructive, false),
         ] {
+            // The live catalogue is what policy reads; the registration
+            // snapshot is never used as trust evidence.
+            runtime.set_cached(vec![definition("read_note", "Read a note", annotations)]);
             let settings = ctx_settings(trust, side_effects);
             let tool = direct_tool_for(
                 &runtime,
@@ -1273,6 +1282,23 @@ mod tests {
                 PreflightResult::Block { .. } => panic!("never blocks when trusted"),
             }
         }
+
+        // A tool the live catalogue does not know (still reconnecting, or
+        // dropped by the server) is unknown evidence: it asks even though the
+        // registration snapshot claimed it was read-only.
+        runtime.clear_cached();
+        let tool = direct_tool_for(
+            &runtime,
+            ctx_settings(TrustLevel::Allow, SideEffects::Read),
+            definition("read_note", "Read a note", read_only),
+        );
+        assert!(
+            matches!(
+                tool.preflight_with_context(&args, &ctx(&session)),
+                PreflightResult::Confirm { .. }
+            ),
+            "an uncached direct tool must ask"
+        );
 
         // A blocked tool is refused with the panel context.
         let tool = direct_tool_for(

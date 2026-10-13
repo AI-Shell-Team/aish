@@ -29,6 +29,7 @@ pub struct RequestIdAllocator {
 }
 
 impl RequestIdAllocator {
+    /// Create an allocator whose first id is `1`.
     pub fn new() -> Self {
         Self {
             next_id: AtomicI64::new(1),

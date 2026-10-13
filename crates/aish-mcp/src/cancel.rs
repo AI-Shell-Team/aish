@@ -22,10 +22,13 @@ pub struct CancelListener {
 }
 
 impl CancelListener {
+    /// Wrap a cancellation token in a shareable handle; the returned `Arc` is
+    /// what transports and the manager hold, so they share one token.
     pub fn new(token: Arc<CancellationToken>) -> Arc<Self> {
         Arc::new(Self { token })
     }
 
+    /// Whether the wrapped token has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.token.is_cancelled()
     }

@@ -68,22 +68,36 @@ pub enum McpCommand {
 /// Arguments of `/mcp add`, filled from flags (quick-add) or by the wizard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AddArgs {
+    /// Server name; `None` until the first positional argument or the wizard
+    /// fills it, and `add_to_config` rejects an empty one.
     pub name: Option<String>,
+    /// Requested transport; `None` makes `add_to_config` pick `http` when a
+    /// URL was given and `stdio` otherwise.
     pub transport: Option<TransportKind>,
     /// `-- <cmd> [args...]`, or what the wizard collected.
     pub command: Vec<String>,
+    /// Endpoint of an `http` server.
     pub url: Option<String>,
     /// `--token <t>` becomes an `Authorization: Bearer <t>` header when no
     /// `Authorization` header was given explicitly (`add_to_config` is the one
     /// place that builds it).
     pub token: Option<String>,
+    /// Trust level to configure; `None` keeps the safe `ask` default.
     pub trust: Option<TrustLevel>,
+    /// Declared side-effect scope; `None` keeps `unknown`, the most dangerous
+    /// default, so an undeclared server is never auto-approved.
     pub side_effects: Option<SideEffects>,
+    /// Per-request deadline in milliseconds (`0` disables the client-side
+    /// deadline).
     pub timeout_ms: Option<u64>,
+    /// Cap on the bytes one tool call may return before truncation.
     pub max_output_bytes: Option<usize>,
     /// `--expose gateway|tools`; `None` means the default `gateway` exposure.
     pub expose: Option<ExposeMode>,
+    /// Extra environment variables (`KEY=VALUE`) for a stdio child.
     pub env: Vec<(String, String)>,
+    /// Extra HTTP headers for an `http` server; `--token` deliberately stays
+    /// out of this list.
     pub headers: Vec<(String, String)>,
 }
 

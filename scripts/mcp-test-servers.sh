@@ -15,7 +15,12 @@
 #   scripts/mcp-test-servers.sh status
 #   scripts/mcp-test-servers.sh config           # print the YAML to paste
 #   scripts/mcp-test-servers.sh selftest         # isolated dry run: every server must connect
+#   scripts/mcp-test-servers.sh install          # write those servers into the real config.yaml
 #   scripts/mcp-test-servers.sh stop             # stop the HTTP endpoint and clean up
+#
+# `install` rewrites the `mcp:` section of `~/.config/aish/config.yaml` (other
+# sections and unknown keys are preserved) after saving a timestamped backup
+# next to it, and prints the backup path; restore it to undo the change.
 #
 # `selftest` runs aish against a throw-away XDG root (config, data, state and
 # cache), so it never touches `~/.local/share/aish/sessions.db`. Teardown only

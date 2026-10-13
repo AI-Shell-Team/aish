@@ -358,7 +358,10 @@ fn mcp_test_tip(error: &aish_mcp::McpError) -> Option<&'static str> {
 fn print_mcp_line(key: &str, pairs: &[(&str, String)]) {
     let mut args = std::collections::HashMap::new();
     for (name, value) in pairs {
-        args.insert((*name).to_string(), value.clone());
+        // Server-supplied text (tool names, descriptions, error bodies) is
+        // printed verbatim otherwise: a hostile server could inject terminal
+        // escape sequences into status, tool listings and failure messages.
+        args.insert((*name).to_string(), sanitize_for_display(value));
     }
     println!("{}", t_with_args(key, &args));
 }
@@ -469,10 +472,12 @@ fn mcp_server_options(
                     "disabled"
                 });
             let tools = snapshot.map(|snap| snap.tools.len()).unwrap_or(0);
-            let label = format!(
+            // Only the displayed label is sanitized: the value handed back to
+            // the caller stays the exact configured name.
+            let label = sanitize_for_display(&format!(
                 "{name} [{transport}] {status} · tools: {tools}",
                 name = server.name
-            );
+            ));
             let description = snapshot
                 .map(|snap| {
                     format!(
@@ -7596,10 +7601,10 @@ impl AishShell {
             return;
         };
         for line in aish_mcp::render_status(&manager) {
-            println!("{line}");
+            println!("{}", sanitize_for_display(&line));
         }
         if let Some(line) = aish_mcp::render_summary_line(&manager) {
-            println!("{line}");
+            println!("{}", sanitize_for_display(&line));
         }
         let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
         if settings.servers.is_empty() {
@@ -7620,7 +7625,7 @@ impl AishShell {
                 match aish_mcp::render_server_tools(&manager, server) {
                     Some(lines) => {
                         for line in lines {
-                            println!("{line}");
+                            println!("{}", sanitize_for_display(&line));
                         }
                     }
                     None => print_mcp_line(
@@ -7648,7 +7653,7 @@ impl AishShell {
                     self.wait_for_mcp_catalogue(&manager, &name);
                     if let Some(lines) = aish_mcp::render_server_tools(&manager, &name) {
                         for line in lines {
-                            println!("{line}");
+                            println!("{}", sanitize_for_display(&line));
                         }
                     }
                 }
@@ -8180,10 +8185,12 @@ impl AishShell {
             String::new(),
         )];
         for tool in &tools {
+            // Names and descriptions come from the server; only the rendered
+            // columns are sanitized, the row value stays the exact tool name.
             options.push((
                 tool.name.clone(),
-                tool.name.clone(),
-                tool.description.clone().unwrap_or_default(),
+                sanitize_for_display(&tool.name),
+                sanitize_for_display(tool.description.as_deref().unwrap_or_default()),
             ));
         }
         pick_menu_with_question(
@@ -8209,10 +8216,12 @@ impl AishShell {
             String::new(),
         )];
         for tool in &tools {
+            // Names and descriptions come from the server; only the rendered
+            // columns are sanitized, the row value stays the exact tool name.
             options.push((
                 tool.name.clone(),
-                tool.name.clone(),
-                tool.description.clone().unwrap_or_default(),
+                sanitize_for_display(&tool.name),
+                sanitize_for_display(tool.description.as_deref().unwrap_or_default()),
             ));
         }
         pick_menu_with_question(

@@ -353,6 +353,18 @@ impl Inner {
                     return Ok(result);
                 }
             }
+            if decoder.overflowed() {
+                // One line exceeded the decoder's cap: report the real cause
+                // instead of the generic "no response" below.
+                return Err(McpError::new(
+                    &self.server,
+                    TransportKind::Http,
+                    McpFailureStage::Receive,
+                    McpFailureClass::MalformedResponse,
+                    false,
+                    format!("SSE line exceeded {} bytes", crate::sse::MAX_SSE_LINE_BYTES),
+                ));
+            }
         }
         for event in decoder.finish() {
             if let Some(result) = self.consume_event(&event, Some(expected))? {

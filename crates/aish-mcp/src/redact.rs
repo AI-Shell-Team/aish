@@ -57,6 +57,14 @@ pub fn is_secret_key(key: &str) -> bool {
     if NAMES.iter().any(|name| lower.contains(name)) {
         return true;
     }
+    // Short, ambiguous names match exactly: `key`, `auth` and `sig` are
+    // credential names as whole words, but as substrings they would also hit
+    // innocent words ("monkey", "author"), and over-masking diagnostics hides
+    // the failure the user is reading about.
+    const SHORT: [&str; 5] = ["key", "auth", "sig", "pass", "pw"];
+    if SHORT.contains(&lower.as_str()) {
+        return true;
+    }
     lower.contains("private_key") || lower.contains("access_key") || lower.contains("signature")
 }
 
@@ -182,8 +190,33 @@ fn is_value_delimiter(byte: u8) -> bool {
 
 /// Skip one value starting at `index`. A scheme prefix (`Bearer`/`Basic`)
 /// pulls the following token in as well, so `Bearer abc` is fully consumed.
+/// A quoted value is consumed up to its closing quote, so the JSON shape
+/// `"api_key": "sk-…"` masks the whole value (and not just its opening quote).
 fn skip_value(text: &str, bytes: &[u8], mut index: usize) -> usize {
     let start = index;
+    while index < bytes.len() && bytes[index] == b' ' {
+        index += 1;
+    }
+    if let Some(quote) = bytes
+        .get(index)
+        .copied()
+        .filter(|b| *b == b'"' || *b == b'\'')
+    {
+        index += 1;
+        while index < bytes.len() {
+            if bytes[index] == b'\\' {
+                index += 2;
+                continue;
+            }
+            let byte = bytes[index];
+            index += 1;
+            if byte == quote {
+                break;
+            }
+        }
+        return index;
+    }
+    index = start;
     while index < bytes.len() && !is_value_delimiter(bytes[index]) {
         index += 1;
     }
@@ -216,11 +249,7 @@ fn mask_assignments(text: &str) -> String {
                 out.push_str(&text[copied..=index]);
                 out.push(' ');
                 out.push_str(REDACTED);
-                let mut value_start = index + 1;
-                while value_start < bytes.len() && bytes[value_start] == b' ' {
-                    value_start += 1;
-                }
-                let value_end = skip_value(text, bytes, value_start);
+                let value_end = skip_value(text, bytes, index + 1);
                 copied = value_end;
                 index = value_end;
                 continue;
@@ -233,9 +262,25 @@ fn mask_assignments(text: &str) -> String {
 }
 
 /// Last whitespace/quote/comma delimited token of `segment`.
+///
+/// One trailing quote is stripped first so a JSON key (`"api_key":`) is
+/// recognized as `api_key` instead of collapsing to an empty token.
 fn last_token(segment: &str) -> &str {
-    segment
-        .rsplit(|c: char| c.is_whitespace() || c == ',' || c == ';' || c == '"' || c == '\'')
+    let trimmed = segment.trim_end();
+    let trimmed = trimmed
+        .strip_suffix('"')
+        .or_else(|| trimmed.strip_suffix('\''))
+        .unwrap_or(trimmed);
+    trimmed
+        .rsplit(|c: char| {
+            c.is_whitespace()
+                || c == ','
+                || c == ';'
+                || c == '"'
+                || c == '\''
+                || c == '{'
+                || c == '['
+        })
         .next()
         .unwrap_or("")
 }
@@ -554,6 +599,43 @@ mod tests {
         assert_eq!(short, "run -c /bin/sh -x");
     }
 
+    /// Error bodies are often JSON, and a JSON key ends with a quote: the
+    /// quoted key and its quoted value must both be recognized.
+    #[test]
+    fn masks_json_shaped_assignments() {
+        let body = r#"{"error":"invalid_request","api_key":"sk-live-1234"}"#;
+        let masked = sanitize_diagnostic_text(body);
+        assert!(!masked.contains("sk-live-1234"), "{masked}");
+        assert!(masked.contains("invalid_request"), "{masked}");
+
+        let spaced = r#"{ "Authorization" : "Bearer abc.def" }"#;
+        let masked = sanitize_diagnostic_text(spaced);
+        assert!(!masked.contains("abc.def"), "{masked}");
+
+        // A quoted non-secret value is left alone.
+        let plain = r#"{"model":"glm-4.7"}"#;
+        assert_eq!(sanitize_diagnostic_text(plain), plain);
+    }
+
+    /// `key`/`auth`/`sig` are credentials as whole words but not as substrings.
+    #[test]
+    fn masks_short_credential_names_exactly() {
+        for name in ["key", "auth", "sig", "KEY", "Auth"] {
+            let masked = sanitize_diagnostic_text(&format!("https://h/mcp?{name}=AIzaSECRET"));
+            assert!(
+                !masked.contains("AIzaSECRET"),
+                "{name} must be treated as a credential: {masked}"
+            );
+        }
+        // Innocent words that merely contain them stay readable.
+        assert_eq!(
+            sanitize_diagnostic_text("hockey=2 author=bob"),
+            "hockey=2 author=bob"
+        );
+        assert!(is_secret_key("key"));
+        assert!(!is_secret_key("monkey"));
+    }
+
     #[test]
     fn sanitizes_nested_data_with_bounds() {
         let payload = serde_json::json!({
@@ -562,10 +644,10 @@ mod tests {
             "note": "x".repeat(500)
         });
         let sanitized = sanitize_data(&payload);
-        assert_eq!(
-            sanitized["auth"]["authorization"],
-            Value::String(REDACTED.into())
-        );
+        // `auth` is a credential name, so the whole subtree under it is masked
+        // (a secret-keyed value is replaced as a unit, whatever its shape).
+        assert_eq!(sanitized["auth"], Value::String(REDACTED.into()));
+        assert!(!sanitized.to_string().contains("secret-token"));
         assert!(sanitized["items"].as_array().unwrap().len() <= MAX_DATA_ITEMS + 1);
         assert!(sanitized["note"].as_str().unwrap().len() <= MAX_DATA_STRING + 3);
     }

@@ -304,6 +304,7 @@ gateway 工具用法（每个 server 一个工具，通过 `action` 区分）：
 
 传输层硬性约束（防恶意/异常 server）：
 
+- **子进程环境变量**：stdio server 只继承一个白名单（`HOME`、`LOGNAME`、`PATH`、`SHELL`、`TERM`、`USER`、`TMPDIR`、`LANG`、`LC_ALL`、`LC_CTYPE`、`SSL_CERT_FILE`、`SSL_CERT_DIR` 与 `XDG_*` 路径变量），**不会**拿到 `AISH_API_KEY`、云凭据或 `SSH_AUTH_SOCK` 等父进程敏感变量；需要其它变量时请在 `env:` 中显式声明（同名覆盖白名单值）。
 - 单帧上限：stdio 的一行与 HTTP 响应体各 8 MiB，超出即按协议错误结束该请求/连接；SSE 单行另有 1 MiB 上限。这样 `max_output_bytes` 之外也不会被对端撑爆内存。
 - 握手超时：无论 `request_timeout_ms` 是否设为 `0`，连接握手本身都有 30 秒上限，避免卡死的 server 让客户端永久等待。
 - 重定向：HTTP 仅跟随**同源**（scheme + host + 端口）重定向，最多 5 跳；跨源重定向不跟随，直接按 HTTP 状态错误上报，避免把自定义头、`Mcp-Session-Id` 与请求体（含工具参数）发给第三方主机。

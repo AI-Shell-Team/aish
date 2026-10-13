@@ -40,6 +40,8 @@ impl ExposeMode {
         }
     }
 
+    /// Canonical string written to the config `expose` field; the inverse of
+    /// [`ExposeMode::parse`].
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gateway => "gateway",
@@ -51,20 +53,35 @@ impl ExposeMode {
 /// Resolved settings of one server.
 #[derive(Debug, Clone)]
 pub struct ServerSettings {
+    /// Server name, as configured.
     pub name: String,
+    /// Transport kind: stdio runs a child process, http speaks Streamable
+    /// HTTP.
     pub transport: TransportKind,
+    /// Whether the server should be connected.
     pub enabled: bool,
+    /// Child command for the stdio transport.
     pub command: Option<String>,
+    /// Arguments passed after the child command.
     pub args: Vec<String>,
+    /// Extra environment variables overlaid on the inherited allowlist (see
+    /// [`ServerSettings::child_env`]).
     pub env: BTreeMap<String, String>,
+    /// Working directory of the child process, when configured.
     pub cwd: Option<String>,
+    /// Endpoint of an `http` server.
     pub url: Option<String>,
+    /// HTTP headers sent with every request.
     pub headers: BTreeMap<String, String>,
     /// `None` disables the client-side deadline (config value `0`).
     pub request_timeout: Option<Duration>,
+    /// Server-level default trust level.
     pub trust: TrustLevel,
+    /// Side effects the user declared for the server's tools.
     pub side_effects: SideEffects,
+    /// Per-tool trust overrides, keyed by tool name.
     pub tool_trust: BTreeMap<String, TrustLevel>,
+    /// Cap on the bytes one tool call may return before truncation.
     pub max_output_bytes: usize,
 }
 
@@ -105,10 +122,19 @@ impl ServerSettings {
         }
     }
 
-    /// Environment for the child process: the parent environment plus the
-    /// configured overlay, so servers keep `PATH`/`HOME`.
+    /// Environment for the child process.
+    ///
+    /// Only a small allowlist of the parent environment is inherited — the
+    /// variables a launcher needs to find toolchains, its caches and the
+    /// locale — plus the server's configured `env` overlay, which wins. The
+    /// full parent environment is deliberately *not* passed: an MCP server is
+    /// untrusted by default, and handing it `AISH_API_KEY`, cloud credentials
+    /// or `SSH_AUTH_SOCK` would contradict that. Anything else a server needs
+    /// must be declared explicitly in its `env:` block.
     pub fn child_env(&self) -> BTreeMap<String, String> {
-        let mut env: BTreeMap<String, String> = std::env::vars().collect();
+        let mut env: BTreeMap<String, String> = std::env::vars()
+            .filter(|(key, _)| is_inherited_env(key))
+            .collect();
         for (key, value) in &self.env {
             env.insert(key.clone(), value.clone());
         }
@@ -116,12 +142,46 @@ impl ServerSettings {
     }
 }
 
+/// Parent variables handed to an MCP child process (see
+/// [`ServerSettings::child_env`]).
+///
+/// Mirrors the allowlist the reference MCP SDKs use (`HOME`, `LOGNAME`, `PATH`,
+/// `SHELL`, `TERM`, `USER`) plus the locale, temp-directory, TLS-trust and
+/// XDG base-directory variables that package launchers (`uvx`, `npx`) and
+/// locale-aware programs need to behave the way they do in the user's shell.
+const INHERITED_ENV_VARS: [&str; 12] = [
+    "HOME",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "USER",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// True when `key` may be inherited by an MCP child process.
+fn is_inherited_env(key: &str) -> bool {
+    // `XDG_*` are base *directories* (cache/config/state), never credentials,
+    // and `uv`/`npx` resolve their caches through them.
+    INHERITED_ENV_VARS.contains(&key) || key.starts_with("XDG_")
+}
+
 /// Resolved `mcp:` section.
 #[derive(Debug, Clone)]
 pub struct McpSettings {
+    /// Whether MCP is enabled at all.
     pub enabled: bool,
+    /// Default per-request deadline for servers that do not set their own;
+    /// `None` disables client-side deadlines.
     pub request_timeout: Option<Duration>,
+    /// Default cap on the bytes one tool call may return before truncation.
     pub max_output_bytes: usize,
+    /// Resolved per-server settings, in configuration order.
     pub servers: Vec<ServerSettings>,
 }
 
@@ -136,6 +196,7 @@ impl McpSettings {
         self.servers.iter().filter(|server| server.enabled)
     }
 
+    /// Settings of the named server, when it is configured.
     pub fn server(&self, name: &str) -> Option<&ServerSettings> {
         self.servers.iter().find(|server| server.name == name)
     }
@@ -400,6 +461,68 @@ pub fn resolve_settings(config: &McpConfig) -> (McpSettings, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An MCP server is untrusted by default, so it must not receive the
+    /// parent's credentials just because it was started from within aish: only
+    /// the launcher/locale allowlist plus the configured overlay may cross the
+    /// process boundary.
+    #[test]
+    fn child_env_keeps_the_allowlist_and_the_overlay_only() {
+        // SAFETY: this test only reads these variables through `std::env::vars`
+        // inside `child_env`, and it removes them again at the end.
+        std::env::set_var("AISH_TEST_SECRET_TOKEN", "leak-me");
+        std::env::set_var("SSH_AUTH_SOCK", "/tmp/agent.sock");
+
+        let mut entry = raw("env", "stdio");
+        entry.command = Some("/bin/true".to_string());
+        entry
+            .env
+            .insert("DECLARED".to_string(), "value".to_string());
+        let config = McpConfig {
+            enabled: true,
+            servers: vec![entry],
+            ..McpConfig::default()
+        };
+        let (settings, warnings) = resolve_settings(&config);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let server = settings.server("env").expect("resolved");
+
+        let env = server.child_env();
+        assert!(
+            !env.contains_key("AISH_TEST_SECRET_TOKEN"),
+            "an undeclared parent variable must not reach the child"
+        );
+        assert!(!env.contains_key("SSH_AUTH_SOCK"));
+        assert_eq!(env.get("DECLARED").map(String::as_str), Some("value"));
+        if let Ok(path) = std::env::var("PATH") {
+            assert_eq!(env.get("PATH"), Some(&path), "launchers need PATH");
+        }
+
+        // The configured overlay wins over the inherited value.
+        let mut override_entry = raw("env2", "stdio");
+        override_entry.command = Some("/bin/true".to_string());
+        override_entry
+            .env
+            .insert("PATH".to_string(), "/custom/bin".to_string());
+        let config = McpConfig {
+            enabled: true,
+            servers: vec![override_entry],
+            ..McpConfig::default()
+        };
+        let (settings, _) = resolve_settings(&config);
+        assert_eq!(
+            settings
+                .server("env2")
+                .expect("resolved")
+                .child_env()
+                .get("PATH")
+                .map(String::as_str),
+            Some("/custom/bin")
+        );
+
+        std::env::remove_var("AISH_TEST_SECRET_TOKEN");
+        std::env::remove_var("SSH_AUTH_SOCK");
+    }
 
     fn raw(name: &str, transport: &str) -> McpServerConfig {
         McpServerConfig {

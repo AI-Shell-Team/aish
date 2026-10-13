@@ -32,7 +32,9 @@ pub const MAX_TOOL_NAME_LEN: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JsonRpcId {
+    /// Integer id (`id: 1`), what this client sends.
     Number(i64),
+    /// String id, accepted because some servers mint their own.
     String(String),
 }
 
@@ -48,8 +50,11 @@ impl std::fmt::Display for JsonRpcId {
 /// JSON-RPC error object as carried by a response frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
+    /// JSON-RPC error code.
     pub code: i64,
+    /// Error message from the server.
     pub message: String,
+    /// Optional structured error data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
 }
@@ -57,11 +62,15 @@ pub struct JsonRpcError {
 /// JSON-RPC response frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
+    /// Wire value of the `jsonrpc` field (`"2.0"`).
     #[serde(default)]
     pub jsonrpc: String,
+    /// Request id this frame answers.
     pub id: JsonRpcId,
+    /// Successful result, when the call did not fail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    /// Error object, when the call failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
 }
@@ -149,16 +158,22 @@ fn parse_error(value: &serde_json::Value) -> Option<JsonRpcError> {
 /// `serverInfo` from the `initialize` result.
 #[derive(Debug, Clone, Default)]
 pub struct ServerInfo {
+    /// Server name.
     pub name: String,
+    /// Server version.
     pub version: String,
 }
 
 /// Parsed `initialize` result.
 #[derive(Debug, Clone)]
 pub struct InitializeResult {
+    /// Protocol revision the server negotiated.
     pub protocol_version: String,
+    /// Raw `capabilities` object of the server.
     pub capabilities: serde_json::Value,
+    /// `serverInfo` as reported by the server.
     pub server_info: ServerInfo,
+    /// Server instructions, when it sent any.
     pub instructions: Option<String>,
 }
 
@@ -203,9 +218,13 @@ impl InitializeResult {
 /// caller falls back to the side effects the user declared in the config.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ToolAnnotations {
+    /// `readOnlyHint`: the tool only reads.
     pub read_only_hint: Option<bool>,
+    /// `destructiveHint`: the tool can destroy data.
     pub destructive_hint: Option<bool>,
+    /// `idempotentHint`: repeating the call has the same effect.
     pub idempotent_hint: Option<bool>,
+    /// `openWorldHint`: the tool can affect the outside world.
     pub open_world_hint: Option<bool>,
 }
 
@@ -226,6 +245,7 @@ impl ToolAnnotations {
         }
     }
 
+    /// True when the server sent no hint at all.
     pub fn is_empty(&self) -> bool {
         self.read_only_hint.is_none()
             && self.destructive_hint.is_none()
@@ -237,13 +257,19 @@ impl ToolAnnotations {
 /// One `tools/list` entry.
 #[derive(Debug, Clone)]
 pub struct McpToolDefinition {
+    /// Tool name, kept only when it can be used as an identifier.
     pub name: String,
+    /// Description from the server, trimmed; `None` when it sent none.
     pub description: Option<String>,
+    /// Raw `inputSchema` of the tool.
     pub input_schema: Option<serde_json::Value>,
+    /// Behavior hints the server reported.
     pub annotations: ToolAnnotations,
 }
 
 impl McpToolDefinition {
+    /// Parse one `tools/list` entry; `None` when the name is missing or
+    /// cannot be used as an identifier.
     pub fn from_value(value: &serde_json::Value) -> Option<Self> {
         let name = value.get("name").and_then(|v| v.as_str())?.to_string();
         if !is_usable_tool_name(&name) {
@@ -297,32 +323,35 @@ fn is_usable_tool_name(name: &str) -> bool {
 /// One block of a `tools/call` result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpContent {
-    Text {
-        text: String,
-    },
-    Image {
-        mime_type: String,
-        bytes: usize,
-    },
+    /// A `text` block; its text is fed to the model as-is.
+    Text { text: String },
+    /// An `image` block: only the mime type and an estimated byte size
+    /// survive, since aish tool results are text.
+    Image { mime_type: String, bytes: usize },
+    /// A `resource` block: its URI and, when sent, its mime type.
     Resource {
         uri: String,
         mime_type: Option<String>,
     },
-    Other {
-        kind: String,
-    },
+    /// Any block type this client does not model; only its `type` string is
+    /// kept.
+    Other { kind: String },
 }
 
 /// Parsed `tools/call` result.
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallResult {
+    /// Content blocks, in the order the server sent them.
     pub content: Vec<McpContent>,
+    /// `structuredContent`, when the server sent it.
     pub structured_content: Option<serde_json::Value>,
     /// The server reported a tool-level error (`isError: true`).
     pub is_error: bool,
 }
 
 impl ToolCallResult {
+    /// Parse a `tools/call` result leniently: missing fields become defaults
+    /// (no content, not an error).
     pub fn from_value(value: &serde_json::Value) -> Self {
         let content = value
             .get("content")
@@ -532,11 +561,15 @@ fn summarize_container(value: &serde_json::Value) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransportKind {
+    /// Child process transport (JSONL over stdin/stdout).
     Stdio,
+    /// Streamable HTTP transport.
     Http,
 }
 
 impl TransportKind {
+    /// Canonical string of the kind (`stdio`/`http`), used in config files
+    /// and status output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Stdio => "stdio",
@@ -580,6 +613,7 @@ pub enum McpFailureClass {
 }
 
 impl McpFailureClass {
+    /// Canonical snake_case string of the class, used in error descriptions.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Connect => "connect",
@@ -601,14 +635,20 @@ impl McpFailureClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpFailureStage {
+    /// Establishing the connection.
     Connect,
+    /// Writing the request.
     Send,
+    /// Reading the response.
     Receive,
+    /// Decoding the response.
     Decode,
+    /// Protocol-level violation.
     Protocol,
 }
 
 impl McpFailureStage {
+    /// Canonical string of the stage, used in error descriptions.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Connect => "connect",
@@ -627,17 +667,27 @@ impl McpFailureStage {
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("{message}")]
 pub struct McpError {
+    /// Name of the server that failed.
     pub server: String,
+    /// Transport the failure happened on.
     pub transport: TransportKind,
+    /// Where in the request lifecycle it happened.
     pub stage: McpFailureStage,
+    /// Failure classification.
     pub failure: McpFailureClass,
+    /// True when a retry may succeed.
     pub retryable: bool,
+    /// Technical description, sanitized of credentials.
     pub message: String,
+    /// JSON-RPC error code, when the server returned one.
     pub code: Option<i64>,
+    /// Structured error data, sanitized of credentials.
     pub data: Option<serde_json::Value>,
 }
 
 impl McpError {
+    /// Build an error without code or data; the message is sanitized of
+    /// credentials.
     pub fn new(
         server: impl Into<String>,
         transport: TransportKind,
@@ -658,11 +708,13 @@ impl McpError {
         }
     }
 
+    /// Attach a JSON-RPC error code.
     pub fn with_code(mut self, code: i64) -> Self {
         self.code = Some(code);
         self
     }
 
+    /// Attach structured data, sanitized of credentials.
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = Some(crate::redact::sanitize_data(&data));
         self
@@ -811,13 +863,19 @@ impl McpError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SideEffects {
+    /// Read-only; the only level that can be auto-approved.
     Read,
+    /// May reach the network.
     Network,
+    /// May modify the system (files, processes, external services).
     Write,
+    /// Nothing declared; treated as the most dangerous.
     Unknown,
 }
 
 impl SideEffects {
+    /// Parse a config value (`read`, `network`, `write`, `unknown`, with the
+    /// common aliases); `None` when unrecognized.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "read" | "read_only" | "readonly" => Some(Self::Read),
@@ -828,6 +886,7 @@ impl SideEffects {
         }
     }
 
+    /// Canonical string of the level, used in config files and status output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
@@ -857,6 +916,8 @@ pub enum TrustLevel {
 }
 
 impl TrustLevel {
+    /// Parse a config value (`ask`, `allow`, `block`, with the `trusted` and
+    /// `deny` aliases); `None` when unrecognized.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "ask" => Some(Self::Ask),
@@ -866,6 +927,7 @@ impl TrustLevel {
         }
     }
 
+    /// Canonical string of the level, used in config files and status output.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ask => "ask",
@@ -902,6 +964,7 @@ pub enum ServerStatus {
 }
 
 impl ServerStatus {
+    /// Short display label (`disabled`, `connecting`, `connected`, `failed`).
     pub fn label(&self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -915,8 +978,11 @@ impl ServerStatus {
 /// One discovered tool, as shown by `/mcp tools <server>`.
 #[derive(Debug, Clone)]
 pub struct ToolSummary {
+    /// Tool name.
     pub name: String,
+    /// Description from the server, when it sent one.
     pub description: Option<String>,
+    /// Side effects currently reported for the tool.
     pub side_effects: SideEffects,
     /// Parameter names the server marks as required in `inputSchema`.
     ///
@@ -947,12 +1013,19 @@ impl ToolSummary {
 /// credentials: `endpoint` is redacted and env/header values are never stored.
 #[derive(Debug, Clone)]
 pub struct ServerSnapshot {
+    /// Server name.
     pub name: String,
+    /// Transport kind.
     pub transport: TransportKind,
+    /// Redacted endpoint label; never a credential.
     pub endpoint: String,
+    /// Current connection state.
     pub status: ServerStatus,
+    /// Effective trust level.
     pub trust: TrustLevel,
+    /// Side effects the user declared for the server.
     pub declared_side_effects: SideEffects,
+    /// Discovered tools.
     pub tools: Vec<ToolSummary>,
     /// Whether the server sent `instructions` (the text itself is not shown).
     pub instructions: bool,

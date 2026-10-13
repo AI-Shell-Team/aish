@@ -296,12 +296,18 @@ impl ConfigLoader {
 
         let tmp_path = Self::temp_path(path);
         let write = std::fs::File::create(&tmp_path).and_then(|mut file| {
-            // The target's mode must be in place before any byte of content
-            // lands, otherwise the temp file would sit world-readable with
-            // credentials in it.
+            // The mode must be in place before any byte of content lands,
+            // otherwise the temp file would sit world-readable with credentials
+            // in it. An existing file keeps its own mode; a new one is created
+            // owner-only, because a config carries the API key and header
+            // values and must not depend on the process umask.
             #[cfg(unix)]
-            if let Ok(metadata) = std::fs::metadata(path) {
-                let _ = file.set_permissions(metadata.permissions());
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(path)
+                    .map(|metadata| metadata.permissions())
+                    .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
+                let _ = file.set_permissions(mode);
             }
             file.write_all(contents.as_bytes())?;
             file.sync_all()
@@ -788,6 +794,26 @@ mod tests {
         ConfigLoader::save_atomic(&config, &path).unwrap();
 
         assert_eq!(mode_of(&path), 0o600, "save_atomic must keep the mode");
+        assert!(leftover_tmp_files(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_config_file_is_owner_only() {
+        // A config carries the API key and header values, so a file created by
+        // aish must not depend on the process umask for its mode.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+
+        let mut config = ConfigModel::default();
+        config.model = "glm-4.7".into();
+        ConfigLoader::save_atomic(&config, &path).unwrap();
+
+        assert_eq!(
+            mode_of(&path),
+            0o600,
+            "a new config must be readable by its owner only"
+        );
         assert!(leftover_tmp_files(dir.path()).is_empty());
     }
 }

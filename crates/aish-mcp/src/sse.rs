@@ -123,6 +123,7 @@ pub struct SseDecoder {
 }
 
 impl SseDecoder {
+    /// Create an empty decoder.
     pub fn new() -> Self {
         Self::default()
     }
@@ -141,13 +142,16 @@ impl SseDecoder {
             return Vec::new();
         }
         self.buffer.extend_from_slice(chunk);
+        // Complete lines are drained first: the cap applies to one *line*, so a
+        // chunk carrying many well-formed events must not be mistaken for an
+        // overlong one.
+        let events = self.drain_lines(false);
         if self.buffer.len() > MAX_SSE_LINE_BYTES {
             self.buffer.clear();
             self.overflowed = true;
             self.state = EventState::default();
-            return Vec::new();
         }
-        self.drain_lines(false)
+        events
     }
 
     /// Flush the end of the stream: a trailing line without a terminator is
@@ -393,5 +397,26 @@ mod tests {
         assert!(decoder.push(&chunk).is_empty());
         assert!(!decoder.overflowed());
         assert_eq!(decoder.push(b"\ndata: ok\n\n"), vec![event("ok")]);
+    }
+
+    /// The cap applies to one *line*: a chunk carrying many well-formed events
+    /// is larger than the cap but must be decoded, not discarded.
+    #[test]
+    fn decodes_a_chunk_larger_than_the_cap_when_its_lines_are_short() {
+        let mut decoder = SseDecoder::new();
+        let mut chunk = Vec::new();
+        let mut expected = 0usize;
+        while chunk.len() <= MAX_SSE_LINE_BYTES {
+            chunk.extend_from_slice(format!("data: e{expected}\n\n").as_bytes());
+            expected += 1;
+        }
+        let events = decoder.push(&chunk);
+        assert!(
+            !decoder.overflowed(),
+            "complete short lines are not a cap hit"
+        );
+        assert_eq!(events.len(), expected);
+        assert_eq!(events[0], event("e0"));
+        assert_eq!(events[expected - 1], event(&format!("e{}", expected - 1)));
     }
 }

@@ -36,6 +36,10 @@ const MCP_SERVER_ARG_SUBCOMMANDS: &[&str] = &[
     "rm",
     "test",
     "tool",
+    // `/mcp trust <server> <tool|*> <level>` and `/mcp tools [server]` both
+    // take a server name as their first argument.
+    "trust",
+    "tools",
 ];
 
 pub struct CompletionEngine {
@@ -437,9 +441,15 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tools_takes_no_server_argument() {
+    fn mcp_tools_and_trust_complete_the_server_name() {
+        // `/mcp tools [server]` and `/mcp trust <server> …` both take a
+        // configured server as their first argument.
+        assert_eq!(mcp_result(&["fixture"], "/mcp tools ").1, vec!["fixture"]);
+        assert_eq!(mcp_result(&["fixture"], "/mcp tools fi").1, vec!["fixture"]);
+        assert_eq!(mcp_result(&["fixture"], "/mcp trust ").1, vec!["fixture"]);
+        assert_eq!(mcp_result(&["fixture"], "/mcp trust fi").1, vec!["fixture"]);
+        // Still nothing to offer without a configured server.
         assert!(mcp_opts(&[], "/mcp tools ").is_none());
-        assert!(mcp_opts(&["fixture"], "/mcp tools fi").is_none());
     }
 
     #[test]
