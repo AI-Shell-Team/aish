@@ -299,7 +299,105 @@ fn prompt_edit_value(label: &str, desc: &str, current: &str, secret: bool) -> Op
     }
 }
 
+/// Like [`prompt_edit_value`], but accepts an empty answer.
+///
+/// `/mcp add` asks for a few optional fields (extra arguments, an API token);
+/// cliclack's input is required by default, which would trap the wizard on an
+/// empty `<Enter>`.
+fn prompt_edit_optional(label: &str, desc: &str) -> Option<String> {
+    let _guard = aish_tools::bash::acquire_interactive_input_guard();
+    let prompt = if desc.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label}\n{}", theme::faint(desc))
+    };
+    let result: std::io::Result<String> = cliclack::input(&prompt).required(false).interact();
+    match result {
+        Ok(value) => Some(value.trim().to_string()),
+        Err(_) => None,
+    }
+}
+
+/// Bytes of a tool's `inputSchema` that `/mcp tool` prints before truncating.
+const MCP_TOOL_SCHEMA_MAX_BYTES: usize = 4000;
+
+/// Why a read-only `/mcp test` did not produce a catalogue.
+enum McpTestFailure {
+    /// The 20 second wall-clock budget expired.
+    Timeout,
+    /// The connection or `tools/list` failed.
+    Error(aish_mcp::McpError),
+}
+
+/// Turn a failed `/mcp test` into the one remediation hint worth printing, or
+/// `None` when the failure has no obvious cause.
+fn mcp_test_tip(error: &aish_mcp::McpError) -> Option<&'static str> {
+    use aish_mcp::McpFailureClass;
+    let message = error.message.to_ascii_lowercase();
+    match error.failure {
+        McpFailureClass::Timeout => Some("shell.mcp.test_tip_timeout"),
+        McpFailureClass::HttpStatus if matches!(error.code, Some(401) | Some(403)) => {
+            Some("shell.mcp.test_tip_auth")
+        }
+        McpFailureClass::Connect if message.contains("refused") => {
+            Some("shell.mcp.test_tip_refused")
+        }
+        McpFailureClass::Connect
+            if message.contains("spawn") || message.contains("no such file") =>
+        {
+            Some("shell.mcp.test_tip_not_found")
+        }
+        _ => None,
+    }
+}
+
+/// Render an i18n template with `{placeholder}` pairs and print the result.
+///
+/// The `/mcp` surface is a pile of short messages; this keeps their placeholder
+/// maps from drowning the dispatch and edit logic.
+fn print_mcp_line(key: &str, pairs: &[(&str, String)]) {
+    let mut args = std::collections::HashMap::new();
+    for (name, value) in pairs {
+        args.insert((*name).to_string(), value.clone());
+    }
+    println!("{}", t_with_args(key, &args));
+}
+
+/// Server names offered by `/mcp <sub> <server>` completion: everything the
+/// runtime knows, plus everything in the config so a name completes before its
+/// server connected and after it was disabled. Sorted and de-duplicated so the
+/// completion list is stable.
+fn collect_mcp_completion_names(
+    manager: Option<&std::sync::Arc<aish_mcp::McpManager>>,
+    config: &aish_config::McpConfig,
+) -> Vec<String> {
+    let mut names: Vec<String> = manager
+        .map(|manager| {
+            manager
+                .servers()
+                .into_iter()
+                .map(|server| server.name)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    names.extend(config.servers.iter().map(|server| server.name.clone()));
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn pick_menu(title: &str, options: &[(String, String, String)]) -> Option<String> {
+    pick_menu_with_question(title, "", options)
+}
+
+/// Like [`pick_menu`], but shows `question` under the title. The interactive
+/// `/mcp` menu asks one thing per panel, so the question carries that step's
+/// intent ("Which server?" / "Which tool?").
+fn pick_menu_with_question(
+    title: &str,
+    question: &str,
+    options: &[(String, String, String)],
+) -> Option<String> {
     let opts: Vec<crate::tui::DialogOption> = options
         .iter()
         .map(|(v, l, d)| {
@@ -310,9 +408,221 @@ fn pick_menu(title: &str, options: &[(String, String, String)]) -> Option<String
             o
         })
         .collect();
-    match crate::tui::show_selection_dialog(title, "", &opts, false, true) {
+    match crate::tui::show_selection_dialog(title, question, &opts, false, true) {
         crate::tui::DialogResult::Selected(v) => Some(v),
         _ => None,
+    }
+}
+
+/// i18n keys of the shared server picker (`/mcp` menu), kept in one place so
+/// the picker call sites stay one line long.
+const MCP_PICK_SERVER_TITLE: &str = "shell.mcp.pick_server_title";
+const MCP_PICK_SERVER_QUESTION: &str = "shell.mcp.pick_server_question";
+
+/// Value of the first row of the `/mcp` menu's tools picker: "list the whole
+/// catalogue". Deliberately not a valid tool name, so a remote tool can never
+/// be confused with it.
+const MCP_TOOLS_LIST_ROW: &str = "\u{0}mcp-tools-list";
+
+/// Budget for `/mcp test`: covers connect, `tools/list` and close.
+///
+/// The server's own `request_timeout_ms` may be `0` (deadline disabled), so the
+/// shell needs its own bound to keep the TUI thread out of a `block_on` that
+/// never returns.
+const MCP_TEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Extra time granted to a probe whose token was just cancelled, so the client
+/// can close its transport (and reap the child) instead of being dropped.
+const MCP_TEST_DRAIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Build the `(value, label, description)` rows of an interactive server
+/// picker: `name [transport] status · tools: N`.
+///
+/// Transport, status and tool count come from the runtime snapshot when the
+/// manager tracks the server; a server the manager has not seen yet falls back
+/// to its configured transport and `connecting` (enabled) or `disabled`.
+/// Disabled servers are listed too — they are what the enable/disable row is
+/// for.
+///
+/// Pure on purpose: the label shape and the fallbacks are unit-testable
+/// without a terminal or a live manager.
+fn mcp_server_options(
+    servers: &[aish_config::McpServerConfig],
+    snapshots: &[aish_mcp::ServerSnapshot],
+) -> Vec<(String, String, String)> {
+    servers
+        .iter()
+        .map(|server| {
+            let snapshot = snapshots.iter().find(|snap| snap.name == server.name);
+            let transport = snapshot.map(|snap| snap.transport.as_str()).unwrap_or(
+                if server.transport.is_empty() {
+                    "stdio"
+                } else {
+                    server.transport.as_str()
+                },
+            );
+            let status = snapshot
+                .map(|snap| snap.status.label())
+                .unwrap_or(if server.enabled {
+                    "connecting"
+                } else {
+                    "disabled"
+                });
+            let tools = snapshot.map(|snap| snap.tools.len()).unwrap_or(0);
+            let label = format!(
+                "{name} [{transport}] {status} · tools: {tools}",
+                name = server.name
+            );
+            let description = snapshot
+                .map(|snap| {
+                    format!(
+                        "trust: {trust} · side effects: {side}",
+                        trust = snap.trust.as_str(),
+                        side = snap.declared_side_effects.as_str()
+                    )
+                })
+                .unwrap_or_default();
+            (server.name.clone(), label, description)
+        })
+        .collect()
+}
+
+/// Whether `server` counts as on, which decides the direction of the menu's
+/// single enable/disable row: a tracked snapshot that is not `disabled`
+/// decides, otherwise the config's own `enabled` flag does.
+///
+/// Pure like [`mcp_server_options`], so the toggle direction is unit-testable.
+fn mcp_server_is_on(
+    servers: &[aish_config::McpServerConfig],
+    snapshots: &[aish_mcp::ServerSnapshot],
+    server: &str,
+) -> bool {
+    if let Some(snapshot) = snapshots.iter().find(|snapshot| snapshot.name == server) {
+        return !matches!(snapshot.status, aish_mcp::ServerStatus::Disabled);
+    }
+    servers
+        .iter()
+        .find(|entry| entry.name == server)
+        .map(|entry| entry.enabled)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod mcp_server_options_tests {
+    use super::*;
+
+    fn server(name: &str, enabled: bool, transport: &str) -> aish_config::McpServerConfig {
+        aish_config::McpServerConfig {
+            name: name.to_string(),
+            transport: transport.to_string(),
+            enabled,
+            ..Default::default()
+        }
+    }
+
+    fn snapshot(
+        name: &str,
+        status: aish_mcp::ServerStatus,
+        tools: usize,
+    ) -> aish_mcp::ServerSnapshot {
+        aish_mcp::ServerSnapshot {
+            name: name.to_string(),
+            transport: aish_mcp::TransportKind::Stdio,
+            endpoint: "stdio".to_string(),
+            status,
+            trust: aish_mcp::TrustLevel::Ask,
+            declared_side_effects: aish_mcp::SideEffects::Read,
+            tools: (0..tools)
+                .map(|index| aish_mcp::ToolSummary {
+                    name: format!("tool{index}"),
+                    description: None,
+                    side_effects: aish_mcp::SideEffects::Read,
+                    required: Vec::new(),
+                })
+                .collect(),
+            instructions: false,
+        }
+    }
+
+    #[test]
+    fn lists_every_configured_server_including_disabled() {
+        let servers = vec![server("on", true, "stdio"), server("off", false, "http")];
+        let values: Vec<String> = mcp_server_options(&servers, &[])
+            .into_iter()
+            .map(|(value, _, _)| value)
+            .collect();
+        assert_eq!(values, vec!["on", "off"]);
+    }
+
+    #[test]
+    fn label_carries_transport_status_and_tool_count() {
+        let servers = vec![server("fs", true, "stdio")];
+        let snapshots = vec![snapshot(
+            "fs",
+            aish_mcp::ServerStatus::Connected {
+                protocol_version: "2024-11-05".to_string(),
+                tool_count: 2,
+            },
+            2,
+        )];
+        let options = mcp_server_options(&servers, &snapshots);
+        assert_eq!(options.len(), 1);
+        let (value, label, description) = &options[0];
+        assert_eq!(value, "fs");
+        assert_eq!(label, "fs [stdio] connected · tools: 2");
+        assert_eq!(description, "trust: ask · side effects: read");
+    }
+
+    #[test]
+    fn server_without_snapshot_falls_back_to_config_transport() {
+        let servers = vec![
+            server("coming", true, "stdio"),
+            server("off", false, "http"),
+            server("defaulted", true, ""),
+        ];
+        let options = mcp_server_options(&servers, &[]);
+        let labels: Vec<&str> = options.iter().map(|(_, label, _)| label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "coming [stdio] connecting · tools: 0",
+                "off [http] disabled · tools: 0",
+                "defaulted [stdio] connecting · tools: 0",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_servers_yields_no_options() {
+        assert!(mcp_server_options(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn toggle_direction_follows_snapshot_then_config() {
+        let servers = vec![
+            server("live", true, "stdio"),
+            server("down", true, "stdio"),
+            server("configured", true, "stdio"),
+            server("off", false, "stdio"),
+        ];
+        let snapshots = vec![
+            snapshot("live", aish_mcp::ServerStatus::Connecting, 0),
+            snapshot("down", aish_mcp::ServerStatus::Disabled, 0),
+            snapshot(
+                "missing",
+                aish_mcp::ServerStatus::Failed {
+                    reason: "nope".to_string(),
+                },
+                0,
+            ),
+        ];
+        // A tracked snapshot wins: connecting counts as on, disabled as off.
+        assert!(mcp_server_is_on(&servers, &snapshots, "live"));
+        assert!(!mcp_server_is_on(&servers, &snapshots, "down"));
+        // Untracked: the config's own `enabled` flag decides.
+        assert!(mcp_server_is_on(&servers, &snapshots, "configured"));
+        assert!(!mcp_server_is_on(&servers, &snapshots, "off"));
+        assert!(!mcp_server_is_on(&servers, &snapshots, "unknown"));
     }
 }
 
@@ -707,6 +1017,20 @@ pub struct AishShell {
     /// startup summary is displayed; committed to disk on the first real
     /// user command so transient launches do not swallow the notes.
     pending_changelog_marker: Option<String>,
+    /// MCP client manager. `None` when the `mcp:` section is inactive
+    /// (disabled or no enabled server) or when the shell session is a
+    /// restricted one that must not expose MCP tools.
+    mcp_manager: Option<std::sync::Arc<aish_mcp::McpManager>>,
+    /// Handle of the shell's tokio runtime, stored in [`AishShell::run`] so
+    /// `/mcp reload` and `/mcp reconnect` can drive async manager calls
+    /// without owning a runtime of their own.
+    mcp_runtime: Option<tokio::runtime::Handle>,
+    /// Names of the MCP gateway tools this shell registered. A reconfiguration
+    /// unregisters exactly these and leaves every other tool untouched.
+    mcp_tool_names: std::collections::HashSet<String>,
+    /// Live MCP server names for `/mcp <sub> <server>` completion, shared with
+    /// the completion engine and refreshed after every reconfiguration.
+    mcp_completion_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl AishShell {
@@ -1338,6 +1662,52 @@ impl AishShell {
             )));
             tool_registry.register(Box::new(aish_tools::SkillTrustTool));
         }
+
+        // MCP client: resolve the `mcp:` section, surface config warnings once
+        // at startup, then register one gateway tool per enabled server. These
+        // are only registered for the main session — restricted SSH-followup /
+        // channel sessions build their own reduced tool sets and must stay
+        // MCP-free.
+        let mut mcp_manager: Option<std::sync::Arc<aish_mcp::McpManager>> = None;
+        // Names of the gateway tools registered below, so a later `/mcp`
+        // reconfiguration can unregister exactly those and rebuild them.
+        let mut mcp_tool_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        {
+            let (mcp_settings, warnings) = aish_mcp::resolve_settings(&config.mcp);
+            for warning in &warnings {
+                let mut args = std::collections::HashMap::new();
+                args.insert("warning".to_string(), warning.clone());
+                println!("{}", t_with_args("shell.mcp.config_warning", &args));
+            }
+            if !mcp_settings.is_inactive() {
+                let existing_names: std::collections::HashSet<String> = tool_registry
+                    .tool_names()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let manager = aish_mcp::McpManager::new(mcp_settings);
+                for tool in aish_mcp::gateway_tools(&manager) {
+                    let name = tool.name().to_string();
+                    if existing_names.contains(&name) {
+                        tracing::warn!(
+                            "MCP gateway tool `{name}` collides with an existing tool; skipping"
+                        );
+                        continue;
+                    }
+                    mcp_tool_names.insert(name);
+                    tool_registry.register(tool);
+                }
+                mcp_manager = Some(manager);
+            }
+        }
+
+        // Server names offered by `/mcp <sub> <server>` completion: whatever
+        // the runtime knows, plus everything in the config so a name completes
+        // before its server connected and after it was disabled.
+        let mcp_completion_names = std::sync::Arc::new(std::sync::Mutex::new(
+            collect_mcp_completion_names(mcp_manager.as_ref(), &config.mcp),
+        ));
 
         let tools: Vec<(String, Box<dyn aish_llm::Tool>)> = tool_registry.drain_tools();
         for (_name, tool) in tools {
@@ -2406,6 +2776,10 @@ impl AishShell {
             expand_history,
             resource_monitor: crate::resource_monitor::Monitor::new(resource_thresholds),
             pending_changelog_marker,
+            mcp_manager,
+            mcp_runtime: None,
+            mcp_tool_names,
+            mcp_completion_names,
             last_resource_check: None,
             shared_recorder,
             inline_ai: None,
@@ -2479,9 +2853,25 @@ impl AishShell {
     pub fn run(&mut self) -> aish_core::Result<()> {
         let runtime = tokio::runtime::Runtime::new()?;
 
+        // MCP: connect servers on the shell's runtime in the background, and
+        // remember the handle so `/mcp reload|reconnect` can block on it.
+        if let Some(manager) = self.mcp_manager.clone() {
+            manager.start(runtime.handle());
+        }
+        self.mcp_runtime = Some(runtime.handle().clone());
+
+        // With a live runtime, re-sync the MCP tool set: servers configured
+        // with `expose: tools` get their per-tool schemas here (the catalogue
+        // is fetched with a short bounded wait), and everything else stays as
+        // registered during construction.
+        if self.mcp_manager.is_some() {
+            self.sync_mcp_tools();
+        }
+
         // Set up SIGTERM handler for graceful shutdown
         let sigterm_exit = Arc::new(AtomicBool::new(false));
         let sigterm_flag = sigterm_exit.clone();
+        let mcp_for_sigterm = self.mcp_manager.clone();
         runtime.spawn(async move {
             let mut sigterm_stream =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
@@ -2490,6 +2880,12 @@ impl AishShell {
                 };
             sigterm_stream.recv().await;
             sigterm_flag.store(true, Ordering::SeqCst);
+            // Best-effort: close MCP connections and kill child processes
+            // before the process exits. Runs in the background so the signal
+            // handler never blocks.
+            if let Some(manager) = mcp_for_sigterm {
+                manager.shutdown().await;
+            }
         });
         // omp-style async update check: fire-and-forget, never blocks startup.
         let update_notice = Arc::new(parking_lot::Mutex::new(
@@ -2549,6 +2945,7 @@ impl AishShell {
         // Initialize readline with history, tab completion, and line editing
         let mut rl = ShellReadline::new(
             self.pty.clone(),
+            self.mcp_completion_names.clone(),
             autosuggest,
             inline_ai,
             self.config.history_size,
@@ -3418,6 +3815,13 @@ impl AishShell {
         }
 
         drop(rl);
+
+        // Close MCP connections and kill child processes before exiting. The
+        // manager bounds the wait, so a wedged server cannot hang shutdown.
+        if let Some(manager) = &self.mcp_manager {
+            runtime.block_on(manager.shutdown());
+        }
+
         self.shutdown();
 
         Ok(())
@@ -3901,6 +4305,7 @@ impl AishShell {
             Some("/doctor") => self.handle_doctor_command(&parts),
             Some("/diagnose") => self.handle_failure_diagnose_command(),
             Some("/status") => self.handle_status_command(),
+            Some("/mcp") => self.handle_mcp_command(&parts),
             Some("/live_sessions") => self.handle_live_sessions_command(),
             Some("/kill_live_sessions") => self.handle_kill_live_sessions_command(&parts),
             Some("/undo") => {
@@ -7067,6 +7472,1172 @@ impl AishShell {
         )
         .into_iter()
         .for_each(|l| println!("{}", l));
+
+        // One-line MCP summary, shown only when the client is configured.
+        if let Some(manager) = &self.mcp_manager {
+            if let Some(line) = aish_mcp::render_summary_line(manager) {
+                println!("{}", line);
+            }
+        }
+    }
+
+    /// Handle `/mcp <subcommand>`, dispatched through
+    /// [`aish_mcp::parse_command`] so the flag surface has exactly one
+    /// definition (the same one `aish_mcp` tests).
+    ///
+    /// `/mcp` with no argument and `/mcp list` are aliases of `/mcp status`.
+    /// Unlike the read-only commands, `add`/`remove`/`enable`/`disable`/`trust`
+    /// also work when no manager exists yet — that is the point: the first
+    /// server can only be added from here.
+    fn handle_mcp_command(&mut self, parts: &[&str]) {
+        let args: Vec<&str> = parts.iter().skip(1).copied().collect();
+        let command = match aish_mcp::parse_command(&args) {
+            Ok(command) => command,
+            Err(error) => {
+                self.report_mcp_parse_error(&args, &error);
+                return;
+            }
+        };
+
+        match command {
+            aish_mcp::McpCommand::Status => {
+                self.print_mcp_status();
+                // Bare `/mcp` (no subcommand) continues into the interactive
+                // menu; an explicit `status`/`list` stays a plain report so
+                // scripts and copied output keep working.
+                if args.is_empty() {
+                    let manager = self.mcp_manager.clone();
+                    self.mcp_menu(manager.as_ref());
+                }
+            }
+            aish_mcp::McpCommand::Help => println!("{}", t("shell.mcp.help")),
+            aish_mcp::McpCommand::Tools { server } => self.print_mcp_tools(server.as_deref()),
+            aish_mcp::McpCommand::Tool { server, tool } => {
+                self.print_mcp_tool_detail(&server, &tool)
+            }
+            aish_mcp::McpCommand::Add(args) => {
+                // Nothing named and nothing pointed at: run the wizard.
+                let wizard = args.name.is_none() && args.command.is_empty() && args.url.is_none();
+                let args = if wizard {
+                    match self.run_mcp_add_wizard() {
+                        Some(args) => args,
+                        None => {
+                            println!("{}", t("shell.mcp.add_cancelled"));
+                            return;
+                        }
+                    }
+                } else {
+                    args
+                };
+                self.apply_mcp_add(args);
+            }
+            aish_mcp::McpCommand::Remove { name } => self.apply_mcp_remove(&name),
+            aish_mcp::McpCommand::Enable { name } => self.apply_mcp_enabled(&name, true),
+            aish_mcp::McpCommand::Disable { name } => self.apply_mcp_enabled(&name, false),
+            aish_mcp::McpCommand::Trust {
+                server,
+                tool,
+                level,
+            } => self.apply_mcp_trust(&server, &tool, level),
+            aish_mcp::McpCommand::Test { name } => self.run_mcp_test(&name),
+            aish_mcp::McpCommand::Reload => match self.mcp_manager.clone() {
+                Some(manager) => self.run_mcp_reload(&manager),
+                None => self.print_mcp_inactive_hint(),
+            },
+            aish_mcp::McpCommand::Reconnect { name } => match self.mcp_manager.clone() {
+                Some(manager) => self.run_mcp_reconnect(&manager, Some(&name)),
+                None => println!("{}", t("shell.mcp.runtime_unavailable")),
+            },
+            aish_mcp::McpCommand::Unknown(sub) => {
+                print_mcp_line("shell.mcp.unknown_subcommand", &[("sub", sub)]);
+                println!("{}", t("shell.mcp.help"));
+            }
+        }
+    }
+
+    /// Report a malformed `/mcp` invocation.
+    ///
+    /// `parse_command` returns short technical messages; map them onto the few
+    /// user-facing shapes: a missing name, a bad `add` flag, a bad `trust`
+    /// level, and anything else plus the command list.
+    fn report_mcp_parse_error(&self, args: &[&str], error: &str) {
+        let sub = args.first().copied().unwrap_or("");
+        if error.contains("requires") || error.contains("takes exactly one") {
+            print_mcp_line("shell.mcp.missing_server_arg", &[("sub", sub.to_string())]);
+        } else if sub.eq_ignore_ascii_case("add") {
+            print_mcp_line("shell.mcp.add_failed", &[("error", error.to_string())]);
+        } else if sub.eq_ignore_ascii_case("trust") {
+            print_mcp_line("shell.mcp.trust_failed", &[("error", error.to_string())]);
+        } else {
+            print_mcp_line("shell.mcp.unknown_subcommand", &[("sub", sub.to_string())]);
+            println!("{}", t("shell.mcp.help"));
+        }
+    }
+
+    /// Print the "nothing to do here" hint for a command that needs a live
+    /// manager: which of the two cases applies (nothing configured vs.
+    /// configured but inactive) is what tells the user which knob to turn.
+    fn print_mcp_inactive_hint(&self) {
+        let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
+        if settings.servers.is_empty() {
+            println!("{}", t("shell.mcp.no_servers"));
+            println!("{}", t("shell.mcp.help_hint"));
+        } else {
+            println!("{}", t("shell.mcp.disabled_hint"));
+        }
+    }
+
+    /// `/mcp status` / `/mcp list`: one block per configured server followed by
+    /// a summary line. Endpoints are already redacted by the manager; no
+    /// credential ever reaches this output.
+    fn print_mcp_status(&self) {
+        let Some(manager) = self.mcp_manager.clone() else {
+            self.print_mcp_inactive_hint();
+            return;
+        };
+        for line in aish_mcp::render_status(&manager) {
+            println!("{line}");
+        }
+        if let Some(line) = aish_mcp::render_summary_line(&manager) {
+            println!("{line}");
+        }
+        let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
+        if settings.servers.is_empty() {
+            println!("{}", t("shell.mcp.help_hint"));
+        }
+    }
+
+    /// `/mcp tools [server]`: list the tools one server advertised — or, with
+    /// no server, every server that is currently running.
+    fn print_mcp_tools(&self, server: Option<&str>) {
+        let Some(manager) = self.mcp_manager.clone() else {
+            self.print_mcp_inactive_hint();
+            return;
+        };
+        match server {
+            Some(server) => {
+                self.wait_for_mcp_catalogue(&manager, server);
+                match aish_mcp::render_server_tools(&manager, server) {
+                    Some(lines) => {
+                        for line in lines {
+                            println!("{line}");
+                        }
+                    }
+                    None => print_mcp_line(
+                        "shell.mcp.unknown_server",
+                        &[("server", server.to_string())],
+                    ),
+                }
+            }
+            None => {
+                let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
+                if settings.servers.is_empty() {
+                    println!("{}", t("shell.mcp.no_servers"));
+                    return;
+                }
+                let names: Vec<String> = manager
+                    .snapshots()
+                    .into_iter()
+                    .map(|snapshot| snapshot.name)
+                    .collect();
+                if names.is_empty() {
+                    println!("{}", t("shell.mcp.disabled_hint"));
+                    return;
+                }
+                for name in names {
+                    self.wait_for_mcp_catalogue(&manager, &name);
+                    if let Some(lines) = aish_mcp::render_server_tools(&manager, &name) {
+                        for line in lines {
+                            println!("{line}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `/mcp tool <server> <tool>`: everything the trust model knows about one
+    /// tool, so the user can see whether a call would prompt *before* making it.
+    fn print_mcp_tool_detail(&self, server: &str, tool: &str) {
+        let Some(manager) = self.mcp_manager.clone() else {
+            let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
+            if settings.server(server).is_none() {
+                print_mcp_line(
+                    "shell.mcp.unknown_server",
+                    &[("server", server.to_string())],
+                );
+            } else {
+                println!("{}", t("shell.mcp.runtime_unavailable"));
+            }
+            return;
+        };
+        let Some(settings) = manager.server(server) else {
+            print_mcp_line(
+                "shell.mcp.unknown_server",
+                &[("server", server.to_string())],
+            );
+            return;
+        };
+
+        self.wait_for_mcp_catalogue(&manager, server);
+        let definitions = manager.cached_tools(server).unwrap_or_default();
+        let Some(definition) = definitions
+            .into_iter()
+            .find(|definition| definition.name == tool)
+        else {
+            print_mcp_line(
+                "shell.mcp.tool_unknown",
+                &[("server", server.to_string()), ("tool", tool.to_string())],
+            );
+            return;
+        };
+
+        print_mcp_line(
+            "shell.mcp.tool_detail_header",
+            &[("server", server.to_string()), ("tool", tool.to_string())],
+        );
+        print_mcp_line(
+            "shell.mcp.tool_detail_description",
+            &[(
+                "description",
+                definition.description.clone().unwrap_or_default(),
+            )],
+        );
+
+        // The trust verdict is what the approval path would decide for a call
+        // right now: declared scope combined with what the server reported,
+        // then evaluated against the effective trust level.
+        let declared = settings.side_effects;
+        let reported = aish_mcp::reported_side_effects(&definition.annotations);
+        let effective = aish_mcp::combine_side_effects(declared, reported);
+        print_mcp_line(
+            "shell.mcp.tool_detail_side_effects",
+            &[
+                ("declared", declared.as_str().to_string()),
+                (
+                    "reported",
+                    reported
+                        .map(|effects| effects.as_str())
+                        .unwrap_or("none")
+                        .to_string(),
+                ),
+                ("effective", effective.as_str().to_string()),
+            ],
+        );
+
+        let trust = settings.effective_trust(tool);
+        let verdict = match aish_mcp::evaluate_call_trust(trust, effective) {
+            aish_mcp::TrustDecision::Allow => t("shell.mcp.verdict_allow"),
+            aish_mcp::TrustDecision::Confirm => t("shell.mcp.verdict_confirm"),
+            aish_mcp::TrustDecision::Block => t("shell.mcp.verdict_block"),
+        };
+        print_mcp_line(
+            "shell.mcp.tool_detail_trust",
+            &[("trust", trust.as_str().to_string()), ("verdict", verdict)],
+        );
+
+        let schema = definition
+            .input_schema
+            .as_ref()
+            .and_then(|schema| serde_json::to_string_pretty(schema).ok())
+            .unwrap_or_else(|| "{}".to_string());
+        let (schema, _truncated) =
+            aish_mcp::types::truncate_utf8(&schema, MCP_TOOL_SCHEMA_MAX_BYTES);
+        print_mcp_line("shell.mcp.tool_detail_schema", &[("schema", schema)]);
+    }
+
+    /// Give a connecting server a short bounded window to finish its handshake
+    /// so `/mcp tools` issued right after startup (or right after an `enable`)
+    /// sees a real catalogue instead of a bare `connecting` line.
+    fn wait_for_mcp_catalogue(&self, manager: &std::sync::Arc<aish_mcp::McpManager>, server: &str) {
+        if let Some(runtime) = &self.mcp_runtime {
+            runtime.block_on(async {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    manager.cached_or_fetch_tools(server, None),
+                )
+                .await;
+            });
+        }
+    }
+
+    /// `/mcp add ...` (quick-add or wizard): stage the entry, write it, then
+    /// bring the server and its gateway tool up.
+    fn apply_mcp_add(&mut self, args: aish_mcp::AddArgs) {
+        let mut staging = self.config.mcp.clone();
+        let entry = match aish_mcp::add_to_config(&mut staging, &args) {
+            Ok(entry) => entry,
+            Err(error) => {
+                print_mcp_line("shell.mcp.add_failed", &[("error", error)]);
+                return;
+            }
+        };
+        let previous = std::mem::replace(&mut self.config.mcp, staging);
+        if let Err(error) = self.commit_mcp_config(previous) {
+            print_mcp_line("shell.mcp.config_write_failed", &[("error", error)]);
+            return;
+        }
+        print_mcp_line(
+            "shell.mcp.added",
+            &[
+                ("server", entry.name.clone()),
+                ("transport", entry.transport.clone()),
+                ("status", self.mcp_status_label(&entry.name)),
+            ],
+        );
+    }
+
+    /// `/mcp add` with no arguments: collect a server definition step by step.
+    /// Returns `None` when the user cancels any step.
+    fn run_mcp_add_wizard(&self) -> Option<aish_mcp::AddArgs> {
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+
+        // Never accept an empty name: re-ask until the user types one or
+        // cancels the prompt.
+        let name = loop {
+            let value = prompt_edit_value(&t("shell.mcp.add.name_prompt"), "", "", false)?;
+            if !value.is_empty() {
+                break value;
+            }
+        };
+        let mut args = aish_mcp::AddArgs {
+            name: Some(name),
+            ..Default::default()
+        };
+
+        // Option labels are the config values themselves (`stdio`/`http`,
+        // `ask`/`allow`/`block`, `read`/`network`/`write`/`unknown`), matching
+        // how `/setting` presents its enumerations.
+        let transport = match show_selection_dialog(
+            &t("shell.mcp.add.transport_title"),
+            &t("shell.mcp.add.transport_question"),
+            &[
+                DialogOption::new("stdio", "stdio"),
+                DialogOption::new("http", "http"),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) if value == "stdio" => aish_mcp::TransportKind::Stdio,
+            DialogResult::Selected(value) if value == "http" => aish_mcp::TransportKind::Http,
+            _ => return None,
+        };
+
+        match transport {
+            aish_mcp::TransportKind::Stdio => {
+                let command = prompt_edit_value(&t("shell.mcp.add.command_prompt"), "", "", false)?;
+                if command.is_empty() {
+                    return None;
+                }
+                let extra = prompt_edit_optional(&t("shell.mcp.add.args_prompt"), "")?;
+                let mut parts = vec![command];
+                parts.extend(extra.split_whitespace().map(str::to_string));
+                args.command = parts;
+            }
+            aish_mcp::TransportKind::Http => {
+                let url = prompt_edit_value(&t("shell.mcp.add.url_prompt"), "", "", false)?;
+                if url.is_empty() {
+                    return None;
+                }
+                let token = prompt_edit_optional(&t("shell.mcp.add.token_prompt"), "")?;
+                args.url = Some(url);
+                if !token.is_empty() {
+                    args.token = Some(token);
+                }
+            }
+        }
+        args.transport = Some(transport);
+
+        args.trust = match show_selection_dialog(
+            &t("shell.mcp.add.trust_title"),
+            &t("shell.mcp.add.trust_question"),
+            &[
+                DialogOption::new("ask", "ask"),
+                DialogOption::new("allow", "allow"),
+                DialogOption::new("block", "block"),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) => aish_mcp::TrustLevel::parse(&value),
+            _ => None,
+        };
+        args.trust?;
+
+        // Exposure is picked before the side effects because it is the other
+        // half of "how this server shows up": `gateway` (one discovery tool)
+        // or `tools` (one tool per remote tool).
+        args.expose = match show_selection_dialog(
+            &t("shell.mcp.add.expose_title"),
+            &t("shell.mcp.add.expose_question"),
+            &[
+                DialogOption::new("gateway", "gateway"),
+                DialogOption::new("tools", "tools"),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) => aish_mcp::ExposeMode::parse(&value),
+            _ => None,
+        };
+        args.expose?;
+
+        args.side_effects = match show_selection_dialog(
+            &t("shell.mcp.add.side_effects_title"),
+            &t("shell.mcp.add.side_effects_question"),
+            &[
+                DialogOption::new("read", "read"),
+                DialogOption::new("network", "network"),
+                DialogOption::new("write", "write"),
+                DialogOption::new("unknown", "unknown"),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) => aish_mcp::SideEffects::parse(&value),
+            _ => None,
+        };
+        args.side_effects?;
+
+        // The summary labels are the `mcp.servers` key names, so the text the
+        // user confirms matches what lands in the config file.
+        let target = match transport {
+            aish_mcp::TransportKind::Stdio => args.command.join(" "),
+            aish_mcp::TransportKind::Http => args.url.clone().unwrap_or_default(),
+        };
+        let summary = format!(
+            "{name}\n{transport}: {target}\ntrust: {trust}\nexpose: {expose}\nside_effects: {side_effects}",
+            name = args.name.as_deref().unwrap_or_default(),
+            transport = transport.as_str(),
+            trust = args.trust.map(|level| level.as_str()).unwrap_or("ask"),
+            expose = args.expose.map(|mode| mode.as_str()).unwrap_or("gateway"),
+            side_effects = args
+                .side_effects
+                .map(|effects| effects.as_str())
+                .unwrap_or("unknown"),
+        );
+        let question = t_with_args("shell.mcp.add.confirm_summary", &{
+            let mut map = std::collections::HashMap::new();
+            map.insert("summary".to_string(), summary);
+            map
+        });
+
+        match show_selection_dialog(
+            &t("shell.mcp.add.confirm_title"),
+            &question,
+            &[
+                DialogOption::new("yes", t("shell.mcp.add.confirm_yes")),
+                DialogOption::new("no", t("shell.mcp.add.confirm_no")),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) if value == "yes" => Some(args),
+            _ => None,
+        }
+    }
+
+    /// Bare `/mcp`: pick one action from a panel, run it, and return.
+    ///
+    /// Every action that needs a server or a tool then walks its own panel
+    /// (`mcp_pick_server` / `mcp_pick_tools_row` / `mcp_pick_tool` /
+    /// `mcp_pick_trust_level`), so a user never types a name or a flag. The
+    /// menu does not loop: one action per `/mcp`, which keeps the panels
+    /// sequential (one panel exits before the next opens) and avoids nesting an
+    /// async wait inside a panel.
+    ///
+    /// The top menu has nine rows so each one is reachable with the panel's
+    /// 1-9 quick select; `Esc` leaves it (`shell.mcp.menu_cancelled`).
+    ///
+    /// `manager` is the runtime handle cloned by the caller, so the panels
+    /// never hold a borrow of `self` across a config mutation.
+    ///
+    /// A cancelled panel (`Esc`) changes nothing and returns.
+    fn mcp_menu(&mut self, manager: Option<&std::sync::Arc<aish_mcp::McpManager>>) {
+        // Exactly nine rows, so every row is reachable with the panel's 1-9
+        // quick select. `tools` and `toggle` carry the rows that would have
+        // needed a tenth and an eleventh.
+        // A manager that exists but has no configured server (everything was
+        // removed, or MCP is disabled) is the same dead end for every other
+        // action, so the menu collapses to the wizard.
+        let nothing_configured = manager
+            .map(|manager| manager.settings().servers.is_empty())
+            .unwrap_or(true);
+        let options: Vec<(String, String, String)> = if manager.is_none() || nothing_configured {
+            // Without a live manager only the wizard can do anything — and the
+            // first server is created by it, never by hand-editing config.yaml.
+            // The empty/inactive hints were already printed by
+            // `print_mcp_status`; `Esc` leaves the menu.
+            vec![("add".to_string(), t("shell.mcp.menu_add"), String::new())]
+        } else {
+            [
+                ("add", "shell.mcp.menu_add"),
+                ("tools", "shell.mcp.menu_tools"),
+                ("test", "shell.mcp.menu_test"),
+                ("trust", "shell.mcp.menu_trust"),
+                ("toggle", "shell.mcp.menu_toggle"),
+                ("reconnect", "shell.mcp.menu_reconnect"),
+                ("reload", "shell.mcp.menu_reload"),
+                ("remove", "shell.mcp.menu_remove"),
+                ("help", "shell.mcp.menu_help"),
+            ]
+            .into_iter()
+            .map(|(value, key)| (value.to_string(), t(key), String::new()))
+            .collect()
+        };
+
+        let Some(action) = pick_menu_with_question(
+            &t("shell.mcp.menu_title"),
+            &t("shell.mcp.menu_question"),
+            &options,
+        ) else {
+            println!("{}", t("shell.mcp.menu_cancelled"));
+            return;
+        };
+
+        match action.as_str() {
+            // Same wizard as `/mcp add`, so the two entry points never drift.
+            "add" => match self.run_mcp_add_wizard() {
+                Some(args) => self.apply_mcp_add(args),
+                None => println!("{}", t("shell.mcp.add_cancelled")),
+            },
+            // One panel: "list the whole catalogue" first, then one row per
+            // tool whose choice prints the `/mcp tool` detail.
+            "tools" => {
+                let Some(manager) = manager else { return };
+                let Some(server) = self.mcp_pick_server(
+                    Some(manager),
+                    MCP_PICK_SERVER_TITLE,
+                    MCP_PICK_SERVER_QUESTION,
+                ) else {
+                    return;
+                };
+                let Some(choice) = self.mcp_pick_tools_row(manager, &server) else {
+                    return;
+                };
+                if choice == MCP_TOOLS_LIST_ROW {
+                    self.print_mcp_tools(Some(&server));
+                } else {
+                    self.print_mcp_tool_detail(&server, &choice);
+                }
+            }
+            "test" => {
+                if let Some(server) =
+                    self.mcp_pick_server(manager, MCP_PICK_SERVER_TITLE, MCP_PICK_SERVER_QUESTION)
+                {
+                    self.run_mcp_test(&server);
+                }
+            }
+            "trust" => {
+                let Some(manager) = manager else { return };
+                let Some(server) = self.mcp_pick_server(
+                    Some(manager),
+                    MCP_PICK_SERVER_TITLE,
+                    MCP_PICK_SERVER_QUESTION,
+                ) else {
+                    return;
+                };
+                let Some(tool) = self.mcp_pick_tool(manager, &server) else {
+                    return;
+                };
+                let Some(level) = Self::mcp_pick_trust_level() else {
+                    return;
+                };
+                self.apply_mcp_trust(&server, &tool, level);
+            }
+            // One row instead of two: the runtime state decides the direction.
+            "toggle" => {
+                let Some(server) =
+                    self.mcp_pick_server(manager, MCP_PICK_SERVER_TITLE, MCP_PICK_SERVER_QUESTION)
+                else {
+                    return;
+                };
+                let enabled = !mcp_server_is_on(
+                    &self.config.mcp.servers,
+                    &manager
+                        .map(|manager| manager.snapshots())
+                        .unwrap_or_default(),
+                    &server,
+                );
+                self.apply_mcp_enabled(&server, enabled);
+            }
+            "reconnect" => {
+                let Some(manager) = manager else { return };
+                if let Some(server) = self.mcp_pick_server(
+                    Some(manager),
+                    MCP_PICK_SERVER_TITLE,
+                    MCP_PICK_SERVER_QUESTION,
+                ) {
+                    self.run_mcp_reconnect(manager, Some(&server));
+                }
+            }
+            "reload" => match manager {
+                Some(manager) => self.run_mcp_reload(manager),
+                None => self.print_mcp_inactive_hint(),
+            },
+            "remove" => {
+                let Some(server) =
+                    self.mcp_pick_server(manager, MCP_PICK_SERVER_TITLE, MCP_PICK_SERVER_QUESTION)
+                else {
+                    return;
+                };
+                if !Self::mcp_confirm_remove(&server) {
+                    return;
+                }
+                self.apply_mcp_remove(&server);
+            }
+            "help" => println!("{}", t("shell.mcp.help")),
+            _ => {}
+        }
+    }
+
+    /// Ask for a trust level (`ask`/`allow`/`block`) — the menu's `trust`
+    /// action shares the wizard's vocabulary.
+    fn mcp_pick_trust_level() -> Option<aish_mcp::TrustLevel> {
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+
+        match show_selection_dialog(
+            &t("shell.mcp.pick_level_title"),
+            &t("shell.mcp.pick_level_question"),
+            &[
+                DialogOption::new("ask", "ask"),
+                DialogOption::new("allow", "allow"),
+                DialogOption::new("block", "block"),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) => aish_mcp::TrustLevel::parse(&value),
+            _ => None,
+        }
+    }
+
+    /// Confirm a destructive menu action. `false` on cancel.
+    fn mcp_confirm_remove(server: &str) -> bool {
+        use crate::tui::{show_selection_dialog, DialogOption, DialogResult};
+
+        let question = t_with_args("shell.mcp.menu_remove_confirm_question", &{
+            let mut map = std::collections::HashMap::new();
+            map.insert("server".to_string(), server.to_string());
+            map
+        });
+        match show_selection_dialog(
+            &t("shell.mcp.menu_remove_confirm_title"),
+            &question,
+            &[
+                DialogOption::new("yes", t("shell.mcp.menu_remove_confirm_yes")),
+                DialogOption::new("no", t("shell.mcp.menu_remove_confirm_no")),
+            ],
+            false,
+            true,
+        ) {
+            DialogResult::Selected(value) if value == "yes" => true,
+            _ => false,
+        }
+    }
+
+    /// Pick one server, from every configured one (disabled rows included —
+    /// they are what the enable/disable row acts on).
+    ///
+    /// Labels come from [`mcp_server_options`]: `name [transport] status ·
+    /// tools: N`. Returns `None` when nothing is configured or the user
+    /// cancels.
+    fn mcp_pick_server(
+        &self,
+        manager: Option<&std::sync::Arc<aish_mcp::McpManager>>,
+        title_key: &str,
+        question_key: &str,
+    ) -> Option<String> {
+        let snapshots = manager
+            .map(|manager| manager.snapshots())
+            .unwrap_or_default();
+        let options = mcp_server_options(&self.config.mcp.servers, &snapshots);
+        if options.is_empty() {
+            println!("{}", t("shell.mcp.no_servers"));
+            println!("{}", t("shell.mcp.help_hint"));
+            return None;
+        }
+        pick_menu_with_question(&t(title_key), &t(question_key), &options)
+    }
+
+    /// Tools picker for the menu's `tools` action: row 1 lists the whole
+    /// catalogue, the remaining rows are one tool each, and picking a tool is
+    /// exactly what `/mcp tool <server> <tool>` prints.
+    ///
+    /// Returns [`MCP_TOOLS_LIST_ROW`] for row 1, otherwise the chosen tool
+    /// name; `None` when the user cancels. A server with no catalogue still
+    /// gets row 1, so the "no tools" line stays reachable.
+    fn mcp_pick_tools_row(
+        &self,
+        manager: &std::sync::Arc<aish_mcp::McpManager>,
+        server: &str,
+    ) -> Option<String> {
+        self.wait_for_mcp_catalogue(manager, server);
+        let tools = manager.cached_tools(server).unwrap_or_default();
+        let mut options: Vec<(String, String, String)> = vec![(
+            MCP_TOOLS_LIST_ROW.to_string(),
+            t("shell.mcp.menu_tools_list"),
+            String::new(),
+        )];
+        for tool in &tools {
+            options.push((
+                tool.name.clone(),
+                tool.name.clone(),
+                tool.description.clone().unwrap_or_default(),
+            ));
+        }
+        pick_menu_with_question(
+            &t("shell.mcp.pick_tool_title"),
+            &t("shell.mcp.pick_tool_question"),
+            &options,
+        )
+    }
+
+    /// Trust picker for one server: `*` (the whole server) first, then one row
+    /// per advertised tool. Returns the chosen tool name or `*`, and `None`
+    /// when the user cancels.
+    fn mcp_pick_tool(
+        &self,
+        manager: &std::sync::Arc<aish_mcp::McpManager>,
+        server: &str,
+    ) -> Option<String> {
+        self.wait_for_mcp_catalogue(manager, server);
+        let tools = manager.cached_tools(server).unwrap_or_default();
+        let mut options: Vec<(String, String, String)> = vec![(
+            aish_mcp::ANY_TOOL.to_string(),
+            t("shell.mcp.pick_tool_any"),
+            String::new(),
+        )];
+        for tool in &tools {
+            options.push((
+                tool.name.clone(),
+                tool.name.clone(),
+                tool.description.clone().unwrap_or_default(),
+            ));
+        }
+        pick_menu_with_question(
+            &t("shell.mcp.pick_tool_title"),
+            &t("shell.mcp.pick_tool_question"),
+            &options,
+        )
+    }
+
+    /// `/mcp remove <name>` (and the menu's remove action): drop a server from
+    /// the config, the runtime and the tool table.
+    fn apply_mcp_remove(&mut self, name: &str) {
+        let mut staging = self.config.mcp.clone();
+        if let Err(error) = aish_mcp::remove_from_config(&mut staging, name) {
+            print_mcp_line("shell.mcp.remove_failed", &[("error", error)]);
+            return;
+        }
+        let previous = std::mem::replace(&mut self.config.mcp, staging);
+        if let Err(error) = self.commit_mcp_config(previous) {
+            print_mcp_line("shell.mcp.config_write_failed", &[("error", error)]);
+            return;
+        }
+        print_mcp_line("shell.mcp.removed", &[("server", name.to_string())]);
+    }
+
+    /// `/mcp enable|disable <name>` (and the menu's enable/disable actions):
+    /// flip one server's `enabled` flag and make the runtime and the tool table
+    /// follow immediately.
+    fn apply_mcp_enabled(&mut self, name: &str, enabled: bool) {
+        let already = self
+            .config
+            .mcp
+            .servers
+            .iter()
+            .find(|server| server.name == name)
+            .map(|server| server.enabled == enabled)
+            .unwrap_or(false);
+        if already {
+            if enabled {
+                print_mcp_line("shell.mcp.already_enabled", &[("server", name.to_string())]);
+            } else {
+                print_mcp_line(
+                    "shell.mcp.already_disabled",
+                    &[("server", name.to_string())],
+                );
+            }
+            return;
+        }
+
+        let mut staging = self.config.mcp.clone();
+        if let Err(error) = aish_mcp::set_enabled_in_config(&mut staging, name, enabled) {
+            print_mcp_line("shell.mcp.toggle_failed", &[("error", error)]);
+            return;
+        }
+        let previous = std::mem::replace(&mut self.config.mcp, staging);
+        if let Err(error) = self.commit_mcp_config(previous) {
+            print_mcp_line("shell.mcp.config_write_failed", &[("error", error)]);
+            return;
+        }
+        if enabled {
+            print_mcp_line(
+                "shell.mcp.enabled",
+                &[
+                    ("server", name.to_string()),
+                    ("status", self.mcp_status_label(name)),
+                ],
+            );
+        } else {
+            print_mcp_line("shell.mcp.disabled", &[("server", name.to_string())]);
+        }
+    }
+
+    /// `/mcp trust <server> <tool|*> <ask|allow|block>` (and the menu's trust
+    /// action): change the trust policy and re-register the server's gateway
+    /// tool, which captured the previous settings when it was built.
+    fn apply_mcp_trust(&mut self, server: &str, tool: &str, level: aish_mcp::TrustLevel) {
+        let mut staging = self.config.mcp.clone();
+        if let Err(error) = aish_mcp::set_trust_in_config(&mut staging, server, tool, level) {
+            print_mcp_line("shell.mcp.trust_failed", &[("error", error)]);
+            return;
+        }
+        let previous = std::mem::replace(&mut self.config.mcp, staging);
+        if let Err(error) = self.commit_mcp_config(previous) {
+            print_mcp_line("shell.mcp.config_write_failed", &[("error", error)]);
+            return;
+        }
+        print_mcp_line(
+            "shell.mcp.trust_updated",
+            &[
+                ("server", server.to_string()),
+                ("tool", tool.to_string()),
+                ("level", level.as_str().to_string()),
+            ],
+        );
+    }
+
+    /// `/mcp test <name>`: a read-only connection test driven straight from the
+    /// config. It never touches the manager or the tool table, so a server can
+    /// be probed before it is enabled.
+    fn run_mcp_test(&mut self, name: &str) {
+        let Some(runtime) = self.mcp_runtime.clone() else {
+            println!("{}", t("shell.mcp.runtime_unavailable"));
+            return;
+        };
+        let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
+        let Some(server) = settings.server(name).cloned() else {
+            print_mcp_line("shell.mcp.unknown_server", &[("server", name.to_string())]);
+            return;
+        };
+
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string))
+            .unwrap_or_default();
+        let outcome = runtime.block_on(async {
+            // One budget covers the whole probe: connecting, listing and
+            // closing. On expiry the token is cancelled *and* the probe task
+            // keeps running for a short grace period, so the client tears its
+            // transport (and the child process) down itself instead of being
+            // dropped mid-handshake. `request_timeout_ms: 0` disables the
+            // transport's own deadline, so this outer bound is what keeps the
+            // TUI thread from blocking forever.
+            let token = std::sync::Arc::new(aish_llm::CancellationToken::new());
+            let cancel = aish_mcp::CancelListener::new(token.clone());
+            let transport = server.transport;
+            let server = server.clone();
+            let cwd = cwd.clone();
+            let mut probe = tokio::spawn(async move {
+                let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
+                let options = aish_mcp::ConnectOptions {
+                    roots: vec![cwd],
+                    cancel: Some(cancel.clone()),
+                    events,
+                };
+                let connection = aish_mcp::client::connect(&server, options).await?;
+                let version = connection.server_info().version.clone();
+                let tools = connection.list_tools(Some(cancel)).await;
+                connection.close().await;
+                tools.map(|tools| (version, tools))
+            });
+
+            match tokio::time::timeout(MCP_TEST_BUDGET, &mut probe).await {
+                Ok(Ok(Ok(result))) => Ok(result),
+                Ok(Ok(Err(error))) => Err(McpTestFailure::Error(error)),
+                Ok(Err(join_error)) => Err(McpTestFailure::Error(aish_mcp::McpError::eof(
+                    name,
+                    transport,
+                    format!("the connection probe stopped: {join_error}"),
+                ))),
+                Err(_) => {
+                    token.cancel();
+                    match tokio::time::timeout(MCP_TEST_DRAIN, &mut probe).await {
+                        Ok(Ok(Ok(result))) => Ok(result),
+                        _ => {
+                            probe.abort();
+                            Err(McpTestFailure::Timeout)
+                        }
+                    }
+                }
+            }
+        });
+
+        match outcome {
+            Ok((version, tools)) => {
+                print_mcp_line(
+                    "shell.mcp.test_ok",
+                    &[
+                        ("server", name.to_string()),
+                        ("version", version),
+                        ("tools", tools.len().to_string()),
+                    ],
+                );
+                for tool in tools.iter().take(10) {
+                    print_mcp_line(
+                        "shell.mcp.test_tool_line",
+                        &[
+                            ("name", tool.name.clone()),
+                            ("description", tool.description.clone().unwrap_or_default()),
+                        ],
+                    );
+                }
+            }
+            Err(failure) => {
+                let (error, tip) = match &failure {
+                    McpTestFailure::Timeout => {
+                        ("timeout".to_string(), Some("shell.mcp.test_tip_timeout"))
+                    }
+                    McpTestFailure::Error(error) => (error.describe(), mcp_test_tip(error)),
+                };
+                print_mcp_line(
+                    "shell.mcp.test_failed",
+                    &[("server", name.to_string()), ("error", error)],
+                );
+                if let Some(tip) = tip {
+                    println!("{}", t(tip));
+                }
+            }
+        }
+    }
+
+    /// Write the staged `mcp` section to disk, then align the runtime and the
+    /// tool table with it.
+    ///
+    /// On a write failure the previous section is restored, so the in-memory
+    /// config never diverges from the file on disk.
+    fn commit_mcp_config(&mut self, previous: aish_config::McpConfig) -> Result<(), String> {
+        if let Err(error) = self.persist_mcp_config() {
+            self.config.mcp = previous;
+            return Err(error);
+        }
+        self.sync_mcp_tools();
+        Ok(())
+    }
+
+    /// Write the current in-memory `mcp` section back to `config.yaml`.
+    ///
+    /// Uses the raw-document editor so key order is preserved, and merges the
+    /// typed section into the document instead of replacing it
+    /// ([`aish_mcp::commands::merge_into_document`]): a key the typed config does
+    /// not model — a user extension inside `mcp:`, a hand-added key on one
+    /// server entry — is left alone, while only the fields this shell owns
+    /// (`enabled`, the timeouts, the `servers` list) are written. Servers are
+    /// joined by name, so `remove` still drops its entry. The write itself is
+    /// atomic (temp file + rename, permissions preserved). Comments are not
+    /// preserved — the YAML is re-serialized.
+    fn persist_mcp_config(&self) -> Result<(), String> {
+        let path = aish_config::ConfigLoader::default_config_path();
+        let mcp = self.config.mcp.clone();
+        aish_config::ConfigLoader::update_raw(&path, |document| {
+            aish_mcp::commands::merge_into_document(document, &mcp)
+                .map_err(aish_core::AishError::Config)
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    /// Align the runtime and the LLM tool table with the in-memory `mcp` config.
+    ///
+    /// Runs after every `/mcp` edit: it starts a manager the first time an
+    /// enabled server appears, pushes the new settings into the running
+    /// manager, then rebuilds the MCP gateway tools so an add, remove, enable,
+    /// disable or trust change takes effect without a restart.
+    ///
+    /// The rebuild is idempotent and cheap: one ~200 byte tool per enabled
+    /// server, and only the names this shell registered are unregistered, so a
+    /// builtin is never touched.
+    fn sync_mcp_tools(&mut self) {
+        let (settings, _) = aish_mcp::resolve_settings(&self.config.mcp);
+
+        if self.mcp_manager.is_none() && !settings.is_inactive() {
+            let manager = aish_mcp::McpManager::new(settings.clone());
+            match &self.mcp_runtime {
+                Some(handle) => manager.start(handle),
+                None => println!("{}", t("shell.mcp.runtime_unavailable")),
+            }
+            self.mcp_manager = Some(manager);
+        }
+
+        if let Some(manager) = self.mcp_manager.clone() {
+            if let Some(runtime) = self.mcp_runtime.clone() {
+                let _ = runtime.block_on(manager.apply_settings(settings.clone()));
+            }
+        }
+
+        for name in std::mem::take(&mut self.mcp_tool_names) {
+            self.ai_handler.unregister_tool(&name);
+        }
+        if let Some(manager) = self.mcp_manager.clone() {
+            let servers: Vec<aish_mcp::ServerSettings> = if settings.enabled {
+                settings.enabled_servers().cloned().collect()
+            } else {
+                // The master switch is off: no gateway tool may stay exposed,
+                // even for a server whose own `enabled` flag is true.
+                Vec::new()
+            };
+            for server in &servers {
+                let runtime: std::sync::Arc<dyn aish_mcp::McpRuntime> = manager.clone();
+                let mut tools: Vec<Box<dyn aish_llm::Tool>> = Vec::new();
+
+                // `expose: tools`: put the real schemas in the request so the
+                // model can call a remote tool directly. The catalogue may
+                // still be in flight, so wait a short, bounded time; a server
+                // that is not ready keeps only its gateway tool until the next
+                // `/mcp reload`.
+                if self.mcp_exposes_tools(&server.name) {
+                    if let Some(handle) = self.mcp_runtime.clone() {
+                        let catalogue = handle.block_on(async {
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(3),
+                                manager.cached_or_fetch_tools(&server.name, None),
+                            )
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                        });
+                        if let Some(catalogue) = catalogue {
+                            tools.extend(aish_mcp::direct_tools(
+                                runtime.clone(),
+                                server,
+                                &catalogue,
+                            ));
+                        }
+                    }
+                }
+
+                tools.extend(aish_mcp::gateway_tools_with(
+                    runtime,
+                    std::slice::from_ref(server),
+                ));
+
+                for tool in tools {
+                    let name = tool.name().to_string();
+                    if self.ai_handler.has_tool(&name) {
+                        tracing::warn!(
+                            tool = %name,
+                            "MCP tool collides with an existing tool; skipping"
+                        );
+                        continue;
+                    }
+                    self.ai_handler.register_tool(tool);
+                    self.mcp_tool_names.insert(name);
+                }
+            }
+        }
+
+        self.refresh_mcp_completion_names();
+    }
+
+    /// Whether this server opted into per-tool exposure (`expose: tools`).
+    fn mcp_exposes_tools(&self, server: &str) -> bool {
+        self.config
+            .mcp
+            .servers
+            .iter()
+            .find(|entry| entry.name == server)
+            .and_then(|entry| aish_mcp::ExposeMode::parse(&entry.expose))
+            .unwrap_or(aish_mcp::ExposeMode::Gateway)
+            == aish_mcp::ExposeMode::Tools
+    }
+
+    /// Refresh the shared `/mcp` server-name list used by tab completion.
+    fn refresh_mcp_completion_names(&self) {
+        let names = collect_mcp_completion_names(self.mcp_manager.as_ref(), &self.config.mcp);
+        if let Ok(mut slot) = self.mcp_completion_names.lock() {
+            *slot = names;
+        }
+    }
+
+    /// Status label of a server after a change: its manager snapshot when the
+    /// runtime already tracks it, otherwise `connecting` (a freshly enabled
+    /// server is already on its way up).
+    fn mcp_status_label(&self, server: &str) -> String {
+        if let Some(manager) = &self.mcp_manager {
+            if let Some(snapshot) = manager
+                .snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.name == server)
+            {
+                return snapshot.status.label().to_string();
+            }
+        }
+        "connecting".to_string()
+    }
+
+    /// `/mcp reload`: reconnect every server from the current config. Reports
+    /// each failure; prints a success line only when every server reconnected.
+    fn run_mcp_reload(&mut self, manager: &std::sync::Arc<aish_mcp::McpManager>) {
+        let Some(runtime) = self.mcp_runtime.clone() else {
+            println!("{}", t("shell.mcp.runtime_unavailable"));
+            return;
+        };
+        println!("{}", t("shell.mcp.reload_header"));
+        let failures = runtime.block_on(manager.reload());
+        for (server, err) in &failures {
+            let mut args = std::collections::HashMap::new();
+            args.insert("server".to_string(), server.clone());
+            args.insert("reason".to_string(), err.describe());
+            println!("{}", t_with_args("shell.mcp.reconnect_failed", &args));
+        }
+        if failures.is_empty() {
+            println!("{}", t("shell.mcp.reload_done"));
+        }
+        // Reconnects re-read every catalogue: refresh the exposed tool set so
+        // `expose: tools` servers pick up added or removed remote tools.
+        self.sync_mcp_tools();
+    }
+
+    /// `/mcp reconnect <server>`: reconnect one server and report the outcome.
+    fn run_mcp_reconnect(
+        &mut self,
+        manager: &std::sync::Arc<aish_mcp::McpManager>,
+        server: Option<&str>,
+    ) {
+        let Some(server) = server else {
+            println!("{}", t("shell.mcp.help"));
+            return;
+        };
+        let Some(runtime) = self.mcp_runtime.clone() else {
+            println!("{}", t("shell.mcp.runtime_unavailable"));
+            return;
+        };
+
+        let mut start_args = std::collections::HashMap::new();
+        start_args.insert("server".to_string(), server.to_string());
+        println!(
+            "{}",
+            t_with_args("shell.mcp.reconnect_started", &start_args)
+        );
+
+        let server_name = server.to_string();
+        match runtime.block_on(manager.reconnect(&server_name)) {
+            Ok(()) => {
+                let mut args = std::collections::HashMap::new();
+                args.insert("server".to_string(), server_name);
+                println!("{}", t_with_args("shell.mcp.reconnect_done", &args));
+            }
+            Err(err) => {
+                let mut args = std::collections::HashMap::new();
+                args.insert("server".to_string(), server_name);
+                args.insert("reason".to_string(), err.describe());
+                println!("{}", t_with_args("shell.mcp.reconnect_failed", &args));
+            }
+        }
+        // A reconnect re-reads that server's catalogue: keep `expose: tools`
+        // in sync with what the server actually offers now.
+        self.sync_mcp_tools();
     }
 
     fn select_recent_session(&mut self) {
@@ -13586,6 +15157,8 @@ mod audit_export_tests {
             user_choice: None,
             matched_rule: None,
             risk_level: None,
+            duration_ms: None,
+            outcome: None,
         }];
 
         // Write events.jsonl

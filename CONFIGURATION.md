@@ -169,6 +169,147 @@ context_auto_compact:
   max_consecutive_failures: 3
 ```
 
+#### mcp
+
+MCP (Model Context Protocol) 客户端配置，用于接入外部 MCP server 提供的工具。协议版本 `2025-11-25`。`enabled` 为总开关；未配置任何 `servers` 时该小节无副作用。单条 server 的解析失败只会产生启动警告，不会阻止 shell 启动。
+
+顶层字段：
+
+| 字段 | 类型 | 默认值 | 描述 | 验证规则 |
+|------|------|--------|------|----------|
+| `enabled` | boolean | `true` | 是否启用 MCP 客户端（无 `servers` 时无副作用） | true/false |
+| `request_timeout_ms` | integer | `30000` | 默认单请求超时（毫秒），`0` 表示禁用客户端超时 | 值 >= 0 |
+| `max_output_bytes` | integer | `65536` | 单次工具调用返回内容在截断前的默认字节上限 | 值 > 0 |
+| `servers` | list | `[]` | MCP server 列表 | 每项见下表 |
+
+`servers` 列表项字段：
+
+| 字段 | 类型 | 默认值 | 描述 | 验证规则 |
+|------|------|--------|------|----------|
+| `name` | string | 无 | server 唯一名称，同时决定 gateway 工具名 `mcp__<name>`（会做小写化与字符清洗） | 不能为空，重复名称会被忽略并告警 |
+| `transport` | string | `stdio` | 传输方式，`stdio` 或 `http`；空值等价 `stdio` | `stdio`\|`http`（`streamable-http` 视为 `http`） |
+| `enabled` | boolean | `true` | 是否启动该 server | true/false |
+| `command` | string/null | `null` | `stdio` 传输要启动的可执行文件 | `stdio` 时必填，否则该 server 被忽略 |
+| `args` | list[string] | `[]` | 传给 `command` 的参数 | 可选 |
+| `env` | map[string, string] | `{}` | `stdio` 子进程的额外环境变量，值支持 `${VAR}` 展开 | 可选；未设置变量展开为空串并告警 |
+| `cwd` | string/null | `null` | `stdio` 子进程的工作目录 | 可选 |
+| `url` | string/null | `null` | `http` 传输的端点地址 | `http` 时必填，否则该 server 被忽略 |
+| `headers` | map[string, string] | `{}` | `http` 请求的额外头，值支持 `${VAR}` 展开 | 可选；未设置变量展开为空串并告警 |
+| `request_timeout_ms` | integer/null | `null` | 该 server 的单请求超时（毫秒）；`null` 继承顶层，`0` 禁用超时 | 值 >= 0 |
+| `trust` | string | `ask` | 默认信任级别；空值等价 `ask` | `ask`\|`allow`\|`block` |
+| `side_effects` | string | `unknown` | 声明的副作用范围；空值等价 `unknown` | `read`\|`network`\|`write`\|`unknown` |
+| `tools` | map[string, string] | `{}` | 按工具名覆盖信任级别 | 每项 value 为 `ask`\|`allow`\|`block` |
+| `max_output_bytes` | integer/null | `null` | 该 server 单次调用返回内容的字节上限；`null` 继承顶层 | 值 > 0 |
+| `expose` | string | `gateway` | 工具暴露方式：`gateway` = 只注册一个 `mcp__<server>` 网关工具（按需发现，默认）；`tools` = 额外为每个远端工具注册 `mcp__<server>_<tool>`（带真实 schema，启动时最多等待 3s 拉取目录） | `gateway`\|`tools` |
+
+示例：
+
+```yaml
+mcp:
+  enabled: true
+  request_timeout_ms: 30000
+  max_output_bytes: 65536
+  servers:
+    # stdio server：本地文件系统
+    - name: fs
+      transport: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env:
+        LOG_LEVEL: debug
+      cwd: /tmp
+      trust: ask
+      side_effects: read
+      tools:
+        read_file: allow
+        write_file: block
+      max_output_bytes: 262144
+      expose: gateway            # 或 tools：把每个工具的 schema 直接暴露给模型
+
+    # http server：远程 GitHub
+    - name: github
+      transport: http
+      url: https://api.example.com/mcp
+      headers:
+        Authorization: "Bearer ${GITHUB_TOKEN}"
+      request_timeout_ms: 15000
+      trust: ask
+      side_effects: network
+```
+
+#### /mcp 命令、gateway 工具与信任模型
+
+`expose: tools` 时该 server 还会为每个远端工具注册一个 `mcp__<server>_<tool>`（真实 schema 进入请求，模型可直接调用；启动期最多等 3s 拉目录，未就绪时仍保留 gateway 工具，可 `/mcp reload` 重试）。默认 `expose: gateway` 下，MCP 工具不会在启动时注入提示词：每个启用的 server 只注册一个 gateway 工具 `mcp__<server>`（约 200 字节的静态 schema），模型按需通过 `action` 参数发现与调用工具，因此 server 的工具清单不会固化进上下文。若 server 的 `list` 结果变化，gateway 工具的系统提示片段随之刷新。
+
+`/mcp` 子命令：
+
+不带参数直接输入 `/mcp` 时会先打印状态，再弹出**九行交互菜单**（面板支持 1-9 数字快选）：添加 MCP server（向导）、工具、测试连接、设置信任、启用/禁用 server、重连 server、重载全部、移除 server、帮助。每行都会再弹出自己的选择面板：先选 server（选项显示为 `名字 [传输] 状态 · 工具数`），再按需选工具或信任级别（`ask`/`allow`/`block`）——「工具」行的首行是「工具列表」（打印该 server 的全部工具），其余行是各个工具，选中即打印 `/mcp tool` 的详情；「设置信任」行的首行是 `*`（整个 server）。「启用/禁用 server」是同一行：按运行时当前状态自动反向操作（启用中就禁用，否则启用）。全程不需要记忆或手敲任何参数，也不需要手改 config.yaml；`Esc` 直接退出菜单，任一步取消都不执行也不写盘。一个 server 都没配置时菜单只给「添加 MCP server（向导）」一行，添加过程逐步提问（名称、传输、命令或 URL、trust、expose、副作用）。需要脚本化或复制输出时，下面的显式子命令仍完全等价可用（`/mcp status`、`/mcp list` 不会弹菜单）。
+
+| 命令 | 说明 |
+|------|------|
+| `/mcp` | 打印状态，然后弹出交互菜单（见上）；`/mcp status`、`/mcp list` 只打印状态不弹菜单 |
+| `/mcp status`、`/mcp list` | 打印每个 server 的传输、连接状态、工具数、信任级别与声明副作用，末尾给出汇总行；未配置任何 server 时提示运行 `/mcp add` |
+| `/mcp help` | 显示全部子命令、quick-add 语法与信任模型说明 |
+| `/mcp tools [server]` | 列出某个 server 暴露的工具（名称、副作用、描述）；省略 server 时逐个 server 打印 |
+| `/mcp tool <server> <tool>` | 打印单个工具详情：描述、声明/上报/生效副作用、信任级别与判定（`verdict`，即现在调用会不会弹确认）、`inputSchema`（超过 4000 字节截断） |
+| `/mcp add` | 交互式向导（见下） |
+| `/mcp add <name> ...` | quick-add，一次写盘（见下） |
+| `/mcp remove <name>`、`/mcp rm <name>` | 删除 server |
+| `/mcp enable <name>` | 启用 server（立即连接） |
+| `/mcp disable <name>` | 禁用 server（注销其 gateway 工具） |
+| `/mcp trust <server> <tool\|*> <ask\|allow\|block>` | 设置单个工具（`*` 表示整个 server）的信任级别 |
+| `/mcp test <name>` | 只读连接测试：不改配置、不动运行中的 manager，连接一次、列出前 10 个工具后关闭；失败时给出提示 |
+| `/mcp reload` | 按当前配置重连所有 server，逐条报告失败 |
+| `/mcp reconnect <server>` | 重连单个 server |
+
+quick-add 示例：
+
+```bash
+/mcp add fs --side-effects read --trust allow -- npx -y @modelcontextprotocol/server-filesystem /tmp
+/mcp add remote --url https://api.example.com/mcp --token "$TOKEN" --side-effects network --expose tools
+```
+
+quick-add flag：`--transport stdio|http`、`--url <url>`、`--token <t>`（生成 `Authorization: Bearer <t>` 头）、`--trust ask|allow|block`、`--side-effects read|network|write|unknown`、`--timeout <ms>`、`--max-output <bytes>`、`--expose gateway|tools`（工具暴露方式，默认 `gateway`，见上表 `expose` 字段）、`--env KEY=VALUE`、`--header KEY=VALUE`；stdio server 用 `-- <command> [args...]` 传命令行（`--url` 与 `-- <command>` 互斥）。
+
+`/mcp add` 不带参数时进入向导，按顺序询问：名称 → 传输方式（stdio 问命令与可选参数；http 问 URL 与可选 token）→ 信任级别（`ask`/`allow`/`block`）→ 工具暴露方式 `expose`（`gateway`/`tools`）→ 声明副作用（`read`/`network`/`write`/`unknown`）→ 确认（显示名字、transport、命令或 URL、trust、expose、副作用）。任一步取消都不会写盘。
+
+未配置任何 server 时提示 `mcp.servers` 为空；已配置但 `enabled: false` 或没有启用的 server 时提示如何启用。shell 未提供 tokio runtime 时 `reload`/`reconnect`/`test` 不可用。`/mcp <子命令> <server>` 的 server 名支持 Tab 补全，候选来自运行中的 manager 与配置文件名字的并集。
+
+变更立即生效：`add`/`remove`/`enable`/`disable`/`trust` 都先**原子重写 config.yaml**（临时文件 + rename；未知键保留，**注释不保留**），再热插拔运行中的 manager 与 gateway 工具——新启用的 server 立即注册工具，删除/禁用的 server 立即注销其工具，trust 变更立即重建该 server 的 gateway 工具（工具持有注册时抓取的设置快照），无需重启 shell。写盘失败会回滚内存配置并打印错误，磁盘与内存不会不一致。
+
+gateway 工具用法（每个 server 一个工具，通过 `action` 区分）：
+
+| `action` | 其他参数 | 作用 |
+|----------|----------|------|
+| `list` | 无 | 列出该 server 的工具（名称、副作用、描述） |
+| `describe` | `tool` | 返回该工具的 `inputSchema`，用于构造参数 |
+| `call` | `tool`、`arguments`（对象） | 调用工具并回传结果（受截断与审计规则约束） |
+
+信任模型（`trust` × 生效副作用）：
+
+| `trust` | 生效副作用 | 决策 |
+|---------|-----------|------|
+| `allow` | `read` | 免确认，自动执行 |
+| `allow` | `network` / `write` / `unknown` | 需要用户确认 |
+| `ask` | 任意 | 需要用户确认 |
+| `block` | 任意 | 直接拒绝 |
+
+生效副作用 = 用户声明的 `side_effects` 与 server 通过工具注解上报的副作用中更危险者；server 的自我声明只会收紧、不会放宽用户声明。每次批准仅对当次精确参数生效，参数变化需重新确认。
+
+判定基于**当前**注解：若客户端还没拿到该工具的注解、或目录已被 server 标记为过期（`notifications/tools/list_changed`），一律按 `unknown` 处理并要求确认——不会退回成「按用户声明放行」。会话内「本次批准并记住」的精确调用不再弹确认，但 `trust: block` 永远优先：先拒绝再考虑记忆。
+
+`${VAR}` 展开：`env` 与 `headers` 的值支持 `${VAR}` 引用进程环境变量；变量未设置时展开为空串并在启动时告警（避免把字面量凭据发给 server）。凭据（env 值、header 值、URL 查询串与 userinfo、`--token` 形式的 argv）不会出现在 `/mcp` 状态输出、日志或审计记录中；endpoint 展示时已脱敏。
+
+`/mcp` 的配置写入通过原始文档合并进行：只更新它负责的键（`mcp.enabled`、`mcp.request_timeout_ms`、`mcp.servers` 及按名字匹配的 server 条目），`mcp` 小节内的扩展键、每个 server 条目的未知键（例如未来版本新增的字段）以及其他小节都原样保留；写入是「临时文件 + rename」的原子替换，且会沿用原文件权限。
+
+传输层硬性约束（防恶意/异常 server）：
+
+- 单帧上限：stdio 的一行与 HTTP 响应体各 8 MiB，超出即按协议错误结束该请求/连接；SSE 单行另有 1 MiB 上限。这样 `max_output_bytes` 之外也不会被对端撑爆内存。
+- 握手超时：无论 `request_timeout_ms` 是否设为 `0`，连接握手本身都有 30 秒上限，避免卡死的 server 让客户端永久等待。
+- 重定向：HTTP 仅跟随**同源**（scheme + host + 端口）重定向，最多 5 跳；跨源重定向不跟随，直接按 HTTP 状态错误上报，避免把自定义头、`Mcp-Session-Id` 与请求体（含工具参数）发给第三方主机。
+- 取消：用户按 Esc（或超时）时客户端会向 server 发送 `notifications/cancelled`（尽力而为，不阻塞取消路径），并按进程组 SIGTERM → SIGKILL 回收 stdio 子进程（含 `npx`/`uvx` 这类启动器留下的孙进程）。
+- `/mcp test`：整体（连接 + 列工具 + 关闭）受 20 秒预算约束，超时先请求取消、再给 5 秒收尾，不会卡住 TUI 线程。
+
 ## terminal_resize_mode 说明
 
 - `full`：PTY 命令跟随终端 resize（命令运行中每 100 ms 检测一次，命令开始前也会同步）。默认值。

@@ -205,6 +205,7 @@ shell:
     memory: "Ver, verificar u olvidar memorias a largo plazo"
     compact: "Compactar el contexto de la IA ahora (texto de enfoque opcional)"
     instructions: "Alternar la carga de instrucciones AGENTS.md del proyecto (on/off/status; esta sesión)"
+    mcp: "Inspeccionar, recargar y reconectar servidores MCP y sus herramientas"
 
   slash_group:
     diagnostics: "Diagnóstico"
@@ -224,6 +225,138 @@ shell:
     undo_count: "{count} cambio(s) se pueden deshacer"
     plan_planning: "Planificando"
     plan_normal: "Normal"
+
+  mcp:
+    no_servers: "MCP: no hay servidores configurados. Añada una entrada `mcp.servers` a su configuración."
+    disabled_hint: "MCP está configurado pero inactivo. Establezca `mcp.enabled: true` y habilite al menos un servidor."
+    config_warning: "Advertencia de configuración de MCP: {warning}"
+    status_line: "{name} [{transport}] {status} · herramientas: {tools} · confianza: {trust} · efectos secundarios: {side_effects}"
+    endpoint: "  endpoint: {endpoint}"
+    failure: "  fallo: {reason}"
+    tool_line: "  {name} ({side_effects}) — {description}"
+    tools_header: "Herramientas expuestas por `{server}` ({count}):"
+    server_connecting: "`{server}` aún se está conectando; reinténtelo en un momento (`/mcp status` muestra el estado)."
+    unknown_server: "Servidor MCP desconocido: {server}"
+    no_tools: "El servidor MCP `{server}` no expone ninguna herramienta."
+    summary: "MCP: {connected}/{total} servidor(es) conectado(s), {tools} herramienta(s) disponible(s)."
+    runtime_unavailable: "El runtime de MCP aún no está disponible; reintente cuando el shell esté en ejecución."
+    reload_header: "Recargando servidores MCP..."
+    reload_done: "Servidores MCP recargados."
+    reconnect_started: "Reconectando el servidor MCP `{server}`..."
+    reconnect_done: "Servidor MCP `{server}` reconectado."
+    reconnect_failed: "El servidor MCP `{server}` falló: {reason}"
+    confirm_message: "El servidor MCP `{server}` quiere llamar a la herramienta `{tool}` (efectos secundarios declarados: {side_effects}).\nArgumentos: {args}"
+    blocked_message: "La política de MCP bloqueó la herramienta `{tool}` en el servidor `{server}`."
+    alternative_hint: "Apruebe una vez, o configure `trust: allow` junto con `side_effects: read` para el servidor `{server}` y las herramientas de solo lectura no volverán a preguntar."
+    invalid_action: "Acción MCP no válida; se esperaba una de: list, describe, call."
+    tool_required: "Se requiere un nombre de herramienta MCP para esta acción."
+    reason_server: "Llamada MCP al servidor `{server}`, herramienta `{tool}`"
+    reason_side_effects: "Efectos secundarios declarados `{declared}`; el servidor informó `{reported}`"
+    reason_arguments: "Argumentos: {args}"
+    reason_trust: "Nivel de confianza: {trust}"
+    call_failed: "La llamada MCP al servidor `{server}`, herramienta `{tool}` falló: {detail}"
+    needs_async: "Esta herramienta MCP necesita un runtime asíncrono; llámela desde el bucle de herramientas normal."
+    help_hint: "Ejecute `/mcp add` para configurar su primer servidor MCP."
+    unknown_subcommand: "Subcomando `/mcp` desconocido: {sub}"
+    missing_server_arg: "A `/mcp {sub}` le falta un argumento obligatorio (un nombre de servidor)."
+    config_write_failed: "No se pudo escribir config.yaml; el cambio se revirtió: {error}"
+    tool_detail_header: "Herramienta MCP `{server}`/`{tool}`"
+    tool_detail_description: "  descripción: {description}"
+    tool_detail_side_effects: "  efectos secundarios: declarados {declared} · informados {reported} · efectivos {effective}"
+    tool_detail_trust: "  confianza: {trust} → {verdict}"
+    tool_detail_schema: "  inputSchema:\n{schema}"
+    tool_unknown: "El servidor MCP `{server}` no expone ninguna herramienta llamada `{tool}`."
+    verdict_allow: "permitida sin preguntar"
+    verdict_confirm: "pide confirmación"
+    verdict_block: "bloqueada por la política"
+    add_cancelled: "Alta de servidor MCP cancelada; no se escribió nada."
+    added: "Servidor MCP `{server}` [{transport}] añadido ({status})."
+    add_failed: "No se pudo añadir el servidor MCP: {error}"
+    removed: "Servidor MCP `{server}` eliminado."
+    remove_failed: "No se pudo eliminar el servidor MCP: {error}"
+    enabled: "Servidor MCP `{server}` activado ({status})."
+    disabled: "Servidor MCP `{server}` desactivado; sus herramientas se dieron de baja."
+    already_enabled: "El servidor MCP `{server}` ya está activado."
+    already_disabled: "El servidor MCP `{server}` ya está desactivado."
+    toggle_failed: "No se pudo cambiar el estado del servidor MCP: {error}"
+    trust_updated: "Confianza de `{tool}` en `{server}` establecida en {level}."
+    trust_failed: "No se pudo establecer la confianza MCP: {error}"
+    test_ok: "Servidor MCP `{server}` correcto (versión {version}), {tools} herramienta(s) disponible(s)."
+    test_tool_line: "  {name} — {description}"
+    test_failed: "Falló la prueba del servidor MCP `{server}`: {error}"
+    test_tip_not_found: "Pista: no se pudo iniciar el comando — compruebe la ruta del ejecutable y que esté instalado."
+    test_tip_refused: "Pista: la conexión fue rechazada — ¿está el servidor en marcha y son correctos la URL y el puerto?"
+    test_tip_timeout: "Pista: el servidor no respondió a tiempo; pruebe `/mcp reconnect` o aumente `request_timeout_ms`."
+    test_tip_auth: "Pista: falló la autenticación — compruebe el token/header configurado para este servidor."
+    menu_title: "Menú de MCP"
+    menu_question: "¿Qué quieres hacer con MCP?"
+    menu_add: "Añadir un servidor MCP (asistente)"
+    menu_tools: "Herramientas"
+    menu_tools_list: "Listar todas las herramientas"
+    menu_test: "Probar la conexión"
+    menu_trust: "Definir la confianza"
+    menu_toggle: "Activar/desactivar un servidor"
+    menu_reconnect: "Reconectar un servidor"
+    menu_reload: "Recargar todos los servidores"
+    menu_remove: "Eliminar un servidor"
+    menu_help: "Ayuda"
+    menu_remove_confirm_title: "Eliminar servidor MCP"
+    menu_remove_confirm_question: "¿Eliminar el servidor MCP `{server}` y dar de baja sus herramientas?"
+    menu_remove_confirm_yes: "Sí, eliminar"
+    menu_remove_confirm_no: "No, cancelar"
+    pick_server_title: "Seleccionar servidor MCP"
+    pick_server_question: "¿Qué servidor?"
+    pick_tool_title: "Seleccionar herramienta MCP"
+    pick_tool_question: "¿Qué herramienta?"
+    pick_tool_any: "* (todas las herramientas)"
+    pick_level_title: "Nivel de confianza"
+    pick_level_question: "¿Cuánta confianza dar a las llamadas?"
+    menu_cancelled: "Menú de MCP cancelado; no se cambió nada."
+    add:
+      name_prompt: "Nombre del servidor"
+      transport_title: "Añadir servidor MCP"
+      transport_question: "¿Qué transporte usa este servidor?"
+      command_prompt: "Comando de inicio (p. ej. npx)"
+      args_prompt: "Argumentos adicionales, separados por espacios (opcional)"
+      url_prompt: "URL del servidor (p. ej. https://example.com/mcp)"
+      token_prompt: "Token Bearer (opcional; se guarda en la configuración)"
+      trust_title: "Nivel de confianza"
+      trust_question: "¿Cuánto se deben confiar las llamadas a este servidor?"
+      expose_title: "Exposición de herramientas"
+      expose_question: "¿Cómo deben exponerse las herramientas de este servidor al modelo?"
+      side_effects_title: "Efectos secundarios declarados"
+      side_effects_question: "¿Qué pueden hacer las herramientas de este servidor?"
+      confirm_title: "Confirmar nuevo servidor MCP"
+      confirm_summary: "¿Añadir este servidor?\n\n{summary}"
+      confirm_yes: "Sí, añadirlo"
+      confirm_no: "No, cancelar"
+    help: |-
+      `/mcp` sin argumentos abre un menú de nueve filas (1-9 para elegir y luego acción → servidor → herramienta); los subcomandos de abajo siguen siendo equivalentes.
+      Comandos del cliente MCP:
+        /mcp | /mcp status | /mcp list   Mostrar todos los servidores configurados
+        /mcp help                        Mostrar esta ayuda
+        /mcp tools [server]              Listar las herramientas de uno o de todos
+        /mcp tool <server> <tool>        Ver el esquema y el veredicto de confianza de una herramienta
+        /mcp add                         Asistente interactivo (nombre, transporte, confianza...)
+        /mcp add <name> -- <cmd> [args]  Alta rápida de un servidor stdio
+        /mcp add <name> --url <url>      Alta rápida de un servidor HTTP
+        /mcp remove | rm <name>          Eliminar un servidor
+        /mcp enable <name>               Activar un servidor (se conecta ahora)
+        /mcp disable <name>              Desactivar un servidor (da de baja sus herramientas)
+        /mcp trust <server> <tool|*> <ask|allow|block>
+                                         Fijar la confianza de una herramienta o de todo un servidor
+        /mcp test <name>                 Conectar una vez y listar las herramientas sin activarlo
+        /mcp reload                      Reconectar todos los servidores según la configuración
+        /mcp reconnect <server>          Reconectar un servidor
+      Opciones de alta rápida: --transport stdio|http, --url <url>, --token <t>, --trust ask|allow|block,
+        --side-effects read|network|write|unknown, --timeout <ms>, --max-output <bytes>,
+        --expose gateway|tools, --env KEY=VALUE, --header KEY=VALUE y `-- <command> [args...]` para stdio.
+      Cada cambio reescribe config.yaml de forma atómica (se conservan las claves desconocidas, no los comentarios) y surte efecto de inmediato.
+      Las gateway tools (una por servidor) aceptan un `action`:
+        action: "list"                        Listar las herramientas del servidor
+        action: "describe", tool: "<name>"    Describir una herramienta
+        action: "call", tool: "<name>", args: {...}   Llamar a una herramienta
+      Modelo de confianza: una llamada se aprueba automáticamente solo si el servidor es `trust: allow` y sus efectos secundarios efectivos son `read`; `unknown`/`write`/`network` siempre preguntan, y `trust: block` se rechaza de plano.
 
   feedback:
     select_type: "Seleccionar tipo de comentario"

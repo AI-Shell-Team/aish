@@ -1,0 +1,34 @@
+[package]
+name = "aish-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "MCP (Model Context Protocol) client for aish: stdio + Streamable HTTP transports, risk-gated tool exposure"
+
+[dependencies]
+aish-core = { workspace = true }
+aish-config = { workspace = true }
+aish-i18n = { workspace = true }
+aish-llm = { workspace = true }
+aish-security = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+
+[[bin]]
+name = "aish-mcp-fixture"
+path = "src/bin/mcp_fixture.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
