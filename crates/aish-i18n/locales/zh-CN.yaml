@@ -49,6 +49,7 @@ cli:
     http_error: "HTTP 客户端错误: {error}"
     check_failed: "检查更新失败: {error}"
     download_failed: "下载失败: {error}"
+    download_fallback: "GitHub 下载失败，改为从官网下载"
     file_create_failed: "创建文件失败: {error}"
     download_read_error: "下载读取错误: {error}"
     write_error: "写入错误: {error}"

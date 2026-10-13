@@ -1,6 +1,6 @@
 //! Startup update check (omp-style async notice).
 //!
-//! Probes `cdn.aishell.ai/download/latest` for a newer version on a background
+//! Probes `www.aishell.ai/repo/latest` for a newer version on a background
 //! thread. When one exists, the REPL prints a one-shot notice. Cache-backed
 //! (24h TTL) so a typical day triggers at most one network request, and silent
 //! on every failure — the probe never blocks or interrupts startup.
@@ -12,10 +12,10 @@ use aish_core::AishError;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-const LATEST_VERSION_URL: &str = "https://cdn.aishell.ai/download/latest";
+const DEFAULT_REPO_BASE_URL: &str = "https://www.aishell.ai/repo";
 /// How long a cached probe result stays valid.
 const CACHE_TTL_SECS: i64 = 24 * 3600;
-/// Hard cap on the network fetch so a slow CDN cannot stall the check.
+/// Hard cap on the network fetch so a slow host cannot stall the check.
 const FETCH_TIMEOUT_SECS: u64 = 5;
 
 /// Resolved update info ready to display.
@@ -82,10 +82,24 @@ pub fn probe_update(current: &str) -> Option<UpdateInfo> {
     newer.then_some(UpdateInfo { latest })
 }
 
+fn resolve_latest_version_url(latest_override: Option<&str>, repo_base: Option<&str>) -> String {
+    if let Some(url) = latest_override.map(str::trim).filter(|url| !url.is_empty()) {
+        return url.to_string();
+    }
+    let base = repo_base
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .unwrap_or(DEFAULT_REPO_BASE_URL)
+        .trim_end_matches('/');
+    format!("{base}/latest")
+}
+
 fn latest_version_url() -> String {
-    // Mirrors aish-cli's AISH_LATEST_URL override so tests/enterprise mirrors
-    // can point both the manual `aish update` and this startup probe at one host.
-    std::env::var("AISH_LATEST_URL").unwrap_or_else(|_| LATEST_VERSION_URL.to_string())
+    // Same overrides as `aish update`: AISH_LATEST_URL wins, otherwise the
+    // official-site repo base (AISH_REPO_BASE_URL, default www.aishell.ai/repo).
+    let latest = std::env::var("AISH_LATEST_URL").ok();
+    let repo_base = std::env::var("AISH_REPO_BASE_URL").ok();
+    resolve_latest_version_url(latest.as_deref(), repo_base.as_deref())
 }
 
 fn fetch_latest_tag() -> Result<String, AishError> {
@@ -193,6 +207,30 @@ mod tests {
     fn is_newer_garbage_is_false() {
         assert!(!is_newer("garbage", "0.3.4"));
         assert!(!is_newer("0.3.5", "garbage"));
+    }
+
+    #[test]
+    fn latest_version_url_defaults_to_official_site() {
+        assert_eq!(
+            resolve_latest_version_url(None, None),
+            "https://www.aishell.ai/repo/latest"
+        );
+    }
+
+    #[test]
+    fn latest_version_url_honors_overrides() {
+        assert_eq!(
+            resolve_latest_version_url(Some("https://mirror.example/latest"), None),
+            "https://mirror.example/latest"
+        );
+        assert_eq!(
+            resolve_latest_version_url(None, Some("https://mirror.example/repo/")),
+            "https://mirror.example/repo/latest"
+        );
+        assert_eq!(
+            resolve_latest_version_url(Some("  "), Some("https://mirror.example/repo")),
+            "https://mirror.example/repo/latest"
+        );
     }
 
     #[test]
