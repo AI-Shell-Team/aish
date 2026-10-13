@@ -199,6 +199,15 @@ impl SseDecoder {
                     next += 1;
                 }
             }
+            // A terminated line is still a line: enforce the cap here too, or a
+            // peer could send one over-long line per chunk and never hit the
+            // buffer check in `push`.
+            if terminator - start > MAX_SSE_LINE_BYTES {
+                self.overflowed = true;
+                self.state = EventState::default();
+                start = next;
+                continue;
+            }
             // Line endings are ASCII, so they can never cut a UTF-8 sequence.
             let line = String::from_utf8_lossy(&self.buffer[start..terminator]);
             if let Some(event) = self.state.push_line(&line) {
@@ -397,6 +406,22 @@ mod tests {
         assert!(decoder.push(&chunk).is_empty());
         assert!(!decoder.overflowed());
         assert_eq!(decoder.push(b"\ndata: ok\n\n"), vec![event("ok")]);
+    }
+
+    /// A single over-long line is flagged even when it *is* terminated, so a
+    /// peer cannot bypass the cap by always sending the newline.
+    #[test]
+    fn drops_a_terminated_line_longer_than_the_cap() {
+        let mut decoder = SseDecoder::new();
+        let mut chunk = vec![b'x'; MAX_SSE_LINE_BYTES + 1];
+        chunk.push(b'\n');
+        let events = decoder.push(&chunk);
+        assert!(decoder.overflowed());
+        assert!(events.is_empty());
+        assert!(
+            decoder.buffer.len() <= MAX_SSE_LINE_BYTES,
+            "the overlong line must not be retained"
+        );
     }
 
     /// The cap applies to one *line*: a chunk carrying many well-formed events

@@ -192,8 +192,8 @@ fn is_value_delimiter(byte: u8) -> bool {
 /// pulls the following token in as well, so `Bearer abc` is fully consumed.
 /// A quoted value is consumed up to its closing quote, so the JSON shape
 /// `"api_key": "sk-…"` masks the whole value (and not just its opening quote).
-fn skip_value(text: &str, bytes: &[u8], mut index: usize) -> usize {
-    let start = index;
+fn skip_value(text: &str, bytes: &[u8], index: usize) -> usize {
+    let mut index = index;
     while index < bytes.len() && bytes[index] == b' ' {
         index += 1;
     }
@@ -205,7 +205,10 @@ fn skip_value(text: &str, bytes: &[u8], mut index: usize) -> usize {
         index += 1;
         while index < bytes.len() {
             if bytes[index] == b'\\' {
-                index += 2;
+                // An escape (and the character it escapes) is part of the
+                // value; the advance stays inside the text even when the value
+                // is truncated right after a backslash.
+                index = (index + 2).min(bytes.len());
                 continue;
             }
             let byte = bytes[index];
@@ -216,11 +219,13 @@ fn skip_value(text: &str, bytes: &[u8], mut index: usize) -> usize {
         }
         return index;
     }
-    index = start;
+    // Unquoted: scan from the first non-space character, so `token= value`
+    // masks the value and not just the spaces in front of it.
+    let value_start = index;
     while index < bytes.len() && !is_value_delimiter(bytes[index]) {
         index += 1;
     }
-    let word = text[start..index].to_ascii_lowercase();
+    let word = text[value_start..index].to_ascii_lowercase();
     if word == "bearer" || word == "basic" {
         while index < bytes.len() && bytes[index] == b' ' {
             index += 1;
@@ -615,6 +620,26 @@ mod tests {
         // A quoted non-secret value is left alone.
         let plain = r#"{"model":"glm-4.7"}"#;
         assert_eq!(sanitize_diagnostic_text(plain), plain);
+    }
+
+    /// Truncated and space-separated values must still be masked (and must not
+    /// panic on a byte index past the end).
+    #[test]
+    fn masks_truncated_and_separated_values() {
+        // A value cut off right after a backslash: the escape advance stays
+        // inside the text.
+        let truncated = r#"{"api_key":"ab\"#;
+        let masked = sanitize_diagnostic_text(truncated);
+        assert!(!masked.contains("ab"), "{masked}");
+        assert!(masked.contains("[redacted]"), "{masked}");
+
+        // `token= value` masks the value, not just the space in front of it.
+        let spaced = sanitize_diagnostic_text("token= mycredential123");
+        assert!(!spaced.contains("mycredential123"), "{spaced}");
+
+        // A bearer scheme after a space-separated `=` is consumed as well.
+        let bearer = sanitize_diagnostic_text("token= Bearer abc.def");
+        assert!(!bearer.contains("abc.def"), "{bearer}");
     }
 
     /// `key`/`auth`/`sig` are credentials as whole words but not as substrings.
