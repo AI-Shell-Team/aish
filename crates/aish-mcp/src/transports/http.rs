@@ -280,6 +280,18 @@ impl Inner {
         )
     }
 
+    /// Failure for one SSE line that exceeded the decoder's cap.
+    fn oversized_sse_line(&self) -> McpError {
+        McpError::new(
+            &self.server,
+            TransportKind::Http,
+            McpFailureStage::Receive,
+            McpFailureClass::MalformedResponse,
+            false,
+            format!("SSE line exceeded {} bytes", crate::sse::MAX_SSE_LINE_BYTES),
+        )
+    }
+
     /// Send a request and resolve its JSON-RPC result.
     async fn post_request(&self, payload: &str, expected: u64) -> Result<Value, McpError> {
         let response = self.send_post(payload).await?;
@@ -348,22 +360,18 @@ impl Inner {
             if total > MAX_RESPONSE_BYTES {
                 return Err(self.oversized_body());
             }
-            for event in decoder.push(&chunk) {
+            let events = decoder.push(&chunk);
+            if decoder.overflowed() {
+                // One line exceeded the decoder's cap: report the real cause
+                // instead of the generic "no response" below, *before*
+                // consuming events from the same chunk — the decoder contract
+                // is that an oversized line fails the response.
+                return Err(self.oversized_sse_line());
+            }
+            for event in events {
                 if let Some(result) = self.consume_event(&event, Some(expected))? {
                     return Ok(result);
                 }
-            }
-            if decoder.overflowed() {
-                // One line exceeded the decoder's cap: report the real cause
-                // instead of the generic "no response" below.
-                return Err(McpError::new(
-                    &self.server,
-                    TransportKind::Http,
-                    McpFailureStage::Receive,
-                    McpFailureClass::MalformedResponse,
-                    false,
-                    format!("SSE line exceeded {} bytes", crate::sse::MAX_SSE_LINE_BYTES),
-                ));
             }
         }
         for event in decoder.finish() {
@@ -465,14 +473,15 @@ impl Inner {
             let Ok(chunk) = chunk else {
                 return;
             };
-            for event in decoder.push(&chunk) {
-                let _ = self.consume_event(&event, None);
-            }
+            let events = decoder.push(&chunk);
             if decoder.overflowed() {
                 // A peer that never terminates a line must not keep this
                 // background drain alive: the stream is malformed, so stop
-                // reading it.
+                // reading it without forwarding anything from this chunk.
                 return;
+            }
+            for event in events {
+                let _ = self.consume_event(&event, None);
             }
         }
         for event in decoder.finish() {
@@ -1211,6 +1220,34 @@ mod tests {
         assert_eq!(request.json_body()["method"], json!("tools/call"));
 
         transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn an_oversized_sse_line_fails_the_request_before_its_response() {
+        // The same chunk carries an over-long line *and* the answering frame:
+        // the cap must fail the request instead of returning that answer.
+        let server = FakeServer::start(vec![handler(|request| {
+            let id = request.json_body()["id"].to_string();
+            Reply::new(200, "OK", "text/event-stream", vec![format!(
+                "data: {}\n\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"ok\":true}}}}\n\n",
+                "x".repeat(crate::sse::MAX_SSE_LINE_BYTES + 1)
+            )])
+        })])
+        .await;
+        let (transport, _events) = test_transport(&server);
+
+        let error = transport
+            .request("tools/list", None, None)
+            .await
+            .expect_err("an over-long SSE line must fail the request");
+        assert_eq!(error.failure, McpFailureClass::MalformedResponse);
+        assert_eq!(error.stage, McpFailureStage::Receive);
+        assert!(
+            error.message.contains("SSE line exceeded"),
+            "unexpected message: {}",
+            error.message
+        );
+        let _ = server;
     }
 
     #[tokio::test]

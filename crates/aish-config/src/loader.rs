@@ -69,25 +69,16 @@ impl ConfigLoader {
                 // Persist the merged Value (not the typed ConfigModel)
                 // so unknown keys / user-extension fields / comments are
                 // preserved — migration is additive, not lossy.
+                //
+                // The same crash-safe writer as every other config write is
+                // used here on purpose: it carries the target's file mode onto
+                // the replacement, so migrating a config the user chmod'ed to
+                // 0600 cannot hand back a world-readable file with the API key
+                // in it.
                 let migrated = serde_yaml::to_string(&value).map_err(|e| {
                     AishError::Config(format!("failed to serialize migrated config: {e}"))
                 })?;
-                // Atomic replace: write to a temp file in the same
-                // directory then rename, so a crash mid-write cannot
-                // corrupt config.yaml.
-                let tmp_path = path.with_extension("yaml.tmp");
-                std::fs::write(&tmp_path, &migrated).map_err(|e| {
-                    AishError::Config(format!(
-                        "failed to write migrated temp {}: {e}",
-                        tmp_path.display()
-                    ))
-                })?;
-                std::fs::rename(&tmp_path, &path).map_err(|e| {
-                    AishError::Config(format!(
-                        "failed to atomically replace migrated {}: {e}",
-                        path.display()
-                    ))
-                })?;
+                Self::write_atomic(&path, &migrated)?;
                 debug!(path = %path.display(), "migrated config: added missing fields");
             }
             config
@@ -394,6 +385,23 @@ mod tests {
         assert!(on_disk.contains("model: glm-4.7"));
         assert!(on_disk.contains("api_key: secret"));
         assert!(on_disk.contains("enable_token_estimation: true"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_migration_keeps_the_file_mode() {
+        // The migration rewrite replaces the file, so it must go through the
+        // same mode-preserving writer as every other config write: a 0600
+        // config holds the API key and must not come back world-readable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\napi_key: secret\n").unwrap();
+        chmod(&path, 0o600);
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.model, "glm-4.7");
+        assert_eq!(mode_of(&path), 0o600, "migration must keep mode 600");
+        assert!(leftover_tmp_files(dir.path()).is_empty());
     }
 
     #[test]
