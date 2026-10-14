@@ -218,12 +218,49 @@ fn site_release_download_url(tag_name: &str, filename: &str) -> String {
     )
 }
 
-/// GitHub first, official site second. Matches the website installer.
-fn release_download_urls(tag_name: &str, filename: &str) -> [String; 2] {
-    [
+fn nonempty_env<F>(env_get: F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_get(key)
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Optional mirror. Stable prefers `AISH_DOWNLOAD_BASE_URL`, then `AISH_REPO_URL`.
+/// Beta uses `AISH_BETA_DOWNLOAD_BASE_URL`. The archive layout is the previous
+/// `{base}/releases/<version>/<file>` path.
+fn mirror_download_base_url<F>(include_pre_release: bool, env_get: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    if include_pre_release {
+        nonempty_env(env_get, "AISH_BETA_DOWNLOAD_BASE_URL")
+    } else {
+        nonempty_env(env_get, "AISH_DOWNLOAD_BASE_URL")
+            .or_else(|| nonempty_env(env_get, "AISH_REPO_URL"))
+    }
+}
+
+fn mirror_release_download_url(base: &str, tag_name: &str, filename: &str) -> String {
+    let version = tag_name.strip_prefix('v').unwrap_or(tag_name);
+    format!("{base}/releases/{version}/{filename}")
+}
+
+/// GitHub, then the official site, then a configured mirror.
+fn release_download_urls<F>(tag_name: &str, filename: &str, env_get: F) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    let mut urls = vec![
         github_release_download_url(tag_name, filename),
         site_release_download_url(tag_name, filename),
-    ]
+    ];
+    let version = tag_name.strip_prefix('v').unwrap_or(tag_name);
+    if let Some(base) = mirror_download_base_url(is_prerelease_version(version), env_get) {
+        urls.push(mirror_release_download_url(&base, tag_name, filename));
+    }
+    urls
 }
 
 fn normalize_tag(version_value: &str) -> Result<String, AishError> {
@@ -430,13 +467,18 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
     })?;
 
     let dest_path = temp_dir.join(&filename);
-    let urls = release_download_urls(tag_name, &filename);
+    let urls = release_download_urls(tag_name, &filename, get_env_var);
     let mut last_error = None;
     for (index, url) in urls.iter().enumerate() {
         if index > 0 {
             let _ = std::fs::remove_file(&dest_path);
             println!();
-            print_dim(&t("cli.update.download_fallback"));
+            let message = if index == 1 {
+                t("cli.update.download_fallback")
+            } else {
+                t("cli.update.download_mirror")
+            };
+            print_dim(&message);
         }
         let connect_timeout_secs = (index == 0).then_some(GITHUB_CONNECT_TIMEOUT_SECS);
         match download_with_progress(url, &dest_path, connect_timeout_secs) {
@@ -444,7 +486,7 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.expect("release download has two candidate URLs"))
+    Err(last_error.expect("release download has at least one candidate URL"))
 }
 
 // ---------------------------------------------------------------------------
@@ -962,7 +1004,7 @@ mod tests {
 
     #[test]
     fn test_release_download_urls_try_github_then_site() {
-        let urls = release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz");
+        let urls = release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |_| None);
 
         assert_eq!(
             urls[0],
@@ -976,7 +1018,11 @@ mod tests {
 
     #[test]
     fn test_release_download_urls_beta_uses_official_site() {
-        let urls = release_download_urls("v0.3.0-beta.3", "aish-0.3.0-beta.3-linux-amd64.tar.gz");
+        let urls = release_download_urls(
+            "v0.3.0-beta.3",
+            "aish-0.3.0-beta.3-linux-amd64.tar.gz",
+            |_| None,
+        );
 
         assert_eq!(
             urls[0],
@@ -985,6 +1031,57 @@ mod tests {
         assert_eq!(
             urls[1],
             "https://www.aishell.ai/repo/beta/v0.3.0-beta.3/aish-0.3.0-beta.3-linux-amd64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_release_download_urls_append_stable_mirror() {
+        let urls =
+            release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |key| match key {
+                "AISH_DOWNLOAD_BASE_URL" => Some("https://mirror.example/download/".to_string()),
+                "AISH_REPO_URL" => Some("https://other.example/repo".to_string()),
+                _ => None,
+            });
+
+        assert_eq!(urls.len(), 3);
+        assert_eq!(
+            urls[2],
+            "https://mirror.example/download/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_release_download_urls_repo_url_is_stable_fallback() {
+        let urls =
+            release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |key| match key {
+                "AISH_REPO_URL" => Some("https://mirror.example/repo".to_string()),
+                "AISH_DOWNLOAD_BASE_URL" => Some("   ".to_string()),
+                _ => None,
+            });
+
+        assert_eq!(
+            urls[2],
+            "https://mirror.example/repo/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_release_download_urls_append_beta_mirror() {
+        let urls = release_download_urls(
+            "v0.3.0-beta.3",
+            "aish-0.3.0-beta.3-linux-amd64.tar.gz",
+            |key| match key {
+                "AISH_BETA_DOWNLOAD_BASE_URL" => {
+                    Some("https://mirror.example/download/beta".to_string())
+                }
+                "AISH_DOWNLOAD_BASE_URL" => Some("https://mirror.example/download".to_string()),
+                _ => None,
+            },
+        );
+
+        assert_eq!(
+            urls[2],
+            "https://mirror.example/download/beta/releases/0.3.0-beta.3/aish-0.3.0-beta.3-linux-amd64.tar.gz"
         );
     }
 
