@@ -7,7 +7,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.15] - 2026-10-14
+
+### Added
+
+- Project instructions: `aish` loads `AGENTS.md` from the repository root and from the directories in use (including `@`-style file pointers), injects them prefix-cache-safe, and refreshes that directory context as you `cd`. `/instructions` prints the current state and loaded files, `/instructions off` disables project instructions for the session and clears every injected block, and `/instructions on` re-discovers them on the next turn. (#562, #590)
+- New `web_search` tool: queries the web through a fallback chain (keyed providers first, then credential-free Bing and DuckDuckGo) and returns a bounded, deduplicated list of candidate sources with title, URL, snippet, and fetch time. Output is capped at 4 KB and page text is rendered as untrusted data. (#566, #576)
 
 ### Fixed
 
@@ -19,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Terminal device queries (`ESC[6n`, `ESC[c`, `ESC[>c`, `ESC[…$p`, …) are no longer deleted from a command's output. Full-screen programs measure the surface, anchor their live region and detect host-side resizes from the terminal's answers; stripping the requests made them fall back to degraded repaint modes (`TSP: terminal did not confirm the surface`, `resize anchor … cpr=timeout`).
 - A command's newline is no longer translated twice on its way to the terminal (`printf 'A\nB\n'` used to display as `A\r\r\nB\r\r\n`). Both the child PTY's slave and the real terminal applied `OPOST|ONLCR`; the relay now compensates for the second translation.
 - Answers to terminal device queries are still kept out of line-oriented commands, but the filter moved from the output side to stdin: reports are dropped until a command shows full-screen behaviour (alternate screen, hidden cursor, mouse tracking, bracketed paste, synchronized output, APC) and then forwarded, so TUIs receive their answers while `cat`/`read`/pagers never see them echoed or executed. A prefix held back as a possible report is handed to the child after 500 ms (and a fingerprint split across two reads still counts), so genuine input is never withheld.
+- Backend command payloads no longer glue the command and its pager-restore suffix onto one line, so a trailing `&` or a heredoc terminator no longer corrupts the persistent shell, wedges follow-up commands behind a stuck `PS2` continuation, or waits out a ~1-year timeout. The restore is deferred until after the command reaches a terminal state so `read`/`cat` cannot consume it, the bash tool's default wait is bounded at 3600 s, and Ctrl+O output panels open reliably even when the terminal does not answer cursor-position queries. (#541, #555)
+- `/export` keeps the full AI conversation across context compaction: turns absorbed into a summary are recorded in a new append-only transcript and no longer vanish from the export, older sessions still fall back to the previous snapshot, and an incomplete transcript is surfaced as a warning. (#530, #556)
+- A turn that stops at the tool-iteration limit keeps its completed tool calls and results in the session instead of dropping them, so the model does not re-run side effects that already happened. (#572)
+- A sub-agent that ends in `Fatal` now prints the failure category and the completed-tool summary instead of ending the turn silently. `/token` and the footer track provider cache hits separately, so cached tokens no longer inflate input usage. (#579, #580)
+- The shell keeps `sudo`/`su` command text intact on every input path, popup recovery included, so quoted spaces survive and a command is never recorded as a success without running; a blocked builtin no longer adds a second history row with exit code 0. Shell state is copied from the session after a compound line that starts with `cd`, `export`, or `unset`; state reads no longer depend on an external `base64` (a missing or incompatible one could wipe the process environment); and a variable the session unset is removed from the process on the first read. (#546, #574)
+- The prompt's git-dirty check no longer blocks rendering: a cache hit returns immediately and a stale entry returns the last known value while a single background refresh runs, so the prompt never stalls and the dirty dot lags by at most ~2 s. (#599, #600)
 
 ## [0.3.14] - 2026-09-23
 
