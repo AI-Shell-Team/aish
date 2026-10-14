@@ -202,34 +202,38 @@ jobs:
       id-token: write
     env:
       VERSION: ${{ needs.release-meta.outputs.version }}
-      ARTIFACT_ROOT: artifacts/release
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-      CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
-      DOWNLOAD_PREFIX: ${{ contains(needs.release-meta.outputs.version, '-') && 'download/beta' || 'download' }}
+      # CDN/R2 publishing is disabled because the CDN is unavailable.
+      # Re-enable these (and the matching steps below) once the CDN is back.
+      # ARTIFACT_ROOT: artifacts/release
+      # R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      # R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      # AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      # AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      # AWS_DEFAULT_REGION: auto
+      # CDN_BASE_URL: ${{ vars.CDN_BASE_URL }}
+      # DOWNLOAD_PREFIX: ${{ contains(needs.release-meta.outputs.version, '-') && 'download/beta' || 'download' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download release artifacts
-        uses: actions/download-artifact@v6
-        with:
-          pattern: release-bundle-linux-*
-          path: ${{ env.ARTIFACT_ROOT }}
-
-      - name: Ensure aws CLI is available
-        run: |
-          if ! command -v aws >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y awscli
-          fi
-          aws --version
-
-      - name: Publish release bundles
-        run: bash ./packaging/scripts/publish_release.sh
+      # CDN/R2 publishing is disabled because the CDN is unavailable.
+      # Re-enable these steps once the CDN is back.
+      # - name: Download release artifacts
+      #   uses: actions/download-artifact@v6
+      #   with:
+      #     pattern: release-bundle-linux-*
+      #     path: ${{ env.ARTIFACT_ROOT }}
+      #
+      # - name: Ensure aws CLI is available
+      #   run: |
+      #     if ! command -v aws >/dev/null 2>&1; then
+      #       sudo apt-get update
+      #       sudo apt-get install -y awscli
+      #     fi
+      #     aws --version
+      #
+      # - name: Publish release bundles
+      #   run: bash ./packaging/scripts/publish_release.sh
 
       - name: Skip PyPI publish for prerelease versions
         if: ${{ contains(needs.release-meta.outputs.version, '-') }}
@@ -282,8 +286,8 @@ jobs:
             echo "- Tag: ${RELEASE_TAG}"
             echo
             if [[ "${RELEASE_VERSION}" == *-* ]]; then
-              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, PyPI publishing was skipped for this prerelease, and the CDN beta channel was updated for this release."
+              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and PyPI publishing was skipped for this prerelease. (CDN publishing is disabled.)"
             else
-              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, the package was published to PyPI via Trusted Publishing, and the CDN channel was updated for this release."
+              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and the package was published to PyPI via Trusted Publishing. (CDN publishing is disabled.)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
