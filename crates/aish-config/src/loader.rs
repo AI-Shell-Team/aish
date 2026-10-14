@@ -298,7 +298,10 @@ impl ConfigLoader {
                 let mode = std::fs::metadata(path)
                     .map(|metadata| metadata.permissions())
                     .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
-                let _ = file.set_permissions(mode);
+                // A failure here is fatal on purpose: without the mode in place
+                // the temp file may be readable by other users, so no
+                // credential is ever written into it.
+                file.set_permissions(mode)?;
             }
             file.write_all(contents.as_bytes())?;
             file.sync_all()

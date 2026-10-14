@@ -164,11 +164,25 @@ const INHERITED_ENV_VARS: [&str; 12] = [
     "SSL_CERT_DIR",
 ];
 
+/// Base-directory variables from the XDG spec that launchers resolve their
+/// caches, config and runtime files through.
+const INHERITED_XDG_VARS: [&str; 7] = [
+    "XDG_CONFIG_HOME",
+    "XDG_CONFIG_DIRS",
+    "XDG_DATA_HOME",
+    "XDG_DATA_DIRS",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+];
+
 /// True when `key` may be inherited by an MCP child process.
+///
+/// The `XDG_` names are matched exactly, not by prefix: `XDG_*` is a spec
+/// namespace for directory variables, but a user could perfectly well define
+/// `XDG_API_TOKEN`, and a wildcard would hand it to every server.
 fn is_inherited_env(key: &str) -> bool {
-    // `XDG_*` are base *directories* (cache/config/state), never credentials,
-    // and `uv`/`npx` resolve their caches through them.
-    INHERITED_ENV_VARS.contains(&key) || key.starts_with("XDG_")
+    INHERITED_ENV_VARS.contains(&key) || INHERITED_XDG_VARS.contains(&key)
 }
 
 /// Resolved `mcp:` section.
@@ -472,6 +486,7 @@ mod tests {
         // inside `child_env`, and it removes them again at the end.
         std::env::set_var("AISH_TEST_SECRET_TOKEN", "leak-me");
         std::env::set_var("SSH_AUTH_SOCK", "/tmp/agent.sock");
+        std::env::set_var("XDG_API_TOKEN", "also-a-credential");
 
         let mut entry = raw("env", "stdio");
         entry.command = Some("/bin/true".to_string());
@@ -493,6 +508,10 @@ mod tests {
             "an undeclared parent variable must not reach the child"
         );
         assert!(!env.contains_key("SSH_AUTH_SOCK"));
+        assert!(
+            !env.contains_key("XDG_API_TOKEN"),
+            "an XDG-named credential is not an XDG directory variable"
+        );
         assert_eq!(env.get("DECLARED").map(String::as_str), Some("value"));
         if let Ok(path) = std::env::var("PATH") {
             assert_eq!(env.get("PATH"), Some(&path), "launchers need PATH");
@@ -522,6 +541,7 @@ mod tests {
 
         std::env::remove_var("AISH_TEST_SECRET_TOKEN");
         std::env::remove_var("SSH_AUTH_SOCK");
+        std::env::remove_var("XDG_API_TOKEN");
     }
 
     fn raw(name: &str, transport: &str) -> McpServerConfig {
