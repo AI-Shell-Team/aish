@@ -1137,13 +1137,41 @@ impl McpManager {
                         match event {
                             ServerEvent::Notification { method, params: _ } => {
                                 if method == TOOLS_LIST_CHANGED {
-                                    self.driver_update(&name, generation, epoch, |state| {
-                                        state.tools_stale = true;
-                                    });
                                     tracing::debug!(
                                         server = %name,
                                         "mcp: server announced a tool list change"
                                     );
+                                    // A tool the server just added has to become
+                                    // usable (and visible in `/mcp tools`)
+                                    // without a manual reload. The catalogue is
+                                    // marked stale first, so a call that races
+                                    // the refresh still asks instead of trusting
+                                    // the old annotations, and the refresh runs
+                                    // on its own task so a slow server cannot
+                                    // stall this event loop.
+                                    if !self.tools_are_stale(&name) {
+                                        self.driver_update(&name, generation, epoch, |state| {
+                                            state.tools_stale = true;
+                                        });
+                                        let this = Arc::clone(&self);
+                                        let refreshed = name.clone();
+                                        let connection = Arc::clone(&connection);
+                                        tokio::spawn(async move {
+                                            if !this.is_current(&refreshed, generation, epoch) {
+                                                return;
+                                            }
+                                            match connection.list_tools(None).await {
+                                                Ok(tools) => {
+                                                    this.store_tools(&refreshed, &connection, tools)
+                                                }
+                                                Err(error) => tracing::debug!(
+                                                    server = %refreshed,
+                                                    error = %error.describe(),
+                                                    "mcp: refreshing the tool list failed"
+                                                ),
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             ServerEvent::Closed { error } => {
@@ -2138,34 +2166,66 @@ done"#;
         assert_eq!(*state.status.borrow(), ServerStatus::Disabled);
     }
 
+    /// A server that grows its tool list: the first listing announces a change
+    /// and returns one tool, every later listing returns two. A client that only
+    /// flagged the catalogue stale would never see `late_comer`.
+    const GROWING_SERVER: &str = r#"count="$1"
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      id=${line#*'"id":'}; id=${id%%,*}
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"growing","version":"0.1.0"}}}\n' "$id"
+      ;;
+    *'"method":"tools/list"'*)
+      if [ -f "$count" ]; then n=$(cat "$count"); fi
+      n=$((n + 1))
+      printf '%s\n' "$n" > "$count"
+      id=${line#*'"id":'}; id=${id%%,*}
+      if [ "$n" -lt 2 ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo","annotations":{"readOnlyHint":true}}]}}\n' "$id"
+        printf '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'
+      else
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"echo","description":"Echo","annotations":{"readOnlyHint":true}},{"name":"late_comer","description":"Appeared later","annotations":{"readOnlyHint":true}}]}}\n' "$id"
+      fi
+      ;;
+  esac
+done"#;
+
     #[tokio::test]
-    async fn a_tool_list_change_invalidates_the_cached_catalogue() {
+    async fn a_tool_list_change_refreshes_the_catalogue() {
         let dir = tempfile::tempdir().expect("tempdir");
         let counter = dir.path().join("tools-list-count");
-        let manager = manager_for(vec![fixture_settings(&counter, "fixture")]);
+        let manager = manager_for(vec![script_settings(GROWING_SERVER, &counter, "growing")]);
 
         manager.start(&tokio::runtime::Handle::current());
-        wait_connected(&manager, "fixture").await;
-        // The fixture announces a change after the listing the handshake made.
-        wait_until(|| tools_are_stale(&manager, "fixture").then_some(())).await;
-        assert_eq!(
-            tools_list_count(&counter),
-            1,
-            "only the start-up listing ran"
-        );
+        wait_connected(&manager, "growing").await;
 
-        // A stale cache stays visible in status output...
-        assert_eq!(snapshot_of(&manager, "fixture").tools.len(), 2);
-        // ...but asking for tools pulls the catalogue again.
-        let tools = manager
-            .cached_or_fetch_tools("fixture", None)
-            .await
-            .expect("tools");
-        assert_eq!(tools.len(), 2);
+        // The notification arrives with the first listing; the client has to
+        // re-list on its own for the added tool to show up.
+        let names = wait_until(|| {
+            let tools = manager.cached_tools("growing");
+            let has_late = tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.name == "late_comer"));
+            has_late.then(|| {
+                tools
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|tool| tool.name)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await;
+        assert_eq!(names, vec!["echo", "late_comer"]);
         assert_eq!(
             tools_list_count(&counter),
             2,
-            "the notification must force a new tools/list"
+            "the notification must trigger exactly one refresh"
+        );
+        assert!(
+            !tools_are_stale(&manager, "growing"),
+            "a landed refresh clears the stale flag"
         );
 
         manager.shutdown().await;

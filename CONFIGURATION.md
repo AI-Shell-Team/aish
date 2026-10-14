@@ -239,7 +239,7 @@ mcp:
 
 #### /mcp 命令、gateway 工具与信任模型
 
-`expose: tools` 时该 server 还会为每个远端工具注册一个 `mcp__<server>_<tool>`（真实 schema 进入请求，模型可直接调用；启动期最多等 3s 拉目录，未就绪时仍保留 gateway 工具，可 `/mcp reload` 重试）。默认 `expose: gateway` 下，MCP 工具不会在启动时注入提示词：每个启用的 server 只注册一个 gateway 工具 `mcp__<server>`（约 200 字节的静态 schema），模型按需通过 `action` 参数发现与调用工具，因此 server 的工具清单不会固化进上下文。若 server 的 `list` 结果变化，gateway 工具的系统提示片段随之刷新。
+`expose: tools` 时该 server 还会为每个远端工具注册一个 `mcp__<server>_<tool>`（真实 schema 进入请求，模型可直接调用；启动期最多等 3s 拉目录，未就绪时仍保留 gateway 工具，可 `/mcp reload` 重试）。默认 `expose: gateway` 下，MCP 工具不会在启动时注入提示词：每个启用的 server 只注册一个 gateway 工具 `mcp__<server>`（约 200 字节的静态 schema），模型按需通过 `action` 参数发现与调用工具，因此 server 的工具清单不会固化进上下文。server 发出 `notifications/tools/list_changed` 时客户端会立刻重新拉取目录（期间该 server 的工具按副作用未知处理、需要确认，刷新落地后恢复），因此新增工具无需手动 `/mcp reload` 即可在 `/mcp tools` 与调用中生效；gateway 工具的系统提示片段也随之刷新。
 
 `/mcp` 子命令：
 

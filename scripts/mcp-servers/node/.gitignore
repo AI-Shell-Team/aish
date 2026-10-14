@@ -1,0 +1,3 @@
+# The TypeScript servers reuse the SDK that ships in a user-level npx cache:
+# `scripts/mcp-server-matrix.sh check|run` links it here when it is missing.
+node_modules
