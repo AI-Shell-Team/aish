@@ -82,24 +82,17 @@ pub fn probe_update(current: &str) -> Option<UpdateInfo> {
     newer.then_some(UpdateInfo { latest })
 }
 
-fn resolve_latest_version_url(latest_override: Option<&str>, repo_base: Option<&str>) -> String {
+fn resolve_latest_version_url(latest_override: Option<&str>) -> String {
     if let Some(url) = latest_override.map(str::trim).filter(|url| !url.is_empty()) {
         return url.to_string();
     }
-    let base = repo_base
-        .map(str::trim)
-        .filter(|base| !base.is_empty())
-        .unwrap_or(DEFAULT_REPO_BASE_URL)
-        .trim_end_matches('/');
-    format!("{base}/latest")
+    format!("{DEFAULT_REPO_BASE_URL}/latest")
 }
 
 fn latest_version_url() -> String {
-    // Same overrides as `aish update`: AISH_LATEST_URL wins, otherwise the
-    // official-site repo base (AISH_REPO_BASE_URL, default www.aishell.ai/repo).
+    // AISH_LATEST_URL still overrides the full metadata URL. The site itself is fixed.
     let latest = std::env::var("AISH_LATEST_URL").ok();
-    let repo_base = std::env::var("AISH_REPO_BASE_URL").ok();
-    resolve_latest_version_url(latest.as_deref(), repo_base.as_deref())
+    resolve_latest_version_url(latest.as_deref())
 }
 
 fn fetch_latest_tag() -> Result<String, AishError> {
@@ -212,24 +205,20 @@ mod tests {
     #[test]
     fn latest_version_url_defaults_to_official_site() {
         assert_eq!(
-            resolve_latest_version_url(None, None),
+            resolve_latest_version_url(None),
             "https://www.aishell.ai/repo/latest"
         );
     }
 
     #[test]
-    fn latest_version_url_honors_overrides() {
+    fn latest_version_url_honors_latest_override() {
         assert_eq!(
-            resolve_latest_version_url(Some("https://mirror.example/latest"), None),
+            resolve_latest_version_url(Some("https://mirror.example/latest")),
             "https://mirror.example/latest"
         );
         assert_eq!(
-            resolve_latest_version_url(None, Some("https://mirror.example/repo/")),
-            "https://mirror.example/repo/latest"
-        );
-        assert_eq!(
-            resolve_latest_version_url(Some("  "), Some("https://mirror.example/repo")),
-            "https://mirror.example/repo/latest"
+            resolve_latest_version_url(Some("  ")),
+            "https://www.aishell.ai/repo/latest"
         );
     }
 
