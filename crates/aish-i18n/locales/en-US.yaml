@@ -50,6 +50,7 @@ cli:
     check_failed: "Failed to check for updates: {error}"
     download_failed: "Download failed: {error}"
     download_fallback: "GitHub download failed, trying the official site"
+    download_mirror: "Trying the configured mirror"
     file_create_failed: "Failed to create file: {error}"
     download_read_error: "Download read error: {error}"
     write_error: "Write error: {error}"
