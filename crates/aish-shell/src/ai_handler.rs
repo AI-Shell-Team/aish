@@ -10,6 +10,7 @@ use aish_core::{LlmEvent, MemoryCategory, MemoryScope, MemoryType, PlanModeState
 use aish_llm::{ChatMessage, LlmCallbackResult, LlmSession, MessageContent, Tool};
 use aish_memory::ttl::default_ttl;
 use aish_memory::{MemoryManager, MemorySource};
+use aish_prompts::project_instructions::{ProjectInstructionsLimits, ProjectInstructionsState};
 use aish_prompts::PromptManager;
 use aish_session::SessionContextMessage;
 use aish_skills::SkillManager;
@@ -185,6 +186,16 @@ pub struct AiHandler {
     last_partial_turn_steps: usize,
     /// Whether the most recent partial turn was stopped at the iteration
     /// limit (as opposed to a provider failure); selects the user hint.
+    /// Project-level instruction loading state: last discovery cwd plus the
+    /// discovered files. Reconciled at the start of every AI turn; unchanged
+    /// cwd short-circuits with zero filesystem IO.
+    project_instructions: ProjectInstructionsState,
+    /// Last filesystem probe signature (path/mtime/size of every candidate
+    /// file). Compared each AI turn so files created, edited, or deleted
+    /// under the SAME cwd trigger re-discovery without a cwd round-trip.
+    project_instructions_probe: String,
+    project_instructions_limits: ProjectInstructionsLimits,
+    project_instructions_redactor: Option<Arc<dyn Fn(&str) -> String + Send + Sync>>,
     last_partial_turn_limit: bool,
 }
 
@@ -219,9 +230,56 @@ impl AiHandler {
             ),
             auto_search,
             secret_redactor: None,
+            project_instructions: ProjectInstructionsState::default(),
+            project_instructions_probe: String::new(),
+            project_instructions_limits: ProjectInstructionsLimits::default(),
+            project_instructions_redactor: None,
             last_partial_turn_steps: 0,
             last_partial_turn_limit: false,
         }
+    }
+
+    /// Configure project instruction loading from config.
+    pub fn set_project_instructions_config(&mut self, limits: ProjectInstructionsLimits) {
+        self.project_instructions_limits = limits;
+    }
+
+    /// Set a redactor applied to project instruction content before it
+    /// enters the AI context.
+    pub fn set_project_instructions_redactor(
+        &mut self,
+        redactor: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    ) {
+        self.project_instructions_redactor = Some(redactor);
+    }
+
+    /// Read-only access to the current project instruction state for
+    /// `/status` display.
+    pub fn project_instructions_state(&self) -> &ProjectInstructionsState {
+        &self.project_instructions
+    }
+
+    /// Session-level on/off switch for project instruction loading
+    /// (issue #562, for troubleshooting). Independent of the config file:
+    /// disabling here clears the discovered state AND removes every
+    /// project-instruction block from the persistent context, so no stale
+    /// rules stay active. Re-enabling re-discovers on the next turn.
+    /// Returns the new enabled state.
+    pub fn set_project_instructions_session_enabled(&mut self, enabled: bool) -> bool {
+        self.project_instructions_limits.enabled = enabled;
+        if !enabled {
+            self.project_instructions = ProjectInstructionsState::default();
+            self.project_instructions_probe.clear();
+            self.context_manager
+                .clear_system_blocks("<project-instructions>");
+        }
+        enabled
+    }
+
+    /// Whether project instruction loading is currently enabled (config
+    /// AND session switch).
+    pub fn project_instructions_enabled(&self) -> bool {
+        self.project_instructions_limits.enabled
     }
 
     /// Set the secret redactor used before persisting tool outputs.
@@ -526,9 +584,13 @@ impl AiHandler {
 
         // Step 2: Auto-recall relevant memories into context
         self.recall_memories(&question_processed);
-
         // Step 3: Inject loaded skills into context as knowledge
         self.inject_skills();
+
+        // Step 3b: Reconcile project instruction files against the current
+        // working directory. Pure state update — the rendered block is
+        // appended as a context message in step 5 below.
+        self.inject_project_instructions();
 
         // Step 4: Compact persistent context before building messages.
         let plan_state = self.plan_state();
@@ -556,27 +618,39 @@ impl AiHandler {
         // unchanged (same cwd, same minute) so history does not accumulate
         // identical env blocks; a change appends a new block at the natural
         // turn position.
-        let last_env_unchanged = self
-            .context_manager
-            .messages_snapshot()
-            .iter()
-            .rev()
-            .find(|m| m.role == "system" && m.content.contains("**Environment Update:**"))
-            .is_some_and(|m| m.content == env_block);
-        if !last_env_unchanged {
-            self.context_manager.add_memory(
-                MemoryType::Llm,
-                ContextMessage {
-                    role: "system".to_string(),
-                    content: env_block,
-                    memory_type: MemoryType::Llm,
-                    name: None,
-                    tool_call_id: None,
-                    tool_calls: None,
-                    reasoning_content: None,
-                },
-            );
-        }
+        self.context_manager
+            .append_dedupe_system("**Environment Update:**", &env_block);
+
+        // The project-instructions block rides as an APPENDED context
+        // message (same append-dedupe contract as the env block above).
+        // Prefix-cache rationale: the provider cache matches the longest
+        // common PREFIX of the message list. Putting this block in the
+        // system message (even at its tail) busts the cache for EVERY
+        // message after the system on any AGENTS.md change or cross-project
+        // cd. As an appended message, a change costs only the new block +
+        // the new question; all prior history stays hit.
+        //
+        // Empty rendered block: when instructions WERE loaded earlier
+        // (leaving a project, deleting every AGENTS.md), append the
+        // explicit no-instructions notice so stale rules from the previous
+        // project do not stay the newest block in history. When nothing
+        // was ever loaded, append nothing (pure noise otherwise).
+        let pi_block = self.project_instructions.rendered();
+        let block = if pi_block.is_empty() {
+            let had_instructions = self.context_manager.messages_snapshot().iter().any(|m| {
+                m.role == "system"
+                    && (m.content.contains("<repo-rules>") || m.content.contains("<dir-context>"))
+            });
+            if had_instructions {
+                aish_prompts::NO_INSTRUCTIONS_NOTICE
+            } else {
+                ""
+            }
+        } else {
+            &pi_block
+        };
+        self.context_manager
+            .append_dedupe_system("<project-instructions>", block);
         let context_messages = self.build_context_messages();
 
         // Step 6: Extract images from the question text
@@ -1450,6 +1524,72 @@ When a registry search IS warranted:\n\
 
         self.context_manager
             .inject_knowledge_stable("skills", &content);
+    }
+
+    /// Reconcile project instruction files (`AGENTS.md` layers plus the
+    /// user-level file) against the current working directory.
+    ///
+    /// Pure state reconciliation: this never touches the conversation
+    /// context. The caller appends the rendered block as a context message
+    /// only when it changed, so the message history stays append-only and
+    /// the provider prefix cache survives AGENTS.md edits and cross-project
+    /// cd transitions. Contract:
+    /// - Same cwd: one cheap filesystem probe (stat per candidate file);
+    ///   unchanged signature short-circuits. Files created, edited, or
+    ///   deleted under the SAME cwd flip the signature and trigger
+    ///   re-discovery — no cwd round-trip needed.
+    /// - Changed cwd: re-discover once; identical file sets (moving within
+    ///   one project) only move the cwd record, the block stays identical.
+    /// - Disabled config: state resets to empty, no new block is appended.
+    fn inject_project_instructions(&mut self) {
+        if !self.project_instructions_limits.enabled {
+            if !self.project_instructions.files.is_empty()
+                || !self.project_instructions.discovery_cwd.is_empty()
+                || !self.project_instructions_probe.is_empty()
+            {
+                self.project_instructions = ProjectInstructionsState::default();
+                self.project_instructions_probe.clear();
+            }
+            return;
+        }
+
+        let current_cwd = cwd();
+        let probe = aish_prompts::probe_chain(std::path::Path::new(&current_cwd));
+        if current_cwd == self.project_instructions.discovery_cwd
+            && probe == self.project_instructions_probe
+        {
+            // Same cwd, same file signatures: nothing changed. Zero reads.
+            return;
+        }
+
+        let mut state = aish_prompts::discover(
+            std::path::Path::new(&current_cwd),
+            &self.project_instructions_limits,
+        );
+        // Apply the instruction-content redactor (secret hygiene) before
+        // rendering so anything entering the AI context is sanitized.
+        if let Some(redactor) = &self.project_instructions_redactor {
+            for file in &mut state.files {
+                file.content = redactor(&file.content);
+            }
+        }
+
+        // Same rendered block (moving between two directories of the same
+        // project, no AGENTS.md between them): only the cwd record moves;
+        // the block the next request sees is byte-identical. Comparing the
+        // rendered output — not a content-length signature — catches
+        // same-length edits that would otherwise short-circuit and serve
+        // stale instructions.
+        if state.rendered() == self.project_instructions.rendered()
+            && !self.project_instructions.files.is_empty()
+        {
+            self.project_instructions.discovery_cwd = current_cwd;
+            self.project_instructions_probe = probe;
+            return;
+        }
+
+        self.project_instructions = state;
+        self.project_instructions_probe = probe;
     }
 
     /// Build context messages from the context manager into ChatMessage format.
@@ -2673,6 +2813,360 @@ mod tests {
             ContextBudgetPolicy::default(),
             false,
         )
+    }
+
+    // ---- project instruction injection --------------------------------
+
+    /// Serialize tests that mutate process-global state (`set_current_dir`,
+    /// `AISH_CONFIG_DIR`): cargo runs tests in parallel threads and the
+    /// reconciler compares the *process* cwd, so concurrent tests would
+    /// observe each other's directories.
+    static PROJECT_INSTRUCTIONS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// The wire view of the PI block: the rendered block that the send path
+    /// appends as a context message when it changed.
+    fn pi_block(handler: &AiHandler) -> String {
+        handler.project_instructions.rendered()
+    }
+
+    /// Simulate the send-path PI append (dedupe against the last PI message
+    /// in the context), mirroring the inline logic in `process_question`.
+    fn send_append_pi(handler: &mut AiHandler) {
+        let block = pi_block(handler);
+        let block = if block.is_empty() {
+            let had_instructions = handler.context_manager.messages_snapshot().iter().any(|m| {
+                m.role == "system"
+                    && (m.content.contains("<repo-rules>") || m.content.contains("<dir-context>"))
+            });
+            if had_instructions {
+                aish_prompts::NO_INSTRUCTIONS_NOTICE.to_string()
+            } else {
+                return;
+            }
+        } else {
+            block
+        };
+        handler
+            .context_manager
+            .append_dedupe_system("<project-instructions>", &block);
+    }
+
+    /// Count PI block messages currently in the context.
+    fn pi_msg_count(handler: &AiHandler) -> usize {
+        handler
+            .context_manager
+            .messages_snapshot()
+            .iter()
+            .filter(|m| m.content.contains("<project-instructions>"))
+            .count()
+    }
+
+    #[test]
+    fn project_instructions_reconcile_discover_and_stay_stable() {
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "always run cargo test").unwrap();
+        let sub = repo.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // Isolate the user-level AGENTS.md lookup via AISH_CONFIG_DIR.
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        handler.project_instructions.discovery_cwd = String::new();
+
+        // First turn at `sub`: discovery runs and the send path appends the
+        // block as a context message. The system message stays STATIC —
+        // the block never enters it (prefix-cache contract).
+        std::env::set_current_dir(&sub).unwrap();
+        handler.inject_project_instructions();
+        let static_core = handler.system_message_parts().0;
+        send_append_pi(&mut handler);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(msgs
+            .iter()
+            .any(|m| m.content.contains("<project-instructions>")
+                && m.content.contains("always run cargo test")));
+        assert!(
+            !static_core.contains("<project-instructions>"),
+            "the block must never enter the system message"
+        );
+        assert_eq!(
+            handler.project_instructions.discovery_cwd,
+            sub.to_string_lossy()
+        );
+        assert_eq!(pi_msg_count(&handler), 1);
+
+        // Same cwd, unchanged files: reconciliation is a no-op and the
+        // send-path dedupe does not append a second copy.
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(
+            pi_msg_count(&handler),
+            1,
+            "unchanged block must not append a duplicate message"
+        );
+
+        // Same cwd but the file changed on disk: the probe signature flips,
+        // re-discovery runs, and the send path APPENDS the new block — the
+        // old messages stay untouched (prefix cache preserved).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(repo.join("AGENTS.md"), "updated rule: use make check").unwrap();
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(msgs.iter().any(|m| m.content.contains("updated rule")));
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("always run cargo test")),
+            "the old block message stays in history (append-only)"
+        );
+        assert_eq!(pi_msg_count(&handler), 2);
+
+        // cd into a sibling without its own AGENTS.md: boundary is still
+        // the repo root, so the same file applies — the block is
+        // byte-identical and the send-path dedupe appends nothing new.
+        let docs = repo.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::env::set_current_dir(&docs).unwrap();
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(
+            handler.project_instructions.discovery_cwd,
+            docs.to_string_lossy()
+        );
+        assert_eq!(
+            pi_msg_count(&handler),
+            2,
+            "identical block across sibling dirs must not append a copy"
+        );
+        // System message stays byte-identical across the whole test.
+        assert_eq!(handler.system_message_parts().0, static_core);
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn project_instructions_created_after_entering_dir_is_discovered() {
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        let deep = repo.join("a/b");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        handler.project_instructions.discovery_cwd = String::new();
+
+        // Enter the deep dir FIRST (no AGENTS.md anywhere).
+        std::env::set_current_dir(&deep).unwrap();
+        handler.inject_project_instructions();
+        assert!(handler.project_instructions.files.is_empty());
+        assert!(!pi_block(&handler).contains("<project-instructions>"));
+
+        // Create AGENTS.md at the repo root NOW, same cwd.
+        std::fs::write(repo.join("AGENTS.md"), "late rule: use make build").unwrap();
+        handler.inject_project_instructions();
+        let block = pi_block(&handler);
+        assert!(
+            block.contains("late rule: use make build"),
+            "same-cwd creation must be discovered without a cwd round-trip"
+        );
+
+        // Deleting it under the same cwd drops the block again.
+        std::fs::remove_file(repo.join("AGENTS.md")).unwrap();
+        handler.inject_project_instructions();
+        assert!(
+            !pi_block(&handler).contains("<project-instructions>"),
+            "same-cwd deletion must clear the block"
+        );
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn project_instructions_leaving_project_clears_block() {
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "project rules").unwrap();
+        let outside = tmp.path().join("plain");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        handler.project_instructions.discovery_cwd = String::new();
+
+        std::env::set_current_dir(&repo).unwrap();
+        handler.inject_project_instructions();
+        assert!(pi_block(&handler).contains("project rules"));
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 1);
+
+        // cd outside the repo: state resets and the send path appends the
+        // explicit no-instructions notice so stale rules from the old
+        // project do not stay the newest block in history.
+        std::env::set_current_dir(&outside).unwrap();
+        handler.inject_project_instructions();
+        assert!(handler.project_instructions.files.is_empty());
+        assert!(
+            !pi_block(&handler).contains("<project-instructions>"),
+            "leaving the project must drop the block for new turns"
+        );
+        send_append_pi(&mut handler);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("No project instruction files apply")),
+            "leaving a loaded project must append the no-instructions notice"
+        );
+        assert_eq!(pi_msg_count(&handler), 2);
+
+        // cd back into the repo: the real block replaces the notice (the
+        // dedupe compares against the last PI message, which is the notice).
+        std::env::set_current_dir(&repo).unwrap();
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 3);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(
+            msgs.iter()
+                .last()
+                .is_some_and(|m| m.content.contains("project rules")),
+            "re-entering the project must re-append the real block"
+        );
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn project_instructions_session_switch_disables_clears_and_reenables() {
+        // Issue #562: the session-level switch must disable loading, clear
+        // the discovered state AND every PI block from the context, and
+        // re-enable with re-discovery on the next turn.
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "project rules").unwrap();
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        std::env::set_current_dir(&repo).unwrap();
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 1);
+        assert!(handler.project_instructions_enabled());
+
+        // Disable for the session: state cleared, every PI block removed
+        // from the context, loading gated off.
+        assert!(!handler.set_project_instructions_session_enabled(false));
+        assert!(handler.project_instructions.files.is_empty());
+        assert!(handler.project_instructions.discovery_cwd.is_empty());
+        assert_eq!(
+            pi_msg_count(&handler),
+            0,
+            "disabling must clear every PI block from the context"
+        );
+        // The gate holds: reconcile does nothing while disabled.
+        handler.inject_project_instructions();
+        assert!(handler.project_instructions.files.is_empty());
+
+        // Re-enable: the next turn re-discovers and the send path appends
+        // the block again.
+        assert!(handler.set_project_instructions_session_enabled(true));
+        handler.inject_project_instructions();
+        send_append_pi(&mut handler);
+        assert_eq!(pi_msg_count(&handler), 1);
+        let msgs = handler.context_manager.messages_snapshot();
+        assert!(msgs.iter().any(|m| m.content.contains("project rules")));
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn project_instructions_disabled_config_resets_state() {
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        handler.project_instructions_limits.enabled = false;
+        // Simulate a previously loaded state.
+        handler.project_instructions.discovery_cwd = "/somewhere".to_string();
+
+        handler.inject_project_instructions();
+        assert!(handler.project_instructions.files.is_empty());
+        assert!(handler.project_instructions.discovery_cwd.is_empty());
+        assert!(
+            !pi_block(&handler).contains("<project-instructions>"),
+            "disabled config must drop the block for new turns"
+        );
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn project_instructions_redactor_sanitizes_content() {
+        let _guard = PROJECT_INSTRUCTIONS_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("AGENTS.md"),
+            "token: sk-proj-abcdefghijklmnopqrstuvwx",
+        )
+        .unwrap();
+        let cfg = tempfile::tempdir().expect("cfg");
+        std::env::set_var("AISH_CONFIG_DIR", cfg.path());
+
+        let mut handler = test_handler();
+        handler.project_instructions.discovery_cwd = String::new();
+        handler.project_instructions_redactor = Some(Arc::new(|text: &str| {
+            aish_security::secret::redact_secrets(
+                text,
+                &aish_security::secret::SecretScanner::new(&[]),
+            )
+        }));
+
+        std::env::set_current_dir(&repo).unwrap();
+        handler.inject_project_instructions();
+        let block = pi_block(&handler);
+        assert!(
+            !block.contains("sk-proj-abcdefghijklmnopqrstuvwx"),
+            "secret must be redacted before entering the AI context"
+        );
+        assert!(block.contains("<project-instructions>"));
+
+        std::env::remove_var("AISH_CONFIG_DIR");
+        std::env::set_current_dir(tmp.path()).unwrap();
     }
 
     fn turn_with_tool_call() -> Vec<ChatMessage> {

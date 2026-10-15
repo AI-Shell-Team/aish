@@ -1137,11 +1137,27 @@ impl AishShell {
         // registration so the session UUID and host are available to the
         // memory store callback as provenance metadata.
         let session_store = match &config.session_db_path {
-            Some(path) => SessionStore::open(Some(std::path::Path::new(path))).ok(),
+            Some(path) => SessionStore::open(Some(std::path::Path::new(
+                &shellexpand::tilde(path).into_owned(),
+            )))
+            .ok(),
             None => SessionStore::open(None).ok(),
         };
         let session_uuid = if let Some(ref store) = session_store {
-            match store.create_session(&config.model, Some(&config.api_base)) {
+            // Daemon-mode children inherit the PTY session id via
+            // AISH_SESSION_ID; reusing it as the persisted session UUID lets
+            // `aish -c` correlate live sessions with their history counts.
+            // Standalone shells have no such var, and nested shells (aish
+            // launched inside a daemon PTY) hit a taken row, both of which
+            // fall back to a fresh UUID so no foreign session is hijacked.
+            let daemon_session_id = std::env::var("AISH_SESSION_ID")
+                .ok()
+                .filter(|id| !id.is_empty());
+            match store.create_session_with_uuid(
+                daemon_session_id.as_deref().unwrap_or_default(),
+                &config.model,
+                Some(&config.api_base),
+            ) {
                 Ok(record) => record.session_uuid,
                 Err(_) => uuid::Uuid::new_v4().to_string(),
             }
@@ -2202,6 +2218,21 @@ impl AishShell {
             config.skills.auto_search,
         );
 
+        // Project instruction loading (issue #562): config-driven limits and
+        // enable switch; content passes the secret redactor before entering
+        // the AI context (same scanner as the audit path).
+        ai_handler.set_project_instructions_config(aish_prompts::ProjectInstructionsLimits {
+            enabled: config.project_instructions.enabled,
+            max_file_bytes: config.project_instructions.max_file_bytes,
+            max_total_bytes: config.project_instructions.max_total_bytes,
+        });
+        {
+            let scanner = security_manager.secret_scanner().clone();
+            ai_handler.set_project_instructions_redactor(Arc::new(move |text: &str| {
+                aish_security::secret::redact_secrets(text, &scanner)
+            }));
+        }
+
         // Redact secrets from tool outputs before they enter persistent
         // LLM context (same scanner as the audit path).
         {
@@ -2297,7 +2328,7 @@ impl AishShell {
 
         // Initialize persistent PTY session
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let pty = aish_pty::PersistentPty::start(&state.cwd, rows, cols).map_err(|e| {
+        let mut pty = aish_pty::PersistentPty::start(&state.cwd, rows, cols).map_err(|e| {
             let mut args = std::collections::HashMap::new();
             args.insert(
                 "error".to_string(),
@@ -2305,6 +2336,10 @@ impl AishShell {
             );
             aish_core::AishError::Pty(t_with_args("shell.general_error", &args))
         })?;
+        pty.set_follow_resize(
+            aish_config::TerminalResizeMode::parse(&config.terminal_resize_mode)
+                .follows_pty_commands(),
+        );
         let pty = Arc::new(Mutex::new(pty));
 
         // Inject PersistentPty into the bash tool slot.
@@ -3207,82 +3242,9 @@ impl AishShell {
                     self.record_history(input, 0);
                 }
                 crate::types::InputIntent::BuiltinCommand => {
-                    let parts: Vec<&str> = input.split_whitespace().collect();
-                    if let Some(cmd) = parts.first() {
-                        if *cmd == "setup" {
-                            self.run_setup_wizard();
-                            self.record_history(input, 0);
-                            continue;
-                        }
-                        let result = self.state.handle_builtin(cmd, &parts[1..]);
-                        if let Some(ref output) = result.output {
-                            println!("{}", output);
-                            if !output.is_empty() {
-                                crate::recorder::shared_record_output(
-                                    &self.shared_recorder,
-                                    &format!("{}\n", output),
-                                );
-                            }
-                        }
-                        if result.should_exit {
-                            self.record_history(input, 0);
-                            break;
-                        }
-                        // PTY-required commands (su, sudo) — InputGuard
-                        // check first, then route directly to PTY.
-                        if result.route_to_pty {
-                            if !self.screen_shell_command(input) {
-                                continue;
-                            }
-                            if let Some(ref pty_cmd) = result.pty_command {
-                                self.set_phase(ShellPhase::Running);
-                                let exit_code = self.execute_external_command(pty_cmd);
-                                self.set_phase(ShellPhase::Editing);
-                                self.record_history(input, exit_code);
-                                self.reset_interruption();
-                                continue;
-                            }
-                        }
-                        // State-modifying commands (cd, pushd, popd, export,
-                        // unset) also need to be sent to the PTY bash process
-                        // so that the persistent bash session stays in sync.
-                        // Otherwise bash's CWD/env diverges from the Rust
-                        // shell's tracking, causing the next external command
-                        // to run in the wrong directory/environment.
-                        // InputGuard MUST screen here too: bash will execute
-                        // any command-substitution payloads embedded in the
-                        // arguments (e.g. `export FOO=$(rm -rf /etc)`), so
-                        // bypassing this check would let destructive code
-                        // slip through unfiltered.
-                        if crate::commands::is_state_modifying(cmd)
-                            && !crate::commands::is_rejected(cmd)
-                        {
-                            if !self.screen_shell_command(input) {
-                                // Destructive payload blocked — skip the sync
-                                // so bash never sees it. State in Rust is
-                                // already updated by handle_builtin above,
-                                // but the destructive payload in the value
-                                // never reaches bash.
-                                self.record_history(input, 0);
-                                continue;
-                            }
-                            self.sync_command_to_pty(input);
-                        }
-
-                        // Add builtin result to LLM context
-                        let builtin_output = result.output.clone().unwrap_or_default();
-                        let mut entry = format!(
-                            "[Shell] {}\n<returncode>0</returncode>\n<output>{}</output>",
-                            input, builtin_output
-                        );
-                        if crate::commands::is_state_modifying(cmd)
-                            && !crate::commands::is_rejected(cmd)
-                        {
-                            entry.push_str(&format!("\n<cwd>{}</cwd>", self.state.cwd));
-                        }
-                        self.ai_handler.add_shell_context(&entry);
+                    if self.dispatch_builtin_line(input) {
+                        break;
                     }
-                    self.record_history(input, 0);
                 }
                 crate::types::InputIntent::SpecialCommand => {
                     if self.handle_special_command(input) {
@@ -3612,6 +3574,57 @@ impl AishShell {
         }
     }
 
+    /// Run a builtin from the main readline loop and from slash / `@` popup
+    /// recovery. Returns `true` when the shell should exit.
+    ///
+    /// `sudo` / `su` execute the original line once and record the PTY exit
+    /// code. A blocked or declined command is not recorded as success.
+    fn dispatch_builtin_line(&mut self, input: &str) -> bool {
+        let first = input.split_whitespace().next().unwrap_or("");
+        if first == "setup" {
+            self.run_setup_wizard();
+            self.record_history(input, 0);
+            return false;
+        }
+        let result = self.state.handle_builtin_line(input);
+        if let Some(ref output) = result.output {
+            println!("{}", output);
+            if !output.is_empty() {
+                crate::recorder::shared_record_output(
+                    &self.shared_recorder,
+                    &format!("{}\n", output),
+                );
+            }
+        }
+        if result.should_exit {
+            self.record_history(input, 0);
+            return true;
+        }
+        if result.route_to_pty {
+            let Some(command) = result.pty_command.clone() else {
+                return false;
+            };
+            if !self.screen_shell_command(&command) {
+                return false;
+            }
+            self.set_phase(ShellPhase::Running);
+            let exit_code = self.execute_external_command(&command);
+            self.set_phase(ShellPhase::Editing);
+            self.record_history(input, exit_code);
+            self.reset_interruption();
+            return false;
+        }
+
+        let builtin_output = result.output.clone().unwrap_or_default();
+        let entry = format!(
+            "[Shell] {}\n<returncode>0</returncode>\n<output>{}</output>",
+            input, builtin_output
+        );
+        self.ai_handler.add_shell_context(&entry);
+        self.record_history(input, 0);
+        false
+    }
+
     /// Classify and run a readline submission. Returns `true` to break the main loop.
     fn process_readline_submission(&mut self, line: &str) -> bool {
         let input = line.trim();
@@ -3645,26 +3658,7 @@ impl AishShell {
                 self.track_command_failure_state(input, exit_code);
                 false
             }
-            crate::types::InputIntent::BuiltinCommand => {
-                let parts: Vec<&str> = input.split_whitespace().collect();
-                if let Some(cmd) = parts.first() {
-                    if *cmd == "setup" {
-                        self.run_setup_wizard();
-                        self.record_history(input, 0);
-                        return false;
-                    }
-                    let result = self.state.handle_builtin(cmd, &parts[1..]);
-                    if let Some(ref output) = result.output {
-                        println!("{}", output);
-                    }
-                    if result.should_exit {
-                        self.record_history(input, 0);
-                        return true;
-                    }
-                }
-                self.record_history(input, 0);
-                false
-            }
+            crate::types::InputIntent::BuiltinCommand => self.dispatch_builtin_line(input),
             crate::types::InputIntent::Help => {
                 let result = self.state.handle_builtin("help", &[]);
                 if let Some(output) = result.output {
@@ -4214,6 +4208,7 @@ impl AishShell {
                 }
             }
             Some("/forget-approvals") => self.handle_forget_approvals(),
+            Some("/instructions") => self.handle_instructions_command(&parts),
             Some("/audit") => self.handle_audit_command(&parts),
             Some("/memory") => self.handle_memory_command(&parts),
             Some("/skill") => self.handle_skill_command(&parts),
@@ -4246,6 +4241,63 @@ impl AishShell {
             "\x1b[36m{}\x1b[0m",
             t_with_args("shell.forget_approvals_cleared", &args)
         );
+    }
+
+    /// `/instructions` — session-level toggle for project `AGENTS.md`
+    /// instruction loading (issue #562, for troubleshooting).
+    ///
+    /// Subcommands:
+    /// - `/instructions` or `/instructions status` — show the current state
+    /// - `/instructions off` — disable for THIS session: clears the
+    ///   discovered state AND every project-instruction block from the
+    ///   context so no stale rules stay active
+    /// - `/instructions on` — re-enable; the next AI turn re-discovers
+    fn handle_instructions_command(&mut self, parts: &[&str]) {
+        let sub = parts.get(1).copied().unwrap_or("status");
+        match sub {
+            "on" | "off" => {
+                let enabled = self
+                    .ai_handler
+                    .set_project_instructions_session_enabled(sub == "on");
+                let state_str = if enabled {
+                    t("shell.setting.on")
+                } else {
+                    t("shell.setting.off")
+                };
+                let mut args = std::collections::HashMap::new();
+                args.insert("state".to_string(), state_str);
+                println!(
+                    "{}",
+                    theme::accent(&t_with_args("shell.instructions_toggled", &args))
+                );
+            }
+            "status" => {
+                let enabled = self.ai_handler.project_instructions_enabled();
+                let state = self.ai_handler.project_instructions_state();
+                let loaded = state.files.len();
+                let status = if !enabled {
+                    t("shell.setting.off")
+                } else if loaded == 0 {
+                    t("status.instructions_none")
+                } else {
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("count".to_string(), loaded.to_string());
+                    t_with_args("status.instructions_loaded", &args)
+                };
+                println!("{}: {}", theme::accent(&t("status.instructions")), status);
+                crate::status::render_project_instructions(state, enabled)
+                    .into_iter()
+                    .for_each(|l| println!("{}", l));
+            }
+            // Unknown subcommands fall through to the status display.
+            _ => {
+                let enabled = self.ai_handler.project_instructions_enabled();
+                let state = self.ai_handler.project_instructions_state();
+                crate::status::render_project_instructions(state, enabled)
+                    .into_iter()
+                    .for_each(|l| println!("{}", l));
+            }
+        }
     }
 
     /// `/memory` — view, verify, or forget long-term memories.
@@ -7009,6 +7061,12 @@ impl AishShell {
             live_id.as_deref(),
             &self.config.model,
         );
+        crate::status::render_project_instructions(
+            self.ai_handler.project_instructions_state(),
+            self.config.project_instructions.enabled,
+        )
+        .into_iter()
+        .for_each(|l| println!("{}", l));
     }
 
     fn select_recent_session(&mut self) {
@@ -7035,12 +7093,10 @@ impl AishShell {
                 return;
             }
         };
-
         let items: Vec<ResumeSessionItem> = sessions
             .iter()
             .map(|session| ResumeSessionItem::from_record(session, &self.session_uuid))
             .collect();
-
         match select_resume_session(&items) {
             Ok(Some(session_id)) => self.resume_session(&session_id),
             Ok(None) => {}
@@ -7690,6 +7746,12 @@ impl AishShell {
                             self.switch_endpoint_model(base, &key, model);
                         }
                     }
+                    // Enter finishes the picker and hands the keyboard back to
+                    // the shell, whether the model actually changed or the user
+                    // re-picked the current one. Only `a` (add account) and
+                    // `m` (manage) return to the list, so the re-fetched entries
+                    // are visible right away.
+                    break;
                 }
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
                     self.accounts_add_interactive();
@@ -8977,9 +9039,13 @@ impl AishShell {
         // Record user command input before execution
         crate::recorder::shared_record_input(&self.shared_recorder, &format!("{}\n", command));
 
-        // Sync terminal size before each command
-        if let Ok((cols, rows)) = crossterm::terminal::size() {
-            self.lock_pty().resize(rows, cols);
+        // Sync terminal size before each command. Skipped when resize following
+        // is disabled (`terminal_resize_mode: off`), which freezes the geometry
+        // for troubleshooting; the per-command loop keeps following from there.
+        if self.lock_pty().follows_resize() {
+            if let Ok((cols, rows)) = crossterm::terminal::size() {
+                self.lock_pty().resize(rows, cols);
+            }
         }
 
         // Ensure the PTY is alive before sending a command.
@@ -9166,27 +9232,26 @@ impl AishShell {
         }
         self.ai_handler.add_shell_context(&entry);
 
+        if crate::shell_session::needs_full_shell_state(command) {
+            let probed = {
+                let mut pty = self.lock_pty();
+                if pty.is_running() {
+                    crate::shell_session::probe(&mut pty)
+                } else {
+                    None
+                }
+            };
+            if let Some(probed) = probed {
+                crate::shell_session::adopt(&mut self.state, probed);
+            }
+        }
+
         // Check if PTY is still running, restart if not
         if !self.lock_pty().is_running() {
             self.restart_pty();
         }
 
         exit_code
-    }
-
-    /// Silently sync a state-modifying command (cd, export, etc.) to the
-    /// persistent PTY bash process so that bash's CWD and env stay in sync
-    /// with the Rust shell's tracking. Output is discarded.
-    fn sync_command_to_pty(&mut self, command: &str) {
-        if !self.lock_pty().is_running() {
-            return;
-        }
-        let _ = self.pty.lock().unwrap().execute_command(
-            command,
-            std::time::Duration::from_secs(5),
-            None,
-            false,
-        );
     }
 
     fn sync_state_from_pty_cwd(&mut self) {
@@ -9224,7 +9289,11 @@ impl AishShell {
     fn restart_pty_with_notice(&mut self, show_notice: bool) -> aish_core::Result<()> {
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         match aish_pty::PersistentPty::start(&self.state.cwd, rows, cols) {
-            Ok(new_pty) => {
+            Ok(mut new_pty) => {
+                new_pty.set_follow_resize(
+                    aish_config::TerminalResizeMode::parse(&self.config.terminal_resize_mode)
+                        .follows_pty_commands(),
+                );
                 *self.lock_pty() = new_pty;
                 if show_notice {
                     println!("{}", theme::warning("bash session restarted"));
@@ -14064,5 +14133,186 @@ mod resume_audit_uuid_tests {
             .filter(|e| e.ai_tool.as_deref() == Some("audit_probe"))
             .count();
         assert_eq!(probe_events, 2, "expected one ai_tool event per probe");
+    }
+}
+
+/// Popup recovery (`process_readline_submission`) is the shared path for
+/// slash and `@` dismissals. These tests drive that entry on Linux.
+#[cfg(all(test, target_os = "linux"))]
+mod privilege_dispatch_tests {
+    use super::*;
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn apply(vars: &[(&'static str, std::path::PathBuf)]) -> Self {
+            let mut saved = Vec::with_capacity(vars.len());
+            for (key, value) in vars {
+                saved.push((*key, std::env::var_os(key)));
+                std::env::set_var(key, value);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in &self.saved {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Shell whose config and policy paths stay inside `tmp`. Caller must hold
+    /// `env_test_lock` and drop `shell` before `_env`.
+    fn open_test_shell() -> (tempfile::TempDir, EnvGuard, AishShell) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+        let data_dir = tmp.path().join("data");
+        let cache_dir = tmp.path().join("cache");
+        for dir in [&home, &config_dir, &data_dir, &cache_dir] {
+            std::fs::create_dir_all(dir).expect("create temp dir");
+        }
+        let env = EnvGuard::apply(&[
+            ("HOME", home),
+            ("XDG_CONFIG_HOME", config_dir.clone()),
+            ("XDG_DATA_HOME", data_dir),
+            ("XDG_CACHE_HOME", cache_dir.clone()),
+            ("AISH_CONFIG_DIR", config_dir.join("aish")),
+            (
+                "AISH_BUILTIN_SKILLS_CACHE",
+                cache_dir.join("builtin-skills"),
+            ),
+            (
+                "AISH_SYSTEM_POLICY_PATH",
+                tmp.path().join("absent-system-policy.yaml"),
+            ),
+        ]);
+        let db_path = tmp.path().join("aish").join("sessions.db");
+        std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("create db dir");
+        let config = ConfigModel {
+            model: "test-model".into(),
+            api_base: "http://127.0.0.1:1/v1".into(),
+            api_key: "test-key".into(),
+            session_db_path: Some(db_path.display().to_string()),
+            ..Default::default()
+        };
+        let shell = AishShell::new(config).expect("shell construction");
+        (tmp, env, shell)
+    }
+
+    #[test]
+    fn popup_recovery_blocks_privilege_command_without_recording_success() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _env, mut shell) = open_test_shell();
+
+        let blocked = "sudo rm -rf /";
+        assert!(
+            !shell.process_readline_submission(blocked),
+            "a blocked command must not exit the shell"
+        );
+        let history = shell
+            .session_store
+            .as_ref()
+            .expect("session store")
+            .get_history(&shell.session_uuid, 10)
+            .expect("history");
+        let matches: Vec<_> = history.iter().filter(|e| e.command == blocked).collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "blocked command recorded once: {history:?}"
+        );
+        assert_eq!(matches[0].returncode, Some(1));
+        let mentioned = shell
+            .ai_handler
+            .context_messages_snapshot()
+            .iter()
+            .any(|m| m.content.contains(blocked));
+        assert!(
+            !mentioned,
+            "a blocked privilege command must not be injected as a completed shell turn"
+        );
+
+        // A blocked state-modifying builtin must not gain a success row.
+        // `screen_shell_command` records exit 1; the dispatcher must not
+        // append exit 0 afterwards.
+        let blocked_export = "export FOO=$(rm -rf /)";
+        assert!(!shell.process_readline_submission(blocked_export));
+        let history = shell
+            .session_store
+            .as_ref()
+            .expect("session store")
+            .get_history(&shell.session_uuid, 10)
+            .expect("history");
+        let export_rows: Vec<_> = history
+            .iter()
+            .filter(|e| e.command == blocked_export)
+            .collect();
+        assert_eq!(
+            export_rows.len(),
+            1,
+            "blocked export recorded once: {history:?}"
+        );
+        assert_eq!(export_rows[0].returncode, Some(1));
+    }
+
+    #[test]
+    fn popup_recovery_executes_sudo_text_once() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _env, mut shell) = open_test_shell();
+        // Skip the confirm prompt so the PTY receives the original line.
+        shell.input_guard.set_enabled(false);
+
+        let line = "sudo -n printf '%s\\n' 'a  b'";
+        assert!(!shell.process_readline_submission(line));
+
+        let context = shell.ai_handler.context_messages_snapshot();
+        let shell_turn = context
+            .iter()
+            .find(|m| {
+                m.content
+                    .starts_with(&format!("[Shell] {line}\n<returncode>"))
+            })
+            .unwrap_or_else(|| panic!("missing original command in context: {context:?}"));
+        let collapsed = "sudo -n printf '%s\\n' 'a b'";
+        assert!(
+            !shell_turn
+                .content
+                .contains(&format!("[Shell] {collapsed}\n")),
+            "token rejoin collapsed the quoted spaces: {}",
+            shell_turn.content
+        );
+        let code_at = shell_turn
+            .content
+            .find("<returncode>")
+            .expect("returncode tag");
+        let code_text = &shell_turn.content[code_at + "<returncode>".len()..];
+        let code_text = code_text.split("</returncode>").next().expect("close tag");
+        let exit_code: i32 = code_text.trim().parse().expect("exit code");
+
+        let history = shell
+            .session_store
+            .as_ref()
+            .expect("session store")
+            .get_history(&shell.session_uuid, 10)
+            .expect("history");
+        let matches: Vec<_> = history.iter().filter(|e| e.command == line).collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "sudo executed and recorded once: {history:?}"
+        );
+        assert_eq!(matches[0].returncode, Some(exit_code));
     }
 }

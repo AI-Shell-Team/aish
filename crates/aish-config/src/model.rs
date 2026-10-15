@@ -352,6 +352,70 @@ impl Default for SkillsConfig {
         }
     }
 }
+/// Project-level `AGENTS.md` instruction loading configuration.
+///
+/// Controls automatic discovery of layered project instruction files
+/// (standalone `AGENTS.md` between the repository root and the cwd, plus a
+/// user-level default in the aish config dir).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProjectInstructionsConfig {
+    /// Enable automatic loading of project instruction files. Default: true.
+    pub enabled: bool,
+    /// Per-file size cap in bytes. Larger files are truncated, never fatal.
+    /// Default: 65536 (64 KiB).
+    pub max_file_bytes: usize,
+    /// Total size cap across all loaded files in bytes. Files beyond the
+    /// budget are skipped. Default: 196608 (192 KiB).
+    pub max_total_bytes: usize,
+}
+impl Default for ProjectInstructionsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // Keep in sync with aish_prompts::DEFAULT_MAX_FILE_BYTES / DEFAULT_MAX_TOTAL_BYTES.
+            max_file_bytes: 64 * 1024,
+            max_total_bytes: 192 * 1024,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal resize mode
+// ---------------------------------------------------------------------------
+
+/// How the shell follows terminal window resizes.
+///
+/// See `CONFIGURATION.md` (`terminal_resize_mode`) for the user-facing contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TerminalResizeMode {
+    /// Follow resizes for PTY commands and built-in UI (default).
+    #[default]
+    Full,
+    /// Follow resizes for PTY commands only.
+    PtyOnly,
+    /// Never follow resizes (escape hatch for debugging).
+    Off,
+}
+
+impl TerminalResizeMode {
+    /// Parse the config string; unknown values fall back to [`Self::Full`].
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "pty_only" => Self::PtyOnly,
+            "off" => Self::Off,
+            _ => Self::Full,
+        }
+    }
+
+    /// Whether a running PTY command should be resized when the window changes.
+    ///
+    /// A TUI that keeps drawing for a stale geometry wraps its own output on the
+    /// real terminal, so `off` is the only mode that skips this.
+    pub fn follows_pty_commands(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level config model
@@ -375,8 +439,6 @@ pub struct ConfigModel {
     pub bash_output_offload: Option<OutputOffloadConfig>,
     pub pty_output_keep_bytes: usize,
     pub memory: Option<MemoryConfig>,
-    pub session_db_path: Option<String>,
-
     /// Interval between live-session resource checks in the REPL. 0 disables
     /// the background check entirely (the `/live_sessions` panel still shows
     /// resources when opened). Default: 30.
@@ -405,6 +467,8 @@ pub struct ConfigModel {
     /// no container/kube segments. Default: true.
     #[serde(default = "default_true")]
     pub remote_rich_prompt: bool,
+
+    pub session_db_path: Option<String>,
 
     /// Hostname regex patterns that escalate the PS1 marker to Danger
     /// color.
@@ -538,6 +602,10 @@ pub struct ConfigModel {
     /// Default: true.
     #[serde(default = "default_true")]
     pub check_update_on_startup: bool,
+    /// Project-level `AGENTS.md` instruction loading (discovery limits and
+    /// enable switch).
+    #[serde(default)]
+    pub project_instructions: ProjectInstructionsConfig,
 }
 
 impl Default for ConfigModel {
@@ -593,6 +661,7 @@ impl Default for ConfigModel {
             recent_models: vec![],
             fallback_revert_on_cooldown: default_true(),
             check_update_on_startup: default_true(),
+            project_instructions: ProjectInstructionsConfig::default(),
         }
     }
 }
@@ -843,6 +912,25 @@ api_key: sk-test
         assert!(config.enable_scripts);
         assert_eq!(config.history_size, 1000);
         assert_eq!(config.terminal_resize_mode, "full");
+    }
+
+    #[test]
+    fn test_terminal_resize_mode_parse_and_predicates() {
+        assert_eq!(TerminalResizeMode::parse("full"), TerminalResizeMode::Full);
+        assert_eq!(
+            TerminalResizeMode::parse(" PTY_ONLY "),
+            TerminalResizeMode::PtyOnly
+        );
+        assert_eq!(TerminalResizeMode::parse("off"), TerminalResizeMode::Off);
+        // Unknown values fall back to the documented default.
+        assert_eq!(
+            TerminalResizeMode::parse("nonsense"),
+            TerminalResizeMode::Full
+        );
+
+        assert!(TerminalResizeMode::Full.follows_pty_commands());
+        assert!(TerminalResizeMode::PtyOnly.follows_pty_commands());
+        assert!(!TerminalResizeMode::Off.follows_pty_commands());
     }
 
     #[test]

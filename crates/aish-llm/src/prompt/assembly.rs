@@ -37,7 +37,6 @@ impl PromptAssembly {
         }
     }
 }
-
 fn merge_system_with_appendix(base_system: &str, appendix: Option<String>) -> String {
     match appendix {
         None => base_system.to_string(),

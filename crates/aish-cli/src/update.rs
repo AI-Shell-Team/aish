@@ -1,7 +1,8 @@
-//! Self-update via CDN release metadata and bundles.
+//! Self-update via the official site and GitHub Releases.
 //!
-//! Version discovery and downloads use `cdn.aishell.ai` only (Claude Code–style
-//! `/latest` text + versioned release paths). No GitHub API dependency.
+//! Version discovery reads a plain version string from `www.aishell.ai/repo/latest`
+//! (same source as the website installer). The bundle is downloaded from GitHub
+//! Releases first, then from the official site. CDN is not used.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,10 +14,12 @@ use serde_json::Value;
 
 use crate::install_channel::{current_install_channel, InstallChannel, PipChannelContext};
 
-const DEFAULT_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download";
-const DEFAULT_BETA_DOWNLOAD_BASE_URL: &str = "https://cdn.aishell.ai/download/beta";
+const GITHUB_REPO: &str = "AI-Shell-Team/aish";
+const DEFAULT_REPO_BASE_URL: &str = "https://www.aishell.ai/repo";
 const CONNECTION_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 300;
+/// Give up on a GitHub connection that never completes, then try the official site.
+const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 30;
 
 fn print_dim(msg: &str) {
     println!("\x1b[2m{msg}\x1b[0m");
@@ -143,18 +146,23 @@ fn detect_platform() -> Result<(&'static str, &'static str), AishError> {
 // Update check
 // ---------------------------------------------------------------------------
 
-fn build_http_client(timeout_secs: u64) -> Result<reqwest::blocking::Client, AishError> {
-    reqwest::blocking::Client::builder()
+fn build_http_client(
+    timeout_secs: u64,
+    connect_timeout_secs: Option<u64>,
+) -> Result<reqwest::blocking::Client, AishError> {
+    let mut builder = reqwest::blocking::Client::builder()
         .user_agent("aish-update-checker")
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|e| {
-            AishError::Config({
-                let mut args = std::collections::HashMap::new();
-                args.insert("error".to_string(), e.to_string());
-                t_with_args("cli.update.http_error", &args)
-            })
+        .timeout(std::time::Duration::from_secs(timeout_secs));
+    if let Some(connect_timeout_secs) = connect_timeout_secs {
+        builder = builder.connect_timeout(std::time::Duration::from_secs(connect_timeout_secs));
+    }
+    builder.build().map_err(|e| {
+        AishError::Config({
+            let mut args = std::collections::HashMap::new();
+            args.insert("error".to_string(), e.to_string());
+            t_with_args("cli.update.http_error", &args)
         })
+    })
 }
 
 fn get_env_var(name: &str) -> Option<String> {
@@ -167,19 +175,13 @@ fn is_prerelease_version(version: &str) -> bool {
         .unwrap_or_else(|_| version.strip_prefix('v').unwrap_or(version).contains('-'))
 }
 
-fn resolve_download_base_url<F>(include_pre_release: bool, env_get: F) -> String
-where
-    F: Fn(&str) -> Option<String> + Copy,
-{
-    let value = if include_pre_release {
-        env_get("AISH_BETA_DOWNLOAD_BASE_URL")
-            .unwrap_or_else(|| DEFAULT_BETA_DOWNLOAD_BASE_URL.to_string())
+/// Stable metadata lives at the official site; beta metadata lives under `/beta`.
+fn channel_base_url(include_pre_release: bool) -> String {
+    if include_pre_release {
+        format!("{DEFAULT_REPO_BASE_URL}/beta")
     } else {
-        env_get("AISH_DOWNLOAD_BASE_URL")
-            .or_else(|| env_get("AISH_REPO_URL"))
-            .unwrap_or_else(|| DEFAULT_DOWNLOAD_BASE_URL.to_string())
-    };
-    value.trim_end_matches('/').to_string()
+        DEFAULT_REPO_BASE_URL.to_string()
+    }
 }
 
 fn resolve_latest_version_url<F>(include_pre_release: bool, env_get: F) -> String
@@ -188,10 +190,9 @@ where
 {
     if include_pre_release {
         env_get("AISH_BETA_LATEST_URL")
-            .unwrap_or_else(|| format!("{}/latest", resolve_download_base_url(true, env_get)))
+            .unwrap_or_else(|| format!("{}/latest", channel_base_url(true)))
     } else {
-        env_get("AISH_LATEST_URL")
-            .unwrap_or_else(|| format!("{}/latest", resolve_download_base_url(false, env_get)))
+        env_get("AISH_LATEST_URL").unwrap_or_else(|| format!("{}/latest", channel_base_url(false)))
     }
 }
 
@@ -199,22 +200,67 @@ fn get_latest_version_url(include_pre_release: bool) -> String {
     resolve_latest_version_url(include_pre_release, get_env_var)
 }
 
-fn resolve_release_download_url<F>(tag_name: &str, filename: &str, env_get: F) -> String
-where
-    F: Fn(&str) -> Option<String> + Copy,
-{
-    let version_str = tag_name.strip_prefix('v').unwrap_or(tag_name);
-    let include_pre_release = is_prerelease_version(version_str);
+fn github_release_download_url(tag_name: &str, filename: &str) -> String {
+    let tag = if tag_name.starts_with('v') {
+        tag_name.to_string()
+    } else {
+        format!("v{tag_name}")
+    };
+    format!("https://github.com/{GITHUB_REPO}/releases/download/{tag}/{filename}")
+}
+
+fn site_release_download_url(tag_name: &str, filename: &str) -> String {
+    let version = tag_name.strip_prefix('v').unwrap_or(tag_name);
+    let include_pre_release = is_prerelease_version(version);
     format!(
-        "{}/releases/{}/{}",
-        resolve_download_base_url(include_pre_release, env_get),
-        version_str,
-        filename
+        "{}/v{version}/{filename}",
+        channel_base_url(include_pre_release)
     )
 }
 
-fn get_release_download_url(tag_name: &str, filename: &str) -> String {
-    resolve_release_download_url(tag_name, filename, get_env_var)
+fn nonempty_env<F>(env_get: F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_get(key)
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Optional mirror. Stable prefers `AISH_DOWNLOAD_BASE_URL`, then `AISH_REPO_URL`.
+/// Beta uses `AISH_BETA_DOWNLOAD_BASE_URL`. The archive layout is the previous
+/// `{base}/releases/<version>/<file>` path.
+fn mirror_download_base_url<F>(include_pre_release: bool, env_get: F) -> Option<String>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    if include_pre_release {
+        nonempty_env(env_get, "AISH_BETA_DOWNLOAD_BASE_URL")
+    } else {
+        nonempty_env(env_get, "AISH_DOWNLOAD_BASE_URL")
+            .or_else(|| nonempty_env(env_get, "AISH_REPO_URL"))
+    }
+}
+
+fn mirror_release_download_url(base: &str, tag_name: &str, filename: &str) -> String {
+    let version = tag_name.strip_prefix('v').unwrap_or(tag_name);
+    format!("{base}/releases/{version}/{filename}")
+}
+
+/// GitHub, then the official site, then a configured mirror.
+fn release_download_urls<F>(tag_name: &str, filename: &str, env_get: F) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String> + Copy,
+{
+    let mut urls = vec![
+        github_release_download_url(tag_name, filename),
+        site_release_download_url(tag_name, filename),
+    ];
+    let version = tag_name.strip_prefix('v').unwrap_or(tag_name);
+    if let Some(base) = mirror_download_base_url(is_prerelease_version(version), env_get) {
+        urls.push(mirror_release_download_url(&base, tag_name, filename));
+    }
+    urls
 }
 
 fn normalize_tag(version_value: &str) -> Result<String, AishError> {
@@ -232,7 +278,7 @@ fn normalize_tag(version_value: &str) -> Result<String, AishError> {
     Ok(format!("v{normalized}"))
 }
 
-/// Build update info from a CDN `/latest` tag when `latest > current`.
+/// Build update info from a `/latest` tag when `latest > current`.
 fn build_update_info(
     tag_name: &str,
     current_version: &str,
@@ -241,28 +287,27 @@ fn build_update_info(
     let latest = tag_name.strip_prefix('v').unwrap_or(tag_name);
     let current = current_version.strip_prefix('v').unwrap_or(current_version);
 
-    // Stable channel must not offer a prerelease even if CDN /latest is mis-tagged.
+    // Stable channel must not offer a prerelease even if /latest is mis-tagged.
     if (!include_pre_release && is_prerelease_version(latest))
         || compare_versions(latest, current) != std::cmp::Ordering::Greater
     {
         return None;
     }
 
-    let base = resolve_download_base_url(include_pre_release, get_env_var);
     Some(UpdateInfo {
         tag_name: tag_name.to_string(),
         current_version: current.to_string(),
         latest_version: latest.to_string(),
-        html_url: format!("{base}/releases/{latest}"),
+        html_url: format!("https://github.com/{GITHUB_REPO}/releases/tag/{tag_name}"),
     })
 }
 
-/// Check CDN `/latest` for a newer version. No GitHub API calls.
+/// Check the official site `/latest` for a newer version. No GitHub API calls.
 pub fn check_for_updates(
     current_version: &str,
     include_pre_release: bool,
 ) -> Result<Option<UpdateInfo>, AishError> {
-    let client = build_http_client(CONNECTION_TIMEOUT_SECS)?;
+    let client = build_http_client(CONNECTION_TIMEOUT_SECS, None)?;
     let url = get_latest_version_url(include_pre_release);
 
     let resp = client.get(&url).send().map_err(|e| {
@@ -328,8 +373,12 @@ fn format_download_progress(downloaded: u64, total: u64) -> String {
     }
 }
 
-fn download_with_progress(url: &str, dest: &Path) -> Result<(), AishError> {
-    let client = build_http_client(DOWNLOAD_TIMEOUT_SECS)?;
+fn download_with_progress(
+    url: &str,
+    dest: &Path,
+    connect_timeout_secs: Option<u64>,
+) -> Result<(), AishError> {
+    let client = build_http_client(DOWNLOAD_TIMEOUT_SECS, connect_timeout_secs)?;
 
     let resp = client.get(url).send().map_err(|e| {
         AishError::Config({
@@ -400,7 +449,7 @@ fn download_with_progress(url: &str, dest: &Path) -> Result<(), AishError> {
 }
 
 // ---------------------------------------------------------------------------
-// Download release (CDN only)
+// Download release (GitHub, then the official site)
 // ---------------------------------------------------------------------------
 
 fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
@@ -418,9 +467,26 @@ fn download_release(tag_name: &str) -> Result<PathBuf, AishError> {
     })?;
 
     let dest_path = temp_dir.join(&filename);
-    let cdn_url = get_release_download_url(tag_name, &filename);
-    download_with_progress(&cdn_url, &dest_path)?;
-    Ok(dest_path)
+    let urls = release_download_urls(tag_name, &filename, get_env_var);
+    let mut last_error = None;
+    for (index, url) in urls.iter().enumerate() {
+        if index > 0 {
+            let _ = std::fs::remove_file(&dest_path);
+            println!();
+            let message = if index == 1 {
+                t("cli.update.download_fallback")
+            } else {
+                t("cli.update.download_mirror")
+            };
+            print_dim(&message);
+        }
+        let connect_timeout_secs = (index == 0).then_some(GITHUB_CONNECT_TIMEOUT_SECS);
+        match download_with_progress(url, &dest_path, connect_timeout_secs) {
+            Ok(()) => return Ok(dest_path),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.expect("release download has at least one candidate URL"))
 }
 
 // ---------------------------------------------------------------------------
@@ -891,7 +957,7 @@ mod tests {
         assert_eq!(info.tag_name, "v0.3.0");
         assert_eq!(
             info.html_url,
-            "https://cdn.aishell.ai/download/releases/0.3.0"
+            "https://github.com/AI-Shell-Team/aish/releases/tag/v0.3.0"
         );
     }
 
@@ -917,8 +983,8 @@ mod tests {
         let stable_url = resolve_latest_version_url(false, |_| None);
         let beta_url = resolve_latest_version_url(true, |_| None);
 
-        assert_eq!(stable_url, "https://cdn.aishell.ai/download/latest");
-        assert_eq!(beta_url, "https://cdn.aishell.ai/download/beta/latest");
+        assert_eq!(stable_url, "https://www.aishell.ai/repo/latest");
+        assert_eq!(beta_url, "https://www.aishell.ai/repo/beta/latest");
     }
 
     #[test]
@@ -937,31 +1003,85 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_release_download_url_uses_stable_cdn() {
-        let url = resolve_release_download_url("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |_| None);
+    fn test_release_download_urls_try_github_then_site() {
+        let urls = release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |_| None);
 
         assert_eq!(
-            url,
-            "https://cdn.aishell.ai/download/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+            urls[0],
+            "https://github.com/AI-Shell-Team/aish/releases/download/v0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            urls[1],
+            "https://www.aishell.ai/repo/v0.3.0/aish-0.3.0-linux-amd64.tar.gz"
         );
     }
 
     #[test]
-    fn test_resolve_release_download_url_uses_beta_cdn() {
-        let url = resolve_release_download_url(
+    fn test_release_download_urls_beta_uses_official_site() {
+        let urls = release_download_urls(
+            "v0.3.0-beta.3",
+            "aish-0.3.0-beta.3-linux-amd64.tar.gz",
+            |_| None,
+        );
+
+        assert_eq!(
+            urls[0],
+            "https://github.com/AI-Shell-Team/aish/releases/download/v0.3.0-beta.3/aish-0.3.0-beta.3-linux-amd64.tar.gz"
+        );
+        assert_eq!(
+            urls[1],
+            "https://www.aishell.ai/repo/beta/v0.3.0-beta.3/aish-0.3.0-beta.3-linux-amd64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_release_download_urls_append_stable_mirror() {
+        let urls =
+            release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |key| match key {
+                "AISH_DOWNLOAD_BASE_URL" => Some("https://mirror.example/download/".to_string()),
+                "AISH_REPO_URL" => Some("https://other.example/repo".to_string()),
+                _ => None,
+            });
+
+        assert_eq!(urls.len(), 3);
+        assert_eq!(
+            urls[2],
+            "https://mirror.example/download/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_release_download_urls_repo_url_is_stable_fallback() {
+        let urls =
+            release_download_urls("v0.3.0", "aish-0.3.0-linux-amd64.tar.gz", |key| match key {
+                "AISH_REPO_URL" => Some("https://mirror.example/repo".to_string()),
+                "AISH_DOWNLOAD_BASE_URL" => Some("   ".to_string()),
+                _ => None,
+            });
+
+        assert_eq!(
+            urls[2],
+            "https://mirror.example/repo/releases/0.3.0/aish-0.3.0-linux-amd64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_release_download_urls_append_beta_mirror() {
+        let urls = release_download_urls(
             "v0.3.0-beta.3",
             "aish-0.3.0-beta.3-linux-amd64.tar.gz",
             |key| match key {
                 "AISH_BETA_DOWNLOAD_BASE_URL" => {
-                    Some("https://cdn.example.com/download/beta".to_string())
+                    Some("https://mirror.example/download/beta".to_string())
                 }
+                "AISH_DOWNLOAD_BASE_URL" => Some("https://mirror.example/download".to_string()),
                 _ => None,
             },
         );
 
         assert_eq!(
-            url,
-            "https://cdn.example.com/download/beta/releases/0.3.0-beta.3/aish-0.3.0-beta.3-linux-amd64.tar.gz"
+            urls[2],
+            "https://mirror.example/download/beta/releases/0.3.0-beta.3/aish-0.3.0-beta.3-linux-amd64.tar.gz"
         );
     }
 
