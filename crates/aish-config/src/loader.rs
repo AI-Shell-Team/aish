@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use aish_core::{AishError, Result};
@@ -68,25 +69,16 @@ impl ConfigLoader {
                 // Persist the merged Value (not the typed ConfigModel)
                 // so unknown keys / user-extension fields / comments are
                 // preserved — migration is additive, not lossy.
+                //
+                // The same crash-safe writer as every other config write is
+                // used here on purpose: it carries the target's file mode onto
+                // the replacement, so migrating a config the user chmod'ed to
+                // 0600 cannot hand back a world-readable file with the API key
+                // in it.
                 let migrated = serde_yaml::to_string(&value).map_err(|e| {
                     AishError::Config(format!("failed to serialize migrated config: {e}"))
                 })?;
-                // Atomic replace: write to a temp file in the same
-                // directory then rename, so a crash mid-write cannot
-                // corrupt config.yaml.
-                let tmp_path = path.with_extension("yaml.tmp");
-                std::fs::write(&tmp_path, &migrated).map_err(|e| {
-                    AishError::Config(format!(
-                        "failed to write migrated temp {}: {e}",
-                        tmp_path.display()
-                    ))
-                })?;
-                std::fs::rename(&tmp_path, &path).map_err(|e| {
-                    AishError::Config(format!(
-                        "failed to atomically replace migrated {}: {e}",
-                        path.display()
-                    ))
-                })?;
+                Self::write_atomic(&path, &migrated)?;
                 debug!(path = %path.display(), "migrated config: added missing fields");
             }
             config
@@ -196,23 +188,178 @@ impl ConfigLoader {
     }
 
     /// Persist config to a YAML file.
+    ///
+    /// Delegates to [`Self::save_atomic`], so the write is crash-safe (temp
+    /// file + rename) rather than a truncating in-place write.
     pub fn save(config: &ConfigModel, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AishError::Config(format!(
-                    "failed to create config directory {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
+        Self::save_atomic(config, path)
+    }
 
+    /// Serialize-then-rename, so a crash never leaves a truncated config behind.
+    ///
+    /// The serialized YAML is written to a sibling temp file in the same
+    /// directory (same filesystem, so `rename` is atomic), synced, and then
+    /// renamed over `path`, whose permission bits are carried over first (unix;
+    /// see [`Self::write_atomic`]). Missing parent directories are created
+    /// first, and the temp file is removed if either the write or the rename
+    /// fails.
+    pub fn save_atomic(config: &ConfigModel, path: &Path) -> Result<()> {
         let yaml = serde_yaml::to_string(config)
             .map_err(|e| AishError::Config(format!("failed to serialize config: {e}")))?;
+        Self::write_atomic(path, &yaml)
+    }
 
-        std::fs::write(path, yaml)
-            .map_err(|e| AishError::Config(format!("failed to write {}: {e}", path.display())))?;
+    /// Edit the raw YAML document in place: parse the file (or an empty document
+    /// when it does not exist), hand the mutable document to `edit`, then write it
+    /// back atomically. Unknown keys and any structure the typed `ConfigModel`
+    /// does not model are preserved — only the subtree `edit` touches changes.
+    ///
+    /// The file is only written when `edit` returns `Ok`; if `edit` fails the
+    /// original file is left untouched byte-for-byte. An empty or non-existent
+    /// file starts as an empty `Mapping` so the result is always valid YAML.
+    ///
+    /// The final write goes through [`Self::write_atomic`]: crash-safe (temp
+    /// file + `rename` + `fsync`) and mode-preserving.
+    ///
+    /// Limitation: this is an *unlocked* read-modify-write. Two processes that
+    /// load and edit the same file concurrently can lose one of the two
+    /// updates (last writer wins); there is deliberately no lockfile, so
+    /// nothing breaks when a writer is killed.
+    pub fn update_raw<F>(path: &Path, edit: F) -> Result<()>
+    where
+        F: FnOnce(&mut serde_yaml::Value) -> Result<()>,
+    {
+        let mut document = if path.exists() {
+            let raw = std::fs::read_to_string(path).map_err(|e| {
+                AishError::Config(format!("failed to read {}: {e}", path.display()))
+            })?;
+            // An empty file (or one containing only `null`) parses to
+            // `Value::Null`; normalize it to an empty mapping so edits can
+            // insert keys without a special case.
+            match serde_yaml::from_str::<serde_yaml::Value>(&raw).map_err(|e| {
+                AishError::Config(format!("failed to parse {}: {e}", path.display()))
+            })? {
+                serde_yaml::Value::Null => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                other => other,
+            }
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
 
+        edit(&mut document)?;
+
+        let yaml = serde_yaml::to_string(&document).map_err(|e| {
+            AishError::Config(format!("failed to serialize {}: {e}", path.display()))
+        })?;
+        Self::write_atomic(path, &yaml)
+    }
+
+    /// Write `contents` to `path` via a same-directory temp file + `rename`.
+    ///
+    /// Crash-safe: the temp file is flushed to stable storage (`sync_all`)
+    /// before the `rename`, and the parent directory is synced after it, so a
+    /// crash leaves either the complete old file or the complete new one.
+    ///
+    /// When `path` already exists its permissions are copied onto the temp file
+    /// *before* the content is written, so a hand-`chmod 600` config (api_key,
+    /// tokens) does not come back world-readable after an edit. This is unix
+    /// mode-copying and best effort — a target whose metadata cannot be read
+    /// keeps the default mode the fresh temp file got. A brand-new file keeps
+    /// the usual `0666 & !umask`.
+    ///
+    /// Creates missing parent directories. The temp file is removed if the
+    /// write or the rename fails, so a failed call never leaves debris behind.
+    ///
+    /// Limitation: the replacement itself is atomic, but this does not serialize
+    /// concurrent writers — see [`Self::update_raw`] for the read-modify-write
+    /// window that callers inherit.
+    fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    AishError::Config(format!(
+                        "failed to create config directory {}: {e}",
+                        parent.display()
+                    ))
+                })?;
+            }
+        }
+
+        let tmp_path = Self::temp_path(path);
+        let write = std::fs::File::create(&tmp_path).and_then(|mut file| {
+            // The mode must be in place before any byte of content lands,
+            // otherwise the temp file would sit world-readable with credentials
+            // in it. An existing file keeps its own mode; a new one is created
+            // owner-only, because a config carries the API key and header
+            // values and must not depend on the process umask.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(path)
+                    .map(|metadata| metadata.permissions())
+                    .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o600));
+                // A failure here is fatal on purpose: without the mode in place
+                // the temp file may be readable by other users, so no
+                // credential is ever written into it.
+                file.set_permissions(mode)?;
+            }
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()
+        });
+        if let Err(e) = write {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(AishError::Config(format!(
+                "failed to write temp {}: {e}",
+                tmp_path.display()
+            )));
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(AishError::Config(format!(
+                "failed to atomically replace {}: {e}",
+                path.display()
+            )));
+        }
+        Self::sync_parent_directory(path);
         Ok(())
+    }
+
+    /// Best-effort `fsync` of `path`'s parent directory, so the `rename` that
+    /// replaced `path` also survives a crash (the file's own data is already
+    /// synced by [`Self::write_atomic`]).
+    ///
+    /// Failure is ignored on purpose: not every platform/filesystem allows a
+    /// directory to be opened or synced, and durability is a bonus — it must
+    /// not turn a completed write into an error.
+    fn sync_parent_directory(path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let directory = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        if let Ok(handle) = std::fs::File::open(directory) {
+            let _ = handle.sync_all();
+        }
+    }
+
+    /// Build the sibling temp path used by [`Self::write_atomic`].
+    ///
+    /// Shape: `<file-name>.tmp-<pid>` (e.g. `config.yaml.tmp-4242`). Keeping it
+    /// in the same directory as the target guarantees the final `rename` stays
+    /// on one filesystem; the pid keeps concurrent processes from colliding.
+    fn temp_path(path: &Path) -> PathBuf {
+        let mut name = path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("config.yaml"));
+        name.push(format!(".tmp-{}", std::process::id()));
+        match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+            _ => PathBuf::from(name),
+        }
     }
 }
 
@@ -241,6 +388,23 @@ mod tests {
         assert!(on_disk.contains("model: glm-4.7"));
         assert!(on_disk.contains("api_key: secret"));
         assert!(on_disk.contains("enable_token_estimation: true"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_migration_keeps_the_file_mode() {
+        // The migration rewrite replaces the file, so it must go through the
+        // same mode-preserving writer as every other config write: a 0600
+        // config holds the API key and must not come back world-readable.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\napi_key: secret\n").unwrap();
+        chmod(&path, 0o600);
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.model, "glm-4.7");
+        assert_eq!(mode_of(&path), 0o600, "migration must keep mode 600");
+        assert!(leftover_tmp_files(dir.path()).is_empty());
     }
 
     #[test]
@@ -428,5 +592,239 @@ mod tests {
         assert!(path.exists(), "config file should have been created");
         let on_disk = std::fs::read_to_string(&path).unwrap();
         assert!(on_disk.contains("model:"));
+    }
+
+    /// Names of leftover temp files (`*.tmp*`) in `dir`, if any.
+    fn leftover_tmp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                if name.contains(".tmp") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn update_raw_only_touches_edited_subtree() {
+        // A user config with an unknown extension key and a nested object.
+        // Editing the `mcp` subtree must leave everything else byte-identical
+        // in value terms — unknown keys are the whole reason this API exists.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "model: glm-4.7\n\
+             api_key: secret\n\
+             my_custom_extension: 7\n\
+             nested_thing:\n\
+             \x20 inner: keep\n\
+             \x20 other: [a, b]\n\
+             mcp:\n\
+             \x20 enabled: true\n\
+             \x20 servers:\n\
+             \x20 - name: old\n\
+             \x20   transport: stdio\n\
+             \x20   command: old-cmd\n",
+        )
+        .unwrap();
+
+        ConfigLoader::update_raw(&path, |doc| {
+            let root = doc.as_mapping_mut().expect("root mapping");
+            let mut server = serde_yaml::Mapping::new();
+            server.insert("name".into(), serde_yaml::Value::String("new".into()));
+            server.insert(
+                "transport".into(),
+                serde_yaml::Value::String("stdio".into()),
+            );
+            server.insert(
+                "command".into(),
+                serde_yaml::Value::String("new-cmd".into()),
+            );
+            let mut mcp = serde_yaml::Mapping::new();
+            mcp.insert("enabled".into(), serde_yaml::Value::Bool(true));
+            mcp.insert(
+                "servers".into(),
+                serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(server)]),
+            );
+            root.insert("mcp".into(), serde_yaml::Value::Mapping(mcp));
+            Ok(())
+        })
+        .unwrap();
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("model: glm-4.7"), "got:\n{on_disk}");
+        assert!(on_disk.contains("api_key: secret"), "got:\n{on_disk}");
+        assert!(
+            on_disk.contains("my_custom_extension: 7"),
+            "unknown key must survive update_raw; got:\n{on_disk}"
+        );
+        assert!(
+            on_disk.contains("nested_thing:"),
+            "unrelated subtree must survive; got:\n{on_disk}"
+        );
+        assert!(on_disk.contains("inner: keep"), "got:\n{on_disk}");
+        assert!(
+            on_disk.contains("new-cmd"),
+            "mcp subtree must be new; got:\n{on_disk}"
+        );
+        assert!(
+            !on_disk.contains("old-cmd"),
+            "old mcp subtree must be gone; got:\n{on_disk}"
+        );
+
+        // And the resulting document still loads as a typed ConfigModel.
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.model, "glm-4.7");
+        assert!(config.mcp.enabled);
+        assert_eq!(config.mcp.servers.len(), 1);
+        assert_eq!(config.mcp.servers[0].name, "new");
+    }
+
+    #[test]
+    fn update_raw_leaves_file_untouched_when_edit_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let original = "model: glm-4.7\nmy_custom_extension: 7\n";
+        std::fs::write(&path, original).unwrap();
+
+        let err =
+            ConfigLoader::update_raw(&path, |_doc| Err(AishError::Config("edit refused".into())))
+                .unwrap_err();
+        assert!(err.to_string().contains("edit refused"), "got: {err}");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(leftover_tmp_files(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn save_atomic_round_trips_and_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nested, not-yet-existing parent: save_atomic must create it.
+        let path = dir.path().join("aish").join("config.yaml");
+
+        let mut config = ConfigModel::default();
+        config.model = "glm-4.7".into();
+        config.api_key = "secret".into();
+        ConfigLoader::save_atomic(&config, &path).unwrap();
+
+        let loaded = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(loaded.model, "glm-4.7");
+        assert_eq!(loaded.api_key, "secret");
+
+        assert!(
+            leftover_tmp_files(&path.parent().unwrap()).is_empty(),
+            "no *.tmp* files may remain: {:?}",
+            leftover_tmp_files(&path.parent().unwrap())
+        );
+    }
+
+    #[test]
+    fn update_raw_creates_file_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aish").join("config.yaml");
+        assert!(!path.exists());
+
+        ConfigLoader::update_raw(&path, |doc| {
+            let root = doc.as_mapping_mut().expect("root mapping");
+            root.insert("model".into(), serde_yaml::Value::String("glm-4.7".into()));
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(path.exists());
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.model, "glm-4.7");
+        assert!(leftover_tmp_files(&path.parent().unwrap()).is_empty());
+    }
+
+    /// The permission bits of `path` (unix).
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_raw_preserves_the_file_mode() {
+        // config.yaml holds api_key / MCP tokens, so a user who ran
+        // `chmod 600 config.yaml` must not get it back as world-readable after
+        // any `/mcp` (or other) raw edit: the temp file has to inherit the
+        // target's mode before the rename.
+        //
+        // 0o600 and 0o640 are both checked because they cover every umask: a
+        // freshly created temp file (`0666 & !umask`) can equal at most one of
+        // them, so this cannot pass by accident.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+
+        for mode in [0o600, 0o640] {
+            std::fs::write(&path, "model: glm-4.7\napi_key: secret\n").unwrap();
+            chmod(&path, mode);
+
+            ConfigLoader::update_raw(&path, |document| {
+                document
+                    .as_mapping_mut()
+                    .expect("root mapping")
+                    .insert("theme".into(), serde_yaml::Value::String("dark".into()));
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(mode_of(&path), mode, "update_raw must keep mode {mode:o}");
+            assert!(std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("theme: dark"));
+            assert!(leftover_tmp_files(dir.path()).is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_atomic_preserves_the_file_mode() {
+        // Same guarantee through the other public entry point (`save` ->
+        // `save_atomic` -> `write_atomic`).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\napi_key: secret\n").unwrap();
+        chmod(&path, 0o600);
+
+        let mut config = ConfigModel::default();
+        config.model = "glm-4.7".into();
+        ConfigLoader::save_atomic(&config, &path).unwrap();
+
+        assert_eq!(mode_of(&path), 0o600, "save_atomic must keep the mode");
+        assert!(leftover_tmp_files(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_config_file_is_owner_only() {
+        // A config carries the API key and header values, so a file created by
+        // aish must not depend on the process umask for its mode.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+
+        let mut config = ConfigModel::default();
+        config.model = "glm-4.7".into();
+        ConfigLoader::save_atomic(&config, &path).unwrap();
+
+        assert_eq!(
+            mode_of(&path),
+            0o600,
+            "a new config must be readable by its owner only"
+        );
+        assert!(leftover_tmp_files(dir.path()).is_empty());
     }
 }

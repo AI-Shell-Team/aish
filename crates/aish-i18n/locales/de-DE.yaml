@@ -205,6 +205,7 @@ shell:
     memory: "Langfristige Erinnerungen anzeigen, verifizieren oder löschen"
     compact: "KI-Kontext jetzt komprimieren (optionaler Fokus)"
     instructions: "Projekt-AGENTS.md-Anweisungsladen umschalten (on/off/status; nur diese Sitzung)"
+    mcp: "MCP-Server und ihre Tools prüfen, neu laden und neu verbinden"
 
   slash_group:
     diagnostics: "Diagnose"
@@ -224,6 +225,138 @@ shell:
     undo_count: "{count} Änderung(en) rückgängig machbar"
     plan_planning: "Planung"
     plan_normal: "Normal"
+
+  mcp:
+    no_servers: "MCP: keine Server konfiguriert. Fügen Sie der Konfiguration einen `mcp.servers`-Eintrag hinzu."
+    disabled_hint: "MCP ist konfiguriert, aber inaktiv. Setzen Sie `mcp.enabled: true` und aktivieren Sie mindestens einen Server."
+    config_warning: "MCP-Konfigurationswarnung: {warning}"
+    status_line: "{name} [{transport}] {status} · Tools: {tools} · Vertrauen: {trust} · Nebenwirkungen: {side_effects}"
+    endpoint: "  Endpunkt: {endpoint}"
+    failure: "  Fehler: {reason}"
+    tool_line: "  {name} ({side_effects}) — {description}"
+    tools_header: "Von `{server}` bereitgestellte Tools ({count}):"
+    server_connecting: "`{server}` verbindet noch; bitte gleich erneut versuchen (`/mcp status` zeigt den Zustand)."
+    unknown_server: "Unbekannter MCP-Server: {server}"
+    no_tools: "MCP-Server `{server}` stellt keine Tools bereit."
+    summary: "MCP: {connected}/{total} Server verbunden, {tools} Tool(s) verfügbar."
+    runtime_unavailable: "MCP-Laufzeit ist noch nicht verfügbar; versuchen Sie es erneut, sobald die Shell läuft."
+    reload_header: "MCP-Server werden neu geladen..."
+    reload_done: "MCP-Server neu geladen."
+    reconnect_started: "MCP-Server `{server}` wird neu verbunden..."
+    reconnect_done: "MCP-Server `{server}` neu verbunden."
+    reconnect_failed: "MCP-Server `{server}` fehlgeschlagen: {reason}"
+    confirm_message: "MCP-Server `{server}` möchte Tool `{tool}` aufrufen (deklarierte Nebenwirkungen: {side_effects}).\nArgumente: {args}"
+    blocked_message: "Die MCP-Richtlinie hat Tool `{tool}` auf Server `{server}` blockiert."
+    alternative_hint: "Einmal genehmigen, oder `trust: allow` zusammen mit `side_effects: read` für Server `{server}` setzen, damit schreibgeschützte Tools nicht mehr nachfragen."
+    invalid_action: "Ungültige MCP-Aktion; erwartet: list, describe oder call."
+    tool_required: "Für diese Aktion ist ein MCP-Toolname erforderlich."
+    reason_server: "MCP-Aufruf an Server `{server}`, Tool `{tool}`"
+    reason_side_effects: "Deklarierte Nebenwirkungen `{declared}`; Server meldete `{reported}`"
+    reason_arguments: "Argumente: {args}"
+    reason_trust: "Vertrauensstufe: {trust}"
+    call_failed: "MCP-Aufruf an Server `{server}`, Tool `{tool}` fehlgeschlagen: {detail}"
+    needs_async: "Dieses MCP-Tool benötigt eine Async-Laufzeit; rufen Sie es über die normale Tool-Schleife auf."
+    help_hint: "Führen Sie `/mcp add` aus, um den ersten MCP-Server einzurichten."
+    unknown_subcommand: "Unbekannter `/mcp`-Unterbefehl: {sub}"
+    missing_server_arg: "`/mcp {sub}` fehlt ein erforderliches Argument (ein Servername)."
+    config_write_failed: "Schreiben von config.yaml fehlgeschlagen; die Änderung wurde zurückgenommen: {error}"
+    tool_detail_header: "MCP-Tool `{server}`/`{tool}`"
+    tool_detail_description: "  Beschreibung: {description}"
+    tool_detail_side_effects: "  Nebenwirkungen: deklariert {declared} · gemeldet {reported} · wirksam {effective}"
+    tool_detail_trust: "  Vertrauen: {trust} → {verdict}"
+    tool_detail_schema: "  inputSchema:\n{schema}"
+    tool_unknown: "MCP-Server `{server}` stellt kein Tool namens `{tool}` bereit."
+    verdict_allow: "ohne Rückfrage erlaubt"
+    verdict_confirm: "fragt nach Bestätigung"
+    verdict_block: "durch Richtlinie blockiert"
+    add_cancelled: "Hinzufügen des MCP-Servers abgebrochen; es wurde nichts geschrieben."
+    added: "MCP-Server `{server}` [{transport}] hinzugefügt ({status})."
+    add_failed: "Hinzufügen des MCP-Servers fehlgeschlagen: {error}"
+    removed: "MCP-Server `{server}` entfernt."
+    remove_failed: "Entfernen des MCP-Servers fehlgeschlagen: {error}"
+    enabled: "MCP-Server `{server}` aktiviert ({status})."
+    disabled: "MCP-Server `{server}` deaktiviert; seine Tools wurden abgemeldet."
+    already_enabled: "MCP-Server `{server}` ist bereits aktiviert."
+    already_disabled: "MCP-Server `{server}` ist bereits deaktiviert."
+    toggle_failed: "Ändern des MCP-Serverstatus fehlgeschlagen: {error}"
+    trust_updated: "Vertrauen für `{tool}` auf `{server}` auf {level} gesetzt."
+    trust_failed: "Setzen des MCP-Vertrauens fehlgeschlagen: {error}"
+    test_ok: "MCP-Server `{server}` OK (Version {version}), {tools} Tool(s) verfügbar."
+    test_tool_line: "  {name} — {description}"
+    test_failed: "Test des MCP-Servers `{server}` fehlgeschlagen: {error}"
+    test_tip_not_found: "Hinweis: Der Befehl konnte nicht gestartet werden — prüfen Sie den Pfad und ob er installiert ist."
+    test_tip_refused: "Hinweis: Die Verbindung wurde abgelehnt — läuft der Server und stimmen URL/Port?"
+    test_tip_timeout: "Hinweis: Der Server antwortete nicht rechtzeitig; versuchen Sie `/mcp reconnect` oder erhöhen Sie `request_timeout_ms`."
+    test_tip_auth: "Hinweis: Authentifizierung fehlgeschlagen — prüfen Sie Token/Header dieses Servers."
+    menu_title: "MCP-Menü"
+    menu_question: "Was möchten Sie mit MCP tun?"
+    menu_add: "MCP-Server hinzufügen (Assistent)"
+    menu_tools: "Tools"
+    menu_tools_list: "Alle Tools auflisten"
+    menu_test: "Verbindung testen"
+    menu_trust: "Vertrauen setzen"
+    menu_toggle: "Server aktivieren/deaktivieren"
+    menu_reconnect: "Server neu verbinden"
+    menu_reload: "Alle Server neu laden"
+    menu_remove: "Server entfernen"
+    menu_help: "Hilfe"
+    menu_remove_confirm_title: "MCP-Server entfernen"
+    menu_remove_confirm_question: "MCP-Server `{server}` entfernen und seine Tools abmelden?"
+    menu_remove_confirm_yes: "Ja, entfernen"
+    menu_remove_confirm_no: "Nein, abbrechen"
+    pick_server_title: "MCP-Server auswählen"
+    pick_server_question: "Welchen Server?"
+    pick_tool_title: "MCP-Tool auswählen"
+    pick_tool_question: "Welches Tool?"
+    pick_tool_any: "* (alle Tools)"
+    pick_level_title: "Vertrauensstufe"
+    pick_level_question: "Wie viel Vertrauen sollen Aufrufe erhalten?"
+    menu_cancelled: "MCP-Menü abgebrochen; nichts wurde geändert."
+    add:
+      name_prompt: "Servername"
+      transport_title: "MCP-Server hinzufügen"
+      transport_question: "Welchen Transport verwendet dieser Server?"
+      command_prompt: "Startbefehl (z. B. npx)"
+      args_prompt: "Zusätzliche Argumente, durch Leerzeichen getrennt (optional)"
+      url_prompt: "Server-URL (z. B. https://example.com/mcp)"
+      token_prompt: "Bearer-Token (optional; wird in der Konfiguration gespeichert)"
+      trust_title: "Vertrauensstufe"
+      trust_question: "Wie sehr sollen Aufrufe an diesen Server vertraut werden?"
+      expose_title: "Tool-Bereitstellung"
+      expose_question: "Wie sollen die Tools dieses Servers dem Modell bereitgestellt werden?"
+      side_effects_title: "Deklarierte Nebenwirkungen"
+      side_effects_question: "Was können die Tools dieses Servers tun?"
+      confirm_title: "Neuen MCP-Server bestätigen"
+      confirm_summary: "Diesen Server hinzufügen?\n\n{summary}"
+      confirm_yes: "Ja, hinzufügen"
+      confirm_no: "Nein, abbrechen"
+    help: |-
+      `/mcp` ohne Argumente öffnet ein Menü mit neun Zeilen (1-9 zum Auswählen, dann Aktion → Server → Tool); die Unterbefehle unten bleiben gleichwertig.
+      MCP-Client-Befehle:
+        /mcp | /mcp status | /mcp list   Alle konfigurierten Server anzeigen
+        /mcp help                        Diese Hilfe anzeigen
+        /mcp tools [server]              Tools eines Servers oder aller auflisten
+        /mcp tool <server> <tool>        Schema und Vertrauensurteil eines Tools anzeigen
+        /mcp add                         Interaktiver Assistent (Name, Transport, Vertrauen...)
+        /mcp add <name> -- <cmd> [args]  stdio-Server schnell hinzufügen
+        /mcp add <name> --url <url>      HTTP-Server schnell hinzufügen
+        /mcp remove | rm <name>          Einen Server entfernen
+        /mcp enable <name>               Server aktivieren (verbindet sofort)
+        /mcp disable <name>              Server deaktivieren (meldet seine Tools ab)
+        /mcp trust <server> <tool|*> <ask|allow|block>
+                                         Vertrauen für ein Tool oder einen ganzen Server setzen
+        /mcp test <name>                 Einmal verbinden und Tools auflisten, ohne zu aktivieren
+        /mcp reload                      Alle Server gemäß Konfiguration neu verbinden
+        /mcp reconnect <server>          Einen Server neu verbinden
+      Schnell-Hinzufügen-Optionen: --transport stdio|http, --url <url>, --token <t>, --trust ask|allow|block,
+        --side-effects read|network|write|unknown, --timeout <ms>, --max-output <bytes>,
+        --expose gateway|tools, --env KEY=VALUE, --header KEY=VALUE und `-- <command> [args...]` für stdio.
+      Jede Änderung schreibt config.yaml atomar neu (unbekannte Schlüssel bleiben erhalten, Kommentare nicht) und wirkt sofort.
+      Gateway-Tools (eines pro Server) akzeptieren ein `action`:
+        action: "list"                        Tools des Servers auflisten
+        action: "describe", tool: "<name>"    Ein Tool beschreiben
+        action: "call", tool: "<name>", args: {...}   Ein Tool aufrufen
+      Vertrauensmodell: Ein Aufruf wird nur automatisch genehmigt, wenn der Server `trust: allow` ist und die wirksamen Nebenwirkungen `read` sind; `unknown`/`write`/`network` fragen immer, und `trust: block` wird direkt abgelehnt.
 
   feedback:
     select_type: "Feedback-Typ auswählen"

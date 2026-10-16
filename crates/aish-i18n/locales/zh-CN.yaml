@@ -380,6 +380,7 @@ shell:
     memory: "查看、验证或删除长期记忆"
     compact: "立即压缩 AI 上下文（可附加重点说明）"
     instructions: "切换项目 AGENTS.md 指令加载（on/off/status；仅本会话）"
+    mcp: "查看、重载并重连 MCP server 及其工具"
 
   slash_group:
     diagnostics: "诊断"
@@ -399,6 +400,138 @@ shell:
     undo_count: "可撤销 {count} 项"
     plan_planning: "规划中"
     plan_normal: "普通模式"
+
+  mcp:
+    no_servers: "MCP：未配置任何 server。请在配置中加入 `mcp.servers`。"
+    disabled_hint: "MCP 已配置但未启用。请设置 `mcp.enabled: true` 并至少启用一个 server。"
+    config_warning: "MCP 配置警告：{warning}"
+    status_line: "{name} [{transport}] {status} · 工具: {tools} · 信任: {trust} · 副作用: {side_effects}"
+    endpoint: "  端点: {endpoint}"
+    failure: "  失败: {reason}"
+    tool_line: "  {name}（{side_effects}）— {description}"
+    tools_header: "`{server}` 暴露的工具（{count}）:"
+    server_connecting: "`{server}` 仍在连接中；请稍后重试（`/mcp status` 可查看当前状态）。"
+    unknown_server: "未知的 MCP server：{server}"
+    no_tools: "MCP server `{server}` 未暴露任何工具。"
+    summary: "MCP：已连接 {connected}/{total} 个 server，可用 {tools} 个工具。"
+    runtime_unavailable: "MCP 运行时尚不可用；请在 shell 运行后重试。"
+    reload_header: "正在重载 MCP server..."
+    reload_done: "MCP server 已重载。"
+    reconnect_started: "正在重连 MCP server `{server}`..."
+    reconnect_done: "MCP server `{server}` 已重连。"
+    reconnect_failed: "MCP server `{server}` 失败：{reason}"
+    confirm_message: "MCP server `{server}` 请求调用工具 `{tool}`（声明副作用：{side_effects}）。\n参数：{args}"
+    blocked_message: "MCP 策略已阻止 server `{server}` 上的工具 `{tool}`。"
+    alternative_hint: "可单次批准；若该 server 只做只读操作，可在配置中为它设置 `trust: allow` 与 `side_effects: read`，之后只读工具不再确认。"
+    invalid_action: "无效的 MCP 操作；应为 list、describe 或 call 之一。"
+    tool_required: "该操作需要提供 MCP 工具名。"
+    reason_server: "MCP 调用 server `{server}` 的工具 `{tool}`"
+    reason_side_effects: "声明副作用 `{declared}`；server 上报 `{reported}`"
+    reason_arguments: "参数：{args}"
+    reason_trust: "信任级别：{trust}"
+    call_failed: "MCP 调用 server `{server}` 的工具 `{tool}` 失败：{detail}"
+    needs_async: "该 MCP 工具需要异步运行时；请通过常规工具循环调用。"
+    help_hint: "运行 `/mcp add` 配置第一个 MCP server。"
+    unknown_subcommand: "未知的 `/mcp` 子命令：{sub}"
+    missing_server_arg: "`/mcp {sub}` 缺少必需参数（server 名称）。"
+    config_write_failed: "写入 config.yaml 失败；已回滚本次修改：{error}"
+    tool_detail_header: "MCP 工具 `{server}`/`{tool}`"
+    tool_detail_description: "  描述：{description}"
+    tool_detail_side_effects: "  副作用：声明 {declared} · 上报 {reported} · 生效 {effective}"
+    tool_detail_trust: "  信任：{trust} → {verdict}"
+    tool_detail_schema: "  inputSchema：\n{schema}"
+    tool_unknown: "MCP server `{server}` 没有名为 `{tool}` 的工具。"
+    verdict_allow: "无需确认即可调用"
+    verdict_confirm: "调用时需要确认"
+    verdict_block: "被策略拒绝"
+    add_cancelled: "已取消添加 MCP server；未写入任何内容。"
+    added: "已添加 MCP server `{server}` [{transport}]（{status}）。"
+    add_failed: "添加 MCP server 失败：{error}"
+    removed: "已移除 MCP server `{server}`。"
+    remove_failed: "移除 MCP server 失败：{error}"
+    enabled: "已启用 MCP server `{server}`（{status}）。"
+    disabled: "已禁用 MCP server `{server}`；其工具已注销。"
+    already_enabled: "MCP server `{server}` 已处于启用状态。"
+    already_disabled: "MCP server `{server}` 已处于禁用状态。"
+    toggle_failed: "修改 MCP server 状态失败：{error}"
+    trust_updated: "`{server}` 上 `{tool}` 的信任级别已设为 {level}。"
+    trust_failed: "设置 MCP 信任级别失败：{error}"
+    test_ok: "MCP server `{server}` 正常（版本 {version}），可用工具 {tools} 个。"
+    test_tool_line: "  {name} — {description}"
+    test_failed: "MCP server `{server}` 测试失败：{error}"
+    test_tip_not_found: "提示：命令无法启动——请检查可执行文件路径以及是否已安装。"
+    test_tip_refused: "提示：连接被拒绝——server 是否在运行？URL/端口是否正确？"
+    test_tip_timeout: "提示：server 未及时响应；可尝试 `/mcp reconnect` 或调大 `request_timeout_ms`。"
+    test_tip_auth: "提示：认证失败——请检查为该 server 配置的 token/header。"
+    menu_title: "MCP 菜单"
+    menu_question: "要对 MCP 做什么？"
+    menu_add: "添加 MCP server（向导）"
+    menu_tools: "工具"
+    menu_tools_list: "工具列表"
+    menu_test: "测试连接"
+    menu_trust: "设置信任"
+    menu_toggle: "启用/禁用 server"
+    menu_reconnect: "重连 server"
+    menu_reload: "重载全部 server"
+    menu_remove: "移除 server"
+    menu_help: "帮助"
+    menu_remove_confirm_title: "移除 MCP server"
+    menu_remove_confirm_question: "要移除 MCP server `{server}` 并注销其工具吗？"
+    menu_remove_confirm_yes: "是，移除"
+    menu_remove_confirm_no: "否，取消"
+    pick_server_title: "选择 MCP server"
+    pick_server_question: "选择哪个 server？"
+    pick_tool_title: "选择 MCP 工具"
+    pick_tool_question: "选择哪个工具？"
+    pick_tool_any: "*（所有工具）"
+    pick_level_title: "信任级别"
+    pick_level_question: "对该调用应给予多大信任？"
+    menu_cancelled: "已取消 MCP 菜单；未做任何修改。"
+    add:
+      name_prompt: "Server 名称"
+      transport_title: "添加 MCP server"
+      transport_question: "该 server 使用哪种传输方式？"
+      command_prompt: "启动命令（例如 npx）"
+      args_prompt: "额外参数，以空格分隔（可选）"
+      url_prompt: "Server URL（例如 https://example.com/mcp）"
+      token_prompt: "Bearer token（可选；会写入配置）"
+      trust_title: "信任级别"
+      trust_question: "对该 server 的调用应给予多大信任？"
+      expose_title: "工具暴露方式"
+      expose_question: "该 server 的工具如何暴露给模型？"
+      side_effects_title: "声明的副作用"
+      side_effects_question: "该 server 的工具可能做什么？"
+      confirm_title: "确认新增 MCP server"
+      confirm_summary: "要添加该 server 吗？\n\n{summary}"
+      confirm_yes: "是，添加"
+      confirm_no: "否，取消"
+    help: |-
+      直接输入 `/mcp` 会给出九行交互菜单（可用数字 1-9 快选，再逐层选择动作 → server → 工具，无需记参数）；下列子命令等价可用。
+      MCP 客户端命令：
+        /mcp | /mcp status | /mcp list   显示所有已配置的 server
+        /mcp help                        显示本帮助
+        /mcp tools [server]              列出某个或全部 server 的工具
+        /mcp tool <server> <tool>        查看某个工具的 schema 与信任判定
+        /mcp add                         交互式向导（名称、传输、信任……）
+        /mcp add <name> -- <cmd> [args]  快速添加 stdio server
+        /mcp add <name> --url <url>      快速添加 HTTP server
+        /mcp remove | rm <name>          移除 server
+        /mcp enable <name>               启用 server（立即连接）
+        /mcp disable <name>              禁用 server（注销其工具）
+        /mcp trust <server> <tool|*> <ask|allow|block>
+                                         设置某个工具或整个 server 的信任级别
+        /mcp test <name>                 不改动配置，连接一次并列出工具
+        /mcp reload                      按配置重连所有 server
+        /mcp reconnect <server>          重连单个 server
+      快速添加参数：--transport stdio|http、--url <url>、--token <t>、--trust ask|allow|block、
+        --side-effects read|network|write|unknown、--timeout <ms>、--max-output <bytes>、
+        --expose gateway|tools、--env KEY=VALUE、--header KEY=VALUE，stdio 用 `-- <command> [args...]`。
+      每次修改都会原子重写 config.yaml（保留未知键，不保留注释）并立即生效。
+      gateway 工具（每个 server 一个）接受 `action`：
+        action: "list"                        列出该 server 的工具
+        action: "describe", tool: "<name>"    描述某个工具
+        action: "call", tool: "<name>", args: {...}   调用某个工具
+      信任模型：仅当 server 为 `trust: allow` 且生效副作用为 `read` 时调用才会被自动批准；`unknown`/`write`/`network` 一律需要确认，`trust: block` 直接拒绝。
 
   record:
     started: "⏺ 录制已开始: {path}"

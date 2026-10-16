@@ -465,6 +465,24 @@ impl AiHandler {
         self.llm_session.register_tool(tool);
     }
 
+    /// Remove a registered tool and hand it back, or `None` when no tool owns
+    /// `name`. Used to drop an MCP gateway tool whose server was disabled or
+    /// deleted so the model stops seeing it.
+    pub fn unregister_tool(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.llm_session.unregister_tool(name)
+    }
+
+    /// Whether a tool named `name` is currently registered.
+    ///
+    /// Checked while rebuilding the MCP gateway tools so a gateway tool never
+    /// shadows a builtin that already owns its name.
+    pub fn has_tool(&self, name: &str) -> bool {
+        !self
+            .llm_session
+            .shared_tools_by_names(std::iter::once(name))
+            .is_empty()
+    }
+
     /// Return a snapshot of token usage statistics for the last 7 days.
     pub fn token_stats(&self) -> aish_llm::TokenStats {
         self.token_store.stats()

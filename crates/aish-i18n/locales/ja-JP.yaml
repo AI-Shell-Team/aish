@@ -205,6 +205,7 @@ shell:
     memory: "長期メモリの表示、検証、削除"
     compact: "AIコンテキストを今すぐ圧縮（フォーカス指定は任意）"
     instructions: "プロジェクト AGENTS.md 命令の読み込みを切り替え（on/off/status；このセッションのみ）"
+    mcp: "MCP サーバーとそのツールを確認・再読込・再接続"
 
   slash_group:
     diagnostics: "診断"
@@ -224,6 +225,138 @@ shell:
     undo_count: "取り消し可能 {count} 件"
     plan_planning: "計画中"
     plan_normal: "通常"
+
+  mcp:
+    no_servers: "MCP: サーバーが設定されていません。設定に `mcp.servers` を追加してください。"
+    disabled_hint: "MCP は設定されていますが無効です。`mcp.enabled: true` とし、少なくとも1つのサーバーを有効にしてください。"
+    config_warning: "MCP 設定の警告: {warning}"
+    status_line: "{name} [{transport}] {status} · ツール: {tools} · 信頼: {trust} · 副作用: {side_effects}"
+    endpoint: "  エンドポイント: {endpoint}"
+    failure: "  失敗: {reason}"
+    tool_line: "  {name}（{side_effects}）— {description}"
+    tools_header: "`{server}` が公開するツール（{count}）:"
+    server_connecting: "`{server}` はまだ接続中です。しばらくして再試行してください（状態は `/mcp status` で確認できます）。"
+    unknown_server: "不明な MCP サーバー: {server}"
+    no_tools: "MCP サーバー `{server}` はツールを公開していません。"
+    summary: "MCP: {connected}/{total} サーバー接続済み、{tools} ツールが利用可能。"
+    runtime_unavailable: "MCP ランタイムがまだ利用できません。シェル起動後に再試行してください。"
+    reload_header: "MCP サーバーを再読み込みしています..."
+    reload_done: "MCP サーバーを再読み込みしました。"
+    reconnect_started: "MCP サーバー `{server}` に再接続しています..."
+    reconnect_done: "MCP サーバー `{server}` に再接続しました。"
+    reconnect_failed: "MCP サーバー `{server}` が失敗しました: {reason}"
+    confirm_message: "MCP サーバー `{server}` がツール `{tool}` の呼び出しを要求しています（宣言された副作用: {side_effects}）。\n引数: {args}"
+    blocked_message: "MCP ポリシーがサーバー `{server}` のツール `{tool}` をブロックしました。"
+    alternative_hint: "一度だけ承認するか、このサーバーが読み取り専用なら設定で `trust: allow` と `side_effects: read` を指定すると、以降は確認されません。"
+    invalid_action: "無効な MCP アクションです。list、describe、call のいずれかを指定してください。"
+    tool_required: "このアクションには MCP ツール名が必要です。"
+    reason_server: "MCP 呼び出し: サーバー `{server}`、ツール `{tool}`"
+    reason_side_effects: "宣言された副作用 `{declared}`；サーバーの申告 `{reported}`"
+    reason_arguments: "引数: {args}"
+    reason_trust: "信頼レベル: {trust}"
+    call_failed: "MCP 呼び出し（サーバー `{server}`、ツール `{tool}`）が失敗しました: {detail}"
+    needs_async: "この MCP ツールには非同期ランタイムが必要です。通常のツールループから呼び出してください。"
+    help_hint: "最初の MCP サーバーを設定するには `/mcp add` を実行してください。"
+    unknown_subcommand: "不明な `/mcp` サブコマンド: {sub}"
+    missing_server_arg: "`/mcp {sub}` には必須の引数（サーバー名）がありません。"
+    config_write_failed: "config.yaml の書き込みに失敗しました。変更はロールバックされました: {error}"
+    tool_detail_header: "MCP ツール `{server}`/`{tool}`"
+    tool_detail_description: "  説明: {description}"
+    tool_detail_side_effects: "  副作用: 宣言 {declared} · 報告 {reported} · 実効 {effective}"
+    tool_detail_trust: "  信頼: {trust} → {verdict}"
+    tool_detail_schema: "  inputSchema:\n{schema}"
+    tool_unknown: "MCP サーバー `{server}` に `{tool}` という名前のツールはありません。"
+    verdict_allow: "確認なしで呼び出し可能"
+    verdict_confirm: "呼び出し時に確認を求めます"
+    verdict_block: "ポリシーによりブロック"
+    add_cancelled: "MCP サーバーの追加をキャンセルしました。何も書き込まれていません。"
+    added: "MCP サーバー `{server}` [{transport}] を追加しました（{status}）。"
+    add_failed: "MCP サーバーの追加に失敗しました: {error}"
+    removed: "MCP サーバー `{server}` を削除しました。"
+    remove_failed: "MCP サーバーの削除に失敗しました: {error}"
+    enabled: "MCP サーバー `{server}` を有効化しました（{status}）。"
+    disabled: "MCP サーバー `{server}` を無効化しました。ツールは登録解除されました。"
+    already_enabled: "MCP サーバー `{server}` はすでに有効です。"
+    already_disabled: "MCP サーバー `{server}` はすでに無効です。"
+    toggle_failed: "MCP サーバーの状態変更に失敗しました: {error}"
+    trust_updated: "`{server}` の `{tool}` の信頼レベルを {level} に設定しました。"
+    trust_failed: "MCP の信頼設定に失敗しました: {error}"
+    test_ok: "MCP サーバー `{server}` は正常です（バージョン {version}）。利用可能なツール: {tools} 個。"
+    test_tool_line: "  {name} — {description}"
+    test_failed: "MCP サーバー `{server}` のテストに失敗しました: {error}"
+    test_tip_not_found: "ヒント: コマンドを起動できませんでした。実行ファイルのパスとインストール状況を確認してください。"
+    test_tip_refused: "ヒント: 接続が拒否されました。サーバーが起動しているか、URL/ポートが正しいか確認してください。"
+    test_tip_timeout: "ヒント: サーバーが時間内に応答しませんでした。`/mcp reconnect` を試すか `request_timeout_ms` を増やしてください。"
+    test_tip_auth: "ヒント: 認証に失敗しました。このサーバーに設定した token/header を確認してください。"
+    menu_title: "MCP メニュー"
+    menu_question: "MCP で何をしますか？"
+    menu_add: "MCP サーバーを追加（ウィザード）"
+    menu_tools: "ツール"
+    menu_tools_list: "ツール一覧を表示"
+    menu_test: "接続テスト"
+    menu_trust: "信頼を設定"
+    menu_toggle: "サーバーの有効化/無効化"
+    menu_reconnect: "サーバーに再接続"
+    menu_reload: "全サーバーを再読み込み"
+    menu_remove: "サーバーを削除"
+    menu_help: "ヘルプ"
+    menu_remove_confirm_title: "MCP サーバーを削除"
+    menu_remove_confirm_question: "MCP サーバー `{server}` を削除し、そのツールを登録解除しますか？"
+    menu_remove_confirm_yes: "はい、削除します"
+    menu_remove_confirm_no: "いいえ、キャンセル"
+    pick_server_title: "MCP サーバーを選択"
+    pick_server_question: "どのサーバーを使用しますか？"
+    pick_tool_title: "MCP ツールを選択"
+    pick_tool_question: "どのツールを使用しますか？"
+    pick_tool_any: "*（すべてのツール）"
+    pick_level_title: "信頼レベル"
+    pick_level_question: "この呼び出しをどの程度信頼しますか？"
+    menu_cancelled: "MCP メニューをキャンセルしました。変更はありません。"
+    add:
+      name_prompt: "サーバー名"
+      transport_title: "MCP サーバーを追加"
+      transport_question: "このサーバーはどのトランスポートを使いますか？"
+      command_prompt: "起動コマンド（例: npx）"
+      args_prompt: "追加引数（スペース区切り、任意）"
+      url_prompt: "サーバー URL（例: https://example.com/mcp）"
+      token_prompt: "Bearer トークン（任意、設定に保存されます）"
+      trust_title: "信頼レベル"
+      trust_question: "このサーバーへの呼び出しをどの程度信頼しますか？"
+      expose_title: "ツールの公開方法"
+      expose_question: "このサーバーのツールをモデルにどう公開しますか？"
+      side_effects_title: "宣言する副作用"
+      side_effects_question: "このサーバーのツールは何を行えますか？"
+      confirm_title: "MCP サーバーの追加を確認"
+      confirm_summary: "このサーバーを追加しますか？\n\n{summary}"
+      confirm_yes: "はい、追加する"
+      confirm_no: "いいえ、キャンセル"
+    help: |-
+      引数なしの `/mcp` で9行の対話メニューが開きます（1-9 で選択し、アクション → サーバー → ツールの順に進みます）。以下のサブコマンドも同等に使えます。
+      MCP クライアントコマンド:
+        /mcp | /mcp status | /mcp list   設定済みの全サーバーを表示
+        /mcp help                        このヘルプを表示
+        /mcp tools [server]              1つ、または全サーバーのツール一覧
+        /mcp tool <server> <tool>        1つのツールのスキーマと信頼判定を表示
+        /mcp add                         対話ウィザード（名前、トランスポート、信頼…）
+        /mcp add <name> -- <cmd> [args]  stdio サーバーをクイック追加
+        /mcp add <name> --url <url>      HTTP サーバーをクイック追加
+        /mcp remove | rm <name>          サーバーを削除
+        /mcp enable <name>               サーバーを有効化（即座に接続）
+        /mcp disable <name>              サーバーを無効化（ツールを登録解除）
+        /mcp trust <server> <tool|*> <ask|allow|block>
+                                         1つのツール、またはサーバー全体の信頼を設定
+        /mcp test <name>                 設定を変えずに接続し、ツールを一覧
+        /mcp reload                      設定に従い全サーバーを再接続
+        /mcp reconnect <server>          1つのサーバーを再接続
+      クイック追加フラグ: --transport stdio|http、--url <url>、--token <t>、--trust ask|allow|block、
+        --side-effects read|network|write|unknown、--timeout <ms>、--max-output <bytes>、
+        --expose gateway|tools、--env KEY=VALUE、--header KEY=VALUE、stdio は `-- <command> [args...]`。
+      変更は毎回 config.yaml をアトミックに書き換え（未知のキーは保持、コメントは保持しない）、即座に反映されます。
+      gateway ツール（サーバーごとに1つ）は `action` を受け取ります:
+        action: "list"                        そのサーバーのツール一覧
+        action: "describe", tool: "<name>"    1つのツールを説明
+        action: "call", tool: "<name>", args: {...}   ツールを呼び出す
+      信頼モデル: サーバーが `trust: allow` かつ実効副作用が `read` のときのみ自動承認されます。`unknown`/`write`/`network` は常に確認を求め、`trust: block` は即座に拒否されます。
 
   feedback:
     select_type: "フィードバックの種類を選択"

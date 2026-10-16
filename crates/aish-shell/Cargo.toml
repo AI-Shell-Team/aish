@@ -13,6 +13,7 @@ aish-i18n.workspace = true
 aish-pty.workspace = true
 aish-scripts.workspace = true
 aish-llm.workspace = true
+aish-mcp.workspace = true
 aish-session.workspace = true
 rusqlite.workspace = true
 aish-context.workspace = true
