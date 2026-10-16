@@ -1,6 +1,6 @@
 //! `Agent` tool — synchronous sub-agent spawn entry point for the main LLM.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ impl AgentTool {
         partial_messages: Vec<ChatMessage>,
     ) -> ToolResult {
         let mut calls = Vec::new();
-        let mut results = HashMap::new();
+        let mut results: HashMap<&str, VecDeque<&str>> = HashMap::new();
         for message in &partial_messages {
             if message.role == "assistant" {
                 if let Some(tool_calls) = &message.tool_calls {
@@ -119,10 +119,21 @@ impl AgentTool {
                 if let (Some(id), Some(output)) =
                     (message.tool_call_id.as_deref(), message.text_content())
                 {
-                    results.entry(id).or_insert(output);
+                    results.entry(id).or_default().push_back(output);
                 }
             }
         }
+
+        let mut remaining_results = results.clone();
+        let completed_tool_count = calls
+            .iter()
+            .filter(|(id, _)| {
+                remaining_results
+                    .get_mut(id.as_str())
+                    .and_then(VecDeque::pop_front)
+                    .is_some()
+            })
+            .count();
 
         let final_text_budget = if calls.is_empty() {
             MAX_INCOMPLETE_OUTPUT_BYTES
@@ -150,8 +161,8 @@ impl AgentTool {
             let per_call_budget = remaining_budget / calls.len();
             for (index, (id, name)) in calls.iter().enumerate() {
                 let result = results
-                    .get(id.as_str())
-                    .copied()
+                    .get_mut(id.as_str())
+                    .and_then(VecDeque::pop_front)
                     .unwrap_or("(result unavailable)");
                 let line_prefix = format!("\n  {}. {} [{}]: ", index + 1, name, id);
                 if line_prefix.len() >= per_call_budget {
@@ -174,10 +185,6 @@ impl AgentTool {
         }
         debug_assert!(output.len() <= MAX_INCOMPLETE_OUTPUT_BYTES);
 
-        let completed_tool_count = calls
-            .iter()
-            .filter(|(id, _)| results.contains_key(id.as_str()))
-            .count();
         ToolResult {
             ok: true,
             output,
@@ -511,6 +518,62 @@ mod tests {
         assert!(result
             .output
             .contains("grep [evidence-call]: KEEP_THIS_EVIDENCE"));
+    }
+
+    #[test]
+    fn incomplete_tool_result_keeps_distinct_results_for_reused_call_ids() {
+        let partial_messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![aish_llm::ToolCall {
+                    id: "reused-id".to_string(),
+                    name: "first_tool".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+                cache_control: None,
+            },
+            ChatMessage::tool_result("reused-id", "first result"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![aish_llm::ToolCall {
+                    id: "reused-id".to_string(),
+                    name: "second_tool".to_string(),
+                    arguments: "{}".to_string(),
+                }]),
+                tool_call_id: None,
+                name: None,
+                reasoning_content: None,
+                cache_control: None,
+            },
+            ChatMessage::tool_result("reused-id", "second result"),
+        ];
+
+        let result = AgentTool::spawn_result_to_tool_result(SpawnResult {
+            text: "partial work".to_string(),
+            status: LoopStatus::Incomplete,
+            partial_messages,
+            ..Default::default()
+        });
+
+        assert!(result
+            .output
+            .contains("first_tool [reused-id]: first result"));
+        assert!(result
+            .output
+            .contains("second_tool [reused-id]: second result"));
+        assert_eq!(
+            result
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("completed_tool_count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
     }
 
     #[test]
