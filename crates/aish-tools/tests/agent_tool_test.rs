@@ -43,6 +43,32 @@ fn mock_spawn_incomplete<'a>(
         Ok(SpawnResult {
             text: "[incomplete: max turns reached]\npartial conclusion".to_string(),
             status: LoopStatus::Incomplete,
+            partial_messages: vec![
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![
+                        ToolCall {
+                            id: "c1".to_string(),
+                            name: "grep".to_string(),
+                            arguments: r#"{"pattern":"first"}"#.to_string(),
+                        },
+                        ToolCall {
+                            id: "c2".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: r#"{"path":"second"}"#.to_string(),
+                        },
+                    ]),
+                    tool_call_id: None,
+                    name: None,
+                    reasoning_content: None,
+                    cache_control: None,
+                },
+                // Deliberately reverse result order: evidence must be joined
+                // by tool_call_id rather than paired by position.
+                ChatMessage::tool_result("c2", "SECOND_TOOL_RESULT"),
+                ChatMessage::tool_result("c1", "FIRST_TOOL_RESULT"),
+            ],
             ..Default::default()
         })
     })
@@ -193,6 +219,35 @@ async fn test_agent_tool_mock_spawn_incomplete_success_with_prefix() {
     assert!(result.ok);
     assert!(result.output.starts_with("[incomplete: max turns reached]"));
     assert!(result.output.contains("partial conclusion"));
+    assert!(result.output.contains("grep [c1]: FIRST_TOOL_RESULT"));
+    assert!(result.output.contains("read_file [c2]: SECOND_TOOL_RESULT"));
+    assert_eq!(result.output.matches("FIRST_TOOL_RESULT").count(), 1);
+    assert_eq!(result.output.matches("SECOND_TOOL_RESULT").count(), 1);
+    assert_eq!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("command_status"))
+            .and_then(|value| value.as_str()),
+        Some("incomplete")
+    );
+    assert_eq!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("reason"))
+            .and_then(|value| value.as_str()),
+        Some("sub_agent_max_turns_reached")
+    );
+    assert_ne!(
+        result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("dispatch_status"))
+            .and_then(|value| value.as_str()),
+        Some("short_circuit"),
+        "incomplete work must let the parent session continue"
+    );
 }
 
 #[tokio::test]

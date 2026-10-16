@@ -1,5 +1,6 @@
 //! `Agent` tool — synchronous sub-agent spawn entry point for the main LLM.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,6 +11,10 @@ use aish_llm::{
 };
 
 use super::prompt;
+
+const MAX_INCOMPLETE_FINAL_TEXT_BYTES: usize = 4 * 1024;
+const MAX_INCOMPLETE_OUTPUT_BYTES: usize = 8 * 1024;
+const MAX_INCOMPLETE_TOOL_OUTPUT_BYTES: usize = 1024;
 
 /// Injectable spawn backend for tests.
 pub type SpawnFn = Arc<
@@ -78,7 +83,8 @@ impl AgentTool {
         let partial_messages = result.partial_messages;
         let error_category = result.error_category;
         match result.status {
-            LoopStatus::Complete | LoopStatus::Incomplete => ToolResult::success(result.text),
+            LoopStatus::Complete => ToolResult::success(result.text),
+            LoopStatus::Incomplete => Self::incomplete_tool_result(result.text, partial_messages),
             LoopStatus::Cancelled => {
                 // User-facing copy matches shell Ctrl+C (`shell.interrupted`);
                 // meta.reason stays machine-readable for short-circuit handling.
@@ -88,6 +94,75 @@ impl AgentTool {
                 let category = error_category.unwrap_or_else(|| "unknown".to_string());
                 Self::fatal_tool_result(result.text, category, partial_messages)
             }
+        }
+    }
+
+    /// Keep the sub-agent's completed tool evidence visible to the parent when
+    /// it reaches its turn limit. The text is bounded because this output is
+    /// sent back through the parent model's context.
+    fn incomplete_tool_result(
+        final_text: String,
+        partial_messages: Vec<ChatMessage>,
+    ) -> ToolResult {
+        let mut calls = Vec::new();
+        let mut results = HashMap::new();
+        for message in &partial_messages {
+            if message.role == "assistant" {
+                if let Some(tool_calls) = &message.tool_calls {
+                    calls.extend(
+                        tool_calls
+                            .iter()
+                            .map(|call| (call.id.clone(), call.name.clone())),
+                    );
+                }
+            } else if message.role == "tool" {
+                if let (Some(id), Some(output)) =
+                    (message.tool_call_id.as_deref(), message.text_content())
+                {
+                    results.entry(id).or_insert(output);
+                }
+            }
+        }
+
+        let mut output = truncate_with_marker(
+            &final_text,
+            MAX_INCOMPLETE_FINAL_TEXT_BYTES,
+            "\n...(final text truncated)",
+        );
+        if !calls.is_empty() {
+            output.push_str("\n\nCompleted before turn limit:");
+            for (index, (id, name)) in calls.iter().enumerate() {
+                let result = results
+                    .get(id.as_str())
+                    .copied()
+                    .unwrap_or("(result unavailable)");
+                let result = truncate_with_marker(
+                    result,
+                    MAX_INCOMPLETE_TOOL_OUTPUT_BYTES,
+                    "...(truncated)",
+                );
+                output.push_str(&format!("\n  {}. {} [{}]: {}", index + 1, name, id, result));
+            }
+        }
+        output = truncate_with_marker(
+            &output,
+            MAX_INCOMPLETE_OUTPUT_BYTES,
+            "\n...(partial results truncated)",
+        );
+
+        let completed_tool_count = calls
+            .iter()
+            .filter(|(id, _)| results.contains_key(id.as_str()))
+            .count();
+        ToolResult {
+            ok: true,
+            output,
+            meta: Some(serde_json::json!({
+                "command_status": "incomplete",
+                "reason": "sub_agent_max_turns_reached",
+                "completed_tool_count": completed_tool_count,
+                "partial_message_count": partial_messages.len(),
+            })),
         }
     }
 
@@ -163,6 +238,19 @@ impl AgentTool {
             })),
         }
     }
+}
+
+fn truncate_with_marker(text: &str, max_bytes: usize, marker: &str) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let content_limit = max_bytes.saturating_sub(marker.len());
+    let mut end = content_limit.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], marker)
 }
 
 impl Default for AgentTool {
@@ -305,6 +393,52 @@ mod tests {
         assert!(!names.contains(&"command-diagnose"));
         assert!(!names.contains(&"diagnose"));
     }
+
+    #[test]
+    fn incomplete_tool_result_caps_partial_evidence() {
+        let tool_calls = (0..12)
+            .map(|index| aish_llm::ToolCall {
+                id: format!("call-{index}"),
+                name: "read_file".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .collect();
+        let mut partial_messages = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
+            cache_control: None,
+        }];
+        for index in (0..12).rev() {
+            partial_messages.push(ChatMessage::tool_result(
+                format!("call-{index}"),
+                "界".repeat(600),
+            ));
+        }
+
+        let result = AgentTool::spawn_result_to_tool_result(SpawnResult {
+            text: "[incomplete: max turns reached]\n".to_string(),
+            status: LoopStatus::Incomplete,
+            partial_messages,
+            ..Default::default()
+        });
+
+        assert!(result.output.starts_with("[incomplete: max turns reached]"));
+        assert!(result.output.len() <= MAX_INCOMPLETE_OUTPUT_BYTES);
+        assert!(result.output.contains("...(partial results truncated)"));
+        assert_eq!(
+            result
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("completed_tool_count"))
+                .and_then(serde_json::Value::as_u64),
+            Some(12)
+        );
+    }
+
     #[test]
     fn description_encourages_parallel_independent_agents() {
         let tool = AgentTool::new();
