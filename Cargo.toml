@@ -9,6 +9,7 @@ members = [
     "crates/aish-security",
     "crates/aish-pty",
     "crates/aish-llm",
+    "crates/aish-mcp",
     "crates/aish-session",
     "crates/aish-context",
     "crates/aish-skills",
@@ -128,6 +129,7 @@ aish-i18n = { path = "crates/aish-i18n" }
 aish-security = { path = "crates/aish-security" }
 aish-pty = { path = "crates/aish-pty" }
 aish-llm = { path = "crates/aish-llm" }
+aish-mcp = { path = "crates/aish-mcp" }
 aish-session = { path = "crates/aish-session" }
 aish-context = { path = "crates/aish-context" }
 aish-skills = { path = "crates/aish-skills" }

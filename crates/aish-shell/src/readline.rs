@@ -200,6 +200,16 @@ pub const SLASH_COMMANDS: &[SlashCommandMeta] = &[
         enter: EnterPolicy::Fill,
     },
     SlashCommandMeta {
+        name: "/mcp",
+        desc: "Inspect, reload and reconnect MCP servers and their tools",
+        group: SlashGroup::Skills,
+        keywords: &["mcp", "server", "tools", "plugin"],
+        // Bare `/mcp` is safe and useful on its own: it prints the status block
+        // and opens the interactive menu, so Enter runs it instead of only
+        // filling the line.
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
         name: "/undo",
         desc: "Undo the most recent AI file edit (edit_file/write_file)",
         group: SlashGroup::FilesMemory,
@@ -778,12 +788,13 @@ pub struct ShellReadline {
 impl ShellReadline {
     pub fn new(
         pty: Arc<Mutex<aish_pty::PersistentPty>>,
+        mcp_names: Arc<Mutex<Vec<String>>>,
         autosuggest: Arc<Mutex<AutoSuggest>>,
         inline_ai: Option<Arc<crate::inline_completion::InlineCompleter>>,
         history_size: usize,
         auto_suggest: bool,
     ) -> rustyline::Result<Self> {
-        let engine = Arc::new(CompletionEngine::new(pty));
+        let engine = Arc::new(CompletionEngine::new(pty).with_mcp_names(mcp_names));
 
         let builder = Config::builder()
             .completion_type(CompletionType::List)
@@ -1056,7 +1067,7 @@ mod tests {
                 cmd.name
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 26);
+        assert_eq!(SLASH_COMMANDS.len(), 27);
     }
 
     #[test]

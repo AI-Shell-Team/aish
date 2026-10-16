@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
     decision      TEXT,
     user_choice   TEXT,
     matched_rule  TEXT,
-    risk_level    TEXT
+    risk_level    TEXT,
+    duration_ms   INTEGER,
+    outcome       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
@@ -646,8 +648,9 @@ impl SessionStore {
                  (ts, session_uuid, user, host, event_type,
                   command, source, return_code,
                   ai_tool, ai_args, ai_result,
-                  decision, user_choice, matched_rule, risk_level)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                  decision, user_choice, matched_rule, risk_level,
+                  duration_ms, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     ts_str,
                     event.session_uuid,
@@ -664,6 +667,8 @@ impl SessionStore {
                     event.user_choice,
                     event.matched_rule,
                     event.risk_level,
+                    event.duration_ms,
+                    event.outcome,
                 ],
             )
             .map_err(|e| AishError::Session(format!("failed to insert audit event: {e}")))?;
@@ -677,7 +682,8 @@ impl SessionStore {
             "SELECT id, ts, session_uuid, user, host, event_type,
                     command, source, return_code,
                     ai_tool, ai_args, ai_result,
-                    decision, user_choice, matched_rule, risk_level
+                    decision, user_choice, matched_rule, risk_level,
+                    duration_ms, outcome
              FROM audit_events WHERE 1=1",
         );
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -742,6 +748,8 @@ impl SessionStore {
                     user_choice: row.get(13)?,
                     matched_rule: row.get(14)?,
                     risk_level: row.get(15)?,
+                    duration_ms: row.get(16)?,
+                    outcome: row.get(17)?,
                 })
             })
             .map_err(|e| AishError::Session(format!("failed to query audit events: {e}")))?;
@@ -877,18 +885,33 @@ fn restrict_db_permissions(db_path: &Path) {
 fn restrict_db_permissions(_db_path: &Path) {}
 
 /// Add columns introduced after the initial schema (`parent_session_uuid`,
-/// `branch_point_message_id`) to databases created by older builds. Idempotent:
-/// each column is added only when missing, detected via `PRAGMA table_info`.
+/// `branch_point_message_id` on `sessions`; `duration_ms`, `outcome` on
+/// `audit_events`) to databases created by older builds. Idempotent: each
+/// column is added only when missing, detected via `PRAGMA table_info`.
 fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
     add_column_if_missing(
         conn,
+        "sessions",
         "parent_session_uuid",
         "ALTER TABLE sessions ADD COLUMN parent_session_uuid TEXT DEFAULT NULL;",
     )?;
     add_column_if_missing(
         conn,
+        "sessions",
         "branch_point_message_id",
         "ALTER TABLE sessions ADD COLUMN branch_point_message_id INTEGER DEFAULT NULL;",
+    )?;
+    add_column_if_missing(
+        conn,
+        "audit_events",
+        "duration_ms",
+        "ALTER TABLE audit_events ADD COLUMN duration_ms INTEGER DEFAULT NULL;",
+    )?;
+    add_column_if_missing(
+        conn,
+        "audit_events",
+        "outcome",
+        "ALTER TABLE audit_events ADD COLUMN outcome TEXT DEFAULT NULL;",
     )?;
     Ok(())
 }
@@ -898,8 +921,13 @@ fn migrate_schema(conn: &rusqlite::Connection) -> Result<()> {
 /// name` error is still treated as success so a concurrent `SessionStore::open`
 /// that won the race between probe and alter cannot break startup. Any other
 /// error propagates unchanged.
-fn add_column_if_missing(conn: &rusqlite::Connection, column: &str, sql: &str) -> Result<()> {
-    if column_exists(conn, column)? {
+fn add_column_if_missing(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+    sql: &str,
+) -> Result<()> {
+    if column_exists(conn, table, column)? {
         return Ok(());
     }
     match conn.execute_batch(sql) {
@@ -911,10 +939,12 @@ fn add_column_if_missing(conn: &rusqlite::Connection, column: &str, sql: &str) -
     }
 }
 
-/// Whether `sessions` has a column named `column`, via `PRAGMA table_info`.
-fn column_exists(conn: &rusqlite::Connection, column: &str) -> Result<bool> {
+/// Whether `table` has a column named `column`, via `PRAGMA table_info`.
+fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> Result<bool> {
+    // `PRAGMA table_info(...)` does not accept bound parameters, so the table
+    // name is embedded; callers pass only internal constants.
     let mut stmt = conn
-        .prepare("PRAGMA table_info(sessions)")
+        .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|e| AishError::Session(format!("failed to probe session columns: {e}")))?;
     let names = stmt
         .query_map([], |row| row.get::<_, String>(1))
@@ -1243,6 +1273,145 @@ mod tests {
         assert_eq!(window.len(), 1);
         assert_eq!(window[0].command.as_deref(), Some("pwd"));
     }
+
+    #[test]
+    fn audit_event_duration_and_outcome_round_trip() {
+        use aish_core::{AuditEvent, AuditEventType, AuditSink};
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("audit.db");
+        let audit = AuditStore::open(Some(&db_path)).unwrap();
+
+        let now = Utc::now();
+        audit.record(
+            AuditEvent::ai_tool(
+                now,
+                Some("sess-1".into()),
+                Some("root".into()),
+                Some("h".into()),
+                "bash".into(),
+                r#"{"command":"false"}"#.into(),
+                "exit status 1".into(),
+            )
+            .with_duration_ms(4321)
+            .with_outcome("exit_nonzero"),
+        );
+        // An event without the new metadata stores NULL and reads back None.
+        audit.record(AuditEvent::command(
+            now,
+            Some("sess-1".into()),
+            Some("root".into()),
+            Some("h".into()),
+            "true".into(),
+            "user".into(),
+            0,
+        ));
+
+        let all = audit
+            .query(&AuditQuery {
+                event_type: Some(AuditEventType::AiTool),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].duration_ms, Some(4321));
+        assert_eq!(all[0].outcome.as_deref(), Some("exit_nonzero"));
+
+        let commands = audit
+            .query(&AuditQuery {
+                event_type: Some(AuditEventType::Command),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].duration_ms.is_none());
+        assert!(commands[0].outcome.is_none());
+    }
+
+    #[test]
+    fn migrate_schema_adds_audit_columns_to_legacy_db() {
+        // A database whose `audit_events` table predates the duration_ms and
+        // outcome columns; re-opening must add them transparently.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("legacy-audit.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_events (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts            TEXT NOT NULL,
+                    session_uuid  TEXT,
+                    user          TEXT,
+                    host          TEXT,
+                    event_type    TEXT NOT NULL,
+                    command       TEXT,
+                    source        TEXT,
+                    return_code   INTEGER,
+                    ai_tool       TEXT,
+                    ai_args       TEXT,
+                    ai_result     TEXT,
+                    decision      TEXT,
+                    user_choice   TEXT,
+                    matched_rule  TEXT,
+                    risk_level    TEXT
+                );
+                INSERT INTO audit_events
+                    (ts, session_uuid, user, host, event_type, command,
+                     source, return_code)
+                VALUES ('2026-01-01T00:00:00+00:00', 'legacy-sess', 'root',
+                        'legacy-host', 'command', 'echo hi', 'user', 0);",
+            )
+            .unwrap();
+        }
+
+        let store = SessionStore::open(Some(&db_path)).unwrap();
+
+        // The legacy row is readable and the new columns default to NULL.
+        let legacy = store
+            .query_audit_events(&AuditQuery {
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].command.as_deref(), Some("echo hi"));
+        assert!(legacy[0].duration_ms.is_none());
+        assert!(legacy[0].outcome.is_none());
+
+        // New events carrying the metadata persist into the migrated table.
+        let id = store
+            .add_audit_event(
+                &aish_core::AuditEvent::ai_tool(
+                    Utc::now(),
+                    Some("legacy-sess".into()),
+                    Some("root".into()),
+                    Some("legacy-host".into()),
+                    "bash".into(),
+                    "{}".into(),
+                    "done".into(),
+                )
+                .with_duration_ms(77)
+                .with_outcome("ok"),
+            )
+            .unwrap();
+        assert!(id > 1);
+
+        let rows = store
+            .query_audit_events(&AuditQuery {
+                limit: 100,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let migrated = rows
+            .iter()
+            .find(|r| r.duration_ms == Some(77))
+            .expect("migrated event present");
+        assert_eq!(migrated.outcome.as_deref(), Some("ok"));
+    }
+
     fn temp_store() -> (tempfile::TempDir, SessionStore) {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("sessions.db");

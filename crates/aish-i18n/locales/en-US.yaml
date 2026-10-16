@@ -380,6 +380,7 @@ shell:
     memory: "View, verify, or forget long-term memories"
     compact: "Compact the AI context now (optional focus text)"
     instructions: "Toggle project AGENTS.md instruction loading (on/off/status; this session)"
+    mcp: "Inspect, reload and reconnect MCP servers and their tools"
 
   slash_group:
     diagnostics: "Diagnostics"
@@ -399,6 +400,138 @@ shell:
     undo_count: "{count} file change(s) can be undone"
     plan_planning: "Planning"
     plan_normal: "Normal"
+
+  mcp:
+    no_servers: "MCP: no servers configured. Add an `mcp.servers` entry to your configuration."
+    disabled_hint: "MCP is configured but inactive. Set `mcp.enabled: true` and enable at least one server."
+    config_warning: "MCP config warning: {warning}"
+    status_line: "{name} [{transport}] {status} · tools: {tools} · trust: {trust} · side effects: {side_effects}"
+    endpoint: "  endpoint: {endpoint}"
+    failure: "  failure: {reason}"
+    tool_line: "  {name} ({side_effects}) — {description}"
+    tools_header: "Tools exposed by `{server}` ({count}):"
+    server_connecting: "`{server}` is still connecting; retry in a moment (`/mcp status` shows the current state)."
+    unknown_server: "Unknown MCP server: {server}"
+    no_tools: "MCP server `{server}` exposes no tools."
+    summary: "MCP: {connected}/{total} server(s) connected, {tools} tool(s) available."
+    runtime_unavailable: "MCP runtime is not available yet; retry once the shell is running."
+    reload_header: "Reloading MCP servers..."
+    reload_done: "MCP servers reloaded."
+    reconnect_started: "Reconnecting MCP server `{server}`..."
+    reconnect_done: "MCP server `{server}` reconnected."
+    reconnect_failed: "MCP server `{server}` failed: {reason}"
+    confirm_message: "MCP server `{server}` wants to call tool `{tool}` (declared side effects: {side_effects}).\nArguments: {args}"
+    blocked_message: "MCP policy blocked tool `{tool}` on server `{server}`."
+    alternative_hint: "Approve once, or set `trust: allow` together with `side_effects: read` for server `{server}` to skip prompts for read-only tools."
+    invalid_action: "Invalid MCP action; expected one of: list, describe, call."
+    tool_required: "An MCP tool name is required for this action."
+    reason_server: "MCP call to server `{server}`, tool `{tool}`"
+    reason_side_effects: "Declared side effects `{declared}`; server reported `{reported}`"
+    reason_arguments: "Arguments: {args}"
+    reason_trust: "Trust level: {trust}"
+    call_failed: "MCP call to server `{server}`, tool `{tool}` failed: {detail}"
+    needs_async: "This MCP tool needs an async runtime; call it through the normal tool loop."
+    help_hint: "Run `/mcp add` to configure your first MCP server."
+    unknown_subcommand: "Unknown `/mcp` subcommand: {sub}"
+    missing_server_arg: "`/mcp {sub}` is missing a required argument (a server name)."
+    config_write_failed: "Failed to write config.yaml; the change was rolled back: {error}"
+    tool_detail_header: "MCP tool `{server}`/`{tool}`"
+    tool_detail_description: "  description: {description}"
+    tool_detail_side_effects: "  side effects: declared {declared} · reported {reported} · effective {effective}"
+    tool_detail_trust: "  trust: {trust} → {verdict}"
+    tool_detail_schema: "  inputSchema:\n{schema}"
+    tool_unknown: "MCP server `{server}` does not expose a tool named `{tool}`."
+    verdict_allow: "allowed without prompting"
+    verdict_confirm: "asks for confirmation"
+    verdict_block: "blocked by policy"
+    add_cancelled: "MCP add cancelled; nothing was written."
+    added: "Added MCP server `{server}` [{transport}] ({status})."
+    add_failed: "Failed to add MCP server: {error}"
+    removed: "Removed MCP server `{server}`."
+    remove_failed: "Failed to remove MCP server: {error}"
+    enabled: "Enabled MCP server `{server}` ({status})."
+    disabled: "Disabled MCP server `{server}`; its tools were unregistered."
+    already_enabled: "MCP server `{server}` is already enabled."
+    already_disabled: "MCP server `{server}` is already disabled."
+    toggle_failed: "Failed to change MCP server state: {error}"
+    trust_updated: "Trust of `{tool}` on `{server}` set to {level}."
+    trust_failed: "Failed to set MCP trust: {error}"
+    test_ok: "MCP server `{server}` OK (version {version}), {tools} tool(s) available."
+    test_tool_line: "  {name} — {description}"
+    test_failed: "MCP server `{server}` test failed: {error}"
+    test_tip_not_found: "Hint: the command could not be started — check the executable path and that it is installed."
+    test_tip_refused: "Hint: the connection was refused — is the server running and the URL/port correct?"
+    test_tip_timeout: "Hint: the server did not answer in time; try `/mcp reconnect` or raise `request_timeout_ms`."
+    test_tip_auth: "Hint: authentication failed — check the token/header configured for this server."
+    menu_title: "MCP menu"
+    menu_question: "What do you want to do with MCP?"
+    menu_add: "Add an MCP server (wizard)"
+    menu_tools: "Tools"
+    menu_tools_list: "List every tool"
+    menu_test: "Test connection"
+    menu_trust: "Set trust"
+    menu_toggle: "Enable / disable a server"
+    menu_reconnect: "Reconnect a server"
+    menu_reload: "Reload all servers"
+    menu_remove: "Remove a server"
+    menu_help: "Help"
+    menu_remove_confirm_title: "Remove MCP server"
+    menu_remove_confirm_question: "Remove MCP server `{server}` and unregister its tools?"
+    menu_remove_confirm_yes: "Yes, remove"
+    menu_remove_confirm_no: "No, cancel"
+    pick_server_title: "Select MCP server"
+    pick_server_question: "Which server?"
+    pick_tool_title: "Select MCP tool"
+    pick_tool_question: "Which tool?"
+    pick_tool_any: "* (all tools)"
+    pick_level_title: "Trust level"
+    pick_level_question: "How much should calls be trusted?"
+    menu_cancelled: "MCP menu cancelled; nothing was changed."
+    add:
+      name_prompt: "Server name"
+      transport_title: "Add MCP server"
+      transport_question: "Which transport does this server use?"
+      command_prompt: "Command to launch (e.g. npx)"
+      args_prompt: "Extra arguments, space separated (optional)"
+      url_prompt: "Server URL (e.g. https://example.com/mcp)"
+      token_prompt: "Bearer token (optional; stored in the config)"
+      trust_title: "Trust level"
+      trust_question: "How much should calls to this server be trusted?"
+      expose_title: "Tool exposure"
+      expose_question: "How should this server's tools be exposed to the model?"
+      side_effects_title: "Declared side effects"
+      side_effects_question: "What can this server's tools do?"
+      confirm_title: "Confirm new MCP server"
+      confirm_summary: "Add this server?\n\n{summary}"
+      confirm_yes: "Yes, add it"
+      confirm_no: "No, cancel"
+    help: |-
+      Run `/mcp` on its own for a nine-row interactive menu (pick by number 1-9, then action → server → tool); the subcommands below stay equivalent.
+      MCP client commands:
+        /mcp | /mcp status | /mcp list   Show every configured server
+        /mcp help                        Show this help
+        /mcp tools [server]              List the tools of one server, or of all
+        /mcp tool <server> <tool>        Show one tool's schema and trust verdict
+        /mcp add                         Interactive wizard (name, transport, trust...)
+        /mcp add <name> -- <cmd> [args]  Quick-add a stdio server
+        /mcp add <name> --url <url>      Quick-add an HTTP server
+        /mcp remove | rm <name>          Remove a server
+        /mcp enable <name>               Enable a server (connects it now)
+        /mcp disable <name>              Disable a server (drops its tools)
+        /mcp trust <server> <tool|*> <ask|allow|block>
+                                         Set the trust of one tool, or of a whole server
+        /mcp test <name>                 Connect once and list tools without enabling
+        /mcp reload                      Reconnect every server from the config
+        /mcp reconnect <server>          Reconnect one server
+      Quick-add flags: --transport stdio|http, --url <url>, --token <t>, --trust ask|allow|block,
+        --side-effects read|network|write|unknown, --timeout <ms>, --max-output <bytes>,
+        --expose gateway|tools, --env KEY=VALUE, --header KEY=VALUE, and `-- <command> [args...]` for stdio.
+      Every change rewrites config.yaml atomically (unknown keys preserved, comments not) and takes effect immediately.
+      Gateway tools (one per server) accept an `action`:
+        action: "list"                        List the server's tools
+        action: "describe", tool: "<name>"    Describe one tool
+        action: "call", tool: "<name>", args: {...}   Call a tool
+      Trust model: a call is auto-approved only when the server is `trust: allow` and its effective side effects are `read`; `unknown`/`write`/`network` always ask, and `trust: block` is refused outright.
 
   record:
     started: "⏺ Recording started: {path}"

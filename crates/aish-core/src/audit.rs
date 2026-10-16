@@ -83,6 +83,16 @@ pub struct AuditEvent {
     pub matched_rule: Option<String>,
     /// Risk level: "LOW", "MEDIUM", or "HIGH".
     pub risk_level: Option<String>,
+    // --- Execution timing / outcome (any event type) ---
+    /// Wall-clock duration of the audited operation, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Structured result status, free-form: normally the status the tool
+    /// reported in its result meta (`command_status`: "ok", "timeout",
+    /// "cancelled", "exit_nonzero", ...), otherwise the producer's own fallback
+    /// "ok" / "error" for a tool that reports no status of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 impl AuditEvent {
@@ -128,6 +138,8 @@ impl AuditEvent {
             user_choice: None,
             matched_rule: None,
             risk_level: None,
+            duration_ms: None,
+            outcome: None,
         }
     }
 
@@ -158,6 +170,8 @@ impl AuditEvent {
             user_choice: None,
             matched_rule: None,
             risk_level: None,
+            duration_ms: None,
+            outcome: None,
         }
     }
 
@@ -190,7 +204,22 @@ impl AuditEvent {
             user_choice,
             matched_rule,
             risk_level,
+            duration_ms: None,
+            outcome: None,
         }
+    }
+
+    /// Attach the measured duration of the audited operation, in milliseconds.
+    pub fn with_duration_ms(mut self, ms: u64) -> Self {
+        self.duration_ms = Some(ms);
+        self
+    }
+
+    /// Attach a structured result status (e.g. "ok", "error", "timeout",
+    /// "cancelled", "exit_nonzero").
+    pub fn with_outcome(mut self, outcome: impl Into<String>) -> Self {
+        self.outcome = Some(outcome.into());
+        self
     }
 }
 
@@ -263,5 +292,61 @@ mod tests {
             "user".into(),
             0,
         ));
+    }
+
+    #[test]
+    fn builders_attach_duration_and_outcome() {
+        let ev = AuditEvent::ai_tool(
+            Utc::now(),
+            Some("s1".into()),
+            None,
+            None,
+            "bash".into(),
+            "{}".into(),
+            "done".into(),
+        )
+        .with_duration_ms(1234)
+        .with_outcome("exit_nonzero");
+        assert_eq!(ev.duration_ms, Some(1234));
+        assert_eq!(ev.outcome.as_deref(), Some("exit_nonzero"));
+
+        // Constructors leave both fields empty by default.
+        let plain =
+            AuditEvent::command(Utc::now(), None, None, None, "ls".into(), "user".into(), 0);
+        assert!(plain.duration_ms.is_none());
+        assert!(plain.outcome.is_none());
+    }
+
+    #[test]
+    fn legacy_json_without_new_fields_deserializes_to_none() {
+        let json = r#"{
+            "timestamp": "2026-01-01T00:00:00Z",
+            "session_uuid": "s1",
+            "user": "root",
+            "host": "h1",
+            "event_type": "command",
+            "command": "ls -la",
+            "source": "user",
+            "return_code": 0,
+            "ai_tool": null,
+            "ai_args": null,
+            "ai_result": null,
+            "decision": null,
+            "user_choice": null,
+            "matched_rule": null,
+            "risk_level": null
+        }"#;
+        let ev: AuditEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(ev.command.as_deref(), Some("ls -la"));
+        assert!(ev.duration_ms.is_none());
+        assert!(ev.outcome.is_none());
+    }
+
+    #[test]
+    fn new_fields_are_skipped_when_none() {
+        let ev = AuditEvent::command(Utc::now(), None, None, None, "ls".into(), "user".into(), 0);
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(!json.contains("duration_ms"));
+        assert!(!json.contains("outcome"));
     }
 }

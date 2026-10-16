@@ -140,6 +140,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aish-mcp"
+version = "0.3.15"
+dependencies = [
+ "aish-config",
+ "aish-core",
+ "aish-i18n",
+ "aish-llm",
+ "aish-security",
+ "futures",
+ "libc",
+ "nix 0.29.0",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "aish-md-table"
 version = "0.3.15"
 dependencies = [
@@ -237,6 +261,7 @@ dependencies = [
  "aish-hosts",
  "aish-i18n",
  "aish-llm",
+ "aish-mcp",
  "aish-md-table",
  "aish-memory",
  "aish-prompts",

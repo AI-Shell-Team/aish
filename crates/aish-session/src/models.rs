@@ -89,6 +89,10 @@ pub struct AuditEventRecord {
     pub user_choice: Option<String>,
     pub matched_rule: Option<String>,
     pub risk_level: Option<String>,
+    /// Wall-clock duration of the operation, in milliseconds.
+    pub duration_ms: Option<u64>,
+    /// Structured result status (the tool's own outcome vocabulary).
+    pub outcome: Option<String>,
 }
 
 /// Optional filters for querying audit events.

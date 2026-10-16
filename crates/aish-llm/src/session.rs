@@ -43,6 +43,20 @@ fn audit_security_info(security: &PreflightSecurityContext) -> (Option<String>, 
 /// Maximum consecutive tool failures before pausing for user confirmation.
 const MAX_CONSECUTIVE_FAILURES: usize = 3;
 
+/// Registry name of the shell tool that owns the `command` argument.
+///
+/// The remembered-command approval shortcut keys on `args["command"]`, which is
+/// a shell command for this tool only.
+const SHELL_COMMAND_TOOL: &str = "bash";
+
+/// Registry-name prefix of MCP tools (`mcp__<server>` for the gateway tool,
+/// `mcp__<server>_<tool>` for a directly exposed one — see
+/// `aish_mcp::GATEWAY_TOOL_PREFIX`).
+///
+/// MCP tools resolve remembered approvals in their own preflight, ordered after
+/// their block arm, so a remembered "yes" can never outvote `trust: block`.
+const MCP_TOOL_PREFIX: &str = "mcp__";
+
 const COMPACT_SUMMARY_SYSTEM_PROMPT: &str = "You summarize old AI Shell context for a shell operations assistant. Respond with TEXT ONLY. Do not call tools. Preserve operational facts, commands, failures, important stderr, environment constraints, plan state, and pending user intent. Output a concise <conversation-summary> block with stable section headings.";
 
 /// Main LLM session that orchestrates the chat loop with tool calling.
@@ -207,6 +221,13 @@ impl LlmSession {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
+    /// Remove a registered tool and return its handle, or `None` when the name is
+    /// not registered. Used by the shell to drop a tool whose backing resource
+    /// (an MCP server) went away or was disabled, so the model stops seeing it.
+    pub fn unregister_tool(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.remove(name)
+    }
+
     /// Return shared handles for tools whose names appear in `names` (order preserved).
     pub fn shared_tools_by_names<'a, I>(&self, names: I) -> Vec<Arc<dyn Tool>>
     where
@@ -260,6 +281,24 @@ impl LlmSession {
     /// of the session.
     pub fn set_approval_memory(&mut self, memory: Arc<parking_lot::Mutex<ApprovalMemory>>) {
         self.approval_memory = Some(memory);
+    }
+
+    /// True when this exact tool target was approved with "remember" earlier in
+    /// the session.
+    ///
+    /// A tool consults this from its own preflight, after its block arm, so a
+    /// remembered "yes" can relax a confirmation but never outvote a refusal
+    /// (see `run_tool_preflight` for why MCP tools use this instead of the
+    /// session-level shortcut). Sub-agent sessions always report `false`: a
+    /// remembered "yes" from the main chat must not bypass the sub-agent's
+    /// read-only bash enforcement (issue #545).
+    pub fn is_approval_remembered(&self, tool_name: &str, target: &str) -> bool {
+        if self.is_sub_agent {
+            return false;
+        }
+        self.approval_memory
+            .as_ref()
+            .is_some_and(|memory| memory.lock().is_target_allowed(tool_name, target))
     }
 
     /// Set the callback invoked when a tool's preflight returns a display-only security notice.
@@ -1324,6 +1363,10 @@ impl LlmSession {
                 return result;
             }
 
+            // Wall-clock duration of the call, recorded in the audit event so
+            // slow tools (MCP calls, network tools) are visible after the fact.
+            let started = std::time::Instant::now();
+
             self.emit_event(LlmEvent {
                 event_type: LlmEventType::ToolExecutionStart,
                 data: serde_json::json!({
@@ -1447,15 +1490,35 @@ impl LlmSession {
                     full
                 }
             };
-            self.emit_audit(AuditEvent::ai_tool(
-                chrono::Utc::now(),
-                self.audit_session_uuid.clone(),
-                None,
-                None,
-                tool_call.name.clone(),
-                audited_args,
-                result_summary,
-            ));
+            // Structured result state for audit consumers: prefer the outcome
+            // vocabulary a tool published in `meta["command_status"]`, otherwise
+            // map the boolean `ok`.
+            let outcome = result
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("command_status"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    if result.ok {
+                        "ok".to_string()
+                    } else {
+                        "error".to_string()
+                    }
+                });
+            self.emit_audit(
+                AuditEvent::ai_tool(
+                    chrono::Utc::now(),
+                    self.audit_session_uuid.clone(),
+                    None,
+                    None,
+                    tool_call.name.clone(),
+                    audited_args,
+                    result_summary,
+                )
+                .with_duration_ms(started.elapsed().as_millis() as u64)
+                .with_outcome(outcome),
+            );
 
             result
         } else {
@@ -1712,24 +1775,37 @@ impl LlmSession {
             )));
         }
 
-        // Approval memory: if this command or tool target was previously
-        // approved for the session, skip the whole preflight (including the
-        // sandbox pre-run). Sub-agents never consult it: a remembered "yes"
-        // from the main chat must not bypass the sub-agent's read-only bash
-        // enforcement (issue #545 — the correction agent re-ran a
-        // user-approved sudo command with no prompt).
+        // Approval memory: a remembered "yes" for this session lets an
+        // identical call skip its preflight (and, for the shell tool, the
+        // sandbox pre-run). Three rules keep it from widening trust:
+        //   * `args["command"]` is a shell command only for the shell tool, so
+        //     that shortcut is consulted for the shell tool alone. A tool whose
+        //     arguments happen to carry an unrelated `command` key (an MCP
+        //     server's, for example) used to inherit a bash approval and skip
+        //     its whole preflight — including a refusal.
+        //   * MCP tools decide their own remembered approvals inside their
+        //     preflight, in an arm ordered after the block arm, so a remembered
+        //     "yes" can relax a confirmation but never a `trust: block`. The
+        //     shortcut here is therefore skipped for them.
+        //   * Sub-agents never consult memory at all: a remembered "yes"
+        //     from the main chat must not bypass the sub-agent's read-only bash
+        //     enforcement (issue #545 — the correction agent re-ran a
+        //     user-approved sudo command with no prompt).
         let memory_command = args.get("command").and_then(|value| value.as_str());
         let memory_target = tool.approval_memory_key(args);
         let memory_allowed = !self.is_sub_agent
-            && (memory_command.is_some_and(|command| {
-                self.approval_memory
-                    .as_ref()
-                    .is_some_and(|memory| memory.lock().is_allowed(command))
-            }) || memory_target.as_deref().is_some_and(|target| {
-                self.approval_memory
-                    .as_ref()
-                    .is_some_and(|memory| memory.lock().is_target_allowed(tool_name, target))
-            }));
+            && !tool_name.starts_with(MCP_TOOL_PREFIX)
+            && ((tool_name == SHELL_COMMAND_TOOL
+                && memory_command.is_some_and(|command| {
+                    self.approval_memory
+                        .as_ref()
+                        .is_some_and(|memory| memory.lock().is_allowed(command))
+                }))
+                || memory_target.as_deref().is_some_and(|target| {
+                    self.approval_memory
+                        .as_ref()
+                        .is_some_and(|memory| memory.lock().is_target_allowed(tool_name, target))
+                }));
         if memory_allowed {
             self.emit_audit(AuditEvent::security_decision(
                 chrono::Utc::now(),
@@ -1777,8 +1853,14 @@ impl LlmSession {
                 };
                 if matches!(choice, ApprovalChoice::RememberSession) {
                     if let Some(memory) = &self.approval_memory {
-                        if let Some(command) = memory_command {
-                            memory.lock().remember(command);
+                        // Only the shell tool's confirmation speaks for a shell
+                        // command: a panel raised for another tool (an MCP
+                        // server's, say) must not teach the bash memory a
+                        // command that was never run as a shell command.
+                        if tool_name == SHELL_COMMAND_TOOL {
+                            if let Some(command) = memory_command {
+                                memory.lock().remember(command);
+                            }
                         }
                         if let Some(target) = memory_target.as_deref() {
                             memory.lock().remember_target(tool_name, target);
@@ -3065,6 +3147,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_unregister_tool_removes_and_returns_handle() {
+        use std::sync::Arc;
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.register_shared_tool(Arc::new(MockTool::new("mock_server_tool")));
+
+        let names = |s: &LlmSession| -> Vec<String> {
+            s.tool_specs()
+                .into_iter()
+                .map(|spec| spec.function.name)
+                .collect()
+        };
+        assert!(names(&session).contains(&"mock_server_tool".to_string()));
+
+        let removed = session.unregister_tool("mock_server_tool");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().name(), "mock_server_tool");
+        assert!(!names(&session).contains(&"mock_server_tool".to_string()));
+
+        assert!(session.unregister_tool("mock_server_tool").is_none());
+    }
+
+    #[test]
+    fn test_reregister_same_name_overwrites_existing_tool() {
+        use crate::prompt::{PromptAssembly, PromptContext};
+        use std::sync::Arc;
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.register_shared_tool(Arc::new(MockTool::with_prompt("dup", "first")));
+        session.register_shared_tool(Arc::new(MockTool::with_prompt("dup", "second")));
+
+        let specs = PromptAssembly::build(&session, PromptContext::MainChat, "").tool_specs;
+        assert_eq!(specs.len(), 1);
+        let section = PromptAssembly::build(&session, PromptContext::MainChat, "").system_message;
+        assert!(section.contains("second"));
+        assert!(!section.contains("first"));
+    }
+
     // Mock tool for testing
     struct MockTool {
         name: String,
@@ -3301,6 +3422,84 @@ mod tests {
             counter.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "remembered command must skip preflight entirely"
+        );
+    }
+
+    /// The remembered-command shortcut keys on `args["command"]`, which is a
+    /// shell command only for the shell tool. Another tool whose arguments
+    /// happen to carry a `command` key (an MCP server's, for example) must not
+    /// inherit a bash approval and skip its own preflight — that used to bypass
+    /// the tool's refusal entirely.
+    #[tokio::test]
+    async fn command_approval_memory_does_not_leak_into_other_tools() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        session.register_tool(Box::new(ConfirmCountingNamedTool {
+            name: "mcp__srv",
+            preflight_calls: counter.clone(),
+            memory_key: None,
+        }));
+        let panels = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = panels.clone();
+        session.set_confirmation_callback(std::sync::Arc::new(
+            move |_ctx: &PreflightSecurityContext| {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ApprovalChoice::RememberSession
+            },
+        ));
+        let memory = std::sync::Arc::new(parking_lot::Mutex::new(ApprovalMemory::new()));
+        session.set_approval_memory(memory.clone());
+
+        let tool_call = ToolCall {
+            id: "call_1".into(),
+            name: "mcp__srv".into(),
+            arguments: serde_json::json!({ "command": "systemctl restart nginx" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&tool_call).await.ok);
+
+        let second = ToolCall {
+            id: "call_2".into(),
+            name: "mcp__srv".into(),
+            arguments: serde_json::json!({ "command": "systemctl restart nginx" }).to_string(),
+        };
+        assert!(session.execute_tool_external(&second).await.ok);
+
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a non-shell tool must run its preflight even for a remembered command"
+        );
+        assert_eq!(
+            panels.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the confirmation panel must be shown again"
+        );
+        assert!(
+            !memory.lock().is_allowed("systemctl restart nginx"),
+            "an MCP panel must not teach the shell command memory"
+        );
+
+        // The shell tool still uses the shortcut for the same command.
+        let mut shell_session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let shell_counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        shell_session.register_tool(Box::new(ConfirmCountingTool::new(shell_counter.clone())));
+        shell_session.set_confirmation_callback(std::sync::Arc::new(
+            |_ctx: &PreflightSecurityContext| ApprovalChoice::RememberSession,
+        ));
+        shell_session.set_approval_memory(std::sync::Arc::new(parking_lot::Mutex::new(
+            ApprovalMemory::new(),
+        )));
+        let shell_call = ToolCall {
+            id: "call_3".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": "systemctl restart nginx" }).to_string(),
+        };
+        assert!(shell_session.execute_tool_external(&shell_call).await.ok);
+        assert!(shell_session.execute_tool_external(&shell_call).await.ok);
+        assert_eq!(
+            shell_counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the shell tool keeps its fast path"
         );
     }
 
@@ -4275,6 +4474,82 @@ mod tests {
                 ("ai_tool".to_string(), "session-b".to_string()),
             ]
         );
+    }
+
+    /// The audit trail must carry the same structured outcome the tool card
+    /// shows, plus how long the call took: MCP servers are slow and remote, so
+    /// "which call took 30s and how did it end" has to be answerable from the
+    /// audit log alone (issue #564 acceptance).
+    #[tokio::test]
+    async fn audit_records_duration_and_structured_outcome() {
+        #[derive(Default)]
+        struct RecordingSink(parking_lot::Mutex<Vec<AuditEvent>>);
+
+        impl aish_core::AuditSink for RecordingSink {
+            fn record(&self, event: AuditEvent) {
+                self.0.lock().push(event);
+            }
+        }
+
+        struct OutcomeTool;
+
+        impl Tool for OutcomeTool {
+            fn name(&self) -> &str {
+                "outcome_tool"
+            }
+
+            fn description(&self) -> &str {
+                "reports a structured outcome"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+
+            fn execute(&self, _args: serde_json::Value) -> ToolResult {
+                ToolResult {
+                    ok: false,
+                    output: "timed out talking to the server".to_string(),
+                    meta: Some(serde_json::json!({"command_status": "timeout"})),
+                }
+            }
+
+            fn execute_async<'a>(
+                &'a self,
+                _args: serde_json::Value,
+            ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+                Box::pin(async move {
+                    ToolResult {
+                        ok: false,
+                        output: "timed out talking to the server".to_string(),
+                        meta: Some(serde_json::json!({"command_status": "timeout"})),
+                    }
+                })
+            }
+        }
+
+        let sink = Arc::new(RecordingSink::default());
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_audit_context(sink.clone(), None, "session-a".to_string(), None, None);
+        session.register_tool(Box::new(OutcomeTool));
+
+        let result = session
+            .execute_tool_external(&ToolCall {
+                id: "call_1".into(),
+                name: "outcome_tool".into(),
+                arguments: "{}".into(),
+            })
+            .await;
+        assert!(!result.ok);
+
+        let events = sink.0.lock();
+        let ai_tool = events
+            .iter()
+            .find(|event| event.event_type == aish_core::AuditEventType::AiTool)
+            .expect("ai_tool event");
+        assert_eq!(ai_tool.ai_tool.as_deref(), Some("outcome_tool"));
+        assert_eq!(ai_tool.outcome.as_deref(), Some("timeout"));
+        assert!(ai_tool.duration_ms.is_some());
     }
 
     struct ExecuteCountingTool {

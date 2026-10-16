@@ -59,7 +59,37 @@ fn each_builtin_command_enter_executes() {
 
 #[test]
 fn slash_commands_table_has_expected_count() {
-    assert_eq!(SLASH_COMMANDS.len(), 26);
+    assert_eq!(SLASH_COMMANDS.len(), 27);
+}
+
+#[test]
+fn mcp_command_runs_on_enter() {
+    let mcp = SLASH_COMMANDS
+        .iter()
+        .find(|c| c.name == "/mcp")
+        .expect("/mcp command registered");
+    assert!(matches!(mcp.enter, EnterPolicy::Execute));
+
+    // Bare `/mcp` prints the status block and opens the interactive menu, so
+    // Enter must run it directly instead of only filling the line.
+    let mut session = session_with(mcp.name);
+    match session.dispatch_event(key(KeyCode::Enter)) {
+        Some(SlashInputOutcome::Command(text)) => assert_eq!(text, "/mcp"),
+        other => panic!("Enter on /mcp produced {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_command_has_i18n_description() {
+    const LOCALES: &[&str] = &["en-US", "zh-CN", "de-DE", "es-ES", "fr-FR", "ja-JP"];
+    for locale in LOCALES {
+        aish_i18n::set_locale(locale);
+        assert_ne!(
+            aish_i18n::t("shell.slash.mcp"),
+            "shell.slash.mcp",
+            "missing shell.slash.mcp in locale {locale}"
+        );
+    }
 }
 
 #[test]

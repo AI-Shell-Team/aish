@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -418,6 +418,110 @@ impl TerminalResizeMode {
 }
 
 // ---------------------------------------------------------------------------
+// MCP client sub-config
+// ---------------------------------------------------------------------------
+
+/// One MCP server entry under `mcp.servers`.
+///
+/// Field names and defaults must stay in sync with `crates/aish-mcp`, whose
+/// `config` module resolves these raw values into runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    /// Unique server name; also the `mcp__<name>__<tool>` tool prefix.
+    pub name: String,
+    /// Transport: `"stdio"` or `"http"`. An empty value is treated as
+    /// `"stdio"` by the resolver.
+    pub transport: String,
+    /// Whether this server is started at all. Default: true.
+    pub enabled: bool,
+    /// Executable to spawn for the `stdio` transport.
+    pub command: Option<String>,
+    /// Arguments passed to `command`.
+    pub args: Vec<String>,
+    /// Extra environment variables for `stdio` children. Values may reference
+    /// `${VAR}`; the resolver expands them at startup.
+    pub env: BTreeMap<String, String>,
+    /// Working directory for `stdio` children.
+    pub cwd: Option<String>,
+    /// Endpoint URL for the `http` transport.
+    pub url: Option<String>,
+    /// Extra HTTP headers. Values may reference `${VAR}` like `env`.
+    pub headers: BTreeMap<String, String>,
+    /// Per-request deadline in milliseconds. `None` inherits
+    /// `mcp.request_timeout_ms`; `Some(0)` disables the client timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// Default trust level: `"ask"`, `"allow"` or `"block"`. An empty value is
+    /// treated as `"ask"`.
+    pub trust: String,
+    /// Declared side effects: `"read"`, `"network"`, `"write"` or
+    /// `"unknown"`. An empty value is treated as `"unknown"`.
+    pub side_effects: String,
+    /// Per-tool trust overrides, keyed by tool name.
+    pub tools: BTreeMap<String, String>,
+    /// Per-server cap on the bytes one tool call may return before
+    /// truncation. `None` inherits `mcp.max_output_bytes`.
+    pub max_output_bytes: Option<usize>,
+    /// How this server's tools reach the model: `"gateway"` (default) registers
+    /// a single `mcp__<server>` tool that discovers tools on demand, `"tools"`
+    /// additionally registers one tool per remote tool
+    /// (`mcp__<server>_<tool>`) with its real schema once the catalogue is
+    /// known. An empty value is treated as `"gateway"`.
+    pub expose: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            // Empty transport is normalized to `stdio` by the `aish-mcp`
+            // resolver; keeping it empty lets YAML omit the field entirely.
+            transport: String::new(),
+            enabled: true,
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            url: None,
+            headers: BTreeMap::new(),
+            request_timeout_ms: None,
+            trust: String::new(),
+            side_effects: String::new(),
+            tools: BTreeMap::new(),
+            max_output_bytes: None,
+            expose: String::new(),
+        }
+    }
+}
+
+/// MCP client configuration (the `mcp:` section).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// Master switch. Default: true; with no `servers` it has no effect.
+    pub enabled: bool,
+    /// Default per-request deadline in milliseconds. `0` disables the client
+    /// timeout. Default: 30000 (see `aish_mcp::types::DEFAULT_REQUEST_TIMEOUT_MS`).
+    pub request_timeout_ms: u64,
+    /// Default cap on the bytes one tool call may return before truncation.
+    /// Default: 65536 (see `aish_mcp::types::DEFAULT_MAX_OUTPUT_BYTES`).
+    pub max_output_bytes: usize,
+    /// Configured servers.
+    pub servers: Vec<McpServerConfig>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            request_timeout_ms: 30_000,
+            max_output_bytes: 64 * 1024,
+            servers: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-level config model
 // ---------------------------------------------------------------------------
 
@@ -581,6 +685,9 @@ pub struct ConfigModel {
     /// Skill marketplace: auto-search + registry sources.
     #[serde(default)]
     pub skills: SkillsConfig,
+    /// MCP client: servers, timeouts and output caps.
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Additional API accounts for multi-key quota rotation under the same
     /// provider. The top-level `api_key` is always the primary (account #0);
     /// entries here are tried in order when the primary hits a rate/usage limit.
@@ -656,6 +763,7 @@ impl Default for ConfigModel {
             inline_completion: InlineCompletionConfig::default(),
             pty_daemon_enabled: default_true(),
             skills: SkillsConfig::default(),
+            mcp: McpConfig::default(),
             api_accounts: vec![],
             fallback_models: vec![],
             recent_models: vec![],
@@ -1105,5 +1213,136 @@ inline_completion:
         assert!(m.inline_completion.enabled);
         assert_eq!(m.inline_completion.debounce_ms, 400);
         assert_eq!(m.inline_completion.max_tokens, 512);
+    }
+
+    // ---------------------------------------------------------------------------
+    // MCP client config
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn mcp_defaults_when_section_absent() {
+        // A server that only sets `name` must pick up every other default.
+        let yaml = r#"
+mcp:
+  servers:
+    - name: fs
+"#;
+        let m: ConfigModel = serde_yaml::from_str(yaml).unwrap();
+        assert!(m.mcp.enabled);
+        assert_eq!(m.mcp.request_timeout_ms, 30_000);
+        assert_eq!(m.mcp.max_output_bytes, 65_536);
+        assert_eq!(m.mcp.servers.len(), 1);
+
+        let server = &m.mcp.servers[0];
+        assert_eq!(server.name, "fs");
+        assert_eq!(server.transport, "");
+        assert!(server.enabled);
+        assert_eq!(server.command, None);
+        assert!(server.args.is_empty());
+        assert!(server.env.is_empty());
+        assert_eq!(server.cwd, None);
+        assert_eq!(server.url, None);
+        assert!(server.headers.is_empty());
+        assert_eq!(server.request_timeout_ms, None);
+        assert_eq!(server.trust, "");
+        assert_eq!(server.side_effects, "");
+        assert!(server.tools.is_empty());
+        assert_eq!(server.max_output_bytes, None);
+
+        // Omitting `mcp:` entirely also yields the defaults.
+        let empty: ConfigModel = serde_yaml::from_str("{}").unwrap();
+        assert!(empty.mcp.enabled);
+        assert!(empty.mcp.servers.is_empty());
+    }
+
+    #[test]
+    fn mcp_deserializes_full_server_with_maps() {
+        let yaml = r#"
+mcp:
+  enabled: false
+  request_timeout_ms: 0
+  max_output_bytes: 1024
+  servers:
+    - name: fs
+      transport: stdio
+      enabled: false
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      env:
+        LOG_LEVEL: debug
+        TOKEN: "${FS_TOKEN}"
+      cwd: /tmp
+      request_timeout_ms: 5000
+      trust: allow
+      side_effects: read
+      tools:
+        write_file: block
+        read_file: allow
+      max_output_bytes: 2048
+    - name: github
+      transport: http
+      url: https://api.example.com/mcp
+      headers:
+        Authorization: "Bearer ${GH_TOKEN}"
+      trust: ask
+      side_effects: network
+"#;
+        let m: ConfigModel = serde_yaml::from_str(yaml).unwrap();
+        assert!(!m.mcp.enabled);
+        assert_eq!(m.mcp.request_timeout_ms, 0);
+        assert_eq!(m.mcp.max_output_bytes, 1024);
+        assert_eq!(m.mcp.servers.len(), 2);
+
+        let stdio = &m.mcp.servers[0];
+        assert_eq!(stdio.name, "fs");
+        assert_eq!(stdio.transport, "stdio");
+        assert!(!stdio.enabled);
+        assert_eq!(stdio.command.as_deref(), Some("npx"));
+        assert_eq!(
+            stdio.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        );
+        assert_eq!(
+            stdio.env.get("LOG_LEVEL").map(String::as_str),
+            Some("debug")
+        );
+        assert_eq!(
+            stdio.env.get("TOKEN").map(String::as_str),
+            Some("${FS_TOKEN}")
+        );
+        assert_eq!(stdio.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(stdio.request_timeout_ms, Some(5000));
+        assert_eq!(stdio.trust, "allow");
+        assert_eq!(stdio.side_effects, "read");
+        assert_eq!(
+            stdio.tools.get("write_file").map(String::as_str),
+            Some("block")
+        );
+        assert_eq!(
+            stdio.tools.get("read_file").map(String::as_str),
+            Some("allow")
+        );
+        assert_eq!(stdio.max_output_bytes, Some(2048));
+
+        let http = &m.mcp.servers[1];
+        assert_eq!(http.name, "github");
+        assert_eq!(http.transport, "http");
+        assert_eq!(http.url.as_deref(), Some("https://api.example.com/mcp"));
+        assert_eq!(
+            http.headers.get("Authorization").map(String::as_str),
+            Some("Bearer ${GH_TOKEN}")
+        );
+        assert_eq!(http.trust, "ask");
+        assert_eq!(http.side_effects, "network");
+        assert_eq!(http.request_timeout_ms, None);
+    }
+
+    #[test]
+    fn config_model_default_mcp_enabled_and_empty_servers() {
+        let m = ConfigModel::default();
+        assert!(m.mcp.enabled);
+        assert!(m.mcp.servers.is_empty());
+        assert_eq!(m.mcp.request_timeout_ms, 30_000);
+        assert_eq!(m.mcp.max_output_bytes, 65_536);
     }
 }
