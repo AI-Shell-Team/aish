@@ -24,8 +24,8 @@ pub enum LiveEffect {
     /// Security keys also map here — they are applied via the dedicated
     /// `is_security_setting` path in `app.rs`, not through this enum.
     None,
-    /// Rebuild the model-dependent tools (WebFetch) — e.g. after temperature or
-    /// `max_tokens` changes.
+    /// Rebuild the model-dependent tools (WebFetch) — e.g. after a
+    /// `temperature` change.
     ToolsRefresh,
     /// Apply a new `max_tokens` budget to the running LLM session and rebuild
     /// the model-dependent tools.
@@ -967,7 +967,8 @@ pub fn live_effect(key: SettingKey) -> LiveEffect {
 
 /// Whether the running session must be restarted for `key`'s new value to take
 /// effect. The model/credential fields are applied live via `update_model`,
-/// temperature/max_tokens rebuild tools live, Security settings are pushed into
+/// `max_tokens` is pushed into the running LLM session, temperature rebuilds the
+/// model-dependent tools, Security settings are pushed into
 /// the running `SecurityManager` + InputGuard, and `prompt_style` is read from
 /// `self.config` on each render — everything else is consumed only at startup.
 pub fn requires_restart(key: SettingKey) -> bool {
