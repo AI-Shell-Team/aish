@@ -9,7 +9,10 @@ use crate::model_id::resolve_model_for_api;
 use crate::types::{ChatMessage, ToolSpec};
 
 /// Default max_tokens when config does not specify a value.
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+///
+/// Single source of truth lives in [`aish_core::DEFAULT_MAX_TOKENS`]; the
+/// config loader enforces the same value as a floor.
+pub use aish_core::DEFAULT_MAX_TOKENS;
 
 /// HTTP client for OpenAI-compatible chat completion APIs.
 pub struct LlmClient {
