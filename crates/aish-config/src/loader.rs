@@ -49,6 +49,13 @@ impl ConfigLoader {
                     .expect("ConfigModel::default() must serialize")
             });
             let mut changed = Self::merge_missing(&mut value, default_value);
+            if Self::enforce_min_max_tokens(&mut value) {
+                changed = true;
+                debug!(
+                    path = %path.display(),
+                    "raised max_tokens to the enforced minimum"
+                );
+            }
             let stripped = Self::strip_legacy_security_keys(&mut value);
             if !stripped.is_empty() {
                 changed = true;
@@ -120,6 +127,35 @@ impl ConfigLoader {
             }
         }
         changed
+    }
+
+    /// Raise a below-floor top-level `max_tokens` to the enforced minimum.
+    ///
+    /// Earlier installs wrote `max_tokens: 4096` into `config.yaml`; that cap
+    /// truncated long answers, so any smaller explicit value is lifted to
+    /// [`aish_core::DEFAULT_MAX_TOKENS`] on load. A missing or `null` value is
+    /// left untouched: the same floor is applied downstream when the field is
+    /// unset. Returns true when the value changed (caller should persist).
+    fn enforce_min_max_tokens(value: &mut serde_yaml::Value) -> bool {
+        let Some(map) = value.as_mapping_mut() else {
+            return false;
+        };
+        let key = serde_yaml::Value::String("max_tokens".to_string());
+        let Some(serde_yaml::Value::Number(n)) = map.get(&key) else {
+            return false;
+        };
+        let Some(current) = n.as_u64() else {
+            return false;
+        };
+        let floor = u64::from(aish_core::DEFAULT_MAX_TOKENS);
+        if current >= floor {
+            return false;
+        }
+        map.insert(
+            key,
+            serde_yaml::Value::Number(serde_yaml::Number::from(floor)),
+        );
+        true
     }
 
     /// Remove security fields that used to live in `config.yaml` but are now
@@ -388,6 +424,46 @@ mod tests {
         assert!(on_disk.contains("model: glm-4.7"));
         assert!(on_disk.contains("api_key: secret"));
         assert!(on_disk.contains("enable_token_estimation: true"));
+    }
+
+    #[test]
+    fn load_raises_legacy_max_tokens_to_the_floor() {
+        // Older installs wrote the then-default 4096 into their config; that
+        // cap truncated long answers, so it is lifted to the new minimum.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\nmax_tokens: 4096\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.max_tokens, Some(aish_core::DEFAULT_MAX_TOKENS));
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains(&format!("max_tokens: {}", aish_core::DEFAULT_MAX_TOKENS)),
+            "raised value must be persisted; got:\n{on_disk}"
+        );
+    }
+
+    #[test]
+    fn load_keeps_explicit_max_tokens_above_the_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\nmax_tokens: 200000\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.max_tokens, Some(200_000));
+    }
+
+    #[test]
+    fn load_leaves_unset_max_tokens_as_none() {
+        // Unset means "provider default", floored downstream — not a
+        // materialized number in the user's yaml.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.max_tokens, None);
     }
 
     #[cfg(unix)]

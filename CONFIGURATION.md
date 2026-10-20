@@ -48,7 +48,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `api_key` | string/null | `null` | API 密钥 | 可选，推荐用环境变量 |
 | `codex_auth_path` | string/null | `null` | OpenAI Codex 认证文件路径 | 可选 |
 | `temperature` | float | `0.7` | 生成温度 | 0.0 ≤ 值 ≤ 2.0 |
-| `max_tokens` | integer | `1000` | 最大令牌数 | 值 > 0 |
+| `max_tokens` | integer | `40960` | 最大输出令牌数。留空 = 使用模型默认上限；小于 40960 的显式值会在加载时提升到 40960 | 值 > 0 |
 
 ### 界面配置
 
@@ -330,7 +330,7 @@ codex_auth_path: null
 
 # 生成参数
 temperature: 0.7
-max_tokens: 1000
+max_tokens: 40960
 
 # 界面配置
 prompt_style: "🚀"
@@ -469,7 +469,7 @@ model: openai/gpt-4-turbo-preview
 api_base: https://openrouter.ai/api/v1
 api_key: sk-or-v1-your-key-here
 temperature: 0.7
-max_tokens: 2000
+max_tokens: 40960
 ```
 
 ### 其他兼容 OpenAI API 的服务
@@ -552,7 +552,7 @@ max_tokens: -1    # ❌ 错误：必须 > 0
 
 # 正确的配置
 temperature: 1.5  # ✅ 正确
-max_tokens: 2000  # ✅ 正确
+max_tokens: 40960  # ✅ 正确（40960 是最小值，更小的值会被提升）
 ```
 
 ### 配置文件损坏处理
