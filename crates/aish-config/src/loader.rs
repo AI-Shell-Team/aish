@@ -154,8 +154,8 @@ impl ConfigLoader {
         let Some(current) = n.as_u64() else {
             return false;
         };
-        // `0` is the "provider default" spelling and already resolves to the
-        // default budget downstream, so it is left as written instead of
+        // `0` is the unset spelling and already resolves to
+        // `DEFAULT_MAX_TOKENS` downstream, so it is left as written instead of
         // being materialized into a number.
         if current == 0 {
             return false;
@@ -513,10 +513,9 @@ mod tests {
     }
 
     #[test]
-    fn load_keeps_a_zero_max_tokens_as_the_provider_default() {
-        // `0` is the "provider default" spelling and already resolves to the
-        // default budget downstream, so the loader must not materialize it
-        // into a number.
+    fn load_keeps_a_zero_max_tokens_as_unset() {
+        // `0` is the unset spelling and already resolves to `DEFAULT_MAX_TOKENS`
+        // downstream, so the loader must not materialize it into a number.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "model: glm-4.7\nmax_tokens: 0\n").unwrap();
@@ -533,7 +532,7 @@ mod tests {
 
     #[test]
     fn load_leaves_unset_max_tokens_as_none() {
-        // Unset means "provider default", floored downstream — not a
+        // Unset resolves to `DEFAULT_MAX_TOKENS` downstream — not a
         // materialized number in the user's yaml.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
