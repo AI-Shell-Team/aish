@@ -830,16 +830,22 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
                 None
             } else {
                 let n = parse_u32(value)?;
-                // The loader raises a below-floor value on the next start, so
-                // accepting one here would silently undo the edit. `0` means
-                // "provider default" and is exempt.
-                if n > 0 && n < aish_core::DEFAULT_MAX_TOKENS && cfg.enforce_min_max_tokens {
-                    return Err(format!(
-                        "max_tokens must be at least {} (set `enforce_min_max_tokens: false` in config.yaml to allow a lower cap)",
-                        aish_core::DEFAULT_MAX_TOKENS
-                    ));
+                if n == 0 {
+                    // `0` is the "provider default" spelling; it resolves to
+                    // the default budget downstream, so it is stored the same
+                    // way an unset value is.
+                    None
+                } else {
+                    // The loader raises a below-floor value on the next start,
+                    // so accepting one here would silently undo the edit.
+                    if n < aish_core::DEFAULT_MAX_TOKENS && cfg.enforce_min_max_tokens {
+                        return Err(format!(
+                            "max_tokens must be at least {} (set `enforce_min_max_tokens: false` in config.yaml to allow a lower cap)",
+                            aish_core::DEFAULT_MAX_TOKENS
+                        ));
+                    }
+                    Some(n)
                 }
-                Some(n)
             };
         }
         SettingKey::PromptStyle => cfg.prompt_style = opt_string(value),
@@ -1292,6 +1298,15 @@ mod tests {
         cfg.enforce_min_max_tokens = false;
         apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap();
         assert_eq!(cfg.max_tokens, Some(1024));
+    }
+
+    #[test]
+    fn max_tokens_zero_is_the_provider_default() {
+        // `0` and an unset value mean the same thing, so both are stored as
+        // "unset" and neither is raised by the loader.
+        let mut cfg = default_cfg();
+        apply(&mut cfg, SettingKey::MaxTokens, "0").unwrap();
+        assert_eq!(cfg.max_tokens, None);
     }
 
     #[test]

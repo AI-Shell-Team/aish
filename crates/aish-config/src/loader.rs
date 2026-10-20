@@ -154,6 +154,12 @@ impl ConfigLoader {
         let Some(current) = n.as_u64() else {
             return false;
         };
+        // `0` is the "provider default" spelling and already resolves to the
+        // default budget downstream, so it is left as written instead of
+        // being materialized into a number.
+        if current == 0 {
+            return false;
+        }
         let floor = u64::from(aish_core::DEFAULT_MAX_TOKENS);
         if current >= floor {
             return false;
@@ -504,6 +510,25 @@ mod tests {
 
         let config = ConfigLoader::load(Some(&path)).unwrap();
         assert!(config.enforce_min_max_tokens);
+    }
+
+    #[test]
+    fn load_keeps_a_zero_max_tokens_as_the_provider_default() {
+        // `0` is the "provider default" spelling and already resolves to the
+        // default budget downstream, so the loader must not materialize it
+        // into a number.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\nmax_tokens: 0\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.max_tokens, Some(0));
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("max_tokens: 0"),
+            "the explicit zero must survive; got:\n{on_disk}"
+        );
     }
 
     #[test]
