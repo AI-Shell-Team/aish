@@ -493,6 +493,15 @@ impl LlmSession {
         );
     }
 
+    /// Update the output-token budget of the running session.
+    ///
+    /// `None` restores the provider default (the shared
+    /// [`crate::client::DEFAULT_MAX_TOKENS`]). Applied to the next request;
+    /// already running tool iterations keep the budget they started with.
+    pub fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
+        self.max_tokens = max_tokens;
+    }
+
     /// Install a multi-account rotation + fallback state. When set, every
     /// chat completion routes through the rotation loop, advancing to the next
     /// API account or fallback model on recoverable failures.
@@ -3092,6 +3101,19 @@ mod tests {
         let session = LlmSession::new("http://localhost", "key", "model", None, None);
         let state = session.plan_state();
         assert_eq!(state.lock().unwrap().phase, aish_core::PlanPhase::Normal);
+    }
+
+    #[test]
+    fn test_set_max_tokens_updates_the_budget() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, Some(4096));
+        assert_eq!(session.loop_max_tokens(), Some(4096));
+
+        session.set_max_tokens(Some(8192));
+        assert_eq!(session.loop_max_tokens(), Some(8192));
+
+        // `None` restores the provider default.
+        session.set_max_tokens(None);
+        assert_eq!(session.loop_max_tokens(), None);
     }
 
     #[test]

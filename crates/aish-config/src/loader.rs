@@ -136,7 +136,14 @@ impl ConfigLoader {
     /// [`aish_core::DEFAULT_MAX_TOKENS`] on load. A missing or `null` value is
     /// left untouched: the same floor is applied downstream when the field is
     /// unset. Returns true when the value changed (caller should persist).
+    ///
+    /// `enforce_min_max_tokens: false` turns the floor off: the explicit value
+    /// is then kept as written. That is the supported escape hatch for
+    /// gateways that reject a `max_tokens` above the model's own output cap.
     fn enforce_min_max_tokens(value: &mut serde_yaml::Value) -> bool {
+        if !Self::min_max_tokens_floor_enabled(value) {
+            return false;
+        }
         let Some(map) = value.as_mapping_mut() else {
             return false;
         };
@@ -156,6 +163,18 @@ impl ConfigLoader {
             serde_yaml::Value::Number(serde_yaml::Number::from(floor)),
         );
         true
+    }
+
+    /// Whether the `max_tokens` floor applies to this config.
+    ///
+    /// Only an explicit `enforce_min_max_tokens: false` disables it; a
+    /// missing or malformed value keeps the floor active.
+    fn min_max_tokens_floor_enabled(value: &serde_yaml::Value) -> bool {
+        let Some(map) = value.as_mapping() else {
+            return true;
+        };
+        let key = serde_yaml::Value::String("enforce_min_max_tokens".to_string());
+        !matches!(map.get(&key), Some(serde_yaml::Value::Bool(false)))
     }
 
     /// Remove security fields that used to live in `config.yaml` but are now
@@ -452,6 +471,39 @@ mod tests {
 
         let config = ConfigLoader::load(Some(&path)).unwrap();
         assert_eq!(config.max_tokens, Some(200_000));
+    }
+
+    #[test]
+    fn load_keeps_a_below_floor_max_tokens_when_the_floor_is_disabled() {
+        // The supported escape hatch for gateways that reject a `max_tokens`
+        // above the model's own output cap.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "model: glm-4.7\nmax_tokens: 4096\nenforce_min_max_tokens: false\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.max_tokens, Some(4096));
+        assert!(!config.enforce_min_max_tokens);
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("max_tokens: 4096"),
+            "the explicit value must survive; got:\n{on_disk}"
+        );
+    }
+
+    #[test]
+    fn load_defaults_the_floor_to_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert!(config.enforce_min_max_tokens);
     }
 
     #[test]

@@ -429,6 +429,13 @@ impl AiHandler {
         self.llm_session.update_model(model, api_base, api_key);
     }
 
+    /// Update the output-token budget of the underlying LLM session.
+    ///
+    /// `None` restores the provider default.
+    pub fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
+        self.llm_session.set_max_tokens(max_tokens);
+    }
+
     /// Update the session UUID recorded in audit events after a session
     /// switch (/resume, /sessions, /fork).
     pub fn set_audit_session_uuid(&mut self, session_uuid: String) {
