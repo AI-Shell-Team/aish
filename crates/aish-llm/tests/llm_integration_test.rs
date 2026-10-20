@@ -110,7 +110,8 @@ fn test_setup_verification_uses_runtime_model_resolution() {
 
 #[test]
 fn test_default_max_tokens_constant() {
-    assert_eq!(DEFAULT_MAX_TOKENS, 4096);
+    assert_eq!(DEFAULT_MAX_TOKENS, aish_core::DEFAULT_MAX_TOKENS);
+    assert_eq!(DEFAULT_MAX_TOKENS, 40_960);
 }
 
 #[test]

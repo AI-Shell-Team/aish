@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `max_tokens` defaults to 40960 instead of 4096, and an explicit non-zero value below 40960 in `~/.config/aish/config.yaml` is raised to 40960 on load (the file is migrated in place; `null`/absent and `0` still resolve to the new default). The old cap was small enough that long answers were cut off mid-thought and a thinking model could spend the whole budget on reasoning and return an empty answer; configs written by older installs carried the stale `4096` explicitly, so the migration lifts them instead of only fixing fresh installs. Only the top-level `max_tokens` is floored — `inline_completion.max_tokens` (512) and `context_auto_compact.summary_max_tokens` keep their own budgets. (#619)
+- New `enforce_min_max_tokens` config flag (default `true`) turns the `max_tokens` floor off for gateways that reject a `max_tokens` above the model's own output cap: with it set to `false` an explicit smaller value is kept as written. `/setting max_tokens` refuses a below-floor value while the floor is active and points at the flag instead of writing a value that the next start would silently undo.
+- `/setting max_tokens` now reaches the running session: the output budget lives on the LLM session, but the setting only rebuilt the model-dependent tools, so a new value took effect after a restart only.
+
 ### Added
 
 - MCP client (`crates/aish-mcp`, issue #564). Servers are declared under `mcp.servers` in `~/.config/aish/config.yaml` with the `stdio` or Streamable HTTP transport, `${VAR}` expansion in `env`/`headers`, and per-server/per-tool `trust` and `side_effects` declarations. Servers connect in the background; `/mcp status|list|tools|reload|reconnect` shows state, and `/status` carries a one-line summary. Credentials never reach status output, logs or audit records.

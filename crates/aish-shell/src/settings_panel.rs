@@ -24,9 +24,12 @@ pub enum LiveEffect {
     /// Security keys also map here — they are applied via the dedicated
     /// `is_security_setting` path in `app.rs`, not through this enum.
     None,
-    /// Rebuild the model-dependent tools (WebFetch) — e.g. after temperature or
-    /// `max_tokens` changes.
+    /// Rebuild the model-dependent tools (WebFetch) — e.g. after a
+    /// `temperature` change.
     ToolsRefresh,
+    /// Apply a new `max_tokens` budget to the running LLM session and rebuild
+    /// the model-dependent tools.
+    MaxTokens,
     /// Re-initialize the whole LLM session + tools + inline completer — needed
     /// when `model` / `api_base` / `api_key` change.
     ModelSession,
@@ -826,7 +829,23 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
             cfg.max_tokens = if value.is_empty() {
                 None
             } else {
-                Some(parse_u32(value)?)
+                let n = parse_u32(value)?;
+                if n == 0 {
+                    // `0` is the unset spelling: downstream it resolves to
+                    // `DEFAULT_MAX_TOKENS`, so it is stored the same way as a
+                    // blank value.
+                    None
+                } else {
+                    // The loader raises a below-floor value on the next start,
+                    // so accepting one here would silently undo the edit.
+                    if n < aish_core::DEFAULT_MAX_TOKENS && cfg.enforce_min_max_tokens {
+                        return Err(format!(
+                            "max_tokens must be at least {} (set `enforce_min_max_tokens: false` in config.yaml to allow a lower cap)",
+                            aish_core::DEFAULT_MAX_TOKENS
+                        ));
+                    }
+                    Some(n)
+                }
             };
         }
         SettingKey::PromptStyle => cfg.prompt_style = opt_string(value),
@@ -939,7 +958,8 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
 pub fn live_effect(key: SettingKey) -> LiveEffect {
     match key {
         SettingKey::Model | SettingKey::ApiBase | SettingKey::ApiKey => LiveEffect::ModelSession,
-        SettingKey::Temperature | SettingKey::MaxTokens => LiveEffect::ToolsRefresh,
+        SettingKey::MaxTokens => LiveEffect::MaxTokens,
+        SettingKey::Temperature => LiveEffect::ToolsRefresh,
         // Security keys are applied via `is_security_setting` in app.rs.
         _ => LiveEffect::None,
     }
@@ -947,7 +967,8 @@ pub fn live_effect(key: SettingKey) -> LiveEffect {
 
 /// Whether the running session must be restarted for `key`'s new value to take
 /// effect. The model/credential fields are applied live via `update_model`,
-/// temperature/max_tokens rebuild tools live, Security settings are pushed into
+/// `max_tokens` is pushed into the running LLM session, temperature rebuilds the
+/// model-dependent tools, Security settings are pushed into
 /// the running `SecurityManager` + InputGuard, and `prompt_style` is read from
 /// `self.config` on each render — everything else is consumed only at startup.
 pub fn requires_restart(key: SettingKey) -> bool {
@@ -1255,9 +1276,37 @@ mod tests {
     #[test]
     fn max_tokens_clears_on_empty() {
         let mut cfg = default_cfg();
-        apply(&mut cfg, SettingKey::MaxTokens, "4096").unwrap();
-        assert_eq!(cfg.max_tokens, Some(4096));
+        apply(&mut cfg, SettingKey::MaxTokens, "65536").unwrap();
+        assert_eq!(cfg.max_tokens, Some(65536));
         apply(&mut cfg, SettingKey::MaxTokens, "").unwrap();
+        assert_eq!(cfg.max_tokens, None);
+    }
+
+    #[test]
+    fn max_tokens_below_the_floor_is_rejected() {
+        // The loader raises a below-floor value on the next start, so the
+        // panel must refuse it instead of silently undoing the edit.
+        let mut cfg = default_cfg();
+        let err = apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap_err();
+        assert!(err.contains("40960"), "got {err}");
+        assert!(err.contains("enforce_min_max_tokens"), "got {err}");
+        assert_eq!(cfg.max_tokens, None);
+    }
+
+    #[test]
+    fn max_tokens_below_the_floor_is_allowed_when_the_floor_is_disabled() {
+        let mut cfg = default_cfg();
+        cfg.enforce_min_max_tokens = false;
+        apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap();
+        assert_eq!(cfg.max_tokens, Some(1024));
+    }
+
+    #[test]
+    fn max_tokens_zero_is_the_provider_default() {
+        // `0` and an unset value mean the same thing, so both are stored as
+        // "unset" and neither is raised by the loader.
+        let mut cfg = default_cfg();
+        apply(&mut cfg, SettingKey::MaxTokens, "0").unwrap();
         assert_eq!(cfg.max_tokens, None);
     }
 
@@ -1282,6 +1331,9 @@ mod tests {
     fn model_fields_signal_session_refresh() {
         assert_eq!(live_effect(SettingKey::Model), LiveEffect::ModelSession);
         assert_eq!(live_effect(SettingKey::ApiKey), LiveEffect::ModelSession);
+        // The output budget lives on the running session, so it needs its own
+        // effect instead of the tool-only refresh.
+        assert_eq!(live_effect(SettingKey::MaxTokens), LiveEffect::MaxTokens);
         // Security keys are handled outside LiveEffect.
         assert_eq!(live_effect(SettingKey::InputGuardEnabled), LiveEffect::None);
         assert_eq!(live_effect(SettingKey::EnableSandbox), LiveEffect::None);

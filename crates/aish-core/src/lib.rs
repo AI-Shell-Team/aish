@@ -18,6 +18,14 @@ pub mod error;
 pub mod plan;
 pub mod types;
 
+/// Default and minimum `max_tokens` for LLM responses.
+///
+/// Used when the config leaves `max_tokens` unset, and enforced as a floor on
+/// any smaller explicit value: the previous 4096 default truncated long
+/// answers, so installs that had it written into `config.yaml` are lifted to
+/// this value on load.
+pub const DEFAULT_MAX_TOKENS: u32 = 40_960;
+
 pub use audit::{AuditEvent, AuditEventType, AuditSink, NullAuditSink};
 pub use error::{AishError, Result};
 pub use plan::*;
