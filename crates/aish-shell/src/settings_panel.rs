@@ -831,9 +831,9 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
             } else {
                 let n = parse_u32(value)?;
                 if n == 0 {
-                    // `0` is the "provider default" spelling; it resolves to
-                    // the default budget downstream, so it is stored the same
-                    // way an unset value is.
+                    // `0` is the unset spelling: downstream it resolves to
+                    // `DEFAULT_MAX_TOKENS`, so it is stored the same way as a
+                    // blank value.
                     None
                 } else {
                     // The loader raises a below-floor value on the next start,

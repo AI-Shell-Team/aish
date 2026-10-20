@@ -48,7 +48,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `api_key` | string/null | `null` | API 密钥 | 可选，推荐用环境变量 |
 | `codex_auth_path` | string/null | `null` | OpenAI Codex 认证文件路径 | 可选 |
 | `temperature` | float | `0.7` | 生成温度 | 0.0 ≤ 值 ≤ 2.0 |
-| `max_tokens` | integer | `40960` | 最大输出令牌数。留空、`null` 或 `0` = 使用模型默认上限；1～40959 的显式值会在加载时提升到 40960（除非 `enforce_min_max_tokens: false`） | ≥ 0（0 = 默认） |
+| `max_tokens` | integer | `40960` | 最大输出令牌数。留空、`null` 或 `0` = 使用 aish 默认上限（40960）；1～40959 的显式值会在加载时提升到 40960（除非 `enforce_min_max_tokens: false`） | ≥ 0（0 = 默认） |
 | `enforce_min_max_tokens` | boolean | `true` | 是否强制 `max_tokens` 下限。严格网关（拒绝超过模型自身输出上限的 `max_tokens`）可设为 `false`，保留自己写的小值 | true/false |
 
 ### 界面配置
@@ -471,7 +471,10 @@ model: openai/gpt-4-turbo-preview
 api_base: https://openrouter.ai/api/v1
 api_key: sk-or-v1-your-key-here
 temperature: 0.7
-max_tokens: 40960
+# gpt-4-turbo-preview only accepts 4096 completion tokens, so the 40960
+# floor must be turned off for this model or every request is rejected.
+max_tokens: 4096
+enforce_min_max_tokens: false
 ```
 
 ### 其他兼容 OpenAI API 的服务
@@ -550,7 +553,7 @@ export LANGFUSE_HOST="https://cloud.langfuse.com"  # 或你的自托管实例
 temperature: 3.0  # ❌ 错误：必须 ≤ 2.0
 
 # 无效的最大令牌数
-max_tokens: -1    # ❌ 错误：必须 ≥ 0（0、null 或留空 = 模型默认）
+max_tokens: -1    # ❌ 错误：必须 ≥ 0（0、null 或留空 = aish 默认 40960）
 
 # 正确的配置
 temperature: 1.5  # ✅ 正确

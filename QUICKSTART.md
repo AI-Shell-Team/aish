@@ -124,7 +124,7 @@ model: openai/deepseek-chat      # LLM model to use
 api_base: https://openrouter.ai/api/v1  # Custom API base URL
 api_key: your_api_key            # API key (prefer env var)
 temperature: 0.7                 # Temperature for LLM responses
-max_tokens: 40960                # Maximum tokens for responses (floor; 0 = model default)
+max_tokens: 40960                # Maximum tokens for responses (floor; 0 = aish default)
 prompt_style: "🚀"               # Prompt style character
 theme: dark                      # Shell theme (dark/light)
 auto_suggest: true               # Enable auto-suggestions
@@ -257,7 +257,8 @@ enable_langfuse: false
 model: openai/gpt-4-turbo-preview
 api_base: https://openrouter.ai/api/v1
 temperature: 0.7
-max_tokens: 40960
+max_tokens: 4096                # Only 4096 output tokens are supported here
+enforce_min_max_tokens: false   # Otherwise 4096 is raised to the 40960 floor
 ```
 
 ### With Environment Variables
