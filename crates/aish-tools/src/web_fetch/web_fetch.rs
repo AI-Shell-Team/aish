@@ -18,6 +18,13 @@ use super::utils::{
 
 const TOOL_NAME: &str = "WebFetch";
 
+fn extract_secondary_model_content(response: &serde_json::Value) -> Result<String, String> {
+    let (content, _reasoning, _tool_calls, _usage) = StreamParser::parse_response(response);
+    content
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| "secondary model returned no response content".to_string())
+}
+
 /// Fetch a URL, extract readable text, and answer a focused prompt about it.
 pub struct WebFetchTool {
     api_base: String,
@@ -70,11 +77,7 @@ impl WebFetchTool {
             .await
             .map_err(|error| error.to_string())?
         {
-            LlmResponse::Json(json) => {
-                let (content, _reasoning, _tool_calls, _usage) =
-                    StreamParser::parse_response(&json);
-                Ok(content.unwrap_or_else(|| "No response from model".to_string()))
-            }
+            LlmResponse::Json(json) => extract_secondary_model_content(&json),
             LlmResponse::Stream(_) => Err("secondary model unexpectedly returned a stream".into()),
         }
     }
@@ -269,7 +272,102 @@ impl Tool for WebFetchTool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
     use super::*;
+
+    fn spawn_chat_completion_server(
+        response: serde_json::Value,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local fixture");
+        let port = listener.local_addr().expect("fixture address").port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept chat completion request");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set fixture read timeout");
+
+            let mut headers = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut chunk).expect("read request headers");
+                assert_ne!(n, 0, "client closed before sending request headers");
+                headers.extend_from_slice(&chunk[..n]);
+                if headers.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let body = response.to_string();
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(reply.as_bytes())
+                .expect("write fixture response");
+        });
+
+        (format!("http://127.0.0.1:{port}/v1"), handle)
+    }
+
+    #[tokio::test]
+    async fn apply_prompt_to_content_rejects_responses_without_body() {
+        let empty_responses = [
+            (
+                "null content",
+                serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": null}}]
+                }),
+            ),
+            (
+                "empty content",
+                serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": ""}}]
+                }),
+            ),
+            (
+                "whitespace content",
+                serde_json::json!({
+                    "choices": [{"message": {"role": "assistant", "content": " \t\n"}}]
+                }),
+            ),
+            (
+                "reasoning without content",
+                serde_json::json!({
+                    "choices": [{"message": {
+                        "role": "assistant",
+                        "reasoning_content": "private reasoning"
+                    }}]
+                }),
+            ),
+        ];
+
+        for (case, response) in empty_responses {
+            let (api_base, server) = spawn_chat_completion_server(response);
+            let tool = WebFetchTool::new(&api_base, "test-key", "test-model", Some(0.1), Some(256));
+            let result = tool
+                .apply_prompt_to_content("summarize", "fixture page", true)
+                .await;
+            server.join().expect("fixture server should finish");
+            assert!(
+                result.is_err(),
+                "{case} must not be accepted as an extracted answer: {result:?}"
+            );
+        }
+
+        let (api_base, server) = spawn_chat_completion_server(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "verified fixture answer"}}]
+        }));
+        let tool = WebFetchTool::new(&api_base, "test-key", "test-model", Some(0.1), Some(256));
+        let result = tool
+            .apply_prompt_to_content("summarize", "fixture page", true)
+            .await;
+        server.join().expect("fixture server should finish");
+        assert_eq!(result, Ok("verified fixture answer".to_string()));
+    }
 
     #[test]
     fn http_status_error_returns_failure() {
