@@ -272,14 +272,16 @@ enum RegistryAction {
 
 fn main() {
     let cli = Cli::parse();
+    let config_path = cli.config.clone();
+    let api_key_override = cli.api_key.clone();
 
     // Initialize logging. RUST_LOG wins; otherwise honor the selected
     // config's `log_level` (best-effort early load). Passing the --config
     // path here (not None) matters: load() runs an additive migration that
     // rewrites the file when keys are missing, so load(None) would touch the
     // DEFAULT path even when --config points elsewhere. Falls back to "warn".
-    let config_path = cli.config.as_deref().map(std::path::Path::new);
-    let log_level = aish_config::ConfigLoader::load(config_path)
+    let config_file = config_path.as_deref().map(std::path::Path::new);
+    let log_level = aish_config::ConfigLoader::load(config_file)
         .map(|c| c.log_level)
         .unwrap_or_else(|_| "warn".to_string());
     tracing_subscriber::fmt()
@@ -313,6 +315,18 @@ fn main() {
     // on reattach.
     if cli.pty_daemon {
         tty_watchdog::disarm();
+        // Apply the effective CLI overrides before the PTY fork so the shell
+        // child inherits them without needing to read or mutate the process
+        // environment after fork.
+        for (daemon_var, shell_var) in [
+            ("AISH_DAEMON_MODEL", "AISH_MODEL"),
+            ("AISH_DAEMON_API_BASE", "AISH_API_BASE"),
+            ("AISH_DAEMON_API_KEY", "AISH_API_KEY"),
+        ] {
+            if let Ok(value) = std::env::var(daemon_var) {
+                std::env::set_var(shell_var, value);
+            }
+        }
         let cwd = std::env::var("AISH_DAEMON_CWD").unwrap_or_else(|_| {
             std::env::current_dir()
                 .unwrap_or_default()
@@ -333,6 +347,7 @@ fn main() {
             std::path::Path::new(&socket_path),
             &session_id,
             &shell_exe,
+            cli.config.as_deref(),
         ) {
             eprintln!("PTY daemon error: {e}");
             std::process::exit(1);
@@ -367,14 +382,14 @@ fn main() {
         return;
     }
 
-    let config_path = cli.config.as_deref().map(std::path::Path::new);
-    let mut config = match aish_config::ConfigLoader::load(config_path) {
-        Ok(config) => config,
-        Err(e) => {
-            tracing::debug!("Config load failed (using defaults): {}", e);
-            aish_config::ConfigModel::default()
-        }
-    };
+    let mut config =
+        match aish_config::ConfigLoader::load(config_path.as_deref().map(std::path::Path::new)) {
+            Ok(config) => config,
+            Err(e) => {
+                tracing::debug!("Config load failed (using defaults): {}", e);
+                aish_config::ConfigModel::default()
+            }
+        };
 
     // Apply CLI arg overrides
     if let Some(model) = cli.model {
@@ -392,14 +407,14 @@ fn main() {
         // Use --continue/-c to attach to an existing live session.
         None | Some(Commands::Run) => {
             if cli.continue_session {
-                run_shell_continue(config);
+                run_shell_continue(config, config_path.as_deref(), api_key_override.as_deref());
             } else {
                 // Standalone shell only: the daemon-attach fallback inside
                 // run_shell_new must not run with a live watchdog, because
                 // exit(0) mid-attach would skip backend detach and termios
                 // restore.
                 tty_watchdog::arm_for_interactive();
-                run_shell_new(config);
+                run_shell_new(config, config_path.as_deref(), api_key_override.as_deref());
             }
         }
         Some(Commands::Resume { session_id }) => {
@@ -524,10 +539,23 @@ fn get_terminal_size() -> (u16, u16) {
 /// file via `aish_pty::discover_sessions()`.
 fn spawn_pty_daemon(
     cwd: &str,
+    config_path: Option<&str>,
     model: Option<&str>,
     api_base: Option<&str>,
+    api_key: Option<&str>,
 ) -> Result<aish_pty::DaemonSessionInfo, Box<dyn std::error::Error>> {
     use uuid::Uuid;
+
+    // A daemon-created "new session" inherits the config selected by the
+    // shell process inside the PTY. Ordinary CLI launches pass the path
+    // explicitly and never consult this internal daemon-only variable.
+    let daemon_child = std::env::var("AISH_DAEMON_MODE").as_deref() == Ok("1");
+    let config_path = resolve_pty_daemon_config_path(
+        config_path,
+        daemon_child,
+        std::env::var("AISH_DAEMON_CONFIG").ok(),
+        std::path::Path::new(cwd),
+    );
 
     let session_id = Uuid::new_v4().to_string();
     let socket_dir = aish_pty::pty_socket_dir().map_err(|e| e.to_string())?;
@@ -542,14 +570,17 @@ fn spawn_pty_daemon(
         .arg("--pty-session")
         .arg(&session_id);
 
-    // Pass configuration to the daemon via environment.
+    forward_pty_daemon_config(
+        &mut cmd,
+        config_path.as_deref(),
+        model,
+        api_base,
+        api_key,
+        daemon_child,
+    );
+
+    // Pass the original working directory and executable to the daemon.
     cmd.env("AISH_DAEMON_CWD", cwd);
-    if let Some(m) = model {
-        cmd.env("AISH_DAEMON_MODEL", m);
-    }
-    if let Some(b) = api_base {
-        cmd.env("AISH_DAEMON_API_BASE", b);
-    }
     // The daemon runs the aish binary itself inside a PTY, so the full
     // AishShell UI (prompt, AI mode, completions) is preserved.
     cmd.env("AISH_DAEMON_SHELL_EXE", &current_exe);
@@ -595,6 +626,63 @@ fn spawn_pty_daemon(
     .into())
 }
 
+/// Forward the selected config and effective overrides to the hidden daemon.
+/// The API key travels in the environment, never in process arguments.
+fn forward_pty_daemon_config(
+    cmd: &mut std::process::Command,
+    config_path: Option<&str>,
+    model: Option<&str>,
+    api_base: Option<&str>,
+    api_key: Option<&str>,
+    inherit_daemon_config: bool,
+) {
+    if !inherit_daemon_config {
+        for name in [
+            "AISH_DAEMON_CONFIG",
+            "AISH_DAEMON_MODEL",
+            "AISH_DAEMON_API_BASE",
+            "AISH_DAEMON_API_KEY",
+        ] {
+            cmd.env_remove(name);
+        }
+    }
+    if let Some(path) = config_path {
+        cmd.arg("--config")
+            .arg(path)
+            .env("AISH_DAEMON_CONFIG", path);
+    }
+    if let Some(model) = model {
+        cmd.env("AISH_DAEMON_MODEL", model);
+    }
+    if let Some(api_base) = api_base {
+        cmd.env("AISH_DAEMON_API_BASE", api_base);
+    }
+    if let Some(api_key) = api_key {
+        cmd.env("AISH_DAEMON_API_KEY", api_key);
+    }
+}
+
+fn resolve_pty_daemon_config_path(
+    explicit: Option<&str>,
+    daemon_child: bool,
+    inherited: Option<String>,
+    cwd: &std::path::Path,
+) -> Option<String> {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| daemon_child.then_some(inherited).flatten())
+        .map(|path| {
+            let path = std::path::Path::new(&path);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            }
+            .to_string_lossy()
+            .into_owned()
+        })
+}
+
 /// Whether PTY daemon mode is active: enabled in config *and* not
 /// suppressed by `AISH_PTY_DAEMON=0` (set inside daemon children to
 /// prevent infinite recursion).
@@ -608,13 +696,18 @@ fn is_daemon_mode(config: &aish_config::ConfigModel) -> bool {
 /// Spawn a fresh PTY daemon session from the current executable and
 /// attach to it.  Returns `true` on successful attach (caller returns),
 /// `false` if spawning or attaching failed (caller falls back).
-fn spawn_daemon_and_attach(config: &aish_config::ConfigModel) -> bool {
+fn spawn_daemon_and_attach(
+    config: &aish_config::ConfigModel,
+    config_path: Option<&str>,
+    api_key_override: Option<&str>,
+) -> bool {
     let cwd = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
     match spawn_pty_daemon(
         &cwd,
+        config_path,
         if config.model.is_empty() {
             None
         } else {
@@ -625,6 +718,7 @@ fn spawn_daemon_and_attach(config: &aish_config::ConfigModel) -> bool {
         } else {
             Some(config.api_base.as_str())
         },
+        api_key_override,
     ) {
         Ok(info) => run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id),
         Err(e) => {
@@ -634,7 +728,11 @@ fn spawn_daemon_and_attach(config: &aish_config::ConfigModel) -> bool {
     }
 }
 
-fn run_shell_continue(config: aish_config::ConfigModel) {
+fn run_shell_continue(
+    config: aish_config::ConfigModel,
+    config_path: Option<&str>,
+    api_key_override: Option<&str>,
+) {
     if !is_daemon_mode(&config) {
         run_shell_normal(config);
         return;
@@ -658,7 +756,7 @@ fn run_shell_continue(config: aish_config::ConfigModel) {
         }
     }
 
-    if !spawn_daemon_and_attach(&config) {
+    if !spawn_daemon_and_attach(&config, config_path, api_key_override) {
         eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
         run_shell_normal(config);
     }
@@ -1137,13 +1235,17 @@ fn session_label(s: &aish_pty::DaemonSessionInfo) -> String {
     }
 }
 
-fn run_shell_new(config: aish_config::ConfigModel) {
+fn run_shell_new(
+    config: aish_config::ConfigModel,
+    config_path: Option<&str>,
+    api_key_override: Option<&str>,
+) {
     if !is_daemon_mode(&config) {
         run_shell_normal(config);
         return;
     }
 
-    if !spawn_daemon_and_attach(&config) {
+    if !spawn_daemon_and_attach(&config, config_path, api_key_override) {
         eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
         run_shell_normal(config);
     }
@@ -1807,7 +1909,7 @@ fn handle_osc_action(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let info = match spawn_pty_daemon(&cwd, None, None) {
+        let info = match spawn_pty_daemon(&cwd, None, None, None, None) {
             Ok(info) => info,
             Err(e) => {
                 eprint!(
@@ -1959,6 +2061,98 @@ impl OscScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_config_and_overrides_are_forwarded_without_putting_key_in_args() {
+        let mut command = std::process::Command::new("aish");
+        forward_pty_daemon_config(
+            &mut command,
+            Some("/tmp/aish-config/custom.yaml"),
+            Some("model-b"),
+            Some("http://127.0.0.1:9000/v1"),
+            Some("test-credential-b"),
+            false,
+        );
+
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--config".to_string(),
+                "/tmp/aish-config/custom.yaml".to_string()
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "test-credential-b"));
+
+        let env: std::collections::HashMap<String, String> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            env.get("AISH_DAEMON_CONFIG").map(String::as_str),
+            Some("/tmp/aish-config/custom.yaml")
+        );
+        assert_eq!(
+            env.get("AISH_DAEMON_MODEL").map(String::as_str),
+            Some("model-b")
+        );
+        assert_eq!(
+            env.get("AISH_DAEMON_API_BASE").map(String::as_str),
+            Some("http://127.0.0.1:9000/v1")
+        );
+        assert_eq!(
+            env.get("AISH_DAEMON_API_KEY").map(String::as_str),
+            Some("test-credential-b")
+        );
+    }
+
+    #[test]
+    fn new_sessions_only_inherit_a_config_path_from_a_daemon_child() {
+        assert_eq!(
+            resolve_pty_daemon_config_path(
+                None,
+                true,
+                Some("/tmp/aish-config/custom.yaml".into()),
+                std::path::Path::new("/workspace")
+            ),
+            Some("/tmp/aish-config/custom.yaml".into())
+        );
+        assert_eq!(
+            resolve_pty_daemon_config_path(
+                None,
+                false,
+                Some("/tmp/stale.yaml".into()),
+                std::path::Path::new("/workspace")
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_pty_daemon_config_path(
+                Some("/tmp/explicit.yaml"),
+                true,
+                Some("/tmp/inherited.yaml".into()),
+                std::path::Path::new("/workspace")
+            ),
+            Some("/tmp/explicit.yaml".into())
+        );
+        assert_eq!(
+            resolve_pty_daemon_config_path(
+                Some("configs/custom.yaml"),
+                false,
+                None,
+                std::path::Path::new("/workspace/project")
+            ),
+            Some("/workspace/project/configs/custom.yaml".into())
+        );
+    }
 
     #[test]
     fn test_show_models_usage_does_not_panic() {
