@@ -314,9 +314,13 @@ impl InputGuard {
 }
 
 /// Translate built-in rule copy while leaving custom policy messages intact.
-/// A custom rule can reuse a built-in ID, so match the stable ID and original
-/// message before using its translation key.
+/// Custom rules can reuse a built-in ID and message, but do not have the
+/// built-in safer alternative that marks the default rule definition.
 fn localized_rule_text(rule: &InputRule, field: &str, fallback: &str) -> String {
+    if rule.safer_alternative.is_none() {
+        return fallback.to_string();
+    }
+
     const BUILT_IN_RULES: &[(&str, &str)] = &[
         ("destructive_rm", "rm with -r/-f targeting system paths"),
         ("dd_device", "dd writing to block device"),
@@ -596,18 +600,14 @@ mod tests {
         let rule = InputRule {
             regex: regex::Regex::new("sudo").unwrap(),
             name: "sudo_usage".into(),
-            message: "custom rule explanation".into(),
+            message: "command uses sudo".into(),
             category: RuleCategory::PrivilegeEscalation,
             target_group: TargetGroup::None,
-            safer_alternative: Some("custom suggestion"),
+            safer_alternative: None,
         };
         assert_eq!(
             localized_rule_text(&rule, "reason", &rule.message),
-            "custom rule explanation"
-        );
-        assert_eq!(
-            localized_rule_text(&rule, "safer", rule.safer_alternative.unwrap()),
-            "custom suggestion"
+            "command uses sudo"
         );
     }
 

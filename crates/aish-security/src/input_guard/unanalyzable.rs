@@ -165,6 +165,7 @@ mod tests {
 
     #[test]
     fn overlong_triggers() {
+        aish_i18n::set_locale("en-US");
         let s = "x".repeat(MAX + 1);
         let v = unanalyzable_check(&s, MAX).unwrap();
         match v {
