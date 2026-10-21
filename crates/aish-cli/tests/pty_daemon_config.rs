@@ -317,51 +317,62 @@ fn wait_for_session_count(
     }
 }
 
-#[test]
-fn new_session_uses_selected_config_and_cli_overrides_for_llm_request() {
-    let workspace = TestWorkspace::new();
+fn write_test_config(path: &std::path::Path, temperature: f32) {
+    fs::write(
+        path,
+        format!(
+            "model: config-model\napi_base: http://127.0.0.1:1/wrong/v1\napi_key: config-key\ntemperature: {temperature}\npty_daemon_enabled: true\ninline_completion:\n  enabled: false\n"
+        ),
+    )
+    .expect("write test config");
+}
+
+fn assert_daemon_request(
+    workspace: &TestWorkspace,
+    selected_config_path: Option<&std::path::Path>,
+    expected_temperature: f64,
+    create_new_session: bool,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind local LLM stub");
     let port = listener.local_addr().unwrap().port();
     let request_thread = thread::spawn(move || capture_one_request(listener));
-    fs::write(
-        &workspace.config_path,
-        "model: config-model\napi_base: http://127.0.0.1:1/wrong/v1\napi_key: config-key\ntemperature: 0.73\npty_daemon_enabled: true\ninline_completion:\n  enabled: false\n",
-    )
-    .expect("write selected config");
-
     let api_base = format!("http://127.0.0.1:{port}/override/v1");
-    let mut process = PtyProcess::spawn(
-        &workspace,
-        &[
-            "--config",
-            workspace.config_path.to_str().unwrap(),
-            "--model",
-            "cli-model",
-            "--api-base",
-            &api_base,
-            "--api-key",
-            "cli-key",
-        ],
-    );
+    let mut args = Vec::new();
+    if let Some(path) = selected_config_path {
+        args.extend(["--config".to_string(), path.to_string_lossy().into_owned()]);
+    }
+    args.extend([
+        "--model".to_string(),
+        "cli-model".to_string(),
+        "--api-base".to_string(),
+        api_base,
+        "--api-key".to_string(),
+        "cli-key".to_string(),
+    ]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut process = PtyProcess::spawn(workspace, &args);
     let initial_sessions = wait_for_session_count(&workspace.workdir, 1, Duration::from_secs(15));
     assert_eq!(
         initial_sessions.len(),
         1,
         "PTY session path should be isolated"
     );
-    process.read_for(Duration::from_millis(500));
-
-    process.write(b"/live_sessions\n");
-    let _ = process.read_until(b"Live PTY Sessions", Duration::from_secs(10));
-    process.write(b"\x1b[F\r");
-    let sessions = wait_for_session_count(&workspace.workdir, 2, Duration::from_secs(15));
-    assert!(
-        sessions
-            .iter()
-            .any(|session| session.session_id != initial_sessions[0].session_id),
-        "selecting Create new session should start another daemon"
-    );
-    process.read_for(Duration::from_millis(700));
+    if create_new_session {
+        process.read_for(Duration::from_millis(500));
+        process.write(b"/live_sessions\n");
+        let _ = process.read_until(b"Live PTY Sessions", Duration::from_secs(10));
+        process.write(b"\x1b[F\r");
+        let sessions = wait_for_session_count(&workspace.workdir, 2, Duration::from_secs(15));
+        assert!(
+            sessions
+                .iter()
+                .any(|session| session.session_id != initial_sessions[0].session_id),
+            "selecting Create new session should start another daemon"
+        );
+        process.read_for(Duration::from_millis(700));
+    } else {
+        process.read_for(Duration::from_millis(500));
+    }
 
     process.write(b";verify daemon configuration\n");
     let request = request_thread
@@ -372,5 +383,26 @@ fn new_session_uses_selected_config_and_cli_overrides_for_llm_request() {
     assert_eq!(request.path, "/override/v1/chat/completions");
     assert_eq!(request.authorization.as_deref(), Some("Bearer cli-key"));
     assert_eq!(request.body["model"], "cli-model");
-    assert_eq!(request.body["temperature"], 0.73);
+    assert_eq!(request.body["temperature"], expected_temperature);
+}
+
+#[test]
+fn new_session_uses_selected_config_and_cli_overrides_for_llm_request() {
+    let workspace = TestWorkspace::new();
+    let default_config_path = workspace.root.join("default-config/config.yaml");
+    fs::create_dir_all(default_config_path.parent().unwrap()).expect("create default config dir");
+    write_test_config(&default_config_path, 0.11);
+    write_test_config(&workspace.config_path, 0.73);
+
+    assert_daemon_request(&workspace, Some(&workspace.config_path), 0.73, true);
+}
+
+#[test]
+fn daemon_without_explicit_config_uses_default_config_and_cli_overrides() {
+    let workspace = TestWorkspace::new();
+    let default_config_path = workspace.root.join("default-config/config.yaml");
+    fs::create_dir_all(default_config_path.parent().unwrap()).expect("create default config dir");
+    write_test_config(&default_config_path, 0.41);
+
+    assert_daemon_request(&workspace, None, 0.41, false);
 }

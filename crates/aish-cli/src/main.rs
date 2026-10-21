@@ -534,6 +534,7 @@ fn get_terminal_size() -> (u16, u16) {
     }
 }
 
+/// Configuration captured by the CLI for daemon launches and later `/new` actions.
 #[derive(Clone, Debug, Default)]
 struct PtyDaemonLaunchConfig {
     config_path: Option<String>,
@@ -543,6 +544,7 @@ struct PtyDaemonLaunchConfig {
 }
 
 impl PtyDaemonLaunchConfig {
+    /// Capture the selected config and effective overrides before terminal attachment.
     fn from_config(
         config_path: Option<&str>,
         config: &aish_config::ConfigModel,
@@ -744,6 +746,7 @@ fn spawn_daemon_and_attach(
     }
 }
 
+/// Attach to a live session or create a daemon using the current CLI settings.
 fn run_shell_continue(config: aish_config::ConfigModel, launch_config: &PtyDaemonLaunchConfig) {
     if !is_daemon_mode(&config) {
         run_shell_normal(config);
@@ -1251,6 +1254,7 @@ fn session_label(s: &aish_pty::DaemonSessionInfo) -> String {
     }
 }
 
+/// Start a new daemon-backed shell with the selected CLI configuration.
 fn run_shell_new(config: aish_config::ConfigModel, launch_config: &PtyDaemonLaunchConfig) {
     if !is_daemon_mode(&config) {
         run_shell_normal(config);
@@ -1263,6 +1267,7 @@ fn run_shell_new(config: aish_config::ConfigModel, launch_config: &PtyDaemonLaun
     }
 }
 
+/// Resume a live daemon session, preserving CLI settings for any later `/new`.
 fn run_shell_resume(
     config: aish_config::ConfigModel,
     session_id: &str,
