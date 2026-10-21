@@ -40,8 +40,8 @@ impl I18nManager {
     /// Create a manager for the given locale, falling back to `"en-US"` when
     /// the requested locale file cannot be found.
     pub fn new_with_locale(locale: &str) -> Self {
-        let fallback_translations =
-            Self::load_translations("en-US").unwrap_or_else(|| parse_yaml(EN_US_YAML));
+        let english_override = Self::load_locale_yaml_from_disk("en-US");
+        let fallback_translations = english_fallback_translations(english_override.as_deref());
         let translations = match Self::load_translations(locale) {
             Some(t) => t,
             None => if locale != "en-US" {
@@ -228,6 +228,17 @@ fn parse_yaml(content: &str) -> HashMap<String, String> {
     map
 }
 
+/// Build the English fallback from embedded strings plus any partial en-US
+/// filesystem override. User-provided values take precedence over embedded
+/// values, while missing override keys retain their embedded translations.
+fn english_fallback_translations(locale_override: Option<&str>) -> HashMap<String, String> {
+    let mut translations = parse_yaml(EN_US_YAML);
+    if let Some(locale_override) = locale_override {
+        translations.extend(parse_yaml(locale_override));
+    }
+    translations
+}
+
 /// Replace `{name}` tokens in `template` with values from `args`.
 fn substitute_placeholders(template: &str, args: &HashMap<String, String>) -> String {
     let mut result = template.to_string();
@@ -395,6 +406,22 @@ shell:
     }
 
     #[test]
+    fn partial_english_override_keeps_embedded_fallback_keys() {
+        let fallback = english_fallback_translations(Some(
+            "shell:\n  security:\n    input_guard:\n      labels:\n        targets: Custom targets\n",
+        ));
+
+        assert_eq!(
+            fallback.get("shell.security.input_guard.labels.targets"),
+            Some(&"Custom targets".to_string())
+        );
+        assert_eq!(
+            fallback.get("shell.security.input_guard.labels.safer"),
+            Some(&"Safer".to_string())
+        );
+    }
+
+    #[test]
     fn unknown_locale_falls_back() {
         // "xx-XX" has no YAML file, but en-US is embedded so this should still work.
         let mgr = I18nManager::new_with_locale("xx-XX");
@@ -463,9 +490,10 @@ shell:
         // Build the manager straight from the embedded YAML so a host-side
         // locale file override cannot mask a missing embedded key.
         for &(tag, yaml) in EMBEDDED_LOCALES {
+            let translations = parse_yaml(yaml);
             let mgr = I18nManager {
-                translations: parse_yaml(yaml),
-                fallback_translations: parse_yaml(EN_US_YAML),
+                translations: translations.clone(),
+                fallback_translations: english_fallback_translations(None),
                 locale: tag.to_string(),
             };
             for key in [
@@ -476,6 +504,12 @@ shell:
                 "shell.audit_export.publish_failed",
                 "shell.audit_export.exported",
             ] {
+                assert!(
+                    translations.contains_key(key),
+                    "embedded locale {:?} is missing key {:?}",
+                    tag,
+                    key
+                );
                 let val = mgr.t(key);
                 assert_ne!(
                     val, key,
