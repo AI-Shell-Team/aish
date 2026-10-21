@@ -371,17 +371,6 @@ fn main() {
         return;
     }
 
-    // Hidden entry: raw terminal passthrough attach to an existing daemon.
-    if let Some(socket_path) = &cli.pty_attach {
-        tty_watchdog::disarm();
-        let session_id = cli
-            .pty_session
-            .clone()
-            .unwrap_or_else(|| "attach".to_string());
-        let _ = run_pty_raw_attach(socket_path, &session_id);
-        return;
-    }
-
     let mut config =
         match aish_config::ConfigLoader::load(config_path.as_deref().map(std::path::Path::new)) {
             Ok(config) => config,
@@ -401,26 +390,42 @@ fn main() {
     if let Some(api_base) = cli.api_base {
         config.api_base = api_base;
     }
+    let daemon_launch_config = PtyDaemonLaunchConfig::from_config(
+        config_path.as_deref(),
+        &config,
+        api_key_override.as_deref(),
+    );
+
+    // Hidden entry: raw terminal passthrough attach to an existing daemon.
+    if let Some(socket_path) = &cli.pty_attach {
+        tty_watchdog::disarm();
+        let session_id = cli
+            .pty_session
+            .clone()
+            .unwrap_or_else(|| "attach".to_string());
+        let _ = run_pty_raw_attach(socket_path, &session_id, &daemon_launch_config);
+        return;
+    }
 
     match cli.command {
         // `aish` or `aish run`: start a fresh shell by default.
         // Use --continue/-c to attach to an existing live session.
         None | Some(Commands::Run) => {
             if cli.continue_session {
-                run_shell_continue(config, config_path.as_deref(), api_key_override.as_deref());
+                run_shell_continue(config, &daemon_launch_config);
             } else {
                 // Standalone shell only: the daemon-attach fallback inside
                 // run_shell_new must not run with a live watchdog, because
                 // exit(0) mid-attach would skip backend detach and termios
                 // restore.
                 tty_watchdog::arm_for_interactive();
-                run_shell_new(config, config_path.as_deref(), api_key_override.as_deref());
+                run_shell_new(config, &daemon_launch_config);
             }
         }
         Some(Commands::Resume { session_id }) => {
             // Resume may attach to a daemon session (run_pty_raw_attach);
             // the standalone-shell fallback inside it re-arms the watchdog.
-            run_shell_resume(config, &session_id);
+            run_shell_resume(config, &session_id, &daemon_launch_config);
         }
         Some(Commands::Kill { ids }) => kill_session_by_id(&ids),
         Some(Commands::KillAll) => kill_session_by_id(&["all".to_string()]),
@@ -529,6 +534,31 @@ fn get_terminal_size() -> (u16, u16) {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct PtyDaemonLaunchConfig {
+    config_path: Option<String>,
+    model: Option<String>,
+    api_base: Option<String>,
+    api_key: Option<String>,
+}
+
+impl PtyDaemonLaunchConfig {
+    fn from_config(
+        config_path: Option<&str>,
+        config: &aish_config::ConfigModel,
+        api_key_override: Option<&str>,
+    ) -> Self {
+        Self {
+            config_path: config_path.map(str::to_owned),
+            model: (!config.model.is_empty()).then(|| config.model.clone()),
+            api_base: (!config.api_base.is_empty()).then(|| config.api_base.clone()),
+            // The config file and environment remain available to the child.
+            // Keep only the explicit CLI secret in this launch context.
+            api_key: api_key_override.map(str::to_owned),
+        }
+    }
+}
+
 /// Spawn a detached PTY daemon process (via exec of the current binary) and
 /// return its session info. The daemon survives client disconnects and keeps
 /// the underlying bash PTY alive. Blocks up to 8 seconds waiting for the
@@ -539,10 +569,7 @@ fn get_terminal_size() -> (u16, u16) {
 /// file via `aish_pty::discover_sessions()`.
 fn spawn_pty_daemon(
     cwd: &str,
-    config_path: Option<&str>,
-    model: Option<&str>,
-    api_base: Option<&str>,
-    api_key: Option<&str>,
+    launch_config: &PtyDaemonLaunchConfig,
 ) -> Result<aish_pty::DaemonSessionInfo, Box<dyn std::error::Error>> {
     use uuid::Uuid;
 
@@ -551,7 +578,7 @@ fn spawn_pty_daemon(
     // explicitly and never consult this internal daemon-only variable.
     let daemon_child = std::env::var("AISH_DAEMON_MODE").as_deref() == Ok("1");
     let config_path = resolve_pty_daemon_config_path(
-        config_path,
+        launch_config.config_path.as_deref(),
         daemon_child,
         std::env::var("AISH_DAEMON_CONFIG").ok(),
         std::path::Path::new(cwd),
@@ -573,9 +600,9 @@ fn spawn_pty_daemon(
     forward_pty_daemon_config(
         &mut cmd,
         config_path.as_deref(),
-        model,
-        api_base,
-        api_key,
+        launch_config.model.as_deref(),
+        launch_config.api_base.as_deref(),
+        launch_config.api_key.as_deref(),
         daemon_child,
     );
 
@@ -611,8 +638,8 @@ fn spawn_pty_daemon(
                     .unwrap_or_default()
                     .as_secs(),
                 cwd: cwd.to_string(),
-                model: model.map(String::from),
-                api_base: api_base.map(String::from),
+                model: launch_config.model.clone(),
+                api_base: launch_config.api_base.clone(),
                 name: None,
             });
         }
@@ -698,29 +725,18 @@ fn is_daemon_mode(config: &aish_config::ConfigModel) -> bool {
 /// `false` if spawning or attaching failed (caller falls back).
 fn spawn_daemon_and_attach(
     config: &aish_config::ConfigModel,
-    config_path: Option<&str>,
-    api_key_override: Option<&str>,
+    launch_config: &PtyDaemonLaunchConfig,
 ) -> bool {
     let cwd = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    match spawn_pty_daemon(
-        &cwd,
-        config_path,
-        if config.model.is_empty() {
-            None
-        } else {
-            Some(config.model.as_str())
-        },
-        if config.api_base.is_empty() {
-            None
-        } else {
-            Some(config.api_base.as_str())
-        },
-        api_key_override,
-    ) {
-        Ok(info) => run_pty_raw_attach(&info.socket_path.to_string_lossy(), &info.session_id),
+    match spawn_pty_daemon(&cwd, launch_config) {
+        Ok(info) => run_pty_raw_attach(
+            &info.socket_path.to_string_lossy(),
+            &info.session_id,
+            launch_config,
+        ),
         Err(e) => {
             eprintln!("\x1b[33m[aish] PTY daemon failed: {}\x1b[0m", e);
             false
@@ -728,11 +744,7 @@ fn spawn_daemon_and_attach(
     }
 }
 
-fn run_shell_continue(
-    config: aish_config::ConfigModel,
-    config_path: Option<&str>,
-    api_key_override: Option<&str>,
-) {
+fn run_shell_continue(config: aish_config::ConfigModel, launch_config: &PtyDaemonLaunchConfig) {
     if !is_daemon_mode(&config) {
         run_shell_normal(config);
         return;
@@ -745,7 +757,11 @@ fn run_shell_continue(
             SessionAction::Attach(s) => {
                 let short = &s.session_id[..8.min(s.session_id.len())];
                 eprintln!("\x1b[32m[aish] Attaching to session {short}\x1b[0m");
-                if run_pty_raw_attach(&s.socket_path.to_string_lossy(), &s.session_id) {
+                if run_pty_raw_attach(
+                    &s.socket_path.to_string_lossy(),
+                    &s.session_id,
+                    launch_config,
+                ) {
                     record_session_use(&s.session_id);
                     return;
                 }
@@ -756,7 +772,7 @@ fn run_shell_continue(
         }
     }
 
-    if !spawn_daemon_and_attach(&config, config_path, api_key_override) {
+    if !spawn_daemon_and_attach(&config, launch_config) {
         eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
         run_shell_normal(config);
     }
@@ -1235,23 +1251,23 @@ fn session_label(s: &aish_pty::DaemonSessionInfo) -> String {
     }
 }
 
-fn run_shell_new(
-    config: aish_config::ConfigModel,
-    config_path: Option<&str>,
-    api_key_override: Option<&str>,
-) {
+fn run_shell_new(config: aish_config::ConfigModel, launch_config: &PtyDaemonLaunchConfig) {
     if !is_daemon_mode(&config) {
         run_shell_normal(config);
         return;
     }
 
-    if !spawn_daemon_and_attach(&config, config_path, api_key_override) {
+    if !spawn_daemon_and_attach(&config, launch_config) {
         eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
         run_shell_normal(config);
     }
 }
 
-fn run_shell_resume(config: aish_config::ConfigModel, session_id: &str) {
+fn run_shell_resume(
+    config: aish_config::ConfigModel,
+    session_id: &str,
+    launch_config: &PtyDaemonLaunchConfig,
+) {
     // First check if this is an active daemon session (by UUID or 8-char prefix)
     let sessions = aish_pty::discover_sessions();
     if let Some(session) = sessions
@@ -1262,7 +1278,11 @@ fn run_shell_resume(config: aish_config::ConfigModel, session_id: &str) {
             "\x1b[32m[aish] Resuming daemon session {}\x1b[0m",
             &session.session_id[..8.min(session.session_id.len())]
         );
-        if run_pty_raw_attach(&session.socket_path.to_string_lossy(), &session.session_id) {
+        if run_pty_raw_attach(
+            &session.socket_path.to_string_lossy(),
+            &session.session_id,
+            launch_config,
+        ) {
             record_session_use(&session.session_id);
         }
         return;
@@ -1518,7 +1538,11 @@ fn check_langfuse(
 /// socket and passes bytes back and forth. It demonstrates the detach/reattach
 /// lifecycle: exiting this function (via Ctrl+Q) detaches from the daemon
 /// without killing the underlying bash process.
-fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
+fn run_pty_raw_attach(
+    socket_path: &str,
+    session_id: &str,
+    launch_config: &PtyDaemonLaunchConfig,
+) -> bool {
     use aish_pty::PtyBackend;
     use std::os::fd::AsRawFd;
 
@@ -1787,6 +1811,7 @@ fn run_pty_raw_attach(socket_path: &str, session_id: &str) -> bool {
                             &mut rows,
                             &mut cols,
                             stdout_fd,
+                            launch_config,
                         ) {
                             OscResult::Continue => {
                                 // Clear scanner buffer after switch
@@ -1898,6 +1923,7 @@ fn handle_osc_action(
     rows: &mut u16,
     cols: &mut u16,
     stdout_fd: i32,
+    launch_config: &PtyDaemonLaunchConfig,
 ) -> OscResult {
     if action == "detach" {
         return OscResult::Exit;
@@ -1909,7 +1935,7 @@ fn handle_osc_action(
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        let info = match spawn_pty_daemon(&cwd, None, None, None, None) {
+        let info = match spawn_pty_daemon(&cwd, launch_config) {
             Ok(info) => info,
             Err(e) => {
                 eprint!(
