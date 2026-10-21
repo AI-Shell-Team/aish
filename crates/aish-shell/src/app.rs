@@ -1306,7 +1306,7 @@ impl AishShell {
         self.screen_input(
             input,
             aish_security::input_guard::InputContext::AiPrompt,
-            "Send to AI anyway?",
+            &t("shell.security.input_guard.confirm.send_to_ai"),
             false,
         )
     }
@@ -1317,7 +1317,7 @@ impl AishShell {
         self.screen_input(
             input,
             aish_security::input_guard::InputContext::ShellCommand,
-            "Execute anyway?",
+            &t("shell.security.input_guard.confirm.execute"),
             true,
         )
     }

@@ -24,6 +24,7 @@ static EMBEDDED_LOCALES: &[(&str, &str)] = &[
 /// Manages locale detection, YAML loading and key lookup.
 pub struct I18nManager {
     translations: HashMap<String, String>,
+    fallback_translations: HashMap<String, String>,
     locale: String,
 }
 
@@ -39,6 +40,8 @@ impl I18nManager {
     /// Create a manager for the given locale, falling back to `"en-US"` when
     /// the requested locale file cannot be found.
     pub fn new_with_locale(locale: &str) -> Self {
+        let fallback_translations =
+            Self::load_translations("en-US").unwrap_or_else(|| parse_yaml(EN_US_YAML));
         let translations = match Self::load_translations(locale) {
             Some(t) => t,
             None => if locale != "en-US" {
@@ -62,6 +65,7 @@ impl I18nManager {
 
         Self {
             translations,
+            fallback_translations,
             locale: locale.to_string(),
         }
     }
@@ -72,15 +76,18 @@ impl I18nManager {
         Ok(Self::new())
     }
 
-    /// Look up a dot-separated key.  Returns the value string, or the key
-    /// itself when the key is missing (so callers always get usable text).
+    /// Look up a dot-separated key. Returns the selected translation, then
+    /// the English fallback, or the key itself when neither locale has it.
     pub fn t(&self, key: &str) -> String {
         match self.translations.get(key) {
             Some(val) => val.clone(),
-            None => {
-                debug!(target: "aish_i18n", "missing i18n key: {:?}", key);
-                key.to_string()
-            }
+            None => match self.fallback_translations.get(key) {
+                Some(val) => val.clone(),
+                None => {
+                    debug!(target: "aish_i18n", "missing i18n key: {:?}", key);
+                    key.to_string()
+                }
+            },
         }
     }
 
@@ -380,6 +387,14 @@ shell:
     }
 
     #[test]
+    fn missing_locale_key_falls_back_to_english() {
+        let mut mgr = I18nManager::new_with_locale("zh-CN");
+        let key = "shell.security.input_guard.labels.targets";
+        mgr.translations.remove(key);
+        assert_eq!(mgr.t(key), "Targets");
+    }
+
+    #[test]
     fn unknown_locale_falls_back() {
         // "xx-XX" has no YAML file, but en-US is embedded so this should still work.
         let mgr = I18nManager::new_with_locale("xx-XX");
@@ -450,6 +465,7 @@ shell:
         for &(tag, yaml) in EMBEDDED_LOCALES {
             let mgr = I18nManager {
                 translations: parse_yaml(yaml),
+                fallback_translations: parse_yaml(EN_US_YAML),
                 locale: tag.to_string(),
             };
             for key in [

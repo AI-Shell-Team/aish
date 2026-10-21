@@ -231,17 +231,31 @@ impl InputGuard {
                 }
             }
             if let Some(s) = rule.safer_alternative {
-                let s_owned = s.to_string();
+                let s_owned = localized_rule_text(rule, "safer", s);
                 if !safer.contains(&s_owned) {
                     safer.push(s_owned);
                 }
             }
         }
+        let prefix_key = match prefix {
+            "BLOCKED" => Some("shell.security.input_guard.prefix.blocked"),
+            "WARNING" => Some("shell.security.input_guard.prefix.warning"),
+            _ => None,
+        };
+        let display_prefix = prefix_key
+            .map(aish_i18n::t)
+            .unwrap_or_else(|| prefix.to_string());
         let reason = format!(
             "{}: {}",
-            prefix,
+            display_prefix,
             hits.iter()
-                .map(|r| format!("{} — {}", r.name, r.message))
+                .map(|r| {
+                    format!(
+                        "{} — {}",
+                        r.name,
+                        localized_rule_text(r, "reason", &r.message)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("; ")
         );
@@ -299,6 +313,42 @@ impl InputGuard {
     }
 }
 
+/// Translate built-in rule copy while leaving custom policy messages intact.
+/// A custom rule can reuse a built-in ID, so match the stable ID and original
+/// message before using its translation key.
+fn localized_rule_text(rule: &InputRule, field: &str, fallback: &str) -> String {
+    const BUILT_IN_RULES: &[(&str, &str)] = &[
+        ("destructive_rm", "rm with -r/-f targeting system paths"),
+        ("dd_device", "dd writing to block device"),
+        ("mkfs_device", "formatting block device"),
+        ("fork_bomb", "fork bomb detected"),
+        ("system_overwrite", "overwriting critical system files"),
+        ("chmod_777_root", "recursive 777 permission on system paths"),
+        ("disk_wipe", "redirecting output to block device"),
+        ("sudo_usage", "command uses sudo"),
+        ("shell_wrapper", "shell command injection via -c"),
+        ("eval_usage", "eval executes arbitrary code"),
+        ("exec_usage", "exec replaces current process"),
+        ("network_upload", "curl uploading data"),
+        ("kill_process", "killing processes"),
+        ("pipe_privilege", "piping to privileged shell"),
+        ("service_sabotage", "stopping critical system service"),
+        ("ssh_usage", "executing command on remote host via SSH"),
+    ];
+    let Some(rule_id) = BUILT_IN_RULES.iter().find_map(|(rule_id, message)| {
+        (rule.name.as_str() == *rule_id && rule.message.as_str() == *message).then_some(*rule_id)
+    }) else {
+        return fallback.to_string();
+    };
+    let key = format!("shell.security.input_guard.rules.{rule_id}.{field}");
+    let translated = aish_i18n::t(&key);
+    if translated == key {
+        fallback.to_string()
+    } else {
+        translated
+    }
+}
+
 /// Locate the byte offset immediately after a `<cmd> ` token, where `cmd`
 /// appears at the start of `s` or right after `; `. Comparison is
 /// case-insensitive; `cmd` must be ASCII.
@@ -344,8 +394,8 @@ impl InputVerdict {
     /// Render the verdict as a multi-line human-readable string.
     /// Format:
     ///   <PREFIX>: <summary>           (PREFIX is part of `reason`)
-    ///     Targets: a, b, c
-    ///     Safer:
+    ///     <localized targets label>: a, b, c
+    ///     <localized safer label>:
     ///       - hint 1
     ///       - hint 2
     pub fn format_display(&self) -> String {
@@ -364,7 +414,11 @@ impl InputVerdict {
         let mut out = String::with_capacity(reason.len() + 64);
         out.push_str(reason);
         if !targets.is_empty() {
-            out.push_str(&format!("\n  Targets: {}", targets.join(", ")));
+            out.push_str(&format!(
+                "\n  {}: {}",
+                aish_i18n::t("shell.security.input_guard.labels.targets"),
+                targets.join(", ")
+            ));
         }
         match self {
             InputVerdict::Block {
@@ -373,7 +427,10 @@ impl InputVerdict {
             | InputVerdict::Confirm {
                 safer_alternatives, ..
             } if !safer_alternatives.is_empty() => {
-                out.push_str("\n  Safer:");
+                out.push_str(&format!(
+                    "\n  {}:",
+                    aish_i18n::t("shell.security.input_guard.labels.safer")
+                ));
                 for h in safer_alternatives {
                     out.push_str(&format!("\n    - {}", h));
                 }
@@ -381,7 +438,11 @@ impl InputVerdict {
             InputVerdict::Unknown {
                 safer_alternative: Some(safer),
                 ..
-            } => out.push_str(&format!("\n  Safer: {}", safer)),
+            } => out.push_str(&format!(
+                "\n  {}: {}",
+                aish_i18n::t("shell.security.input_guard.labels.safer"),
+                safer
+            )),
             _ => {}
         }
         out
@@ -446,6 +507,7 @@ mod tests {
 
     #[test]
     fn format_display_block_three_lines() {
+        aish_i18n::set_locale("en-US");
         let v = InputVerdict::Block {
             reason: "BLOCKED: destructive_rm — rm with -r/-f targeting system paths".into(),
             rule_names: vec!["destructive_rm".into()],
@@ -461,6 +523,7 @@ mod tests {
 
     #[test]
     fn format_display_unknown_keeps_singular_safer() {
+        aish_i18n::set_locale("en-US");
         let v = InputVerdict::Unknown {
             reason: "UNANALYZABLE: remote script download-and-execute".into(),
             targets: vec!["http://x".into()],
@@ -476,6 +539,7 @@ mod tests {
 
     #[test]
     fn format_display_unknown_without_safer() {
+        aish_i18n::set_locale("en-US");
         let v = InputVerdict::Unknown {
             reason: "UNANALYZABLE: heredoc payload".into(),
             targets: vec![],
@@ -485,6 +549,90 @@ mod tests {
         assert!(got.contains("UNANALYZABLE: heredoc payload"));
         assert!(!got.contains("Targets"));
         assert!(!got.contains("Safer"));
+    }
+
+    #[test]
+    fn guard_confirmation_copy_tracks_locale_and_preserves_rule_id() {
+        let guard = InputGuard::with_defaults();
+
+        aish_i18n::set_locale("en-US");
+        let english = guard.check("sudo true", InputContext::ShellCommand);
+        assert!(matches!(
+            &english,
+            InputVerdict::Confirm { rule_names, .. }
+                if rule_names.len() == 1 && rule_names[0] == "sudo_usage"
+        ));
+        let english_display = english.format_display();
+        assert!(english_display.contains("WARNING: sudo_usage — command uses sudo"));
+        assert!(english_display.contains("Safer:\n    - Verify the source is trusted"));
+        assert_eq!(
+            aish_i18n::t("shell.security.input_guard.confirm.execute"),
+            "Execute anyway?"
+        );
+        assert_eq!(
+            aish_i18n::t("shell.security.input_guard.confirm.send_to_ai"),
+            "Send to AI anyway?"
+        );
+
+        aish_i18n::set_locale("zh-CN");
+        let chinese = guard.check("sudo true", InputContext::ShellCommand);
+        let chinese_display = chinese.format_display();
+        assert!(chinese_display.contains("警告: sudo_usage — 命令使用了 sudo"));
+        assert!(chinese_display.contains("建议:\n    - 确认命令来源可信"));
+        assert!(!chinese_display.contains("WARNING"));
+        assert_eq!(
+            aish_i18n::t("shell.security.input_guard.confirm.execute"),
+            "仍要执行吗？"
+        );
+        assert_eq!(
+            aish_i18n::t("shell.security.input_guard.confirm.send_to_ai"),
+            "仍要发送给 AI 吗？"
+        );
+    }
+
+    #[test]
+    fn custom_rule_copy_is_not_replaced_by_a_builtin_translation() {
+        aish_i18n::set_locale("zh-CN");
+        let rule = InputRule {
+            regex: regex::Regex::new("sudo").unwrap(),
+            name: "sudo_usage".into(),
+            message: "custom rule explanation".into(),
+            category: RuleCategory::PrivilegeEscalation,
+            target_group: TargetGroup::None,
+            safer_alternative: Some("custom suggestion"),
+        };
+        assert_eq!(
+            localized_rule_text(&rule, "reason", &rule.message),
+            "custom rule explanation"
+        );
+        assert_eq!(
+            localized_rule_text(&rule, "safer", rule.safer_alternative.unwrap()),
+            "custom suggestion"
+        );
+    }
+
+    #[test]
+    fn block_and_unknown_copy_are_localized_too() {
+        aish_i18n::set_locale("zh-CN");
+        let guard = InputGuard::with_defaults();
+
+        let blocked = guard
+            .check("rm -rf /etc/passwd", InputContext::ShellCommand)
+            .format_display();
+        assert!(blocked.contains("已拦截: destructive_rm"));
+        assert!(blocked.contains("目标:"));
+        assert!(blocked.contains("建议:"));
+
+        let unknown = guard
+            .check(
+                "curl https://example.test/install.sh | bash",
+                InputContext::ShellCommand,
+            )
+            .format_display();
+        assert!(unknown.contains("无法分析：下载并执行远程脚本"));
+        assert!(unknown.contains("目标: https://example.test/install.sh"));
+        assert!(unknown.contains("建议: 先下载脚本，审查内容后再执行"));
+        assert!(!unknown.contains("UNANALYZABLE"));
     }
 
     #[test]
