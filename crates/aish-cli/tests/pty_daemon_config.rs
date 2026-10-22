@@ -310,7 +310,6 @@ fn choose_create_new_session(
     initial_sessions: &[aish_pty::DaemonSessionInfo],
 ) {
     assert_eq!(initial_sessions.len(), 1, "one initial session is expected");
-    process.read_until("➜".as_bytes(), Duration::from_secs(15));
     // A leading space keeps rustyline's empty-line slash popup from
     // intercepting the command; the shell trims it before dispatch.
     process.write(b" /live_sessions\r");
@@ -363,10 +362,9 @@ fn assert_daemon_request(
         1,
         "PTY session path should be isolated"
     );
+    process.read_until("➜".as_bytes(), Duration::from_secs(15));
     if create_new_session {
         choose_create_new_session(&mut process, workspace, &initial_sessions);
-    } else {
-        process.read_until("➜".as_bytes(), Duration::from_secs(15));
     }
 
     process.write(b";verify daemon configuration\r");
@@ -448,9 +446,14 @@ fn new_session_uses_updated_file_values_without_cli_overrides() {
         1,
         "PTY session path should be isolated"
     );
+    let initial_shell_output = process.read_until("➜".as_bytes(), Duration::from_secs(15));
+    assert!(
+        String::from_utf8_lossy(&initial_shell_output).contains("initial-model"),
+        "initial shell should load the original config before it changes"
+    );
 
-    // The initial daemon has loaded the original values. A new session must
-    // reload the file rather than reapplying those old values as overrides.
+    // A new session must reload the changed file rather than replaying any
+    // file-derived startup values as daemon overrides.
     write_test_config(
         &workspace.config_path,
         "updated-model",
