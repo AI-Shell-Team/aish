@@ -46,7 +46,7 @@ pub use api::{
     test_connection as test_api_connection, ApiDialect, StreamContext,
 };
 pub use approval_memory::{ApprovalChoice, ApprovalMemory};
-pub use client::{LlmClient, LlmResponse, DEFAULT_MAX_TOKENS};
+pub use client::{LlmClient, LlmResponse};
 pub use langfuse::{LangfuseClient, LangfuseConfig};
 pub use model_id::{normalize_model_for_provider, resolve_model_for_api, trim_model_name};
 pub use models::{
