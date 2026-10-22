@@ -339,7 +339,7 @@ fn choose_create_new_session(
     initial_sessions: &[aish_pty::DaemonSessionInfo],
 ) {
     assert_eq!(initial_sessions.len(), 1, "one initial session is expected");
-    process.read_for(Duration::from_millis(500));
+    process.read_until("➜".as_bytes(), Duration::from_secs(15));
     process.write(b"/live_sessions\r");
     let _ = process.read_until(b"Live PTY Sessions", Duration::from_secs(10));
     // The picker puts Create new session last, so End selects it regardless of
@@ -356,7 +356,7 @@ fn choose_create_new_session(
     process.read_for(Duration::from_millis(700));
     aish_pty::kill_session(&initial_sessions[0].socket_path)
         .expect("terminate the initial daemon before checking the new session");
-    process.read_for(Duration::from_millis(300));
+    process.read_until("➜".as_bytes(), Duration::from_secs(15));
 }
 
 fn assert_daemon_request(
@@ -392,7 +392,7 @@ fn assert_daemon_request(
     if create_new_session {
         choose_create_new_session(&mut process, workspace, &initial_sessions);
     } else {
-        process.read_for(Duration::from_millis(500));
+        process.read_until("➜".as_bytes(), Duration::from_secs(15));
     }
 
     process.write(b";verify daemon configuration\r");
