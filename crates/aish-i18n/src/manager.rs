@@ -24,6 +24,7 @@ static EMBEDDED_LOCALES: &[(&str, &str)] = &[
 /// Manages locale detection, YAML loading and key lookup.
 pub struct I18nManager {
     translations: HashMap<String, String>,
+    fallback_translations: HashMap<String, String>,
     locale: String,
 }
 
@@ -39,6 +40,8 @@ impl I18nManager {
     /// Create a manager for the given locale, falling back to `"en-US"` when
     /// the requested locale file cannot be found.
     pub fn new_with_locale(locale: &str) -> Self {
+        let english_override = Self::load_locale_yaml_from_disk("en-US");
+        let fallback_translations = english_fallback_translations(english_override.as_deref());
         let translations = match Self::load_translations(locale) {
             Some(t) => t,
             None => if locale != "en-US" {
@@ -62,6 +65,7 @@ impl I18nManager {
 
         Self {
             translations,
+            fallback_translations,
             locale: locale.to_string(),
         }
     }
@@ -72,15 +76,18 @@ impl I18nManager {
         Ok(Self::new())
     }
 
-    /// Look up a dot-separated key.  Returns the value string, or the key
-    /// itself when the key is missing (so callers always get usable text).
+    /// Look up a dot-separated key. Returns the selected translation, then
+    /// the English fallback, or the key itself when neither locale has it.
     pub fn t(&self, key: &str) -> String {
         match self.translations.get(key) {
             Some(val) => val.clone(),
-            None => {
-                debug!(target: "aish_i18n", "missing i18n key: {:?}", key);
-                key.to_string()
-            }
+            None => match self.fallback_translations.get(key) {
+                Some(val) => val.clone(),
+                None => {
+                    debug!(target: "aish_i18n", "missing i18n key: {:?}", key);
+                    key.to_string()
+                }
+            },
         }
     }
 
@@ -219,6 +226,17 @@ fn parse_yaml(content: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Build the English fallback from embedded strings plus any partial en-US
+/// filesystem override. User-provided values take precedence over embedded
+/// values, while missing override keys retain their embedded translations.
+fn english_fallback_translations(locale_override: Option<&str>) -> HashMap<String, String> {
+    let mut translations = parse_yaml(EN_US_YAML);
+    if let Some(locale_override) = locale_override {
+        translations.extend(parse_yaml(locale_override));
+    }
+    translations
 }
 
 /// Replace `{name}` tokens in `template` with values from `args`.
@@ -380,6 +398,30 @@ shell:
     }
 
     #[test]
+    fn missing_locale_key_falls_back_to_english() {
+        let mut mgr = I18nManager::new_with_locale("zh-CN");
+        let key = "shell.security.input_guard.labels.targets";
+        mgr.translations.remove(key);
+        assert_eq!(mgr.t(key), "Targets");
+    }
+
+    #[test]
+    fn partial_english_override_keeps_embedded_fallback_keys() {
+        let fallback = english_fallback_translations(Some(
+            "shell:\n  security:\n    input_guard:\n      labels:\n        targets: Custom targets\n",
+        ));
+
+        assert_eq!(
+            fallback.get("shell.security.input_guard.labels.targets"),
+            Some(&"Custom targets".to_string())
+        );
+        assert_eq!(
+            fallback.get("shell.security.input_guard.labels.safer"),
+            Some(&"Safer".to_string())
+        );
+    }
+
+    #[test]
     fn unknown_locale_falls_back() {
         // "xx-XX" has no YAML file, but en-US is embedded so this should still work.
         let mgr = I18nManager::new_with_locale("xx-XX");
@@ -448,8 +490,10 @@ shell:
         // Build the manager straight from the embedded YAML so a host-side
         // locale file override cannot mask a missing embedded key.
         for &(tag, yaml) in EMBEDDED_LOCALES {
+            let translations = parse_yaml(yaml);
             let mgr = I18nManager {
-                translations: parse_yaml(yaml),
+                translations: translations.clone(),
+                fallback_translations: english_fallback_translations(None),
                 locale: tag.to_string(),
             };
             for key in [
@@ -460,6 +504,12 @@ shell:
                 "shell.audit_export.publish_failed",
                 "shell.audit_export.exported",
             ] {
+                assert!(
+                    translations.contains_key(key),
+                    "embedded locale {:?} is missing key {:?}",
+                    tag,
+                    key
+                );
                 let val = mgr.t(key);
                 assert_ne!(
                     val, key,

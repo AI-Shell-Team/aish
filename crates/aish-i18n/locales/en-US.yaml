@@ -672,6 +672,72 @@ shell:
       approve_remember: "Yes, and don't ask again for this command"
       cancel: "Cancel"
     choice_prompt: "Your choice (default: n): "
+    input_guard:
+      prefix:
+        blocked: "BLOCKED"
+        warning: "WARNING"
+      labels:
+        targets: "Targets"
+        safer: "Safer"
+      confirm:
+        execute: "Execute anyway?"
+        send_to_ai: "Send to AI anyway?"
+      rules:
+        destructive_rm:
+          reason: "rm with -r/-f targeting system paths"
+          safer: "Use trash-cli, or list the path first"
+        dd_device:
+          reason: "dd writing to block device"
+          safer: "Verify the device and back up data before writing"
+        mkfs_device:
+          reason: "formatting block device"
+          safer: "Verify the device and back up data before formatting"
+        fork_bomb:
+          reason: "fork bomb detected"
+          safer: "Never run this in production"
+        system_overwrite:
+          reason: "overwriting critical system files"
+          safer: "Back up the original file before making changes"
+        chmod_777_root:
+          reason: "recursive 777 permission on system paths"
+          safer: "Use the minimum permissions needed"
+        disk_wipe:
+          reason: "redirecting output to block device"
+          safer: "Verify the target device"
+        sudo_usage:
+          reason: "command uses sudo"
+          safer: "Verify the source is trusted and understand the command's effects"
+        shell_wrapper:
+          reason: "shell command injection via -c"
+          safer: "Review the command after -c"
+        eval_usage:
+          reason: "eval executes arbitrary code"
+          safer: "Review where the eval expression comes from"
+        exec_usage:
+          reason: "exec replaces current process"
+          safer: "Understand how exec replaces the current process"
+        network_upload:
+          reason: "curl uploading data"
+          safer: "Verify the upload target and data sensitivity"
+        kill_process:
+          reason: "killing processes"
+          safer: "Verify which process the PID identifies"
+        pipe_privilege:
+          reason: "piping to privileged shell"
+          safer: "Review where the piped command comes from"
+        service_sabotage:
+          reason: "stopping critical system service"
+          safer: "Confirm the impact of this operation"
+        ssh_usage:
+          reason: "executing command on remote host via SSH"
+          safer: "Verify the remote host is trusted"
+      unknown:
+        input_too_long: "UNANALYZABLE: input too long ({bytes} bytes > {max})"
+        input_too_long_safer: "Split the command into steps, or write it to a script and review it first"
+        remote_script: "UNANALYZABLE: remote script download-and-execute"
+        remote_script_safer: "Download the script first, review it, then execute it"
+        heredoc: "UNANALYZABLE: heredoc payload to execution-context command"
+        heredoc_safer: "Write the heredoc to a temporary file, review it, then execute it"
 
   command_cancelled: "Command cancelled"
 
