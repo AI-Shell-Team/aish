@@ -64,32 +64,40 @@ fn is_exec_heredoc(normalized: &str) -> bool {
 pub fn unanalyzable_check(normalized: &str, max_analyzable_bytes: usize) -> Option<InputVerdict> {
     // (1) Overlong input
     if normalized.len() > max_analyzable_bytes {
+        let mut args = std::collections::HashMap::new();
+        args.insert("bytes".to_string(), normalized.len().to_string());
+        args.insert("max".to_string(), max_analyzable_bytes.to_string());
         return Some(InputVerdict::Unknown {
-            reason: format!(
-                "UNANALYZABLE: input too long ({} bytes > {})",
-                normalized.len(),
-                max_analyzable_bytes
+            reason: aish_i18n::t_with_args(
+                "shell.security.input_guard.unknown.input_too_long",
+                &args,
             ),
             targets: vec![],
-            safer_alternative: Some("拆成多步分批执行，或写入脚本文件后审查".into()),
+            safer_alternative: Some(aish_i18n::t(
+                "shell.security.input_guard.unknown.input_too_long_safer",
+            )),
         });
     }
 
     // (2) Remote script download-and-execute
     if let Some(urls) = detect_remote_script_exec(normalized) {
         return Some(InputVerdict::Unknown {
-            reason: "UNANALYZABLE: remote script download-and-execute".into(),
+            reason: aish_i18n::t("shell.security.input_guard.unknown.remote_script"),
             targets: urls,
-            safer_alternative: Some("先 curl -o /tmp/x.sh，检查内容后再 bash /tmp/x.sh".into()),
+            safer_alternative: Some(aish_i18n::t(
+                "shell.security.input_guard.unknown.remote_script_safer",
+            )),
         });
     }
 
     // (3) Heredoc payload to execution-context command
     if is_exec_heredoc(normalized) {
         return Some(InputVerdict::Unknown {
-            reason: "UNANALYZABLE: heredoc payload to execution-context command".into(),
+            reason: aish_i18n::t("shell.security.input_guard.unknown.heredoc"),
             targets: vec![],
-            safer_alternative: Some("将 heredoc 内容写入临时文件，审查后再执行".into()),
+            safer_alternative: Some(aish_i18n::t(
+                "shell.security.input_guard.unknown.heredoc_safer",
+            )),
         });
     }
 
@@ -157,6 +165,7 @@ mod tests {
 
     #[test]
     fn overlong_triggers() {
+        aish_i18n::set_locale("en-US");
         let s = "x".repeat(MAX + 1);
         let v = unanalyzable_check(&s, MAX).unwrap();
         match v {

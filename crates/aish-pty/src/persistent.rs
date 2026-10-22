@@ -5068,7 +5068,11 @@ fn display_ask_user(request: &crate::AskUserRequest) {
 /// Display a yellow warning and prompt `[y/N]`, then read one raw key.
 /// Returns `true` only when the user presses `y` or `Y`.
 fn read_confirm_raw(stdin_fd: libc::c_int, master_fd: libc::c_int, reason: &str) -> bool {
-    let msg = format!("\r\n\x1b[33m{}\x1b[0m\r\nExecute anyway? [y/N] ", reason);
+    let msg = format!(
+        "\r\n\x1b[33m{}\x1b[0m\r\n{} [y/N] ",
+        reason,
+        aish_i18n::t("shell.security.input_guard.confirm.execute")
+    );
     unsafe {
         libc::write(libc::STDOUT_FILENO, msg.as_ptr() as *const _, msg.len());
     }

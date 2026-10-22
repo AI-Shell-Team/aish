@@ -28,7 +28,8 @@ thread_local! {
 
 /// Translate a dot-separated key using the thread-local [`I18nManager`].
 ///
-/// Returns the translated value, or the key itself when the key is missing.
+/// Falls back to en-US when the selected locale lacks a key, then returns the
+/// key itself only when it is absent from both locales.
 ///
 /// # Example
 /// ```ignore

@@ -226,6 +226,7 @@ dependencies = [
 name = "aish-security"
 version = "0.3.15"
 dependencies = [
+ "aish-i18n",
  "libc",
  "regex",
  "serde",

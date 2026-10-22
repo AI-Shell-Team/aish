@@ -672,6 +672,72 @@ shell:
       approve_remember: "允许，并不再对该命令询问"
       cancel: "取消"
     choice_prompt: "你的选择(默认：n)："
+    input_guard:
+      prefix:
+        blocked: "已拦截"
+        warning: "警告"
+      labels:
+        targets: "目标"
+        safer: "建议"
+      confirm:
+        execute: "仍要执行吗？"
+        send_to_ai: "仍要发送给 AI 吗？"
+      rules:
+        destructive_rm:
+          reason: "使用 -r/-f 删除系统路径"
+          safer: "使用 trash-cli，或先列出路径确认"
+        dd_device:
+          reason: "dd 正在写入块设备"
+          safer: "写入前请确认设备并备份数据"
+        mkfs_device:
+          reason: "正在格式化块设备"
+          safer: "格式化前请确认设备并备份数据"
+        fork_bomb:
+          reason: "检测到 fork bomb"
+          safer: "切勿在生产环境运行"
+        system_overwrite:
+          reason: "正在覆盖关键系统文件"
+          safer: "修改前请备份原文件"
+        chmod_777_root:
+          reason: "正在对系统路径递归设置 777 权限"
+          safer: "仅授予所需的最低权限"
+        disk_wipe:
+          reason: "正在将输出重定向到块设备"
+          safer: "请确认目标设备"
+        sudo_usage:
+          reason: "命令使用了 sudo"
+          safer: "确认命令来源可信，并了解其影响"
+        shell_wrapper:
+          reason: "通过 -c 执行 Shell 命令"
+          safer: "检查 -c 后的命令内容"
+        eval_usage:
+          reason: "eval 将执行任意代码"
+          safer: "检查 eval 表达式的来源"
+        exec_usage:
+          reason: "exec 将替换当前进程"
+          safer: "了解 exec 替换当前进程的影响"
+        network_upload:
+          reason: "curl 正在上传数据"
+          safer: "确认上传目标和数据敏感性"
+        kill_process:
+          reason: "正在终止进程"
+          safer: "确认 PID 对应的进程身份"
+        pipe_privilege:
+          reason: "正在将管道内容传给高权限 Shell"
+          safer: "检查管道命令的来源"
+        service_sabotage:
+          reason: "正在停止关键系统服务"
+          safer: "确认此操作的影响"
+        ssh_usage:
+          reason: "正在通过 SSH 在远程主机执行命令"
+          safer: "确认目标主机可信"
+      unknown:
+        input_too_long: "无法分析：输入过长（{bytes} 字节 > {max}）"
+        input_too_long_safer: "请拆分为多个步骤，或写入脚本文件后审查"
+        remote_script: "无法分析：下载并执行远程脚本"
+        remote_script_safer: "先下载脚本，审查内容后再执行"
+        heredoc: "无法分析：无法静态检查执行上下文中的 heredoc 内容"
+        heredoc_safer: "将 heredoc 内容写入临时文件，审查后再执行"
 
   command_cancelled: "命令已取消"
 
