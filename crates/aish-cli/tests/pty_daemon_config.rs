@@ -311,11 +311,9 @@ fn choose_create_new_session(
 ) {
     assert_eq!(initial_sessions.len(), 1, "one initial session is expected");
     process.read_until("➜".as_bytes(), Duration::from_secs(15));
-    process.write(b"/");
-    process.read_until(b"/help", Duration::from_secs(10));
-    process.write(b"live_sessions");
-    process.read_until(b"/live_sessions", Duration::from_secs(10));
-    process.write(b"\r");
+    // A leading space keeps rustyline's empty-line slash popup from
+    // intercepting the command; the shell trims it before dispatch.
+    process.write(b" /live_sessions\r");
     let _ = process.read_until(b"Live PTY Sessions", Duration::from_secs(10));
     // The picker puts Create new session last, so End selects it regardless of
     // which live session was most recently attached.
