@@ -273,6 +273,8 @@ enum RegistryAction {
 fn main() {
     let cli = Cli::parse();
     let config_path = cli.config.clone();
+    let model_override = cli.model.clone();
+    let api_base_override = cli.api_base.clone();
     let api_key_override = cli.api_key.clone();
 
     // Initialize logging. RUST_LOG wins; otherwise honor the selected
@@ -390,9 +392,10 @@ fn main() {
     if let Some(api_base) = cli.api_base {
         config.api_base = api_base;
     }
-    let daemon_launch_config = PtyDaemonLaunchConfig::from_config(
+    let daemon_launch_config = PtyDaemonLaunchConfig::from_cli_overrides(
         config_path.as_deref(),
-        &config,
+        model_override.as_deref(),
+        api_base_override.as_deref(),
         api_key_override.as_deref(),
     );
 
@@ -538,25 +541,24 @@ fn get_terminal_size() -> (u16, u16) {
 #[derive(Clone, Debug, Default)]
 struct PtyDaemonLaunchConfig {
     config_path: Option<String>,
-    model: Option<String>,
-    api_base: Option<String>,
-    api_key: Option<String>,
+    model_override: Option<String>,
+    api_base_override: Option<String>,
+    api_key_override: Option<String>,
 }
 
 impl PtyDaemonLaunchConfig {
-    /// Capture the selected config and effective overrides before terminal attachment.
-    fn from_config(
+    /// Capture only explicit CLI overrides before terminal attachment.
+    fn from_cli_overrides(
         config_path: Option<&str>,
-        config: &aish_config::ConfigModel,
+        model_override: Option<&str>,
+        api_base_override: Option<&str>,
         api_key_override: Option<&str>,
     ) -> Self {
         Self {
             config_path: config_path.map(str::to_owned),
-            model: (!config.model.is_empty()).then(|| config.model.clone()),
-            api_base: (!config.api_base.is_empty()).then(|| config.api_base.clone()),
-            // The config file and environment remain available to the child.
-            // Keep only the explicit CLI secret in this launch context.
-            api_key: api_key_override.map(str::to_owned),
+            model_override: model_override.map(str::to_owned),
+            api_base_override: api_base_override.map(str::to_owned),
+            api_key_override: api_key_override.map(str::to_owned),
         }
     }
 }
@@ -602,9 +604,9 @@ fn spawn_pty_daemon(
     forward_pty_daemon_config(
         &mut cmd,
         config_path.as_deref(),
-        launch_config.model.as_deref(),
-        launch_config.api_base.as_deref(),
-        launch_config.api_key.as_deref(),
+        launch_config.model_override.as_deref(),
+        launch_config.api_base_override.as_deref(),
+        launch_config.api_key_override.as_deref(),
         daemon_child,
     );
 
@@ -640,8 +642,8 @@ fn spawn_pty_daemon(
                     .unwrap_or_default()
                     .as_secs(),
                 cwd: cwd.to_string(),
-                model: launch_config.model.clone(),
-                api_base: launch_config.api_base.clone(),
+                model: launch_config.model_override.clone(),
+                api_base: launch_config.api_base_override.clone(),
                 name: None,
             });
         }
@@ -725,10 +727,7 @@ fn is_daemon_mode(config: &aish_config::ConfigModel) -> bool {
 /// Spawn a fresh PTY daemon session from the current executable and
 /// attach to it.  Returns `true` on successful attach (caller returns),
 /// `false` if spawning or attaching failed (caller falls back).
-fn spawn_daemon_and_attach(
-    config: &aish_config::ConfigModel,
-    launch_config: &PtyDaemonLaunchConfig,
-) -> bool {
+fn spawn_daemon_and_attach(launch_config: &PtyDaemonLaunchConfig) -> bool {
     let cwd = std::env::current_dir()
         .unwrap_or_default()
         .to_string_lossy()
@@ -775,7 +774,7 @@ fn run_shell_continue(config: aish_config::ConfigModel, launch_config: &PtyDaemo
         }
     }
 
-    if !spawn_daemon_and_attach(&config, launch_config) {
+    if !spawn_daemon_and_attach(launch_config) {
         eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
         run_shell_normal(config);
     }
@@ -1261,7 +1260,7 @@ fn run_shell_new(config: aish_config::ConfigModel, launch_config: &PtyDaemonLaun
         return;
     }
 
-    if !spawn_daemon_and_attach(&config, launch_config) {
+    if !spawn_daemon_and_attach(launch_config) {
         eprintln!("\x1b[33m[aish] Falling back to standalone shell.\x1b[0m");
         run_shell_normal(config);
     }

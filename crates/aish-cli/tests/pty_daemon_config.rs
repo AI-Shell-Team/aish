@@ -317,14 +317,46 @@ fn wait_for_session_count(
     }
 }
 
-fn write_test_config(path: &std::path::Path, temperature: f32) {
+fn write_test_config(
+    path: &std::path::Path,
+    model: &str,
+    api_base: &str,
+    api_key: &str,
+    temperature: f32,
+) {
     fs::write(
         path,
         format!(
-            "model: config-model\napi_base: http://127.0.0.1:1/wrong/v1\napi_key: config-key\ntemperature: {temperature}\npty_daemon_enabled: true\ninline_completion:\n  enabled: false\n"
+            "model: {model}\napi_base: {api_base}\napi_key: {api_key}\ntemperature: {temperature}\npty_daemon_enabled: true\ninline_completion:\n  enabled: false\n"
         ),
     )
     .expect("write test config");
+}
+
+fn create_new_session(
+    process: &mut PtyProcess,
+    workspace: &TestWorkspace,
+    initial_sessions: &[aish_pty::DaemonSessionInfo],
+) {
+    assert_eq!(initial_sessions.len(), 1, "one initial session is expected");
+    process.read_for(Duration::from_millis(500));
+    process.write(b"/live_sessions\r");
+    let _ = process.read_until(b"Live PTY Sessions", Duration::from_secs(10));
+    // The picker puts Create new session last, so End selects it regardless of
+    // which live session was most recently attached.
+    process.write(b"\x1b[F\r");
+
+    let sessions = wait_for_session_count(&workspace.workdir, 2, Duration::from_secs(15));
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session_id != initial_sessions[0].session_id),
+        "selecting Create new session should start another daemon"
+    );
+    process.read_for(Duration::from_millis(700));
+    aish_pty::kill_session(&initial_sessions[0].socket_path)
+        .expect("terminate the initial daemon before checking the new session");
+    process.read_for(Duration::from_millis(300));
 }
 
 fn assert_daemon_request(
@@ -358,23 +390,12 @@ fn assert_daemon_request(
         "PTY session path should be isolated"
     );
     if create_new_session {
-        process.read_for(Duration::from_millis(500));
-        process.write(b"/live_sessions\n");
-        let _ = process.read_until(b"Live PTY Sessions", Duration::from_secs(10));
-        process.write(b"\x1b[F\r");
-        let sessions = wait_for_session_count(&workspace.workdir, 2, Duration::from_secs(15));
-        assert!(
-            sessions
-                .iter()
-                .any(|session| session.session_id != initial_sessions[0].session_id),
-            "selecting Create new session should start another daemon"
-        );
-        process.read_for(Duration::from_millis(700));
+        create_new_session(&mut process, workspace, &initial_sessions);
     } else {
         process.read_for(Duration::from_millis(500));
     }
 
-    process.write(b";verify daemon configuration\n");
+    process.write(b";verify daemon configuration\r");
     let request = request_thread
         .join()
         .expect("local LLM request capture thread")
@@ -383,7 +404,13 @@ fn assert_daemon_request(
     assert_eq!(request.path, "/override/v1/chat/completions");
     assert_eq!(request.authorization.as_deref(), Some("Bearer cli-key"));
     assert_eq!(request.body["model"], "cli-model");
-    assert_eq!(request.body["temperature"], expected_temperature);
+    let actual_temperature = request.body["temperature"]
+        .as_f64()
+        .expect("temperature in captured request");
+    assert!(
+        (actual_temperature - expected_temperature).abs() < 1e-6,
+        "expected temperature {expected_temperature}, got {actual_temperature}"
+    );
 }
 
 #[test]
@@ -391,8 +418,20 @@ fn new_session_uses_selected_config_and_cli_overrides_for_llm_request() {
     let workspace = TestWorkspace::new();
     let default_config_path = workspace.root.join("default-config/config.yaml");
     fs::create_dir_all(default_config_path.parent().unwrap()).expect("create default config dir");
-    write_test_config(&default_config_path, 0.11);
-    write_test_config(&workspace.config_path, 0.73);
+    write_test_config(
+        &default_config_path,
+        "default-model",
+        "http://127.0.0.1:1/wrong/v1",
+        "default-key",
+        0.11,
+    );
+    write_test_config(
+        &workspace.config_path,
+        "config-model",
+        "http://127.0.0.1:1/wrong/v1",
+        "config-key",
+        0.73,
+    );
 
     assert_daemon_request(&workspace, Some(&workspace.config_path), 0.73, true);
 }
@@ -402,7 +441,66 @@ fn daemon_without_explicit_config_uses_default_config_and_cli_overrides() {
     let workspace = TestWorkspace::new();
     let default_config_path = workspace.root.join("default-config/config.yaml");
     fs::create_dir_all(default_config_path.parent().unwrap()).expect("create default config dir");
-    write_test_config(&default_config_path, 0.41);
+    write_test_config(
+        &default_config_path,
+        "default-model",
+        "http://127.0.0.1:1/wrong/v1",
+        "default-key",
+        0.41,
+    );
 
     assert_daemon_request(&workspace, None, 0.41, false);
+}
+
+#[test]
+fn new_session_uses_updated_file_values_without_cli_overrides() {
+    let workspace = TestWorkspace::new();
+    let config_path = workspace.config_path.to_string_lossy().into_owned();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local LLM stub");
+    let port = listener.local_addr().unwrap().port();
+    let api_base = format!("http://127.0.0.1:{port}/updated/v1");
+    write_test_config(
+        &workspace.config_path,
+        "initial-model",
+        "http://127.0.0.1:1/initial/v1",
+        "initial-key",
+        0.11,
+    );
+
+    let mut process = PtyProcess::spawn(&workspace, &["--config", &config_path]);
+    let initial_sessions = wait_for_session_count(&workspace.workdir, 1, Duration::from_secs(15));
+    assert_eq!(
+        initial_sessions.len(),
+        1,
+        "PTY session path should be isolated"
+    );
+
+    // The initial daemon has loaded the original values. A new session must
+    // reload the file rather than reapplying those old values as overrides.
+    write_test_config(
+        &workspace.config_path,
+        "updated-model",
+        &api_base,
+        "updated-key",
+        0.73,
+    );
+    create_new_session(&mut process, &workspace, &initial_sessions);
+
+    let request_thread = thread::spawn(move || capture_one_request(listener));
+    process.write(b";verify updated daemon configuration\r");
+    let request = request_thread
+        .join()
+        .expect("local LLM request capture thread")
+        .expect("capture LLM request from new session");
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/updated/v1/chat/completions");
+    assert_eq!(request.authorization.as_deref(), Some("Bearer updated-key"));
+    assert_eq!(request.body["model"], "updated-model");
+    let actual_temperature = request.body["temperature"]
+        .as_f64()
+        .expect("temperature in captured request");
+    assert!(
+        (actual_temperature - 0.73).abs() < 1e-6,
+        "expected temperature 0.73, got {actual_temperature}"
+    );
 }
