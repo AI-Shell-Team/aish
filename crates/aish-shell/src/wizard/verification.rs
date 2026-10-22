@@ -6,7 +6,6 @@
 use aish_i18n::t_with_args;
 use aish_llm::api::resolve_anthropic_messages_url;
 use aish_llm::providers::codex::{load_codex_auth, probe_codex_oauth_connectivity};
-use aish_llm::DEFAULT_MAX_TOKENS;
 use serde_json::json;
 use std::collections::HashMap;
 use tracing::debug;
@@ -516,7 +515,6 @@ pub fn check_connectivity(
     let body = json!({
         "model": model,
         "messages": [{"role": "user", "content": "Hi"}],
-        "max_tokens": DEFAULT_MAX_TOKENS,
     });
 
     let start = std::time::Instant::now();

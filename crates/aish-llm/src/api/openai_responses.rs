@@ -11,7 +11,7 @@ use crate::providers::codex::{
 use crate::types::{ChatMessage, ToolSpec};
 
 use super::convert::{chat_messages_to_values, codex_error_to_aish, tools_to_values};
-use super::{effective_max_tokens, StreamContext};
+use super::StreamContext;
 
 pub async fn stream(
     ctx: &StreamContext,
@@ -24,7 +24,10 @@ pub async fn stream(
     let message_values = chat_messages_to_values(messages)?;
     let tool_values = tools.map(tools_to_values).transpose()?;
     let tool_refs = tool_values.as_deref();
-    let max_output = Some(effective_max_tokens(max_tokens));
+    // `None`/`0` means "no cap": the codex request builder omits the field
+    // (it filters non-positive values), so the model's own output limit
+    // applies instead of a global constant that cannot fit every model.
+    let max_output = max_tokens;
 
     if stream {
         let resp = create_openai_responses_http_response(

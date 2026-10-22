@@ -431,7 +431,9 @@ impl AiHandler {
 
     /// Update the output-token budget of the underlying LLM session.
     ///
-    /// `None` restores [`aish_core::DEFAULT_MAX_TOKENS`].
+    /// `None` means "no cap": the request omits the field and the provider
+    /// applies the model's own output limit. Applied to the next request;
+    /// already running tool iterations keep the budget they started with.
     pub fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
         self.llm_session.set_max_tokens(max_tokens);
     }

@@ -495,9 +495,10 @@ impl LlmSession {
 
     /// Update the output-token budget of the running session.
     ///
-    /// `None` (and `Some(0)`) restore [`crate::client::DEFAULT_MAX_TOKENS`].
-    /// Applied to the next request; already running tool iterations keep the
-    /// budget they started with.
+    /// `None` (and `Some(0)`) mean "no cap": the request omits the field
+    /// and the provider applies the model's own output limit. Applied to
+    /// the next request; already running tool iterations keep the budget
+    /// they started with.
     pub fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
         self.max_tokens = max_tokens;
     }
@@ -3111,7 +3112,7 @@ mod tests {
         session.set_max_tokens(Some(8192));
         assert_eq!(session.loop_max_tokens(), Some(8192));
 
-        // `None` restores `DEFAULT_MAX_TOKENS`.
+        // `None` means "no cap" (field omitted from the request).
         session.set_max_tokens(None);
         assert_eq!(session.loop_max_tokens(), None);
     }

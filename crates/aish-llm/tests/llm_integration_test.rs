@@ -9,7 +9,6 @@
 use aish_llm::{
     detect_provider, detect_provider_from_model, normalize_model_for_provider,
     refine_provider_from_api_base, resolve_model_for_api, ChatMessage, LlmClient, SubSessionConfig,
-    DEFAULT_MAX_TOKENS,
 };
 
 #[test]
@@ -106,12 +105,6 @@ fn test_setup_verification_uses_runtime_model_resolution() {
         resolve_model_for_api(config_model, "https://openrouter.ai/api/v1"),
         "openai/gpt-4o"
     );
-}
-
-#[test]
-fn test_default_max_tokens_constant() {
-    assert_eq!(DEFAULT_MAX_TOKENS, aish_core::DEFAULT_MAX_TOKENS);
-    assert_eq!(DEFAULT_MAX_TOKENS, 40_960);
 }
 
 #[test]
