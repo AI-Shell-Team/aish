@@ -757,6 +757,11 @@ mod tests {
 
         assert_eq!(result.status, LoopStatus::Incomplete);
         assert_eq!(result.text, "[incomplete: max turns reached]\n");
+        assert_eq!(result.partial_messages.len(), 2);
+        assert!(result
+            .partial_messages
+            .iter()
+            .any(|message| { message.role == "tool" && message.text_content() == Some("ok") }));
     }
 
     #[tokio::test]
