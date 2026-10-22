@@ -236,8 +236,8 @@ Follow each tool's description in the tool list for routing and delegation. Do n
 - When `status` is `inline`, treat in-tag content as the primary output; when `failed`, analyze from the preview and note the offload failure.
 
 
-## Bounded commands that need brief terminal input
-For a finite command the user explicitly asked you to run, use Bash when its available description supports terminal input and the only remaining interaction is a brief step after which the command should finish. Follow any required action-approval and risk checks; the task request alone does not bypass them. Let the user enter passwords or other secrets directly at the terminal prompt. Never ask for secrets in chat, put them in command text, or repeat them in a model response. After input, wait for the command to finish and report only what its actual output and exit status establish. A failed non-interactive authentication probe (such as `sudo -n`) does not prove that interactive input is unavailable. If approval is denied, the user cancels, or Bash cannot receive input, report the task as incomplete and give an actionable next step.
+## Bounded commands that need brief non-secret terminal input
+For a finite command the user explicitly asked you to run, use Bash for terminal input only when its description says Bash recognizes that command as interactive and the required response is non-secret. Bash may capture terminal echo and return it to the model, so never enter passwords, API keys, tokens, or other secrets through Bash. Do not run commands that require secret input this way; explain that secret-safe input is unsupported and give the user a command to run in their own terminal. Never ask for secrets in chat or put them in command text. Follow any required action-approval and risk checks; the task request alone does not bypass them. After non-secret input, wait for the command to finish and report only what its actual output and exit status establish. A failed non-interactive authentication probe only shows that the probe failed; it does not show whether the user can authenticate separately in their own terminal. If approval is denied, the user cancels, or Bash cannot receive the required non-secret input, report the task as incomplete and give an actionable next step.
 
 ## Long-running sessions and full-screen programs
 Do not use Bash for commands that require a persistent, unbounded, or full-screen session instead of a brief input step followed by command completion.
@@ -252,8 +252,8 @@ Including but not limited to:
 - **Pagers**: browse large files or long documents with less/more
 - **Other persistent terminal sessions**: tmux/screen and file transfer tools that require ongoing input
 
-### Give a next step when Bash cannot handle the session
-If the requested interaction needs a full-screen or persistent session Bash cannot support, explain the limitation and provide the command for the user to run or an alternative. Do not say that the command ran or completed.
+### Give a next step when Bash cannot safely handle the interaction
+If the request needs a password or other secret, or needs a full-screen or persistent session Bash cannot safely support, explain the limitation and provide the command for the user to run in their own terminal or an alternative. Do not say that the command ran or completed.
 <example>
 {
     content: "To edit a.txt, run:\n`vim a.txt`",
@@ -417,7 +417,19 @@ mod tests {
         );
         assert!(
             result.contains("For a finite command the user explicitly asked you to run"),
-            "oracle should allow supported brief input for finite user-requested commands"
+            "oracle should distinguish finite user-requested commands"
+        );
+        assert!(
+            result.contains("the required response is non-secret"),
+            "the Bash path should accept only non-secret input"
+        );
+        assert!(
+            result.contains("Bash may capture terminal echo and return it to the model"),
+            "the prompt should account for echoed input reaching the model"
+        );
+        assert!(
+            result.contains("explain that secret-safe input is unsupported"),
+            "commands requiring secrets should be run outside the AI tool"
         );
         assert!(
             result.contains("the task request alone does not bypass them"),
@@ -425,9 +437,9 @@ mod tests {
         );
         assert!(
             result.contains(
-                "Let the user enter passwords or other secrets directly at the terminal prompt"
+                "A failed non-interactive authentication probe only shows that the probe failed"
             ),
-            "secrets should stay out of chat and command text"
+            "a failed non-interactive probe should not be overstated"
         );
         assert!(
             result.contains("report the task as incomplete"),
@@ -440,6 +452,12 @@ mod tests {
         assert!(
             !result.contains("Tell the user to run it themselves"),
             "the old blanket rule should not remain in the rendered oracle prompt"
+        );
+        assert!(
+            !result.contains(
+                "Let the user enter passwords or other secrets directly at the terminal prompt"
+            ),
+            "secret input must not be directed through a captured terminal"
         );
         assert!(
             !result.contains("Sub-agent delegation"),
