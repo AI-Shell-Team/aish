@@ -8,12 +8,6 @@ use crate::llm_stream::LlmStream;
 use crate::model_id::resolve_model_for_api;
 use crate::types::{ChatMessage, ToolSpec};
 
-/// Default max_tokens when config does not specify a value.
-///
-/// Single source of truth lives in [`aish_core::DEFAULT_MAX_TOKENS`]; the
-/// config loader enforces the same value as a floor.
-pub use aish_core::DEFAULT_MAX_TOKENS;
-
 /// HTTP client for OpenAI-compatible chat completion APIs.
 pub struct LlmClient {
     http: Client,
@@ -266,10 +260,17 @@ impl LlmClient {
     }
 }
 
-fn effective_max_tokens(max_tokens: Option<u32>) -> u32 {
+/// Resolve the effective output cap for an OpenAI-compatible request.
+///
+/// Unset (`None`) or `0` means "no cap": the field is omitted from the request
+/// so the provider applies the model's own output limit. This is the default
+/// because a single global number cannot fit both a 16k-output model and a
+/// 128k-output one — a value large enough for the latter is rejected by the
+/// former, and a value accepted by both truncates the bigger models.
+fn effective_max_tokens(max_tokens: Option<u32>) -> Option<u32> {
     match max_tokens {
-        None | Some(0) => DEFAULT_MAX_TOKENS,
-        Some(n) => n,
+        None | Some(0) => None,
+        Some(n) => Some(n),
     }
 }
 
@@ -280,10 +281,13 @@ fn apply_temperature(body: &mut serde_json::Value, temperature: Option<f64>) {
 }
 
 /// Newer OpenAI-compatible models reject `max_tokens` and require
-/// `max_completion_tokens >= 1`. `None`/`0` still maps to the default budget
-/// so gateways do not fill this field with 0.
+/// `max_completion_tokens >= 1`. `None`/`0` omits the field entirely so the
+/// model's own output limit applies; gateways that fill it with 0 are mapped
+/// to "unset".
 fn apply_max_token_fields(body: &mut serde_json::Value, max_tokens: Option<u32>) {
-    body["max_completion_tokens"] = serde_json::json!(effective_max_tokens(max_tokens));
+    if let Some(n) = effective_max_tokens(max_tokens) {
+        body["max_completion_tokens"] = serde_json::json!(n);
+    }
 }
 
 /// Format an HTTP error response into a user-friendly error message.
@@ -437,23 +441,27 @@ mod tests {
 
     #[test]
     fn test_effective_max_tokens() {
-        assert_eq!(effective_max_tokens(None), DEFAULT_MAX_TOKENS);
-        assert_eq!(effective_max_tokens(Some(0)), DEFAULT_MAX_TOKENS);
-        assert_eq!(effective_max_tokens(Some(1000)), 1000);
+        // Unset or 0 means "no cap" — the provider's model limit applies.
+        assert_eq!(effective_max_tokens(None), None);
+        assert_eq!(effective_max_tokens(Some(0)), None);
+        assert_eq!(effective_max_tokens(Some(1000)), Some(1000));
     }
 
     #[test]
     fn test_apply_max_token_fields_sends_completion_tokens_only() {
+        // Unset: the field is omitted so the model's own limit applies.
         let mut body = serde_json::json!({});
         apply_max_token_fields(&mut body, None);
-        assert_eq!(body["max_completion_tokens"], DEFAULT_MAX_TOKENS);
+        assert!(body.get("max_completion_tokens").is_none());
         assert!(body.get("max_tokens").is_none());
 
+        // 0 (gateway placeholder) is treated as unset too.
         let mut body = serde_json::json!({});
         apply_max_token_fields(&mut body, Some(0));
-        assert_eq!(body["max_completion_tokens"], DEFAULT_MAX_TOKENS);
+        assert!(body.get("max_completion_tokens").is_none());
         assert!(body.get("max_tokens").is_none());
 
+        // An explicit cap is forwarded under the modern field name.
         let mut body = serde_json::json!({});
         apply_max_token_fields(&mut body, Some(1000));
         assert_eq!(body["max_completion_tokens"], 1000);
