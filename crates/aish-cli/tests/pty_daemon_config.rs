@@ -333,7 +333,7 @@ fn write_test_config(
     .expect("write test config");
 }
 
-fn create_new_session(
+fn choose_create_new_session(
     process: &mut PtyProcess,
     workspace: &TestWorkspace,
     initial_sessions: &[aish_pty::DaemonSessionInfo],
@@ -390,7 +390,7 @@ fn assert_daemon_request(
         "PTY session path should be isolated"
     );
     if create_new_session {
-        create_new_session(&mut process, workspace, &initial_sessions);
+        choose_create_new_session(&mut process, workspace, &initial_sessions);
     } else {
         process.read_for(Duration::from_millis(500));
     }
@@ -484,7 +484,7 @@ fn new_session_uses_updated_file_values_without_cli_overrides() {
         "updated-key",
         0.73,
     );
-    create_new_session(&mut process, &workspace, &initial_sessions);
+    choose_create_new_session(&mut process, &workspace, &initial_sessions);
 
     let request_thread = thread::spawn(move || capture_one_request(listener));
     process.write(b";verify updated daemon configuration\r");
