@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mcp.servers[].expose: tools` (opt-in) additionally exposes one tool per remote tool (`mcp__<server>_<tool>`) with its real schema, so the model can call it directly instead of discovering through the gateway; the default stays `gateway` so a server's whole catalogue is never injected into the prompt. `/mcp status` now also lists configured-but-disabled servers as `disabled` instead of hiding them.
 - Bare `/mcp` prints the status block and then opens a nine-row interactive menu (every row is reachable by number 1-9): add a server (wizard), tools, test, trust, enable/disable, reconnect, reload, remove, help. Each row opens its own panel — pick the server (rows show `name [transport] status · tools: N`), then the tool or the trust level; the tools row's first entry lists the whole catalogue and its remaining entries print the per-tool detail, the trust row's first entry is `*` for the whole server, and enable/disable is one row that flips the server according to its current runtime state. `Esc` leaves the menu and no action runs without a selection, so every MCP operation is reachable without recalling arguments or hand-editing `config.yaml`; with nothing configured the menu is the `add` row alone (the wizard). The explicit subcommands (`/mcp status|list|tools|tool|add|remove|enable|disable|trust|test|reload|reconnect`) are unchanged, and `/mcp help` now documents the menu.
 
+### Fixed
+
+- `aish -c` preselects the session the user attached to most often instead of defaulting to "create new session" or to a single remembered id. Attach counts live in `~/.cache/aish/session-usage.json` (the previous `last-attach-session` file is imported once with that id and removed), the update is guarded by an advisory lock, and with no history the newest live session is preselected. "Create new session" stays selectable but is never the default row: with no live session the picker is skipped entirely and a session is spawned directly. Sessions whose daemon has exited are ignored.
+
 ## [0.3.15] - 2026-10-14
 
 ### Added

@@ -648,7 +648,7 @@ fn run_shell_continue(config: aish_config::ConfigModel) {
                 let short = &s.session_id[..8.min(s.session_id.len())];
                 eprintln!("\x1b[32m[aish] Attaching to session {short}\x1b[0m");
                 if run_pty_raw_attach(&s.socket_path.to_string_lossy(), &s.session_id) {
-                    save_last_attached_session(&s.session_id);
+                    record_session_use(&s.session_id);
                     return;
                 }
                 eprintln!("\x1b[33m[aish] Attach failed.\x1b[0m");
@@ -718,23 +718,18 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
             })
             .collect();
 
-        // "Create new" is the last item; the default selection is the last
-        // session the user attached to (if still live), so repeated `aish -c`
-        // runs land on the same session without re-picking.
+        // "Create new" is the last item. The default row is the session the
+        // user attached to most often; without any attach history it is the
+        // first session (newest start). "Create new" is never preselected
+        // here — it only runs when no session is live, and then no picker is
+        // shown at all.
         items.push(SearchSelectItem::new(
             "new",
             aish_i18n::t("shell.live_sessions.create_new"),
         ));
 
-        let last = read_last_attached_session()
-            .filter(|id| sessions.iter().any(|s| s.session_id == *id))
-            .map(|id| {
-                let idx = sessions
-                    .iter()
-                    .position(|s| s.session_id == id)
-                    .unwrap_or(0);
-                format!("session:{idx}")
-            });
+        let default = default_session_index(&sessions, &read_session_usage())
+            .map(|idx| format!("session:{idx}"));
 
         let panel = SearchSelectPanel::new(
             aish_i18n::t("shell.live_sessions.panel_title"),
@@ -742,7 +737,7 @@ fn show_session_picker(initial_sessions: Vec<aish_pty::DaemonSessionInfo>) -> Se
             items,
         )
         .with_footer(aish_i18n::t("shell.live_sessions.panel_footer"))
-        .with_selected_value(last.as_deref().or(Some("new")));
+        .with_selected_value(default.as_deref());
 
         match PanelRuntime::new().run(panel) {
             Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(value))) => {
@@ -775,26 +770,156 @@ fn index_from_value(value: &str, len: usize) -> Option<usize> {
     (idx < len).then_some(idx)
 }
 
-/// Cache file holding the session id of the last successful attach, so
-/// repeated `aish -c` runs preselect the same session.
-fn last_attached_path() -> Option<std::path::PathBuf> {
-    dirs::cache_dir().map(|d| d.join("aish").join("last-attach-session"))
+/// Cache file mapping session id → number of successful attaches, so
+/// `aish -c` preselects the session the user chooses most often.
+fn session_usage_path() -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|d| d.join("aish").join("session-usage.json"))
 }
 
-fn read_last_attached_session() -> Option<String> {
-    let path = last_attached_path()?;
-    let id = std::fs::read_to_string(path).ok()?;
-    let id = id.trim();
-    (!id.is_empty()).then(|| id.to_string())
-}
-
-fn save_last_attached_session(session_id: &str) {
-    if let Some(path) = last_attached_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, session_id);
+fn read_session_usage() -> std::collections::HashMap<String, u64> {
+    let Some(path) = session_usage_path() else {
+        return std::collections::HashMap::new();
+    };
+    if path.exists() {
+        return read_session_usage_file_at(&path);
     }
+    // The cache does not exist yet: the one-time legacy import rewrites the
+    // file, so it has to hold the same lock as the attach writers or it can
+    // replace a count they just wrote. Without the lock, read what is there
+    // and leave the import to a later run.
+    let Some(_lock) = lock_session_usage(&path) else {
+        return read_session_usage_file_at(&path);
+    };
+    read_session_usage_at(&path)
+}
+
+fn read_session_usage_file_at(path: &std::path::Path) -> std::collections::HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return std::collections::HashMap::new();
+    };
+    serde_json::from_str::<std::collections::HashMap<String, u64>>(&text).unwrap_or_default()
+}
+
+/// Read that also runs the one-time legacy import. The import rewrites the
+/// cache, so callers must hold `lock_session_usage` for `path`.
+fn read_session_usage_at(path: &std::path::Path) -> std::collections::HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return seed_from_legacy_last_attach(path);
+    };
+    serde_json::from_str::<std::collections::HashMap<String, u64>>(&text).unwrap_or_default()
+}
+
+/// Upgrade path for the previous single-id cache (`last-attach-session`):
+/// count that id once so the user keeps their old default, then drop the file.
+fn seed_from_legacy_last_attach(
+    usage_path: &std::path::Path,
+) -> std::collections::HashMap<String, u64> {
+    let legacy = usage_path.with_file_name("last-attach-session");
+    let mut usage = std::collections::HashMap::new();
+    if let Ok(id) = std::fs::read_to_string(&legacy) {
+        let id = id.trim();
+        if !id.is_empty() {
+            usage.insert(id.to_string(), 1);
+            let _ = write_session_usage_at(usage_path, &usage);
+        }
+        let _ = std::fs::remove_file(&legacy);
+    }
+    usage
+}
+
+fn write_session_usage_at(
+    path: &std::path::Path,
+    usage: &std::collections::HashMap<String, u64>,
+) -> std::io::Result<()> {
+    let json = serde_json::to_string(usage)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Write-then-rename so an interrupted write cannot corrupt the cache, with
+    // a per-process temp name so concurrent writers cannot clobber each other.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    if let Err(error) = std::fs::write(&tmp, json) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Exclusive advisory lock held across the usage read-modify-write so two
+/// attaches finishing at the same time cannot drop a count; dropping the
+/// guard closes the file and releases the lock.
+struct SessionUsageLock {
+    _file: std::fs::File,
+}
+
+/// Bounded wait: the attach path must never stall on the cache, so give up
+/// after ~100 ms and skip the counter update instead.
+fn lock_session_usage(path: &std::path::Path) -> Option<SessionUsageLock> {
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = path.with_file_name("session-usage.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)
+        .ok()?;
+    for _ in 0..20 {
+        // SAFETY: [Category 8 — FFI] `flock` takes a valid fd from a live
+        // `File` and a flag word; `LOCK_NB` makes it non-blocking, and a
+        // failure return is retried with the same live fd.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Some(SessionUsageLock { _file: file });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    None
+}
+
+fn record_session_use(session_id: &str) {
+    if let Some(path) = session_usage_path() {
+        // Best effort: the attach already succeeded, a lost count only
+        // nudges the picker default.
+        let _ = record_session_use_at(&path, session_id);
+    }
+}
+
+/// `Ok(false)` means the lock stayed busy for the whole bounded wait and this
+/// count was skipped; `Err` means the cache itself could not be written.
+fn record_session_use_at(path: &std::path::Path, session_id: &str) -> std::io::Result<bool> {
+    let Some(_lock) = lock_session_usage(path) else {
+        return Ok(false);
+    };
+    let mut usage = read_session_usage_at(path);
+    *usage.entry(session_id.to_string()).or_insert(0) += 1;
+    write_session_usage_at(path, &usage)?;
+    Ok(true)
+}
+
+/// Default row of the session picker: the live session with the highest
+/// attach count. Sessions are sorted newest-first, so ties and an empty usage
+/// map both keep the newest session. `None` only when nothing is live, in
+/// which case the caller spawns a new session without showing the picker.
+fn default_session_index(
+    sessions: &[aish_pty::DaemonSessionInfo],
+    usage: &std::collections::HashMap<String, u64>,
+) -> Option<usize> {
+    let mut best: Option<(usize, u64)> = None;
+    for (idx, session) in sessions.iter().enumerate() {
+        let count = usage.get(&session.session_id).copied().unwrap_or(0);
+        if best.is_none_or(|(_, best_count)| count > best_count) {
+            best = Some((idx, count));
+        }
+    }
+    best.map(|(idx, _)| idx)
 }
 
 /// Run the normal (non-daemon) AishShell.
@@ -1035,7 +1160,9 @@ fn run_shell_resume(config: aish_config::ConfigModel, session_id: &str) {
             "\x1b[32m[aish] Resuming daemon session {}\x1b[0m",
             &session.session_id[..8.min(session.session_id.len())]
         );
-        run_pty_raw_attach(&session.socket_path.to_string_lossy(), &session.session_id);
+        if run_pty_raw_attach(&session.socket_path.to_string_lossy(), &session.session_id) {
+            record_session_use(&session.session_id);
+        }
         return;
     }
 
@@ -1837,5 +1964,109 @@ mod tests {
     fn test_show_models_usage_does_not_panic() {
         let config = aish_config::ConfigModel::default();
         show_models_usage(&config);
+    }
+
+    fn session(id: &str, started_at: u64) -> aish_pty::DaemonSessionInfo {
+        aish_pty::DaemonSessionInfo {
+            session_id: id.to_string(),
+            socket_path: std::path::PathBuf::from(format!("/tmp/{id}.sock")),
+            daemon_pid: 1,
+            child_pid: 2,
+            started_at,
+            cwd: "/tmp".to_string(),
+            model: None,
+            api_base: None,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn default_session_prefers_most_used() {
+        // Newest-first ordering is the picker's invariant.
+        let sessions = vec![
+            session("newest", 300),
+            session("old", 100),
+            session("mid", 200),
+        ];
+        let usage =
+            std::collections::HashMap::from([("old".to_string(), 5u64), ("newest".to_string(), 1)]);
+        assert_eq!(default_session_index(&sessions, &usage), Some(1));
+    }
+
+    #[test]
+    fn default_session_falls_back_to_newest_without_history() {
+        let sessions = vec![session("newest", 300), session("old", 100)];
+        assert_eq!(
+            default_session_index(&sessions, &std::collections::HashMap::new()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn default_session_keeps_newest_on_tie() {
+        let sessions = vec![session("newest", 300), session("old", 100)];
+        let usage =
+            std::collections::HashMap::from([("newest".to_string(), 2u64), ("old".to_string(), 2)]);
+        assert_eq!(default_session_index(&sessions, &usage), Some(0));
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "aish-usage-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir.join("session-usage.json")
+    }
+
+    #[test]
+    fn session_usage_counts_every_concurrent_attach() {
+        let path = scratch_dir("concurrent");
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        // Retry a lock miss; an I/O failure must fail the test
+                        // rather than spin.
+                        while !record_session_use_at(&path, "sess").expect("usage write") {}
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        let usage = read_session_usage_at(&path);
+        assert_eq!(usage.get("sess").copied(), Some(200));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn legacy_last_attach_seeds_usage_once() {
+        let path = scratch_dir("legacy");
+        let legacy = path.with_file_name("last-attach-session");
+        std::fs::write(&legacy, "old-session\n").expect("legacy file");
+        assert_eq!(
+            read_session_usage_at(&path).get("old-session").copied(),
+            Some(1)
+        );
+        assert!(!legacy.exists());
+        assert_eq!(
+            read_session_usage_at(&path).get("old-session").copied(),
+            Some(1)
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn default_session_ignores_dead_session_history() {
+        let sessions = vec![session("live", 100)];
+        let usage = std::collections::HashMap::from([("gone".to_string(), 9u64)]);
+        assert_eq!(default_session_index(&sessions, &usage), Some(0));
+        assert_eq!(default_session_index(&[], &usage), None);
     }
 }
