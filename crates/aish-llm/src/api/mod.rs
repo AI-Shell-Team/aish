@@ -226,11 +226,10 @@ pub(crate) fn retry_backoff_delay(attempt: u32) -> std::time::Duration {
 
 /// `max_tokens` sent to Anthropic-compatible endpoints when the config leaves
 /// it unset. The Anthropic Messages API requires the field, so an explicit
-/// "unset" must still carry a number; a value big enough for every current
-/// Claude model (64k-128k output) while staying below every model's context
-/// window. Smaller-output models cap the request server-side.
-pub(crate) const ANTHROPIC_FALLBACK_MAX_TOKENS: u32 = 128_000;
-
+/// "unset" must still carry a number. 64k is the lowest output ceiling among
+/// current Claude models (Haiku 4.5 = 64k, Sonnet 4.5 = 64k, Opus 4.6 = 128k);
+/// a larger value would be rejected with a 400 by the lower-ceiling models.
+pub(crate) const ANTHROPIC_FALLBACK_MAX_TOKENS: u32 = 64_000;
 /// Resolve the output cap for a request.
 ///
 /// Unset (`None`) or `0` means "no cap". OpenAI-compatible endpoints omit the
