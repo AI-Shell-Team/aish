@@ -1,11 +1,16 @@
 pub(crate) const DESCRIPTION: &str = "\
-Execute a bash command and return its output. Use ONLY for running commands, \
-builds, tests, and read-only discovery (find, ls, stat, ps). NEVER use bash \
-to read, write, or edit files — use read_file to read, edit_file to modify, \
-write_file to create; use grep/glob for search; use Python for structured \
-scripts; use Agent (subagent_type=explore) for open-ended multi-round \
-path/code search; use Agent (subagent_type=troubleshoot) for open-ended \
-system/service diagnosis; use Agent to delegate other isolated sub-tasks.";
+Execute one bash command in a PTY and return its output and exit status. For \
+commands the tool recognizes as interactive (such as sudo or su prompts), it \
+can pause for brief terminal input and continue when the user responds. Keep \
+passwords and other secrets in terminal input; never ask for them in chat or \
+put them in command text. This does not support persistent or full-screen \
+sessions. Use ONLY for running commands, builds, tests, and read-only discovery \
+(find, ls, stat, ps). NEVER use bash to read, write, or edit files — use \
+read_file to read, edit_file to modify, write_file to create; use grep/glob for \
+search; use Python for structured scripts; use Agent (subagent_type=explore) \
+for open-ended multi-round path/code search; use Agent \
+(subagent_type=troubleshoot) for open-ended system/service diagnosis; use Agent \
+to delegate other isolated sub-tasks.";
 
 pub(crate) const PROMPT: &str = r#"Use this tool to run shell commands.
 
@@ -27,7 +32,7 @@ pub(crate) fn parameters() -> serde_json::Value {
         "properties": {
             "command": {
                 "type": "string",
-                "description": "Bash command to execute."
+                "description": "Bash command to execute. Commands recognized as interactive (such as sudo or su prompts) may pause for brief terminal input; persistent or full-screen sessions are unsupported."
             },
             "timeout": {
                 "type": "integer",
@@ -37,4 +42,23 @@ pub(crate) fn parameters() -> serde_json::Value {
         },
         "required": ["command"]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn description_discloses_bounded_terminal_input() {
+        assert!(DESCRIPTION.contains("commands the tool recognizes as interactive"));
+        assert!(DESCRIPTION.contains("pause for brief terminal input"));
+        assert!(DESCRIPTION.contains("never ask for them in chat"));
+        assert!(DESCRIPTION.contains("persistent or full-screen sessions"));
+
+        let command_description = parameters()["properties"]["command"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(command_description.contains("brief terminal input"));
+        assert!(command_description.contains("full-screen sessions are unsupported"));
+    }
 }
