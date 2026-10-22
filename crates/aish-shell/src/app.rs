@@ -3976,7 +3976,10 @@ impl AishShell {
         self.state.last_exit_code = exit_code;
         self.state.can_correct_error = exit_code != 0 && exit_code != 130;
         if exit_code != 0 && exit_code != 130 {
-            let hint = t("shell.error_correction.press_semicolon_hint");
+            let hint = t(crate::failure_hint::hint_key(
+                command,
+                &self.state.last_output,
+            ));
             let hint_str = format!("{}\n", theme::muted(&format!("<{}>", hint)));
             crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
             eprintln!("{}", theme::muted(&format!("<{}>", hint)));
@@ -15794,6 +15797,45 @@ mod privilege_dispatch_tests {
         };
         let shell = AishShell::new(config).expect("shell construction");
         (tmp, env, shell)
+    }
+
+    #[test]
+    fn apt_failure_hint_preserves_the_error_and_does_not_start_ai() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_root = tempfile::tempdir().expect("fake command directory");
+        let fake_bin = fake_root.path().join("bin");
+        std::fs::create_dir_all(&fake_bin).expect("create fake bin");
+        let fake_apt = fake_bin.join("apt");
+        std::fs::write(
+            &fake_apt,
+            "#!/bin/sh\nprintf '%s\\n' 'E: Could not open lock file (13: Permission denied)' >&2\nexit 100\n",
+        )
+        .expect("write fake apt command");
+        std::fs::set_permissions(&fake_apt, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake apt executable");
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!("{}:{}", fake_bin.display(), original_path.to_string_lossy());
+        let _path_env = EnvGuard::apply(&[("PATH", std::path::PathBuf::from(path))]);
+
+        let (_tmp, _env, mut shell) = open_test_shell();
+        let exit_code = shell.execute_external_command("apt update");
+        assert_eq!(exit_code, 100);
+        assert!(shell.state.last_output.contains("Permission denied"));
+        let context_before = shell.ai_handler.context_messages_snapshot().len();
+
+        shell.track_command_failure_state("apt update", exit_code);
+
+        assert_eq!(shell.state.last_command.as_deref(), Some("apt update"));
+        assert_eq!(shell.state.last_exit_code, exit_code);
+        assert!(shell.state.can_correct_error);
+        assert_eq!(
+            shell.ai_handler.context_messages_snapshot().len(),
+            context_before
+        );
     }
 
     #[test]
