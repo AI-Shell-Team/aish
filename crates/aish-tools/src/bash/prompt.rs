@@ -55,7 +55,8 @@ mod tests {
         assert!(DESCRIPTION.contains("never ask for them in chat"));
         assert!(DESCRIPTION.contains("persistent or full-screen sessions"));
 
-        let command_description = parameters()["properties"]["command"]["description"]
+        let command_schema = parameters();
+        let command_description = command_schema["properties"]["command"]["description"]
             .as_str()
             .unwrap();
         assert!(command_description.contains("brief terminal input"));
