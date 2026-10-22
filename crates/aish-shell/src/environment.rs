@@ -10,6 +10,33 @@ use tracing::{debug, warn};
 /// definition wins — the precedence the old per-file invocations had.
 const SEGMENT_SENTINEL: &str = "__AISH_ENV_SEGMENT__";
 
+/// Parse a sentinel-separated env dump, applying the first definition of
+/// each key and skipping keys already present in the process environment.
+///
+/// Segments arrive in rc-file order; within one process a variable exported
+/// by an earlier rc file keeps its value even when a later rc file
+/// re-exports it — the precedence the old per-file merge had.
+fn parse_env_dump(raw: &str, merged: &mut HashMap<String, String>) {
+    for entry in raw.split('\0') {
+        if entry == SEGMENT_SENTINEL {
+            continue;
+        }
+        if let Some((key, value)) = entry.split_once('=') {
+            let key = key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            // Only insert keys not already present in the current process
+            // environment or in `merged` (preserves parent PATH and the
+            // first rc file's exports).
+            if std::env::var(key).is_err() && !merged.contains_key(key) {
+                std::env::set_var(key, value);
+                merged.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+}
+
 /// Bootstrap environment from bashrc / bash_profile.
 ///
 /// Sources `~/.bash_profile` and `~/.bashrc` via a single short-lived bash
@@ -17,90 +44,64 @@ const SEGMENT_SENTINEL: &str = "__AISH_ENV_SEGMENT__";
 /// variables into the current process environment (existing values are never
 /// overwritten).
 ///
-/// Both rc files are sourced in one `bash -lc` invocation — the per-process
+/// Both rc files are handled in one `bash -lc` invocation — the per-process
 /// startup cost (nvm, conda, pyenv, …) is paid once instead of once per file.
-/// Within that one process, a variable exported by an earlier rc file keeps
-/// its value even when a later rc file re-exports it: each file's segment of
-/// the dump is applied in order and the first definition of a key wins,
-/// matching the old per-file merge.
+/// The login shell has already sourced `~/.bash_profile` at startup, so the
+/// script only sources `~/.bashrc` itself; each file's state is captured by
+/// a sentinel-separated `env -0` dump, and the first definition of a key
+/// wins, matching the old per-file merge. Completed dumps are parsed even
+/// when the shell later exits nonzero (e.g. `exit` inside `.bashrc`), so a
+/// broken later file does not discard what earlier files exported.
 pub fn load_bash_env() -> HashMap<String, String> {
     let mut merged: HashMap<String, String> = HashMap::new();
 
-    // Collect existing rc files in order: bash_profile first, then bashrc.
-    let rc_files: Vec<String> = [".bash_profile", ".bashrc"]
-        .iter()
-        .filter_map(|rc_file| {
-            let path = dirs::home_dir()
-                .map(|h| h.join(rc_file))
-                .unwrap_or_default();
-            if path.exists() {
-                Some(path.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let home = dirs::home_dir().unwrap_or_default();
+    let profile_path = home.join(".bash_profile");
+    let rc_path = home.join(".bashrc");
 
-    if rc_files.is_empty() {
+    if !profile_path.exists() && !rc_path.exists() {
         return merged;
     }
 
-    // Source every existing rc file in one bash invocation, dumping the env
-    // after each one. Each source is separated by `;` (not `&&`) so a failing
-    // rc file does not skip the rest — matches the old per-file behaviour
-    // where a broken .bash_profile never prevented .bashrc from being sourced.
-    let segments: Vec<String> = rc_files
-        .iter()
-        .map(|p| format!("source '{p}' 2>/dev/null; printf '\\0{SEGMENT_SENTINEL}\\0'; env -0"))
-        .collect();
-    let script = segments.join("; ");
+    // One `bash -lc` invocation. `-l` makes bash read `.bash_profile` (if
+    // present) exactly once at shell startup; the first dump below captures
+    // that state without sourcing it a second time. Then `.bashrc` is
+    // sourced — mirroring an interactive login shell's load order — and a
+    // second dump captures the rc additions. Each `source` failure must not
+    // skip the rest, so commands are separated by `;` rather than `&&`.
+    let script = format!(
+        "printf '\\0{SEGMENT_SENTINEL}\\0'; env -0; \
+         if [ -f '{rc}' ]; then source '{rc}' 2>/dev/null; fi; \
+         printf '\\0{SEGMENT_SENTINEL}\\0'; env -0",
+        rc = rc_path.to_string_lossy()
+    );
 
     match Command::new("/bin/bash").arg("-lc").arg(&script).output() {
-        Ok(output) if output.status.success() => {
-            let raw = String::from_utf8_lossy(&output.stdout);
-            // Segments arrive in rc-file order; the first definition of a
-            // key wins, so an earlier file's export survives a later
-            // re-export (the old per-file precedence).
-            for entry in raw.split('\0') {
-                if entry == SEGMENT_SENTINEL {
-                    continue;
-                }
-                if let Some((key, value)) = entry.split_once('=') {
-                    let key = key.trim();
-                    if key.is_empty() {
-                        continue;
-                    }
-                    // Only insert keys not already present in the current
-                    // process environment or in `merged` (preserves parent
-                    // PATH and the first rc file's exports).
-                    if std::env::var(key).is_err() && !merged.contains_key(key) {
-                        std::env::set_var(key, value);
-                        merged.insert(key.to_string(), value.to_string());
-                    }
-                }
-            }
-            debug!(
-                target: "aish_env",
-                "loaded {} new vars from {} rc file(s)",
-                merged.len(),
-                rc_files.len()
-            );
-        }
         Ok(output) => {
-            debug!(
-                target: "aish_env",
-                "bash sourcing {} exited with {:?}",
-                rc_files.join(", "),
-                output.status.code()
-            );
+            let raw = String::from_utf8_lossy(&output.stdout);
+            // Completed dumps are parsed even on a nonzero exit: a later rc
+            // file that runs `exit` must not discard what earlier segments
+            // already printed. The old per-file invocations kept a failed
+            // file's predecessors the same way.
+            if !raw.is_empty() {
+                parse_env_dump(&raw, &mut merged);
+                debug!(
+                    target: "aish_env",
+                    "loaded {} new vars from bash rc files (exit status: {:?})",
+                    merged.len(),
+                    output.status.code()
+                );
+            }
+            if !output.status.success() {
+                debug!(
+                    target: "aish_env",
+                    "bash sourcing rc files exited with {:?}",
+                    output.status.code()
+                );
+            }
         }
         Err(e) => {
-            warn!(
-                target: "aish_env",
-                "failed to source {}: {}",
-                rc_files.join(", "),
-                e
-            );
+            warn!(target: "aish_env", "failed to source bash rc files: {}", e);
         }
     }
 
