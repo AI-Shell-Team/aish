@@ -353,10 +353,11 @@ fn choose_create_new_session(
             .any(|session| session.session_id != initial_sessions[0].session_id),
         "selecting Create new session should start another daemon"
     );
-    process.read_for(Duration::from_millis(700));
+    // Wait for the newly attached shell prompt so the test proves it is ready
+    // before the original daemon is terminated and the request is sent.
+    process.read_until("➜".as_bytes(), Duration::from_secs(15));
     aish_pty::kill_session(&initial_sessions[0].socket_path)
         .expect("terminate the initial daemon before checking the new session");
-    process.read_until("➜".as_bytes(), Duration::from_secs(15));
 }
 
 fn assert_daemon_request(
