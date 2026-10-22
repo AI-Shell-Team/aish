@@ -539,7 +539,7 @@ pub fn build_codex_request(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
 ) -> Value {
     let mut instructions: Vec<String> = Vec::new();
     let mut input_items: Vec<Value> = Vec::new();
@@ -1003,7 +1003,7 @@ pub async fn create_openai_responses_with_api_key(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     timeout_secs: u64,
 ) -> Result<Value, CodexError> {
     let resp = create_openai_responses_http_response(
@@ -1030,7 +1030,7 @@ pub async fn create_openai_responses_http_response(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     timeout_secs: u64,
 ) -> Result<reqwest::Response, CodexError> {
     let base = api_base.trim().trim_end_matches('/');
@@ -1108,7 +1108,7 @@ pub async fn create_codex_chat_completion(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     api_base: Option<&str>,
     auth_path: Option<&Path>,
     timeout_secs: u64,
@@ -1135,7 +1135,7 @@ pub async fn create_codex_http_response(
     tools: Option<&[Value]>,
     tool_choice: &str,
     max_output_tokens: Option<u32>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     api_base: Option<&str>,
     auth_path: Option<&Path>,
     timeout_secs: u64,

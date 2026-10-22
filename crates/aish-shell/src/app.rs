@@ -11248,7 +11248,7 @@ impl AishShell {
         api_key: &str,
         model: &str,
         codex_auth_path: Option<&str>,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
         system_msg: &str,
         original_question: &str,

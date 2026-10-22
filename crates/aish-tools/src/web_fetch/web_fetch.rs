@@ -30,7 +30,7 @@ pub struct WebFetchTool {
     api_base: String,
     api_key: String,
     model: String,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
 }
 
@@ -39,7 +39,7 @@ impl WebFetchTool {
         api_base: &str,
         api_key: &str,
         model: &str,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Self {
         Self {

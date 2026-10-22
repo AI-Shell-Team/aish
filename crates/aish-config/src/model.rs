@@ -531,7 +531,7 @@ pub struct ConfigModel {
     pub model: String,
     pub api_base: String,
     pub api_key: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub max_tokens: Option<u32>,
     /// Enforce the `max_tokens` floor when the config is loaded.
     ///
@@ -885,6 +885,15 @@ tool_arg_preview:
         assert_eq!(config.tool_arg_preview.max_lines, 3);
         assert_eq!(config.tool_arg_preview.max_chars, 80);
         assert_eq!(config.tool_arg_preview.max_items, 5);
+    }
+
+    #[test]
+    fn test_temperature_deserialization_preserves_decimal_precision() {
+        let config: ConfigModel =
+            serde_yaml::from_str("temperature: 0.3").expect("failed to parse YAML");
+
+        assert_eq!(config.temperature, 0.3_f64);
+        assert_eq!(config.temperature.to_string(), "0.3");
     }
 
     #[test]

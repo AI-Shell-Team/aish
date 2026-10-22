@@ -12,7 +12,7 @@ pub async fn stream(
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
     stream: bool,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
     let mut client = LlmClient::new(&ctx.api_base, &ctx.api_key, &ctx.model);
