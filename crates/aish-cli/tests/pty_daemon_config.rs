@@ -144,35 +144,6 @@ impl PtyProcess {
             String::from_utf8_lossy(&output)
         );
     }
-
-    fn read_for(&mut self, duration: Duration) {
-        let deadline = Instant::now() + duration;
-        let mut buffer = [0u8; 4096];
-        while Instant::now() < deadline {
-            let mut descriptor = libc::pollfd {
-                fd: self.master.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: `descriptor` points to one initialized pollfd and lives
-            // for the duration of the call.
-            let ready = unsafe { libc::poll(&mut descriptor, 1, 100) };
-            assert!(
-                ready >= 0,
-                "poll PTY master: {}",
-                std::io::Error::last_os_error()
-            );
-            if ready > 0 {
-                match self.master.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(error) => panic!("read PTY master: {error}"),
-                }
-            }
-        }
-    }
 }
 
 impl Drop for PtyProcess {
