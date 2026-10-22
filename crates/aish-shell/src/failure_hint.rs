@@ -43,7 +43,43 @@ fn apt_command(command: &str) -> Option<(&str, &str)> {
     if !matches!(program, "apt" | "apt-get") {
         return None;
     }
-    Some((program, words.get(index + 1).copied().unwrap_or("")))
+    let subcommand_index = apt_subcommand_index(&words, index + 1)?;
+    Some((program, words[subcommand_index]))
+}
+
+/// Find the first APT subcommand after its leading options.
+fn apt_subcommand_index(words: &[&str], mut index: usize) -> Option<usize> {
+    while let Some(option) = words.get(index).copied() {
+        if option == "--" {
+            return (index + 1 < words.len()).then_some(index + 1);
+        }
+        if !option.starts_with('-') {
+            return Some(index);
+        }
+
+        if matches!(
+            option,
+            "-c" | "--config-file"
+                | "-o"
+                | "--option"
+                | "-t"
+                | "--target-release"
+                | "-a"
+                | "--host-architecture"
+                | "-S"
+                | "--snapshot"
+                | "--cli-version"
+        ) {
+            // APT accepts these options with the value in the next token.
+            // Do not mistake that value for the subcommand.
+            index += 2;
+        } else {
+            // Boolean flags, combined short flags, and options whose value is
+            // attached with '=' or directly after a short option are one token.
+            index += 1;
+        }
+    }
+    None
 }
 
 fn is_permission_error(output: &str) -> bool {
@@ -61,13 +97,11 @@ fn is_permission_error(output: &str) -> bool {
 
 fn is_package_manager_lock_error(output: &str) -> bool {
     [
-        "could not get lock",
-        "unable to acquire the dpkg frontend lock",
-        "unable to lock the administration directory",
-        "it is held by another process",
-        "is another process using it?",
+        "held by process",
+        "held by another process",
         "被另一个进程占用",
         "由另一个进程持有",
+        "锁正由进程",
     ]
     .iter()
     .any(|marker| output.contains(marker))
@@ -93,6 +127,24 @@ mod tests {
     }
 
     #[test]
+    fn apt_update_recognizes_leading_options_and_their_values() {
+        for command in [
+            "apt-get -q update",
+            "apt-get -o APT::Get::Assume-Yes=true update",
+            "apt --config-file /tmp/apt.conf -q update",
+        ] {
+            assert_eq!(
+                hint_key(
+                    command,
+                    "E: Could not open lock file (13: Permission denied)"
+                ),
+                APT_PERMISSION_HINT,
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
     fn apt_lock_contention_takes_priority_over_permission_text() {
         assert_eq!(
             hint_key(
@@ -104,9 +156,34 @@ mod tests {
         assert_eq!(
             hint_key(
                 "apt-get install curl",
-                "Unable to acquire the dpkg frontend lock"
+                "Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1234 (apt-get)"
             ),
             PACKAGE_MANAGER_LOCK_HINT
+        );
+        assert_eq!(
+            hint_key(
+                "apt-get install curl",
+                "无法获得锁 /var/lib/dpkg/lock-frontend。锁正由进程 1234（apt-get）持有"
+            ),
+            PACKAGE_MANAGER_LOCK_HINT
+        );
+    }
+
+    #[test]
+    fn lock_errors_without_holder_evidence_keep_the_generic_hint() {
+        assert_eq!(
+            hint_key(
+                "apt-get install curl",
+                "Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?"
+            ),
+            GENERIC_HINT
+        );
+        assert_eq!(
+            hint_key(
+                "apt-get install curl",
+                "Could not get lock /var/lib/dpkg/lock-frontend"
+            ),
+            GENERIC_HINT
         );
     }
 
