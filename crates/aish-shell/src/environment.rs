@@ -17,6 +17,15 @@ const SEGMENT_SENTINEL: &str = "__AISH_ENV_SEGMENT__";
 /// by an earlier rc file keeps its value even when a later rc file
 /// re-exports it — the precedence the old per-file merge had.
 fn parse_env_dump(raw: &str, merged: &mut HashMap<String, String>) {
+    // Skip everything before the first sentinel: a login startup file can
+    // print arbitrary stdout (`echo 'FAKE=value'`) before the script's own
+    // output begins, and that text must never be imported as environment
+    // entries. No sentinel at all means the dump never started — import
+    // nothing.
+    let first_sentinel = format!("\0{SEGMENT_SENTINEL}\0");
+    let Some((_, raw)) = raw.split_once(&first_sentinel) else {
+        return;
+    };
     for entry in raw.split('\0') {
         if entry == SEGMENT_SENTINEL {
             continue;
