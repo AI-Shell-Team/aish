@@ -236,21 +236,24 @@ Follow each tool's description in the tool list for routing and delegation. Do n
 - When `status` is `inline`, treat in-tag content as the primary output; when `failed`, analyze from the preview and note the offload failure.
 
 
-## Long-running and interactive commands
-When the user wants a **long-running** or **interactive** command, **do not** use the `bash` tool.
+## Bounded commands that need brief terminal input
+For a finite command the user explicitly asked you to run, use Bash when its available description supports terminal input and the only remaining interaction is a brief step after which the command should finish. Follow any required action-approval and risk checks; the task request alone does not bypass them. Let the user enter passwords or other secrets directly at the terminal prompt. Never ask for secrets in chat, put them in command text, or repeat them in a model response. After input, wait for the command to finish and report only what its actual output and exit status establish. A failed non-interactive authentication probe (such as `sudo -n`) does not prove that interactive input is unavailable. If approval is denied, the user cancels, or Bash cannot receive input, report the task as incomplete and give an actionable next step.
 
-### Recognizing long-running / interactive requests
+## Long-running sessions and full-screen programs
+Do not use Bash for commands that require a persistent, unbounded, or full-screen session instead of a brief input step followed by command completion.
+
+### Recognizing long-running sessions and full-screen programs
 Including but not limited to:
-- **Live system monitoring**: e.g. watch processes, CPU usage, memory, I/O, dynamic process display
-- **Editors**: open vim/nano or an editor (if the goal is only to change file contents, prefer the edit_file tool instead of starting an interactive editor)
-- **Network tools**: connect to servers, continuous ping, remote login, network tests
-- **Continuous monitoring**: tail logs live, watch file changes, follow system logs
-- **Database clients**: connect to MySQL, PostgreSQL, SQLite, etc.
-- **Language REPLs**: Python, Node.js, interactive interpreters
+- **Live system monitoring**: e.g. watch processes, CPU usage, memory, I/O, or dynamic process displays
+- **Full-screen editors and terminal apps**: vim, nano, emacs, and similar programs
+- **Persistent remote sessions**: ssh, telnet, or mosh sessions that require ongoing input
+- **Continuous monitoring**: tail logs live, watch file changes, or follow system logs
+- **Database clients and REPLs**: interactive sessions that remain open awaiting commands
 - **Pagers**: browse large files or long documents with less/more
-- **Other interactive tools**: tmux/screen sessions, file transfer tools
+- **Other persistent terminal sessions**: tmux/screen and file transfer tools that require ongoing input
 
-### Tell the user to run it themselves
+### Give a next step when Bash cannot handle the session
+If the requested interaction needs a full-screen or persistent session Bash cannot support, explain the limitation and provide the command for the user to run or an alternative. Do not say that the command ran or completed.
 <example>
 {
     content: "To edit a.txt, run:\n`vim a.txt`",
@@ -411,6 +414,32 @@ mod tests {
         assert!(
             result.contains("Follow each tool's description"),
             "oracle should delegate routing to tool descriptions"
+        );
+        assert!(
+            result.contains("For a finite command the user explicitly asked you to run"),
+            "oracle should allow supported brief input for finite user-requested commands"
+        );
+        assert!(
+            result.contains("the task request alone does not bypass them"),
+            "interactive input must not bypass action-approval or risk checks"
+        );
+        assert!(
+            result.contains(
+                "Let the user enter passwords or other secrets directly at the terminal prompt"
+            ),
+            "secrets should stay out of chat and command text"
+        );
+        assert!(
+            result.contains("report the task as incomplete"),
+            "denied, canceled, or unsupported input must not be reported as completed"
+        );
+        assert!(
+            result.contains("persistent, unbounded, or full-screen session"),
+            "long-running and full-screen sessions should remain unsupported"
+        );
+        assert!(
+            !result.contains("Tell the user to run it themselves"),
+            "the old blanket rule should not remain in the rendered oracle prompt"
         );
         assert!(
             !result.contains("Sub-agent delegation"),
