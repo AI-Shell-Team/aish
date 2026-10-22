@@ -777,11 +777,31 @@ fn session_usage_path() -> Option<std::path::PathBuf> {
 }
 
 fn read_session_usage() -> std::collections::HashMap<String, u64> {
-    session_usage_path()
-        .map(|path| read_session_usage_at(&path))
-        .unwrap_or_default()
+    let Some(path) = session_usage_path() else {
+        return std::collections::HashMap::new();
+    };
+    if path.exists() {
+        return read_session_usage_file_at(&path);
+    }
+    // The cache does not exist yet: the one-time legacy import rewrites the
+    // file, so it has to hold the same lock as the attach writers or it can
+    // replace a count they just wrote. Without the lock, read what is there
+    // and leave the import to a later run.
+    let Some(_lock) = lock_session_usage(&path) else {
+        return read_session_usage_file_at(&path);
+    };
+    read_session_usage_at(&path)
 }
 
+fn read_session_usage_file_at(path: &std::path::Path) -> std::collections::HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return std::collections::HashMap::new();
+    };
+    serde_json::from_str::<std::collections::HashMap<String, u64>>(&text).unwrap_or_default()
+}
+
+/// Read that also runs the one-time legacy import. The import rewrites the
+/// cache, so callers must hold `lock_session_usage` for `path`.
 fn read_session_usage_at(path: &std::path::Path) -> std::collections::HashMap<String, u64> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return seed_from_legacy_last_attach(path);
@@ -800,27 +820,34 @@ fn seed_from_legacy_last_attach(
         let id = id.trim();
         if !id.is_empty() {
             usage.insert(id.to_string(), 1);
-            write_session_usage_at(usage_path, &usage);
+            let _ = write_session_usage_at(usage_path, &usage);
         }
         let _ = std::fs::remove_file(&legacy);
     }
     usage
 }
 
-fn write_session_usage_at(path: &std::path::Path, usage: &std::collections::HashMap<String, u64>) {
-    let Ok(json) = serde_json::to_string(usage) else {
-        return;
-    };
+fn write_session_usage_at(
+    path: &std::path::Path,
+    usage: &std::collections::HashMap<String, u64>,
+) -> std::io::Result<()> {
+    let json = serde_json::to_string(usage)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))?;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
     // Write-then-rename so an interrupted write cannot corrupt the cache, with
     // a per-process temp name so concurrent writers cannot clobber each other.
     let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let written = std::fs::write(&tmp, json).is_ok();
-    if !written || std::fs::rename(&tmp, path).is_err() {
+    if let Err(error) = std::fs::write(&tmp, json) {
         let _ = std::fs::remove_file(&tmp);
+        return Err(error);
     }
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Exclusive advisory lock held across the usage read-modify-write so two
@@ -859,17 +886,22 @@ fn lock_session_usage(path: &std::path::Path) -> Option<SessionUsageLock> {
 
 fn record_session_use(session_id: &str) {
     if let Some(path) = session_usage_path() {
-        record_session_use_at(&path, session_id);
+        // Best effort: the attach already succeeded, a lost count only
+        // nudges the picker default.
+        let _ = record_session_use_at(&path, session_id);
     }
 }
 
-fn record_session_use_at(path: &std::path::Path, session_id: &str) {
+/// `Ok(false)` means the lock stayed busy for the whole bounded wait and this
+/// count was skipped; `Err` means the cache itself could not be written.
+fn record_session_use_at(path: &std::path::Path, session_id: &str) -> std::io::Result<bool> {
     let Some(_lock) = lock_session_usage(path) else {
-        return;
+        return Ok(false);
     };
     let mut usage = read_session_usage_at(path);
     *usage.entry(session_id.to_string()).or_insert(0) += 1;
-    write_session_usage_at(path, &usage);
+    write_session_usage_at(path, &usage)?;
+    Ok(true)
 }
 
 /// Default row of the session picker: the live session with the highest
@@ -1998,7 +2030,9 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     for _ in 0..25 {
-                        record_session_use_at(&path, "sess");
+                        // Retry a lock miss; an I/O failure must fail the test
+                        // rather than spin.
+                        while !record_session_use_at(&path, "sess").expect("usage write") {}
                     }
                 })
             })
