@@ -777,11 +777,14 @@ fn session_usage_path() -> Option<std::path::PathBuf> {
 }
 
 fn read_session_usage() -> std::collections::HashMap<String, u64> {
-    let Some(path) = session_usage_path() else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return seed_from_legacy_last_attach(&path);
+    session_usage_path()
+        .map(|path| read_session_usage_at(&path))
+        .unwrap_or_default()
+}
+
+fn read_session_usage_at(path: &std::path::Path) -> std::collections::HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return seed_from_legacy_last_attach(path);
     };
     serde_json::from_str::<std::collections::HashMap<String, u64>>(&text).unwrap_or_default()
 }
@@ -797,34 +800,76 @@ fn seed_from_legacy_last_attach(
         let id = id.trim();
         if !id.is_empty() {
             usage.insert(id.to_string(), 1);
-            write_session_usage(&usage);
+            write_session_usage_at(usage_path, &usage);
         }
         let _ = std::fs::remove_file(&legacy);
     }
     usage
 }
 
-fn write_session_usage(usage: &std::collections::HashMap<String, u64>) {
-    let Some(path) = session_usage_path() else {
-        return;
-    };
+fn write_session_usage_at(path: &std::path::Path, usage: &std::collections::HashMap<String, u64>) {
     let Ok(json) = serde_json::to_string(usage) else {
         return;
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Write-then-rename so an interrupted write cannot corrupt the cache.
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    // Write-then-rename so an interrupted write cannot corrupt the cache, with
+    // a per-process temp name so concurrent writers cannot clobber each other.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let written = std::fs::write(&tmp, json).is_ok();
+    if !written || std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
+/// Exclusive advisory lock held across the usage read-modify-write so two
+/// attaches finishing at the same time cannot drop a count; dropping the
+/// guard closes the file and releases the lock.
+struct SessionUsageLock {
+    _file: std::fs::File,
+}
+
+/// Bounded wait: the attach path must never stall on the cache, so give up
+/// after ~100 ms and skip the counter update instead.
+fn lock_session_usage(path: &std::path::Path) -> Option<SessionUsageLock> {
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = path.with_file_name("session-usage.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)
+        .ok()?;
+    for _ in 0..20 {
+        // SAFETY: [Category 8 — FFI] `flock` takes a valid fd from a live
+        // `File` and a flag word; `LOCK_NB` makes it non-blocking, and a
+        // failure return is retried with the same live fd.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Some(SessionUsageLock { _file: file });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    None
+}
+
 fn record_session_use(session_id: &str) {
-    let mut usage = read_session_usage();
+    if let Some(path) = session_usage_path() {
+        record_session_use_at(&path, session_id);
+    }
+}
+
+fn record_session_use_at(path: &std::path::Path, session_id: &str) {
+    let Some(_lock) = lock_session_usage(path) else {
+        return;
+    };
+    let mut usage = read_session_usage_at(path);
     *usage.entry(session_id.to_string()).or_insert(0) += 1;
-    write_session_usage(&usage);
+    write_session_usage_at(path, &usage);
 }
 
 /// Default row of the session picker: the live session with the highest
@@ -1931,6 +1976,56 @@ mod tests {
         let usage =
             std::collections::HashMap::from([("newest".to_string(), 2u64), ("old".to_string(), 2)]);
         assert_eq!(default_session_index(&sessions, &usage), Some(0));
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "aish-usage-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir.join("session-usage.json")
+    }
+
+    #[test]
+    fn session_usage_counts_every_concurrent_attach() {
+        let path = scratch_dir("concurrent");
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..25 {
+                        record_session_use_at(&path, "sess");
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        let usage = read_session_usage_at(&path);
+        assert_eq!(usage.get("sess").copied(), Some(200));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn legacy_last_attach_seeds_usage_once() {
+        let path = scratch_dir("legacy");
+        let legacy = path.with_file_name("last-attach-session");
+        std::fs::write(&legacy, "old-session\n").expect("legacy file");
+        assert_eq!(
+            read_session_usage_at(&path).get("old-session").copied(),
+            Some(1)
+        );
+        assert!(!legacy.exists());
+        assert_eq!(
+            read_session_usage_at(&path).get("old-session").copied(),
+            Some(1)
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
