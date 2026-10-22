@@ -67,12 +67,16 @@ pub fn load_bash_env() -> HashMap<String, String> {
     // present) exactly once at shell startup; the first dump below captures
     // that state without sourcing it a second time. Then `.bashrc` is
     // sourced — mirroring an interactive login shell's load order — and a
-    // second dump captures the rc additions. Each `source` failure must not
-    // skip the rest, so commands are separated by `;` rather than `&&`.
+    // second dump captures the rc additions. The rc dump is emitted only
+    // when the source succeeds, matching the old `source ... && env -0`
+    // that omitted a failing file's contribution; the profile dump stays
+    // regardless (the old per-file invocations kept it).
     let script = format!(
         "printf '\\0{SEGMENT_SENTINEL}\\0'; env -0; \
-         if [ -f '{rc}' ]; then source '{rc}' 2>/dev/null; fi; \
-         printf '\\0{SEGMENT_SENTINEL}\\0'; env -0",
+         if [ -f '{rc}' ]; then \
+             source '{rc}' 2>/dev/null && \
+             printf '\\0{SEGMENT_SENTINEL}\\0' && env -0; \
+         fi",
         rc = rc_path.to_string_lossy()
     );
 
