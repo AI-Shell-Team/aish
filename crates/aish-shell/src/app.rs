@@ -10253,6 +10253,13 @@ impl AishShell {
                     self.refresh_config_dependent_tools();
                 }
                 LiveEffect::ToolsRefresh => self.refresh_config_dependent_tools(),
+                LiveEffect::MaxTokens => {
+                    // The running session keeps its own copy of the budget, so
+                    // a new value only reaches the next request after it is
+                    // pushed into the session.
+                    self.ai_handler.set_max_tokens(self.config.max_tokens);
+                    self.refresh_config_dependent_tools();
+                }
                 LiveEffect::None => {}
             }
         }
