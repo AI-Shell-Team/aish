@@ -144,7 +144,7 @@ pub async fn stream_simple(
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
     stream: bool,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
     match dialect {

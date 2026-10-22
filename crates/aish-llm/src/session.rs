@@ -85,7 +85,7 @@ pub struct LlmSession {
     /// that audit events always reflect the *current* remote host, not a
     /// snapshot taken at session creation time.
     audit_host: Option<Arc<Mutex<Option<String>>>>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
     /// Stable Langfuse trace ID for the entire session (created once, reused across turns).
@@ -134,7 +134,7 @@ impl LlmSession {
         api_base: &str,
         api_key: &str,
         model: &str,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Self {
         Self::with_context(
@@ -146,7 +146,7 @@ impl LlmSession {
 
     pub fn with_context(
         stream_ctx: StreamContext,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Self {
         let api_dialect = resolve_api_dialect(
@@ -471,7 +471,7 @@ impl LlmSession {
         self.record_usage(usage);
     }
 
-    pub(crate) fn loop_temperature(&self) -> Option<f32> {
+    pub(crate) fn loop_temperature(&self) -> Option<f64> {
         self.temperature
     }
 
@@ -555,7 +555,7 @@ impl LlmSession {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
         stream: bool,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
         #[cfg(test)]
@@ -638,7 +638,7 @@ impl LlmSession {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
         stream: bool,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
         self.chat_completion(messages, tools, stream, temperature, max_tokens)

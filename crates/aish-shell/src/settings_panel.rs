@@ -823,7 +823,7 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
         SettingKey::ApiBase => cfg.api_base = value.to_string(),
         SettingKey::ApiKey => cfg.api_key = value.to_string(),
         SettingKey::Temperature => {
-            cfg.temperature = parse_f32(value, 0.0..=2.0)?;
+            cfg.temperature = parse_f64(value, 0.0..=2.0)?;
         }
         SettingKey::MaxTokens => {
             cfg.max_tokens = if value.is_empty() {
@@ -1021,21 +1021,6 @@ fn parse_bool(value: &str) -> Result<bool, String> {
         "false" | "off" | "0" | "no" | "n" => Ok(false),
         other => Err(format!("expected on/off, got `{other}`")),
     }
-}
-
-fn parse_f32(value: &str, range: std::ops::RangeInclusive<f32>) -> Result<f32, String> {
-    let n: f32 = value
-        .parse()
-        .map_err(|_| format!("expected a number, got `{value}`"))?;
-    if !range.contains(&n) {
-        return Err(format!(
-            "{} is out of range {}..={}",
-            n,
-            range.start(),
-            range.end()
-        ));
-    }
-    Ok(n)
 }
 
 fn parse_f64(value: &str, range: std::ops::RangeInclusive<f64>) -> Result<f64, String> {
@@ -1238,7 +1223,9 @@ mod tests {
         let mut cfg = default_cfg();
         assert!(apply(&mut cfg, SettingKey::Temperature, "3.0").is_err());
         apply(&mut cfg, SettingKey::Temperature, "0.8").unwrap();
-        assert!((cfg.temperature - 0.8).abs() < 1e-6);
+        assert_eq!(cfg.temperature, 0.8);
+        apply(&mut cfg, SettingKey::Temperature, "0.3").unwrap();
+        assert_eq!(cfg.temperature, 0.3);
     }
 
     #[test]
