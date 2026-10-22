@@ -152,7 +152,7 @@ impl LlmClient {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
         stream: bool,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
         self.chat_completion_with_extras(
@@ -175,7 +175,7 @@ impl LlmClient {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
         stream: bool,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
         extras: serde_json::Map<String, serde_json::Value>,
     ) -> Result<LlmResponse, AishError> {
@@ -192,9 +192,7 @@ impl LlmClient {
             body["stream_options"] = serde_json::json!({"include_usage": true});
         }
 
-        if let Some(temp) = temperature {
-            body["temperature"] = serde_json::json!(temp);
-        }
+        apply_temperature(&mut body, temperature);
         apply_max_token_fields(&mut body, max_tokens);
         if let Some(tools) = tools {
             body["tools"] = serde_json::json!(tools);
@@ -272,6 +270,12 @@ fn effective_max_tokens(max_tokens: Option<u32>) -> u32 {
     match max_tokens {
         None | Some(0) => DEFAULT_MAX_TOKENS,
         Some(n) => n,
+    }
+}
+
+fn apply_temperature(body: &mut serde_json::Value, temperature: Option<f64>) {
+    if let Some(temperature) = temperature {
+        body["temperature"] = serde_json::json!(temperature);
     }
 }
 
@@ -454,6 +458,17 @@ mod tests {
         apply_max_token_fields(&mut body, Some(1000));
         assert_eq!(body["max_completion_tokens"], 1000);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn test_apply_temperature_preserves_decimal_precision() {
+        let mut body = serde_json::json!({});
+        apply_temperature(&mut body, Some(0.3));
+        assert_eq!(body.to_string(), r#"{"temperature":0.3}"#);
+
+        let mut body = serde_json::json!({});
+        apply_temperature(&mut body, None);
+        assert!(body.get("temperature").is_none());
     }
 
     #[test]
