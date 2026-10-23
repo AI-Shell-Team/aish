@@ -917,27 +917,33 @@ impl PersistentPty {
             // queue where a stdin-reading command would consume it as data
             // or a `\x03` line-discipline flush would drop it.
             //
-            // The seq/text bookkeeping must share the command's line: each
-            // interactive line fires one prompt_ready, so the event carrying
-            // our seq is the command line itself and its exit code is the
-            // command's real status. (A bookkeeping-only line would emit a
-            // seq-marked event with exit code 0, masking failures.) The
-            // trailing `&` caveat does not apply: `a=1; b=2; cmd &` runs the
-            // assignments synchronously and backgrounds only `cmd`.
+            // Keep the bookkeeping, a temporary function containing the
+            // command, and its invocation on the same interactive line. The
+            // traced function gives cancellation a scoped INT trap while the
+            // command still runs in the persistent shell. The event carrying
+            // our seq then reports the command's real status. (A separate
+            // bookkeeping line would mask failures with an exit code of 0.)
             let (pg_prefix, pg_suffix) = backend_pager_override();
             payload.extend_from_slice(pg_prefix.as_bytes());
             payload.push(b'\n');
             if let Some(s) = seq {
                 let quoted = shell_quote_escape(command);
+                let command_function = format!("__aish_backend_command_{}", s.unsigned_abs());
                 payload.extend_from_slice(
                     format!(
-                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; "
+                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; {command_function}() {{\n"
                     )
                     .as_bytes(),
                 );
+                payload.extend_from_slice(command.as_bytes());
+                payload.extend_from_slice(
+                    format!("\n}}; __aish_execute_backend_command {s} {command_function}\n")
+                        .as_bytes(),
+                );
+            } else {
+                payload.extend_from_slice(command.as_bytes());
+                payload.push(b'\n');
             }
-            payload.extend_from_slice(command.as_bytes());
-            payload.push(b'\n');
             // Hold the restore for execute_command to write after the
             // command's terminal state.
             self.pending_pager_restore = Some(pg_suffix);
@@ -8803,6 +8809,72 @@ mod tests {
             "cancelled command created tail markers {:?}: {:?}",
             unexpected_tails,
             first_unexpected_output
+        );
+    }
+
+    #[test]
+    fn test_issue_596_cancel_preserves_shell_with_int_traps() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-trap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let handlers = ["trap ':' INT", "trap 'exit' INT"];
+        let mut tail_markers = Vec::new();
+
+        for (attempt, handler) in handlers.iter().enumerate() {
+            let started = cwd.join(format!("started-{attempt}"));
+            let marker = cwd.join(format!("tail-{attempt}"));
+            tail_markers.push(marker.clone());
+            let token = std::sync::Arc::new(CancelToken::new());
+            let cancel = std::sync::Arc::clone(&token);
+            let started_for_thread = started.clone();
+            let interrupter = std::thread::spawn(move || {
+                let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(
+                    started_for_thread.exists(),
+                    "command never reached its first step"
+                );
+                std::thread::sleep(Duration::from_millis(150));
+                cancel.cancel_as_user_interrupt();
+            });
+
+            let command = format!(
+                "{handler}; touch {}; sleep 3; touch {}",
+                shell_quote_escape(&started.display().to_string()),
+                shell_quote_escape(&marker.display().to_string())
+            );
+            let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+            interrupter.join().expect("cancellation thread");
+            let (output, exit_code, _) = result.expect("cancelled command must return");
+            assert_eq!(
+                exit_code, -1,
+                "cancelled command returned {exit_code}: {output:?}"
+            );
+        }
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "trap - INT; printf session_ok",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+
+        let unexpected_tails = tail_markers
+            .into_iter()
+            .filter(|marker| marker.exists())
+            .collect::<Vec<_>>();
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(
+            unexpected_tails.is_empty(),
+            "cancelled command created tail markers {:?}",
+            unexpected_tails
         );
     }
 

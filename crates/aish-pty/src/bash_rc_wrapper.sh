@@ -37,6 +37,11 @@ __aish_last_exit_code=0
 __AISH_PROTOCOL_VERSION=1
 __AISH_CONTROL_FD="${AISH_CONTROL_FD:-}"
 __AISH_AT_PROMPT=0
+__AISH_CANCEL_ACTIVE=0
+__AISH_CANCEL_DEBUG_GUARD=0
+__AISH_CANCEL_PREV_COMMAND=
+__AISH_CANCEL_SAVED_INT_TRAP=
+__AISH_CANCEL_TRAP_CHANGED=0
 
 __aish_json_escape() {
     local value="$1"
@@ -125,6 +130,41 @@ __aish_emit_command_started() {
     __aish_emit_control_line "$payload"
 }
 
+# Run a backend command in a traced function so Bash's temporary INT trap can
+# abort only that command while leaving the persistent interactive shell alive.
+__aish_execute_backend_command() {
+    local command_seq="$1"
+    local command_function="$2"
+    local saved_int_trap
+    saved_int_trap=$(builtin trap -p INT)
+
+    __AISH_ACTIVE_COMMAND_SEQ="$command_seq"
+    __AISH_CANCEL_SAVED_INT_TRAP="$saved_int_trap"
+    __AISH_CANCEL_TRAP_CHANGED=0
+    __AISH_CANCEL_PREV_COMMAND=
+    __AISH_CANCEL_DEBUG_GUARD=0
+    builtin trap 'return 130' INT
+    __AISH_CANCEL_ACTIVE=1
+
+    declare -ft "$command_function"
+    "$command_function"
+    local exit_code=$?
+
+    __AISH_CANCEL_ACTIVE=0
+    unset -f "$command_function"
+
+    if [[ "$__AISH_CANCEL_TRAP_CHANGED" == "1" ]]; then
+        saved_int_trap="$__AISH_CANCEL_SAVED_INT_TRAP"
+    fi
+    if [[ -n "$saved_int_trap" ]]; then
+        eval "$saved_int_trap"
+    else
+        builtin trap - INT
+    fi
+
+    return "$exit_code"
+}
+
 __aish_rewrite_last_history_entry() {
     local seq="${__AISH_ACTIVE_COMMAND_SEQ:-}"
     local original_command="${__AISH_ACTIVE_COMMAND_TEXT:-}"
@@ -174,11 +214,28 @@ __aish_on_exit() {
 }
 
 __aish_on_debug() {
+    if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+        if [[ "${__AISH_CANCEL_DEBUG_GUARD:-0}" != "1" ]]; then
+            __AISH_CANCEL_DEBUG_GUARD=1
+            if [[ "${__AISH_CANCEL_PREV_COMMAND:-}" =~ ^[[:space:]]*(builtin[[:space:]]+|command[[:space:]]+)?trap([[:space:]]|$) ]]; then
+                __AISH_CANCEL_SAVED_INT_TRAP=$(builtin trap -p INT)
+                __AISH_CANCEL_TRAP_CHANGED=1
+            fi
+            __AISH_CANCEL_PREV_COMMAND="$BASH_COMMAND"
+            builtin trap 'return 130' INT
+            __AISH_CANCEL_DEBUG_GUARD=0
+        fi
+        return 0
+    fi
+
     if [[ "${__AISH_AT_PROMPT:-0}" != "1" ]]; then
         return 0
     fi
 
     case "$BASH_COMMAND" in
+        __aish_backend_command_* )
+            return 0
+            ;;
         __aish_prompt_command*|__aish_on_debug*|__aish_emit_*|__aish_json_escape*|__aish_complete*|_aish_*|trap* )
             return 0
             ;;
@@ -206,7 +263,11 @@ __aish_on_debug() {
     stty echo 2>/dev/null || true
 
     __AISH_AT_PROMPT=0
-    __aish_emit_command_started "$BASH_COMMAND"
+    if [[ -n "${__AISH_ACTIVE_COMMAND_TEXT:-}" ]]; then
+        __aish_emit_command_started "$__AISH_ACTIVE_COMMAND_TEXT"
+    else
+        __aish_emit_command_started "$BASH_COMMAND"
+    fi
     return 0
 }
 
@@ -236,6 +297,7 @@ PROMPT_COMMAND='__aish_prompt_command'
 
 trap '__aish_on_exit' EXIT
 trap '__aish_on_debug' DEBUG
+declare -ft __aish_execute_backend_command
 
 # Disable terminal echo — the frontend (aish) handles all display.
 # This prevents the PTY line discipline from echoing user input back
