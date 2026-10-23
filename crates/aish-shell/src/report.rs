@@ -4,10 +4,16 @@
 //! external resources, and a CSP that forbids everything except inline style.
 //! It therefore opens in a browser with no network at all.
 //!
-//! Every session-derived string passes through [`escape_html`] before it
-//! reaches the page. `pulldown_cmark::html::push_html` is deliberately not
-//! used: it forwards `Event::Html` / `Event::InlineHtml` verbatim, so a log
-//! line containing `<script>` would become live markup.
+//! Model output is Markdown (tables, bold, lists) and is rendered as such by
+//! [`markdown_to_html`]. That helper never lets raw HTML through:
+//! `pulldown_cmark::html::push_html` forwards `Event::Html` / `Event::InlineHtml`
+//! verbatim, so a log line containing `<script>` would become live markup. Both
+//! events are therefore downgraded to `Event::Text`, which `push_html` escapes —
+//! the text stays visible instead of being silently dropped.
+//!
+//! Tool output is not Markdown (it is a `<stdout>`/`<return_code>` envelope
+//! around arbitrary bytes), so evidence bodies go through [`escape_html`] into a
+//! `<pre>` and keep their exact line structure.
 //!
 //! This module is pure (no I/O except the explicit `write_*` helpers) so the
 //! redaction / escaping / gap accounting can be unit tested without a
@@ -17,6 +23,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use pulldown_cmark::{Event, Options, Parser};
 use regex::Regex;
 
 use aish_i18n::{t, t_with_args};
@@ -279,6 +286,59 @@ fn fenced(text: &str) -> String {
     }
     let fence = "`".repeat((longest + 1).max(3));
     format!("{fence}text\n{text}\n{fence}\n")
+}
+
+/// Render model-authored Markdown to HTML.
+///
+/// Raw HTML events are downgraded to `Event::Text`, which `push_html` escapes:
+/// forwarding `Event::Html` verbatim would turn a model answer (or a log line it
+/// quoted) into live markup.
+fn markdown_to_html(text: &str) -> String {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let events = Parser::new_ext(text, options).map(|event| match event {
+        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+        other => other,
+    });
+    let mut out = String::with_capacity(text.len() + text.len() / 2);
+    pulldown_cmark::html::push_html(&mut out, events);
+    out
+}
+
+/// Lines that only wrap a tool result and carry no information of their own.
+const ENVELOPE_TAGS: [&str; 8] = [
+    "<stdout>",
+    "</stdout>",
+    "<stderr>",
+    "</stderr>",
+    "<return_code>",
+    "</return_code>",
+    "<offload>",
+    "</offload>",
+];
+
+/// One-line summary of a body, used as the collapsed `<summary>` text.
+///
+/// Envelope lines are skipped so the reader sees real content instead of
+/// `<stdout>`, and the remaining lines are flattened until `limit` characters
+/// have been collected, so pretty-printed JSON yields its keys rather than a
+/// lone `{`.
+fn preview_line(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || ENVELOPE_TAGS.contains(&line) {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(line);
+        if out.chars().count() >= limit {
+            break;
+        }
+    }
+    clip(&out, limit).replace(['\n', '\t'], " ")
 }
 
 /// Escape a Markdown table cell.
@@ -651,19 +711,23 @@ p, dd { margin: .35rem 0; }
   background: var(--surface); border: 1px solid var(--border); color: var(--muted);
   font-size: .9rem;
 }
+.meta dd code { word-break: break-all; }
 pre {
   margin: .4rem 0; padding: .6rem .75rem; background: var(--surface); border: 1px solid var(--border);
   border-radius: .35rem; white-space: pre-wrap; overflow-wrap: anywhere;
   font: .86rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  max-height: 32rem; overflow: auto;
 }
 details { border: 1px solid var(--border); border-radius: .4rem; padding: .5rem .7rem; margin: .5rem 0; }
 details > summary { cursor: pointer; }
-summary > .badge { margin-left: .5rem; font-size: .78rem; padding: .05rem .4rem; border-radius: .3rem; border: 1px solid var(--border); }
-.badge.ok { color: var(--muted); }
+summary .evt { font-weight: 600; }
+summary .preview { color: var(--muted); font: .82rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-left: .6rem; }
+summary > .badge { margin-left: .5rem; }
+.badge { font-size: .76rem; padding: .05rem .4rem; border-radius: .3rem; border: 1px solid var(--border); background: var(--surface); }
+.badge.ok { color: var(--fg); }
 .badge.warn { color: var(--warning); border-color: var(--warning); }
 .badge.bad { color: var(--error); border-color: var(--error); }
-.label { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; margin-top: .5rem; }
+.label { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; margin-top: .7rem; }
+.hint { color: var(--muted); margin: .5rem 0 0; font-size: .92rem; }
 table { width: 100%; border-collapse: collapse; font-size: .9rem; }
 th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
@@ -671,6 +735,26 @@ td code { font: .85rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 tr.failed td.rc { color: var(--error); }
 ul.gaps { padding-left: 1.2rem; }
 ul.gaps li { margin: .3rem 0; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+  margin: 1.1rem 0 .45rem; padding: 0; border: 0; font-size: 1rem; line-height: 1.35;
+}
+.md h1, .md h2 { font-size: 1.08rem; }
+.md ul, .md ol { margin: .5rem 0; padding-left: 1.4rem; }
+.md li { margin: .22rem 0; }
+.md li > p { margin: .2rem 0; }
+.md code {
+  font: .85rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--surface); border: 1px solid var(--border); border-radius: .25rem; padding: .05rem .28rem;
+}
+.md pre code { background: none; border: 0; padding: 0; }
+.md blockquote { margin: .7rem 0; padding: .1rem 0 .1rem .8rem; border-left: 3px solid var(--border); color: var(--muted); }
+.md hr { border: 0; border-top: 1px solid var(--border); margin: 1.1rem 0; }
+.md table { margin: .7rem 0; }
+.md strong { font-weight: 700; }
+.objective .md { color: var(--muted); font-size: .95rem; }
+.findings .md { font-size: 1.02rem; }
 footer { max-width: 60rem; margin: 3rem auto 0; color: var(--muted); font-size: .85rem; }
 "#;
 
@@ -738,19 +822,19 @@ fn render_html(doc: &ReportDoc) -> String {
         }))
     );
 
-    html.push_str(&section_with_pre(
-        "objective",
-        &t("shell.report.html.objective"),
-        &doc.objective,
+    html.push_str(&format!(
+        "<section id=\"objective\" class=\"objective\"><h2>{}</h2>\n<div class=\"md\">{}</div>\n</section>\n",
+        escape_html(&t("shell.report.html.objective")),
+        markdown_to_html(&doc.objective),
     ));
 
     html.push_str(&format!(
-        "<section id=\"findings\"><h2>{}</h2>\n",
+        "<section id=\"findings\" class=\"findings\"><h2>{}</h2>\n",
         escape_html(&t("shell.report.html.findings"))
     ));
     match &doc.findings {
         Some(text) => {
-            let _ = writeln!(html, "<pre>{}</pre>", escape_html(text));
+            let _ = writeln!(html, "<div class=\"md\">{}</div>", markdown_to_html(text));
         }
         None => {
             let _ = writeln!(
@@ -762,7 +846,8 @@ fn render_html(doc: &ReportDoc) -> String {
     }
     html.push_str("</section>\n");
 
-    // Evidence: one collapsible block per tool call, in call order.
+    // Evidence: one block per tool call, in call order. Rows start expanded so
+    // nothing is hidden by default; the summary still allows collapsing noise.
     let _ = writeln!(
         html,
         "<section id=\"evidence\"><h2>{} ({})</h2>",
@@ -775,15 +860,33 @@ fn render_html(doc: &ReportDoc) -> String {
             "<p class=\"muted\">{}</p>",
             escape_html(&t("shell.report.html.evidence_empty"))
         );
-    }
-    for row in &doc.evidence {
+    } else {
         let _ = writeln!(
             html,
-            "<details><summary><h3 style=\"display:inline\">E{} · {}</h3><span class=\"badge {css}\">{status}</span></summary>",
+            "<p class=\"hint\">{}</p>",
+            escape_html(&t_with_args("shell.report.html.evidence_hint", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("count".to_string(), doc.evidence.len().to_string());
+                args
+            }))
+        );
+    }
+    for row in &doc.evidence {
+        // Prefer the call arguments as the preview; fall back to the first line
+        // of output when a tool call carried no arguments.
+        let preview = if !row.detail.is_empty() {
+            preview_line(&row.detail, 110)
+        } else {
+            preview_line(&row.output, 110)
+        };
+        let _ = writeln!(
+            html,
+            "<details open><summary><span class=\"evt\">E{} · {}</span><span class=\"badge {css}\">{status}</span><span class=\"preview\">{preview}</span></summary>",
             row.index,
             escape_html(&row.tool),
             css = row.status.css(),
             status = escape_html(&t(row.status.key())),
+            preview = escape_html(&preview),
         );
         if !row.detail.is_empty() {
             let _ = writeln!(
@@ -820,8 +923,9 @@ fn render_html(doc: &ReportDoc) -> String {
     if doc.commands.is_empty() {
         let _ = writeln!(
             html,
-            "<p class=\"muted\">{}</p>",
-            escape_html(&t("shell.report.html.commands_empty"))
+            "<p class=\"muted\">{}</p>\n<p class=\"hint\">{}</p>",
+            escape_html(&t("shell.report.html.commands_empty")),
+            escape_html(&t("shell.report.html.commands_empty_ai"))
         );
     } else {
         let _ = writeln!(
@@ -876,15 +980,6 @@ fn render_html(doc: &ReportDoc) -> String {
         escape_html(&t("shell.report.html.footer"))
     );
     html
-}
-
-fn section_with_pre(id: &str, heading: &str, body: &str) -> String {
-    format!(
-        "<section id=\"{id}\"><h2>{heading}</h2>\n<pre>{body}</pre>\n</section>\n",
-        id = escape_html(id),
-        heading = escape_html(heading),
-        body = escape_html(body),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,6 +1299,99 @@ mod tests {
         assert!(!bundle.html.contains("http://"));
         assert!(!bundle.html.contains("https://"));
         assert_eq!(bundle.evidence_rows, 1);
+    }
+
+    #[test]
+    fn markdown_output_is_rendered_not_escaped() {
+        let findings = "**诊断结论：**\n\n| 指标 | 状态 |\n| --- | --- |\n| 内存 | 正常 |\n\n- 第一项\n- 第二项\n\n`vm.swappiness` 为 60。";
+        let messages = vec![
+            message("user", "诊断系统状态"),
+            message("assistant", findings),
+        ];
+        let bundle = build_report(
+            &ReportInput {
+                session_uuid: "11111111-2222-3333-4444-555555555555",
+                model: "test-model",
+                created_at: "2026-01-01 00:00:00 UTC",
+                cwd: Some("/tmp"),
+                messages: &messages,
+                history: &[],
+                transcript_failed: 0,
+            },
+            &SecretScanner::new(&[]),
+        );
+        assert!(bundle.html.contains("<strong>诊断结论：</strong>"));
+        assert!(bundle.html.contains("<table>"));
+        assert!(bundle.html.contains("<li>第一项</li>"));
+        assert!(bundle.html.contains("<code>vm.swappiness</code>"));
+        // The conversation transcript stays verbatim; only the rendered
+        // conclusion must be free of raw Markdown syntax.
+        let findings_start = bundle
+            .html
+            .find("id=\"findings\"")
+            .expect("findings section");
+        let evidence_start = bundle
+            .html
+            .find("id=\"evidence\"")
+            .expect("evidence section");
+        let findings = &bundle.html[findings_start..evidence_start];
+        assert!(!findings.contains("**诊断结论"));
+        assert!(!findings.contains("| 指标 |"));
+    }
+
+    #[test]
+    fn markdown_raw_html_is_neutralised() {
+        let messages = vec![
+            message("user", "look"),
+            message(
+                "assistant",
+                "<script>alert(1)</script> and <img src=x onerror=alert(2)>",
+            ),
+        ];
+        let bundle = build_report(
+            &ReportInput {
+                session_uuid: "11111111-2222-3333-4444-555555555555",
+                model: "test-model",
+                created_at: "2026-01-01 00:00:00 UTC",
+                cwd: None,
+                messages: &messages,
+                history: &[],
+                transcript_failed: 0,
+            },
+            &SecretScanner::new(&[]),
+        );
+        assert!(!bundle.html.contains("<script"));
+        assert!(!bundle.html.contains("<img"));
+        // Downgraded to text, so it stays readable instead of vanishing.
+        assert!(bundle
+            .html
+            .contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    #[test]
+    fn empty_command_table_explains_tool_only_sessions() {
+        // Issue #608 follow-up: a session diagnosed purely through tool calls
+        // has no shell history, so `Commands (0)` must not read as data loss.
+        let messages = vec![message("user", "诊断一下内存")];
+        let bundle = build_report(
+            &ReportInput {
+                session_uuid: "11111111-2222-3333-4444-555555555555",
+                model: "test-model",
+                created_at: "2026-01-01 00:00:00 UTC",
+                cwd: None,
+                messages: &messages,
+                history: &[],
+                transcript_failed: 0,
+            },
+            &SecretScanner::new(&[]),
+        );
+        let start = bundle
+            .html
+            .find("id=\"commands\"")
+            .expect("commands section");
+        let end = bundle.html.find("id=\"gaps\"").expect("gaps section");
+        assert!(bundle.html[start..end]
+            .contains(&escape_html(&t("shell.report.html.commands_empty_ai"))));
     }
 
     #[test]
