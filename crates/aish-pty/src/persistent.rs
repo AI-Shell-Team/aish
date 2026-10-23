@@ -1048,6 +1048,18 @@ impl PersistentPty {
         None
     }
 
+    /// Interrupt both the foreground job and the persistent shell executing it.
+    ///
+    /// The PTY Ctrl+C byte targets only the foreground job's process group.
+    /// For a compound shell list such as `sleep 3; touch marker`, Bash may
+    /// continue to the next list item after the child process receives
+    /// SIGINT. Signaling the shell's own group as well makes it abort the
+    /// current list while keeping the interactive shell available.
+    fn interrupt_current_command(&mut self) {
+        let _ = kill_pg(self.child_pid, Signal::SIGINT);
+        let _ = self.write_master(b"\x03");
+    }
+
     /// Execute a command and wait for completion with timeout.
     /// Returns cleaned output and exit code.
     /// When `cancel_token` is provided, the caller can request
@@ -1131,7 +1143,7 @@ impl PersistentPty {
             // Check external cancellation.
             if let Some(ref ct) = cancel_token {
                 if ct.is_cancelled() {
-                    let _ = self.write_master(b"\x03");
+                    self.interrupt_current_command();
                     cancelled = true;
                     break;
                 }
@@ -1197,12 +1209,12 @@ impl PersistentPty {
                         if data.contains(&0x03) {
                             // Ctrl+C: forward the byte to the PTY so the
                             // terminal driver delivers SIGINT to the
-                            // *foreground* process group (the pager's group),
-                            // not bash's own group. Pagers like `less` swallow
-                            // SIGINT, so the SIGTERM/SIGKILL escalation for
-                            // them happens in the cleanup section below after
-                            // the loop breaks.
-                            let _ = self.write_master(b"\x03");
+                            // *foreground* process group (the pager's group).
+                            // Also interrupt bash's group: after a child in a
+                            // compound command receives SIGINT, bash can
+                            // otherwise continue with later `;`-separated
+                            // commands before the cancellation cleanup runs.
+                            self.interrupt_current_command();
                             if let Some(ref ct) = cancel_token {
                                 // Mark as user interrupt so bash can abort the
                                 // LLM session — raw-mode Ctrl+C is 0x03, not SIGINT.
@@ -1329,7 +1341,7 @@ impl PersistentPty {
         // payloads would reach its stdin. Treat it like a user cancel:
         // interrupt the foreground process, then run the same cleanup path.
         if !cancelled && !command_finished && std::time::Instant::now() >= deadline {
-            let _ = self.write_master(b"\x03");
+            self.interrupt_current_command();
             // Cancel the caller's token too (issue #541: "超时或取消后应
             // 说明命令未完成"): the Bash tool races its own timer against
             // this deadline, so a non-cancelled token here would report the
@@ -8717,6 +8729,71 @@ mod tests {
         assert!(output.contains("hello_world_123"), "output was: {}", output);
 
         pty.stop();
+    }
+
+    /// A cancelled backend command must not continue the rest of its shell
+    /// list after the foreground process receives Ctrl+C (issue #596).
+    #[test]
+    fn test_issue_596_cancel_stops_compound_command_tail() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let mut unexpected_tail: Option<(usize, String)> = None;
+
+        for attempt in 0..10 {
+            let started = cwd.join(format!("started-{attempt}"));
+            let marker = cwd.join(format!("tail-{attempt}"));
+            let token = std::sync::Arc::new(CancelToken::new());
+            let cancel = std::sync::Arc::clone(&token);
+            let started_for_thread = started.clone();
+            let interrupter = std::thread::spawn(move || {
+                let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(
+                    started_for_thread.exists(),
+                    "command never reached its first step"
+                );
+                std::thread::sleep(Duration::from_millis(150));
+                cancel.cancel_as_user_interrupt();
+            });
+
+            let command = format!(
+                "touch {}; sleep 3; touch {}",
+                shell_quote_escape(&started.display().to_string()),
+                shell_quote_escape(&marker.display().to_string())
+            );
+            let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+            interrupter.join().expect("cancellation thread");
+            let (output, exit_code, _) = result.expect("cancelled command must return");
+            assert_eq!(
+                exit_code, -1,
+                "cancelled command returned {exit_code}: {output:?}"
+            );
+            if marker.exists() {
+                unexpected_tail = Some((attempt, output));
+                break;
+            }
+        }
+
+        let (output, exit_code, _) = pty
+            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(
+            unexpected_tail.is_none(),
+            "cancelled command still executed its tail on attempt {}: {:?}",
+            unexpected_tail
+                .as_ref()
+                .map(|(attempt, _)| *attempt)
+                .unwrap_or_default(),
+            unexpected_tail.map(|(_, output)| output)
+        );
     }
 
     /// Regression: user commands must run with PTY ECHO on.
