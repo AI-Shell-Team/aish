@@ -1599,6 +1599,16 @@ impl PersistentPty {
             .collect::<Vec<u8>>();
         let raw_str = String::from_utf8_lossy(&raw_output).to_string();
 
+        // A source file closes an unterminated here-document at EOF and Bash
+        // reports a warning instead of remaining at PS2. Preserve the
+        // backend's failure result for that incomplete command input.
+        if !cancelled
+            && raw_str.contains("here-document at line")
+            && raw_str.contains("delimited by end-of-file")
+        {
+            result_exit_code = -1;
+        }
+
         if cancelled {
             let cleaned = clean_pty_output(&raw_str, command);
             Ok((cleaned, -1, result_cwd))
@@ -9404,12 +9414,11 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
-    /// An unterminated heredoc leaves bash at the PS2 continuation prompt;
-    /// a short timeout must return bounded (not hang), report failure, and
-    /// the PS2 recovery must leave the session usable for the next command
-    /// (issue #541 review).
+    /// An unterminated heredoc is closed by EOF on the private source file;
+    /// report the parser warning as failure and leave the session usable for
+    /// the next command (issue #541 review).
     #[test]
-    fn test_issue_541_ps2_timeout_recovers_session() {
+    fn test_issue_541_unterminated_heredoc_returns_bounded_failure() {
         let cwd = std::env::temp_dir().join(format!("aish-541-ps2-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).expect("create cwd");
         let mut pty = start_test_pty(cwd.to_str().unwrap());
@@ -9420,7 +9429,7 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             .expect("unterminated heredoc must return");
         assert_eq!(
             code, -1,
-            "timed-out heredoc must not report success, out={out:?}"
+            "unterminated heredoc must not report success, out={out:?}"
         );
         assert!(
             started.elapsed() < Duration::from_secs(2),

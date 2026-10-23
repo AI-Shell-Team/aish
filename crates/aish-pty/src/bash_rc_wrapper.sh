@@ -163,6 +163,10 @@ __aish_install_backend_int_trap() {
 }
 
 __aish_begin_backend_command() {
+    # Backend commands can read terminal input (for example through `read` or
+    # Python's input()). Re-enable PTY echo until PROMPT_COMMAND restores the
+    # silent aish prompt.
+    stty echo 2>/dev/null || true
     __AISH_CANCEL_SAVED_INT_TRAP=$(builtin trap -p INT)
     __AISH_CANCEL_SOURCE_ACTIVE=1
     __AISH_CANCEL_ACTIVE=1
