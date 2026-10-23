@@ -42,6 +42,10 @@ __AISH_CANCEL_DEBUG_GUARD=0
 __AISH_CANCEL_PREV_COMMAND=
 __AISH_CANCEL_SAVED_INT_TRAP=
 __AISH_CANCEL_TRAP_CHANGED=0
+__AISH_BACKEND_PS2_PENDING=0
+__AISH_BACKEND_PS2_DEF_PENDING=0
+__AISH_BACKEND_PS2_SET=
+__AISH_BACKEND_PS2=
 
 __aish_json_escape() {
     local value="$1"
@@ -128,6 +132,36 @@ __aish_emit_command_started() {
         '{"version":%s,"type":"command_started","ts":%s,"command_seq":%s,"command":"%s","cwd":"%s","shlvl":%s}' \
         "$__AISH_PROTOCOL_VERSION" "$ts" "$command_seq" "$command_json" "$(__aish_json_escape "$PWD")" "${SHLVL:-0}"
     __aish_emit_control_line "$payload"
+}
+
+# Suppress PS2 while the backend's temporary function definition is parsed.
+# Restore it after the definition, or from PROMPT_COMMAND if parsing is
+# interrupted (for example, a timed-out heredoc).
+__aish_prepare_backend_command_definition() {
+    __AISH_BACKEND_PS2_SET="${PS2+x}"
+    __AISH_BACKEND_PS2="${PS2-}"
+    __AISH_BACKEND_PS2_PENDING=1
+    __AISH_BACKEND_PS2_DEF_PENDING=1
+    PS2=''
+}
+
+__aish_restore_backend_ps2() {
+    if [[ "${__AISH_BACKEND_PS2_PENDING:-0}" != "1" ]]; then
+        return 0
+    fi
+    if [[ "${__AISH_BACKEND_PS2_DEF_PENDING:-0}" == "1" ]]; then
+        __AISH_BACKEND_PS2_DEF_PENDING=0
+        return 0
+    fi
+
+    if [[ "${__AISH_BACKEND_PS2_SET:-}" == "x" ]]; then
+        PS2="$__AISH_BACKEND_PS2"
+    else
+        unset PS2
+    fi
+    __AISH_BACKEND_PS2_PENDING=0
+    __AISH_BACKEND_PS2_SET=
+    __AISH_BACKEND_PS2=
 }
 
 # Run a backend command in a traced function so Bash's temporary INT trap can
@@ -236,6 +270,9 @@ __aish_on_debug() {
         __aish_backend_command_* )
             return 0
             ;;
+        __aish_prepare_backend_command_definition*|__aish_restore_backend_ps2*|__AISH_BACKEND_PS2_*|PS2=* )
+            return 0
+            ;;
         __aish_prompt_command*|__aish_on_debug*|__aish_emit_*|__aish_json_escape*|__aish_complete*|_aish_*|trap* )
             return 0
             ;;
@@ -274,6 +311,7 @@ __aish_on_debug() {
 __aish_prompt_command() {
     local exit_code=$?
     __aish_last_exit_code=$exit_code
+    __aish_restore_backend_ps2
     __aish_rewrite_last_history_entry
     # Call original PROMPT_COMMAND if it exists
     if [[ -n "$__AISH_ORIGINAL_PROMPT_COMMAND" ]]; then

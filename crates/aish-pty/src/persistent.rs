@@ -907,38 +907,31 @@ impl PersistentPty {
             // `cat` while the command runs, restoring the originals
             // afterward.
             //
-            // Line layout (issue #541): line 1 is the env prefix; line 2 is
-            // the seq/text bookkeeping + user command. Appending a `;`-led
-            // restore after the command corrupted syntax boundaries (`cmd &`
-            // → `cmd &;` parse error; heredoc terminator → `EOF;` PS2 hang),
-            // so the restore is NOT queued here. It is written by
-            // `execute_command` after the command's terminal event (or
-            // cancel/PS2 recovery), which also keeps it out of the tty input
-            // queue where a stdin-reading command would consume it as data
-            // or a `\x03` line-discipline flush would drop it.
+            // The pager environment prefix remains on its own line so it
+            // cannot alter command syntax. A second line temporarily hides
+            // PS2 while Bash parses the backend function; the shell restores
+            // it after the definition or from PROMPT_COMMAND if parsing is
+            // interrupted.
             //
-            // Keep the bookkeeping, a temporary function containing the
-            // command, and its invocation on the same interactive line. The
-            // traced function gives cancellation a scoped INT trap while the
-            // command still runs in the persistent shell. The event carrying
-            // our seq then reports the command's real status. (A separate
-            // bookkeeping line would mask failures with an exit code of 0.)
+            // Keep the temporary function, seq/text bookkeeping, and its
+            // invocation on the same interactive line. The traced function
+            // gives cancellation a scoped INT trap while preserving shell
+            // state and command job control. The seq event then carries the
+            // command's real status.
             let (pg_prefix, pg_suffix) = backend_pager_override();
             payload.extend_from_slice(pg_prefix.as_bytes());
             payload.push(b'\n');
             if let Some(s) = seq {
                 let quoted = shell_quote_escape(command);
                 let command_function = format!("__aish_backend_command_{}", s.unsigned_abs());
-                payload.extend_from_slice(
-                    format!(
-                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; {command_function}() {{\n"
-                    )
-                    .as_bytes(),
-                );
+                payload.extend_from_slice(b" __aish_prepare_backend_command_definition\n");
+                payload.extend_from_slice(format!(" {command_function}() {{\n").as_bytes());
                 payload.extend_from_slice(command.as_bytes());
                 payload.extend_from_slice(
-                    format!("\n}}; __aish_execute_backend_command {s} {command_function}\n")
-                        .as_bytes(),
+                    format!(
+                        "\n}}; __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; __aish_restore_backend_ps2; __aish_execute_backend_command {s} {command_function}\n"
+                    )
+                    .as_bytes(),
                 );
             } else {
                 payload.extend_from_slice(command.as_bytes());
