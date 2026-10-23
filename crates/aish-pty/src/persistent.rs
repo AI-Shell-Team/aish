@@ -954,6 +954,18 @@ impl PersistentPty {
 
     /// Send a command to bash (no waiting for completion).
     pub fn send_command(&mut self, command: &str, seq: Option<i32>) -> aish_core::Result<()> {
+        self.send_command_with_options(command, seq, true, true)
+    }
+
+    /// Send a backend command, optionally tracing nested functions and enabling
+    /// PTY echo. Small internal completion queries do not need either behavior.
+    pub(crate) fn send_command_with_options(
+        &mut self,
+        command: &str,
+        seq: Option<i32>,
+        trace_nested_functions: bool,
+        enable_echo: bool,
+    ) -> aish_core::Result<()> {
         let source = if seq.is_some() {
             CommandSource::Backend
         } else {
@@ -991,9 +1003,11 @@ impl PersistentPty {
                 if !prefix.is_empty() && !prefix.ends_with(';') {
                     prefix.push(';');
                 }
+                let trace_nested_functions = usize::from(trace_nested_functions);
+                let enable_echo = usize::from(enable_echo);
                 payload.extend_from_slice(
                     format!(
-                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT=$(< {script_path}); __AISH_CANCEL_MARKER={cancel_path}; __AISH_BACKEND_SETUP=1; {prefix} __AISH_BACKEND_SETUP=0; __aish_begin_backend_command; source {script_path}; __aish_finish_backend_command $?\n"
+                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT=$(< {script_path}); __AISH_CANCEL_MARKER={cancel_path}; __AISH_BACKEND_SETUP=1; __AISH_BACKEND_TRACE_FUNCTIONS={trace_nested_functions}; __AISH_BACKEND_ENABLE_ECHO={enable_echo}; {prefix} __AISH_BACKEND_SETUP=0; __aish_begin_backend_command; source {script_path}; __aish_finish_backend_command $?\n"
                     )
                     .as_bytes(),
                 );

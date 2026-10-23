@@ -49,6 +49,8 @@ __AISH_CANCEL_SAVED_EXTDEBUG=0
 __AISH_CANCEL_ABORT=0
 __AISH_CANCEL_DEBUG_CLEANUP=0
 __AISH_BACKEND_SETUP=0
+__AISH_BACKEND_TRACE_FUNCTIONS=1
+__AISH_BACKEND_ENABLE_ECHO=1
 
 __aish_json_escape() {
     local value="$1"
@@ -166,7 +168,9 @@ __aish_begin_backend_command() {
     # Backend commands can read terminal input (for example through `read` or
     # Python's input()). Re-enable PTY echo until PROMPT_COMMAND restores the
     # silent aish prompt.
-    stty echo 2>/dev/null || true
+    if [[ "${__AISH_BACKEND_ENABLE_ECHO:-1}" == "1" ]]; then
+        stty echo 2>/dev/null || true
+    fi
     __AISH_CANCEL_SAVED_INT_TRAP=$(builtin trap -p INT)
     __AISH_CANCEL_SOURCE_ACTIVE=1
     __AISH_CANCEL_ACTIVE=1
@@ -189,7 +193,9 @@ __aish_begin_backend_command() {
     __aish_install_backend_int_trap
     # The DEBUG hook must see trap changes made inside user-defined functions
     # as well as at the source-file's top level.
-    set -o functrace
+    if [[ "${__AISH_BACKEND_TRACE_FUNCTIONS:-1}" == "1" ]]; then
+        set -o functrace
+    fi
     __AISH_AT_PROMPT=0
     __aish_emit_command_started "${__AISH_ACTIVE_COMMAND_TEXT:-}"
 }
