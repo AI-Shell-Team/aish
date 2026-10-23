@@ -304,7 +304,7 @@ __aish_on_debug() {
                     __AISH_CANCEL_SAVED_FUNCTRACE=0
                     ;;
             esac
-            if [[ "$-" != *T* ]]; then
+            if [[ "${__AISH_BACKEND_TRACE_FUNCTIONS:-1}" == "1" && "$-" != *T* ]]; then
                 __AISH_CANCEL_SAVED_FUNCTRACE=0
                 set -o functrace
             fi
