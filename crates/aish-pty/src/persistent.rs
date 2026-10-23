@@ -1056,7 +1056,12 @@ impl PersistentPty {
     /// SIGINT. Signaling the shell's own group as well makes it abort the
     /// current list while keeping the interactive shell available.
     fn interrupt_current_command(&mut self) {
-        let _ = kill_pg(self.child_pid, Signal::SIGINT);
+        // When job control is disabled (or a shell builtin is running), Bash
+        // can also own the PTY foreground group. In that case the ETX byte
+        // already signals Bash, so avoid delivering SIGINT twice.
+        if pty_foreground_pgrp(self.master_fd).is_some_and(|fg| fg != self.child_pid) {
+            let _ = kill_pg(self.child_pid, Signal::SIGINT);
+        }
         let _ = self.write_master(b"\x03");
     }
 
@@ -8738,11 +8743,13 @@ mod tests {
         let cwd = std::env::temp_dir().join(format!("aish-596-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).expect("create cwd");
         let mut pty = start_test_pty(cwd.to_str().unwrap());
-        let mut unexpected_tail: Option<(usize, String)> = None;
+        let mut tail_markers = Vec::new();
+        let mut first_unexpected_output = None;
 
         for attempt in 0..10 {
             let started = cwd.join(format!("started-{attempt}"));
             let marker = cwd.join(format!("tail-{attempt}"));
+            tail_markers.push(marker.clone());
             let token = std::sync::Arc::new(CancelToken::new());
             let cancel = std::sync::Arc::clone(&token);
             let started_for_thread = started.clone();
@@ -8772,7 +8779,7 @@ mod tests {
                 "cancelled command returned {exit_code}: {output:?}"
             );
             if marker.exists() {
-                unexpected_tail = Some((attempt, output));
+                first_unexpected_output = Some(output);
                 break;
             }
         }
@@ -8783,16 +8790,19 @@ mod tests {
         assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
         assert!(output.contains("session_ok"), "got: {output:?}");
 
+        // Check after the shell has returned from the follow-up command so a
+        // delayed tail from the cancelled command cannot escape the test.
+        let unexpected_tails = tail_markers
+            .into_iter()
+            .filter(|marker| marker.exists())
+            .collect::<Vec<_>>();
         pty.stop();
         let _ = std::fs::remove_dir_all(&cwd);
         assert!(
-            unexpected_tail.is_none(),
-            "cancelled command still executed its tail on attempt {}: {:?}",
-            unexpected_tail
-                .as_ref()
-                .map(|(attempt, _)| *attempt)
-                .unwrap_or_default(),
-            unexpected_tail.map(|(_, output)| output)
+            unexpected_tails.is_empty(),
+            "cancelled command created tail markers {:?}: {:?}",
+            unexpected_tails,
+            first_unexpected_output
         );
     }
 
