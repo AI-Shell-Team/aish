@@ -9546,7 +9546,7 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         let (_, exit_code, _) = pty
             .execute_command(
-                "declare __AISH_PTY_DECLARATION_TEST=kept; set -- first second; __AISH_PTY_ASSIGNMENT_TEST=global",
+                "set -e; declare __AISH_PTY_DECLARATION_TEST=kept; set -- first second; __AISH_PTY_ASSIGNMENT_TEST=global",
                 Duration::from_secs(5),
                 None,
                 false,
@@ -9556,7 +9556,7 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         let (output, exit_code, _) = pty
             .execute_command(
-                "printf '%s:%s:%s:%s' \"$__AISH_PTY_DECLARATION_TEST\" \"$1\" \"$2\" \"$__AISH_PTY_ASSIGNMENT_TEST\"",
+                "if [[ $- == *e* ]]; then printf '%s:%s:%s:%s:errexit' \"$__AISH_PTY_DECLARATION_TEST\" \"$1\" \"$2\" \"$__AISH_PTY_ASSIGNMENT_TEST\"; else exit 23; fi",
                 Duration::from_secs(5),
                 None,
                 false,
@@ -9564,9 +9564,14 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             .expect("follow-up command");
         assert_eq!(exit_code, 0);
         assert!(
-            output.contains("kept:first:second:global"),
+            output.contains("kept:first:second:global:errexit"),
             "got: {output:?}"
         );
+
+        let (_, exit_code, _) = pty
+            .execute_command("set +e; true", Duration::from_secs(5), None, false)
+            .expect("restore errexit to its normal test state");
+        assert_eq!(exit_code, 0);
 
         pty.stop();
     }

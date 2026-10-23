@@ -33,6 +33,8 @@ impl CommandState {
         command_seq: Option<i32>,
     ) {
         let command = command.trim().to_string();
+        // Empty interactive submissions are ignored, but an explicitly
+        // sequenced backend command still needs a completion result.
         if command.is_empty() && command_seq.is_none() {
             return;
         }
