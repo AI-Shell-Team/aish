@@ -3604,6 +3604,10 @@ impl AishShell {
                                     }
                                 }
 
+                                // Issue #608: an explicit request for a report in
+                                // the prompt delivers one without a second ask.
+                                self.maybe_auto_report(&question);
+
                                 self.record_history(input, 0);
                             }
                         }
@@ -3728,6 +3732,8 @@ impl AishShell {
                                                 sep_renderer.render_separator();
                                             }
                                             self.persist_session_snapshot();
+                                            // Issue #608: same auto-delivery as the main AI branch.
+                                            self.maybe_auto_report(&question);
                                             self.record_history(input, 0);
                                         }
                                     }
@@ -4143,12 +4149,18 @@ impl AishShell {
                         if self.ai_handler.cancellation_token().is_cancelled() {
                             self.sub_agent_animation.stop();
                             println!("{}", theme::warning(&t("shell.interrupted")));
-                        } else if !did_stream && !response.trim().is_empty() {
-                            let mut sep = ShellRenderer::new();
-                            sep.set_shared_recorder(self.shared_recorder.clone());
-                            sep.render_separator();
-                            print_md_with_recording(&response, &self.shared_recorder);
-                            sep.render_separator();
+                        } else {
+                            if !did_stream && !response.trim().is_empty() {
+                                let mut sep = ShellRenderer::new();
+                                sep.set_shared_recorder(self.shared_recorder.clone());
+                                sep.render_separator();
+                                print_md_with_recording(&response, &self.shared_recorder);
+                                sep.render_separator();
+                            }
+                            // This path used to skip the snapshot; a report must
+                            // see the turn it describes, so persist it first.
+                            self.persist_session_snapshot();
+                            self.maybe_auto_report(&question);
                         }
                     }
                     Err(aish_core::AishError::Cancelled) => {
@@ -4623,6 +4635,7 @@ impl AishShell {
             Some("/memory") => self.handle_memory_command(&parts),
             Some("/skill") => self.handle_skill_command(&parts),
             Some("/export") => self.handle_export_command(&parts),
+            Some("/report") => self.handle_report_command(&parts),
             Some("/fork") => self.handle_fork_command(),
             Some("/sessions") => self.handle_sessions_command(),
             _ => {
@@ -5124,6 +5137,256 @@ impl AishShell {
                     args
                 })
             ),
+        }
+    }
+
+    /// `/report [open]` — write an offline HTML report for the current session.
+    ///
+    /// Reads only already-recorded session data: no command is re-executed and
+    /// no model call is made, so viewing or regenerating a report can never
+    /// change the analysis it describes (issue #608).
+    fn handle_report_command(&self, parts: &[&str]) {
+        let mut force_open = false;
+        for arg in parts.iter().skip(1) {
+            match *arg {
+                "open" => force_open = true,
+                "--help" | "-h" => {
+                    println!("{}", t("shell.report.usage"));
+                    return;
+                }
+                _ => {
+                    eprintln!("{}", t("shell.report.usage"));
+                    return;
+                }
+            }
+        }
+        if let Some(paths) = self.write_report_files() {
+            self.announce_report(&paths, force_open, true);
+        }
+    }
+
+    /// Auto-delivery hook for a completed AI turn.
+    ///
+    /// Only fires when the user asked for a report in the prompt, so ordinary
+    /// questions and shell commands keep their current behaviour. Failure is
+    /// announced without touching the analysis already shown in the terminal.
+    fn maybe_auto_report(&self, prompt: &str) {
+        if !crate::report::should_auto_report(prompt) {
+            return;
+        }
+        match self.write_report_files() {
+            Some(paths) => self.announce_report(&paths, false, false),
+            None => eprintln!("{}", t("shell.report.not_generated")),
+        }
+    }
+
+    /// Render `report.html` + `report.md` for the current session.
+    ///
+    /// Returns `None` after printing the reason when anything fails, so the
+    /// caller can never claim a report was delivered when it was not.
+    fn write_report_files(&self) -> Option<ReportPaths> {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.report.store_unavailable"));
+            return None;
+        };
+        let uuid = &self.session_uuid;
+        let record = match store.get_session(uuid) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                eprintln!("{}", t("shell.report.not_found"));
+                return None;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.report.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return None;
+            }
+        };
+        let history = match store.get_history(uuid, 100_000) {
+            Ok(history) => history,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.report.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return None;
+            }
+        };
+        let snapshot = record.state_snapshot();
+        // Same source preference as /export (issue #530): the append-only
+        // transcript survives compaction, the snapshot is the legacy fallback.
+        let messages = match store.get_ai_messages(uuid) {
+            Ok(messages) if !messages.is_empty() => messages,
+            Ok(_) => snapshot.context_messages_snapshot.clone(),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.report.load_failed", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        args
+                    })
+                );
+                return None;
+            }
+        };
+        let transcript_failed = self.ai_handler.transcript_failed_appends().unwrap_or(0);
+        let created_at = record
+            .created_at
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+
+        let bundle = crate::report::build_report(
+            &crate::report::ReportInput {
+                session_uuid: uuid,
+                model: &record.model,
+                created_at: &created_at,
+                cwd: snapshot.cwd.as_deref(),
+                messages: &messages,
+                history: &history,
+                transcript_failed,
+            },
+            self.security_manager.secret_scanner(),
+        );
+
+        let dir = crate::report::reports_dir(self.config.report.output_dir.as_deref(), uuid);
+        let html_path = dir.join("report.html");
+        let md_path = dir.join("report.md");
+        if let Err(e) = crate::report::write_private_file(&html_path, bundle.html.as_bytes()) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.report.write_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), html_path.display().to_string());
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            );
+            return None;
+        }
+        // The Markdown copy is for archiving; losing it must not fail the
+        // delivery of the HTML the user asked for.
+        if let Err(e) = crate::report::write_private_file(&md_path, bundle.markdown.as_bytes()) {
+            eprintln!(
+                "{}",
+                t_with_args("shell.report.write_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), md_path.display().to_string());
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            );
+        }
+
+        if transcript_failed > 0 {
+            eprintln!(
+                "{}",
+                t_with_args("shell.report.incomplete_warning", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("failed".to_string(), transcript_failed.to_string());
+                    args
+                })
+            );
+        }
+
+        Some(ReportPaths {
+            html: html_path,
+            markdown: md_path,
+            messages: bundle.messages,
+            evidence: bundle.evidence_rows,
+            commands: history.len(),
+            hits: bundle.redaction_hits,
+        })
+    }
+
+    /// Print the delivery result and, when allowed, open the report.
+    fn announce_report(&self, paths: &ReportPaths, force_open: bool, forced_by_user: bool) {
+        let file = paths.html.display().to_string();
+        println!(
+            "{}",
+            theme::success(&t_with_args("shell.report.generated", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("file".to_string(), file.clone());
+                args.insert("msgs".to_string(), paths.messages.to_string());
+                args.insert("evidence".to_string(), paths.evidence.to_string());
+                args.insert("cmds".to_string(), paths.commands.to_string());
+                args.insert("hits".to_string(), paths.hits.to_string());
+                args
+            }))
+        );
+        if paths.markdown.exists() {
+            println!(
+                "  {}",
+                theme::faint(&t_with_args("shell.report.markdown_saved", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), paths.markdown.display().to_string());
+                    args
+                }))
+            );
+        }
+
+        let remote = crate::report::is_remote_session();
+        let graphical = crate::report::has_graphical_session();
+        let auto = self.config.report.auto_open && crate::report::can_auto_open(remote, graphical);
+        if !force_open && !auto {
+            // SSH and headless shells never launch a browser: give the path
+            // and how to get the file instead.
+            let key = if remote {
+                "shell.report.hint_remote"
+            } else {
+                "shell.report.hint_local"
+            };
+            println!(
+                "  {}",
+                theme::faint(&t_with_args(key, &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), file.clone());
+                    args
+                }))
+            );
+            if forced_by_user && !remote {
+                println!("  {}", theme::faint(&t("shell.report.open_hint")));
+            }
+            return;
+        }
+
+        println!(
+            "  {}",
+            theme::faint(&t_with_args("shell.report.opening", &{
+                let mut args = std::collections::HashMap::new();
+                args.insert("file".to_string(), file.clone());
+                args
+            }))
+        );
+        if let Err(e) = open::that(&paths.html) {
+            // A missing browser is not a report failure: the file exists and
+            // the terminal keeps working.
+            eprintln!(
+                "{}",
+                t_with_args("shell.report.open_failed", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("error".to_string(), e.to_string());
+                    args
+                })
+            );
+            println!(
+                "  {}",
+                theme::faint(&t_with_args("shell.report.hint_local", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("file".to_string(), file.clone());
+                    args
+                }))
+            );
         }
     }
 
@@ -14316,6 +14579,16 @@ fn format_age(secs: u64) -> String {
     }
 }
 
+/// Files and counters of one generated report.
+struct ReportPaths {
+    html: PathBuf,
+    markdown: PathBuf,
+    messages: usize,
+    evidence: usize,
+    commands: usize,
+    hits: usize,
+}
+
 /// Parsed `/export` invocation.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExportOptions {
@@ -15504,6 +15777,102 @@ mod export_tests {
     fn mgr_placeholder_check(key: &str, placeholder: &str) -> bool {
         let mgr = aish_i18n::I18nManager::new_with_locale("en-US");
         mgr.t(key).contains(&format!("{{{placeholder}}}"))
+    }
+
+    #[test]
+    fn report_i18n_keys_exist_in_all_embedded_locales() {
+        // Issue #608: the report is a file the user keeps, so a missing
+        // translation would be frozen into it as a raw dotted key.
+        let keys = [
+            "shell.slash.report",
+            "shell.report.usage",
+            "shell.report.generated",
+            "shell.report.markdown_saved",
+            "shell.report.opening",
+            "shell.report.open_failed",
+            "shell.report.open_hint",
+            "shell.report.hint_local",
+            "shell.report.hint_remote",
+            "shell.report.store_unavailable",
+            "shell.report.not_found",
+            "shell.report.load_failed",
+            "shell.report.write_failed",
+            "shell.report.not_generated",
+            "shell.report.incomplete_warning",
+            "shell.report.html.title",
+            "shell.report.html.session",
+            "shell.report.html.model",
+            "shell.report.html.created",
+            "shell.report.html.generated",
+            "shell.report.html.scope",
+            "shell.report.html.redaction",
+            "shell.report.html.objective",
+            "shell.report.html.findings",
+            "shell.report.html.findings_empty",
+            "shell.report.html.evidence",
+            "shell.report.html.evidence_empty",
+            "shell.report.html.commands",
+            "shell.report.html.commands_empty",
+            "shell.report.html.col_source",
+            "shell.report.html.col_command",
+            "shell.report.html.gaps",
+            "shell.report.html.conversation",
+            "shell.report.html.footer",
+            "shell.report.html.args_label",
+            "shell.report.html.output_label",
+            "shell.report.html.output_missing",
+            "shell.report.html.tool_unknown",
+            "shell.report.html.role_user",
+            "shell.report.html.role_assistant",
+            "shell.report.html.role_system",
+            "shell.report.html.role_tool",
+            "shell.report.html.status_ok",
+            "shell.report.html.status_truncated",
+            "shell.report.html.status_missing",
+            "shell.report.html.gap_failed_commands",
+            "shell.report.html.gap_truncated",
+            "shell.report.html.gap_missing",
+            "shell.report.html.gap_transcript_failed",
+            "shell.report.html.gap_no_findings",
+            "shell.report.html.gap_no_evidence",
+            "shell.report.html.gap_observations_only",
+            "shell.report.html.gap_no_model_calls",
+        ];
+        for tag in ["en-US", "zh-CN", "ja-JP", "de-DE", "es-ES", "fr-FR"] {
+            let mgr = aish_i18n::I18nManager::new_with_locale(tag);
+            for key in keys {
+                let val = mgr.t(key);
+                assert_ne!(val, key, "locale {tag} is missing key {key}");
+            }
+        }
+        // Every placeholder the shell interpolates must survive translation.
+        for (key, placeholder) in [
+            ("shell.report.generated", "file"),
+            ("shell.report.generated", "msgs"),
+            ("shell.report.generated", "evidence"),
+            ("shell.report.generated", "cmds"),
+            ("shell.report.generated", "hits"),
+            ("shell.report.markdown_saved", "file"),
+            ("shell.report.opening", "file"),
+            ("shell.report.open_failed", "error"),
+            ("shell.report.hint_local", "file"),
+            ("shell.report.hint_remote", "file"),
+            ("shell.report.load_failed", "error"),
+            ("shell.report.write_failed", "file"),
+            ("shell.report.write_failed", "error"),
+            ("shell.report.incomplete_warning", "failed"),
+            ("shell.report.html.redaction", "hits"),
+            ("shell.report.html.redaction", "rules"),
+            ("shell.report.html.gap_failed_commands", "count"),
+            ("shell.report.html.gap_truncated", "count"),
+            ("shell.report.html.gap_missing", "count"),
+            ("shell.report.html.gap_transcript_failed", "count"),
+        ] {
+            assert!(
+                mgr_placeholder_check(key, placeholder),
+                "{key} lost the {{{placeholder}}} placeholder"
+            );
+        }
     }
 }
 

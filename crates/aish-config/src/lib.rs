@@ -19,6 +19,6 @@ pub mod model;
 pub use loader::ConfigLoader;
 pub use model::{
     compile_remote_danger_patterns, ApiAccountConfig, ConfigModel, InlineCompletionConfig,
-    McpConfig, McpServerConfig, MemoryConfig, OutputOffloadConfig, RegistrySource, SkillsConfig,
-    TerminalResizeMode, ToolArgPreviewConfig,
+    McpConfig, McpServerConfig, MemoryConfig, OutputOffloadConfig, RegistrySource, ReportConfig,
+    SkillsConfig, TerminalResizeMode, ToolArgPreviewConfig,
 };

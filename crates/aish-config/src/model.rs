@@ -380,6 +380,30 @@ impl Default for ProjectInstructionsConfig {
     }
 }
 
+/// Report artifact generation (`/report`, issue #608).
+///
+/// Reports are always written locally; this only controls where they land and
+/// whether a local graphical session gets a browser opened for them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReportConfig {
+    /// Open the generated report in a browser. Only honoured for local
+    /// graphical sessions; SSH and headless shells always just print the path.
+    /// Default: true.
+    pub auto_open: bool,
+    /// Base directory for report files. Each session gets its own
+    /// sub-directory. `~` is expanded. Default: `<data_local_dir>/aish/reports`.
+    pub output_dir: Option<String>,
+}
+impl Default for ReportConfig {
+    fn default() -> Self {
+        Self {
+            auto_open: true,
+            output_dir: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Terminal resize mode
 // ---------------------------------------------------------------------------
@@ -713,6 +737,9 @@ pub struct ConfigModel {
     /// enable switch).
     #[serde(default)]
     pub project_instructions: ProjectInstructionsConfig,
+    /// Offline HTML report generation (`/report`).
+    #[serde(default)]
+    pub report: ReportConfig,
 }
 
 impl Default for ConfigModel {
@@ -770,6 +797,7 @@ impl Default for ConfigModel {
             fallback_revert_on_cooldown: default_true(),
             check_update_on_startup: default_true(),
             project_instructions: ProjectInstructionsConfig::default(),
+            report: ReportConfig::default(),
         }
     }
 }
