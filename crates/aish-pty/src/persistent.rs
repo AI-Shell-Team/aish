@@ -923,16 +923,31 @@ impl PersistentPty {
             payload.push(b'\n');
             if let Some(s) = seq {
                 let quoted = shell_quote_escape(command);
-                let command_function = format!("__aish_backend_command_{}", s.unsigned_abs());
-                payload.extend_from_slice(b" __aish_prepare_backend_command_definition\n");
-                payload.extend_from_slice(format!(" {command_function}() {{\n").as_bytes());
-                payload.extend_from_slice(command.as_bytes());
-                payload.extend_from_slice(
-                    format!(
-                        "\n}}; __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; __aish_restore_backend_ps2; __aish_execute_backend_command {s} {command_function}\n"
-                    )
-                    .as_bytes(),
-                );
+                if is_simple_stateful_declaration(command) {
+                    // `declare`/`typeset` create function-local variables when
+                    // run inside the cancellation wrapper. Keep standalone,
+                    // side-effect-free declarations at the persistent shell's
+                    // top level so later BashTool calls can see their state.
+                    payload.extend_from_slice(
+                        format!(
+                            " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; "
+                        )
+                        .as_bytes(),
+                    );
+                    payload.extend_from_slice(command.as_bytes());
+                    payload.push(b'\n');
+                } else {
+                    let command_function = format!("__aish_backend_command_{}", s.unsigned_abs());
+                    payload.extend_from_slice(b" __aish_prepare_backend_command_definition\n");
+                    payload.extend_from_slice(format!(" {command_function}() {{\n").as_bytes());
+                    payload.extend_from_slice(command.as_bytes());
+                    payload.extend_from_slice(
+                        format!(
+                            "\n}}; __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; __aish_restore_backend_ps2; __aish_execute_backend_command {s} {command_function}\n"
+                        )
+                        .as_bytes(),
+                    );
+                }
             } else {
                 payload.extend_from_slice(command.as_bytes());
                 payload.push(b'\n');
@@ -6150,6 +6165,75 @@ fn write_rcfile_temp() -> aish_core::Result<std::path::PathBuf> {
     write_rcfile_temp_in(&std::env::temp_dir())
 }
 
+/// Return true for a single simple `declare` or `typeset` command.
+/// These builtins create local variables when called from the cancellation
+/// wrapper, so simple declarations must run at the persistent shell's top level.
+fn is_simple_stateful_declaration(command: &str) -> bool {
+    let command = command.trim_start_matches(|ch| ch == ' ' || ch == '\t');
+    let rest = if let Some(rest) = command.strip_prefix("declare") {
+        rest
+    } else if let Some(rest) = command.strip_prefix("typeset") {
+        rest
+    } else {
+        return false;
+    };
+
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| !ch.is_ascii_whitespace())
+    {
+        return false;
+    }
+
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    let mut previous_was_space = true;
+    let mut chars = rest.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\n' || ch == '\r' {
+            return false;
+        }
+        if escaped {
+            escaped = false;
+            previous_was_space = ch.is_ascii_whitespace();
+            continue;
+        }
+        if ch == '\\' && !in_single_quote {
+            escaped = true;
+            previous_was_space = false;
+            continue;
+        }
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            previous_was_space = false;
+            continue;
+        }
+        if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            previous_was_space = false;
+            continue;
+        }
+        if !in_single_quote {
+            if ch == '`' || (ch == '$' && chars.peek() == Some(&'(')) {
+                return false;
+            }
+        }
+        if !in_single_quote && !in_double_quote {
+            if matches!(ch, ';' | '|' | '&' | '<' | '>') {
+                return false;
+            }
+            if ch == '#' && previous_was_space {
+                break;
+            }
+        }
+        previous_was_space = ch.is_ascii_whitespace();
+    }
+
+    !in_single_quote && !in_double_quote && !escaped
+}
+
 /// Simple shell quoting for embedding a command in a bash assignment.
 pub fn shell_quote_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -7459,6 +7543,33 @@ mod tests {
             }
         }
         panic!("PersistentPty::start failed after retries: {:?}", last_err);
+    }
+
+    #[test]
+    fn test_simple_stateful_declaration_classification() {
+        for command in [
+            "declare value=one",
+            "  typeset -x PATH=/tmp/bin",
+            "declare -a names=(one two)",
+            "declare value='one; two' # note",
+        ] {
+            assert!(
+                is_simple_stateful_declaration(command),
+                "expected declaration to stay top-level: {command}"
+            );
+        }
+
+        for command in [
+            "declare value=one; touch marker",
+            "typeset value=$(printf one)",
+            "A=one declare value=two",
+            "echo declare value=one",
+        ] {
+            assert!(
+                !is_simple_stateful_declaration(command),
+                "expected compound command to use cancellation wrapper: {command}"
+            );
+        }
     }
 
     #[test]
@@ -9332,6 +9443,37 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&tempdir);
+    }
+
+    #[test]
+    fn test_execute_command_persists_standalone_declarations() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = start_test_pty(&cwd);
+
+        let (_, exit_code, _) = pty
+            .execute_command(
+                "declare __AISH_PTY_DECLARATION_TEST=kept",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("declaration command");
+        assert_eq!(exit_code, 0);
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "printf '%s' \"$__AISH_PTY_DECLARATION_TEST\"",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0);
+        assert!(output.contains("kept"), "got: {output:?}");
+
+        pty.stop();
     }
 
     #[test]
