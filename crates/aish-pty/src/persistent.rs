@@ -784,10 +784,76 @@ pub struct PersistentPty {
     /// `execute_command` after the command's terminal state (issue #541
     /// review: never queue it in the tty input queue behind the command).
     pending_pager_restore: Option<String>,
+    /// Private source file and cancellation marker for the active backend command.
+    /// Kept until the command and its deferred pager restore have completed.
+    pending_backend_command_files: Option<BackendCommandFiles>,
     /// Forward window-size changes to the child PTY while a command runs
     /// (driven by `terminal_resize_mode`). Enabled by default; see
     /// `follow_terminal_resize` for why it matters to TUIs.
     follow_resize: bool,
+}
+
+struct BackendCommandFiles {
+    script: std::path::PathBuf,
+    cancel_marker: std::path::PathBuf,
+}
+
+impl BackendCommandFiles {
+    fn create(command: &str) -> aish_core::Result<Self> {
+        let id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("aish-command-{id}.sh"));
+        let cancel_marker = std::env::temp_dir().join(format!("aish-command-{id}.cancel"));
+        let mut source = command.as_bytes().to_vec();
+        if !source.ends_with(b"\n") {
+            source.push(b'\n');
+        }
+
+        write_private_command_file(&script, &source)?;
+        if let Err(err) = write_private_command_file(&cancel_marker, b"") {
+            let _ = std::fs::remove_file(&script);
+            return Err(err);
+        }
+
+        Ok(Self {
+            script,
+            cancel_marker,
+        })
+    }
+
+    fn request_cancel(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.cancel_marker)?
+            .write_all(b"cancel")
+    }
+}
+
+impl Drop for BackendCommandFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.script);
+        let _ = std::fs::remove_file(&self.cancel_marker);
+    }
+}
+
+fn write_private_command_file(path: &std::path::Path, contents: &[u8]) -> aish_core::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|err| AishError::Pty(format!("failed to create backend command file: {err}")))?;
+    if let Err(err) = file.write_all(contents) {
+        let _ = std::fs::remove_file(path);
+        return Err(AishError::Pty(format!(
+            "failed to write backend command file: {err}"
+        )));
+    }
+    Ok(())
 }
 
 #[path = "aish_completion.rs"]
@@ -863,6 +929,7 @@ impl PersistentPty {
             exec_mode: Arc::new(AtomicBool::new(false)),
             next_completion_request_id: AtomicU64::new(0),
             pending_pager_restore: None,
+            pending_backend_command_files: None,
             follow_resize: true,
         };
 
@@ -887,11 +954,26 @@ impl PersistentPty {
 
     /// Send a command to bash (no waiting for completion).
     pub fn send_command(&mut self, command: &str, seq: Option<i32>) -> aish_core::Result<()> {
+        self.send_command_with_options(command, seq, true, true)
+    }
+
+    /// Send a backend command, optionally tracing nested functions and enabling
+    /// PTY echo. Small internal completion queries do not need either behavior.
+    pub(crate) fn send_command_with_options(
+        &mut self,
+        command: &str,
+        seq: Option<i32>,
+        trace_nested_functions: bool,
+        enable_echo: bool,
+    ) -> aish_core::Result<()> {
         let source = if seq.is_some() {
             CommandSource::Backend
         } else {
             CommandSource::User
         };
+        let backend_command_files = seq
+            .map(|_| BackendCommandFiles::create(command))
+            .transpose()?;
         self.command_state.register_command(command, source, seq);
 
         // Prepend Ctrl-U (NAK) to clear stale input in the PTY line
@@ -907,37 +989,34 @@ impl PersistentPty {
             // `cat` while the command runs, restoring the originals
             // afterward.
             //
-            // Line layout (issue #541): line 1 is the env prefix; line 2 is
-            // the seq/text bookkeeping + user command. Appending a `;`-led
-            // restore after the command corrupted syntax boundaries (`cmd &`
-            // → `cmd &;` parse error; heredoc terminator → `EOF;` PS2 hang),
-            // so the restore is NOT queued here. It is written by
-            // `execute_command` after the command's terminal event (or
-            // cancel/PS2 recovery), which also keeps it out of the tty input
-            // queue where a stdin-reading command would consume it as data
-            // or a `\x03` line-discipline flush would drop it.
-            //
-            // The seq/text bookkeeping must share the command's line: each
-            // interactive line fires one prompt_ready, so the event carrying
-            // our seq is the command line itself and its exit code is the
-            // command's real status. (A bookkeeping-only line would emit a
-            // seq-marked event with exit code 0, masking failures.) The
-            // trailing `&` caveat does not apply: `a=1; b=2; cmd &` runs the
-            // assignments synchronously and backgrounds only `cmd`.
+            // Keep setup and source invocation on one interactive line so a
+            // user's PROMPT_COMMAND runs once for this backend command. The
+            // source file executes at the persistent shell's top level, which
+            // preserves Bash state such as declarations and positional params.
             let (pg_prefix, pg_suffix) = backend_pager_override();
-            payload.extend_from_slice(pg_prefix.as_bytes());
-            payload.push(b'\n');
             if let Some(s) = seq {
-                let quoted = shell_quote_escape(command);
+                let files = backend_command_files
+                    .expect("backend command files created for a sequenced command");
+                let script_path = shell_quote_escape(&files.script.display().to_string());
+                let cancel_path = shell_quote_escape(&files.cancel_marker.display().to_string());
+                let mut prefix = pg_prefix;
+                if !prefix.is_empty() && !prefix.ends_with(';') {
+                    prefix.push(';');
+                }
+                let trace_nested_functions = usize::from(trace_nested_functions);
+                let enable_echo = usize::from(enable_echo);
                 payload.extend_from_slice(
                     format!(
-                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; "
+                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT=$(< {script_path}); __AISH_CANCEL_MARKER={cancel_path}; __AISH_BACKEND_SETUP=1; __AISH_BACKEND_TRACE_FUNCTIONS={trace_nested_functions}; __AISH_BACKEND_ENABLE_ECHO={enable_echo}; {prefix} __AISH_BACKEND_SETUP=0; __aish_begin_backend_command; source {script_path}; __aish_finish_backend_command $?\n"
                     )
                     .as_bytes(),
                 );
+                self.pending_backend_command_files = Some(files);
+            } else {
+                payload.extend_from_slice(pg_prefix.as_bytes());
+                payload.extend_from_slice(command.as_bytes());
+                payload.push(b'\n');
             }
-            payload.extend_from_slice(command.as_bytes());
-            payload.push(b'\n');
             // Hold the restore for execute_command to write after the
             // command's terminal state.
             self.pending_pager_restore = Some(pg_suffix);
@@ -947,14 +1026,21 @@ impl PersistentPty {
             return self.write_master(&payload);
         }
 
-        self.write_master(&payload)
+        let result = self.write_master(&payload);
+        if result.is_err() {
+            self.pending_backend_command_files.take();
+            self.pending_pager_restore = None;
+        }
+        result
     }
 
     /// Write the deferred pager-restore line (queued by [`Self::send_command`])
     /// and wait briefly for its null-seq prompt_ready so neither the restore
     /// echo nor its control event leaks into the next command.
     pub(crate) fn flush_pending_pager_restore(&mut self) {
+        let command_files = self.pending_backend_command_files.take();
         let Some(suffix) = self.pending_pager_restore.take() else {
+            drop(command_files);
             return;
         };
         let mut line = b"\x15".to_vec();
@@ -966,6 +1052,7 @@ impl PersistentPty {
         // The restore line triggers one prompt_ready with command_seq null.
         // Drain it so the next execute_command does not see a stale event.
         let _ = self.wait_for_null_seq_prompt(Duration::from_millis(500));
+        drop(command_files);
     }
 
     /// Run one line with no backend pager wrapper and return its exit code.
@@ -1046,6 +1133,102 @@ impl PersistentPty {
             }
         }
         None
+    }
+
+    /// Consume control events already queued when cancellation is requested.
+    /// If the backend command's completion is waiting in the pipe, prefer that
+    /// result to sending an interrupt that could land on the next prompt.
+    fn drain_ready_command_completion(
+        &mut self,
+        seq: i32,
+        result_exit_code: &mut i32,
+        result_cwd: &mut String,
+    ) -> bool {
+        if self.control_fd < 0 || self.control_fd as usize >= libc::FD_SETSIZE {
+            return false;
+        }
+        loop {
+            let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut fds);
+                libc::FD_SET(self.control_fd, &mut fds);
+            }
+            let mut tv = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            let ready = unsafe {
+                libc::select(
+                    self.control_fd + 1,
+                    &mut fds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tv,
+                )
+            };
+            if ready <= 0 || !unsafe { libc::FD_ISSET(self.control_fd, &fds) } {
+                return false;
+            }
+
+            let mut tmp = [0u8; 4096];
+            let read = unsafe {
+                libc::read(
+                    self.control_fd,
+                    tmp.as_mut_ptr() as *mut libc::c_void,
+                    tmp.len(),
+                )
+            };
+            if read <= 0 {
+                return false;
+            }
+            let events = decode_control_chunk(&mut self.control_buffer, &tmp[..read as usize]);
+            for event in &events {
+                if let BackendControlEvent::ShellExiting { .. } = event {
+                    self.running.store(false, Ordering::SeqCst);
+                }
+                if let BackendControlEvent::PromptReady { cwd, .. } = event {
+                    *result_cwd = cwd.clone();
+                }
+                if let Some(result) = self.command_state.handle_event(event) {
+                    if result.command_seq == Some(seq) {
+                        *result_exit_code = result.exit_code;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Interrupt the foreground job and make Bash unwind the active sourced
+    /// command. The private marker lets the INT handler distinguish this signal
+    /// from an ordinary SIGINT and preserve the user's handler for normal use.
+    fn interrupt_current_command(&mut self) {
+        if let Some(files) = &self.pending_backend_command_files {
+            if let Err(err) = files.request_cancel() {
+                debug!(%err, "failed to write backend cancellation marker");
+            }
+        }
+
+        match pty_foreground_pgrp(self.master_fd) {
+            Some(fg) if fg == self.child_pid => {
+                // Bash and the foreground job share a group (job control is
+                // disabled, or a shell builtin is running). ETX delivers one
+                // SIGINT to that group; the marker-aware handler keeps Bash
+                // alive and returns from the source file.
+                let _ = self.write_master(b"\x03");
+            }
+            Some(fg) => {
+                // Keep the shell's SIGINT separate from a foreground child so
+                // each receives exactly one interrupt.
+                let _ = kill(self.child_pid, Signal::SIGINT);
+                let _ = self.write_master(b"\x03");
+                debug!(foreground_pgrp = fg.as_raw(), "interrupted backend command");
+            }
+            None => {
+                let _ = kill(self.child_pid, Signal::SIGINT);
+                let _ = self.write_master(b"\x03");
+            }
+        }
     }
 
     /// Execute a command and wait for completion with timeout.
@@ -1131,7 +1314,15 @@ impl PersistentPty {
             // Check external cancellation.
             if let Some(ref ct) = cancel_token {
                 if ct.is_cancelled() {
-                    let _ = self.write_master(b"\x03");
+                    if self.drain_ready_command_completion(
+                        seq,
+                        &mut result_exit_code,
+                        &mut result_cwd,
+                    ) {
+                        command_finished = true;
+                        break;
+                    }
+                    self.interrupt_current_command();
                     cancelled = true;
                     break;
                 }
@@ -1197,12 +1388,12 @@ impl PersistentPty {
                         if data.contains(&0x03) {
                             // Ctrl+C: forward the byte to the PTY so the
                             // terminal driver delivers SIGINT to the
-                            // *foreground* process group (the pager's group),
-                            // not bash's own group. Pagers like `less` swallow
-                            // SIGINT, so the SIGTERM/SIGKILL escalation for
-                            // them happens in the cleanup section below after
-                            // the loop breaks.
-                            let _ = self.write_master(b"\x03");
+                            // *foreground* process group (the pager's group).
+                            // Also interrupt bash's group: after a child in a
+                            // compound command receives SIGINT, bash can
+                            // otherwise continue with later `;`-separated
+                            // commands before the cancellation cleanup runs.
+                            self.interrupt_current_command();
                             if let Some(ref ct) = cancel_token {
                                 // Mark as user interrupt so bash can abort the
                                 // LLM session — raw-mode Ctrl+C is 0x03, not SIGINT.
@@ -1288,18 +1479,10 @@ impl PersistentPty {
                             }
                             if let Some(r) = self.command_state.handle_event(event) {
                                 // Only an event carrying our seq terminates
-                                // the wait: with the multi-line payload
-                                // (issue #541) the seq/text assignments lead
-                                // the command line, so its prompt_ready is
-                                // the single authoritative terminal event.
-                                // Env-prefix and restore lines complete with
-                                // null-seq events that must NOT break the
-                                // loop — they arrive before the command
-                                // line's event and would surface a wrong
-                                // exit code. A command whose parse failed
-                                // before the seq assignment ran (no seq
-                                // event at all) is bounded by the timeout +
-                                // PS2 recovery below.
+                                // wait. The setup and sourced command share
+                                // one interactive line; the deferred pager
+                                // restore completes separately with a null
+                                // sequence and must not replace this result.
                                 if r.command_seq == Some(seq) {
                                     result_exit_code = r.exit_code;
                                     command_finished = true;
@@ -1329,7 +1512,7 @@ impl PersistentPty {
         // payloads would reach its stdin. Treat it like a user cancel:
         // interrupt the foreground process, then run the same cleanup path.
         if !cancelled && !command_finished && std::time::Instant::now() >= deadline {
-            let _ = self.write_master(b"\x03");
+            self.interrupt_current_command();
             // Cancel the caller's token too (issue #541: "超时或取消后应
             // 说明命令未完成"): the Bash tool races its own timer against
             // this deadline, so a non-cancelled token here would report the
@@ -1429,6 +1612,16 @@ impl PersistentPty {
             .drain(..)
             .collect::<Vec<u8>>();
         let raw_str = String::from_utf8_lossy(&raw_output).to_string();
+
+        // A source file closes an unterminated here-document at EOF and Bash
+        // reports a warning instead of remaining at PS2. Preserve the
+        // backend's failure result for that incomplete command input.
+        if !cancelled
+            && raw_str.contains("here-document at line")
+            && raw_str.contains("delimited by end-of-file")
+        {
+            result_exit_code = -1;
+        }
 
         if cancelled {
             let cleaned = clean_pty_output(&raw_str, command);
@@ -6151,16 +6344,12 @@ const BACKEND_PAGER_VARS: &[&str] = &["PAGER", "SYSTEMD_PAGER", "GIT_PAGER"];
 /// variables in [`BACKEND_PAGER_VARS`] to `cat` while a backend command
 /// runs, then restore their original values.
 ///
-/// Both snippets are **standalone lines**: the caller sends
-/// `prefix\n + command\n + suffix\n` (issue #541). A `;`-led inline suffix
-/// corrupted syntax boundaries (`cmd &` → `cmd &;` parse error; heredoc
-/// terminator → `EOF;` PS2 hang). As separate lines they are always
-/// syntactically independent, and because they run in the *current*
-/// interactive shell (no subshell), `cd` and other side effects still
-/// propagate to the persistent session. The restore is the next sequential
-/// line, so even when the command is killed (SIGINT/SIGKILL on a stuck
-/// pager) bash still runs it — the override never leaks into a subsequent
-/// command.
+/// The prefix is prepended to the backend setup line, and the suffix is sent
+/// separately after the sourced command finishes. The user command itself is
+/// read from a private source file, so its syntax (including `&` and heredocs)
+/// cannot be altered by either snippet. Both execute in the current shell, so
+/// `cd` and other state changes persist. The separate restore line also lets
+/// Bash recover pager variables after cancellation.
 ///
 /// `${VAR-__AISH_UNSET__}` yields the `__AISH_UNSET__` sentinel when `VAR`
 /// is unset, otherwise its current value (possibly empty), so the original
@@ -6171,14 +6360,7 @@ fn backend_pager_override() -> (String, String) {
     let mut restore = String::new();
     let mut unsets = String::new();
     for (i, var) in BACKEND_PAGER_VARS.iter().enumerate() {
-        // Every assignment uses `export` (not a bare `VAR=...`) on purpose:
-        // the backend shell's DEBUG trap classifies a command as an
-        // assignment by matching `^[A-Za-z_][A-Za-z_0-9]*=` and then strips
-        // the `VAR=value ` prefix up to the first space. A bare assignment
-        // with no trailing space (e.g. `__AISH_PV0=${PAGER-...}`) makes that
-        // strip a no-op, looping forever and hanging the shell. `export VAR=`
-        // has a space after `export` so it is never mis-classified.
-        save.push_str(&format!(" export __AISH_PV{i}=${{{var}-__AISH_UNSET__}};"));
+        save.push_str(&format!(" __AISH_PV{i}=${{{var}-__AISH_UNSET__}};"));
         export.push_str(&format!(" export {var}=cat;"));
         restore.push_str(&format!(
             " if [ \"$__AISH_PV{i}\" = __AISH_UNSET__ ]; then unset {var}; else export {var}=\"$__AISH_PV{i}\"; fi;"
@@ -8719,6 +8901,242 @@ mod tests {
         pty.stop();
     }
 
+    /// A cancelled backend command must not continue the rest of its shell
+    /// list after the foreground process receives Ctrl+C (issue #596).
+    #[test]
+    fn test_issue_596_cancel_stops_compound_command_tail() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let mut tail_markers = Vec::new();
+        let mut first_unexpected_output = None;
+
+        for attempt in 0..10 {
+            let started = cwd.join(format!("started-{attempt}"));
+            let marker = cwd.join(format!("tail-{attempt}"));
+            tail_markers.push(marker.clone());
+            let token = std::sync::Arc::new(CancelToken::new());
+            let cancel = std::sync::Arc::clone(&token);
+            let started_for_thread = started.clone();
+            let interrupter = std::thread::spawn(move || {
+                let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(
+                    started_for_thread.exists(),
+                    "command never reached its first step"
+                );
+                std::thread::sleep(Duration::from_millis(150));
+                cancel.cancel_as_user_interrupt();
+            });
+
+            let command = format!(
+                "touch {}; sleep 3; touch {}",
+                shell_quote_escape(&started.display().to_string()),
+                shell_quote_escape(&marker.display().to_string())
+            );
+            let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+            interrupter.join().expect("cancellation thread");
+            let (output, exit_code, _) = result.expect("cancelled command must return");
+            assert_eq!(
+                exit_code, -1,
+                "cancelled command returned {exit_code}: {output:?}"
+            );
+            if marker.exists() {
+                first_unexpected_output = Some(output);
+                break;
+            }
+        }
+
+        let (output, exit_code, _) = pty
+            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+
+        // Check after the shell has returned from the follow-up command so a
+        // delayed tail from the cancelled command cannot escape the test.
+        let unexpected_tails = tail_markers
+            .into_iter()
+            .filter(|marker| marker.exists())
+            .collect::<Vec<_>>();
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(
+            unexpected_tails.is_empty(),
+            "cancelled command created tail markers {:?}: {:?}",
+            unexpected_tails,
+            first_unexpected_output
+        );
+    }
+
+    #[test]
+    fn test_issue_596_cancel_preserves_shell_with_int_traps() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-trap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let handlers = ["trap ':' INT", "trap 'exit' INT"];
+        let mut tail_markers = Vec::new();
+
+        for (attempt, handler) in handlers.iter().enumerate() {
+            let started = cwd.join(format!("started-{attempt}"));
+            let marker = cwd.join(format!("tail-{attempt}"));
+            let source_tail = cwd.join(format!("source-tail-{attempt}"));
+            tail_markers.push(marker.clone());
+            tail_markers.push(source_tail.clone());
+            let token = std::sync::Arc::new(CancelToken::new());
+            let cancel = std::sync::Arc::clone(&token);
+            let started_for_thread = started.clone();
+            let interrupter = std::thread::spawn(move || {
+                let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(
+                    started_for_thread.exists(),
+                    "command never reached its first step"
+                );
+                std::thread::sleep(Duration::from_millis(150));
+                cancel.cancel_as_user_interrupt();
+            });
+
+            let command = format!(
+                "set +m; helper() {{ {handler}; touch {}; sleep 3; touch {}; }}; helper; touch {}",
+                shell_quote_escape(&started.display().to_string()),
+                shell_quote_escape(&marker.display().to_string()),
+                shell_quote_escape(&source_tail.display().to_string())
+            );
+            let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+            interrupter.join().expect("cancellation thread");
+            let (output, exit_code, _) = result.expect("cancelled command must return");
+            assert_eq!(
+                exit_code, -1,
+                "cancelled command returned {exit_code}: {output:?}"
+            );
+        }
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "trap - INT; printf session_ok",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+
+        let unexpected_tails = tail_markers
+            .into_iter()
+            .filter(|marker| marker.exists())
+            .collect::<Vec<_>>();
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(
+            unexpected_tails.is_empty(),
+            "cancelled command created tail markers {:?}",
+            unexpected_tails
+        );
+    }
+
+    #[test]
+    fn test_backend_command_does_not_keep_temporary_int_trap() {
+        let cwd = std::env::temp_dir().join(format!("aish-pty-int-trap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let before_path = cwd.join("int-trap-before");
+        let after_path = cwd.join("int-trap-after");
+        let capture_trap = |path: &std::path::Path| {
+            format!(
+                "builtin trap -p INT > {}",
+                shell_quote_escape(&path.display().to_string())
+            )
+        };
+
+        pty.run_unwrapped_line(&capture_trap(&before_path))
+            .expect("capture original INT trap");
+        let original_trap = std::fs::read_to_string(&before_path).expect("read original trap");
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "trap 'true' EXIT; true",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("backend command");
+        assert_eq!(exit_code, 0, "backend command failed: {output:?}");
+
+        pty.run_unwrapped_line(&capture_trap(&after_path))
+            .expect("capture restored INT trap");
+        let restored_trap = std::fs::read_to_string(&after_path).expect("read restored trap");
+        assert_eq!(restored_trap, original_trap);
+
+        pty.run_unwrapped_line("trap '__aish_on_exit' EXIT")
+            .expect("restore AISH exit hook");
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn test_backend_command_preserves_user_int_trap() {
+        let cwd = std::env::temp_dir().join(format!("aish-pty-user-int-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "trap 'printf user_int' INT; kill -INT $$; printf after_int",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("ordinary INT should run the user's trap");
+        assert_eq!(exit_code, 0, "command failed: {output:?}");
+        assert!(output.contains("user_intafter_int"), "got: {output:?}");
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "kill -INT $$; printf second_int",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("user INT trap should persist across backend commands");
+        assert_eq!(exit_code, 0, "command failed: {output:?}");
+        assert!(output.contains("user_intsecond_int"), "got: {output:?}");
+
+        let (_, exit_code, _) = pty
+            .execute_command("trap - INT; true", Duration::from_secs(5), None, false)
+            .expect("restore default INT disposition");
+        assert_eq!(exit_code, 0);
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn test_backend_command_accepts_empty_and_comment_only_scripts() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = start_test_pty(&cwd);
+
+        for command in ["", "  # comment only"] {
+            let (output, exit_code, _) = pty
+                .execute_command(command, Duration::from_secs(5), None, false)
+                .expect("empty source should return to the persistent prompt");
+            assert_eq!(exit_code, 0, "command {command:?} failed: {output:?}");
+        }
+
+        let (output, exit_code, _) = pty
+            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+        pty.stop();
+    }
+
     /// Regression: user commands must run with PTY ECHO on.
     ///
     /// The bash rc wrapper keeps `-echo` at the aish prompt (frontend
@@ -9010,12 +9428,11 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
-    /// An unterminated heredoc leaves bash at the PS2 continuation prompt;
-    /// a short timeout must return bounded (not hang), report failure, and
-    /// the PS2 recovery must leave the session usable for the next command
-    /// (issue #541 review).
+    /// An unterminated heredoc is closed by EOF on the private source file;
+    /// report the parser warning as failure and leave the session usable for
+    /// the next command (issue #541 review).
     #[test]
-    fn test_issue_541_ps2_timeout_recovers_session() {
+    fn test_issue_541_unterminated_heredoc_returns_bounded_failure() {
         let cwd = std::env::temp_dir().join(format!("aish-541-ps2-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).expect("create cwd");
         let mut pty = start_test_pty(cwd.to_str().unwrap());
@@ -9026,7 +9443,7 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             .expect("unterminated heredoc must return");
         assert_eq!(
             code, -1,
-            "timed-out heredoc must not report success, out={out:?}"
+            "unterminated heredoc must not report success, out={out:?}"
         );
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -9141,6 +9558,45 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&tempdir);
+    }
+
+    #[test]
+    fn test_execute_command_preserves_shell_scope() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = start_test_pty(&cwd);
+
+        let (_, exit_code, _) = pty
+            .execute_command(
+                "set -e; declare __AISH_PTY_DECLARATION_TEST=kept; set -- first second; __AISH_PTY_ASSIGNMENT_TEST=global",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("declaration command");
+        assert_eq!(exit_code, 0);
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "if [[ $- == *e* ]]; then printf '%s:%s:%s:%s:errexit' \"$__AISH_PTY_DECLARATION_TEST\" \"$1\" \"$2\" \"$__AISH_PTY_ASSIGNMENT_TEST\"; else exit 23; fi",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0);
+        assert!(
+            output.contains("kept:first:second:global:errexit"),
+            "got: {output:?}"
+        );
+
+        let (_, exit_code, _) = pty
+            .execute_command("set +e; true", Duration::from_secs(5), None, false)
+            .expect("restore errexit to its normal test state");
+        assert_eq!(exit_code, 0);
+
+        pty.stop();
     }
 
     #[test]
