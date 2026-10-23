@@ -823,7 +823,7 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
         SettingKey::ApiBase => cfg.api_base = value.to_string(),
         SettingKey::ApiKey => cfg.api_key = value.to_string(),
         SettingKey::Temperature => {
-            cfg.temperature = parse_f32(value, 0.0..=2.0)?;
+            cfg.temperature = parse_f64(value, 0.0..=2.0)?;
         }
         SettingKey::MaxTokens => {
             cfg.max_tokens = if value.is_empty() {
@@ -831,19 +831,10 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
             } else {
                 let n = parse_u32(value)?;
                 if n == 0 {
-                    // `0` is the unset spelling: downstream it resolves to
-                    // `DEFAULT_MAX_TOKENS`, so it is stored the same way as a
-                    // blank value.
+                    // `0` means "no cap": the request omits the field and the
+                    // provider applies the model's own output limit.
                     None
                 } else {
-                    // The loader raises a below-floor value on the next start,
-                    // so accepting one here would silently undo the edit.
-                    if n < aish_core::DEFAULT_MAX_TOKENS && cfg.enforce_min_max_tokens {
-                        return Err(format!(
-                            "max_tokens must be at least {} (set `enforce_min_max_tokens: false` in config.yaml to allow a lower cap)",
-                            aish_core::DEFAULT_MAX_TOKENS
-                        ));
-                    }
                     Some(n)
                 }
             };
@@ -1021,21 +1012,6 @@ fn parse_bool(value: &str) -> Result<bool, String> {
         "false" | "off" | "0" | "no" | "n" => Ok(false),
         other => Err(format!("expected on/off, got `{other}`")),
     }
-}
-
-fn parse_f32(value: &str, range: std::ops::RangeInclusive<f32>) -> Result<f32, String> {
-    let n: f32 = value
-        .parse()
-        .map_err(|_| format!("expected a number, got `{value}`"))?;
-    if !range.contains(&n) {
-        return Err(format!(
-            "{} is out of range {}..={}",
-            n,
-            range.start(),
-            range.end()
-        ));
-    }
-    Ok(n)
 }
 
 fn parse_f64(value: &str, range: std::ops::RangeInclusive<f64>) -> Result<f64, String> {
@@ -1238,7 +1214,9 @@ mod tests {
         let mut cfg = default_cfg();
         assert!(apply(&mut cfg, SettingKey::Temperature, "3.0").is_err());
         apply(&mut cfg, SettingKey::Temperature, "0.8").unwrap();
-        assert!((cfg.temperature - 0.8).abs() < 1e-6);
+        assert_eq!(cfg.temperature, 0.8);
+        apply(&mut cfg, SettingKey::Temperature, "0.3").unwrap();
+        assert_eq!(cfg.temperature, 0.3);
     }
 
     #[test]
@@ -1283,28 +1261,17 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_below_the_floor_is_rejected() {
-        // The loader raises a below-floor value on the next start, so the
-        // panel must refuse it instead of silently undoing the edit.
+    fn max_tokens_accepts_any_positive_value() {
+        // No floor: any positive value is forwarded as-is.
         let mut cfg = default_cfg();
-        let err = apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap_err();
-        assert!(err.contains("40960"), "got {err}");
-        assert!(err.contains("enforce_min_max_tokens"), "got {err}");
-        assert_eq!(cfg.max_tokens, None);
-    }
-
-    #[test]
-    fn max_tokens_below_the_floor_is_allowed_when_the_floor_is_disabled() {
-        let mut cfg = default_cfg();
-        cfg.enforce_min_max_tokens = false;
         apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap();
         assert_eq!(cfg.max_tokens, Some(1024));
     }
 
     #[test]
     fn max_tokens_zero_is_the_provider_default() {
-        // `0` and an unset value mean the same thing, so both are stored as
-        // "unset" and neither is raised by the loader.
+        // `0` and an unset value mean the same thing ("no cap"), so both
+        // are stored as `None` — the field is omitted from the request.
         let mut cfg = default_cfg();
         apply(&mut cfg, SettingKey::MaxTokens, "0").unwrap();
         assert_eq!(cfg.max_tokens, None);

@@ -531,16 +531,8 @@ pub struct ConfigModel {
     pub model: String,
     pub api_base: String,
     pub api_key: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub max_tokens: Option<u32>,
-    /// Enforce the `max_tokens` floor when the config is loaded.
-    ///
-    /// The floor ([`aish_core::DEFAULT_MAX_TOKENS`]) keeps a stale or
-    /// hand-written small cap from truncating every answer. Gateways that
-    /// reject a `max_tokens` above the model's own output cap can set this to
-    /// `false` to keep an explicit, smaller value. Default: `true`.
-    #[serde(default = "default_true")]
-    pub enforce_min_max_tokens: bool,
     pub prompt_theme: String,
 
     // Per-tool argument preview settings
@@ -731,7 +723,6 @@ impl Default for ConfigModel {
             api_key: String::new(),
             temperature: 0.3,
             max_tokens: None,
-            enforce_min_max_tokens: true,
             prompt_theme: "default".to_string(),
             tool_arg_preview: ToolArgPreviewConfig::default(),
             tool_arg_preview_max_length: 200,
@@ -885,6 +876,15 @@ tool_arg_preview:
         assert_eq!(config.tool_arg_preview.max_lines, 3);
         assert_eq!(config.tool_arg_preview.max_chars, 80);
         assert_eq!(config.tool_arg_preview.max_items, 5);
+    }
+
+    #[test]
+    fn test_temperature_deserialization_preserves_decimal_precision() {
+        let config: ConfigModel =
+            serde_yaml::from_str("temperature: 0.3").expect("failed to parse YAML");
+
+        assert_eq!(config.temperature, 0.3_f64);
+        assert_eq!(config.temperature.to_string(), "0.3");
     }
 
     #[test]
@@ -1061,16 +1061,6 @@ api_key: sk-test
         assert_eq!(compact.shell_keep_recent_commands, 8);
         assert_eq!(compact.max_consecutive_failures, 3);
         assert_eq!(compact.summary_max_tokens, 4000);
-    }
-
-    #[test]
-    fn test_enforce_min_max_tokens_defaults_to_true() {
-        let cfg: ConfigModel = serde_yaml::from_str("model: test\n").expect("parse");
-        assert!(cfg.enforce_min_max_tokens);
-
-        let cfg: ConfigModel =
-            serde_yaml::from_str("model: test\nenforce_min_max_tokens: false\n").expect("parse");
-        assert!(!cfg.enforce_min_max_tokens);
     }
 
     #[test]

@@ -11,20 +11,23 @@ use crate::providers::codex::{
 use crate::types::{ChatMessage, ToolSpec};
 
 use super::convert::{chat_messages_to_values, codex_error_to_aish, tools_to_values};
-use super::{effective_max_tokens, StreamContext};
+use super::StreamContext;
 
 pub async fn stream(
     ctx: &StreamContext,
     messages: &[ChatMessage],
     tools: Option<&[ToolSpec]>,
     stream: bool,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
 ) -> Result<LlmResponse, AishError> {
     let message_values = chat_messages_to_values(messages)?;
     let tool_values = tools.map(tools_to_values).transpose()?;
     let tool_refs = tool_values.as_deref();
-    let max_output = Some(effective_max_tokens(max_tokens));
+    // `None`/`0` means "no cap": the codex request builder omits the field
+    // (it filters non-positive values), so the model's own output limit
+    // applies instead of a global constant that cannot fit every model.
+    let max_output = max_tokens;
 
     let auth_path = ctx.codex_auth_path.as_deref();
     let api_base = if ctx.api_base.is_empty() {

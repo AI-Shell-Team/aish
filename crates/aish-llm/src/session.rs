@@ -85,7 +85,7 @@ pub struct LlmSession {
     /// that audit events always reflect the *current* remote host, not a
     /// snapshot taken at session creation time.
     audit_host: Option<Arc<Mutex<Option<String>>>>,
-    temperature: Option<f32>,
+    temperature: Option<f64>,
     max_tokens: Option<u32>,
     langfuse: Option<LangfuseClient>,
     /// Stable Langfuse trace ID for the entire session (created once, reused across turns).
@@ -134,7 +134,7 @@ impl LlmSession {
         api_base: &str,
         api_key: &str,
         model: &str,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Self {
         Self::with_context(
@@ -146,7 +146,7 @@ impl LlmSession {
 
     pub fn with_context(
         stream_ctx: StreamContext,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Self {
         let api_dialect = resolve_api_dialect(
@@ -471,7 +471,7 @@ impl LlmSession {
         self.record_usage(usage);
     }
 
-    pub(crate) fn loop_temperature(&self) -> Option<f32> {
+    pub(crate) fn loop_temperature(&self) -> Option<f64> {
         self.temperature
     }
 
@@ -495,9 +495,10 @@ impl LlmSession {
 
     /// Update the output-token budget of the running session.
     ///
-    /// `None` (and `Some(0)`) restore [`crate::client::DEFAULT_MAX_TOKENS`].
-    /// Applied to the next request; already running tool iterations keep the
-    /// budget they started with.
+    /// `None` (and `Some(0)`) mean "no cap": the request omits the field
+    /// and the provider applies the model's own output limit. Applied to
+    /// the next request; already running tool iterations keep the budget
+    /// they started with.
     pub fn set_max_tokens(&mut self, max_tokens: Option<u32>) {
         self.max_tokens = max_tokens;
     }
@@ -555,7 +556,7 @@ impl LlmSession {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
         stream: bool,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
         #[cfg(test)]
@@ -638,7 +639,7 @@ impl LlmSession {
         messages: &[ChatMessage],
         tools: Option<&[ToolSpec]>,
         stream: bool,
-        temperature: Option<f32>,
+        temperature: Option<f64>,
         max_tokens: Option<u32>,
     ) -> Result<LlmResponse, AishError> {
         self.chat_completion(messages, tools, stream, temperature, max_tokens)
@@ -3111,7 +3112,7 @@ mod tests {
         session.set_max_tokens(Some(8192));
         assert_eq!(session.loop_max_tokens(), Some(8192));
 
-        // `None` restores `DEFAULT_MAX_TOKENS`.
+        // `None` means "no cap" (field omitted from the request).
         session.set_max_tokens(None);
         assert_eq!(session.loop_max_tokens(), None);
     }
