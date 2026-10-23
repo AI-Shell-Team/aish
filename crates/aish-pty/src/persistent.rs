@@ -6215,10 +6215,8 @@ fn is_simple_stateful_declaration(command: &str) -> bool {
             previous_was_space = false;
             continue;
         }
-        if !in_single_quote {
-            if ch == '`' || (ch == '$' && chars.peek() == Some(&'(')) {
-                return false;
-            }
+        if !in_single_quote && (ch == '`' || (ch == '$' && chars.peek() == Some(&'('))) {
+            return false;
         }
         if !in_single_quote && !in_double_quote {
             if matches!(ch, ';' | '|' | '&' | '<' | '>') {
