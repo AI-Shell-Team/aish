@@ -41,6 +41,7 @@ __AISH_CANCEL_ACTIVE=0
 __AISH_CANCEL_DEBUG_GUARD=0
 __AISH_CANCEL_PREV_COMMAND=
 __AISH_CANCEL_SAVED_INT_TRAP=
+__AISH_CANCEL_TEMP_INT_TRAP=
 __AISH_CANCEL_TRAP_CHANGED=0
 __AISH_BACKEND_PS2_PENDING=0
 __AISH_BACKEND_PS2_DEF_PENDING=0
@@ -178,6 +179,7 @@ __aish_execute_backend_command() {
     __AISH_CANCEL_PREV_COMMAND=
     __AISH_CANCEL_DEBUG_GUARD=0
     builtin trap 'return 130' INT
+    __AISH_CANCEL_TEMP_INT_TRAP=$(builtin trap -p INT)
     __AISH_CANCEL_ACTIVE=1
 
     declare -ft "$command_function"
@@ -195,6 +197,7 @@ __aish_execute_backend_command() {
     else
         builtin trap - INT
     fi
+    __AISH_CANCEL_TEMP_INT_TRAP=
 
     return "$exit_code"
 }
@@ -252,8 +255,12 @@ __aish_on_debug() {
         if [[ "${__AISH_CANCEL_DEBUG_GUARD:-0}" != "1" ]]; then
             __AISH_CANCEL_DEBUG_GUARD=1
             if [[ "${__AISH_CANCEL_PREV_COMMAND:-}" =~ ^[[:space:]]*(builtin[[:space:]]+|command[[:space:]]+)?trap([[:space:]]|$) ]]; then
-                __AISH_CANCEL_SAVED_INT_TRAP=$(builtin trap -p INT)
-                __AISH_CANCEL_TRAP_CHANGED=1
+                local current_int_trap
+                current_int_trap=$(builtin trap -p INT)
+                if [[ "$current_int_trap" != "$__AISH_CANCEL_TEMP_INT_TRAP" ]]; then
+                    __AISH_CANCEL_SAVED_INT_TRAP="$current_int_trap"
+                    __AISH_CANCEL_TRAP_CHANGED=1
+                fi
             fi
             __AISH_CANCEL_PREV_COMMAND="$BASH_COMMAND"
             builtin trap 'return 130' INT

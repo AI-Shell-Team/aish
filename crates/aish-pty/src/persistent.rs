@@ -8871,6 +8871,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_backend_command_does_not_keep_temporary_int_trap() {
+        let cwd = std::env::temp_dir().join(format!("aish-pty-int-trap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let before_path = cwd.join("int-trap-before");
+        let after_path = cwd.join("int-trap-after");
+        let capture_trap = |path: &std::path::Path| {
+            format!(
+                "builtin trap -p INT > {}",
+                shell_quote_escape(&path.display().to_string())
+            )
+        };
+
+        pty.run_unwrapped_line(&capture_trap(&before_path))
+            .expect("capture original INT trap");
+        let original_trap = std::fs::read_to_string(&before_path).expect("read original trap");
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "trap 'true' EXIT; true",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("backend command");
+        assert_eq!(exit_code, 0, "backend command failed: {output:?}");
+
+        pty.run_unwrapped_line(&capture_trap(&after_path))
+            .expect("capture restored INT trap");
+        let restored_trap = std::fs::read_to_string(&after_path).expect("read restored trap");
+        assert_eq!(restored_trap, original_trap);
+
+        pty.run_unwrapped_line("trap '__aish_on_exit' EXIT")
+            .expect("restore AISH exit hook");
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
     /// Regression: user commands must run with PTY ECHO on.
     ///
     /// The bash rc wrapper keeps `-echo` at the aish prompt (frontend
