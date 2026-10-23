@@ -818,6 +818,20 @@ pub fn kill_session(socket_path: &Path) -> Result<()> {
 // Shell-mode daemon: runs aish inside a PTY (full UI preserved)
 // ---------------------------------------------------------------------------
 
+/// Build the argv passed to the interactive shell inside a daemon PTY.
+fn shell_exec_args(shell_exe: &str, config_path: Option<&str>) -> Result<Vec<std::ffi::CString>> {
+    let mut args = vec![std::ffi::CString::new(shell_exe)
+        .map_err(|e| AishError::Pty(format!("shell executable contains NUL: {e}")))?];
+    if let Some(config_path) = config_path {
+        args.push(std::ffi::CString::new("--config").expect("static argument has no NUL"));
+        args.push(
+            std::ffi::CString::new(config_path)
+                .map_err(|e| AishError::Pty(format!("config path contains NUL: {e}")))?,
+        );
+    }
+    Ok(args)
+}
+
 /// Run a PTY daemon that executes `shell_exe` (typically the aish binary)
 /// inside a PTY. The daemon holds the PTY master fd, serves clients via
 /// Unix socket, and replays scrollback on reattach.
@@ -831,8 +845,14 @@ pub fn run_pty_daemon_shell(
     socket_path: &Path,
     session_id: &str,
     shell_exe: &str,
+    config_path: Option<&str>,
 ) -> Result<()> {
     use nix::unistd::ForkResult;
+
+    // Build argv before fork. The child only needs to exec the selected binary
+    // with the same config path as the CLI that created this daemon.
+    let shell_args = shell_exec_args(shell_exe, config_path)?;
+    let shell_argv: Vec<&std::ffi::CStr> = shell_args.iter().map(|arg| arg.as_c_str()).collect();
 
     // Ignore SIGHUP so daemon survives terminal disconnects.
     // SAFETY: [Category 4 — Uninitialized memory] [Category 8 — FFI]
@@ -912,9 +932,7 @@ pub fn run_pty_daemon_shell(
                 let _ = std::env::set_current_dir(cwd);
             }
             {
-                let exe_cstr = std::ffi::CString::new(shell_exe).unwrap_or_default();
-                let arg_cstr = std::ffi::CString::new(shell_exe).unwrap_or_default();
-                let err = nix::unistd::execvp(&exe_cstr, &[&arg_cstr]);
+                let err = nix::unistd::execvp(&shell_args[0], &shell_argv);
                 eprintln!("exec failed: {:?}", err);
             }
             // SAFETY: [Category 8 — FFI] `_exit(127)` terminates the child
@@ -1300,6 +1318,30 @@ fn do_resize(master_fd: RawFd, rows: u16, cols: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_exec_args_forward_selected_config_path() {
+        let args = shell_exec_args("/usr/bin/aish", Some("/tmp/aish-config/custom.yaml")).unwrap();
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "/usr/bin/aish".to_string(),
+                "--config".to_string(),
+                "/tmp/aish-config/custom.yaml".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_exec_args_leave_default_config_selection_unchanged() {
+        let args = shell_exec_args("/usr/bin/aish", None).unwrap();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].to_string_lossy(), "/usr/bin/aish");
+    }
 
     #[test]
     fn strip_osc_5151_no_sequence_returns_unchanged() {
