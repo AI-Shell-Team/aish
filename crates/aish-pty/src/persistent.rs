@@ -784,10 +784,76 @@ pub struct PersistentPty {
     /// `execute_command` after the command's terminal state (issue #541
     /// review: never queue it in the tty input queue behind the command).
     pending_pager_restore: Option<String>,
+    /// Private source file and cancellation marker for the active backend command.
+    /// Kept until the command and its deferred pager restore have completed.
+    pending_backend_command_files: Option<BackendCommandFiles>,
     /// Forward window-size changes to the child PTY while a command runs
     /// (driven by `terminal_resize_mode`). Enabled by default; see
     /// `follow_terminal_resize` for why it matters to TUIs.
     follow_resize: bool,
+}
+
+struct BackendCommandFiles {
+    script: std::path::PathBuf,
+    cancel_marker: std::path::PathBuf,
+}
+
+impl BackendCommandFiles {
+    fn create(command: &str) -> aish_core::Result<Self> {
+        let id = uuid::Uuid::new_v4();
+        let script = std::env::temp_dir().join(format!("aish-command-{id}.sh"));
+        let cancel_marker = std::env::temp_dir().join(format!("aish-command-{id}.cancel"));
+        let mut source = command.as_bytes().to_vec();
+        if !source.ends_with(b"\n") {
+            source.push(b'\n');
+        }
+
+        write_private_command_file(&script, &source)?;
+        if let Err(err) = write_private_command_file(&cancel_marker, b"") {
+            let _ = std::fs::remove_file(&script);
+            return Err(err);
+        }
+
+        Ok(Self {
+            script,
+            cancel_marker,
+        })
+    }
+
+    fn request_cancel(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.cancel_marker)?
+            .write_all(b"cancel")
+    }
+}
+
+impl Drop for BackendCommandFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.script);
+        let _ = std::fs::remove_file(&self.cancel_marker);
+    }
+}
+
+fn write_private_command_file(path: &std::path::Path, contents: &[u8]) -> aish_core::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|err| AishError::Pty(format!("failed to create backend command file: {err}")))?;
+    if let Err(err) = file.write_all(contents) {
+        let _ = std::fs::remove_file(path);
+        return Err(AishError::Pty(format!(
+            "failed to write backend command file: {err}"
+        )));
+    }
+    Ok(())
 }
 
 #[path = "aish_completion.rs"]
@@ -863,6 +929,7 @@ impl PersistentPty {
             exec_mode: Arc::new(AtomicBool::new(false)),
             next_completion_request_id: AtomicU64::new(0),
             pending_pager_restore: None,
+            pending_backend_command_files: None,
             follow_resize: true,
         };
 
@@ -892,6 +959,9 @@ impl PersistentPty {
         } else {
             CommandSource::User
         };
+        let backend_command_files = seq
+            .map(|_| BackendCommandFiles::create(command))
+            .transpose()?;
         self.command_state.register_command(command, source, seq);
 
         // Prepend Ctrl-U (NAK) to clear stale input in the PTY line
@@ -907,48 +977,29 @@ impl PersistentPty {
             // `cat` while the command runs, restoring the originals
             // afterward.
             //
-            // The pager environment prefix remains on its own line so it
-            // cannot alter command syntax. A second line temporarily hides
-            // PS2 while Bash parses the backend function; the shell restores
-            // it after the definition or from PROMPT_COMMAND if parsing is
-            // interrupted.
-            //
-            // Keep the temporary function, seq/text bookkeeping, and its
-            // invocation on the same interactive line. The traced function
-            // gives cancellation a scoped INT trap while preserving shell
-            // state and command job control. The seq event then carries the
-            // command's real status.
+            // Keep setup and source invocation on one interactive line so a
+            // user's PROMPT_COMMAND runs once for this backend command. The
+            // source file executes at the persistent shell's top level, which
+            // preserves Bash state such as declarations and positional params.
             let (pg_prefix, pg_suffix) = backend_pager_override();
-            payload.extend_from_slice(pg_prefix.as_bytes());
-            payload.push(b'\n');
             if let Some(s) = seq {
-                let quoted = shell_quote_escape(command);
-                if is_simple_stateful_declaration(command) {
-                    // `declare`/`typeset` create function-local variables when
-                    // run inside the cancellation wrapper. Keep standalone,
-                    // side-effect-free declarations at the persistent shell's
-                    // top level so later BashTool calls can see their state.
-                    payload.extend_from_slice(
-                        format!(
-                            " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; "
-                        )
-                        .as_bytes(),
-                    );
-                    payload.extend_from_slice(command.as_bytes());
-                    payload.push(b'\n');
-                } else {
-                    let command_function = format!("__aish_backend_command_{}", s.unsigned_abs());
-                    payload.extend_from_slice(b" __aish_prepare_backend_command_definition\n");
-                    payload.extend_from_slice(format!(" {command_function}() {{\n").as_bytes());
-                    payload.extend_from_slice(command.as_bytes());
-                    payload.extend_from_slice(
-                        format!(
-                            "\n}}; __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT={quoted}; __aish_restore_backend_ps2; __aish_execute_backend_command {s} {command_function}\n"
-                        )
-                        .as_bytes(),
-                    );
+                let files = backend_command_files
+                    .expect("backend command files created for a sequenced command");
+                let script_path = shell_quote_escape(&files.script.display().to_string());
+                let cancel_path = shell_quote_escape(&files.cancel_marker.display().to_string());
+                let mut prefix = pg_prefix;
+                if !prefix.is_empty() && !prefix.ends_with(';') {
+                    prefix.push(';');
                 }
+                payload.extend_from_slice(
+                    format!(
+                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT=$(< {script_path}); __AISH_CANCEL_MARKER={cancel_path}; __AISH_BACKEND_SETUP=1; {prefix} __AISH_BACKEND_SETUP=0; __aish_begin_backend_command; source {script_path}; __aish_finish_backend_command $?\n"
+                    )
+                    .as_bytes(),
+                );
+                self.pending_backend_command_files = Some(files);
             } else {
+                payload.extend_from_slice(pg_prefix.as_bytes());
                 payload.extend_from_slice(command.as_bytes());
                 payload.push(b'\n');
             }
@@ -961,14 +1012,21 @@ impl PersistentPty {
             return self.write_master(&payload);
         }
 
-        self.write_master(&payload)
+        let result = self.write_master(&payload);
+        if result.is_err() {
+            self.pending_backend_command_files.take();
+            self.pending_pager_restore = None;
+        }
+        result
     }
 
     /// Write the deferred pager-restore line (queued by [`Self::send_command`])
     /// and wait briefly for its null-seq prompt_ready so neither the restore
     /// echo nor its control event leaks into the next command.
     pub(crate) fn flush_pending_pager_restore(&mut self) {
+        let command_files = self.pending_backend_command_files.take();
         let Some(suffix) = self.pending_pager_restore.take() else {
+            drop(command_files);
             return;
         };
         let mut line = b"\x15".to_vec();
@@ -980,6 +1038,7 @@ impl PersistentPty {
         // The restore line triggers one prompt_ready with command_seq null.
         // Drain it so the next execute_command does not see a stale event.
         let _ = self.wait_for_null_seq_prompt(Duration::from_millis(500));
+        drop(command_files);
     }
 
     /// Run one line with no backend pager wrapper and return its exit code.
@@ -1062,21 +1121,100 @@ impl PersistentPty {
         None
     }
 
-    /// Interrupt both the foreground job and the persistent shell executing it.
-    ///
-    /// The PTY Ctrl+C byte targets only the foreground job's process group.
-    /// For a compound shell list such as `sleep 3; touch marker`, Bash may
-    /// continue to the next list item after the child process receives
-    /// SIGINT. Signaling the shell's own group as well makes it abort the
-    /// current list while keeping the interactive shell available.
-    fn interrupt_current_command(&mut self) {
-        // When job control is disabled (or a shell builtin is running), Bash
-        // can also own the PTY foreground group. In that case the ETX byte
-        // already signals Bash, so avoid delivering SIGINT twice.
-        if pty_foreground_pgrp(self.master_fd).is_some_and(|fg| fg != self.child_pid) {
-            let _ = kill_pg(self.child_pid, Signal::SIGINT);
+    /// Consume control events already queued when cancellation is requested.
+    /// If the backend command's completion is waiting in the pipe, prefer that
+    /// result to sending an interrupt that could land on the next prompt.
+    fn drain_ready_command_completion(
+        &mut self,
+        seq: i32,
+        result_exit_code: &mut i32,
+        result_cwd: &mut String,
+    ) -> bool {
+        if self.control_fd < 0 || self.control_fd as usize >= libc::FD_SETSIZE {
+            return false;
         }
-        let _ = self.write_master(b"\x03");
+        loop {
+            let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+            unsafe {
+                libc::FD_ZERO(&mut fds);
+                libc::FD_SET(self.control_fd, &mut fds);
+            }
+            let mut tv = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            let ready = unsafe {
+                libc::select(
+                    self.control_fd + 1,
+                    &mut fds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tv,
+                )
+            };
+            if ready <= 0 || !unsafe { libc::FD_ISSET(self.control_fd, &fds) } {
+                return false;
+            }
+
+            let mut tmp = [0u8; 4096];
+            let read = unsafe {
+                libc::read(
+                    self.control_fd,
+                    tmp.as_mut_ptr() as *mut libc::c_void,
+                    tmp.len(),
+                )
+            };
+            if read <= 0 {
+                return false;
+            }
+            let events = decode_control_chunk(&mut self.control_buffer, &tmp[..read as usize]);
+            for event in &events {
+                if let BackendControlEvent::ShellExiting { .. } = event {
+                    self.running.store(false, Ordering::SeqCst);
+                }
+                if let BackendControlEvent::PromptReady { cwd, .. } = event {
+                    *result_cwd = cwd.clone();
+                }
+                if let Some(result) = self.command_state.handle_event(event) {
+                    if result.command_seq == Some(seq) {
+                        *result_exit_code = result.exit_code;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Interrupt the foreground job and make Bash unwind the active sourced
+    /// command. The private marker lets the INT handler distinguish this signal
+    /// from an ordinary SIGINT and preserve the user's handler for normal use.
+    fn interrupt_current_command(&mut self) {
+        if let Some(files) = &self.pending_backend_command_files {
+            if let Err(err) = files.request_cancel() {
+                debug!(%err, "failed to write backend cancellation marker");
+            }
+        }
+
+        match pty_foreground_pgrp(self.master_fd) {
+            Some(fg) if fg == self.child_pid => {
+                // Bash and the foreground job share a group (job control is
+                // disabled, or a shell builtin is running). ETX delivers one
+                // SIGINT to that group; the marker-aware handler keeps Bash
+                // alive and returns from the source file.
+                let _ = self.write_master(b"\x03");
+            }
+            Some(fg) => {
+                // Keep the shell's SIGINT separate from a foreground child so
+                // each receives exactly one interrupt.
+                let _ = kill(self.child_pid, Signal::SIGINT);
+                let _ = self.write_master(b"\x03");
+                debug!(foreground_pgrp = fg.as_raw(), "interrupted backend command");
+            }
+            None => {
+                let _ = kill(self.child_pid, Signal::SIGINT);
+                let _ = self.write_master(b"\x03");
+            }
+        }
     }
 
     /// Execute a command and wait for completion with timeout.
@@ -1162,6 +1300,14 @@ impl PersistentPty {
             // Check external cancellation.
             if let Some(ref ct) = cancel_token {
                 if ct.is_cancelled() {
+                    if self.drain_ready_command_completion(
+                        seq,
+                        &mut result_exit_code,
+                        &mut result_cwd,
+                    ) {
+                        command_finished = true;
+                        break;
+                    }
                     self.interrupt_current_command();
                     cancelled = true;
                     break;
@@ -1319,18 +1465,10 @@ impl PersistentPty {
                             }
                             if let Some(r) = self.command_state.handle_event(event) {
                                 // Only an event carrying our seq terminates
-                                // the wait: with the multi-line payload
-                                // (issue #541) the seq/text assignments lead
-                                // the command line, so its prompt_ready is
-                                // the single authoritative terminal event.
-                                // Env-prefix and restore lines complete with
-                                // null-seq events that must NOT break the
-                                // loop — they arrive before the command
-                                // line's event and would surface a wrong
-                                // exit code. A command whose parse failed
-                                // before the seq assignment ran (no seq
-                                // event at all) is bounded by the timeout +
-                                // PS2 recovery below.
+                                // wait. The setup and sourced command share
+                                // one interactive line; the deferred pager
+                                // restore completes separately with a null
+                                // sequence and must not replace this result.
                                 if r.command_seq == Some(seq) {
                                     result_exit_code = r.exit_code;
                                     command_finished = true;
@@ -6165,73 +6303,6 @@ fn write_rcfile_temp() -> aish_core::Result<std::path::PathBuf> {
     write_rcfile_temp_in(&std::env::temp_dir())
 }
 
-/// Return true for a single simple `declare` or `typeset` command.
-/// These builtins create local variables when called from the cancellation
-/// wrapper, so simple declarations must run at the persistent shell's top level.
-fn is_simple_stateful_declaration(command: &str) -> bool {
-    let command = command.trim_start_matches(|ch| ch == ' ' || ch == '\t');
-    let rest = if let Some(rest) = command.strip_prefix("declare") {
-        rest
-    } else if let Some(rest) = command.strip_prefix("typeset") {
-        rest
-    } else {
-        return false;
-    };
-
-    if rest
-        .chars()
-        .next()
-        .is_some_and(|ch| !ch.is_ascii_whitespace())
-    {
-        return false;
-    }
-
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut escaped = false;
-    let mut previous_was_space = true;
-    let mut chars = rest.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\n' || ch == '\r' {
-            return false;
-        }
-        if escaped {
-            escaped = false;
-            previous_was_space = ch.is_ascii_whitespace();
-            continue;
-        }
-        if ch == '\\' && !in_single_quote {
-            escaped = true;
-            previous_was_space = false;
-            continue;
-        }
-        if ch == '\'' && !in_double_quote {
-            in_single_quote = !in_single_quote;
-            previous_was_space = false;
-            continue;
-        }
-        if ch == '"' && !in_single_quote {
-            in_double_quote = !in_double_quote;
-            previous_was_space = false;
-            continue;
-        }
-        if !in_single_quote && (ch == '`' || (ch == '$' && chars.peek() == Some(&'('))) {
-            return false;
-        }
-        if !in_single_quote && !in_double_quote {
-            if matches!(ch, ';' | '|' | '&' | '<' | '>') {
-                return false;
-            }
-            if ch == '#' && previous_was_space {
-                break;
-            }
-        }
-        previous_was_space = ch.is_ascii_whitespace();
-    }
-
-    !in_single_quote && !in_double_quote && !escaped
-}
-
 /// Simple shell quoting for embedding a command in a bash assignment.
 pub fn shell_quote_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -6249,16 +6320,12 @@ const BACKEND_PAGER_VARS: &[&str] = &["PAGER", "SYSTEMD_PAGER", "GIT_PAGER"];
 /// variables in [`BACKEND_PAGER_VARS`] to `cat` while a backend command
 /// runs, then restore their original values.
 ///
-/// Both snippets are **standalone lines**: the caller sends
-/// `prefix\n + command\n + suffix\n` (issue #541). A `;`-led inline suffix
-/// corrupted syntax boundaries (`cmd &` → `cmd &;` parse error; heredoc
-/// terminator → `EOF;` PS2 hang). As separate lines they are always
-/// syntactically independent, and because they run in the *current*
-/// interactive shell (no subshell), `cd` and other side effects still
-/// propagate to the persistent session. The restore is the next sequential
-/// line, so even when the command is killed (SIGINT/SIGKILL on a stuck
-/// pager) bash still runs it — the override never leaks into a subsequent
-/// command.
+/// The prefix is prepended to the backend setup line, and the suffix is sent
+/// separately after the sourced command finishes. The user command itself is
+/// read from a private source file, so its syntax (including `&` and heredocs)
+/// cannot be altered by either snippet. Both execute in the current shell, so
+/// `cd` and other state changes persist. The separate restore line also lets
+/// Bash recover pager variables after cancellation.
 ///
 /// `${VAR-__AISH_UNSET__}` yields the `__AISH_UNSET__` sentinel when `VAR`
 /// is unset, otherwise its current value (possibly empty), so the original
@@ -6269,14 +6336,7 @@ fn backend_pager_override() -> (String, String) {
     let mut restore = String::new();
     let mut unsets = String::new();
     for (i, var) in BACKEND_PAGER_VARS.iter().enumerate() {
-        // Every assignment uses `export` (not a bare `VAR=...`) on purpose:
-        // the backend shell's DEBUG trap classifies a command as an
-        // assignment by matching `^[A-Za-z_][A-Za-z_0-9]*=` and then strips
-        // the `VAR=value ` prefix up to the first space. A bare assignment
-        // with no trailing space (e.g. `__AISH_PV0=${PAGER-...}`) makes that
-        // strip a no-op, looping forever and hanging the shell. `export VAR=`
-        // has a space after `export` so it is never mis-classified.
-        save.push_str(&format!(" export __AISH_PV{i}=${{{var}-__AISH_UNSET__}};"));
+        save.push_str(&format!(" __AISH_PV{i}=${{{var}-__AISH_UNSET__}};"));
         export.push_str(&format!(" export {var}=cat;"));
         restore.push_str(&format!(
             " if [ \"$__AISH_PV{i}\" = __AISH_UNSET__ ]; then unset {var}; else export {var}=\"$__AISH_PV{i}\"; fi;"
@@ -7541,33 +7601,6 @@ mod tests {
             }
         }
         panic!("PersistentPty::start failed after retries: {:?}", last_err);
-    }
-
-    #[test]
-    fn test_simple_stateful_declaration_classification() {
-        for command in [
-            "declare value=one",
-            "  typeset -x PATH=/tmp/bin",
-            "declare -a names=(one two)",
-            "declare value='one; two' # note",
-        ] {
-            assert!(
-                is_simple_stateful_declaration(command),
-                "expected declaration to stay top-level: {command}"
-            );
-        }
-
-        for command in [
-            "declare value=one; touch marker",
-            "typeset value=$(printf one)",
-            "A=one declare value=two",
-            "echo declare value=one",
-        ] {
-            assert!(
-                !is_simple_stateful_declaration(command),
-                "expected compound command to use cancellation wrapper: {command}"
-            );
-        }
     }
 
     #[test]
@@ -8925,7 +8958,9 @@ mod tests {
         for (attempt, handler) in handlers.iter().enumerate() {
             let started = cwd.join(format!("started-{attempt}"));
             let marker = cwd.join(format!("tail-{attempt}"));
+            let source_tail = cwd.join(format!("source-tail-{attempt}"));
             tail_markers.push(marker.clone());
+            tail_markers.push(source_tail.clone());
             let token = std::sync::Arc::new(CancelToken::new());
             let cancel = std::sync::Arc::clone(&token);
             let started_for_thread = started.clone();
@@ -8943,9 +8978,10 @@ mod tests {
             });
 
             let command = format!(
-                "{handler}; touch {}; sleep 3; touch {}",
+                "set +m; helper() {{ {handler}; touch {}; sleep 3; touch {}; }}; helper; touch {}",
                 shell_quote_escape(&started.display().to_string()),
-                shell_quote_escape(&marker.display().to_string())
+                shell_quote_escape(&marker.display().to_string()),
+                shell_quote_escape(&source_tail.display().to_string())
             );
             let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
             interrupter.join().expect("cancellation thread");
@@ -9017,6 +9053,64 @@ mod tests {
             .expect("restore AISH exit hook");
         pty.stop();
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn test_backend_command_preserves_user_int_trap() {
+        let cwd = std::env::temp_dir().join(format!("aish-pty-user-int-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "trap 'printf user_int' INT; kill -INT $$; printf after_int",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("ordinary INT should run the user's trap");
+        assert_eq!(exit_code, 0, "command failed: {output:?}");
+        assert!(output.contains("user_intafter_int"), "got: {output:?}");
+
+        let (output, exit_code, _) = pty
+            .execute_command(
+                "kill -INT $$; printf second_int",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("user INT trap should persist across backend commands");
+        assert_eq!(exit_code, 0, "command failed: {output:?}");
+        assert!(output.contains("user_intsecond_int"), "got: {output:?}");
+
+        let (_, exit_code, _) = pty
+            .execute_command("trap - INT; true", Duration::from_secs(5), None, false)
+            .expect("restore default INT disposition");
+        assert_eq!(exit_code, 0);
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn test_backend_command_accepts_empty_and_comment_only_scripts() {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let mut pty = start_test_pty(&cwd);
+
+        for command in ["", "  # comment only"] {
+            let (output, exit_code, _) = pty
+                .execute_command(command, Duration::from_secs(5), None, false)
+                .expect("empty source should return to the persistent prompt");
+            assert_eq!(exit_code, 0, "command {command:?} failed: {output:?}");
+        }
+
+        let (output, exit_code, _) = pty
+            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+        pty.stop();
     }
 
     /// Regression: user commands must run with PTY ECHO on.
@@ -9444,7 +9538,7 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
     }
 
     #[test]
-    fn test_execute_command_persists_standalone_declarations() {
+    fn test_execute_command_preserves_shell_scope() {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "/tmp".to_string());
@@ -9452,7 +9546,7 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         let (_, exit_code, _) = pty
             .execute_command(
-                "declare __AISH_PTY_DECLARATION_TEST=kept",
+                "declare __AISH_PTY_DECLARATION_TEST=kept; set -- first second; __AISH_PTY_ASSIGNMENT_TEST=global",
                 Duration::from_secs(5),
                 None,
                 false,
@@ -9462,14 +9556,17 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         let (output, exit_code, _) = pty
             .execute_command(
-                "printf '%s' \"$__AISH_PTY_DECLARATION_TEST\"",
+                "printf '%s:%s:%s:%s' \"$__AISH_PTY_DECLARATION_TEST\" \"$1\" \"$2\" \"$__AISH_PTY_ASSIGNMENT_TEST\"",
                 Duration::from_secs(5),
                 None,
                 false,
             )
             .expect("follow-up command");
         assert_eq!(exit_code, 0);
-        assert!(output.contains("kept"), "got: {output:?}");
+        assert!(
+            output.contains("kept:first:second:global"),
+            "got: {output:?}"
+        );
 
         pty.stop();
     }

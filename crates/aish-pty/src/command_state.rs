@@ -33,7 +33,7 @@ impl CommandState {
         command_seq: Option<i32>,
     ) {
         let command = command.trim().to_string();
-        if command.is_empty() {
+        if command.is_empty() && command_seq.is_none() {
             return;
         }
         let submission = CommandSubmission::new(command, source, command_seq);
@@ -63,9 +63,6 @@ impl CommandState {
             } => {
                 let seq = *command_seq;
                 let submission = self.take_submission(seq)?;
-                if submission.command.is_empty() {
-                    return None;
-                }
 
                 let interrupted = *interrupted || *exit_code == 130;
                 let result = PtyCommandResult {
@@ -238,6 +235,24 @@ mod tests {
         assert_eq!(r.command, "pwd");
         assert_eq!(r.command_seq, Some(-1));
         assert!(!r.allow_error_correction);
+    }
+
+    #[test]
+    fn test_empty_backend_command_completes_by_sequence() {
+        let mut state = CommandState::new();
+        state.register_command("", CommandSource::Backend, Some(-2));
+
+        let ready = BackendControlEvent::PromptReady {
+            command_seq: Some(-2),
+            exit_code: 0,
+            cwd: "/home".to_string(),
+            interrupted: false,
+        };
+        let result = state
+            .handle_event(&ready)
+            .expect("empty backend command still completes");
+        assert_eq!(result.command, "");
+        assert_eq!(result.command_seq, Some(-2));
     }
 
     #[test]

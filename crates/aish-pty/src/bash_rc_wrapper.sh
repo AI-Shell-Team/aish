@@ -39,14 +39,16 @@ __AISH_CONTROL_FD="${AISH_CONTROL_FD:-}"
 __AISH_AT_PROMPT=0
 __AISH_CANCEL_ACTIVE=0
 __AISH_CANCEL_DEBUG_GUARD=0
-__AISH_CANCEL_PREV_COMMAND=
 __AISH_CANCEL_SAVED_INT_TRAP=
 __AISH_CANCEL_TEMP_INT_TRAP=
-__AISH_CANCEL_TRAP_CHANGED=0
-__AISH_BACKEND_PS2_PENDING=0
-__AISH_BACKEND_PS2_DEF_PENDING=0
-__AISH_BACKEND_PS2_SET=
-__AISH_BACKEND_PS2=
+__AISH_CANCEL_MARKER=
+__AISH_CANCEL_SOURCE_ACTIVE=0
+__AISH_CANCEL_SAVED_FUNCTRACE=0
+__AISH_CANCEL_SAVED_ERREXIT=0
+__AISH_CANCEL_SAVED_EXTDEBUG=0
+__AISH_CANCEL_ABORT=0
+__AISH_CANCEL_DEBUG_CLEANUP=0
+__AISH_BACKEND_SETUP=0
 
 __aish_json_escape() {
     local value="$1"
@@ -135,70 +137,88 @@ __aish_emit_command_started() {
     __aish_emit_control_line "$payload"
 }
 
-# Suppress PS2 while the backend's temporary function definition is parsed.
-# Restore it after the definition, or from PROMPT_COMMAND if parsing is
-# interrupted (for example, a timed-out heredoc).
-__aish_prepare_backend_command_definition() {
-    __AISH_BACKEND_PS2_SET="${PS2+x}"
-    __AISH_BACKEND_PS2="${PS2-}"
-    __AISH_BACKEND_PS2_PENDING=1
-    __AISH_BACKEND_PS2_DEF_PENDING=1
-    PS2=''
-}
-
-__aish_restore_backend_ps2() {
-    if [[ "${__AISH_BACKEND_PS2_PENDING:-0}" != "1" ]]; then
-        return 0
-    fi
-    if [[ "${__AISH_BACKEND_PS2_DEF_PENDING:-0}" == "1" ]]; then
-        __AISH_BACKEND_PS2_DEF_PENDING=0
+__aish_int_trap_action() {
+    local definition="$1"
+    if [[ -z "$definition" ]]; then
+        # With no user handler, an ordinary SIGINT should abort this sourced
+        # command while returning the interactive shell to its prompt.
+        printf '%s' 'return 130'
         return 0
     fi
 
-    if [[ "${__AISH_BACKEND_PS2_SET:-}" == "x" ]]; then
-        PS2="$__AISH_BACKEND_PS2"
-    else
-        unset PS2
-    fi
-    __AISH_BACKEND_PS2_PENDING=0
-    __AISH_BACKEND_PS2_SET=
-    __AISH_BACKEND_PS2=
+    # `trap -p` returns shell-escaped syntax. Parse its three words without
+    # evaluating the saved action; the action is inserted into the temporary
+    # handler and runs only if this is not an aish cancellation.
+    eval "set -- $definition"
+    printf '%s' "${3-}"
 }
 
-# Run a backend command in a traced function so Bash's temporary INT trap can
-# abort only that command while leaving the persistent interactive shell alive.
-__aish_execute_backend_command() {
-    local command_seq="$1"
-    local command_function="$2"
-    local saved_int_trap
-    saved_int_trap=$(builtin trap -p INT)
-
-    __AISH_ACTIVE_COMMAND_SEQ="$command_seq"
-    __AISH_CANCEL_SAVED_INT_TRAP="$saved_int_trap"
-    __AISH_CANCEL_TRAP_CHANGED=0
-    __AISH_CANCEL_PREV_COMMAND=
-    __AISH_CANCEL_DEBUG_GUARD=0
-    builtin trap 'return 130' INT
+__aish_install_backend_int_trap() {
+    local action handler
+    action=$(__aish_int_trap_action "$__AISH_CANCEL_SAVED_INT_TRAP")
+    handler='if [[ -n "${__AISH_CANCEL_MARKER:-}" && -s "${__AISH_CANCEL_MARKER}" ]]; then if [[ "${__AISH_CANCEL_SOURCE_ACTIVE:-0}" == "1" ]]; then __AISH_CANCEL_SOURCE_ACTIVE=0; __AISH_CANCEL_ABORT=1; shopt -s extdebug; set -e; return 130; fi; return 0; fi; '
+    handler+="$action"
+    builtin trap "$handler" INT
     __AISH_CANCEL_TEMP_INT_TRAP=$(builtin trap -p INT)
+}
+
+__aish_begin_backend_command() {
+    __AISH_CANCEL_SAVED_INT_TRAP=$(builtin trap -p INT)
+    __AISH_CANCEL_SOURCE_ACTIVE=1
     __AISH_CANCEL_ACTIVE=1
-
-    declare -ft "$command_function"
-    "$command_function"
-    local exit_code=$?
-
-    __AISH_CANCEL_ACTIVE=0
-    unset -f "$command_function"
-
-    if [[ "$__AISH_CANCEL_TRAP_CHANGED" == "1" ]]; then
-        saved_int_trap="$__AISH_CANCEL_SAVED_INT_TRAP"
+    __AISH_CANCEL_DEBUG_GUARD=0
+    if [[ "$-" == *T* ]]; then
+        __AISH_CANCEL_SAVED_FUNCTRACE=1
+    else
+        __AISH_CANCEL_SAVED_FUNCTRACE=0
     fi
-    if [[ -n "$saved_int_trap" ]]; then
-        eval "$saved_int_trap"
+    if [[ "$-" == *e* ]]; then
+        __AISH_CANCEL_SAVED_ERREXIT=1
+    else
+        __AISH_CANCEL_SAVED_ERREXIT=0
+    fi
+    if shopt -q extdebug; then
+        __AISH_CANCEL_SAVED_EXTDEBUG=1
+    else
+        __AISH_CANCEL_SAVED_EXTDEBUG=0
+    fi
+    __aish_install_backend_int_trap
+    # The DEBUG hook must see trap changes made inside user-defined functions
+    # as well as at the source-file's top level.
+    set -o functrace
+    __AISH_AT_PROMPT=0
+    __aish_emit_command_started "${__AISH_ACTIVE_COMMAND_TEXT:-}"
+}
+
+__aish_finish_backend_command() {
+    local exit_code="$1"
+    local was_cancelled="${__AISH_CANCEL_ABORT:-0}"
+    __AISH_CANCEL_SOURCE_ACTIVE=0
+    __AISH_CANCEL_ACTIVE=0
+    __AISH_CANCEL_ABORT=0
+    __AISH_CANCEL_DEBUG_CLEANUP=0
+    if [[ -n "$__AISH_CANCEL_SAVED_INT_TRAP" ]]; then
+        eval "$__AISH_CANCEL_SAVED_INT_TRAP"
     else
         builtin trap - INT
     fi
     __AISH_CANCEL_TEMP_INT_TRAP=
-
+    __AISH_CANCEL_MARKER=
+    if [[ "$__AISH_CANCEL_SAVED_FUNCTRACE" == "0" ]]; then
+        set +o functrace
+    fi
+    if [[ "$__AISH_CANCEL_SAVED_ERREXIT" == "1" ]]; then
+        set -e
+    else
+        set +e
+    fi
+    if [[ "$was_cancelled" == "1" ]]; then
+        if [[ "$__AISH_CANCEL_SAVED_EXTDEBUG" == "1" ]]; then
+            shopt -s extdebug
+        else
+            shopt -u extdebug
+        fi
+    fi
     return "$exit_code"
 }
 
@@ -252,20 +272,54 @@ __aish_on_exit() {
 
 __aish_on_debug() {
     if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+        if [[ "${__AISH_CANCEL_ABORT:-0}" == "1" ]]; then
+            if [[ "${__AISH_CANCEL_DEBUG_CLEANUP:-0}" == "1" ]]; then
+                return 0
+            fi
+            case "$BASH_COMMAND" in
+                __aish_finish_backend_command*|__aish_prompt_command*)
+                    __AISH_CANCEL_DEBUG_CLEANUP=1
+                    return 0
+                    ;;
+            esac
+            return 1
+        fi
         if [[ "${__AISH_CANCEL_DEBUG_GUARD:-0}" != "1" ]]; then
             __AISH_CANCEL_DEBUG_GUARD=1
-            if [[ "${__AISH_CANCEL_PREV_COMMAND:-}" =~ ^[[:space:]]*(builtin[[:space:]]+|command[[:space:]]+)?trap([[:space:]]|$) ]]; then
-                local current_int_trap
-                current_int_trap=$(builtin trap -p INT)
-                if [[ "$current_int_trap" != "$__AISH_CANCEL_TEMP_INT_TRAP" ]]; then
-                    __AISH_CANCEL_SAVED_INT_TRAP="$current_int_trap"
-                    __AISH_CANCEL_TRAP_CHANGED=1
-                fi
+            case "$BASH_COMMAND" in
+                "set -T"|"set -o functrace"|"set -o functrace "*)
+                    __AISH_CANCEL_SAVED_FUNCTRACE=1
+                    ;;
+                "set +T"|"set +o functrace"|"set +o functrace "*)
+                    __AISH_CANCEL_SAVED_FUNCTRACE=0
+                    ;;
+            esac
+            if [[ "$-" != *T* ]]; then
+                __AISH_CANCEL_SAVED_FUNCTRACE=0
+                set -o functrace
             fi
-            __AISH_CANCEL_PREV_COMMAND="$BASH_COMMAND"
-            builtin trap 'return 130' INT
+            if [[ "$-" == *e* ]]; then
+                __AISH_CANCEL_SAVED_ERREXIT=1
+            else
+                __AISH_CANCEL_SAVED_ERREXIT=0
+            fi
+            if shopt -q extdebug; then
+                __AISH_CANCEL_SAVED_EXTDEBUG=1
+            else
+                __AISH_CANCEL_SAVED_EXTDEBUG=0
+            fi
+            local current_int_trap
+            current_int_trap=$(builtin trap -p INT)
+            if [[ "$current_int_trap" != "$__AISH_CANCEL_TEMP_INT_TRAP" ]]; then
+                __AISH_CANCEL_SAVED_INT_TRAP="$current_int_trap"
+                __aish_install_backend_int_trap
+            fi
             __AISH_CANCEL_DEBUG_GUARD=0
         fi
+        return 0
+    fi
+
+    if [[ "${__AISH_BACKEND_SETUP:-0}" == "1" ]]; then
         return 0
     fi
 
@@ -274,10 +328,7 @@ __aish_on_debug() {
     fi
 
     case "$BASH_COMMAND" in
-        __aish_backend_command_* )
-            return 0
-            ;;
-        __aish_prepare_backend_command_definition*|__aish_restore_backend_ps2*|__AISH_BACKEND_PS2_*|PS2=* )
+        __aish_begin_backend_command*|__aish_finish_backend_command*|__AISH_BACKEND_SETUP=*|__AISH_CANCEL_MARKER=* )
             return 0
             ;;
         __aish_prompt_command*|__aish_on_debug*|__aish_emit_*|__aish_json_escape*|__aish_complete*|_aish_*|trap* )
@@ -318,7 +369,12 @@ __aish_on_debug() {
 __aish_prompt_command() {
     local exit_code=$?
     __aish_last_exit_code=$exit_code
-    __aish_restore_backend_ps2
+    # `errexit` can stop the backend wrapper line when cancellation happens
+    # inside a user function. Finish the command here if its inline cleanup
+    # was skipped, then restore the original shell options and INT trap.
+    if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+        __aish_finish_backend_command "$exit_code" || true
+    fi
     __aish_rewrite_last_history_entry
     # Call original PROMPT_COMMAND if it exists
     if [[ -n "$__AISH_ORIGINAL_PROMPT_COMMAND" ]]; then
@@ -342,7 +398,6 @@ PROMPT_COMMAND='__aish_prompt_command'
 
 trap '__aish_on_exit' EXIT
 trap '__aish_on_debug' DEBUG
-declare -ft __aish_execute_backend_command
 
 # Disable terminal echo — the frontend (aish) handles all display.
 # This prevents the PTY line discipline from echoing user input back
