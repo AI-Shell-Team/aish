@@ -135,6 +135,24 @@ tool_arg_preview:
     max_items: 4
 ```
 
+#### report
+
+`/report` 生成的离线 HTML 报告行为（issue #608）。报告只是把已记录的会话数据渲染成一个自包含的 HTML 文件（无脚本、无外部资源），生成过程不重跑命令、不调用模型。
+
+| 字段 | 类型 | 默认值 | 描述 | 验证规则 |
+|------|------|--------|------|----------|
+| `auto_open` | boolean | `true` | 生成报告后是否自动用默认浏览器打开；仅在本地图形会话生效，SSH 或无 `DISPLAY`/`WAYLAND_DISPLAY` 时只打印路径 | true/false |
+| `output_dir` | string/null | `null` | 报告根目录，每个会话一个子目录；`null` 表示 `$XDG_DATA_HOME/aish/reports`，支持 `~` 展开 | 可选 |
+
+示例：
+```yaml
+report:
+  auto_open: false
+  output_dir: ~/notes/aish-reports
+```
+
+生成的 `report.html` 与 `report.md` 位于 `<output_dir>/<session-uuid>/`，目录权限 `0700`、文件权限 `0600`。`/report open` 会忽略 `auto_open` 与远程会话判断，强制尝试打开浏览器。
+
 #### context_auto_compact
 
 自动上下文压缩用于在发送给模型前控制 shell/tool 输出占用。默认策略偏保守：先做确定性的 microcompact，清理旧命令输出、旧 tool result、preview 和冗长 reasoning；只有在 microcompact 后仍接近窗口上限时，才启用模型生成的 full compact summary。full compact 会额外发起一次无工具、低温、非流式的摘要请求，失败时会记录失败次数并回退到最终 trim，不阻塞普通发送路径。
@@ -370,6 +388,11 @@ enable_langfuse: false
 
 # 会话存储
 session_db_path: ~/.local/share/aish/sessions.db
+
+# 报告配置（/report 生成的离线 HTML）
+report:
+  auto_open: true
+  output_dir: null
 
 # Bash 输出 offload 配置
 bash_output_offload:
