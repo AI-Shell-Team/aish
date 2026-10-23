@@ -15,6 +15,9 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use aish_i18n::{t, t_with_args};
 use aish_security::secret::{redact_secrets_with_hits, SecretScanner};
@@ -157,46 +160,74 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 // Auto-trigger heuristic
 // ---------------------------------------------------------------------------
 
-/// Report nouns seen in supported UI locales. The shell cannot inspect the
-/// model's intent without an extra call, so an explicit report request in the
-/// user's prompt is the trigger (issue #608: "用户明确要求生成报告").
-const REPORT_NOUNS: &[&str] = &[
-    "report",
-    "报告",
-    "報告",
-    "レポート",
-    "bericht",
-    "informe",
-    "rapport",
-    "отчёт",
-    "отчет",
-];
+/// Report nouns that are unambiguous in any sentence.
+///
+/// English `report` is a common verb ("how do I report a bug") and Chinese
+/// `报告` is too ("报告一下当前状态"), so those languages only accept request
+/// shapes; the loanword/foreign nouns below are always nouns.
+const REPORT_NOUNS: &str = r"レポート|bericht|informe|rapport|отчёт|отчет";
 
-/// Phrases that revoke an otherwise matching request. Kept short and literal;
-/// it exists so "不要生成报告" / "no report please" do not write files.
-const REPORT_VETOES: &[&str] = &[
-    "不要报告",
-    "不要生成报告",
-    "不用报告",
-    "无需报告",
-    "不需要报告",
-    "别生成报告",
-    "no report",
-    "don't report",
-    "dont report",
-    "do not report",
-];
+/// Chinese/Japanese logographs for "report", which double as verbs.
+const CJK_NOUNS: &str = r"报告|報告";
+
+/// Actions that turn a report noun into a request for the artifact.
+const REQUEST_VERBS: &str = r"写|生成|做|出|整理|汇总|输出|导出|制作|起草|打印|给|要|来|整|打|发";
+
+/// A request for a report.
+///
+/// English requires an explicit artifact request (`generate an HTML report`,
+/// `write a report`, `report please`) because a bare `report` is far more often
+/// a verb than an instruction to produce a document. The same holds for
+/// `报告` / `報告`, which need a producing verb nearby.
+static REPORT_REQUEST: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)(?:{nouns}|\bhtml\s+reports?\b|\breports?\s+please\b|\b(?:generate|write|make|create|produce|prepare|draft)\w*\s+(?:me\s+)?(?:an?\s+|the\s+|some\s+)?(?:\w+\s+){{0,2}}reports?\b|(?:{verbs})[^。，,.!?！？;；\n]{{0,8}}(?:{cjk}))",
+        nouns = REPORT_NOUNS,
+        verbs = REQUEST_VERBS,
+        cjk = CJK_NOUNS
+    ))
+    .expect("report request regex is valid")
+});
+
+/// Negation that precedes the noun, e.g. `不要写报告` / `don't write a report`.
+///
+/// A negation pattern rather than a fixed phrase list: the phrase list missed
+/// `不要写报告` and `别报告了`, and both wrote a file *and* opened a browser
+/// after the user explicitly asked not to. The gap is capped at 16 characters
+/// and stops at punctuation so a negation in an earlier clause cannot veto a
+/// later request (`别只给结论，写个报告`).
+static REPORT_VETO_BEFORE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)(?:不要|不用|无需|不需要|别|停止|\bkein\w*|\bno\b|\bnot\b|\bne\b|\bне\b|don'?t|dont|do\s+not|\bwithout\b)[^。，,.!?！？;；\n]{{0,16}}(?:{nouns}|{cjk}|\breports?\b)",
+        nouns = REPORT_NOUNS,
+        cjk = CJK_NOUNS
+    ))
+    .expect("report veto regex is valid")
+});
+
+/// Negation that follows the noun, as Japanese and colloquial Chinese do:
+/// `レポートはいらない` / `报告就不要了`. An `after` variant is required because
+/// these languages negate by postfix rather than by a leading particle.
+static REPORT_VETO_AFTER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)(?:{nouns}|{cjk}|reports?)[^。，,.!?！？;；\n]{{0,8}}(?:不用了?|不要了?|不需要|いらない|いらん|要らない|不要|なし|not\s+(?:needed|necessary|required)|isn'?t\s+needed)",
+        nouns = REPORT_NOUNS,
+        cjk = CJK_NOUNS
+    ))
+    .expect("report postfix veto regex is valid")
+});
 
 /// `true` when the prompt explicitly asks for a report.
 ///
 /// Deliberately a heuristic: no report is produced for ordinary questions and
-/// shell commands, and a false negative costs one `/report` invocation.
+/// shell commands, and a false negative costs one `/report` invocation. A veto
+/// always wins, because acting against "don't write a report" is worse than
+/// doing nothing.
 pub fn should_auto_report(prompt: &str) -> bool {
-    let lower = prompt.to_lowercase();
-    if REPORT_VETOES.iter().any(|v| lower.contains(v)) {
+    if REPORT_VETO_BEFORE.is_match(prompt) || REPORT_VETO_AFTER.is_match(prompt) {
         return false;
     }
-    REPORT_NOUNS.iter().any(|noun| lower.contains(noun))
+    REPORT_REQUEST.is_match(prompt)
 }
 
 // ---------------------------------------------------------------------------
@@ -251,8 +282,16 @@ fn fenced(text: &str) -> String {
 }
 
 /// Escape a Markdown table cell.
+///
+/// `<` / `>` are escaped because many Markdown renderers pass raw HTML through;
+/// a command containing `<script>` must not become live markup in the `.md`
+/// copy. `&` is escaped first so the entities produced below are not
+/// double-escaped.
 fn table_cell(text: &str) -> String {
-    text.replace('|', "\\|")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('|', "\\|")
         .replace('\n', " ")
         .replace('`', "\\`")
 }
@@ -857,8 +896,8 @@ fn render_markdown(doc: &ReportDoc) -> String {
     let _ = writeln!(md, "# {}", t("shell.report.html.title"));
     md.push_str(&crate::app::export_redaction_banner(true));
     let _ = writeln!(md, "- **session**: `{}`", doc.session_uuid);
-    let _ = writeln!(md, "- **model**: {}", doc.model);
-    let _ = writeln!(md, "- **created**: {}", doc.created_at);
+    let _ = writeln!(md, "- **model**: `{}`", doc.model.replace('`', "'"));
+    let _ = writeln!(md, "- **created**: `{}`", doc.created_at.replace('`', "'"));
     let _ = writeln!(md, "- **generated**: {}", doc.generated_at);
     if let Some(cwd) = &doc.cwd {
         let _ = writeln!(md, "- **cwd**: `{cwd}`");
@@ -1046,10 +1085,89 @@ mod tests {
             "Analyze the slow server and generate an HTML report"
         ));
         assert!(should_auto_report("crée un rapport"));
+        assert!(should_auto_report("生成一份报告"));
         assert!(!should_auto_report("ls -la /tmp"));
         assert!(!should_auto_report("how do I list files?"));
         assert!(!should_auto_report("不要生成报告，只告诉我结论"));
         assert!(!should_auto_report("no report please"));
+    }
+
+    #[test]
+    fn auto_report_trigger_rejects_negations_beyond_fixed_phrases() {
+        // Every case below matched the old fixed-phrase veto list and wrote a
+        // file (plus opened a browser) despite asking for no report.
+        for prompt in [
+            "不要写报告，只给结论",
+            "别报告了",
+            "不用写报告",
+            "不需要report",
+            "don't write a report",
+            "no need for a report",
+            "do not produce a report",
+            "keinen Bericht erstellen",
+            "не нужен отчёт",
+            "我该怎么做，不用报告",
+            "no report",
+        ] {
+            assert!(
+                !should_auto_report(prompt),
+                "negated prompt must not trigger a report: {prompt}"
+            );
+        }
+        // A postfix negation counts too; Japanese and Chinese use it.
+        assert!(!should_auto_report("レポートはいらない"));
+        assert!(!should_auto_report("报告就不要了"));
+        // A negation in an earlier clause must not veto a later request.
+        assert!(should_auto_report("别只给结论，写个报告"));
+        assert!(should_auto_report("不要解释太多。生成报告"));
+        // `stop` is ambiguous ("stop and write a report"), so it is not a veto.
+        assert!(should_auto_report("stop and write a report"));
+    }
+
+    #[test]
+    fn auto_report_trigger_ignores_verb_usage() {
+        // `report` is far more often a verb here; only an artifact request
+        // counts. Chinese 报告 behaves the same way.
+        for prompt in [
+            "how do I report a bug",
+            "report the error to the maintainers",
+            "the tool will report its status",
+            "报告一下当前状态",
+            "报告给管理员",
+            "报告下载链接在哪",
+            "write down the results",
+        ] {
+            assert!(
+                !should_auto_report(prompt),
+                "verb usage must not trigger a report: {prompt}"
+            );
+        }
+        for prompt in [
+            "write a report of the findings",
+            "report please",
+            "html report",
+            "写个报告",
+            "给我一份报告",
+            "请汇总并输出报告",
+        ] {
+            assert!(
+                should_auto_report(prompt),
+                "artifact request must trigger a report: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_table_cells_cannot_break_out_of_the_table() {
+        assert_eq!(table_cell("a|b"), "a\\|b");
+        assert_eq!(table_cell("line\nbreak"), "line break");
+        assert_eq!(
+            table_cell("<script>x</script>"),
+            "&lt;script&gt;x&lt;/script&gt;"
+        );
+        assert_eq!(table_cell("a & b"), "a &amp; b");
+        // `&` is escaped before the entities it introduces.
+        assert_eq!(table_cell("<&>"), "&lt;&amp;&gt;");
     }
 
     #[test]
@@ -1078,6 +1196,9 @@ mod tests {
         assert!(!bundle.html.contains("<img"));
         assert!(bundle.html.contains("&lt;script&gt;"));
         assert!(bundle.html.contains("&lt;img src=x onerror=alert(3)&gt;"));
+        // The Markdown copy keeps session text inside code fences; only the
+        // command table is raw, and `table_cell` escapes it.
+        assert!(!bundle.markdown.contains("| echo '<script"));
         // The document is offline-only: no external loads, no inline script.
         assert!(bundle.html.contains("default-src 'none'"));
         assert!(!bundle.html.contains("http://"));

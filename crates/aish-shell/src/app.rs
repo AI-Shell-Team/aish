@@ -5368,7 +5368,11 @@ impl AishShell {
                 args
             }))
         );
-        if let Err(e) = open::that(&paths.html) {
+        // `that` waits for the launcher to exit, which stalls the TUI while
+        // xdg-open / the portal is slow. A detached spawn returns immediately;
+        // the cost is that only a failed spawn is reported, not a launcher
+        // that later exits non-zero — the file is already on disk either way.
+        if let Err(e) = open::that_detached(&paths.html) {
             // A missing browser is not a report failure: the file exists and
             // the terminal keeps working.
             eprintln!(
