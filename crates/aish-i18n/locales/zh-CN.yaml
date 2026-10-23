@@ -980,6 +980,8 @@ shell:
     potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
     llm_error_title: "❌ 大模型请求失败"
     llm_error_message: "错误: {error}"
+    empty_response: "提供方未返回回答。请检查所选提供方或模型，然后重试。"
+    incomplete_response: "提供方在回答完成前结束了响应。请检查输出上限或尝试其他模型。"
     partial_turn_saved: "已保存本轮已完成的工具执行记录（{steps} 步），失败前的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     partial_turn_saved_limit: "已在达到轮次上限停止前保存本轮已完成的工具执行记录（{steps} 步），已完成的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     llm_error_details_title: "调试详情"

@@ -3368,6 +3368,8 @@ impl AishShell {
                                         e,
                                         aish_core::AishError::Llm(_)
                                             | aish_core::AishError::IterationLimit
+                                            | aish_core::AishError::EmptyResponse
+                                            | aish_core::AishError::IncompleteResponse
                                     ) {
                                         let msg = t("shell.error.llm_error_message")
                                             .replace("{error}", &e.to_string());
@@ -3615,7 +3617,10 @@ impl AishShell {
                         Err(e) => {
                             if !matches!(
                                 e,
-                                aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                                aish_core::AishError::Llm(_)
+                                    | aish_core::AishError::IterationLimit
+                                    | aish_core::AishError::EmptyResponse
+                                    | aish_core::AishError::IncompleteResponse
                             ) {
                                 let msg = t("shell.error.llm_error_message")
                                     .replace("{error}", &e.to_string());
@@ -3741,6 +3746,8 @@ impl AishShell {
                                             e,
                                             aish_core::AishError::Llm(_)
                                                 | aish_core::AishError::IterationLimit
+                                                | aish_core::AishError::EmptyResponse
+                                                | aish_core::AishError::IncompleteResponse
                                         ) {
                                             let msg = t("shell.error.llm_error_message")
                                                 .replace("{error}", &e.to_string());
@@ -4158,7 +4165,10 @@ impl AishShell {
                     Err(e) => {
                         if !matches!(
                             e,
-                            aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                            aish_core::AishError::Llm(_)
+                                | aish_core::AishError::IterationLimit
+                                | aish_core::AishError::EmptyResponse
+                                | aish_core::AishError::IncompleteResponse
                         ) {
                             let msg = t("shell.error.llm_error_message")
                                 .replace("{error}", &e.to_string());

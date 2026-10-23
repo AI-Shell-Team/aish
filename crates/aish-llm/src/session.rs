@@ -686,6 +686,42 @@ impl LlmSession {
         }
     }
 
+    fn emit_inconclusive_response(&self, error_type: &str, message: String) {
+        self.emit_event(LlmEvent {
+            event_type: LlmEventType::Error,
+            data: serde_json::json!({
+                "error_type": error_type,
+                "error_message": message,
+            }),
+            timestamp: now_timestamp(),
+            metadata: None,
+        });
+        self.emit_event(LlmEvent {
+            event_type: LlmEventType::OpEnd,
+            data: serde_json::json!({
+                "reason": "inconclusive",
+                "error_type": error_type,
+            }),
+            timestamp: now_timestamp(),
+            metadata: None,
+        });
+    }
+
+    fn preserve_partial_tool_messages(
+        &self,
+        user_msg: &ChatMessage,
+        messages: &[ChatMessage],
+        initial_len: usize,
+    ) {
+        if messages.len() <= initial_len {
+            return;
+        }
+        let mut partial = Vec::with_capacity(messages.len() - initial_len + 1);
+        partial.push(user_msg.clone());
+        partial.extend_from_slice(&messages[initial_len..]);
+        *self.last_partial_turn.lock() = partial;
+    }
+
     /// Process user input: send to LLM, handle tool calls in a loop, return final response.
     pub async fn process_input(
         &self,
@@ -890,6 +926,9 @@ impl LlmSession {
                 LlmResponse::Json(json) => {
                     let (content, reasoning_content, tool_calls, usage) =
                         StreamParser::parse_response(&json);
+                    let finish_reason = json
+                        .pointer("/choices/0/finish_reason")
+                        .and_then(serde_json::Value::as_str);
                     let (pt, ct) = usage
                         .as_ref()
                         .map(|u| (u.prompt_tokens, u.completion_tokens))
@@ -918,6 +957,26 @@ impl LlmSession {
                                 ct,
                             )
                             .await;
+                    }
+
+                    if finish_reason == Some("length") {
+                        self.preserve_partial_tool_messages(&user_msg, &messages, initial_len);
+                        self.emit_inconclusive_response(
+                            "incomplete_response",
+                            aish_i18n::t("shell.error.incomplete_response"),
+                        );
+                        return Err(AishError::IncompleteResponse);
+                    }
+
+                    if tool_calls.is_empty()
+                        && content.as_deref().is_none_or(|text| text.trim().is_empty())
+                    {
+                        self.preserve_partial_tool_messages(&user_msg, &messages, initial_len);
+                        self.emit_inconclusive_response(
+                            "empty_response",
+                            aish_i18n::t("shell.error.empty_response"),
+                        );
+                        return Err(AishError::EmptyResponse);
                     }
 
                     if tool_calls.is_empty() {
@@ -985,6 +1044,8 @@ impl LlmSession {
                         HashMap::with_capacity(8); // index -> (id, name, args)
 
                     let mut stream_done = false;
+                    let mut stream_completed = false;
+                    let mut finish_reason: Option<String> = None;
                     let mut text_buffer = String::with_capacity(4096);
                     let mut stream = resp;
                     let mut reasoning_started = false;
@@ -1103,9 +1164,12 @@ impl LlmSession {
                                                         entry.2.push_str(&a);
                                                     }
                                                 }
-                                                SseEvent::Finish(_) => {}
+                                                SseEvent::Finish(reason) => {
+                                                    finish_reason = Some(reason);
+                                                }
                                                 SseEvent::Done => {
                                                     stream_done = true;
+                                                    stream_completed = true;
                                                 }
                                             }
                                         }
@@ -1193,8 +1257,33 @@ impl LlmSession {
                             .await;
                     }
 
+                    if finish_reason.as_deref() == Some("length")
+                        || (!stream_completed && finish_reason.is_none())
+                    {
+                        if let Some(ref langfuse) = self.langfuse {
+                            langfuse.flush().await;
+                        }
+                        self.preserve_partial_tool_messages(&user_msg, &messages, initial_len);
+                        self.emit_inconclusive_response(
+                            "incomplete_response",
+                            aish_i18n::t("shell.error.incomplete_response"),
+                        );
+                        return Err(AishError::IncompleteResponse);
+                    }
+
                     // No tool calls — return accumulated content
                     if tool_calls_accum.is_empty() {
+                        if accumulated.trim().is_empty() {
+                            if let Some(ref langfuse) = self.langfuse {
+                                langfuse.flush().await;
+                            }
+                            self.preserve_partial_tool_messages(&user_msg, &messages, initial_len);
+                            self.emit_inconclusive_response(
+                                "empty_response",
+                                aish_i18n::t("shell.error.empty_response"),
+                            );
+                            return Err(AishError::EmptyResponse);
+                        }
                         // Flush Langfuse buffer
                         if let Some(ref langfuse) = self.langfuse {
                             langfuse.flush().await;
@@ -4604,6 +4693,265 @@ mod tests {
         LlmResponse::Stream(crate::llm_stream::LlmStream::from_translated(Box::pin(
             futures::stream::iter(chunks),
         )))
+    }
+
+    #[tokio::test]
+    async fn empty_non_streaming_responses_are_not_successful() {
+        use crate::agents::mock_text_response;
+
+        let responses = [
+            LlmResponse::Json(serde_json::json!({
+                "choices": [{"message": {"content": null}, "finish_reason": "stop"}]
+            })),
+            mock_text_response(""),
+            mock_text_response(" \t\n "),
+        ];
+
+        for response in responses {
+            let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+            session.set_context_budget_policy(ContextBudgetPolicy {
+                enabled: false,
+                ..Default::default()
+            });
+            session.set_test_chat_responses(vec![
+                Ok(response),
+                Ok(mock_text_response("must not be requested automatically")),
+            ]);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let event_sink = events.clone();
+            session.set_event_callback(Arc::new(move |event| {
+                event_sink.lock().unwrap().push(event);
+                None
+            }));
+
+            let result = session
+                .process_input(
+                    &ChatMessage::user("return a short answer"),
+                    &[],
+                    Some("sys"),
+                    false,
+                )
+                .await;
+
+            assert!(
+                matches!(result, Err(AishError::EmptyResponse)),
+                "a response with no usable text or tool calls must not complete"
+            );
+            let events = events.lock().unwrap();
+            assert!(events.iter().any(|event| {
+                event.event_type == LlmEventType::Error
+                    && event.data["error_type"] == "empty_response"
+                    && !event.data["error_message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .is_empty()
+            }));
+            assert!(events.iter().any(|event| {
+                event.event_type == LlmEventType::OpEnd && event.data["reason"] == "inconclusive"
+            }));
+            assert!(!events.iter().any(|event| {
+                event.event_type == LlmEventType::OpEnd && event.data["reason"] == "complete"
+            }));
+            assert_eq!(
+                session
+                    .test_chat_responses
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .len(),
+                1,
+                "an empty response must not trigger an automatic retry"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_streams_and_early_eof_are_not_successful() {
+        let responses = [
+            (mock_sse_response(&[
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ]), false),
+            (mock_sse_response(&[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"  \"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ]), false),
+            (mock_sse_response(&[
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n",
+            ]), true),
+        ];
+
+        for (response, incomplete) in responses {
+            let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+            session.set_context_budget_policy(ContextBudgetPolicy {
+                enabled: false,
+                ..Default::default()
+            });
+            session.set_test_chat_responses(vec![Ok(response)]);
+
+            let result = session
+                .process_input(
+                    &ChatMessage::user("return a short answer"),
+                    &[],
+                    Some("sys"),
+                    true,
+                )
+                .await;
+
+            if incomplete {
+                assert!(matches!(result, Err(AishError::IncompleteResponse)));
+            } else {
+                assert!(matches!(result, Err(AishError::EmptyResponse)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn truncated_streams_are_incomplete_but_normal_short_answers_complete() {
+        use crate::agents::mock_text_response;
+
+        let mut truncated_json = LlmSession::new("http://localhost", "key", "model", None, None);
+        truncated_json.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        truncated_json.set_test_chat_responses(vec![Ok(LlmResponse::Json(serde_json::json!({
+            "choices": [{
+                "message": {"content": "partial"},
+                "finish_reason": "length"
+            }]
+        })))]);
+        assert!(matches!(
+            truncated_json
+                .process_input(
+                    &ChatMessage::user("return a short answer"),
+                    &[],
+                    Some("sys"),
+                    false,
+                )
+                .await,
+            Err(AishError::IncompleteResponse)
+        ));
+
+        let mut truncated = LlmSession::new("http://localhost", "key", "model", None, None);
+        truncated.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        truncated.set_test_chat_responses(vec![Ok(mock_sse_response(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]))]);
+        assert!(
+            matches!(
+                truncated
+                    .process_input(
+                        &ChatMessage::user("return a short answer"),
+                        &[],
+                        Some("sys"),
+                        true,
+                    )
+                    .await,
+                Err(AishError::IncompleteResponse)
+            ),
+            "finish_reason=length must not be reported as a complete answer"
+        );
+
+        let mut normal = LlmSession::new("http://localhost", "key", "model", None, None);
+        normal.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        normal.set_test_chat_responses(vec![Ok(mock_text_response("done"))]);
+        let result = normal
+            .process_input(
+                &ChatMessage::user("return a short answer"),
+                &[],
+                Some("sys"),
+                false,
+            )
+            .await
+            .expect("a normal short answer remains successful");
+        assert_eq!(result.text, "done");
+
+        let mut normal_stream = LlmSession::new("http://localhost", "key", "model", None, None);
+        normal_stream.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        normal_stream.set_test_chat_responses(vec![Ok(mock_sse_response(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]))]);
+        let result = normal_stream
+            .process_input(
+                &ChatMessage::user("return a short answer"),
+                &[],
+                Some("sys"),
+                true,
+            )
+            .await
+            .expect("a normal short stream remains successful");
+        assert_eq!(result.text, "done");
+    }
+
+    #[tokio::test]
+    async fn empty_final_after_tool_execution_preserves_tool_evidence() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "bash",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[("call_1", "bash", "{}")])),
+            Ok(mock_text_response(" \n ")),
+            Ok(mock_text_response("must not be requested automatically")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run the task"), &[], Some("sys"), false)
+            .await;
+        assert!(
+            matches!(result, Err(AishError::EmptyResponse)),
+            "the empty final response must fail"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the tool runs once");
+        assert_eq!(
+            session
+                .test_chat_responses
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .len(),
+            1,
+            "the empty final response must not trigger an automatic retry"
+        );
+
+        let partial = session.take_last_partial_turn();
+        let roles: Vec<&str> = partial
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+        assert_eq!(
+            partial[1]
+                .tool_calls
+                .as_ref()
+                .and_then(|calls| calls.first())
+                .map(|call| call.id.as_str()),
+            Some("call_1")
+        );
+        assert_eq!(partial[2].tool_call_id.as_deref(), Some("call_1"));
     }
 
     #[tokio::test]
