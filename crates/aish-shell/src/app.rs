@@ -3491,126 +3491,7 @@ impl AishShell {
 
                                 self.persist_session_snapshot();
 
-                                // Check if plan mode was exited during this AI turn.
-                                // If exit_plan_mode tool was called, show plan approval UI.
-                                let plan_state = self.ai_handler.plan_state();
-                                if plan_state.phase == aish_core::PlanPhase::Normal
-                                    && plan_state.approval_status
-                                        == aish_core::PlanApprovalStatus::AwaitingUser
-                                    && plan_state.plan_id.is_some()
-                                {
-                                    if let Some(artifact_path) = plan_state.artifact_path.as_ref() {
-                                        // Plan was exited — read artifact and present for approval
-                                        let artifact_text =
-                                            aish_core::plan::read_artifact_text(artifact_path);
-
-                                        // Use the enhanced plan approval flow
-                                        use crate::wizard::plan_approval::{
-                                            PlanApprovalDecision, PlanApprovalFlow,
-                                        };
-                                        let decision = PlanApprovalFlow::review_plan(
-                                            &artifact_text,
-                                            plan_state.summary.as_deref(),
-                                            if plan_state.draft_revision > 0 {
-                                                Some(plan_state.draft_revision)
-                                            } else {
-                                                None
-                                            },
-                                        );
-
-                                        match decision {
-                                            PlanApprovalDecision::Approved => {
-                                                // Create approved snapshot and transition state
-                                                let plan_state_lock =
-                                                    self.ai_handler.plan_state_ptr();
-                                                let mut state = plan_state_lock.lock().unwrap();
-                                                if let Ok(_snapshot) =
-                                                    aish_core::plan::create_approved_snapshot(
-                                                        &mut state,
-                                                    )
-                                                {
-                                                    println!(
-                                                        "{}",
-                                                        theme::success(&t("shell.plan_approved"))
-                                                    );
-                                                    println!(
-                                                        "  {}",
-                                                        theme::faint(&t_with_args(
-                                                            "shell.plan_approved_hint",
-                                                            &std::collections::HashMap::new()
-                                                        ))
-                                                    );
-                                                }
-                                            }
-                                            PlanApprovalDecision::ChangesRequested { feedback } => {
-                                                // Keep in planning phase — re-enter plan mode with feedback
-                                                println!(
-                                                    "{}",
-                                                    theme::warning(&t(
-                                                        "shell.plan_changes_requested"
-                                                    ))
-                                                );
-
-                                                // Re-enter plan mode to let the AI revise
-                                                self.ai_handler.enter_plan_mode(&self.session_uuid);
-
-                                                // Set the approval status and feedback directly on the mutex
-                                                {
-                                                    let plan_state_lock =
-                                                        self.ai_handler.plan_state_ptr();
-                                                    let mut ps = plan_state_lock.lock().unwrap();
-                                                    ps.approval_status =
-                                                    aish_core::PlanApprovalStatus::ChangesRequested;
-                                                    ps.approval_feedback_summary =
-                                                        if feedback.is_empty() {
-                                                            None
-                                                        } else {
-                                                            Some(feedback.clone())
-                                                        };
-                                                    // Bump revision since we're requesting changes
-                                                    aish_core::plan::bump_draft_revision(&mut ps);
-                                                    // Preserve the artifact path from the previous plan
-                                                    ps.artifact_path =
-                                                        plan_state.artifact_path.clone();
-                                                    ps.plan_id = plan_state.plan_id.clone();
-                                                }
-
-                                                // If feedback was provided, send it back to the AI
-                                                // by injecting it as context
-                                                if !feedback.is_empty() {
-                                                    let feedback_msg = format!(
-                                                        "[Plan Review Feedback]\nThe user requested changes to the plan:\n{}\n\nPlease revise the plan accordingly and use exit_plan_mode when ready.",
-                                                        feedback
-                                                    );
-                                                    self.ai_handler
-                                                        .add_shell_context(&feedback_msg);
-                                                    println!(
-                                                        "  {}",
-                                                        theme::faint(&t(
-                                                            "shell.plan_feedback_sent"
-                                                        ))
-                                                    );
-                                                }
-                                            }
-                                            PlanApprovalDecision::Cancelled => {
-                                                let plan_state_lock =
-                                                    self.ai_handler.plan_state_ptr();
-                                                plan_state_lock.lock().unwrap().approval_status =
-                                                    aish_core::PlanApprovalStatus::Cancelled;
-                                                println!(
-                                                    "{}",
-                                                    theme::warning(&t(
-                                                        "shell.plan_review_cancelled"
-                                                    ))
-                                                );
-                                                println!(
-                                                    "{}",
-                                                    theme::faint(&t("shell.plan_review_hint"))
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                self.review_pending_plan();
 
                                 self.record_history(input, 0);
                             }
@@ -3736,6 +3617,7 @@ impl AishShell {
                                                 sep_renderer.render_separator();
                                             }
                                             self.persist_session_snapshot();
+                                            self.review_pending_plan();
                                             self.record_history(input, 0);
                                         }
                                     }
@@ -4151,12 +4033,15 @@ impl AishShell {
                         if self.ai_handler.cancellation_token().is_cancelled() {
                             self.sub_agent_animation.stop();
                             println!("{}", theme::warning(&t("shell.interrupted")));
-                        } else if !did_stream && !response.trim().is_empty() {
-                            let mut sep = ShellRenderer::new();
-                            sep.set_shared_recorder(self.shared_recorder.clone());
-                            sep.render_separator();
-                            print_md_with_recording(&response, &self.shared_recorder);
-                            sep.render_separator();
+                        } else {
+                            if !did_stream && !response.trim().is_empty() {
+                                let mut sep = ShellRenderer::new();
+                                sep.set_shared_recorder(self.shared_recorder.clone());
+                                sep.render_separator();
+                                print_md_with_recording(&response, &self.shared_recorder);
+                                sep.render_separator();
+                            }
+                            self.review_pending_plan();
                         }
                     }
                     Err(aish_core::AishError::Cancelled) => {
@@ -10404,12 +10289,125 @@ impl AishShell {
         (cats, items)
     }
 
-    /// Handle `/plan [start|status|exit]` — plan mode lifecycle.
+    /// Present the pending approval prompt after a plan exits or on user retry.
+    /// Returns whether a plan was awaiting review.
+    fn review_pending_plan(&mut self) -> bool {
+        let plan_state = self.ai_handler.plan_state();
+        if plan_state.phase != aish_core::PlanPhase::Normal
+            || plan_state.approval_status != aish_core::PlanApprovalStatus::AwaitingUser
+            || plan_state.plan_id.is_none()
+        {
+            return false;
+        }
+
+        let Some(artifact_path) = plan_state.artifact_path.as_ref() else {
+            eprintln!(
+                "{}",
+                theme::error("Cannot review the plan because its artifact path is missing.")
+            );
+            println!("The plan remains awaiting approval; restore its artifact and run `/plan review` to retry.");
+            return true;
+        };
+        let artifact_text = match std::fs::read_to_string(artifact_path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    theme::error(&format!(
+                        "Could not read plan artifact {}: {error}",
+                        artifact_path
+                    ))
+                );
+                println!("The plan remains awaiting approval; fix the artifact access problem and run `/plan review` to retry.");
+                return true;
+            }
+        };
+
+        use crate::wizard::plan_approval::{PlanApprovalDecision, PlanApprovalFlow};
+        let decision = PlanApprovalFlow::review_plan(
+            &artifact_text,
+            plan_state.summary.as_deref(),
+            (plan_state.draft_revision > 0).then_some(plan_state.draft_revision),
+        );
+
+        match decision {
+            PlanApprovalDecision::Approved => {
+                let snapshot_result = {
+                    let plan_state_lock = self.ai_handler.plan_state_ptr();
+                    let mut state = plan_state_lock.lock().unwrap();
+                    aish_core::plan::create_approved_snapshot(&mut state)
+                };
+                match snapshot_result {
+                    Ok(_) => {
+                        println!("{}", theme::success(&t("shell.plan_approved")));
+                        println!(
+                            "  {}",
+                            theme::faint(&t_with_args(
+                                "shell.plan_approved_hint",
+                                &std::collections::HashMap::new()
+                            ))
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            theme::error(&format!(
+                                "Could not save the approved plan snapshot: {error}"
+                            ))
+                        );
+                        println!("The plan remains awaiting approval. Fix the file or storage issue, then run `/plan review` to retry.");
+                    }
+                }
+            }
+            PlanApprovalDecision::ChangesRequested { feedback } => {
+                println!("{}", theme::warning(&t("shell.plan_changes_requested")));
+                self.ai_handler.enter_plan_mode(&self.session_uuid);
+
+                {
+                    let plan_state_lock = self.ai_handler.plan_state_ptr();
+                    let mut state = plan_state_lock.lock().unwrap();
+                    state.approval_status = aish_core::PlanApprovalStatus::ChangesRequested;
+                    state.approval_feedback_summary = if feedback.is_empty() {
+                        None
+                    } else {
+                        Some(feedback.clone())
+                    };
+                    aish_core::plan::bump_draft_revision(&mut state);
+                    state.artifact_path = plan_state.artifact_path.clone();
+                    state.plan_id = plan_state.plan_id.clone();
+                }
+
+                if !feedback.is_empty() {
+                    let feedback_msg = format!(
+                        "[Plan Review Feedback]\nThe user requested changes to the plan:\n{}\n\nPlease revise the plan accordingly and use exit_plan_mode when ready.",
+                        feedback
+                    );
+                    self.ai_handler.add_shell_context(&feedback_msg);
+                    println!("  {}", theme::faint(&t("shell.plan_feedback_sent")));
+                }
+            }
+            PlanApprovalDecision::Cancelled => {
+                let plan_state_lock = self.ai_handler.plan_state_ptr();
+                plan_state_lock.lock().unwrap().approval_status =
+                    aish_core::PlanApprovalStatus::Cancelled;
+                println!("{}", theme::warning(&t("shell.plan_review_cancelled")));
+                println!("{}", theme::faint(&t("shell.plan_review_hint")));
+            }
+        }
+
+        self.persist_session_snapshot();
+        true
+    }
+
+    /// Handle `/plan [start|status|exit|review]` — plan mode lifecycle.
     fn handle_plan_command(&mut self, parts: &[&str]) {
         use aish_core::PlanPhase;
 
         if parts.len() > 1 && (parts[1] == "--help" || parts[1] == "-h") {
-            println!("{}", theme::accent("Usage: /plan [start|status|exit]"));
+            println!(
+                "{}",
+                theme::accent("Usage: /plan [start|status|exit|review]")
+            );
             return;
         }
 
@@ -10418,7 +10416,7 @@ impl AishShell {
         let subcommand = parts.get(1).copied().unwrap_or("");
 
         // Reject unknown subcommands
-        if !subcommand.is_empty() && !["start", "status", "exit"].contains(&subcommand) {
+        if !subcommand.is_empty() && !["start", "status", "exit", "review"].contains(&subcommand) {
             eprintln!(
                 "{}",
                 theme::error(&format!("Unknown /plan subcommand: {}", subcommand))
@@ -10432,6 +10430,12 @@ impl AishShell {
                     "exit" => {
                         self.ai_handler.exit_plan_mode();
                         println!("{}", theme::warning("Exited plan mode."));
+                    }
+                    "review" => {
+                        eprintln!(
+                            "{}",
+                            theme::error("Exit plan mode before reviewing its approval.")
+                        );
                     }
                     _ => {
                         // Bare `/plan` or `/plan status` while planning → show status
@@ -10450,6 +10454,11 @@ impl AishShell {
                 match subcommand {
                     "exit" => {
                         println!("mode=shell, approval_status=draft, artifact=-");
+                    }
+                    "review" => {
+                        if !self.review_pending_plan() {
+                            println!("No plan is awaiting approval.");
+                        }
                     }
                     _ => {
                         // `/plan` or `/plan start` from shell mode → enter planning
@@ -11101,6 +11110,7 @@ impl AishShell {
                             self.sync_state_from_pty_cwd();
                             print_md_with_recording(&response, &self.shared_recorder);
                             self.persist_session_snapshot();
+                            self.review_pending_plan();
                             script_env.insert("AISH_LAST_OUTPUT".to_string(), response);
                         }
                         Err(e) => {

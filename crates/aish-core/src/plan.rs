@@ -370,6 +370,25 @@ mod tests {
     }
 
     #[test]
+    fn failed_approved_snapshot_keeps_plan_awaiting_user() {
+        let missing_artifact =
+            std::env::temp_dir().join(format!("aish-missing-plan-{}.md", generate_plan_id()));
+        let mut state = PlanModeState::default();
+        state.phase = PlanPhase::Normal;
+        state.plan_id = Some("snapshot-failure".to_string());
+        state.artifact_path = Some(missing_artifact.to_string_lossy().into_owned());
+        state.draft_revision = 1;
+        state.approval_status = PlanApprovalStatus::AwaitingUser;
+
+        assert!(create_approved_snapshot(&mut state).is_err());
+
+        assert_eq!(state.approval_status, PlanApprovalStatus::AwaitingUser);
+        assert!(state.approved_artifact_path.is_none());
+        assert!(state.approved_revision.is_none());
+        assert!(state.approved_artifact_hash.is_none());
+    }
+
+    #[test]
     fn test_bump_draft_revision() {
         let mut state = create_new_plan_state("test");
         assert_eq!(state.draft_revision, 0);

@@ -2008,6 +2008,9 @@ impl LlmSession {
         let working_directory = std::env::current_dir().ok();
         let plan_mode_block =
             plan_mode_block_reason(&plan_state, tool_name, args, working_directory.as_deref());
+        if let Some(message) = plan_mode_block {
+            return Some(ToolResult::error(format!("Plan mode: {message}")));
+        }
 
         // Approval memory: a remembered "yes" for this session lets an
         // identical call skip its preflight (and, for the shell tool, the
@@ -2027,8 +2030,7 @@ impl LlmSession {
         //     user-approved sudo command with no prompt).
         let memory_command = args.get("command").and_then(|value| value.as_str());
         let memory_target = tool.approval_memory_key(args);
-        let memory_allowed = plan_mode_block.is_none()
-            && !self.is_sub_agent
+        let memory_allowed = !self.is_sub_agent
             && !tool_name.starts_with(MCP_TOOL_PREFIX)
             && ((tool_name == SHELL_COMMAND_TOOL
                 && memory_command.is_some_and(|command| {
@@ -2056,13 +2058,7 @@ impl LlmSession {
             return None;
         }
         let ctx = crate::tool_context::ToolContext::for_session(self);
-        let preflight = match plan_mode_block {
-            Some(message) => PreflightResult::Block {
-                message,
-                security: None,
-            },
-            None => tool.preflight_with_context(args, &ctx),
-        };
+        let preflight = tool.preflight_with_context(args, &ctx);
         match preflight {
             PreflightResult::Allow => {
                 self.emit_audit(AuditEvent::security_decision(
@@ -3346,6 +3342,11 @@ mod tests {
         let write_calls = Arc::new(AtomicU32::new(0));
         let read_calls = Arc::new(AtomicU32::new(0));
         let memory_calls = Arc::new(AtomicU32::new(0));
+        let security_notices = Arc::new(AtomicU32::new(0));
+        let security_notice_count = security_notices.clone();
+        session.set_security_notice_callback(Arc::new(move |_| {
+            security_notice_count.fetch_add(1, Ordering::SeqCst);
+        }));
         session.register_tool(Box::new(ExecuteCountingTool {
             name: "bash",
             calls: bash_calls.clone(),
@@ -3377,6 +3378,15 @@ mod tests {
         assert!(hidden
             .output
             .contains("not available while plan mode is active"));
+        assert_ne!(
+            hidden
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("dispatch_status"))
+                .and_then(serde_json::Value::as_str),
+            Some("short_circuit"),
+            "plan-mode refusals should be returned to the model, not end the turn"
+        );
         assert_eq!(bash_calls.load(Ordering::SeqCst), 0);
 
         let external_hidden = session
@@ -3440,6 +3450,11 @@ mod tests {
             .unwrap();
         assert!(!memory_write.ok);
         assert_eq!(memory_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            security_notices.load(Ordering::SeqCst),
+            0,
+            "plan-mode refusals must not be reported as security blocks"
+        );
     }
 
     #[test]
