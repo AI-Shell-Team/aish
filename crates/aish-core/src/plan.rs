@@ -16,8 +16,8 @@ use crate::types::{PlanApprovalStatus, PlanModeState, PlanPhase};
 
 /// Tools visible during planning phase.
 ///
-/// During planning, the AI can only use read-only tools plus
-/// write_file/edit_file for creating the plan artifact.
+/// During planning, the AI can only use read-only tools (memory search/list
+/// only) plus write_file/edit_file for creating the plan artifact.
 pub const PLANNING_VISIBLE_TOOLS: &[&str] = &[
     "read_file",
     "glob",
@@ -38,7 +38,7 @@ pub const AWAITING_APPROVAL_VISIBLE_TOOLS: &[&str] = &["read_file", "ask_user", 
 /// Tools with side effects (for reference).
 pub const SIDE_EFFECT_TOOLS: &[&str] = &["bash_exec", "python_exec", "write_file", "edit_file"];
 
-/// Read-only tools (safe for planning phase).
+/// Read-only tools (memory search/list only) safe for the planning phase.
 pub const READ_ONLY_TOOLS: &[&str] = &["read_file", "glob", "grep", "ask_user", "memory"];
 
 // ---------------------------------------------------------------------------
@@ -244,6 +244,7 @@ pub fn create_approved_snapshot(state: &mut PlanModeState) -> Result<PathBuf, st
     state.approved_artifact_path = Some(snapshot_path_str.to_string());
     state.approved_revision = Some(state.draft_revision);
     state.approved_artifact_hash = Some(hash);
+    state.approval_status = PlanApprovalStatus::Approved;
     state.updated_at = utc_now_iso();
 
     Ok(snapshot_path)
@@ -266,30 +267,27 @@ pub fn read_artifact_text(path: &str) -> String {
 ///
 /// During planning, only tools in PLANNING_VISIBLE_TOOLS are allowed.
 /// When awaiting user approval, only tools in AWAITING_APPROVAL_VISIBLE_TOOLS are allowed.
-/// During normal mode, all tools are visible.
+/// During normal mode, all tools are visible unless plan approval is pending.
 pub fn filter_tools_for_phase(
     tool_names: &[String],
     phase: &PlanPhase,
     approval_status: Option<&PlanApprovalStatus>,
 ) -> Vec<String> {
+    if matches!(approval_status, Some(PlanApprovalStatus::AwaitingUser)) {
+        return tool_names
+            .iter()
+            .filter(|name| AWAITING_APPROVAL_VISIBLE_TOOLS.contains(&name.as_str()))
+            .cloned()
+            .collect();
+    }
+
     match phase {
         PlanPhase::Normal => tool_names.to_vec(),
-        PlanPhase::Planning => {
-            // If awaiting approval, use the restricted set
-            if let Some(PlanApprovalStatus::AwaitingUser) = approval_status {
-                tool_names
-                    .iter()
-                    .filter(|name| AWAITING_APPROVAL_VISIBLE_TOOLS.contains(&name.as_str()))
-                    .cloned()
-                    .collect()
-            } else {
-                tool_names
-                    .iter()
-                    .filter(|name| PLANNING_VISIBLE_TOOLS.contains(&name.as_str()))
-                    .cloned()
-                    .collect()
-            }
-        }
+        PlanPhase::Planning => tool_names
+            .iter()
+            .filter(|name| PLANNING_VISIBLE_TOOLS.contains(&name.as_str()))
+            .cloned()
+            .collect(),
     }
 }
 
@@ -433,6 +431,30 @@ mod tests {
         assert!(!filtered.contains(&"grep".to_string()));
         assert!(!filtered.contains(&"write_file".to_string()));
         assert!(!filtered.contains(&"bash_exec".to_string()));
+    }
+
+    #[test]
+    fn test_filter_tools_awaiting_approval_after_exit() {
+        let tools = vec![
+            "read_file".to_string(),
+            "ask_user".to_string(),
+            "exit_plan_mode".to_string(),
+            "write_file".to_string(),
+            "bash_exec".to_string(),
+        ];
+        let filtered = filter_tools_for_phase(
+            &tools,
+            &PlanPhase::Normal,
+            Some(&PlanApprovalStatus::AwaitingUser),
+        );
+        assert_eq!(
+            filtered,
+            vec![
+                "read_file".to_string(),
+                "ask_user".to_string(),
+                "exit_plan_mode".to_string()
+            ]
+        );
     }
 
     #[test]

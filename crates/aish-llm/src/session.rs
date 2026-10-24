@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use aish_context::{ContextBudgetPolicy, ContextMessage};
 use aish_core::{
-    AishError, AuditEvent, AuditSink, LlmEvent, LlmEventType, MemoryType, PlanModeState, PlanPhase,
+    AishError, AuditEvent, AuditSink, LlmEvent, LlmEventType, MemoryType, PlanApprovalStatus,
+    PlanModeState, PlanPhase,
 };
 
 use crate::api::{resolve_api_dialect, stream_simple, ApiDialect, StreamContext};
@@ -21,6 +22,221 @@ fn is_short_circuit_result(result: &ToolResult) -> bool {
         .and_then(|meta| meta.get("dispatch_status"))
         .and_then(|value| value.as_str())
         .is_some_and(|status| status.eq_ignore_ascii_case("short_circuit"))
+}
+
+fn resolve_plan_artifact_path(
+    path: &str,
+    working_directory: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+
+    let path = std::path::Path::new(path);
+    if path.is_absolute() || path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+        return None;
+    }
+
+    let components: Vec<_> = path.components().collect();
+    if components.len() != 3
+        || components[0].as_os_str().to_str() != Some(".aish")
+        || components[1].as_os_str().to_str() != Some("plans")
+        || !matches!(components[0], Component::Normal(_))
+        || !matches!(components[1], Component::Normal(_))
+        || !matches!(components[2], Component::Normal(_))
+    {
+        return None;
+    }
+
+    let file_name = components[2].as_os_str().to_str()?;
+    if !file_name.starts_with("plan-") || !file_name.ends_with(".md") {
+        return None;
+    }
+
+    let working_directory = std::fs::canonicalize(working_directory).ok()?;
+    let mut resolved = working_directory.clone();
+    for (index, component) in components.iter().enumerate() {
+        resolved.push(component.as_os_str());
+        match std::fs::symlink_metadata(&resolved) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    || (index < 2 && !metadata.is_dir())
+                    || (index == 2 && !metadata.is_file())
+                {
+                    return None;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+
+    Some(resolved)
+}
+
+fn expected_plan_artifact_path(
+    state: &PlanModeState,
+    working_directory: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let plan_id = state.plan_id.as_deref()?;
+    let expected_path = format!(".aish/plans/plan-{plan_id}.md");
+    if state
+        .artifact_path
+        .as_deref()
+        .is_some_and(|artifact_path| artifact_path != expected_path)
+    {
+        return None;
+    }
+    resolve_plan_artifact_path(&expected_path, working_directory)
+}
+
+fn plan_mode_block_reason(
+    state: &PlanModeState,
+    tool_name: &str,
+    args: &serde_json::Value,
+    working_directory: Option<&std::path::Path>,
+) -> Option<String> {
+    if state.approval_status == PlanApprovalStatus::AwaitingUser {
+        if !aish_core::AWAITING_APPROVAL_VISIBLE_TOOLS.contains(&tool_name) {
+            return Some(format!(
+                "Plan approval is pending; tool '{tool_name}' is unavailable until the user decides."
+            ));
+        }
+        return None;
+    }
+
+    if state.phase != PlanPhase::Planning {
+        if tool_name == "exit_plan_mode" {
+            return Some("There is no active plan waiting to exit.".to_string());
+        }
+        return None;
+    }
+
+    if !aish_core::PLANNING_VISIBLE_TOOLS.contains(&tool_name) {
+        return Some(format!(
+            "Tool '{tool_name}' is not available while plan mode is active."
+        ));
+    }
+
+    if tool_name == "memory"
+        && !matches!(
+            args.get("action").and_then(|action| action.as_str()),
+            Some("search" | "list")
+        )
+    {
+        return Some("Plan mode allows only read-only memory search and list actions.".to_string());
+    }
+
+    if matches!(tool_name, "write_file" | "edit_file") {
+        let requested_path = args.get("path").and_then(|path| path.as_str());
+        let Some(working_directory) = working_directory else {
+            return Some(
+                "Could not resolve the working directory for the plan artifact.".to_string(),
+            );
+        };
+        let expected_path = expected_plan_artifact_path(state, working_directory);
+        let requested_path =
+            requested_path.and_then(|path| resolve_plan_artifact_path(path, working_directory));
+        if expected_path.is_none() || requested_path.is_none() || expected_path != requested_path {
+            let expected = state
+                .plan_id
+                .as_ref()
+                .map(|plan_id| format!(".aish/plans/plan-{plan_id}.md"));
+            return Some(format!(
+                "Plan mode only permits writing the active plan artifact at {}.",
+                expected.as_deref().unwrap_or("the active plan artifact")
+            ));
+        }
+    }
+
+    if tool_name == "exit_plan_mode" {
+        let Some(working_directory) = working_directory else {
+            return Some(
+                "Could not resolve the working directory for the plan artifact.".to_string(),
+            );
+        };
+        let Some(artifact_path) = expected_plan_artifact_path(state, working_directory) else {
+            return Some("Plan mode has no valid active plan artifact path.".to_string());
+        };
+        if !artifact_path.is_file() {
+            return Some(format!(
+                "Create the active plan artifact at {} before exiting plan mode.",
+                state
+                    .plan_id
+                    .as_deref()
+                    .map(|plan_id| format!(".aish/plans/plan-{plan_id}.md"))
+                    .as_deref()
+                    .unwrap_or(".aish/plans/<plan-id>.md")
+            ));
+        }
+    }
+
+    None
+}
+
+fn apply_plan_tool_result(
+    state: &mut PlanModeState,
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &ToolResult,
+    working_directory: Option<&std::path::Path>,
+) {
+    if result.ok {
+        if let Some(action) = result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("action"))
+            .and_then(|action| action.as_str())
+        {
+            match (tool_name, action) {
+                ("enter_plan_mode", "enter_plan_mode") => {
+                    state.phase = PlanPhase::Planning;
+                    state.plan_id = result
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("plan_id"))
+                        .and_then(|plan_id| plan_id.as_str())
+                        .map(str::to_string);
+                    state.artifact_path = result
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("artifact_suggestion"))
+                        .and_then(|path| path.as_str())
+                        .map(str::to_string);
+                    state.summary = result
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("summary"))
+                        .and_then(|summary| summary.as_str())
+                        .map(str::to_string);
+                    state.approval_status = PlanApprovalStatus::Draft;
+                    state.approved_artifact_path = None;
+                    state.approved_revision = None;
+                    state.approved_artifact_hash = None;
+                }
+                ("exit_plan_mode", "exit_plan_mode")
+                    if state.phase == PlanPhase::Planning && state.plan_id.is_some() =>
+                {
+                    state.phase = PlanPhase::Normal;
+                    state.approval_status = PlanApprovalStatus::AwaitingUser;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if result.ok
+        && state.phase == PlanPhase::Planning
+        && state.artifact_path.is_none()
+        && matches!(tool_name, "write_file" | "edit_file")
+    {
+        if let (Some(path), Some(working_directory)) = (
+            args.get("path").and_then(|path| path.as_str()),
+            working_directory,
+        ) {
+            if resolve_plan_artifact_path(path, working_directory).is_some() {
+                state.artifact_path = Some(path.to_string());
+            }
+        }
+    }
 }
 
 fn audit_security_info(security: &PreflightSecurityContext) -> (Option<String>, Option<String>) {
@@ -676,7 +892,12 @@ impl LlmSession {
         if let Some(result) = self.run_tool_preflight(name, tool.as_ref(), &args) {
             return Ok(result);
         }
-        Ok(tool.as_ref().execute_async_in_session(args, self).await)
+        let result = tool
+            .as_ref()
+            .execute_async_in_session(args.clone(), self)
+            .await;
+        self.update_plan_state_after_tool(name, &args, &result);
+        Ok(result)
     }
 
     /// Emit an event through the callback (public for agent use).
@@ -1396,26 +1617,7 @@ impl LlmSession {
                 .execute_async_in_session(args.clone(), self)
                 .await;
 
-            // Update plan state based on tool result metadata
-            if let Some(ref meta) = result.meta {
-                if let Some(action) = meta.get("action").and_then(|a| a.as_str()) {
-                    match action {
-                        "enter_plan_mode" => {
-                            let mut state = self.plan_state.lock().unwrap();
-                            state.phase = PlanPhase::Planning;
-                            state.summary = meta
-                                .get("summary")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s.to_string());
-                        }
-                        "exit_plan_mode" => {
-                            let mut state = self.plan_state.lock().unwrap();
-                            state.phase = PlanPhase::Normal;
-                        }
-                        _ => {}
-                    }
-                }
-            }
+            self.update_plan_state_after_tool(&tool_call.name, &args, &result);
 
             // Prepare output preview only for bash tool (used for terminal display).
             let (output_preview, total_lines) = if tool_call.name == "bash" {
@@ -1773,6 +1975,23 @@ impl LlmSession {
         }
     }
 
+    fn update_plan_state_after_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        result: &ToolResult,
+    ) {
+        let working_directory = std::env::current_dir().ok();
+        let mut state = self.plan_state.lock().unwrap();
+        apply_plan_tool_result(
+            &mut state,
+            tool_name,
+            args,
+            result,
+            working_directory.as_deref(),
+        );
+    }
+
     fn run_tool_preflight(
         &self,
         tool_name: &str,
@@ -1784,6 +2003,11 @@ impl LlmSession {
                 "Tool '{tool_name}' is not available in sub-agent sessions"
             )));
         }
+
+        let plan_state = self.plan_state.lock().unwrap().clone();
+        let working_directory = std::env::current_dir().ok();
+        let plan_mode_block =
+            plan_mode_block_reason(&plan_state, tool_name, args, working_directory.as_deref());
 
         // Approval memory: a remembered "yes" for this session lets an
         // identical call skip its preflight (and, for the shell tool, the
@@ -1803,7 +2027,8 @@ impl LlmSession {
         //     user-approved sudo command with no prompt).
         let memory_command = args.get("command").and_then(|value| value.as_str());
         let memory_target = tool.approval_memory_key(args);
-        let memory_allowed = !self.is_sub_agent
+        let memory_allowed = plan_mode_block.is_none()
+            && !self.is_sub_agent
             && !tool_name.starts_with(MCP_TOOL_PREFIX)
             && ((tool_name == SHELL_COMMAND_TOOL
                 && memory_command.is_some_and(|command| {
@@ -1831,7 +2056,14 @@ impl LlmSession {
             return None;
         }
         let ctx = crate::tool_context::ToolContext::for_session(self);
-        match tool.preflight_with_context(args, &ctx) {
+        let preflight = match plan_mode_block {
+            Some(message) => PreflightResult::Block {
+                message,
+                security: None,
+            },
+            None => tool.preflight_with_context(args, &ctx),
+        };
+        match preflight {
             PreflightResult::Allow => {
                 self.emit_audit(AuditEvent::security_decision(
                     chrono::Utc::now(),
@@ -3102,6 +3334,243 @@ mod tests {
         let session = LlmSession::new("http://localhost", "key", "model", None, None);
         let state = session.plan_state();
         assert_eq!(state.lock().unwrap().phase, aish_core::PlanPhase::Normal);
+    }
+
+    #[tokio::test]
+    async fn plan_mode_dispatch_blocks_hidden_tools_and_limits_writes() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        let bash_calls = Arc::new(AtomicU32::new(0));
+        let write_calls = Arc::new(AtomicU32::new(0));
+        let read_calls = Arc::new(AtomicU32::new(0));
+        let memory_calls = Arc::new(AtomicU32::new(0));
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "bash",
+            calls: bash_calls.clone(),
+        }));
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "write_file",
+            calls: write_calls.clone(),
+        }));
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "read_file",
+            calls: read_calls.clone(),
+        }));
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "memory",
+            calls: memory_calls.clone(),
+        }));
+        {
+            let mut state = session.plan_state.lock().unwrap();
+            state.phase = PlanPhase::Planning;
+            state.plan_id = Some("test-595".to_string());
+            state.artifact_path = Some(".aish/plans/plan-test-595.md".to_string());
+        }
+
+        let hidden = session
+            .execute_tool_by_name("bash", serde_json::json!({"command": "touch marker"}))
+            .await
+            .unwrap();
+        assert!(!hidden.ok);
+        assert!(hidden
+            .output
+            .contains("not available while plan mode is active"));
+        assert_eq!(bash_calls.load(Ordering::SeqCst), 0);
+
+        let external_hidden = session
+            .execute_tool_external(&ToolCall {
+                id: "call_plan_hidden_bash".to_string(),
+                name: "bash".to_string(),
+                arguments: serde_json::json!({"command": "touch marker"}).to_string(),
+            })
+            .await;
+        assert!(!external_hidden.ok);
+        assert_eq!(bash_calls.load(Ordering::SeqCst), 0);
+
+        let external_path = std::env::temp_dir().join("aish-issue-595-outside.md");
+        let outside = session
+            .execute_tool_by_name(
+                "write_file",
+                serde_json::json!({
+                    "path": external_path.to_string_lossy(),
+                    "content": "changed"
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!outside.ok);
+        assert_eq!(write_calls.load(Ordering::SeqCst), 0);
+
+        let valid_plan_write = session
+            .execute_tool_by_name(
+                "write_file",
+                serde_json::json!({
+                    "path": ".aish/plans/plan-test-595.md",
+                    "content": "plan"
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(valid_plan_write.ok);
+        assert_eq!(write_calls.load(Ordering::SeqCst), 1);
+
+        let read = session
+            .execute_tool_by_name("read_file", serde_json::json!({"path": "src/lib.rs"}))
+            .await
+            .unwrap();
+        assert!(read.ok);
+        assert_eq!(read_calls.load(Ordering::SeqCst), 1);
+
+        let memory_read = session
+            .execute_tool_by_name(
+                "memory",
+                serde_json::json!({"action": "search", "query": "x"}),
+            )
+            .await
+            .unwrap();
+        assert!(memory_read.ok);
+        let memory_write = session
+            .execute_tool_by_name(
+                "memory",
+                serde_json::json!({"action": "store", "content": "x"}),
+            )
+            .await
+            .unwrap();
+        assert!(!memory_write.ok);
+        assert_eq!(memory_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn plan_artifact_path_rejects_traversal_absolute_paths_and_symlinks() {
+        let directory = tempfile::tempdir().unwrap();
+        let expected = resolve_plan_artifact_path(".aish/plans/plan-test-595.md", directory.path());
+        assert_eq!(
+            expected,
+            Some(
+                directory
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(".aish/plans/plan-test-595.md")
+            )
+        );
+        assert!(resolve_plan_artifact_path(
+            ".aish/plans/../plans/plan-test-595.md",
+            directory.path()
+        )
+        .is_none());
+        assert!(resolve_plan_artifact_path("/tmp/plan-test-595.md", directory.path()).is_none());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(directory.path().join(".aish")).unwrap();
+            symlink(outside.path(), directory.path().join(".aish/plans")).unwrap();
+            assert!(
+                resolve_plan_artifact_path(".aish/plans/plan-test-595.md", directory.path())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn ai_plan_exit_stays_restricted_until_user_decides() {
+        let mut state = PlanModeState::default();
+        state.phase = PlanPhase::Planning;
+        state.plan_id = Some("test-595".to_string());
+        state.artifact_path = Some(".aish/plans/plan-test-595.md".to_string());
+        let exit_result = ToolResult {
+            ok: true,
+            output: "ready".to_string(),
+            meta: Some(serde_json::json!({"action": "exit_plan_mode"})),
+        };
+        apply_plan_tool_result(
+            &mut state,
+            "exit_plan_mode",
+            &serde_json::json!({}),
+            &exit_result,
+            None,
+        );
+        assert_eq!(state.phase, PlanPhase::Normal);
+        assert_eq!(state.approval_status, PlanApprovalStatus::AwaitingUser);
+        assert!(plan_mode_block_reason(
+            &state,
+            "bash",
+            &serde_json::json!({"command": "touch marker"}),
+            None
+        )
+        .is_some());
+
+        state.approval_status = PlanApprovalStatus::Approved;
+        assert!(plan_mode_block_reason(
+            &state,
+            "bash",
+            &serde_json::json!({"command": "touch marker"}),
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn plan_exit_without_an_active_plan_does_not_lock_normal_chat() {
+        let mut state = PlanModeState::default();
+        let exit_result = ToolResult {
+            ok: true,
+            output: "ready".to_string(),
+            meta: Some(serde_json::json!({"action": "exit_plan_mode"})),
+        };
+
+        assert!(
+            plan_mode_block_reason(&state, "exit_plan_mode", &serde_json::json!({}), None)
+                .is_some()
+        );
+        apply_plan_tool_result(
+            &mut state,
+            "exit_plan_mode",
+            &serde_json::json!({}),
+            &exit_result,
+            None,
+        );
+
+        assert_eq!(state.phase, PlanPhase::Normal);
+        assert_eq!(state.approval_status, PlanApprovalStatus::Draft);
+        assert!(plan_mode_block_reason(
+            &state,
+            "bash",
+            &serde_json::json!({"command": "true"}),
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn plan_exit_requires_an_existing_active_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join(".aish/plans/plan-test-595.md");
+        let mut state = PlanModeState::default();
+        state.phase = PlanPhase::Planning;
+        state.plan_id = Some("test-595".to_string());
+        state.artifact_path = Some(".aish/plans/plan-test-595.md".to_string());
+
+        assert!(plan_mode_block_reason(
+            &state,
+            "exit_plan_mode",
+            &serde_json::json!({}),
+            Some(directory.path())
+        )
+        .is_some());
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, "plan").unwrap();
+        assert!(plan_mode_block_reason(
+            &state,
+            "exit_plan_mode",
+            &serde_json::json!({}),
+            Some(directory.path())
+        )
+        .is_none());
     }
 
     #[test]

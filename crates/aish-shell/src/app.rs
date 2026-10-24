@@ -3495,6 +3495,8 @@ impl AishShell {
                                 // If exit_plan_mode tool was called, show plan approval UI.
                                 let plan_state = self.ai_handler.plan_state();
                                 if plan_state.phase == aish_core::PlanPhase::Normal
+                                    && plan_state.approval_status
+                                        == aish_core::PlanApprovalStatus::AwaitingUser
                                     && plan_state.plan_id.is_some()
                                 {
                                     if let Some(artifact_path) = plan_state.artifact_path.as_ref() {
@@ -3519,7 +3521,9 @@ impl AishShell {
                                         match decision {
                                             PlanApprovalDecision::Approved => {
                                                 // Create approved snapshot and transition state
-                                                let mut state = self.ai_handler.plan_state();
+                                                let plan_state_lock =
+                                                    self.ai_handler.plan_state_ptr();
+                                                let mut state = plan_state_lock.lock().unwrap();
                                                 if let Ok(_snapshot) =
                                                     aish_core::plan::create_approved_snapshot(
                                                         &mut state,
@@ -3589,6 +3593,10 @@ impl AishShell {
                                                 }
                                             }
                                             PlanApprovalDecision::Cancelled => {
+                                                let plan_state_lock =
+                                                    self.ai_handler.plan_state_ptr();
+                                                plan_state_lock.lock().unwrap().approval_status =
+                                                    aish_core::PlanApprovalStatus::Cancelled;
                                                 println!(
                                                     "{}",
                                                     theme::warning(&t(
@@ -10450,6 +10458,13 @@ impl AishShell {
                         let plan_id = plan_state.plan_id.as_deref().unwrap_or("unknown");
                         println!("{}", theme::accent(&theme::bold("=== Plan Mode ===")));
                         println!("{}", theme::faint(&format!("Plan ID: {}", plan_id)));
+                        println!(
+                            "{}",
+                            theme::faint(&format!(
+                                "Plan artifact: {}",
+                                plan_state.artifact_path.as_deref().unwrap_or("-")
+                            ))
+                        );
                         println!("{}", theme::faint("During planning, the AI has access to read-only tools and write_file/edit_file for the plan artifact."));
                         println!(
                             "{}",

@@ -385,7 +385,11 @@ impl AiHandler {
     /// Transition to plan mode: set phase to Planning and initialize plan state.
     pub fn enter_plan_mode(&mut self, session_uuid: &str) {
         use aish_core::plan;
-        let new_state = plan::create_new_plan_state(session_uuid);
+        let mut new_state = plan::create_new_plan_state(session_uuid);
+        new_state.artifact_path = new_state
+            .plan_id
+            .as_ref()
+            .map(|plan_id| format!(".aish/plans/plan-{plan_id}.md"));
         let plan_state = self.llm_session.plan_state();
         let mut state = plan_state.lock().unwrap();
         *state = new_state;
