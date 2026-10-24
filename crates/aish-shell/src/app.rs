@@ -40,6 +40,36 @@ fn format_user_submitted_line(prompt: &str, command: &str) -> String {
     format!("{prompt}{command}")
 }
 
+fn redact_plan_review_feedback(
+    vault: &mut aish_security::secret::SecretVault,
+    scanner: &aish_security::secret::SecretScanner,
+    feedback: &str,
+) -> (String, usize) {
+    let matches = scanner.scan(feedback);
+    let detected_count = matches.len();
+    let redacted = vault.redact(&matches, feedback);
+    let (redacted, known_count) = vault.redact_output(&redacted);
+    (redacted, detected_count + known_count)
+}
+
+fn apply_plan_change_request(
+    state: &mut aish_core::PlanModeState,
+    previous: &aish_core::PlanModeState,
+    feedback: &str,
+) {
+    state.approval_status = aish_core::PlanApprovalStatus::ChangesRequested;
+    state.approval_feedback_summary = if feedback.is_empty() {
+        None
+    } else {
+        Some(feedback.to_string())
+    };
+    state.summary = previous.summary.clone();
+    state.draft_revision = previous.draft_revision;
+    aish_core::plan::bump_draft_revision(state);
+    state.artifact_path = previous.artifact_path.clone();
+    state.plan_id = previous.plan_id.clone();
+}
+
 // ---------------------------------------------------------------------------
 // SIGINT handler for AI operation cancellation
 // ---------------------------------------------------------------------------
@@ -10361,26 +10391,34 @@ impl AishShell {
             }
             PlanApprovalDecision::ChangesRequested { feedback } => {
                 println!("{}", theme::warning(&t("shell.plan_changes_requested")));
+                let (safe_feedback, redacted_count) = {
+                    let mut vault = self.secret_vault.lock().unwrap();
+                    redact_plan_review_feedback(
+                        &mut vault,
+                        self.security_manager.secret_scanner(),
+                        &feedback,
+                    )
+                };
+                if redacted_count > 0 {
+                    println!(
+                        "{}",
+                        theme::warning(
+                            "Sensitive values were redacted before sending plan feedback to AI."
+                        )
+                    );
+                }
                 self.ai_handler.enter_plan_mode(&self.session_uuid);
 
                 {
                     let plan_state_lock = self.ai_handler.plan_state_ptr();
                     let mut state = plan_state_lock.lock().unwrap();
-                    state.approval_status = aish_core::PlanApprovalStatus::ChangesRequested;
-                    state.approval_feedback_summary = if feedback.is_empty() {
-                        None
-                    } else {
-                        Some(feedback.clone())
-                    };
-                    aish_core::plan::bump_draft_revision(&mut state);
-                    state.artifact_path = plan_state.artifact_path.clone();
-                    state.plan_id = plan_state.plan_id.clone();
+                    apply_plan_change_request(&mut state, &plan_state, &safe_feedback);
                 }
 
-                if !feedback.is_empty() {
+                if !safe_feedback.is_empty() {
                     let feedback_msg = format!(
                         "[Plan Review Feedback]\nThe user requested changes to the plan:\n{}\n\nPlease revise the plan accordingly and use exit_plan_mode when ready.",
-                        feedback
+                        safe_feedback
                     );
                     self.ai_handler.add_shell_context(&feedback_msg);
                     println!("  {}", theme::faint(&t("shell.plan_feedback_sent")));
@@ -15928,5 +15966,59 @@ mod privilege_dispatch_tests {
             "sudo executed and recorded once: {history:?}"
         );
         assert_eq!(matches[0].returncode, Some(exit_code));
+    }
+}
+
+#[cfg(test)]
+mod plan_review_follow_up_tests {
+    use super::{apply_plan_change_request, redact_plan_review_feedback};
+    use aish_core::{PlanApprovalStatus, PlanModeState, PlanPhase};
+    use aish_security::secret::{SecretScanner, SecretVault};
+
+    #[test]
+    fn change_request_preserves_plan_summary_and_advances_revision() {
+        let mut previous = PlanModeState::default();
+        previous.phase = PlanPhase::Normal;
+        previous.plan_id = Some("plan-original".to_string());
+        previous.artifact_path = Some(".aish/plans/plan-original.md".to_string());
+        previous.draft_revision = 4;
+        previous.summary = Some("Review the deployment changes".to_string());
+        previous.approval_status = PlanApprovalStatus::AwaitingUser;
+
+        let mut current = PlanModeState::default();
+        current.phase = PlanPhase::Planning;
+        current.plan_id = Some("plan-recreated".to_string());
+        current.artifact_path = Some(".aish/plans/plan-recreated.md".to_string());
+
+        apply_plan_change_request(&mut current, &previous, "add rollback steps");
+
+        assert_eq!(current.phase, PlanPhase::Planning);
+        assert_eq!(current.plan_id, previous.plan_id);
+        assert_eq!(current.artifact_path, previous.artifact_path);
+        assert_eq!(current.summary, previous.summary);
+        assert_eq!(current.draft_revision, 5);
+        assert_eq!(
+            current.approval_status,
+            PlanApprovalStatus::ChangesRequested
+        );
+        assert_eq!(
+            current.approval_feedback_summary.as_deref(),
+            Some("add rollback steps")
+        );
+    }
+
+    #[test]
+    fn plan_review_feedback_is_redacted_before_storage_or_ai_context() {
+        let scanner = SecretScanner::new(&[]);
+        let mut vault = SecretVault::new();
+        let secret = "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let feedback = format!("Do not include OPENAI_API_KEY={secret} in the plan");
+
+        let (safe_feedback, redacted_count) =
+            redact_plan_review_feedback(&mut vault, &scanner, &feedback);
+
+        assert!(redacted_count > 0);
+        assert!(!safe_feedback.contains(secret));
+        assert!(safe_feedback.contains("$SECRET_"));
     }
 }
