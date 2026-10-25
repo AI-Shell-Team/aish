@@ -155,8 +155,8 @@ __aish_int_trap_action() {
     fi
 
     # `trap -p` returns shell-escaped syntax. Parse its three words without
-    # evaluating the saved action; the action is inserted into the temporary
-    # handler and runs only if this is not an aish cancellation.
+    # evaluating the saved action; it runs only when the corresponding signal
+    # arrives and the command was not cancelled by aish.
     eval "set -- $definition"
     printf '%s' "${3-}"
 }
@@ -280,6 +280,9 @@ __aish_print_saved_trap() {
     printf 'trap -- %s %s\n' "$quoted" "$name"
 }
 
+# Keep Bash's private dispatchers installed while preserving the trap action
+# requested by user commands. The user actions are chained from __aish_on_debug
+# and __aish_backend_int_handler instead of replacing those cancellation hooks.
 trap() {
     if [[ "${1-}" == "-p" ]]; then
         shift

@@ -7188,6 +7188,10 @@ fn close_unclosed_heredoc(cmd: &str) -> String {
 /// delimiter never appears in the corresponding body. Output text is not
 /// evidence because a command can print Bash's warning verbatim.
 fn command_has_unclosed_heredoc(cmd: &str) -> bool {
+    if !cmd.contains("<<") {
+        return false;
+    }
+
     let mut pending = Vec::<(String, bool)>::new();
     let mut quote = 0u8;
 
