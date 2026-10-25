@@ -2042,9 +2042,10 @@ impl LlmSession {
                 count = tool_calls.len(),
                 "executing sub-agent tool calls in parallel"
             );
+            let conflicting = &conflicting_ids;
             let results: Vec<ToolResult> =
-                futures::future::join_all(tool_calls.iter().map(|tc| async {
-                    if conflicting_ids.contains(&tc.id) {
+                futures::future::join_all(tool_calls.iter().map(|tc| async move {
+                    if conflicting.contains(&tc.id) {
                         ToolResult::error(format!(
                         "conflicting duplicate tool call ID rejected: {}; no call was dispatched",
                         tc.id
@@ -5398,6 +5399,67 @@ mod tests {
             .and_then(|message| message.text_content())
             .expect("conflicting ID receives a tool result");
         assert!(conflict_result.contains("conflicting duplicate tool call ID"));
+    }
+
+    #[tokio::test]
+    async fn parallel_conflicting_tool_call_id_is_rejected_without_dispatch() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "Agent",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[
+                ("conflict-id", "Agent", r#"{"value":"first"}"#),
+                ("conflict-id", "Agent", r#"{"value":"second"}"#),
+                ("safe-id", "Agent", "{}"),
+            ])),
+            Ok(mock_text_response("done")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run the calls"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let results: Vec<_> = result
+            .new_messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .map(|message| {
+                (
+                    message.tool_call_id.as_deref().unwrap_or_default(),
+                    message.text_content().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        let conflict_result = results
+            .iter()
+            .copied()
+            .find(|(id, _)| *id == "conflict-id")
+            .expect("the conflicting ID receives a rejection result");
+        assert!(conflict_result
+            .1
+            .contains("conflicting duplicate tool call ID"));
+        assert_eq!(
+            results
+                .iter()
+                .copied()
+                .find(|(id, _)| *id == "safe-id")
+                .unwrap()
+                .1,
+            "ok"
+        );
     }
 
     fn mock_sse_response(blocks: &[&str]) -> LlmResponse {
