@@ -56,6 +56,7 @@ __AISH_CANCEL_SAVED_FUNCTRACE=0
 __AISH_CANCEL_SAVED_ERREXIT=0
 __AISH_CANCEL_SAVED_EXTDEBUG=0
 __AISH_CANCEL_ABORT=0
+__AISH_CANCEL_ABORT_STATUS=
 __AISH_CANCEL_DEBUG_CLEANUP=0
 __AISH_BACKEND_SETUP=0
 __AISH_BACKEND_TRACE_FUNCTIONS=1
@@ -168,6 +169,7 @@ __aish_return_status() {
 __aish_abort_backend_source() {
     __AISH_CANCEL_SOURCE_ACTIVE=0
     __AISH_CANCEL_ABORT=1
+    __AISH_CANCEL_ABORT_STATUS=130
     __AISH_CANCEL_DEBUG_CLEANUP=0
     shopt -s extdebug
     set -e
@@ -380,6 +382,7 @@ __aish_begin_backend_command() {
     __AISH_CANCEL_INT_TRAP_RECHECK=0
     __AISH_CANCEL_SOURCE_ACTIVE=1
     __AISH_CANCEL_ACTIVE=1
+    __AISH_CANCEL_ABORT_STATUS=
     __AISH_CANCEL_DEBUG_GUARD=0
     if [[ "$-" == *T* ]]; then
         __AISH_CANCEL_SAVED_FUNCTRACE=1
@@ -409,9 +412,13 @@ __aish_begin_backend_command() {
 __aish_finish_backend_command() {
     local exit_code="$1"
     local was_cancelled="${__AISH_CANCEL_ABORT:-0}"
+    if [[ -n "${__AISH_CANCEL_ABORT_STATUS:-}" ]]; then
+        exit_code=$__AISH_CANCEL_ABORT_STATUS
+    fi
     __AISH_CANCEL_SOURCE_ACTIVE=0
     __AISH_CANCEL_ACTIVE=0
     __AISH_CANCEL_ABORT=0
+    __AISH_CANCEL_ABORT_STATUS=
     __AISH_CANCEL_DEBUG_CLEANUP=0
     if [[ -n "$__AISH_CANCEL_SAVED_INT_TRAP" ]]; then
         eval "$__AISH_CANCEL_SAVED_INT_TRAP"
@@ -612,6 +619,9 @@ __aish_on_debug() {
 
 __aish_prompt_command() {
     local exit_code=$?
+    if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" && -n "${__AISH_CANCEL_ABORT_STATUS:-}" ]]; then
+        exit_code=$__AISH_CANCEL_ABORT_STATUS
+    fi
     __aish_last_exit_code=$exit_code
     # `errexit` can stop the backend wrapper line when cancellation happens
     # inside a user function. Finish the command here if its inline cleanup
