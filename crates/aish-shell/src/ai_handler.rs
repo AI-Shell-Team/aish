@@ -2414,15 +2414,38 @@ mod tests {
 
     #[tokio::test]
     async fn handle_question_persists_usage_when_provider_returns_empty_response() {
+        use std::io::{Read, Write};
+
         let dir = tempfile::tempdir().unwrap();
         let usage_path = dir.path().join("token_stats.json");
+        let response_body = concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("provider request");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("send empty provider response");
+        });
         let mut handler = test_handler();
+        handler.llm_session =
+            LlmSession::new(&format!("http://{addr}/v1"), "key", "model", None, None);
         handler.token_store = crate::token_store::TokenUsageStore::open(usage_path.clone());
-        handler.llm_session.set_test_chat_responses(vec![Ok(
-            aish_llm::agents::mock_text_response_with_usage("  ", 17, 5),
-        )]);
 
         let result = handler.handle_question("return a short answer").await;
+        server.join().expect("mock provider server");
 
         assert!(matches!(result, Err(aish_core::AishError::EmptyResponse)));
         let stats = handler.token_stats();
