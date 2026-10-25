@@ -28,23 +28,137 @@ pub(crate) fn hint_key(command: &str, output: &str) -> &'static str {
 }
 
 fn apt_command(command: &str) -> Option<(&str, &str)> {
+    // This parser only classifies a single simple command. A status from a
+    // later command in a compound line must not be attributed to APT.
+    if command
+        .chars()
+        .any(|ch| matches!(ch, ';' | '|' | '&' | '>' | '<' | '(' | ')' | '\n' | '\r'))
+    {
+        return None;
+    }
+
     let words: Vec<_> = command.split_whitespace().collect();
     let mut index = 0;
-    if words.first().copied() == Some("sudo") {
+    while words
+        .get(index)
+        .is_some_and(|word| is_environment_assignment(word))
+    {
         index += 1;
-        while matches!(
-            words.get(index).copied(),
-            Some("-n" | "--non-interactive" | "-E")
-        ) {
-            index += 1;
+    }
+    if words
+        .get(index)
+        .is_some_and(|word| command_name(word) == "sudo")
+    {
+        index += 1;
+        loop {
+            while words
+                .get(index)
+                .is_some_and(|word| is_environment_assignment(word))
+            {
+                index += 1;
+            }
+
+            let option = *words.get(index)?;
+            if option == "--" {
+                index += 1;
+                break;
+            }
+            if !option.starts_with('-') {
+                break;
+            }
+            if matches!(
+                option,
+                "-A" | "--askpass"
+                    | "-b"
+                    | "--background"
+                    | "-E"
+                    | "--preserve-env"
+                    | "-H"
+                    | "--set-home"
+                    | "-K"
+                    | "--remove-timestamp"
+                    | "-k"
+                    | "--reset-timestamp"
+                    | "-n"
+                    | "--non-interactive"
+                    | "-P"
+                    | "--preserve-groups"
+                    | "-S"
+                    | "--stdin"
+                    | "-V"
+                    | "--version"
+                    | "-v"
+                    | "--validate"
+                    | "-l"
+                    | "--list"
+            ) {
+                index += 1;
+                continue;
+            }
+            if matches!(
+                option,
+                "-C" | "--close-from"
+                    | "-D"
+                    | "--chdir"
+                    | "-g"
+                    | "--group"
+                    | "-h"
+                    | "--host"
+                    | "-p"
+                    | "--prompt"
+                    | "-R"
+                    | "--chroot"
+                    | "-r"
+                    | "--role"
+                    | "-T"
+                    | "--command-timeout"
+                    | "-t"
+                    | "--type"
+                    | "-U"
+                    | "--other-user"
+                    | "-u"
+                    | "--user"
+            ) {
+                index += 2;
+                continue;
+            }
+            if option.starts_with("--") && option.contains('=') {
+                index += 1;
+                continue;
+            }
+            // Unknown sudo options can take separate values. Fail closed so
+            // an option value is never mistaken for the command executable.
+            return None;
         }
     }
-    let program = *words.get(index)?;
+    while words
+        .get(index)
+        .is_some_and(|word| is_environment_assignment(word))
+    {
+        index += 1;
+    }
+    let program = command_name(words.get(index)?);
     if !matches!(program, "apt" | "apt-get") {
         return None;
     }
     let subcommand_index = apt_subcommand_index(&words, index + 1)?;
     Some((program, words[subcommand_index]))
+}
+
+fn command_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+fn is_environment_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 /// Find the first APT subcommand after its leading options.
@@ -69,6 +183,7 @@ fn apt_subcommand_index(words: &[&str], mut index: usize) -> Option<usize> {
                 | "-S"
                 | "--snapshot"
                 | "--cli-version"
+                | "--error-on"
         ) {
             // APT accepts these options with the value in the next token.
             // Do not mistake that value for the subcommand.
@@ -93,6 +208,7 @@ fn is_permission_error(output: &str) -> bool {
     ]
     .iter()
     .any(|marker| output.contains(marker))
+        || (output.contains("(13:") && output.contains("lock"))
 }
 
 fn is_package_manager_lock_error(output: &str) -> bool {
@@ -132,6 +248,7 @@ mod tests {
             "apt-get -q update",
             "apt-get -o APT::Get::Assume-Yes=true update",
             "apt --config-file /tmp/apt.conf -q update",
+            "apt-get --error-on any update",
         ] {
             assert_eq!(
                 hint_key(
@@ -142,6 +259,54 @@ mod tests {
                 "command: {command}"
             );
         }
+    }
+
+    #[test]
+    fn apt_hints_recognize_executable_paths_and_sudo_options() {
+        for command in [
+            "/usr/bin/apt update",
+            "/usr/bin/sudo /usr/bin/apt-get update",
+            "sudo -H apt update",
+            "sudo -u root apt-get update",
+            "sudo -- apt update",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get update",
+            "LC_ALL=C /usr/bin/sudo -u root DEBIAN_FRONTEND=noninteractive /usr/bin/apt update",
+        ] {
+            assert_eq!(
+                hint_key(
+                    command,
+                    "E: Could not open lock file (13: Permission denied)"
+                ),
+                APT_PERMISSION_HINT,
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn compound_commands_keep_the_generic_diagnosis_hint() {
+        for command in [
+            "sudo apt update && touch /root/aish-test",
+            "apt-get update; touch /root/aish-test",
+            "apt update | cat",
+        ] {
+            assert_eq!(
+                hint_key(command, "Permission denied"),
+                GENERIC_HINT,
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn apt_errno_13_is_permission_evidence_across_locales() {
+        assert_eq!(
+            hint_key(
+                "apt update",
+                "E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission non accordée)"
+            ),
+            APT_PERMISSION_HINT
+        );
     }
 
     #[test]
