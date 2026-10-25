@@ -1044,6 +1044,7 @@ impl LlmSession {
                         HashMap::with_capacity(8); // index -> (id, name, args)
 
                     let mut stream_done = false;
+                    let mut stream_eof = false;
                     let mut stream_completed = false;
                     let mut finish_reason: Option<String> = None;
                     let mut text_buffer = String::with_capacity(4096);
@@ -1067,117 +1068,14 @@ impl LlmSession {
                         match stream.chunk().await {
                             Ok(Some(chunk)) => {
                                 text_buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                                // Process complete SSE blocks (delimited by double newline)
-                                while let Some(pos) = text_buffer.find("\n\n") {
-                                    let block = text_buffer[..pos].to_string();
-                                    text_buffer = text_buffer[pos + 2..].to_string();
-
-                                    for line in block.lines() {
-                                        let (events, chunk_usage) =
-                                            StreamParser::parse_sse_chunk(line);
-                                        if let Some(u) = chunk_usage {
-                                            stream_prompt_tokens = u.prompt_tokens;
-                                            stream_completion_tokens = u.completion_tokens;
-                                            stream_cached_tokens = u.cached_tokens;
-                                        }
-                                        // Content is emitted before ToolCallDelta in
-                                        // the same parse batch, so look ahead: a
-                                        // same-frame tool call must still preview
-                                        // the assistant text.
-                                        let frame_has_tool_call = events.iter().any(|event| {
-                                            matches!(event, SseEvent::ToolCallDelta { .. })
-                                        });
-                                        for event in events {
-                                            match event {
-                                                SseEvent::ContentDelta(delta) => {
-                                                    accumulated.push_str(&delta);
-                                                    // Python pattern: only emit content
-                                                    // delta during streaming when tool
-                                                    // calls are present. For plain
-                                                    // conversations the response is
-                                                    // rendered by the caller after the
-                                                    // operation completes.
-                                                    if tool_calls_seen || frame_has_tool_call {
-                                                        if !content_preview_started {
-                                                            content_preview_started = true;
-                                                            self.emit_content_delta(
-                                                                &accumulated,
-                                                                &accumulated,
-                                                            );
-                                                        } else {
-                                                            self.emit_content_delta(
-                                                                &delta,
-                                                                &accumulated,
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                SseEvent::ReasoningDelta(delta) => {
-                                                    reasoning_accumulated.push_str(&delta);
-                                                    if !reasoning_started {
-                                                        reasoning_started = true;
-                                                        self.emit_event(LlmEvent {
-                                                            event_type:
-                                                                LlmEventType::ReasoningStart,
-                                                            data: serde_json::json!({}),
-                                                            timestamp: now_timestamp(),
-                                                            metadata: None,
-                                                        });
-                                                    }
-                                                    self.emit_event(LlmEvent {
-                                                        event_type: LlmEventType::ReasoningDelta,
-                                                        data: serde_json::json!({
-                                                            "delta": delta
-                                                        }),
-                                                        timestamp: now_timestamp(),
-                                                        metadata: None,
-                                                    });
-                                                }
-                                                SseEvent::ToolCallDelta {
-                                                    index,
-                                                    id,
-                                                    name,
-                                                    arguments,
-                                                } => {
-                                                    tool_calls_seen = true;
-                                                    let entry = tool_calls_accum
-                                                        .entry(index)
-                                                        .or_insert_with(|| {
-                                                            (
-                                                                String::new(),
-                                                                String::new(),
-                                                                String::new(),
-                                                            )
-                                                        });
-                                                    if let Some(i) = id {
-                                                        if !i.is_empty() {
-                                                            entry.0 = i;
-                                                        }
-                                                    }
-                                                    if let Some(n) = name {
-                                                        if !n.is_empty() {
-                                                            entry.1 = n;
-                                                        }
-                                                    }
-                                                    if let Some(a) = arguments {
-                                                        entry.2.push_str(&a);
-                                                    }
-                                                }
-                                                SseEvent::Finish(reason) => {
-                                                    finish_reason = Some(reason);
-                                                }
-                                                SseEvent::Done => {
-                                                    stream_done = true;
-                                                    stream_completed = true;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
                             }
                             Ok(None) => {
-                                stream_done = true;
+                                stream_eof = true;
+                                if !text_buffer.is_empty() {
+                                    // SSE dispatches a pending final event at EOF, even
+                                    // when its data line ended with only one newline.
+                                    text_buffer.push_str("\n\n");
+                                }
                             }
                             Err(e) => {
                                 // Preserve partial-turn evidence the same way
@@ -1210,6 +1108,110 @@ impl LlmSession {
                                 }
                                 return Err(AishError::Llm(format!("Stream error: {}", e)));
                             }
+                        }
+                        // Process complete SSE blocks (delimited by double newline).
+                        // A pending final data line is delimited above at EOF so its
+                        // content and finish reason are handled before completeness is
+                        // checked.
+                        while let Some(pos) = text_buffer.find("\n\n") {
+                            let block = text_buffer[..pos].to_string();
+                            text_buffer = text_buffer[pos + 2..].to_string();
+
+                            for line in block.lines() {
+                                let (events, chunk_usage) = StreamParser::parse_sse_chunk(line);
+                                if let Some(u) = chunk_usage {
+                                    stream_prompt_tokens = u.prompt_tokens;
+                                    stream_completion_tokens = u.completion_tokens;
+                                    stream_cached_tokens = u.cached_tokens;
+                                }
+                                // Content is emitted before ToolCallDelta in
+                                // the same parse batch, so look ahead: a
+                                // same-frame tool call must still preview
+                                // the assistant text.
+                                let frame_has_tool_call = events
+                                    .iter()
+                                    .any(|event| matches!(event, SseEvent::ToolCallDelta { .. }));
+                                for event in events {
+                                    match event {
+                                        SseEvent::ContentDelta(delta) => {
+                                            accumulated.push_str(&delta);
+                                            // Python pattern: only emit content
+                                            // delta during streaming when tool
+                                            // calls are present. For plain
+                                            // conversations the response is
+                                            // rendered by the caller after the
+                                            // operation completes.
+                                            if tool_calls_seen || frame_has_tool_call {
+                                                if !content_preview_started {
+                                                    content_preview_started = true;
+                                                    self.emit_content_delta(
+                                                        &accumulated,
+                                                        &accumulated,
+                                                    );
+                                                } else {
+                                                    self.emit_content_delta(&delta, &accumulated);
+                                                }
+                                            }
+                                        }
+                                        SseEvent::ReasoningDelta(delta) => {
+                                            reasoning_accumulated.push_str(&delta);
+                                            if !reasoning_started {
+                                                reasoning_started = true;
+                                                self.emit_event(LlmEvent {
+                                                    event_type: LlmEventType::ReasoningStart,
+                                                    data: serde_json::json!({}),
+                                                    timestamp: now_timestamp(),
+                                                    metadata: None,
+                                                });
+                                            }
+                                            self.emit_event(LlmEvent {
+                                                event_type: LlmEventType::ReasoningDelta,
+                                                data: serde_json::json!({
+                                                    "delta": delta
+                                                }),
+                                                timestamp: now_timestamp(),
+                                                metadata: None,
+                                            });
+                                        }
+                                        SseEvent::ToolCallDelta {
+                                            index,
+                                            id,
+                                            name,
+                                            arguments,
+                                        } => {
+                                            tool_calls_seen = true;
+                                            let entry = tool_calls_accum
+                                                .entry(index)
+                                                .or_insert_with(|| {
+                                                    (String::new(), String::new(), String::new())
+                                                });
+                                            if let Some(i) = id {
+                                                if !i.is_empty() {
+                                                    entry.0 = i;
+                                                }
+                                            }
+                                            if let Some(n) = name {
+                                                if !n.is_empty() {
+                                                    entry.1 = n;
+                                                }
+                                            }
+                                            if let Some(a) = arguments {
+                                                entry.2.push_str(&a);
+                                            }
+                                        }
+                                        SseEvent::Finish(reason) => {
+                                            finish_reason = Some(reason);
+                                        }
+                                        SseEvent::Done => {
+                                            stream_done = true;
+                                            stream_completed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if stream_eof {
+                            break;
                         }
                     }
 
@@ -4805,6 +4807,30 @@ mod tests {
                 assert!(matches!(result, Err(AishError::EmptyResponse)));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn final_sse_data_line_is_processed_when_eof_has_one_newline() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.set_test_chat_responses(vec![Ok(mock_sse_response(&[
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n",
+        ]))]);
+
+        let result = session
+            .process_input(
+                &ChatMessage::user("return a short answer"),
+                &[],
+                Some("sys"),
+                true,
+            )
+            .await
+            .expect("the final SSE data line contains a complete response");
+
+        assert_eq!(result.text, "done");
     }
 
     #[tokio::test]

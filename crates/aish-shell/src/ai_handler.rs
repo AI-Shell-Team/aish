@@ -755,6 +755,10 @@ impl AiHandler {
                 } else {
                     self.commit_partial_turn(&question_processed, &err);
                 }
+                // Providers can bill requests that end in an empty or
+                // incomplete response. Persist usage before propagating the
+                // error so an immediate exit does not lose the request.
+                self.persist_token_usage();
                 return Err(err);
             }
         };
@@ -2407,6 +2411,32 @@ mod tests {
 
     // Execution counter shared by CountingProbeTool (see the #572 e2e test).
     static EXECUTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[tokio::test]
+    async fn handle_question_persists_usage_when_provider_returns_empty_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let usage_path = dir.path().join("token_stats.json");
+        let mut handler = test_handler();
+        handler.token_store = crate::token_store::TokenUsageStore::open(usage_path.clone());
+        handler.llm_session.set_test_chat_responses(vec![Ok(
+            aish_llm::agents::mock_text_response_with_usage("  ", 17, 5),
+        )]);
+
+        let result = handler.handle_question("return a short answer").await;
+
+        assert!(matches!(result, Err(aish_core::AishError::EmptyResponse)));
+        let stats = handler.token_stats();
+        assert_eq!(stats.total_input, 17);
+        assert_eq!(stats.total_output, 5);
+        assert_eq!(stats.request_count, 1);
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(usage_path).unwrap()).unwrap();
+        let daily = persisted.as_object().unwrap().values().next().unwrap();
+        assert_eq!(daily["input"], 17);
+        assert_eq!(daily["output"], 5);
+        assert_eq!(daily["requests"], 1);
+    }
 
     /// Regression: the HashSet refactor dropped the empty-refs early
     /// return, so questions without any `@skill` reference got a stray
