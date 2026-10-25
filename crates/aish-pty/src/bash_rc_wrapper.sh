@@ -40,7 +40,16 @@ __AISH_AT_PROMPT=0
 __AISH_CANCEL_ACTIVE=0
 __AISH_CANCEL_DEBUG_GUARD=0
 __AISH_CANCEL_SAVED_INT_TRAP=
+__AISH_CANCEL_SAVED_INT_ACTION=
+__AISH_CANCEL_SAVED_INT_MODE=unset
 __AISH_CANCEL_TEMP_INT_TRAP=
+__AISH_CANCEL_INT_TRAP_RECHECK=0
+__AISH_ORIGINAL_DEBUG_ACTION=
+__AISH_ORIGINAL_DEBUG_MODE=unset
+__AISH_CANCEL_SAVED_DEBUG_ACTION=
+__AISH_CANCEL_SAVED_DEBUG_MODE=unset
+__AISH_TRAP_WRAPPER_ACTIVE=0
+__AISH_USER_DEBUG_ACTIVE=0
 __AISH_CANCEL_MARKER=
 __AISH_CANCEL_SOURCE_ACTIVE=0
 __AISH_CANCEL_SAVED_FUNCTRACE=0
@@ -142,9 +151,6 @@ __aish_emit_command_started() {
 __aish_int_trap_action() {
     local definition="$1"
     if [[ -z "$definition" ]]; then
-        # With no user handler, an ordinary SIGINT should abort this sourced
-        # command while returning the interactive shell to its prompt.
-        printf '%s' 'return 130'
         return 0
     fi
 
@@ -155,11 +161,197 @@ __aish_int_trap_action() {
     printf '%s' "${3-}"
 }
 
+__aish_return_status() {
+    return "$1"
+}
+
+__aish_abort_backend_source() {
+    __AISH_CANCEL_SOURCE_ACTIVE=0
+    __AISH_CANCEL_ABORT=1
+    __AISH_CANCEL_DEBUG_CLEANUP=0
+    shopt -s extdebug
+    set -e
+    return 0
+}
+
+__aish_run_saved_trap_action() {
+    local entry_status="$1"
+    local action="$2"
+    local had_errexit=0
+    [[ "$-" == *e* ]] && had_errexit=1
+    __AISH_USER_DEBUG_ACTIVE=1
+    set +e
+    __aish_return_status "$entry_status"
+    eval "$action"
+    if [[ "$had_errexit" == "1" && "$-" != *e* ]]; then
+        set -e
+    fi
+    __AISH_USER_DEBUG_ACTIVE=0
+}
+
+__aish_backend_int_handler() {
+    local entry_status="$1"
+    if [[ -n "${__AISH_CANCEL_MARKER:-}" && -s "${__AISH_CANCEL_MARKER}" ]]; then
+        if [[ "${__AISH_CANCEL_SOURCE_ACTIVE:-0}" == "1" ]]; then
+            __aish_abort_backend_source
+            return 130
+        fi
+        return 0
+    fi
+
+    case "$__AISH_CANCEL_SAVED_INT_MODE" in
+        unset)
+            __aish_abort_backend_source
+            return 130
+            ;;
+        ignored)
+            return 0
+            ;;
+        action)
+            __aish_run_saved_trap_action "$entry_status" "$__AISH_CANCEL_SAVED_INT_ACTION"
+            ;;
+    esac
+}
+
+__aish_set_debug_trap() {
+    local action="$1"
+    if [[ "$action" == "-" ]]; then
+        __AISH_ORIGINAL_DEBUG_ACTION=
+        __AISH_ORIGINAL_DEBUG_MODE=unset
+    elif [[ -z "$action" ]]; then
+        __AISH_ORIGINAL_DEBUG_ACTION=
+        __AISH_ORIGINAL_DEBUG_MODE=ignored
+    else
+        __AISH_ORIGINAL_DEBUG_ACTION="$action"
+        __AISH_ORIGINAL_DEBUG_MODE=action
+    fi
+    if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+        __AISH_CANCEL_SAVED_DEBUG_ACTION=$__AISH_ORIGINAL_DEBUG_ACTION
+        __AISH_CANCEL_SAVED_DEBUG_MODE=$__AISH_ORIGINAL_DEBUG_MODE
+    fi
+    builtin trap '__aish_on_debug' DEBUG
+}
+
+__aish_set_backend_int_trap() {
+    local action="$1"
+    if [[ "$action" == "-" ]]; then
+        __AISH_CANCEL_SAVED_INT_TRAP=
+        __AISH_CANCEL_SAVED_INT_ACTION=
+        __AISH_CANCEL_SAVED_INT_MODE=unset
+    else
+        __AISH_CANCEL_SAVED_INT_ACTION="$action"
+        if [[ -z "$action" ]]; then
+            __AISH_CANCEL_SAVED_INT_MODE=ignored
+        else
+            __AISH_CANCEL_SAVED_INT_MODE=action
+        fi
+        printf -v __AISH_CANCEL_SAVED_INT_TRAP 'trap -- %q INT' "$action"
+    fi
+    __aish_install_backend_int_trap
+}
+
+__aish_print_saved_trap() {
+    local signal="$1" mode action name
+    case "$signal" in
+        DEBUG|SIGDEBUG)
+            mode=$__AISH_ORIGINAL_DEBUG_MODE
+            action=$__AISH_ORIGINAL_DEBUG_ACTION
+            name=DEBUG
+            ;;
+        INT|SIGINT|2)
+            if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+                mode=$__AISH_CANCEL_SAVED_INT_MODE
+                action=$__AISH_CANCEL_SAVED_INT_ACTION
+            else
+                builtin trap -p "$signal"
+                return 0
+            fi
+            name=INT
+            ;;
+        *)
+            builtin trap -p "$signal"
+            return 0
+            ;;
+    esac
+
+    [[ "$mode" == "unset" ]] && return 0
+    local quoted
+    printf -v quoted '%q' "$action"
+    printf 'trap -- %s %s\n' "$quoted" "$name"
+}
+
+trap() {
+    if [[ "${1-}" == "-p" ]]; then
+        shift
+        if (($# == 0)); then
+            local installed_traps
+            installed_traps=$(builtin trap -p)
+            while IFS= read -r installed_trap; do
+                case "$installed_trap" in
+                    *" DEBUG"|*" SIGDEBUG") continue ;;
+                    *" INT"|*" SIGINT")
+                        [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]] && continue
+                        ;;
+                esac
+                printf '%s\n' "$installed_trap"
+            done <<< "$installed_traps"
+            __aish_print_saved_trap DEBUG
+            if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+                __aish_print_saved_trap INT
+            fi
+            return 0
+        fi
+        local signal
+        for signal in "$@"; do
+            __aish_print_saved_trap "$signal"
+        done
+        return 0
+    fi
+
+    if [[ "${1-}" == "-l" ]]; then
+        builtin trap "$@"
+        return $?
+    fi
+    if (($# < 2)); then
+        builtin trap "$@"
+        return $?
+    fi
+
+    local action="$1"
+    shift
+    if [[ "$action" == "--" ]]; then
+        action="${1-}"
+        shift
+    fi
+    local signal status=0
+    local -a other_signals=()
+    __AISH_TRAP_WRAPPER_ACTIVE=1
+    for signal in "$@"; do
+        case "$signal" in
+            DEBUG|SIGDEBUG)
+                __aish_set_debug_trap "$action"
+                ;;
+            INT|SIGINT|2)
+                if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
+                    __aish_set_backend_int_trap "$action"
+                else
+                    other_signals+=("$signal")
+                fi
+                ;;
+            *)
+                other_signals+=("$signal")
+                ;;
+        esac
+    done
+    if ((${#other_signals[@]} > 0)); then
+        builtin trap "$action" "${other_signals[@]}" || status=$?
+    fi
+    __AISH_TRAP_WRAPPER_ACTIVE=0
+    return "$status"
+}
+
 __aish_install_backend_int_trap() {
-    local action handler
-    action=$(__aish_int_trap_action "$__AISH_CANCEL_SAVED_INT_TRAP")
-    handler='if [[ -n "${__AISH_CANCEL_MARKER:-}" && -s "${__AISH_CANCEL_MARKER}" ]]; then if [[ "${__AISH_CANCEL_SOURCE_ACTIVE:-0}" == "1" ]]; then __AISH_CANCEL_SOURCE_ACTIVE=0; __AISH_CANCEL_ABORT=1; shopt -s extdebug; set -e; return 130; fi; return 0; fi; '
-    handler+="$action"
+    local handler='__aish_backend_int_handler "$?"'
     builtin trap "$handler" INT
     __AISH_CANCEL_TEMP_INT_TRAP=$(builtin trap -p INT)
 }
@@ -172,6 +364,17 @@ __aish_begin_backend_command() {
         stty echo 2>/dev/null || true
     fi
     __AISH_CANCEL_SAVED_INT_TRAP=$(builtin trap -p INT)
+    __AISH_CANCEL_SAVED_INT_ACTION=$(__aish_int_trap_action "$__AISH_CANCEL_SAVED_INT_TRAP")
+    if [[ -z "$__AISH_CANCEL_SAVED_INT_TRAP" ]]; then
+        __AISH_CANCEL_SAVED_INT_MODE=unset
+    elif [[ -z "$__AISH_CANCEL_SAVED_INT_ACTION" ]]; then
+        __AISH_CANCEL_SAVED_INT_MODE=ignored
+    else
+        __AISH_CANCEL_SAVED_INT_MODE=action
+    fi
+    __AISH_CANCEL_SAVED_DEBUG_ACTION=$__AISH_ORIGINAL_DEBUG_ACTION
+    __AISH_CANCEL_SAVED_DEBUG_MODE=$__AISH_ORIGINAL_DEBUG_MODE
+    __AISH_CANCEL_INT_TRAP_RECHECK=0
     __AISH_CANCEL_SOURCE_ACTIVE=1
     __AISH_CANCEL_ACTIVE=1
     __AISH_CANCEL_DEBUG_GUARD=0
@@ -281,6 +484,11 @@ __aish_on_exit() {
 }
 
 __aish_on_debug() {
+    local entry_status=$?
+    if [[ "${__AISH_TRAP_WRAPPER_ACTIVE:-0}" == "1" || "${__AISH_USER_DEBUG_ACTIVE:-0}" == "1" ]]; then
+        return 0
+    fi
+
     if [[ "${__AISH_CANCEL_ACTIVE:-0}" == "1" ]]; then
         if [[ "${__AISH_CANCEL_ABORT:-0}" == "1" ]]; then
             if [[ "${__AISH_CANCEL_DEBUG_CLEANUP:-0}" == "1" ]]; then
@@ -318,19 +526,42 @@ __aish_on_debug() {
             else
                 __AISH_CANCEL_SAVED_EXTDEBUG=0
             fi
-            local current_int_trap
-            current_int_trap=$(builtin trap -p INT)
-            if [[ "$current_int_trap" != "$__AISH_CANCEL_TEMP_INT_TRAP" ]]; then
-                __AISH_CANCEL_SAVED_INT_TRAP="$current_int_trap"
-                __aish_install_backend_int_trap
+            if [[ "${__AISH_CANCEL_INT_TRAP_RECHECK:-0}" == "1" ]]; then
+                local current_int_trap
+                current_int_trap=$(builtin trap -p INT)
+                if [[ "$current_int_trap" != "$__AISH_CANCEL_TEMP_INT_TRAP" ]]; then
+                    __AISH_CANCEL_SAVED_INT_TRAP="$current_int_trap"
+                    __AISH_CANCEL_SAVED_INT_ACTION=$(
+                        __aish_int_trap_action "$__AISH_CANCEL_SAVED_INT_TRAP"
+                    )
+                    if [[ -z "$__AISH_CANCEL_SAVED_INT_TRAP" ]]; then
+                        __AISH_CANCEL_SAVED_INT_MODE=unset
+                    elif [[ -z "$__AISH_CANCEL_SAVED_INT_ACTION" ]]; then
+                        __AISH_CANCEL_SAVED_INT_MODE=ignored
+                    else
+                        __AISH_CANCEL_SAVED_INT_MODE=action
+                    fi
+                    __aish_install_backend_int_trap
+                fi
+                __AISH_CANCEL_INT_TRAP_RECHECK=0
             fi
+            case "$BASH_COMMAND" in
+                builtin\ trap*) __AISH_CANCEL_INT_TRAP_RECHECK=1 ;;
+            esac
             __AISH_CANCEL_DEBUG_GUARD=0
+        fi
+        if [[ "$__AISH_CANCEL_SAVED_DEBUG_MODE" == "action" ]]; then
+            __aish_run_saved_trap_action "$entry_status" "$__AISH_CANCEL_SAVED_DEBUG_ACTION"
         fi
         return 0
     fi
 
     if [[ "${__AISH_BACKEND_SETUP:-0}" == "1" ]]; then
         return 0
+    fi
+
+    if [[ "$__AISH_ORIGINAL_DEBUG_MODE" == "action" ]]; then
+        __aish_run_saved_trap_action "$entry_status" "$__AISH_ORIGINAL_DEBUG_ACTION"
     fi
 
     if [[ "${__AISH_AT_PROMPT:-0}" != "1" ]]; then
@@ -406,8 +637,17 @@ __AISH_ORIGINAL_PROMPT_COMMAND="$PROMPT_COMMAND"
 # prompt when AISH_ENABLE_CUSTOM_PROMPT=1 is set.
 PROMPT_COMMAND='__aish_prompt_command'
 
-trap '__aish_on_exit' EXIT
-trap '__aish_on_debug' DEBUG
+__AISH_ORIGINAL_DEBUG_TRAP=$(builtin trap -p DEBUG)
+__AISH_ORIGINAL_DEBUG_ACTION=$(__aish_int_trap_action "$__AISH_ORIGINAL_DEBUG_TRAP")
+if [[ -z "$__AISH_ORIGINAL_DEBUG_TRAP" ]]; then
+    __AISH_ORIGINAL_DEBUG_MODE=unset
+elif [[ -z "$__AISH_ORIGINAL_DEBUG_ACTION" ]]; then
+    __AISH_ORIGINAL_DEBUG_MODE=ignored
+else
+    __AISH_ORIGINAL_DEBUG_MODE=action
+fi
+builtin trap '__aish_on_exit' EXIT
+builtin trap '__aish_on_debug' DEBUG
 
 # Disable terminal echo — the frontend (aish) handles all display.
 # This prevents the PTY line discipline from echoing user input back

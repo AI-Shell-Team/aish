@@ -1007,7 +1007,7 @@ impl PersistentPty {
                 let enable_echo = usize::from(enable_echo);
                 payload.extend_from_slice(
                     format!(
-                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT=$(< {script_path}); __AISH_CANCEL_MARKER={cancel_path}; __AISH_BACKEND_SETUP=1; __AISH_BACKEND_TRACE_FUNCTIONS={trace_nested_functions}; __AISH_BACKEND_ENABLE_ECHO={enable_echo}; {prefix} __AISH_BACKEND_SETUP=0; __aish_begin_backend_command; source {script_path}; __aish_finish_backend_command $?\n"
+                        " __AISH_ACTIVE_COMMAND_SEQ={s}; __AISH_ACTIVE_COMMAND_TEXT=$(< {script_path}); __AISH_CANCEL_MARKER={cancel_path}; __AISH_BACKEND_SETUP=1; __AISH_BACKEND_TRACE_FUNCTIONS={trace_nested_functions}; __AISH_BACKEND_ENABLE_ECHO={enable_echo}; {prefix} __AISH_BACKEND_SETUP=0; __aish_begin_backend_command; builtin source {script_path}; __aish_finish_backend_command $?\n"
                     )
                     .as_bytes(),
                 );
@@ -1243,6 +1243,7 @@ impl PersistentPty {
         cancel_token: Option<&CancelToken>,
         display_output: bool,
     ) -> aish_core::Result<(String, i32, String)> {
+        let incomplete_heredoc = command_has_unclosed_heredoc(command);
         let seq = self.allocate_backend_seq();
 
         // Claim stdin for the duration of the exec loop so the shell's
@@ -1613,13 +1614,10 @@ impl PersistentPty {
             .collect::<Vec<u8>>();
         let raw_str = String::from_utf8_lossy(&raw_output).to_string();
 
-        // A source file closes an unterminated here-document at EOF and Bash
-        // reports a warning instead of remaining at PS2. Preserve the
-        // backend's failure result for that incomplete command input.
-        if !cancelled
-            && raw_str.contains("here-document at line")
-            && raw_str.contains("delimited by end-of-file")
-        {
+        // The source file closes an unterminated here-document at EOF and
+        // Bash reports a warning. Determine incompleteness from the submitted
+        // shell text; command output can quote the same warning literally.
+        if !cancelled && incomplete_heredoc {
             result_exit_code = -1;
         }
 
@@ -7186,6 +7184,156 @@ fn close_unclosed_heredoc(cmd: &str) -> String {
     result
 }
 
+/// Return whether the submitted shell source contains a here-document whose
+/// delimiter never appears in the corresponding body. Output text is not
+/// evidence because a command can print Bash's warning verbatim.
+fn command_has_unclosed_heredoc(cmd: &str) -> bool {
+    let mut pending = Vec::<(String, bool)>::new();
+    let mut quote = 0u8;
+
+    for line in cmd.lines() {
+        if let Some((delimiter, strip_tabs)) = pending.first() {
+            let candidate = if *strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if candidate == delimiter {
+                pending.remove(0);
+            }
+            continue;
+        }
+
+        scan_heredoc_operators(line, &mut quote, &mut pending);
+    }
+
+    !pending.is_empty()
+}
+
+fn scan_heredoc_operators(line: &str, quote: &mut u8, pending: &mut Vec<(String, bool)>) {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match *quote {
+            1 => {
+                if bytes[index] == b'\'' {
+                    *quote = 0;
+                }
+                index += 1;
+            }
+            2 => {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    index += 2;
+                } else {
+                    if bytes[index] == b'"' {
+                        *quote = 0;
+                    }
+                    index += 1;
+                }
+            }
+            _ => match bytes[index] {
+                b'\\' => index = (index + 2).min(bytes.len()),
+                b'\'' => {
+                    *quote = 1;
+                    index += 1;
+                }
+                b'"' => {
+                    *quote = 2;
+                    index += 1;
+                }
+                b'#' if index == 0 || bytes[index - 1].is_ascii_whitespace() => break,
+                b'<' if index + 1 < bytes.len() && bytes[index + 1] == b'<' => {
+                    if index + 2 < bytes.len() && bytes[index + 2] == b'<' {
+                        index += 3;
+                        continue;
+                    }
+
+                    let (delimiter, strip_tabs, next) = parse_heredoc_delimiter(bytes, index + 2);
+                    if let Some(delimiter) = delimiter {
+                        pending.push((delimiter, strip_tabs));
+                        index = next;
+                    } else {
+                        index += 2;
+                    }
+                }
+                _ => index += 1,
+            },
+        }
+    }
+}
+
+fn parse_heredoc_delimiter(bytes: &[u8], mut index: usize) -> (Option<String>, bool, usize) {
+    let mut strip_tabs = false;
+    if bytes.get(index) == Some(&b'-') {
+        strip_tabs = true;
+        index += 1;
+    }
+    while bytes
+        .get(index)
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        index += 1;
+    }
+
+    let mut delimiter = Vec::new();
+    let mut word_quote = 0u8;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match word_quote {
+            1 => {
+                if byte == b'\'' {
+                    word_quote = 0;
+                } else {
+                    delimiter.push(byte);
+                }
+                index += 1;
+            }
+            2 => {
+                if byte == b'\\' && index + 1 < bytes.len() {
+                    delimiter.push(bytes[index + 1]);
+                    index += 2;
+                } else {
+                    if byte == b'"' {
+                        word_quote = 0;
+                    } else {
+                        delimiter.push(byte);
+                    }
+                    index += 1;
+                }
+            }
+            _ => match byte {
+                b'\'' => {
+                    word_quote = 1;
+                    index += 1;
+                }
+                b'"' => {
+                    word_quote = 2;
+                    index += 1;
+                }
+                b'\\' if index + 1 < bytes.len() => {
+                    delimiter.push(bytes[index + 1]);
+                    index += 2;
+                }
+                b' ' | b'\t' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' => break,
+                _ => {
+                    delimiter.push(byte);
+                    index += 1;
+                }
+            },
+        }
+    }
+
+    if delimiter.is_empty() {
+        (None, strip_tabs, index)
+    } else {
+        (
+            Some(String::from_utf8_lossy(&delimiter).into_owned()),
+            strip_tabs,
+            index,
+        )
+    }
+}
+
 /// Detect if PTY output looks like a continuation prompt (PS2: `> `).
 /// Used to detect stuck heredoc/quote states after command injection.
 fn looks_like_continuation_prompt(output: &[u8]) -> bool {
@@ -9041,6 +9189,103 @@ mod tests {
     }
 
     #[test]
+    fn test_issue_596_cancel_keeps_private_debug_trap_installed() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-debug-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let started = cwd.join("started");
+        let tail = cwd.join("tail");
+        let token = std::sync::Arc::new(CancelToken::new());
+        let cancel = std::sync::Arc::clone(&token);
+        let started_for_thread = started.clone();
+        let interrupter = std::thread::spawn(move || {
+            let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !started_for_thread.exists() && std::time::Instant::now() < ready_deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                started_for_thread.exists(),
+                "command never reached its marker"
+            );
+            std::thread::sleep(Duration::from_millis(150));
+            cancel.cancel_as_user_interrupt();
+        });
+
+        let command = format!(
+            "trap ':' DEBUG; touch {}; sleep 3; touch {}",
+            shell_quote_escape(&started.display().to_string()),
+            shell_quote_escape(&tail.display().to_string())
+        );
+        let result = pty.execute_command(&command, Duration::from_secs(8), Some(&token), false);
+        interrupter.join().expect("cancellation thread");
+        let (output, exit_code, _) = result.expect("cancelled command must return");
+        assert_eq!(exit_code, -1, "cancelled command returned: {output:?}");
+        assert!(!tail.exists(), "cancelled source must stop before its tail");
+
+        let (output, exit_code, _) = pty
+            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn test_issue_596_default_sigint_unwinds_the_source_and_preserves_shell() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-sigint-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let tail = cwd.join("tail");
+        let command = format!(
+            "helper() {{ (sleep 0.1; kill -INT $$) & wait; touch {}; }}; helper",
+            shell_quote_escape(&tail.display().to_string())
+        );
+
+        let (output, exit_code, _) = pty
+            .execute_command(&command, Duration::from_secs(5), None, false)
+            .expect("ordinary SIGINT must return to the shell");
+        assert_eq!(exit_code, 130, "ordinary SIGINT returned: {output:?}");
+        assert!(!tail.exists(), "SIGINT must unwind the complete source");
+
+        let (output, exit_code, _) = pty
+            .execute_command("printf session_ok", Duration::from_secs(5), None, false)
+            .expect("follow-up command");
+        assert_eq!(exit_code, 0, "follow-up command failed: {output:?}");
+        assert!(output.contains("session_ok"), "got: {output:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn test_issue_596_int_trap_sees_the_original_wait_status() {
+        let cwd =
+            std::env::temp_dir().join(format!("aish-596-int-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+        let marker = cwd.join("handler-ran");
+        let command = format!(
+            "trap '[[ $? == 130 ]] && touch {}' INT; (sleep 0.1; kill -INT $$) & wait; printf source_continued",
+            shell_quote_escape(&marker.display().to_string())
+        );
+
+        let (output, exit_code, _) = pty
+            .execute_command(&command, Duration::from_secs(5), None, false)
+            .expect("SIGINT handler command");
+        assert_eq!(exit_code, 0, "user INT handler failed: {output:?}");
+        assert!(
+            marker.exists(),
+            "handler must observe wait's original status 130"
+        );
+        assert!(output.contains("source_continued"), "got: {output:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn test_backend_command_does_not_keep_temporary_int_trap() {
         let cwd = std::env::temp_dir().join(format!("aish-pty-int-trap-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&cwd).expect("create cwd");
@@ -9376,6 +9621,43 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
+    #[test]
+    fn heredoc_detection_uses_source_tokens_not_quoted_text_or_body() {
+        assert!(command_has_unclosed_heredoc("cat <<'EOF'"));
+        assert!(!command_has_unclosed_heredoc("cat <<'EOF'\nhello\nEOF"));
+        assert!(!command_has_unclosed_heredoc("printf '<<EOF'"));
+        assert!(!command_has_unclosed_heredoc(
+            "cat <<EOF\nliteral <<OTHER\nEOF"
+        ));
+        assert!(!command_has_unclosed_heredoc("cat <<-EOF\n\tbody\n\tEOF"));
+    }
+
+    #[test]
+    fn backend_uses_builtin_source_even_if_the_user_defines_source() {
+        let cwd = std::env::temp_dir().join(format!("aish-596-source-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).expect("create cwd");
+        let mut pty = start_test_pty(cwd.to_str().unwrap());
+
+        let (out, code, _) = pty
+            .execute_command(
+                "source() { return 7; }",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("define source function");
+        assert_eq!(code, 0, "source function definition failed: {out:?}");
+
+        let (out, code, _) = pty
+            .execute_command("printf source_ok", Duration::from_secs(5), None, false)
+            .expect("backend command must bypass the source function");
+        assert_eq!(code, 0, "backend command failed: {out:?}");
+        assert!(out.contains("source_ok"), "got: {out:?}");
+
+        pty.stop();
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
     /// The pager restore must not be queued in the tty input behind the
     /// command (issue #541 review): a stdin-reading command would consume it
     /// as data and a Ctrl+C flush would drop it, leaving PAGER=cat leaked
@@ -9450,6 +9732,18 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
             "PS2 recovery must remain bounded, took {:?}",
             started.elapsed()
         );
+
+        let (quoted_warning, quoted_code, _) = pty
+            .execute_command(
+                "printf 'here-document at line\\ndelimited by end-of-file'",
+                Duration::from_secs(5),
+                None,
+                false,
+            )
+            .expect("quoted warning text must not look like an incomplete heredoc");
+        assert_eq!(quoted_code, 0, "quoted warning output: {quoted_warning:?}");
+        assert!(quoted_warning.contains("here-document at line"));
+        assert!(quoted_warning.contains("delimited by end-of-file"));
 
         let (out, code, _) = pty
             .execute_command("echo session_ok", Duration::from_secs(5), None, false)
