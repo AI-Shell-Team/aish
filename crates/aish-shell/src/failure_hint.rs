@@ -198,17 +198,22 @@ fn apt_subcommand_index(words: &[&str], mut index: usize) -> Option<usize> {
 }
 
 fn is_permission_error(output: &str) -> bool {
-    [
-        "permission denied",
-        "permission is denied",
-        "permission not granted",
-        "权限不够",
-        "权限不足",
-        "权限被拒绝",
-    ]
-    .iter()
-    .any(|marker| output.contains(marker))
-        || (output.contains("(13:") && output.contains("lock"))
+    output
+        .lines()
+        .filter(|line| !line.contains("download is performed unsandboxed as root"))
+        .any(|line| {
+            [
+                "permission denied",
+                "permission is denied",
+                "permission not granted",
+                "权限不够",
+                "权限不足",
+                "权限被拒绝",
+            ]
+            .iter()
+            .any(|marker| line.contains(marker))
+                || (line.contains("(13:") && line.contains("lock"))
+        })
 }
 
 fn is_package_manager_lock_error(output: &str) -> bool {
@@ -360,6 +365,13 @@ mod tests {
         );
         assert_eq!(
             hint_key("apt install curl", "Permission denied"),
+            GENERIC_HINT
+        );
+        assert_eq!(
+            hint_key(
+                "apt update",
+                "E: Temporary failure resolving host\nN: Download is performed unsandboxed as root as file '/home/user/Downloads/pkg.deb' couldn't be accessed by user '_apt'. - pkgAcquire::Run (13: Permission denied)"
+            ),
             GENERIC_HINT
         );
     }
