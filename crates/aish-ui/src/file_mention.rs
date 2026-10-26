@@ -42,10 +42,14 @@ const MAX_VISIBLE_FILES: usize = 10;
 const MAX_PANEL_HEIGHT: u16 = 12;
 /// Cap the recursive scan so enormous trees cannot stall the popup. Hit
 /// early on projects with vendored dependencies; raised once `.gitignore`-
-/// style skipping trims the obvious offenders.
+/// style skipping trims the obvious offenders. The popup flags this cap so
+/// users know the visible results may be incomplete.
 const MAX_FILES_SCANNED: usize = 5000;
+/// Bound how far the recursive scan descends. Reaching this depth also marks
+/// the result set as potentially incomplete.
 const MAX_SCAN_DEPTH: usize = 10;
-/// Bound the filtered list; the popup scrolls within `MAX_VISIBLE_FILES`.
+/// Bound the filtered list; the popup scrolls within `MAX_VISIBLE_FILES` and
+/// flags when this cap hides additional matches.
 const MAX_FILTERED: usize = 50;
 
 /// Build artifacts, VCS state, and dependency trees skipped by the scan.
@@ -81,6 +85,12 @@ pub(crate) struct FileCandidate {
     is_dir: bool,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ScanStatus {
+    truncated: bool,
+    had_errors: bool,
+}
+
 /// Inline `@path` file-mention popup.
 ///
 /// Renders the shell prompt + the fixed line text before `@` + the editable
@@ -95,6 +105,9 @@ pub struct FileMentionSession {
     cursor: usize,
     selected: usize,
     filtered: Vec<usize>,
+    scan_truncated: bool,
+    scan_had_errors: bool,
+    filtered_truncated: bool,
     candidates: Vec<FileCandidate>,
 }
 
@@ -102,7 +115,7 @@ impl FileMentionSession {
     /// Build a new session rooted at `cwd`. `prefix` is the text already on
     /// the line before the `@` (shown for context, not editable here).
     pub fn new(cwd: &Path, prompt: String, prefix: String) -> Self {
-        let candidates = scan_files(cwd);
+        let (candidates, scan_status) = scan_files_with_status(cwd);
         let mut session = Self {
             prompt: strip_ansi_escapes(&prompt),
             prefix,
@@ -110,6 +123,9 @@ impl FileMentionSession {
             cursor: 0,
             selected: 0,
             filtered: Vec::new(),
+            scan_truncated: scan_status.truncated,
+            scan_had_errors: scan_status.had_errors,
+            filtered_truncated: false,
             candidates,
         };
         session.update_filtered();
@@ -169,10 +185,31 @@ impl FileMentionSession {
     }
 
     fn panel_height(&self) -> u16 {
-        if self.filtered.is_empty() {
-            return 1;
-        }
-        (1 + self.filtered.len().min(MAX_VISIBLE_FILES) as u16).min(MAX_PANEL_HEIGHT)
+        let visible_rows = self.filtered.len().min(MAX_VISIBLE_FILES) as u16;
+        let empty_hint = u16::from(self.filtered.is_empty());
+        let incomplete_hints = self.incomplete_hint_count();
+        (1 + visible_rows + empty_hint + incomplete_hints).min(MAX_PANEL_HEIGHT)
+    }
+
+    fn incomplete_hints(&self) -> [Option<&'static str>; 2] {
+        [
+            if self.scan_had_errors {
+                Some("Scan errors; type a missing path and press Enter.")
+            } else if self.scan_truncated {
+                Some("Scan capped; type a missing path and press Enter.")
+            } else {
+                None
+            },
+            if self.filtered_truncated {
+                Some("More matches may exist; narrow the prefix.")
+            } else {
+                None
+            },
+        ]
+    }
+
+    fn incomplete_hint_count(&self) -> u16 {
+        self.incomplete_hints().iter().flatten().count() as u16
     }
 
     fn update_filtered(&mut self) {
@@ -188,6 +225,7 @@ impl FileMentionSession {
             b.0.cmp(&a.0)
                 .then_with(|| self.candidates[a.1].path.cmp(&self.candidates[b.1].path))
         });
+        self.filtered_truncated = scored.len() > MAX_FILTERED;
         self.filtered = scored
             .into_iter()
             .map(|(_, i)| i)
@@ -371,10 +409,29 @@ impl FileMentionSession {
     }
 
     fn render_file_list(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        if self.filtered.is_empty() || area.height == 0 {
+        if area.height == 0 {
             return;
         }
-        let max_visible = area.height as usize;
+        let hint_style = Style::default().fg(Color::Yellow);
+        if self.filtered.is_empty() {
+            let empty_area = Rect::new(area.x, area.y, area.width, 1);
+            frame.render_widget(
+                Paragraph::new("No matches; type a path, then press Enter.").style(hint_style),
+                empty_area,
+            );
+            self.render_incomplete_hints(frame, area, 1, hint_style);
+            return;
+        }
+
+        let hints = self.incomplete_hints();
+        let hint_rows = self.incomplete_hint_count();
+        let results_height = area.height.saturating_sub(hint_rows);
+        if results_height == 0 {
+            self.render_incomplete_hints(frame, area, 0, hint_style);
+            return;
+        }
+        let results_area = Rect::new(area.x, area.y, area.width, results_height);
+        let max_visible = results_height as usize;
         let scroll = self.scroll_offset(max_visible);
         let end = (scroll + max_visible).min(self.filtered.len());
         let lines: Vec<Line> = self.filtered[scroll..end]
@@ -408,7 +465,30 @@ impl FileMentionSession {
             })
             .collect();
 
-        frame.render_widget(Paragraph::new(lines), area);
+        frame.render_widget(Paragraph::new(lines), results_area);
+        for (row, hint) in hints.into_iter().flatten().enumerate() {
+            let hint_area = Rect::new(area.x, area.y + results_height + row as u16, area.width, 1);
+            frame.render_widget(Paragraph::new(hint).style(hint_style), hint_area);
+        }
+    }
+
+    fn render_incomplete_hints(
+        &self,
+        frame: &mut ratatui::Frame<'_>,
+        area: Rect,
+        first_row: u16,
+        style: Style,
+    ) {
+        for (row, hint) in self.incomplete_hints().into_iter().flatten().enumerate() {
+            let y = area.y + first_row + row as u16;
+            if y >= area.y + area.height {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(hint).style(style),
+                Rect::new(area.x, y, area.width, 1),
+            );
+        }
     }
 
     fn scroll_offset(&self, max_visible: usize) -> usize {
@@ -427,15 +507,16 @@ impl FileMentionSession {
 /// Recursively scan `cwd` for files and directories, returning relative
 /// paths. Hidden entries, `IGNORED_DIRS`, and symlinked directories are
 /// skipped. The result is sorted by path for stable ordering.
-pub(crate) fn scan_files(cwd: &Path) -> Vec<FileCandidate> {
+fn scan_files_with_status(cwd: &Path) -> (Vec<FileCandidate>, ScanStatus) {
     let mut out = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut status = ScanStatus::default();
     if let Ok(canon) = cwd.canonicalize() {
         visited.insert(canon);
     }
-    scan_dir(cwd, cwd, 0, &mut out, &mut visited);
+    scan_dir(cwd, cwd, 0, &mut out, &mut visited, &mut status);
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
+    (out, status)
 }
 
 fn scan_dir(
@@ -444,19 +525,31 @@ fn scan_dir(
     depth: usize,
     out: &mut Vec<FileCandidate>,
     visited: &mut HashSet<PathBuf>,
+    status: &mut ScanStatus,
 ) {
     if depth > MAX_SCAN_DEPTH || out.len() >= MAX_FILES_SCANNED {
+        status.truncated = true;
         return;
     }
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => {
+            status.had_errors = true;
+            return;
+        }
     };
     for entry in entries {
         if out.len() >= MAX_FILES_SCANNED {
+            status.truncated = true;
             return;
         }
-        let Ok(entry) = entry else { continue };
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                status.had_errors = true;
+                continue;
+            }
+        };
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
             continue;
@@ -467,7 +560,10 @@ fn scan_dir(
         let path = entry.path();
         let ft = match entry.file_type() {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => {
+                status.had_errors = true;
+                continue;
+            }
         };
         // Skip symlinks to avoid walking into unrelated trees or cycles.
         if ft.is_symlink() {
@@ -491,7 +587,7 @@ fn scan_dir(
                 path: format!("{rel}/"),
                 is_dir: true,
             });
-            scan_dir(root, &path, depth + 1, out, visited);
+            scan_dir(root, &path, depth + 1, out, visited, status);
         } else if ft.is_file() {
             out.push(FileCandidate {
                 path: rel,
@@ -585,6 +681,27 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    fn rendered_lines(session: &FileMentionSession, width: u16, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| session.render(frame, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
     // -- fuzzy_score ---------------------------------------------------------
 
     #[test]
@@ -626,7 +743,7 @@ mod tests {
         fs::create_dir_all(dir.join("target")).unwrap();
         fs::write(dir.join("target").join("bin"), b"x").unwrap();
 
-        let files = scan_files(&dir);
+        let files = scan_files_with_status(&dir).0;
         let paths: Vec<&str> = files.iter().map(|c| c.path.as_str()).collect();
         assert!(paths.contains(&"a.txt"));
         assert!(paths.contains(&"sub/"));
@@ -642,12 +759,62 @@ mod tests {
         let dir = scratch_dir("dirs");
         fs::create_dir_all(dir.join("pkg")).unwrap();
         fs::write(dir.join("pkg").join("f.rs"), b"x").unwrap();
-        let files = scan_files(&dir);
+        let files = scan_files_with_status(&dir).0;
         let pkg = files.iter().find(|c| c.path == "pkg/").unwrap();
         assert!(pkg.is_dir);
         let f = files.iter().find(|c| c.path == "pkg/f.rs").unwrap();
         assert!(!f.is_dir);
         cleanup(&dir);
+    }
+
+    #[test]
+    fn scan_files_reports_when_the_file_count_limit_is_reached() {
+        let dir = scratch_dir("file-limit");
+        for index in 0..=MAX_FILES_SCANNED {
+            fs::write(dir.join(format!("{index:05}.txt")), b"x").unwrap();
+        }
+
+        let (files, status) = scan_files_with_status(&dir);
+        assert_eq!(files.len(), MAX_FILES_SCANNED);
+        assert!(status.truncated);
+        assert!(!status.had_errors);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn scan_files_reports_when_the_depth_limit_is_reached() {
+        let dir = scratch_dir("depth-limit");
+        let mut deep = dir.clone();
+        for depth in 0..=MAX_SCAN_DEPTH {
+            deep.push(format!("level-{depth}"));
+            fs::create_dir_all(&deep).unwrap();
+        }
+        fs::write(deep.join("deep.rs"), b"x").unwrap();
+
+        let (_, status) = scan_files_with_status(&dir);
+        assert!(status.truncated);
+        assert!(!status.had_errors);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn scan_read_errors_are_tracked_separately_from_truncation() {
+        let dir = scratch_dir("read-error");
+        cleanup(&dir);
+
+        let (files, status) = scan_files_with_status(&dir);
+        assert!(files.is_empty());
+        assert!(!status.truncated);
+        assert!(status.had_errors);
+
+        let session = session_in(&dir, "; ").with_query("missing.txt");
+        assert!(session.filtered.is_empty());
+        assert_eq!(session.panel_height(), 3);
+        let lines = rendered_lines(&session, 80, session.panel_height());
+        assert!(lines[1].contains("No matches; type a path, then press Enter."));
+        assert!(lines[2].contains("Scan errors; type a missing path and press Enter."));
     }
 
     // -- FileMentionSession behavior ----------------------------------------
@@ -752,6 +919,62 @@ mod tests {
         // Empty query, first highlighted candidate is a file → selects it.
         // The cancellation branch fires only when nothing matches at all.
         assert!(matches!(outcome, Some(FileMentionOutcome::Selected(_))));
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn no_matches_explain_that_enter_uses_a_typed_path() {
+        let dir = scratch_dir("no-match-hint");
+        let session = session_in(&dir, "; ").with_query("missing.txt");
+
+        assert!(session.filtered.is_empty());
+        assert_eq!(session.panel_height(), 2);
+        let lines = rendered_lines(&session, 64, session.panel_height());
+        assert!(lines[1].contains("No matches; type a path, then press Enter."));
+
+        let mut session = session;
+        assert_eq!(
+            session.dispatch_event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(FileMentionOutcome::Selected("missing.txt".into()))
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn capped_scan_advises_typing_paths_omitted_by_the_scan() {
+        let dir = scratch_dir("truncated-hint");
+        let mut deep = dir.clone();
+        for depth in 0..=MAX_SCAN_DEPTH {
+            deep.push(format!("level-{depth}"));
+            fs::create_dir_all(&deep).unwrap();
+        }
+        fs::write(deep.join("deep.rs"), b"x").unwrap();
+        fs::write(dir.join("visible.rs"), b"x").unwrap();
+
+        let session = session_in(&dir, "; ").with_query("visible");
+        assert!(session.incomplete_hint_count() > 0);
+        let lines = rendered_lines(&session, 64, session.panel_height());
+        assert!(lines.last().unwrap().contains("Scan capped"));
+        assert!(lines.last().unwrap().contains("type a missing path"));
+        assert!(!lines.last().unwrap().contains("narrow the prefix"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn filtered_result_cap_also_displays_the_incomplete_hint() {
+        let dir = scratch_dir("filtered-limit");
+        for index in 0..=MAX_FILTERED {
+            fs::write(dir.join(format!("match-{index:02}.txt")), b"x").unwrap();
+        }
+
+        let session = session_in(&dir, "; ").with_query("match");
+        assert_eq!(session.filtered.len(), MAX_FILTERED);
+        assert!(session.filtered_truncated);
+        let lines = rendered_lines(&session, 64, session.panel_height());
+        assert!(lines.last().unwrap().contains("More matches may exist"));
+        assert!(lines.last().unwrap().contains("narrow the prefix"));
+
         cleanup(&dir);
     }
 }
