@@ -10354,11 +10354,15 @@ impl AishShell {
         };
 
         use crate::wizard::plan_approval::{PlanApprovalDecision, PlanApprovalFlow};
-        let decision = PlanApprovalFlow::review_plan(
+        let Some(decision) = PlanApprovalFlow::review_plan_if_input_available(
             &artifact_text,
             plan_state.summary.as_deref(),
             (plan_state.draft_revision > 0).then_some(plan_state.draft_revision),
-        );
+        ) else {
+            println!("No user input is available. The plan remains awaiting approval; run /plan review to decide.");
+            self.persist_session_snapshot();
+            return true;
+        };
 
         match decision {
             PlanApprovalDecision::Approved => {
