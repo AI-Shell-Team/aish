@@ -932,6 +932,8 @@ shell:
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 快速修复，或 /diagnose 诊断。"
+    apt_permission_hint: "APT 更新需要管理员权限。如果你有 sudo 权限且确实需要刷新软件包索引，请自行运行 `sudo apt update`。"
+    package_manager_lock_hint: "另一个软件包管理进程正在使用锁。请等待它完成或检查占用进程；不要删除锁文件。"
     corrected_command_label: "修复建议:"
     corrected_command_title: "💡 纠正后的命令:"
     confirm_execute_prefix: "执行: "
@@ -980,6 +982,8 @@ shell:
     potential_error: "🚀 潜在错误: {reason}, 尝试解决....."
     llm_error_title: "❌ 大模型请求失败"
     llm_error_message: "错误: {error}"
+    empty_response: "提供方未返回回答。请检查所选提供方或模型，然后重试。"
+    incomplete_response: "提供方在回答完成前结束了响应。请检查输出上限或尝试其他模型。"
     partial_turn_saved: "已保存本轮已完成的工具执行记录（{steps} 步），失败前的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     partial_turn_saved_limit: "已在达到轮次上限停止前保存本轮已完成的工具执行记录（{steps} 步），已完成的工作不会丢失；输入新任务或 ;重试 可从保存点继续。"
     llm_error_details_title: "调试详情"

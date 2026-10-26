@@ -17,6 +17,14 @@ use aish_skills::SkillManager;
 /// Shared handle for the memory manager, accessible from both AiHandler and tools.
 pub type SharedMemoryManager = Arc<Mutex<Option<MemoryManager>>>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PartialTurnStop {
+    ProviderError,
+    EmptyResponse,
+    IncompleteResponse,
+    IterationLimit,
+}
+
 /// Classify a fact string into a memory category using keyword matching.
 fn categorize_fact(fact: &str) -> MemoryCategory {
     let lower = fact.to_lowercase();
@@ -749,8 +757,12 @@ impl AiHandler {
                 if matches!(err, aish_core::AishError::IterationLimit) {
                     self.commit_partial_turn_stopped_at_limit(&question_processed);
                 } else {
-                    self.commit_partial_turn(&question_processed);
+                    self.commit_partial_turn(&question_processed, &err);
                 }
+                // Providers can bill requests that end in an empty or
+                // incomplete response. Persist usage before propagating the
+                // error so an immediate exit does not lose the request.
+                self.persist_token_usage();
                 return Err(err);
             }
         };
@@ -793,8 +805,9 @@ impl AiHandler {
     }
 
     /// Persist a partial turn left by a mid-turn provider failure (issue
-    /// #452) or by the user stopping at the tool-call iteration limit
-    /// (issue #572). Drains the tool-loop messages the LLM session retained
+    /// #452), an inconclusive response, or the user stopping at the
+    /// tool-call iteration limit (issue #572). Drains the tool-loop messages
+    /// the LLM session retained
     /// before the error and commits them to the context manager with the
     /// same redaction/capping as a successful turn. The stored slice starts
     /// with the user message (prepended by the session), so only the tool
@@ -805,10 +818,14 @@ impl AiHandler {
     /// assistant tool_call has a matching tool_result, so the next request
     /// (retry or model switch) replays the completed work and the provider
     /// sees the evidence instead of dangling calls.
-    fn commit_partial_turn(&mut self, question_processed: &str) {
+    fn commit_partial_turn(&mut self, question_processed: &str, error: &aish_core::AishError) {
         let partial = self.llm_session.take_last_partial_turn();
-        let stopped_by_limit = false;
-        self.commit_partial_messages(question_processed, &partial, stopped_by_limit);
+        let stop = match error {
+            aish_core::AishError::EmptyResponse => PartialTurnStop::EmptyResponse,
+            aish_core::AishError::IncompleteResponse => PartialTurnStop::IncompleteResponse,
+            _ => PartialTurnStop::ProviderError,
+        };
+        self.commit_partial_messages(question_processed, &partial, stop);
     }
 
     /// Issue #572 variant: commit a partial turn that ended because the
@@ -817,18 +834,22 @@ impl AiHandler {
     /// persisted record is not misdescribed as a provider error.
     fn commit_partial_turn_stopped_at_limit(&mut self, question_processed: &str) {
         let partial = self.llm_session.take_last_partial_turn();
-        self.commit_partial_messages(question_processed, &partial, true);
+        self.commit_partial_messages(
+            question_processed,
+            &partial,
+            PartialTurnStop::IterationLimit,
+        );
     }
 
     /// Shared commit path: append the user message, the completed
     /// tool-call/tool-result pairs (redacted), and a synthetic assistant
-    /// note describing why the turn stopped. `stopped_by_limit` selects the
-    /// note text and the user-hint state exposed to the shell.
+    /// note describing why the turn stopped. `stop` selects the note text
+    /// and the user-hint state exposed to the shell.
     fn commit_partial_messages(
         &mut self,
         question_processed: &str,
         partial: &[ChatMessage],
-        stopped_by_limit: bool,
+        stop: PartialTurnStop,
     ) {
         if partial.is_empty() {
             self.last_partial_turn_steps = 0;
@@ -843,7 +864,7 @@ impl AiHandler {
             partial
         };
         self.last_partial_turn_steps = tool_messages.len();
-        self.last_partial_turn_limit = stopped_by_limit;
+        self.last_partial_turn_limit = stop == PartialTurnStop::IterationLimit;
 
         if tool_messages.is_empty() {
             return;
@@ -854,22 +875,31 @@ impl AiHandler {
             self.context_manager.add_memory(MemoryType::Llm, ctx_msg);
         }
         // No final assistant text exists (the turn stopped), so nothing is
-        // appended after the tool messages. Mark the interruption with a
-        // synthetic assistant note so the next turn's model understands why
-        // the transcript stops mid-task — and that the evidence above was
-        // already executed, provider failure or deliberate stop alike.
-        let note = if stopped_by_limit {
-            "[turn stopped by the user at the tool-call iteration limit; the tool results above are completed evidence — do not re-run completed side effects]"
-        } else {
-            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]"
+        // appended after the tool messages. Mark why the transcript stopped
+        // and that the evidence above was already executed, so the next turn
+        // does not treat a failed final response as permission to repeat it.
+        let note = match stop {
+            PartialTurnStop::IterationLimit => {
+                "[turn stopped by the user at the tool-call iteration limit; the tool results above are completed evidence — do not re-run completed side effects]"
+            }
+            PartialTurnStop::EmptyResponse => {
+                "[turn status: inconclusive; reason: empty_response; the tool results above are completed evidence — do not re-run completed side effects]"
+            }
+            PartialTurnStop::IncompleteResponse => {
+                "[turn status: incomplete; reason: incomplete_response; the tool results above are completed evidence — do not re-run completed side effects]"
+            }
+            PartialTurnStop::ProviderError => {
+                "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]"
+            }
         };
         self.context_manager
             .add_message("assistant", note, MemoryType::Llm);
         self.context_manager.trim();
-        let reason = if stopped_by_limit {
-            "iteration-limit stop"
-        } else {
-            "provider failure"
+        let reason = match stop {
+            PartialTurnStop::IterationLimit => "iteration-limit stop",
+            PartialTurnStop::EmptyResponse => "empty provider response",
+            PartialTurnStop::IncompleteResponse => "incomplete provider response",
+            PartialTurnStop::ProviderError => "provider failure",
         };
         tracing::info!(
             messages = tool_messages.len(),
@@ -2386,6 +2416,55 @@ mod tests {
     // Execution counter shared by CountingProbeTool (see the #572 e2e test).
     static EXECUTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+    #[tokio::test]
+    async fn handle_question_persists_usage_when_provider_returns_empty_response() {
+        use std::io::{Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let usage_path = dir.path().join("token_stats.json");
+        let response_body = concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":5}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("provider request");
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("send empty provider response");
+        });
+        let mut handler = test_handler();
+        handler.llm_session =
+            LlmSession::new(&format!("http://{addr}/v1"), "key", "model", None, None);
+        handler.token_store = crate::token_store::TokenUsageStore::open(usage_path.clone());
+
+        let result = handler.handle_question("return a short answer").await;
+        server.join().expect("mock provider server");
+
+        assert!(matches!(result, Err(aish_core::AishError::EmptyResponse)));
+        let stats = handler.token_stats();
+        assert_eq!(stats.total_input, 17);
+        assert_eq!(stats.total_output, 5);
+        assert_eq!(stats.request_count, 1);
+
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(usage_path).unwrap()).unwrap();
+        let daily = persisted.as_object().unwrap().values().next().unwrap();
+        assert_eq!(daily["input"], 17);
+        assert_eq!(daily["output"], 5);
+        assert_eq!(daily["requests"], 1);
+    }
+
     /// Regression: the HashSet refactor dropped the empty-refs early
     /// return, so questions without any `@skill` reference got a stray
     /// blank-line prefix prepended when at least one skill was installed.
@@ -3558,22 +3637,10 @@ mod tests {
             },
             ChatMessage::tool_result("call_p1", "out SECRET_TOKEN"),
         ];
-        // The commit method drains from the session; the session-side
-        // buffer round-trip is covered by aish-llm unit tests
-        // (partial_turn_saved_when_provider_fails_after_two_tools). Here we
-        // exercise the persistence/redaction logic directly against
-        // redact_turn_messages, mirroring the commit_partial_turn body.
-        let tool_messages = &partial[1..];
-        handler
-            .context_manager
-            .add_message("user", "run the marker command", MemoryType::Llm);
-        for msg in handler.redact_turn_messages(tool_messages) {
-            handler.context_manager.add_memory(MemoryType::Llm, msg);
-        }
-        handler.context_manager.add_message(
-            "assistant",
-            "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]",
-            MemoryType::Llm,
+        handler.commit_partial_messages(
+            "run the marker command",
+            &partial,
+            PartialTurnStop::ProviderError,
         );
 
         let context = handler.build_context_messages();
@@ -3617,7 +3684,7 @@ mod tests {
             ChatMessage::tool_result("call_l1", "build finished"),
         ];
 
-        handler.commit_partial_messages("do the task", &partial, true);
+        handler.commit_partial_messages("do the task", &partial, PartialTurnStop::IterationLimit);
 
         // The flag the shell hint reads is set.
         assert!(handler.last_partial_turn_stopped_at_limit());
@@ -3655,7 +3722,7 @@ mod tests {
             ChatMessage::tool_result("call_f1", "match found"),
         ];
 
-        handler.commit_partial_messages("do the task", &partial, false);
+        handler.commit_partial_messages("do the task", &partial, PartialTurnStop::ProviderError);
 
         assert!(!handler.last_partial_turn_stopped_at_limit());
         let context = handler.build_context_messages();
@@ -3664,6 +3731,40 @@ mod tests {
             .and_then(|m| m.text_content())
             .unwrap_or_default();
         assert!(note.contains("provider error"), "{note}");
+    }
+
+    #[test]
+    fn commit_partial_messages_records_empty_response_as_inconclusive() {
+        let mut handler = test_handler();
+        let partial = [
+            ChatMessage::user("run the task"),
+            {
+                let mut assistant = ChatMessage::assistant("");
+                assistant.content = None;
+                assistant.tool_calls = Some(vec![aish_llm::ToolCall {
+                    id: "call_empty".to_string(),
+                    name: "bash".to_string(),
+                    arguments: r#"{"command":"touch marker"}"#.to_string(),
+                }]);
+                assistant
+            },
+            ChatMessage::tool_result("call_empty", "marker created"),
+        ];
+
+        handler.commit_partial_messages("run the task", &partial, PartialTurnStop::EmptyResponse);
+
+        let context = handler.build_context_messages();
+        let note = context
+            .last()
+            .and_then(|message| message.text_content())
+            .unwrap_or_default();
+        assert!(note.contains("status: inconclusive"), "{note}");
+        assert!(note.contains("reason: empty_response"), "{note}");
+        assert!(
+            note.contains("do not re-run completed side effects"),
+            "{note}"
+        );
+        assert_eq!(context[2].tool_call_id.as_deref(), Some("call_empty"));
     }
 
     /// Bind a loopback server that replies to POST /v1/chat/completions with

@@ -3398,6 +3398,8 @@ impl AishShell {
                                         e,
                                         aish_core::AishError::Llm(_)
                                             | aish_core::AishError::IterationLimit
+                                            | aish_core::AishError::EmptyResponse
+                                            | aish_core::AishError::IncompleteResponse
                                     ) {
                                         let msg = t("shell.error.llm_error_message")
                                             .replace("{error}", &e.to_string());
@@ -3534,7 +3536,10 @@ impl AishShell {
                         Err(e) => {
                             if !matches!(
                                 e,
-                                aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                                aish_core::AishError::Llm(_)
+                                    | aish_core::AishError::IterationLimit
+                                    | aish_core::AishError::EmptyResponse
+                                    | aish_core::AishError::IncompleteResponse
                             ) {
                                 let msg = t("shell.error.llm_error_message")
                                     .replace("{error}", &e.to_string());
@@ -3661,6 +3666,8 @@ impl AishShell {
                                             e,
                                             aish_core::AishError::Llm(_)
                                                 | aish_core::AishError::IterationLimit
+                                                | aish_core::AishError::EmptyResponse
+                                                | aish_core::AishError::IncompleteResponse
                                         ) {
                                             let msg = t("shell.error.llm_error_message")
                                                 .replace("{error}", &e.to_string());
@@ -3896,7 +3903,10 @@ impl AishShell {
         self.state.last_exit_code = exit_code;
         self.state.can_correct_error = exit_code != 0 && exit_code != 130;
         if exit_code != 0 && exit_code != 130 {
-            let hint = t("shell.error_correction.press_semicolon_hint");
+            let hint = t(crate::failure_hint::hint_key(
+                command,
+                &self.state.last_output,
+            ));
             let hint_str = format!("{}\n", theme::muted(&format!("<{}>", hint)));
             crate::recorder::shared_record_output(&self.shared_recorder, &hint_str);
             eprintln!("{}", theme::muted(&format!("<{}>", hint)));
@@ -3941,6 +3951,7 @@ impl AishShell {
             self.set_phase(ShellPhase::Editing);
             self.record_history(input, exit_code);
             self.reset_interruption();
+            self.track_command_failure_state(input, exit_code);
             return false;
         }
 
@@ -4081,7 +4092,10 @@ impl AishShell {
                     Err(e) => {
                         if !matches!(
                             e,
-                            aish_core::AishError::Llm(_) | aish_core::AishError::IterationLimit
+                            aish_core::AishError::Llm(_)
+                                | aish_core::AishError::IterationLimit
+                                | aish_core::AishError::EmptyResponse
+                                | aish_core::AishError::IncompleteResponse
                         ) {
                             let msg = t("shell.error.llm_error_message")
                                 .replace("{error}", &e.to_string());
@@ -15861,6 +15875,117 @@ mod privilege_dispatch_tests {
         };
         let shell = AishShell::new(config).expect("shell construction");
         (tmp, env, shell)
+    }
+
+    #[test]
+    fn apt_failure_hint_preserves_the_error_and_does_not_start_ai() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_root = tempfile::tempdir().expect("fake command directory");
+        let fake_bin = fake_root.path().join("bin");
+        std::fs::create_dir_all(&fake_bin).expect("create fake bin");
+        let fake_apt = fake_bin.join("apt");
+        std::fs::write(
+            &fake_apt,
+            "#!/bin/sh\nprintf '%s\\n' 'E: Could not open lock file (13: Permission denied)' >&2\nexit 100\n",
+        )
+        .expect("write fake apt command");
+        std::fs::set_permissions(&fake_apt, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake apt executable");
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!("{}:{}", fake_bin.display(), original_path.to_string_lossy());
+        let _path_env = EnvGuard::apply(&[("PATH", std::path::PathBuf::from(path))]);
+
+        let (_tmp, _env, mut shell) = open_test_shell();
+        let hint_path = fake_root.path().join("apt-failure.cast");
+        *shell.shared_recorder.lock().unwrap() = Some(
+            crate::recorder::Recorder::new(hint_path.clone(), (80, 24))
+                .expect("create hint recording"),
+        );
+        let exit_code = shell.execute_external_command("apt update");
+        assert_eq!(exit_code, 100);
+        assert!(shell.state.last_output.contains("Permission denied"));
+        let context_before = shell.ai_handler.context_messages_snapshot().len();
+
+        shell.track_command_failure_state("apt update", exit_code);
+
+        assert_eq!(shell.state.last_command.as_deref(), Some("apt update"));
+        assert_eq!(shell.state.last_exit_code, exit_code);
+        assert!(shell.state.can_correct_error);
+        assert_eq!(
+            shell.ai_handler.context_messages_snapshot().len(),
+            context_before
+        );
+        shell
+            .shared_recorder
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("hint recorder")
+            .flush()
+            .expect("flush hint recording");
+        let recording = std::fs::read_to_string(hint_path).expect("read hint recording");
+        let expected_hint = aish_i18n::t("shell.error_correction.apt_permission_hint");
+        assert!(
+            recording.contains(expected_hint.as_str()),
+            "recording should contain the localized permission hint: {recording}"
+        );
+    }
+
+    #[test]
+    fn sudo_apt_failure_tracks_a_hint_on_the_pty_path() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_root = tempfile::tempdir().expect("fake command directory");
+        let fake_bin = fake_root.path().join("bin");
+        std::fs::create_dir_all(&fake_bin).expect("create fake bin");
+        let fake_sudo = fake_bin.join("sudo");
+        std::fs::write(
+            &fake_sudo,
+            "#!/bin/sh\nprintf '%s\\n' 'E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 1234 (apt-get)' >&2\nexit 100\n",
+        )
+        .expect("write fake sudo command");
+        std::fs::set_permissions(&fake_sudo, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake sudo executable");
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = format!("{}:{}", fake_bin.display(), original_path.to_string_lossy());
+        let _path_env = EnvGuard::apply(&[("PATH", std::path::PathBuf::from(path))]);
+
+        let (_tmp, _env, mut shell) = open_test_shell();
+        shell.input_guard.set_enabled(false);
+        let hint_path = fake_root.path().join("sudo-apt-failure.cast");
+        *shell.shared_recorder.lock().unwrap() = Some(
+            crate::recorder::Recorder::new(hint_path.clone(), (80, 24))
+                .expect("create hint recording"),
+        );
+
+        assert!(!shell.dispatch_builtin_line("sudo apt install curl"));
+        assert_eq!(
+            shell.state.last_command.as_deref(),
+            Some("sudo apt install curl")
+        );
+        assert_eq!(shell.state.last_exit_code, 100);
+        assert!(shell.state.can_correct_error);
+        shell
+            .shared_recorder
+            .lock()
+            .unwrap()
+            .as_mut()
+            .expect("hint recorder")
+            .flush()
+            .expect("flush hint recording");
+        let recording = std::fs::read_to_string(hint_path).expect("read hint recording");
+        let expected_hint = aish_i18n::t("shell.error_correction.package_manager_lock_hint");
+        assert!(
+            recording.contains(expected_hint.as_str()),
+            "recording should contain the localized lock hint: {recording}"
+        );
     }
 
     #[test]
