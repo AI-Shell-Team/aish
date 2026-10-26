@@ -298,12 +298,18 @@ async fn bearer_tokens_gate_the_endpoint_and_stay_redacted() {
 
 #[tokio::test]
 async fn an_unreachable_endpoint_is_a_connect_failure() {
-    // Bind a port and release it, so nothing is listening there.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("the probe listener must bind");
-    let port = listener.local_addr().expect("the probe address").port();
-    drop(listener);
+    // Reserve an ephemeral port without listening on it, and keep the socket
+    // bound for the whole assertion. A bound socket makes the kernel answer a
+    // SYN with RST, so the connect fails with ECONNREFUSED deterministically.
+    // Binding a listener and dropping it (the previous approach) returned the
+    // port to the ephemeral range: another process could take it in the gap and
+    // answer with RST mid-teardown, surfacing as a flaky `Reset` instead of
+    // `Connect`.
+    let socket = tokio::net::TcpSocket::new_v4().expect("the probe socket must build");
+    socket
+        .bind("127.0.0.1:0".parse().expect("the loopback address"))
+        .expect("the probe socket must bind");
+    let port = socket.local_addr().expect("the probe address").port();
 
     let settings = ServerSettings {
         name: "fixture".to_string(),
