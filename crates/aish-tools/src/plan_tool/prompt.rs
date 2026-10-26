@@ -13,7 +13,7 @@ pub(crate) const ENTER_PROMPT: &str = r#"Use this tool when implementation must 
 
 Usage:
 - Enter plan mode before making changes for multi-step or risky work.
-- During planning, use read-only tools plus write_file/edit_file for the plan artifact only.
+- During planning, use read-only tools (memory search/list only) plus write_file/edit_file for the active plan artifact only.
 - Exit plan mode when the plan is ready for user approval."#;
 
 pub(crate) const EXIT_PROMPT: &str = r#"Use this tool when the plan is ready for review.

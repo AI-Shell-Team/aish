@@ -72,7 +72,7 @@ impl Tool for EnterPlanModeTool {
                 "Entering plan mode for: {}\n\
                 Plan ID: {}\n\n\
                 During planning, you have access to:\n\
-                - Read-only tools: read_file, glob, grep, ask_user, memory\n\
+                - Read-only tools: read_file, glob, grep, ask_user, memory search/list\n\
                 - Write tools (for plan only): write_file, edit_file\n\
                 - exit_plan_mode: when ready to present your plan\n\n\
                 Use write_file to create your plan artifact.\n\

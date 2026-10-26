@@ -180,7 +180,7 @@ pub const SLASH_COMMANDS: &[SlashCommandMeta] = &[
     },
     SlashCommandMeta {
         name: "/plan",
-        desc: "Plan mode control",
+        desc: "Plan mode control (start/status/exit/review)",
         group: SlashGroup::ModelSettings,
         keywords: &["plan", "mode"],
         enter: EnterPolicy::Execute,

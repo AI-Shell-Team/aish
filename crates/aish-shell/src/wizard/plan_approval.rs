@@ -3,7 +3,7 @@
 // Displays a formatted plan to the user and collects their decision:
 // approve, request changes with feedback, or cancel.
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 
 use crate::theme;
 
@@ -41,6 +41,30 @@ impl PlanApprovalFlow {
         summary: Option<&str>,
         revision: Option<i32>,
     ) -> PlanApprovalDecision {
+        Self::review_plan_if_input_available(plan_content, summary, revision)
+            .unwrap_or(PlanApprovalDecision::Cancelled)
+    }
+
+    /// Display plan content and collect a decision when input is available.
+    ///
+    /// Returns None if the choice prompt reaches EOF or cannot read input,
+    /// allowing callers to leave an approval pending for a later review.
+    pub(crate) fn review_plan_if_input_available(
+        plan_content: &str,
+        summary: Option<&str>,
+        revision: Option<i32>,
+    ) -> Option<PlanApprovalDecision> {
+        let stdin = io::stdin();
+        let mut input = stdin.lock();
+        Self::review_plan_with_input(plan_content, summary, revision, &mut input)
+    }
+
+    fn review_plan_with_input<R: BufRead>(
+        plan_content: &str,
+        summary: Option<&str>,
+        revision: Option<i32>,
+        input: &mut R,
+    ) -> Option<PlanApprovalDecision> {
         let width = std::env::var("COLUMNS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -134,13 +158,14 @@ impl PlanApprovalFlow {
 
         // Read single character choice
         let mut choice = String::new();
-        if io::stdin().read_line(&mut choice).is_err() {
-            return PlanApprovalDecision::Cancelled;
+        match input.read_line(&mut choice) {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
         }
         let choice = choice.trim().to_uppercase();
 
         match choice.as_str() {
-            "A" | "APPROVE" | "Y" | "YES" => PlanApprovalDecision::Approved,
+            "A" | "APPROVE" | "Y" | "YES" => Some(PlanApprovalDecision::Approved),
             "R" | "REQUEST" => {
                 // Prompt for feedback
                 println!();
@@ -152,10 +177,10 @@ impl PlanApprovalFlow {
                 let _ = io::stdout().flush();
 
                 let mut feedback = String::new();
-                if io::stdin().read_line(&mut feedback).is_err() {
-                    return PlanApprovalDecision::ChangesRequested {
+                if input.read_line(&mut feedback).is_err() {
+                    return Some(PlanApprovalDecision::ChangesRequested {
                         feedback: String::new(),
-                    };
+                    });
                 }
                 let feedback = feedback.trim().to_string();
 
@@ -163,16 +188,16 @@ impl PlanApprovalFlow {
                     println!("{}", theme::faint("  (No feedback provided)"));
                 }
 
-                PlanApprovalDecision::ChangesRequested { feedback }
+                Some(PlanApprovalDecision::ChangesRequested { feedback })
             }
-            "C" | "CANCEL" | "N" | "NO" | "" => PlanApprovalDecision::Cancelled,
+            "C" | "CANCEL" | "N" | "NO" | "" => Some(PlanApprovalDecision::Cancelled),
             _ => {
                 // Unknown choice, treat as cancel
                 println!(
                     "{}",
                     theme::warning("  Unknown option. Cancelling plan review.")
                 );
-                PlanApprovalDecision::Cancelled
+                Some(PlanApprovalDecision::Cancelled)
             }
         }
     }
@@ -212,6 +237,26 @@ mod tests {
 
         let d4 = PlanApprovalDecision::Cancelled;
         assert_ne!(d1, d4);
+    }
+
+    #[test]
+    fn test_review_plan_eof_leaves_decision_pending() {
+        let mut input = io::Cursor::new("");
+
+        assert_eq!(
+            PlanApprovalFlow::review_plan_with_input("## Plan", None, None, &mut input),
+            None
+        );
+    }
+
+    #[test]
+    fn test_review_plan_blank_line_is_explicit_cancellation() {
+        let mut input = io::Cursor::new("\n");
+
+        assert_eq!(
+            PlanApprovalFlow::review_plan_with_input("## Plan", None, None, &mut input),
+            Some(PlanApprovalDecision::Cancelled)
+        );
     }
 
     #[test]

@@ -1,7 +1,5 @@
 //! Central tool visibility rules for prompt assembly.
 
-use aish_core::PlanPhase;
-
 use crate::agents::{parent_has_skill_tool, resolve_tool_names_for_agent, AgentRegistry};
 use crate::session::LlmSession;
 
@@ -25,13 +23,17 @@ impl ToolVisibilityPolicy {
 
     fn main_chat_visible(session: &LlmSession) -> Vec<String> {
         let plan_state = session.plan_state();
-        let phase = plan_state.lock().unwrap().phase.clone();
-        let mut names: Vec<String> = session
+        let plan_state = plan_state.lock().unwrap().clone();
+        let names: Vec<String> = session
             .tool_specs()
             .into_iter()
             .map(|spec| spec.function.name)
-            .filter(|name| tool_visible_in_main_chat_phase(name, &phase))
             .collect();
+        let mut names = aish_core::plan::filter_tools_for_phase(
+            &names,
+            &plan_state.phase,
+            Some(&plan_state.approval_status),
+        );
         names.sort();
         names
     }
@@ -54,18 +56,11 @@ impl ToolVisibilityPolicy {
     }
 }
 
-fn tool_visible_in_main_chat_phase(tool_name: &str, phase: &PlanPhase) -> bool {
-    match phase {
-        PlanPhase::Normal => true,
-        PlanPhase::Planning => aish_core::PLANNING_VISIBLE_TOOLS.contains(&tool_name),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::Tool;
-    use aish_core::PlanPhase;
+    use aish_core::{PlanApprovalStatus, PlanPhase};
 
     struct MockTool {
         name: String,
@@ -121,6 +116,35 @@ mod tests {
 
         let names = ToolVisibilityPolicy::visible_tool_names(&session, &PromptContext::MainChat);
         assert_eq!(names, vec!["read_file".to_string()]);
+    }
+
+    #[test]
+    fn main_chat_awaiting_approval_hides_write_tools_after_exit() {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        for name in [
+            "read_file",
+            "ask_user",
+            "exit_plan_mode",
+            "write_file",
+            "bash",
+        ] {
+            session.register_tool(Box::new(MockTool::new(name)));
+        }
+        {
+            let plan_state = session.plan_state();
+            let mut state = plan_state.lock().unwrap();
+            state.approval_status = PlanApprovalStatus::AwaitingUser;
+        }
+
+        let names = ToolVisibilityPolicy::visible_tool_names(&session, &PromptContext::MainChat);
+        assert_eq!(
+            names,
+            vec![
+                "ask_user".to_string(),
+                "exit_plan_mode".to_string(),
+                "read_file".to_string()
+            ]
+        );
     }
 
     #[test]
