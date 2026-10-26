@@ -39,7 +39,7 @@ impl PersistentPty {
 
         self.exec_buffer.lock().unwrap().clear();
         self.exec_mode.store(true, Ordering::SeqCst);
-        self.send_command(&cmd, Some(seq))?;
+        self.send_command_with_options(&cmd, Some(seq), false, false)?;
 
         let deadline = Instant::now() + timeout;
         let mut completion = None;
@@ -111,7 +111,7 @@ impl PersistentPty {
         // the pager-restore line written below. Interrupt it and let bash
         // settle before flushing.
         if !command_finished {
-            let _ = self.write_master_pub(b"\x03");
+            self.interrupt_current_command();
             let recover_deadline = Instant::now() + Duration::from_millis(500);
             while Instant::now() < recover_deadline {
                 let mut fds = zero_fd_set();
