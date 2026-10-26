@@ -25,6 +25,7 @@ pub mod doctor;
 pub mod environment;
 pub mod esc_watcher;
 pub mod expand_history;
+pub(crate) mod failure_hint;
 pub mod feedback;
 pub mod image;
 pub mod inline_completion;
