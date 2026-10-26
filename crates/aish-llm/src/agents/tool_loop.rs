@@ -206,8 +206,30 @@ pub async fn run_tool_loop_until_done(
             loop_messages.push(chat_msg);
         }
 
-        for tc in &tool_calls {
-            let result = session.execute_tool_external(tc).await;
+        // Apply the same same-round duplicate-ID normalization the main tool
+        // loop uses: a repeated ID must not execute twice, and providers reject
+        // an assistant message that carries two results for one call ID.
+        let normalized = crate::session::normalize_tool_call_batch(&tool_calls);
+        if let Some(last) = messages.last_mut() {
+            if last.role == "assistant" && last.tool_calls.is_some() {
+                last.tool_calls = Some(normalized.calls.clone());
+            }
+        }
+        if let Some(last) = loop_messages.last_mut() {
+            if last.role == "assistant" && last.tool_calls.is_some() {
+                last.tool_calls = Some(normalized.calls.clone());
+            }
+        }
+
+        for tc in &normalized.calls {
+            let result = if normalized.conflicting_ids.contains(&tc.id) {
+                crate::types::ToolResult::error(format!(
+                    "conflicting duplicate tool call ID rejected: {}; no call was dispatched",
+                    tc.id
+                ))
+            } else {
+                session.execute_tool_external(tc).await
+            };
             let tool_msg = ChatMessage::tool_result(&tc.id, result.output);
             messages.push(tool_msg.clone());
             loop_messages.push(tool_msg);
@@ -547,5 +569,119 @@ mod tests {
             outputs.contains(&"file_out"),
             "read_file result must survive"
         );
+    }
+}
+
+#[cfg(test)]
+mod sub_agent_dedupe_tests {
+    use super::*;
+    use crate::agents::{mock_text_response, mock_tool_call_response};
+    use crate::types::Tool;
+    use aish_context::ContextBudgetPolicy;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    struct CountingTool {
+        calls: Arc<AtomicU32>,
+    }
+
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "count"
+        }
+        fn description(&self) -> &str {
+            "count"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn execute(&self, _args: serde_json::Value) -> crate::types::ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            crate::types::ToolResult::success("ok")
+        }
+    }
+
+    async fn run(calls: Arc<AtomicU32>, batch: Vec<(&str, &str, &str)>) -> LoopOutcome {
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(CountingTool { calls }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&batch)),
+            Ok(mock_text_response("done")),
+        ]);
+        run_tool_loop_until_done(
+            &session,
+            &ChatMessage::user("go"),
+            &[],
+            &ToolLoopConfig {
+                max_turns: 5,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    fn tool_ids(outcome: &LoopOutcome) -> Vec<String> {
+        outcome
+            .new_messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .map(|m| m.tool_call_id.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn identical_duplicate_ids_execute_once_in_sub_agent_loop() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let outcome = run(
+            calls.clone(),
+            vec![("dup", "count", "{}"), ("dup", "count", "{}")],
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tool_ids(&outcome), ["dup"]);
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_ids_are_rejected_without_dispatch() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let outcome = run(
+            calls.clone(),
+            vec![
+                ("dup", "count", r#"{"a":1}"#),
+                ("dup", "count", r#"{"a":2}"#),
+            ],
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(tool_ids(&outcome), ["dup"]);
+        let result = outcome
+            .new_messages
+            .iter()
+            .find(|m| m.role == "tool")
+            .and_then(|m| m.text_content())
+            .unwrap_or_default();
+        assert!(
+            result.contains("conflicting duplicate tool call ID"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_ids_still_execute_separately() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let outcome = run(
+            calls.clone(),
+            vec![("a", "count", "{}"), ("b", "count", "{}")],
+        )
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(tool_ids(&outcome), ["a", "b"]);
     }
 }

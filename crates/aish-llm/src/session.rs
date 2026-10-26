@@ -239,16 +239,16 @@ fn apply_plan_tool_result(
     }
 }
 
-struct NormalizedToolCallBatch {
-    calls: Vec<ToolCall>,
-    conflicting_ids: HashSet<String>,
-    duplicate_count: usize,
+pub(crate) struct NormalizedToolCallBatch {
+    pub(crate) calls: Vec<ToolCall>,
+    pub(crate) conflicting_ids: HashSet<String>,
+    pub(crate) duplicate_count: usize,
 }
 
 /// Remove same-ID replays before they can reach tools or provider history.
 /// Reusing an ID with different parameters is ambiguous, so every call with
 /// that ID is rejected instead of executing the first one speculatively.
-fn normalize_tool_call_batch(tool_calls: &[ToolCall]) -> NormalizedToolCallBatch {
+pub(crate) fn normalize_tool_call_batch(tool_calls: &[ToolCall]) -> NormalizedToolCallBatch {
     let mut calls = Vec::with_capacity(tool_calls.len());
     let mut first_by_id = HashMap::<String, usize>::with_capacity(tool_calls.len());
     let mut duplicate_counts = HashMap::<String, usize>::new();
