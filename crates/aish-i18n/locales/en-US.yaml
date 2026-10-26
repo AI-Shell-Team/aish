@@ -932,6 +932,8 @@ shell:
 
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; for quick fix, or /diagnose for diagnosis."
+    apt_permission_hint: "APT update needs administrator privileges. If you have sudo access and intend to refresh package indexes, run `sudo apt update` yourself."
+    package_manager_lock_hint: "Another package manager process is using the lock. Wait for it or check that process; do not remove the lock file."
     corrected_command_label: "Suggested fix:"
     corrected_command_title: "💡 Corrected command:"
     confirm_execute_prefix: "Execute: "
@@ -983,6 +985,8 @@ shell:
     restart_bash_failed: "Failed to restart bash: {error}"
     load_script_failed: "Failed to load script '{script}': {error}"
     llm_error_message: "Error: {error}"
+    empty_response: "The provider returned no answer. Check the selected provider or model, then try again."
+    incomplete_response: "The provider ended this response before it was complete. Check the output limit or try another model."
     partial_turn_saved: "Saved the completed tool steps of this turn ({steps} steps). Work done before the failure is not lost; enter a new task or ;retry to continue from the saved point."
     partial_turn_saved_limit: "Saved the completed tool steps of this turn ({steps} steps) before stopping at the iteration limit. The work is kept; enter a new task or ;retry to continue from the saved point."
     llm_error_details_title: "Debug Details"
