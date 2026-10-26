@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use aish_context::{ContextBudgetPolicy, ContextMessage};
@@ -236,6 +236,55 @@ fn apply_plan_tool_result(
                 state.artifact_path = Some(path.to_string());
             }
         }
+    }
+}
+
+pub(crate) struct NormalizedToolCallBatch {
+    pub(crate) calls: Vec<ToolCall>,
+    pub(crate) conflicting_ids: HashSet<String>,
+    pub(crate) duplicate_count: usize,
+}
+
+/// Remove same-ID replays before they can reach tools or provider history.
+/// Reusing an ID with different parameters is ambiguous, so every call with
+/// that ID is rejected instead of executing the first one speculatively.
+pub(crate) fn normalize_tool_call_batch(tool_calls: &[ToolCall]) -> NormalizedToolCallBatch {
+    let mut calls = Vec::with_capacity(tool_calls.len());
+    let mut first_by_id = HashMap::<String, usize>::with_capacity(tool_calls.len());
+    let mut duplicate_counts = HashMap::<String, usize>::new();
+    let mut conflicting_ids = HashSet::new();
+
+    for call in tool_calls {
+        if call.id.is_empty() {
+            calls.push(call.clone());
+            continue;
+        }
+        if conflicting_ids.contains(&call.id) {
+            continue;
+        }
+        let Some(&first_index) = first_by_id.get(&call.id) else {
+            first_by_id.insert(call.id.clone(), calls.len());
+            calls.push(call.clone());
+            continue;
+        };
+
+        let first = &calls[first_index];
+        let first_args = serde_json::from_str::<serde_json::Value>(&first.arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(first.arguments.clone()));
+        let call_args = serde_json::from_str::<serde_json::Value>(&call.arguments)
+            .unwrap_or_else(|_| serde_json::Value::String(call.arguments.clone()));
+        if first.name == call.name && first_args == call_args {
+            *duplicate_counts.entry(call.id.clone()).or_default() += 1;
+        } else {
+            conflicting_ids.insert(call.id.clone());
+            duplicate_counts.remove(&call.id);
+        }
+    }
+
+    NormalizedToolCallBatch {
+        calls,
+        duplicate_count: duplicate_counts.values().sum(),
+        conflicting_ids,
     }
 }
 
@@ -1948,6 +1997,44 @@ impl LlmSession {
         trace_id: &Option<String>,
         initial_len: usize,
     ) -> Option<crate::types::ProcessResult> {
+        let normalized = normalize_tool_call_batch(tool_calls);
+        let tool_calls = normalized.calls;
+        let conflicting_ids = normalized.conflicting_ids;
+
+        // Keep the assistant history aligned with what is actually dispatched.
+        // Providers require one result per call ID, and duplicate IDs must not
+        // reach the tool loop more than once.
+        if let Some(last) = messages.last_mut() {
+            if last.role == "assistant" && last.tool_calls.is_some() {
+                last.tool_calls = Some(tool_calls.clone());
+            }
+        }
+
+        if normalized.duplicate_count > 0 || !conflicting_ids.is_empty() {
+            let mut notices = Vec::new();
+            if normalized.duplicate_count > 0 {
+                notices.push(format!(
+                    "duplicate tool call ID suppressed: {} identical replay(s)",
+                    normalized.duplicate_count
+                ));
+            }
+            if !conflicting_ids.is_empty() {
+                notices.push(format!(
+                    "conflicting duplicate tool call ID rejected: {} conflicting ID(s)",
+                    conflicting_ids.len()
+                ));
+            }
+            self.emit_event(LlmEvent {
+                event_type: LlmEventType::Error,
+                data: serde_json::json!({
+                    "error_type": "duplicate_tool_call_id",
+                    "error": notices.join("; "),
+                }),
+                timestamp: now_timestamp(),
+                metadata: None,
+            });
+        }
+
         let parallel = tool_calls.len() > 1 && tool_calls.iter().all(|tc| tc.name == "Agent");
 
         if parallel {
@@ -1955,8 +2042,19 @@ impl LlmSession {
                 count = tool_calls.len(),
                 "executing sub-agent tool calls in parallel"
             );
+            let conflicting = &conflicting_ids;
             let results: Vec<ToolResult> =
-                futures::future::join_all(tool_calls.iter().map(|tc| self.execute_tool(tc))).await;
+                futures::future::join_all(tool_calls.iter().map(|tc| async move {
+                    if conflicting.contains(&tc.id) {
+                        ToolResult::error(format!(
+                        "conflicting duplicate tool call ID rejected: {}; no call was dispatched",
+                        tc.id
+                    ))
+                    } else {
+                        self.execute_tool(tc).await
+                    }
+                }))
+                .await;
             for idx in 0..tool_calls.len() {
                 if let Some(pr) = self
                     .process_tool_call_result(
@@ -1991,10 +2089,18 @@ impl LlmSession {
             }
         } else {
             for idx in 0..tool_calls.len() {
-                let result = self.execute_tool(&tool_calls[idx]).await;
+                let tool_call = &tool_calls[idx];
+                let result = if conflicting_ids.contains(&tool_call.id) {
+                    ToolResult::error(format!(
+                        "conflicting duplicate tool call ID rejected: {}; no call was dispatched",
+                        tool_call.id
+                    ))
+                } else {
+                    self.execute_tool(tool_call).await
+                };
                 if let Some(pr) = self
                     .process_tool_call_result(
-                        &tool_calls[idx],
+                        tool_call,
                         result,
                         messages,
                         consecutive_failures,
@@ -5169,6 +5275,191 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             crate::types::ToolResult::success("ok")
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_tool_call_id_is_dispatched_once_but_distinct_ids_are_not_deduplicated() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_callback = events.clone();
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.set_event_callback(std::sync::Arc::new(move |event| {
+            events_callback.lock().unwrap().push(event);
+            None
+        }));
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "counting",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[
+                ("same-id", "counting", r#"{"value":"same"}"#),
+                ("same-id", "counting", r#"{"value":"same"}"#),
+                ("different-id", "counting", r#"{"value":"same"}"#),
+            ])),
+            Ok(mock_text_response("done")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run the calls"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let assistant = result
+            .new_messages
+            .iter()
+            .find(|message| message.role == "assistant" && message.tool_calls.is_some())
+            .expect("assistant tool call message");
+        let ids: Vec<&str> = assistant
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect();
+        assert_eq!(ids, ["same-id", "different-id"]);
+        let tool_results = result
+            .new_messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .count();
+        assert_eq!(
+            tool_results, 2,
+            "history contains one result per unique call ID"
+        );
+        assert!(events.lock().unwrap().iter().any(|event| {
+            event.event_type == aish_core::LlmEventType::Error
+                && event.data["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("duplicate tool call ID suppressed"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn conflicting_tool_call_id_is_rejected_without_dispatching_either_arguments() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "counting",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[
+                ("conflict-id", "counting", r#"{"value":"first"}"#),
+                ("conflict-id", "counting", r#"{"value":"second"}"#),
+                ("safe-id", "counting", r#"{"value":"safe"}"#),
+            ])),
+            Ok(mock_text_response("done")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run the calls"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the unrelated safe ID runs"
+        );
+        let assistant = result
+            .new_messages
+            .iter()
+            .find(|message| message.role == "assistant" && message.tool_calls.is_some())
+            .expect("assistant tool call message");
+        let ids: Vec<&str> = assistant
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|call| call.id.as_str())
+            .collect();
+        assert_eq!(ids, ["conflict-id", "safe-id"]);
+        let conflict_result = result
+            .new_messages
+            .iter()
+            .find(|message| {
+                message.role == "tool" && message.tool_call_id.as_deref() == Some("conflict-id")
+            })
+            .and_then(|message| message.text_content())
+            .expect("conflicting ID receives a tool result");
+        assert!(conflict_result.contains("conflicting duplicate tool call ID"));
+    }
+
+    #[tokio::test]
+    async fn parallel_conflicting_tool_call_id_is_rejected_without_dispatch() {
+        use crate::agents::{mock_text_response, mock_tool_call_response};
+        use std::sync::atomic::Ordering;
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mut session = LlmSession::new("http://localhost", "key", "model", None, None);
+        session.set_context_budget_policy(ContextBudgetPolicy {
+            enabled: false,
+            ..Default::default()
+        });
+        session.register_tool(Box::new(ExecuteCountingTool {
+            name: "Agent",
+            calls: calls.clone(),
+        }));
+        session.set_test_chat_responses(vec![
+            Ok(mock_tool_call_response(&[
+                ("conflict-id", "Agent", r#"{"value":"first"}"#),
+                ("conflict-id", "Agent", r#"{"value":"second"}"#),
+                ("safe-id", "Agent", "{}"),
+            ])),
+            Ok(mock_text_response("done")),
+        ]);
+
+        let result = session
+            .process_input(&ChatMessage::user("run the calls"), &[], Some("sys"), false)
+            .await
+            .expect("process_input should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let results: Vec<_> = result
+            .new_messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .map(|message| {
+                (
+                    message.tool_call_id.as_deref().unwrap_or_default(),
+                    message.text_content().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        let conflict_result = results
+            .iter()
+            .copied()
+            .find(|(id, _)| *id == "conflict-id")
+            .expect("the conflicting ID receives a rejection result");
+        assert!(conflict_result
+            .1
+            .contains("conflicting duplicate tool call ID"));
+        assert_eq!(
+            results
+                .iter()
+                .copied()
+                .find(|(id, _)| *id == "safe-id")
+                .unwrap()
+                .1,
+            "ok"
+        );
     }
 
     fn mock_sse_response(blocks: &[&str]) -> LlmResponse {
