@@ -7237,6 +7237,17 @@ fn scan_heredoc_operators(line: &str, quote: &mut u8, pending: &mut Vec<(String,
             }
             _ => match bytes[index] {
                 b'\\' => index = (index + 2).min(bytes.len()),
+                // `<<` inside an arithmetic context is a left shift, not a
+                // here-document operator: `$((1<<3))`, `((n=1<<3))`, `$[1<<3]`.
+                b'$' if bytes[index + 1..].starts_with(b"((") => {
+                    index = skip_balanced(bytes, index + 3, b'(', b')');
+                }
+                b'(' if bytes.get(index + 1) == Some(&b'(') => {
+                    index = skip_balanced(bytes, index + 2, b'(', b')');
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'[') => {
+                    index = skip_balanced(bytes, index + 2, b'[', b']');
+                }
                 b'\'' => {
                     *quote = 1;
                     index += 1;
@@ -7264,6 +7275,26 @@ fn scan_heredoc_operators(line: &str, quote: &mut u8, pending: &mut Vec<(String,
             },
         }
     }
+}
+
+/// Skip a balanced `open`/`close` pair so operators inside an arithmetic or
+/// index expression are not read as shell word operators.
+fn skip_balanced(bytes: &[u8], mut index: usize, open: u8, close: u8) -> usize {
+    let mut depth = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b if b == open => depth += 1,
+            b if b == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return (index + 1).min(bytes.len());
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    bytes.len()
 }
 
 fn parse_heredoc_delimiter(bytes: &[u8], mut index: usize) -> (Option<String>, bool, usize) {
@@ -9623,6 +9654,33 @@ echo \"AFTER:${{PAGER+x}}:${{SYSTEMD_PAGER+x}}:${{GIT_PAGER+x}}\""
 
         pty.stop();
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn heredoc_detection_ignores_arithmetic_left_shifts() {
+        // `<<` inside an arithmetic context is a left shift, not a
+        // here-document operator. Treating it as one marked a successful
+        // command as failed and consumed the tool-failure budget.
+        for source in [
+            "echo A=$((1<<3))",
+            "echo B=$(( 1 << 3 ))",
+            "((y=1<<2)); echo Y=$y",
+            "echo $[1<<3]",
+            "echo $(( (1<<2) + 1 ))",
+            "echo $((1<<(2+1)))",
+            "if ((1<<2)); then echo yes; fi",
+            "for ((i=0;i<3;i++)); do echo $i; done",
+        ] {
+            assert!(
+                !command_has_unclosed_heredoc(source),
+                "arithmetic shift misread as a here-document: {source}"
+            );
+        }
+
+        // A real here-document next to an arithmetic expression is still
+        // detected.
+        assert!(command_has_unclosed_heredoc("echo $((1<<2)) <<EOF"));
+        assert!(!command_has_unclosed_heredoc("cat <<< $((3<<2))"));
     }
 
     #[test]
