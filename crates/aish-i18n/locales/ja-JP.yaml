@@ -479,6 +479,8 @@ shell:
     potential_error: "🚀 問題の可能性を検出しました: {reason}。解決を試みます..."
     llm_error_title: "❌ LLM リクエストに失敗しました"
     llm_error_message: "エラー: {error}"
+    empty_response: "プロバイダーから回答がありませんでした。選択したプロバイダーまたはモデルを確認して、もう一度お試しください。"
+    incomplete_response: "プロバイダーの応答は完了前に終了しました。出力上限を確認するか、別のモデルをお試しください。"
     partial_turn_saved: "このターンで完了したツール実行ステップを保存しました（{steps} ステップ）。失敗前の作業は失われません。新しいタスクを入力するか ;retry で保存ポイントから続行できます。"
     partial_turn_saved_limit: "イテレーション上限で停止する前に、このターンで完了したツール実行ステップを保存しました（{steps} ステップ）。完了した作業は失われません。新しいタスクを入力するか ;retry で保存ポイントから続行できます。"
     llm_error_details_title: "デバッグ詳細"

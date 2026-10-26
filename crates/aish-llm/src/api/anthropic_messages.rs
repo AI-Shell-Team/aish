@@ -316,10 +316,10 @@ fn anthropic_response_to_openai_json(response: &Value) -> Value {
         .get("stop_reason")
         .and_then(|v| v.as_str())
         .unwrap_or("end_turn");
-    let finish_reason = if stop_reason == "tool_use" {
-        "tool_calls"
-    } else {
-        "stop"
+    let finish_reason = match stop_reason {
+        "tool_use" => "tool_calls",
+        "max_tokens" => "length",
+        _ => "stop",
     };
 
     let mut message = json!({
@@ -406,5 +406,27 @@ mod tests {
         let openai = anthropic_response_to_openai_json(&response);
         assert_eq!(openai["choices"][0]["finish_reason"], "tool_calls");
         assert_eq!(openai["usage"]["prompt_tokens"], 10);
+    }
+
+    #[test]
+    fn test_anthropic_max_tokens_response_is_incomplete_even_with_tool_calls() {
+        let response = json!({
+            "content": [
+                {"type": "text", "text": "partial"},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": "ls"}}
+            ],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        let openai = anthropic_response_to_openai_json(&response);
+        assert_eq!(openai["choices"][0]["finish_reason"], "length");
+        assert_eq!(
+            openai["choices"][0]["message"]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

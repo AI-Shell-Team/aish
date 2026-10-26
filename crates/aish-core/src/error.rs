@@ -12,6 +12,12 @@ pub enum AishError {
     #[error("LLM error: {0}")]
     Llm(String),
 
+    #[error("LLM provider returned no usable response")]
+    EmptyResponse,
+
+    #[error("LLM provider response ended before completion")]
+    IncompleteResponse,
+
     #[error("PTY error: {0}")]
     Pty(String),
 
@@ -64,6 +70,8 @@ impl AishError {
             AishError::Config(_) => "config",
             AishError::Io(_) => "io",
             AishError::Llm(_) => "llm",
+            AishError::EmptyResponse => "empty_response",
+            AishError::IncompleteResponse => "incomplete_response",
             AishError::Pty(_) => "pty",
             AishError::Security(_) => "security",
             AishError::Skill(_) => "skill",
@@ -77,5 +85,19 @@ impl AishError {
             AishError::Parse(_) => "parse",
             AishError::Timeout => "timeout",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AishError;
+
+    #[test]
+    fn inconclusive_llm_errors_have_stable_categories() {
+        assert_eq!(AishError::EmptyResponse.category(), "empty_response");
+        assert_eq!(
+            AishError::IncompleteResponse.category(),
+            "incomplete_response"
+        );
     }
 }

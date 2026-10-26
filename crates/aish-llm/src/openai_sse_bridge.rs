@@ -68,6 +68,17 @@ fn openai_finish_chunk(finish_reason: &str, usage: Option<(u64, u64)>) -> String
     format!("data: {payload}\n\n")
 }
 
+fn openai_usage_chunk(usage: (u64, u64)) -> String {
+    let payload = json!({
+        "choices": [],
+        "usage": {
+            "prompt_tokens": usage.0,
+            "completion_tokens": usage.1,
+        }
+    });
+    format!("data: {payload}\n\n")
+}
+
 const OPENAI_SSE_DONE: &str = "data: [DONE]\n\n";
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -111,6 +122,7 @@ impl AnthropicSseTranslator {
     fn finish_reason(&self) -> &'static str {
         match self.stop_reason.as_deref() {
             Some("tool_use") => "tool_calls",
+            Some("max_tokens") => "length",
             _ if !self.tool_calls.is_empty() => "tool_calls",
             _ => "stop",
         }
@@ -193,16 +205,19 @@ impl AnthropicSseTranslator {
                     }
                 }
                 if let Some(usage) = event.get("usage") {
-                    self.usage = Some((
+                    let (input_tokens, output_tokens) = self.usage.unwrap_or((0, 0));
+                    let usage = (
                         usage
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
+                            .unwrap_or(input_tokens),
                         usage
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                    ));
+                            .unwrap_or(output_tokens),
+                    );
+                    self.usage = Some(usage);
+                    out.push(openai_usage_chunk(usage));
                 }
             }
             "message_start" => {
@@ -218,6 +233,7 @@ impl AnthropicSseTranslator {
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0),
                         ));
+                        out.push(openai_usage_chunk(self.usage.unwrap()));
                     }
                 }
             }
@@ -435,7 +451,6 @@ where
 pub fn translate_anthropic_sse_stream(resp: Response) -> LlmStream {
     let translator = Arc::new(Mutex::new(AnthropicSseTranslator::new()));
     let translator_block = Arc::clone(&translator);
-    let translator_end = Arc::clone(&translator);
     let stream = spawn_sse_translation(
         resp,
         move |block| {
@@ -452,12 +467,7 @@ pub fn translate_anthropic_sse_stream(resp: Response) -> LlmStream {
             }
             Ok(out)
         },
-        move || {
-            let mut translator = translator_end
-                .lock()
-                .map_err(|e| AishError::Llm(format!("SSE translator lock poisoned: {e}")))?;
-            Ok(translator.finish_chunks())
-        },
+        || Ok(Vec::new()),
     );
     LlmStream::from_translated(stream)
 }
@@ -505,6 +515,96 @@ mod tests {
         assert_eq!(out.len(), 1);
         let (events, _) = StreamParser::parse_sse_chunk(out[0].trim());
         assert!(matches!(events.first(), Some(SseEvent::ContentDelta(text)) if text == "Hi"));
+    }
+
+    #[test]
+    fn anthropic_max_tokens_translates_to_incomplete_finish_reason() {
+        let mut translator = AnthropicSseTranslator::new();
+        translator
+            .process_data_line(r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#)
+            .unwrap();
+
+        let chunks = translator
+            .process_data_line(r#"{"type":"message_stop"}"#)
+            .unwrap();
+        let mut finish_reason = None;
+        let mut saw_done = false;
+        for chunk in chunks {
+            for line in chunk.lines() {
+                for event in StreamParser::parse_sse_chunk(line).0 {
+                    match event {
+                        SseEvent::Finish(reason) => finish_reason = Some(reason),
+                        SseEvent::Done => saw_done = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        assert_eq!(finish_reason.as_deref(), Some("length"));
+        assert!(saw_done);
+    }
+
+    #[test]
+    fn anthropic_does_not_signal_completion_before_message_stop() {
+        let mut translator = AnthropicSseTranslator::new();
+        let chunks = translator
+            .process_data_line(
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":11}}}"#,
+            )
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
+        let chunks = translator
+            .process_data_line(
+                r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}"#,
+            )
+            .unwrap();
+        assert_eq!(chunks.len(), 1);
+        let chunks = translator
+            .process_data_line(
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}"#,
+            )
+            .unwrap();
+        let mut finish_reason = None;
+        let mut saw_done = false;
+        let mut usage = None;
+        for chunk in chunks {
+            for line in chunk.lines() {
+                let (events, parsed_usage) = StreamParser::parse_sse_chunk(line);
+                if parsed_usage.is_some() {
+                    usage = parsed_usage;
+                }
+                for event in events {
+                    match event {
+                        SseEvent::Finish(reason) => finish_reason = Some(reason),
+                        SseEvent::Done => saw_done = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(finish_reason.is_none());
+        assert!(!saw_done);
+        let usage = usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 11);
+        assert_eq!(usage.completion_tokens, 5);
+
+        let chunks = translator
+            .process_data_line(r#"{"type":"message_stop"}"#)
+            .unwrap();
+        let events: Vec<_> = chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk
+                    .lines()
+                    .flat_map(|line| StreamParser::parse_sse_chunk(line).0)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, SseEvent::Finish(reason) if reason == "stop")));
+        assert!(events.iter().any(|event| matches!(event, SseEvent::Done)));
     }
 
     #[test]
