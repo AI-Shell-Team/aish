@@ -932,6 +932,8 @@ shell:
 
   error_correction:
     press_semicolon_hint: "命令执行失败。输入 ; 快速修复，或 /diagnose 诊断。"
+    apt_permission_hint: "APT 更新需要管理员权限。如果你有 sudo 权限且确实需要刷新软件包索引，请自行运行 `sudo apt update`。"
+    package_manager_lock_hint: "另一个软件包管理进程正在使用锁。请等待它完成或检查占用进程；不要删除锁文件。"
     corrected_command_label: "修复建议:"
     corrected_command_title: "💡 纠正后的命令:"
     confirm_execute_prefix: "执行: "

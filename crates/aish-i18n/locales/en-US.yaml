@@ -932,6 +932,8 @@ shell:
 
   error_correction:
     press_semicolon_hint: "Command execution failed. Type ; for quick fix, or /diagnose for diagnosis."
+    apt_permission_hint: "APT update needs administrator privileges. If you have sudo access and intend to refresh package indexes, run `sudo apt update` yourself."
+    package_manager_lock_hint: "Another package manager process is using the lock. Wait for it or check that process; do not remove the lock file."
     corrected_command_label: "Suggested fix:"
     corrected_command_title: "💡 Corrected command:"
     confirm_execute_prefix: "Execute: "
