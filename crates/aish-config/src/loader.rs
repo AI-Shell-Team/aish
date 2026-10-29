@@ -48,7 +48,23 @@ impl ConfigLoader {
                 serde_yaml::to_value(ConfigModel::default())
                     .expect("ConfigModel::default() must serialize")
             });
-            let mut changed = Self::merge_missing(&mut value, default_value);
+            // Clean the output cap up before `merge_missing` backfills the
+            // schema, so the value is judged as the user wrote it.
+            let mut changed = false;
+            if let Some(map) = value.as_mapping_mut() {
+                let (cleaned, dropped_cap) = Self::clean_max_tokens(map);
+                changed |= cleaned;
+                if let Some(cap) = dropped_cap {
+                    eprintln!(
+                        "warning: removed `max_tokens: {cap}` from {} — a cap that small truncates answers: a reasoning model spends the whole budget thinking and the turn ends as \"incomplete response\". The request now carries no cap (Anthropic endpoints use their 64k fallback). To cap output deliberately, use {} or more.",
+                        path.display(),
+                        Self::MIN_MAX_TOKENS
+                    );
+                }
+            }
+            if Self::merge_missing(&mut value, default_value) {
+                changed = true;
+            }
             let stripped = Self::strip_legacy_security_keys(&mut value);
             if !stripped.is_empty() {
                 changed = true;
@@ -120,6 +136,56 @@ impl ConfigLoader {
             }
         }
         changed
+    }
+
+    /// Smallest output cap that is safe to keep in `config.yaml`.
+    ///
+    /// A smaller cap is removed, which makes the request omit `max_tokens` and
+    /// lets the provider apply the model's own limit. Two reasons: older
+    /// releases wrote their own default into the file (the Python shell's
+    /// `1000`, the `v0.3.0`–`v0.3.6` wizard's `4096`), and any handwritten cap
+    /// that small truncates a reasoning turn into an `IncompleteResponse`.
+    ///
+    /// The value is the lowest output ceiling among models in current use
+    /// (GPT-4o: 16,384); the models seen most often are far above it (GLM-5.3
+    /// 65,536, DeepSeek V4.1 64K, Claude 5.5 and GPT-5.1-Codex-Max 128K), so a
+    /// cap at or above it is a deliberate, workable choice.
+    pub const MIN_MAX_TOKENS: u32 = 16_384;
+
+    /// Remove a top-level `max_tokens` that would truncate answers.
+    ///
+    /// Any value below [`Self::MIN_MAX_TOKENS`] is dropped, as are the "no
+    /// cap" spellings `0` and `null` (leftover keys that never changed
+    /// behaviour). A value at or above the threshold is a user choice and
+    /// stays untouched.
+    ///
+    /// Returns whether the document changed and, when a cap that actually
+    /// limited answers was dropped, its value so the caller can warn. A
+    /// dropped `0`/`null` never capped anything and is reported as `None`.
+    ///
+    /// Only the top-level key is touched: `inline_completion.max_tokens` (512)
+    /// and `context_auto_compact.summary_max_tokens` are separate budgets.
+    fn clean_max_tokens(map: &mut serde_yaml::Mapping) -> (bool, Option<u32>) {
+        let key = serde_yaml::Value::String("max_tokens".to_string());
+        let Some(current) = map.get(&key).cloned() else {
+            return (false, None);
+        };
+        // `0` and `null` already mean "no cap"; dropping the key only keeps
+        // the file from carrying a dead setting.
+        if current.is_null() || current.as_u64() == Some(0) {
+            map.remove(&key);
+            return (true, None);
+        }
+        let Some(cap) = current
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n < Self::MIN_MAX_TOKENS)
+        else {
+            return (false, None);
+        };
+        map.remove(&key);
+        debug!(max_tokens = cap, "removed a max_tokens below the minimum");
+        (true, Some(cap))
     }
 
     /// Remove security fields that used to live in `config.yaml` but are now
@@ -367,6 +433,19 @@ impl ConfigLoader {
 mod tests {
     use super::*;
 
+    /// Parse the on-disk file and return the top-level key's value.
+    ///
+    /// Nested budgets (`inline_completion.max_tokens`,
+    /// `context_auto_compact.summary_max_tokens`) share the name, so a plain
+    /// substring check would not prove anything about the top-level cap.
+    fn top_level(path: &Path, key: &str) -> Option<serde_yaml::Value> {
+        let raw = std::fs::read_to_string(path).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
+        value
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String(key.to_string())).cloned())
+    }
+
     #[test]
     fn load_migrates_missing_fields_into_existing_yaml() {
         // Minimal user yaml with only a few fields set. After load,
@@ -391,30 +470,142 @@ mod tests {
     }
 
     #[test]
-    fn load_passes_max_tokens_through_untouched() {
-        // An explicit `max_tokens` is forwarded verbatim; the loader never
-        // rewrites it on disk. An unset field stays `None` so the provider
-        // applies the model's own output cap.
+    fn load_drops_a_max_tokens_below_the_minimum() {
+        // Both values a released version ever wrote for the user are below the
+        // minimum: the Python shell's pydantic 1000 and the v0.3.0-v0.3.6
+        // wizard's 4096. (The 40960 floor of #619 never shipped — the commit
+        // postdates v0.3.15 — so no released build produced it.) The check is
+        // on the number, not on a schema version, so a file a previous build
+        // already rewrote or one restored from a backup is cleaned too.
+        for small in [1u32, 1000, 4096, 16_383] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            std::fs::write(&path, format!("model: glm-4.7\nmax_tokens: {small}\n")).unwrap();
+
+            let config = ConfigLoader::load(Some(&path)).unwrap();
+            assert_eq!(
+                config.max_tokens, None,
+                "max_tokens {small} is below the minimum and must become null"
+            );
+            assert_eq!(
+                top_level(&path, "max_tokens"),
+                None,
+                "max_tokens {small} must be removed from disk"
+            );
+        }
+    }
+
+    #[test]
+    fn load_rejects_a_negative_max_tokens_instead_of_dropping_it() {
+        // A negative value does not fit `Option<u32>`, so it fails to
+        // deserialize. The cleanup must not swallow it and must not rewrite
+        // the file: a bad value stays visible instead of vanishing silently.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let original = "model: glm-4.7\nmax_tokens: -1\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            ConfigLoader::load(Some(&path)).is_err(),
+            "a negative max_tokens must be rejected"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a rejected file must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn load_keeps_a_max_tokens_at_or_above_the_minimum() {
+        // 16,384 is the smallest output ceiling among models in use (GPT-4o),
+        // so a cap there is workable and deliberate: it must survive together
+        // with everything above it, up to the largest ceilings in use.
+        for cap in [16_384u32, 20_000, 65_536, 131_072, 393_216] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            std::fs::write(&path, format!("model: glm-4.7\nmax_tokens: {cap}\n")).unwrap();
+
+            let config = ConfigLoader::load(Some(&path)).unwrap();
+            assert_eq!(
+                config.max_tokens,
+                Some(cap),
+                "max_tokens {cap} is at or above the minimum and must survive"
+            );
+            assert_eq!(
+                top_level(&path, "max_tokens"),
+                Some(serde_yaml::Value::Number(serde_yaml::Number::from(
+                    u64::from(cap)
+                ))),
+                "max_tokens {cap} must stay on disk"
+            );
+        }
+    }
+
+    #[test]
+    fn load_never_touches_the_nested_token_budgets() {
+        // `inline_completion.max_tokens` (512) and
+        // `context_auto_compact.summary_max_tokens` are separate budgets that
+        // are supposed to be small; the top-level minimum must not reach them.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "model: glm-4.7\ninline_completion:\n  max_tokens: 512\ncontext_auto_compact:\n  summary_max_tokens: 1200\n",
+        )
+        .unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.inline_completion.max_tokens, 512);
+        assert_eq!(config.context_auto_compact.summary_max_tokens, 1200);
+    }
+
+    #[test]
+    fn load_leaves_an_unset_max_tokens_out_of_the_file() {
+        // `None` means "no cap"; writing `max_tokens: null` back would only
+        // re-introduce the key on every migration. A legacy file that spelled
+        // the unset budget as an explicit null drops the key too, and so does
+        // a leftover `0` — both were already "no cap", so neither warns.
+        for yaml in [
+            "model: glm-4.7\n",
+            "model: glm-4.7\nmax_tokens: null\n",
+            "model: glm-4.7\nmax_tokens: 0\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.yaml");
+            std::fs::write(&path, yaml).unwrap();
+
+            let config = ConfigLoader::load(Some(&path)).unwrap();
+            assert_eq!(config.max_tokens, None);
+
+            assert_eq!(
+                top_level(&path, "max_tokens"),
+                None,
+                "an unset budget must not be materialized; got:\n{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_cleans_a_legacy_file_only_once() {
+        // The cleanup is idempotent: after the first load removed the cap and
+        // rewrote the file, a second load neither finds it again nor rewrites.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "model: glm-4.7\nmax_tokens: 4096\n").unwrap();
 
-        let config = ConfigLoader::load(Some(&path)).unwrap();
-        assert_eq!(config.max_tokens, Some(4096));
+        let first = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(first.max_tokens, None);
+        let migrated = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(top_level(&path, "max_tokens"), None);
 
-        let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            on_disk.contains("max_tokens: 4096"),
-            "explicit value must not be rewritten; got:\n{on_disk}"
+        let second = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(second.max_tokens, None);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            migrated,
+            "a cleaned file must not be rewritten again"
         );
-
-        // No `max_tokens` key => `None` (provider applies model limit).
-        let dir2 = tempfile::tempdir().unwrap();
-        let path2 = dir2.path().join("config.yaml");
-        std::fs::write(&path2, "model: glm-4.7\n").unwrap();
-
-        let config2 = ConfigLoader::load(Some(&path2)).unwrap();
-        assert_eq!(config2.max_tokens, None);
     }
 
     #[cfg(unix)]

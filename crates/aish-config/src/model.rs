@@ -532,6 +532,12 @@ pub struct ConfigModel {
     pub api_base: String,
     pub api_key: String,
     pub temperature: f64,
+    /// Output-token cap. `None` means "no cap", with one provider exception:
+    /// OpenAI-compatible endpoints omit the field so the model's own output
+    /// limit applies, while the Anthropic Messages API requires it and gets a
+    /// 64k fallback. Skipped when serializing so an unset budget never
+    /// reappears in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     pub prompt_theme: String,
 

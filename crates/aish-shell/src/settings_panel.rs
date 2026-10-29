@@ -834,6 +834,14 @@ pub fn apply(cfg: &mut ConfigModel, key: SettingKey, value: &str) -> Result<(), 
                     // `0` means "no cap": the request omits the field and the
                     // provider applies the model's own output limit.
                     None
+                } else if n < aish_config::ConfigLoader::MIN_MAX_TOKENS {
+                    // The loader drops anything below this on the next start,
+                    // so accepting it here would write a value that silently
+                    // disappears. Refuse it instead and name the minimum.
+                    return Err(format!(
+                        "max_tokens must be at least {} (blank or 0 = no cap); a smaller cap truncates answers",
+                        aish_config::ConfigLoader::MIN_MAX_TOKENS
+                    ));
                 } else {
                     Some(n)
                 }
@@ -1261,11 +1269,26 @@ mod tests {
     }
 
     #[test]
-    fn max_tokens_accepts_any_positive_value() {
-        // No floor: any positive value is forwarded as-is.
+    fn max_tokens_rejects_a_value_the_loader_would_drop() {
+        // Anything below the loader's minimum is erased on the next start, so
+        // the panel refuses it instead of writing a value that vanishes.
         let mut cfg = default_cfg();
-        apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap();
-        assert_eq!(cfg.max_tokens, Some(1024));
+        let err = apply(&mut cfg, SettingKey::MaxTokens, "1024").unwrap_err();
+        assert!(
+            err.contains("16384"),
+            "the message must name the minimum; got: {err}"
+        );
+        assert_eq!(cfg.max_tokens, None, "a rejected value must not stick");
+
+        apply(&mut cfg, SettingKey::MaxTokens, "16384").unwrap();
+        assert_eq!(cfg.max_tokens, Some(16_384));
+    }
+
+    #[test]
+    fn max_tokens_accepts_a_value_at_or_above_the_minimum() {
+        let mut cfg = default_cfg();
+        apply(&mut cfg, SettingKey::MaxTokens, "65536").unwrap();
+        assert_eq!(cfg.max_tokens, Some(65536));
     }
 
     #[test]

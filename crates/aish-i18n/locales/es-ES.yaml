@@ -666,7 +666,7 @@ shell:
         desc: "Aleatoriedad de muestreo 0.0–2.0; mayor = más creativo"
       max_tokens:
         label: "Tokens máximos"
-        desc: "Límite de tokens de respuesta (vacío = predeterminado del proveedor)"
+        desc: "Límite de tokens de respuesta (vacío = predeterminado del proveedor); los valores por debajo de 16384 se rechazan"
       prompt_style:
         label: "Símbolo del prompt"
         desc: "Símbolo de prompt personalizado (vacío = flecha predeterminada)"

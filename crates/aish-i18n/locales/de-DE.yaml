@@ -666,7 +666,7 @@ shell:
         desc: "Sampling-Zufälligkeit 0.0–2.0; höher = kreativer"
       max_tokens:
         label: "Max Tokens"
-        desc: "Token-Obergrenze für Antworten (leer = Anbieter-Standard)"
+        desc: "Token-Obergrenze für Antworten (leer = Anbieter-Standard); Werte unter 16384 werden abgelehnt"
       prompt_style:
         label: "Prompt-Symbol"
         desc: "Benutzerdefiniertes Prompt-Symbol (leer = Standardpfeil)"

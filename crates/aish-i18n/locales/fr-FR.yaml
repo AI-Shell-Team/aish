@@ -666,7 +666,7 @@ shell:
         desc: "Aléatoire d'échantillonnage 0.0–2.0 ; plus élevé = plus créatif"
       max_tokens:
         label: "Tokens max"
-        desc: "Plafond de tokens de réponse (vide = valeur par défaut du fournisseur)"
+        desc: "Plafond de tokens de réponse (vide = valeur par défaut du fournisseur) ; les valeurs inférieures à 16384 sont refusées"
       prompt_style:
         label: "Symbole d'invite"
         desc: "Symbole d'invite personnalisé (vide = flèche par défaut)"
