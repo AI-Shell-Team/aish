@@ -48,7 +48,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `api_key` | string/null | `null` | API 密钥 | 可选，推荐用环境变量 |
 | `codex_auth_path` | string/null | `null` | OpenAI Codex 认证文件路径 | 可选 |
 | `temperature` | float | `0.7` | 生成温度 | 0.0 ≤ 值 ≤ 2.0 |
-| `max_tokens` | integer/null | `null` | 单次回复的输出 token 上限；不设置时请求不带该字段，由 provider 按模型自身上限决定（Anthropic 端点必填，未设置时发 64k）。**0 到 16383 的值会在加载时被删除并打印一次告警**（`null`/`0` 静默删除；负数不合法，解析直接失败）：这么小的上限会把长推理截断成 `incomplete response`，而 16384 是当前在用模型中最低的输出上限（GPT-4o）。`/setting max_tokens` 会直接拒绝低于 16384 的输入。16384 及以上的值原样保留 | `0` 或 ≥ 16384 |
+| `max_tokens` | integer/null | `null` | 单次回复的输出 token 上限；不设置时请求不带该字段，由 provider 按模型自身上限决定（Anthropic 端点必填，未设置时发 64k）。**0 到 16383 的值会在加载时被删除并打印一次告警**（`null`/`0` 静默删除；负数不合法，解析直接失败）：这么小的上限会把长推理截断成 `incomplete response`，而 16384 是当前在用模型中最低的输出上限（GPT-4o）。`/setting max_tokens` 会直接拒绝低于 16384 的输入。16384 及以上的值原样保留 | `null`、`0` 或 ≥ 16384 |
 
 ### 界面配置
 
