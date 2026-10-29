@@ -1181,7 +1181,7 @@ shell:
         desc: "Sampling randomness, 0.0-2.0. Lower is more focused and deterministic"
       max_tokens:
         label: "Max Output Tokens"
-        desc: "Cap on response length. Blank = use the model default"
+        desc: "Cap on response length. Blank = use the model default. Values below 16384 are rejected: they truncate long reasoning"
       prompt_style:
         label: "Prompt Symbol"
         desc: "Character shown before the input cursor, e.g. ->, $, or an emoji (blank = default arrow)"
