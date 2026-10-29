@@ -48,7 +48,7 @@ aish run --config ~/work/ai-shell-config.yaml
 | `api_key` | string/null | `null` | API 密钥 | 可选，推荐用环境变量 |
 | `codex_auth_path` | string/null | `null` | OpenAI Codex 认证文件路径 | 可选 |
 | `temperature` | float | `0.7` | 生成温度 | 0.0 ≤ 值 ≤ 2.0 |
-| `max_tokens` | integer/null | `null` | 单次回复的输出 token 上限；不设置时请求不带该字段，由 provider 按模型自身上限决定（Anthropic 端点必填，未设置时发 128k） | 值 > 0 |
+| `max_tokens` | integer/null | `null` | 单次回复的输出 token 上限；不设置时请求不带该字段，由 provider 按模型自身上限决定（Anthropic 端点必填，未设置时发 64k）。**0 到 16383 的值会在加载时被删除并打印一次告警**（`null`/`0` 静默删除；负数不合法，解析直接失败）：这么小的上限会把长推理截断成 `incomplete response`，而 16384 是当前在用模型中最低的输出上限（GPT-4o）。`/setting max_tokens` 会直接拒绝低于 16384 的输入。16384 及以上的值原样保留 | `null`、`0` 或 ≥ 16384 |
 
 ### 界面配置
 
@@ -469,8 +469,8 @@ model: openai/gpt-4-turbo-preview
 api_base: https://openrouter.ai/api/v1
 api_key: sk-or-v1-your-key-here
 temperature: 0.7
-# gpt-4-turbo-preview only accepts 4096 completion tokens.
-max_tokens: 4096
+# max_tokens 留空：gpt-4-turbo-preview 只接受 4096 个输出 token，
+# 而不带该字段时 provider 会按模型自身上限决定，不会越界。
 ```
 
 ### 其他兼容 OpenAI API 的服务
@@ -549,12 +549,13 @@ export LANGFUSE_HOST="https://cloud.langfuse.com"  # 或你的自托管实例
 temperature: 3.0  # ❌ 错误：必须 ≤ 2.0
 
 # 无效的最大令牌数
-max_tokens: -1    # ❌ 错误：必须 > 0
+max_tokens: -1      # ❌ 错误：必须 > 0
+max_tokens: 2000    # ⚠️ 低于 16384，加载时会被删除并给出告警
 
 # 正确的配置
-temperature: 1.5  # ✅ 正确
-max_tokens: null  # ✅ 正确（不发送该字段，由 provider 按模型上限决定）
-max_tokens: 2000  # ✅ 正确（显式限制输出长度）
+temperature: 1.5    # ✅ 正确
+max_tokens: null    # ✅ 正确（不发送该字段，由 provider 按模型上限决定）
+max_tokens: 65536   # ✅ 正确（显式限制输出长度，≥ 16384）
 
 ### 配置文件损坏处理
 
