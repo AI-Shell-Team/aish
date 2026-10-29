@@ -56,7 +56,7 @@ impl ConfigLoader {
                 changed |= cleaned;
                 if let Some(cap) = dropped_cap {
                     eprintln!(
-                        "warning: removed `max_tokens: {cap}` from {} — a cap that small truncates answers: a reasoning model spends the whole budget thinking and the turn ends as \"incomplete response\". The request now omits the field, so the provider's model limit applies. To cap output deliberately, use {} or more.",
+                        "warning: removed `max_tokens: {cap}` from {} — a cap that small truncates answers: a reasoning model spends the whole budget thinking and the turn ends as \"incomplete response\". The request now carries no cap (Anthropic endpoints use their 64k fallback). To cap output deliberately, use {} or more.",
                         path.display(),
                         Self::MIN_MAX_TOKENS
                     );
@@ -493,6 +493,27 @@ mod tests {
                 "max_tokens {small} must be removed from disk"
             );
         }
+    }
+
+    #[test]
+    fn load_rejects_a_negative_max_tokens_instead_of_dropping_it() {
+        // A negative value does not fit `Option<u32>`, so it fails to
+        // deserialize. The cleanup must not swallow it and must not rewrite
+        // the file: a bad value stays visible instead of vanishing silently.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let original = "model: glm-4.7\nmax_tokens: -1\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(
+            ConfigLoader::load(Some(&path)).is_err(),
+            "a negative max_tokens must be rejected"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a rejected file must not be rewritten"
+        );
     }
 
     #[test]
