@@ -135,6 +135,16 @@ tool_arg_preview:
     max_items: 4
 ```
 
+#### /report（无配置项）
+
+`/report` 把最近一次 AI 回答写成可离线打开的 HTML 页面（issue #608）。回答按 Markdown 渲染，页面自包含（内联 CSS、无脚本、无外部资源），生成过程不重跑命令、不调用模型，也不改动对话上下文。
+
+回答下方是工具证据区：按调用顺序列出本轮每次工具调用的参数与输出，用原生 `<details>` 折叠。调用与结果按 `tool_call_id` 配对，结果缺失或乱序不会错位；状态分为 `正常`、`已截断`（在 4 KB 工具输出上限处被截断）、`仅 offload 预览`（完整内容在磁盘上）和 `无结果`。工具输出一律转义进 `<pre>`，不按 Markdown 解析，日志里的 `<script>`、`#` 只会显示为文本。
+
+输出固定为 `$XDG_DATA_HOME/aish/reports/<session-uuid>/report.html`（`~/.local/share/aish/reports`），目录权限 `0700`、文件权限 `0600`。本地图形会话下生成后直接用默认浏览器打开；SSH（`SSH_CONNECTION`/`SSH_TTY`）或无 `DISPLAY`/`WAYLAND_DISPLAY` 时只打印路径和 `scp` 取回方法，不在远端启动浏览器。
+
+没有 `report.*` 配置项：页面只在用户显式执行 `/report` 时生成，不会按轮次自动写文件，因此也没有开关、自动打开或输出目录需要配置。
+
 #### context_auto_compact
 
 自动上下文压缩用于在发送给模型前控制 shell/tool 输出占用。默认策略偏保守：先做确定性的 microcompact，清理旧命令输出、旧 tool result、preview 和冗长 reasoning；只有在 microcompact 后仍接近窗口上限时，才启用模型生成的 full compact summary。full compact 会额外发起一次无工具、低温、非流式的摘要请求，失败时会记录失败次数并回退到最终 trim，不阻塞普通发送路径。
