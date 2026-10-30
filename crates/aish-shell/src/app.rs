@@ -20,7 +20,7 @@ use aish_session::{SessionContextMessage, SessionRecord, SessionStateSnapshot, S
 use aish_skills::hotreload::SkillHotReloader;
 use aish_skills::SkillManager;
 use aish_tools::ToolRegistry;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ai_handler::{AiHandler, SharedMemoryManager};
 use crate::animation::{SharedAnimation, SubAgentThinkingAnimation};
@@ -3652,6 +3652,8 @@ impl AishShell {
                                                 sep_renderer.render_separator();
                                             }
                                             self.persist_session_snapshot();
+                                            // Plan review first: the approval
+                                            // prompt needs the finished turn.
                                             self.review_pending_plan();
                                             self.record_history(input, 0);
                                         }
@@ -4082,6 +4084,7 @@ impl AishShell {
                                 print_md_with_recording(&response, &self.shared_recorder);
                                 sep.render_separator();
                             }
+                            self.persist_session_snapshot();
                             self.review_pending_plan();
                         }
                     }
@@ -4560,6 +4563,7 @@ impl AishShell {
             Some("/memory") => self.handle_memory_command(&parts),
             Some("/skill") => self.handle_skill_command(&parts),
             Some("/export") => self.handle_export_command(&parts),
+            Some("/report") => self.handle_report_command(&parts),
             Some("/fork") => self.handle_fork_command(),
             Some("/sessions") => self.handle_sessions_command(),
             _ => {
@@ -5061,6 +5065,138 @@ impl AishShell {
                     args
                 })
             ),
+        }
+    }
+
+    /// `/report` — write the last answer to an openable HTML page.
+    ///
+    /// Reads only the recorded transcript: no command is re-executed and no
+    /// model call is made. On a local graphical session the page is opened in
+    /// the browser; SSH and headless shells print the path and how to fetch it.
+    fn handle_report_command(&self, parts: &[&str]) {
+        if let Some(arg) = parts.get(1) {
+            if matches!(*arg, "--help" | "-h") {
+                println!("{}", t("shell.report.usage"));
+            } else {
+                eprintln!("{}", t("shell.report.usage"));
+            }
+            return;
+        }
+        if let Some(path) = self.write_report() {
+            self.announce_report(&path);
+        }
+    }
+
+    /// Render the session's last recorded answer into `report.html`.
+    fn write_report(&self) -> Option<PathBuf> {
+        let Some(store) = self.session_store.as_ref() else {
+            eprintln!("{}", t("shell.report.store_unavailable"));
+            return None;
+        };
+        let uuid = &self.session_uuid;
+        let record = match store.get_session(uuid) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                eprintln!("{}", t("shell.report.not_found"));
+                return None;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.report.load_failed", &error_args(&e))
+                );
+                return None;
+            }
+        };
+        // Same source preference as /export (issue #530): the append-only
+        // transcript survives compaction, the snapshot is the legacy fallback.
+        let messages = match store.get_ai_messages(uuid) {
+            Ok(messages) if !messages.is_empty() => messages,
+            Ok(_) => record.state_snapshot().context_messages_snapshot.clone(),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    t_with_args("shell.report.load_failed", &error_args(&e))
+                );
+                return None;
+            }
+        };
+        let Some(answer) = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+            .map(|m| m.content.as_str())
+        else {
+            eprintln!("{}", t("shell.report.no_answer"));
+            return None;
+        };
+        // Same redaction the terminal showed; the page must not leak more.
+        let answer =
+            aish_security::secret::redact_secrets(answer, self.security_manager.secret_scanner());
+        let created_at = record
+            .created_at
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+        let evidence =
+            crate::report::collect_evidence(&messages, self.security_manager.secret_scanner());
+        let html = crate::report::render_page(
+            &t("shell.report.html.title"),
+            &[
+                (&t("shell.report.html.session"), uuid),
+                (&t("shell.report.html.model"), &record.model),
+                (&t("shell.report.html.created"), &created_at),
+            ],
+            &answer,
+            &evidence,
+        );
+
+        let path = crate::report::reports_dir(uuid).join("report.html");
+        if let Err(e) = crate::report::write_private_file(&path, html.as_bytes()) {
+            let mut args = std::collections::HashMap::new();
+            args.insert("file".to_string(), path.display().to_string());
+            args.insert("error".to_string(), e.to_string());
+            eprintln!("{}", t_with_args("shell.report.write_failed", &args));
+            return None;
+        }
+        Some(path)
+    }
+
+    /// Print where the page landed and open it when a desktop is reachable.
+    fn announce_report(&self, path: &Path) {
+        let mut args = std::collections::HashMap::new();
+        args.insert("file".to_string(), path.display().to_string());
+        println!(
+            "{}",
+            theme::success(&t_with_args("shell.report.generated", &args))
+        );
+
+        // SSH and headless shells never launch a browser: give the path and
+        // how to get the file instead.
+        let remote = crate::report::is_remote_session();
+        if remote || !crate::report::has_graphical_session() {
+            let key = if remote {
+                "shell.report.hint_remote"
+            } else {
+                "shell.report.hint_local"
+            };
+            println!("  {}", theme::faint(&t_with_args(key, &args)));
+            return;
+        }
+
+        println!(
+            "  {}",
+            theme::faint(&t_with_args("shell.report.opening", &args))
+        );
+        // A detached spawn returns immediately; only a failed spawn is
+        // reported, and the file is already on disk either way.
+        if let Err(e) = open::that_detached(path) {
+            let mut error = std::collections::HashMap::new();
+            error.insert("error".to_string(), e.to_string());
+            eprintln!("{}", t_with_args("shell.report.open_failed", &error));
+            println!(
+                "  {}",
+                theme::faint(&t_with_args("shell.report.hint_local", &args))
+            );
         }
     }
 
@@ -14397,6 +14533,13 @@ fn format_age(secs: u64) -> String {
     }
 }
 
+/// `{error}` binding for the report's i18n lookups.
+fn error_args(error: &impl std::fmt::Display) -> std::collections::HashMap<String, String> {
+    let mut args = std::collections::HashMap::new();
+    args.insert("error".to_string(), error.to_string());
+    args
+}
+
 /// Parsed `/export` invocation.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExportOptions {
@@ -15585,6 +15728,65 @@ mod export_tests {
     fn mgr_placeholder_check(key: &str, placeholder: &str) -> bool {
         let mgr = aish_i18n::I18nManager::new_with_locale("en-US");
         mgr.t(key).contains(&format!("{{{placeholder}}}"))
+    }
+
+    #[test]
+    fn report_i18n_keys_exist_in_all_embedded_locales() {
+        // Issue #608: the report is a file the user keeps, so a missing
+        // translation would be frozen into it as a raw dotted key.
+        let keys = [
+            "shell.slash.report",
+            "shell.report.usage",
+            "shell.report.generated",
+            "shell.report.opening",
+            "shell.report.open_failed",
+            "shell.report.hint_local",
+            "shell.report.hint_remote",
+            "shell.report.store_unavailable",
+            "shell.report.not_found",
+            "shell.report.no_answer",
+            "shell.report.load_failed",
+            "shell.report.write_failed",
+            "shell.report.html.title",
+            "shell.report.html.session",
+            "shell.report.html.model",
+            "shell.report.html.created",
+            "shell.report.html.evidence",
+            "shell.report.html.evidence_empty",
+            "shell.report.html.evidence_hint",
+            "shell.report.html.args_label",
+            "shell.report.html.output_label",
+            "shell.report.html.output_missing",
+            "shell.report.html.tool_unknown",
+            "shell.report.html.status_ok",
+            "shell.report.html.status_truncated",
+            "shell.report.html.status_offloaded",
+            "shell.report.html.status_missing",
+        ];
+        for tag in ["en-US", "zh-CN", "ja-JP", "de-DE", "es-ES", "fr-FR"] {
+            let mgr = aish_i18n::I18nManager::new_with_locale(tag);
+            for key in keys {
+                let val = mgr.t(key);
+                assert_ne!(val, key, "locale {tag} is missing key {key}");
+            }
+        }
+        // Every placeholder the shell interpolates must survive translation.
+        for (key, placeholder) in [
+            ("shell.report.generated", "file"),
+            ("shell.report.opening", "file"),
+            ("shell.report.open_failed", "error"),
+            ("shell.report.hint_local", "file"),
+            ("shell.report.hint_remote", "file"),
+            ("shell.report.load_failed", "error"),
+            ("shell.report.write_failed", "file"),
+            ("shell.report.write_failed", "error"),
+            ("shell.report.html.evidence_hint", "count"),
+        ] {
+            assert!(
+                mgr_placeholder_check(key, placeholder),
+                "{key} lost the {{{placeholder}}} placeholder"
+            );
+        }
     }
 }
 
