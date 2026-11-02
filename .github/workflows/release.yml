@@ -264,6 +264,73 @@ jobs:
           packages-dir: dist/pypi-upload
           skip-existing: true
 
+  publish-website:
+    name: Publish bundles to official website
+    needs:
+      - release-meta
+      - build-release-packages
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.release-meta.outputs.version }}
+      ARTIFACT_ROOT: artifacts/release
+      WEBSITE_SSH_HOST: ${{ secrets.WEBSITE_SSH_HOST }}
+      WEBSITE_SSH_USER: ${{ secrets.WEBSITE_SSH_USER }}
+      WEBSITE_SSH_PORT: ${{ vars.WEBSITE_SSH_PORT || '22' }}
+      WEBSITE_REPO_ROOT: ${{ vars.WEBSITE_REPO_ROOT }}
+      WEBSITE_SITE_BASE_URL: ${{ vars.WEBSITE_SITE_BASE_URL || 'https://www.aishell.ai/repo' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate website publish configuration
+        run: |
+          missing=()
+          for name in WEBSITE_SSH_HOST WEBSITE_SSH_USER WEBSITE_REPO_ROOT; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            echo "::error::Missing website publish configuration: ${missing[*]}"
+            echo "Configure WEBSITE_SSH_HOST and WEBSITE_SSH_USER as release environment secrets, and WEBSITE_REPO_ROOT as a repository variable." >&2
+            exit 1
+          fi
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: release-bundle-linux-*
+          path: ${{ env.ARTIFACT_ROOT }}
+
+      - name: Configure SSH
+        env:
+          WEBSITE_SSH_PRIVATE_KEY: ${{ secrets.WEBSITE_SSH_PRIVATE_KEY }}
+          WEBSITE_SSH_KNOWN_HOSTS: ${{ secrets.WEBSITE_SSH_KNOWN_HOSTS }}
+        run: |
+          if [[ -z "${WEBSITE_SSH_PRIVATE_KEY}" || -z "${WEBSITE_SSH_KNOWN_HOSTS}" ]]; then
+            echo "::error::WEBSITE_SSH_PRIVATE_KEY and WEBSITE_SSH_KNOWN_HOSTS must be configured as release environment secrets."
+            exit 1
+          fi
+
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$WEBSITE_SSH_PRIVATE_KEY" > "$HOME/.ssh/aishell_website"
+          printf '%s\n' "$WEBSITE_SSH_KNOWN_HOSTS" > "$HOME/.ssh/aishell_website_known_hosts"
+          chmod 0600 "$HOME/.ssh/aishell_website" "$HOME/.ssh/aishell_website_known_hosts"
+
+          ssh -i "$HOME/.ssh/aishell_website" \
+            -p "${WEBSITE_SSH_PORT}" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/aishell_website_known_hosts" \
+            "${WEBSITE_SSH_USER}@${WEBSITE_SSH_HOST}" true
+
+      - name: Publish bundles
+        run: ./packaging/scripts/publish_website.sh
+
   release-summary:
     name: Summarize published release
     needs:
@@ -272,6 +339,7 @@ jobs:
       - build-release-packages
       - build-pypi-packages
       - publish-release
+      - publish-website
     runs-on: ubuntu-latest
     steps:
       - name: Write job summary
@@ -286,8 +354,8 @@ jobs:
             echo "- Tag: ${RELEASE_TAG}"
             echo
             if [[ "${RELEASE_VERSION}" == *-* ]]; then
-              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and PyPI publishing was skipped for this prerelease. (CDN publishing is disabled.)"
+              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded to GitHub Releases and the official website, and PyPI publishing was skipped for this prerelease. (CDN publishing is disabled.)"
             else
-              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded successfully, and the package was published to PyPI via Trusted Publishing. (CDN publishing is disabled.)"
+              echo "GitHub Release metadata was generated from the tag push, bundle assets were uploaded to GitHub Releases and the official website, and the package was published to PyPI via Trusted Publishing. (CDN publishing is disabled.)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
