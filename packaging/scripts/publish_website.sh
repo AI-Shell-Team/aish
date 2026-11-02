@@ -134,7 +134,7 @@ rsync -az --chmod=D755,F644 -e "$RSYNC_SSH" \
         "${STAGE_DIR}/" "${SSH_TARGET}:${REMOTE_TMP_DIR}/"
 
 ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" \
-        "if [ -e $(printf '%q' "$REMOTE_VERSION_DIR") ]; then mv $(printf '%q' "$REMOTE_VERSION_DIR") $(printf '%q' "${REMOTE_TMP_DIR}.previous"); fi; if mv $(printf '%q' "$REMOTE_TMP_DIR") $(printf '%q' "$REMOTE_VERSION_DIR"); then rm -rf $(printf '%q' "${REMOTE_TMP_DIR}.previous"); else mv $(printf '%q' "${REMOTE_TMP_DIR}.previous") $(printf '%q' "$REMOTE_VERSION_DIR"); exit 1; fi"
+        "rm -rf $(printf '%q' "${REMOTE_TMP_DIR}.previous") || exit 1; if [ -e $(printf '%q' "$REMOTE_VERSION_DIR") ]; then mv -T $(printf '%q' "$REMOTE_VERSION_DIR") $(printf '%q' "${REMOTE_TMP_DIR}.previous") || exit 1; fi; if ! mv -T $(printf '%q' "$REMOTE_TMP_DIR") $(printf '%q' "$REMOTE_VERSION_DIR"); then if [ -e $(printf '%q' "${REMOTE_TMP_DIR}.previous") ]; then mv -T $(printf '%q' "${REMOTE_TMP_DIR}.previous") $(printf '%q' "$REMOTE_VERSION_DIR"); fi; exit 1; fi; rm -rf $(printf '%q' "${REMOTE_TMP_DIR}.previous")"
 REMOTE_TMP_DIR=""
 
 latest_source="${STAGE_DIR}/latest"
