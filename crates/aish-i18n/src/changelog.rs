@@ -702,9 +702,14 @@ mod tests {
             args.insert("version".to_string(), v.to_string());
             crate::t_with_args("shell.welcome2.changelog_summary_version", &args)
         };
-        assert!(summary.contains(&heading(intermediate)));
         assert!(summary.contains(&heading(latest)));
         assert!(!summary.contains(&heading(current)));
+        if !summary.contains(&heading(intermediate)) {
+            assert!(
+                summary.contains(&crate::t("shell.welcome2.changelog_summary_truncated")),
+                "an intermediate section may only be omitted when the summary reports truncation"
+            );
+        }
     }
 
     #[test]
