@@ -135,4 +135,67 @@ if "$PYTHON_BIN" "$SANDBOX/packaging/scripts/release_metadata.py" \
 fi
 grep -Fq "Invalid version '01.0.0'" "$TMP_DIR/invalid.out"
 
+WEBSITE_ARTIFACTS="$TMP_DIR/website-artifacts"
+for arch in amd64 arm64; do
+  mkdir -p "$WEBSITE_ARTIFACTS/$arch"
+  bundle="aish-1.0.0-rc1-linux-${arch}.tar.gz"
+  printf 'bundle-%s\n' "$arch" > "$WEBSITE_ARTIFACTS/$arch/$bundle"
+  (
+    cd "$WEBSITE_ARTIFACTS/$arch"
+    sha256sum "$bundle" > "${bundle}.sha256"
+  )
+done
+
+WEBSITE_DRY_RUN_OUTPUT="$TMP_DIR/website-dry-run.out"
+VERSION=1.0.0-rc1 \
+  ARTIFACT_ROOT="$WEBSITE_ARTIFACTS" \
+  WEBSITE_REPO_ROOT=/srv/aishell/repo \
+  WEBSITE_SSH_HOST=example.com \
+  WEBSITE_SSH_USER=deploy \
+  WEBSITE_SITE_BASE_URL=https://www.example.com/repo \
+  DRY_RUN=1 \
+  "$ROOT_DIR/packaging/scripts/publish_website.sh" > "$WEBSITE_DRY_RUN_OUTPUT"
+grep -Fq 'Dry run: channel=beta' "$WEBSITE_DRY_RUN_OUTPUT"
+grep -Fq 'remote_version_dir=/srv/aishell/repo/beta/v1.0.0-rc1' "$WEBSITE_DRY_RUN_OUTPUT"
+grep -Fq 'public_version_url=https://www.example.com/repo/beta/v1.0.0-rc1' "$WEBSITE_DRY_RUN_OUTPUT"
+grep -Fq 'aish-1.0.0-rc1-linux-amd64.tar.gz.sha256' "$WEBSITE_DRY_RUN_OUTPUT"
+grep -Fq 'aish-1.0.0-rc1-linux-arm64.tar.gz.sha256' "$WEBSITE_DRY_RUN_OUTPUT"
+
+STABLE_ARTIFACTS="$TMP_DIR/website-stable-artifacts"
+for arch in amd64 arm64; do
+  mkdir -p "$STABLE_ARTIFACTS/$arch"
+  bundle="aish-1.0.0-linux-${arch}.tar.gz"
+  printf 'stable-%s\n' "$arch" > "$STABLE_ARTIFACTS/$arch/$bundle"
+  (
+    cd "$STABLE_ARTIFACTS/$arch"
+    sha256sum "$bundle" > "${bundle}.sha256"
+  )
+done
+
+WEBSITE_STABLE_OUTPUT="$TMP_DIR/website-stable.out"
+VERSION=1.0.0 \
+  ARTIFACT_ROOT="$STABLE_ARTIFACTS" \
+  WEBSITE_REPO_ROOT=/srv/aishell/repo \
+  WEBSITE_SSH_HOST=example.com \
+  WEBSITE_SSH_USER=deploy \
+  WEBSITE_SITE_BASE_URL=https://www.example.com/repo \
+  DRY_RUN=1 \
+  "$ROOT_DIR/packaging/scripts/publish_website.sh" > "$WEBSITE_STABLE_OUTPUT"
+grep -Fq 'Dry run: channel=stable' "$WEBSITE_STABLE_OUTPUT"
+grep -Fq 'remote_version_dir=/srv/aishell/repo/v1.0.0' "$WEBSITE_STABLE_OUTPUT"
+grep -Fq 'public_version_url=https://www.example.com/repo/v1.0.0' "$WEBSITE_STABLE_OUTPUT"
+
+printf 'corrupted\n' > "$WEBSITE_ARTIFACTS/amd64/aish-1.0.0-rc1-linux-amd64.tar.gz"
+if VERSION=1.0.0-rc1 \
+  ARTIFACT_ROOT="$WEBSITE_ARTIFACTS" \
+  WEBSITE_REPO_ROOT=/srv/aishell/repo \
+  WEBSITE_SSH_HOST=example.com \
+  WEBSITE_SSH_USER=deploy \
+  DRY_RUN=1 \
+  "$ROOT_DIR/packaging/scripts/publish_website.sh" > "$TMP_DIR/website-checksum.out" 2>&1; then
+  echo "Expected checksum mismatch to be rejected" >&2
+  exit 1
+fi
+grep -Fq 'Checksum mismatch for aish-1.0.0-rc1-linux-amd64.tar.gz' "$TMP_DIR/website-checksum.out"
+
 echo "Release script smoke tests passed."
