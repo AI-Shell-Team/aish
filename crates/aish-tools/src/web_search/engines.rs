@@ -240,6 +240,15 @@ struct KeenableResult {
     published_at: Option<String>,
 }
 
+/// Keenable client with redirects disabled so the API key cannot leak cross-host.
+fn keenable_client() -> Result<reqwest::Client, SearchProviderError> {
+    reqwest::Client::builder()
+        .user_agent(user_agent())
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| SearchProviderError::Network(e.to_string()))
+}
+
 impl SearchProvider for KeenableProvider {
     fn id(&self) -> &'static str {
         "keenable"
@@ -259,7 +268,9 @@ impl SearchProvider for KeenableProvider {
             if self.api_key.trim().is_empty() {
                 return SearchResponse::failed("keenable", SearchProviderError::Auth);
             }
-            let client = match build_search_client(user_agent()) {
+            // Never follow redirects: reqwest would forward the custom X-API-Key
+            // header to whatever host the redirect points at.
+            let client = match keenable_client() {
                 Ok(client) => client,
                 Err(err) => return SearchResponse::failed("keenable", err),
             };
