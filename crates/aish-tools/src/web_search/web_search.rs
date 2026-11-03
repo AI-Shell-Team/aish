@@ -8,7 +8,7 @@ use aish_llm::{LlmSession, PreflightResult, Tool, ToolResult};
 
 use super::bing::BingProvider;
 use super::duckduckgo::DuckDuckGoProvider;
-use super::engines::{BraveProvider, SearxngProvider, TavilyProvider};
+use super::engines::{BraveProvider, KeenableProvider, SearxngProvider, TavilyProvider};
 use super::provider::{clamp_result_count, SearchProvider};
 use super::types::{
     clamp_timeout, dedupe_results, SearchProviderError, SearchResponse, SearchResult,
@@ -64,6 +64,11 @@ impl WebSearchTool {
         if !config.tavily_api_key.trim().is_empty() {
             providers.push(Arc::new(TavilyProvider {
                 api_key: config.tavily_api_key.clone(),
+            }));
+        }
+        if !config.keenable_api_key.trim().is_empty() {
+            providers.push(Arc::new(KeenableProvider {
+                api_key: config.keenable_api_key.clone(),
             }));
         }
         if !config.searxng_endpoint.trim().is_empty() {
@@ -620,6 +625,23 @@ mod tests {
         let text = WebSearchTool::format_for_llm(&response);
         let snippet_line = text.lines().find(|l| l.contains('…')).unwrap();
         assert!(snippet_line.chars().count() < 300);
+    }
+
+    #[test]
+    fn keenable_joins_chain_only_with_a_key() {
+        let ids = |config: &WebSearchConfig| {
+            WebSearchTool::from_config(config)
+                .providers
+                .iter()
+                .map(|p| p.id())
+                .collect::<Vec<_>>()
+        };
+        assert!(!ids(&WebSearchConfig::default()).contains(&"keenable"));
+        let config = WebSearchConfig {
+            keenable_api_key: "kn-test".into(),
+            ..WebSearchConfig::default()
+        };
+        assert_eq!(ids(&config).first(), Some(&"keenable"));
     }
 
     #[test]
