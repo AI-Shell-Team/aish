@@ -17,6 +17,19 @@ use aish_skills::SkillManager;
 /// Shared handle for the memory manager, accessible from both AiHandler and tools.
 pub type SharedMemoryManager = Arc<Mutex<Option<MemoryManager>>>;
 
+/// Prefix shared by every synthetic turn note.
+///
+/// [`AiHandler::commit_partial_messages`] appends one of these as an
+/// `assistant` message when a turn stops without producing a final answer.
+/// They are instructions for the next model call, not answers, so anything
+/// that presents the user's last answer to a human must skip them.
+pub const TURN_NOTE_PREFIX: &str = "[turn ";
+
+/// Whether an assistant message is a synthetic turn note rather than an answer.
+pub fn is_turn_note(content: &str) -> bool {
+    content.trim_start().starts_with(TURN_NOTE_PREFIX)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PartialTurnStop {
     ProviderError,
@@ -892,6 +905,10 @@ impl AiHandler {
                 "[turn interrupted by a provider error before completion; the tool results above are partial evidence — do not re-run completed side effects]"
             }
         };
+        debug_assert!(
+            is_turn_note(note),
+            "every synthetic note must keep the {TURN_NOTE_PREFIX:?} prefix"
+        );
         self.context_manager
             .add_message("assistant", note, MemoryType::Llm);
         self.context_manager.trim();
@@ -3699,6 +3716,50 @@ mod tests {
         assert!(!note.contains("provider error"), "{note}");
         // Pairing stayed self-consistent.
         assert_eq!(context[2].tool_call_id.as_deref(), Some("call_l1"));
+    }
+
+    /// Every stop reason must produce a note the prefix test recognises, or
+    /// `/report` would export an instruction to the model as the user's answer.
+    #[test]
+    fn every_partial_turn_stop_writes_a_recognised_turn_note() {
+        for stop in [
+            PartialTurnStop::ProviderError,
+            PartialTurnStop::EmptyResponse,
+            PartialTurnStop::IncompleteResponse,
+            PartialTurnStop::IterationLimit,
+        ] {
+            let mut handler = test_handler();
+            let partial = [
+                ChatMessage::user("q"),
+                {
+                    let mut a = ChatMessage::assistant("");
+                    a.content = None;
+                    a.tool_calls = Some(vec![aish_llm::ToolCall {
+                        id: "c".to_string(),
+                        name: "bash".to_string(),
+                        arguments: "{}".to_string(),
+                    }]);
+                    a
+                },
+                ChatMessage::tool_result("c", "done"),
+            ];
+            handler.commit_partial_messages("q", &partial, stop);
+            let context = handler.build_context_messages();
+            let last = context
+                .last()
+                .and_then(|m| m.text_content())
+                .unwrap_or_default();
+            assert!(is_turn_note(last), "{stop:?} note not recognised: {last}");
+        }
+    }
+
+    /// The predicate is a prefix test, so it must not swallow prose that the
+    /// model wrote starting with a bracket.
+    #[test]
+    fn a_real_answer_is_not_a_turn_note() {
+        assert!(!is_turn_note("## 磁盘分析\n\n根分区 82% 已用。"));
+        assert!(!is_turn_note("[1] 第 1 条建议重跑验证"));
+        assert!(is_turn_note("  [turn status: inconclusive]"));
     }
 
     /// The provider-failure path keeps its original wording and clears the
