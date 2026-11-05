@@ -385,9 +385,17 @@ fn main() {
             // is now visible. The raw error can embed mistyped config
             // values (including secrets), so stderr only names the
             // file; the detail goes to the debug log.
+            let shown_path = config_path.as_deref().map_or_else(
+                || {
+                    aish_config::ConfigLoader::default_config_path()
+                        .display()
+                        .to_string()
+                },
+                ToString::to_string,
+            );
             eprintln!(
                 "warning: failed to load config from {} (using defaults); run with RUST_LOG=debug for details",
-                config_path.as_deref().unwrap_or("the default config path")
+                shown_path
             );
             tracing::debug!("Config load failed (using defaults): {}", e);
             aish_config::ConfigModel::default()
@@ -537,9 +545,13 @@ fn load_config(config_path: Option<&str>) -> aish_config::ConfigModel {
         // never turn a load failure into a silent default config. The raw
         // error can embed mistyped config values (including secrets), so
         // stderr only names the file; the detail goes to the debug log.
+        let shown_path = config_path.map_or_else(
+            || aish_config::ConfigLoader::default_config_path().display().to_string(),
+            ToString::to_string,
+        );
         eprintln!(
             "warning: failed to load config from {} (using defaults); run with RUST_LOG=debug for details",
-            config_path.unwrap_or("the default config path")
+            shown_path
         );
         tracing::debug!("Config load failed (using defaults): {}", e);
         aish_config::ConfigModel::default()

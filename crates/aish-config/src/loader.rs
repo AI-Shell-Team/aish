@@ -723,14 +723,28 @@ mod tests {
         // The fourth case in the #649 matrix: no file at all stays the
         // defaults path and creates nothing (creation is the wizard's job).
         // Only override-immune fields are compared: `apply_env_overrides`
-        // runs even for a missing file, and a sibling test mutates
-        // `AISH_CODEX_AUTH_PATH` in parallel.
+        // runs even for a missing file, so a sibling test mutating
+        // `AISH_CODEX_AUTH_PATH` in parallel must not affect this result.
         let _guard = ENV_TEST_LOCK.lock();
-        std::env::remove_var("AISH_CODEX_AUTH_PATH");
+        let previous_model = std::env::var_os("AISH_MODEL");
+        let previous_api_key = std::env::var_os("AISH_API_KEY");
+        std::env::remove_var("AISH_MODEL");
+        std::env::remove_var("AISH_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("absent").join("config.yaml");
 
-        let config = ConfigLoader::load(Some(&path)).unwrap();
+        let result = ConfigLoader::load(Some(&path));
+        // Restore the overrides whether the load succeeded or failed, so
+        // sibling tests see the original process environment.
+        match previous_model {
+            Some(value) => std::env::set_var("AISH_MODEL", value),
+            None => std::env::remove_var("AISH_MODEL"),
+        }
+        match previous_api_key {
+            Some(value) => std::env::set_var("AISH_API_KEY", value),
+            None => std::env::remove_var("AISH_API_KEY"),
+        }
+        let config = result.unwrap();
         assert_eq!(config.model, ConfigModel::default().model);
         assert_eq!(config.api_key, ConfigModel::default().api_key);
         assert!(!path.exists());
