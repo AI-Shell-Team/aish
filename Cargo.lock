@@ -60,6 +60,7 @@ version = "1.0.0-rc1"
 dependencies = [
  "aish-core",
  "dirs 5.0.1",
+ "parking_lot",
  "regex",
  "serde",
  "serde_yaml",
