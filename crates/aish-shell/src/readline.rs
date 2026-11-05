@@ -245,6 +245,13 @@ pub const SLASH_COMMANDS: &[SlashCommandMeta] = &[
         enter: EnterPolicy::Execute,
     },
     SlashCommandMeta {
+        name: "/report",
+        desc: "Write the latest answer to an HTML page and open it on a desktop session",
+        group: SlashGroup::RecordShare,
+        keywords: &["report", "html", "artifact"],
+        enter: EnterPolicy::Execute,
+    },
+    SlashCommandMeta {
         name: "/instructions",
         desc: "Toggle project AGENTS.md instruction loading (on/off/status; this session)",
         group: SlashGroup::FilesMemory,
@@ -1067,7 +1074,7 @@ mod tests {
                 cmd.name
             );
         }
-        assert_eq!(SLASH_COMMANDS.len(), 27);
+        assert_eq!(SLASH_COMMANDS.len(), 28);
     }
 
     #[test]

@@ -112,13 +112,22 @@ impl SlashCommandEntry {
                 None
             };
         }
-        let name = fuzzy_score(query, &self.name);
-        let desc = fuzzy_score(query, &self.desc);
+        // Which field matched matters more than how well it matched. The
+        // scores themselves are not comparable across fields: `fuzzy_score`
+        // rewards short targets, so `/report` scored 191 on its own name while
+        // `/feedback` scored 192 on its "report" keyword and took the first
+        // row. A name hit is what the user meant; a keyword or description hit
+        // is a hint about a different command.
+        const NAME_TIER: i64 = 2_000;
+        const KEYWORD_TIER: i64 = 1_000;
+        let name = fuzzy_score(query, &self.name).map(|s| s + NAME_TIER);
         let kw = self
             .keywords
             .iter()
             .filter_map(|k| fuzzy_score(query, k))
-            .max();
+            .max()
+            .map(|s| s + KEYWORD_TIER);
+        let desc = fuzzy_score(query, &self.desc);
         name.into_iter()
             .chain(desc)
             .chain(kw)
@@ -791,6 +800,50 @@ mod tests {
 
     fn session_with_input(input: &str) -> SlashInputSession {
         session_with_commands(input, &sample_commands())
+    }
+
+    #[test]
+    fn a_name_match_outranks_another_command_keyword_match() {
+        // Regression: typing `/report` used to select `/feedback`, because
+        // `/feedback` carries a "report" keyword and `fuzzy_score` rewards
+        // shorter targets, so that keyword hit (192 on "report") beat the real
+        // name hit (191 on "/report"). A command's own name must win.
+        let mut report = entry("/report", 5);
+        report.keywords = vec!["report".into(), "html".into(), "artifact".into()];
+        let mut feedback = entry("/feedback", 5);
+        feedback.keywords = vec!["feedback".into(), "report".into(), "issue".into()];
+
+        for order in [
+            vec![report.clone(), feedback.clone()],
+            vec![feedback.clone(), report.clone()],
+        ] {
+            let session = session_with_commands("/report", &order);
+            assert_eq!(
+                session.selected_entry().map(|e| e.name.as_str()),
+                Some("/report"),
+                "ranking must not depend on registration order"
+            );
+        }
+    }
+
+    #[test]
+    fn a_description_match_ranks_below_name_and_keyword_matches() {
+        // Three tiers: name > keyword > description. Otherwise a command whose
+        // prose happens to contain the word would tie with the real command.
+        let mut by_name = entry("/report", 0);
+        by_name.keywords = vec!["report".into()];
+        let mut by_keyword = entry("/feedback", 0);
+        by_keyword.keywords = vec!["report".into()];
+        let mut by_desc = entry("/xyz", 0);
+        by_desc.desc = "report".to_string();
+
+        let session = session_with_commands("/report", &[by_desc, by_keyword, by_name]);
+        let order: Vec<&str> = session
+            .filtered
+            .iter()
+            .map(|i| session.entries[*i].name.as_str())
+            .collect();
+        assert_eq!(order, vec!["/report", "/feedback", "/xyz"]);
     }
 
     #[test]
