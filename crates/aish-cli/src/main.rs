@@ -373,20 +373,26 @@ fn main() {
         return;
     }
 
-    let mut config =
-        match aish_config::ConfigLoader::load(config_path.as_deref().map(std::path::Path::new)) {
-            Ok(config) => config,
-            Err(e) => {
-                // Issue #649: silently falling back to defaults made a
-                // load failure look like "configuration incomplete" and
-                // pushed users into the setup wizard to re-enter their
-                // model. Surface the real error; the wizard below may
-                // still run, but the cause is visible.
-                eprintln!("warning: failed to load config (using defaults): {e}");
-                tracing::debug!("Config load failed (using defaults): {}", e);
-                aish_config::ConfigModel::default()
-            }
-        };
+    let mut config = match aish_config::ConfigLoader::load(
+        config_path.as_deref().map(std::path::Path::new),
+    ) {
+        Ok(config) => config,
+        Err(e) => {
+            // Issue #649: silently falling back to defaults made a
+            // load failure look like "configuration incomplete" and
+            // pushed users into the setup wizard to re-enter their
+            // model. The wizard below may still run, but the failure
+            // is now visible. The raw error can embed mistyped config
+            // values (including secrets), so stderr only names the
+            // file; the detail goes to the debug log.
+            eprintln!(
+                "warning: failed to load config from {} (using defaults); run with RUST_LOG=debug for details",
+                config_path.as_deref().unwrap_or("the default config path")
+            );
+            tracing::debug!("Config load failed (using defaults): {}", e);
+            aish_config::ConfigModel::default()
+        }
+    };
 
     // Apply CLI arg overrides
     if let Some(model) = cli.model {
@@ -520,12 +526,22 @@ fn main() {
     }
 }
 
+/// Load the config for a subcommand path (`models-auth`), falling back to
+/// defaults on failure. Mirrors the interactive startup's visibility rule
+/// (issue #649): the failure is reported on stderr by path only — the raw
+/// error can embed mistyped config values, so details go to the debug log.
 fn load_config(config_path: Option<&str>) -> aish_config::ConfigModel {
     let path = config_path.map(std::path::Path::new);
     aish_config::ConfigLoader::load(path).unwrap_or_else(|e| {
         // Same visibility rule as the interactive startup path (issue #649):
-        // never turn a load failure into a silent default config.
-        eprintln!("warning: failed to load config (using defaults): {e}");
+        // never turn a load failure into a silent default config. The raw
+        // error can embed mistyped config values (including secrets), so
+        // stderr only names the file; the detail goes to the debug log.
+        eprintln!(
+            "warning: failed to load config from {} (using defaults); run with RUST_LOG=debug for details",
+            config_path.unwrap_or("the default config path")
+        );
+        tracing::debug!("Config load failed (using defaults): {}", e);
         aish_config::ConfigModel::default()
     })
 }

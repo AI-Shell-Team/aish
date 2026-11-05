@@ -635,26 +635,27 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn load_migration_failure_on_unwritable_location_keeps_the_parsed_config() {
+    fn load_migration_failure_keeps_the_parsed_config() {
         // Issue #649: a config on a read-only single-file bind mount fails
-        // the migration rewrite (EBUSY on rename; a read-only directory gives
-        // EACCES on the temp file). The parsed config is valid, so load must
-        // return it — with the missing fields backfilled in memory — instead
-        // of erroring into "defaults + setup wizard". The file stays
-        // byte-identical and every later load retries the migration.
+        // the migration rewrite (EBUSY on rename). The parsed config is
+        // valid, so load must return it — with the missing fields backfilled
+        // in memory — instead of erroring into "defaults + setup wizard".
+        // The file stays byte-identical and every later load retries the
+        // migration.
+        //
+        // Deterministic failure fixture: the sibling temp path
+        // (`config.yaml.tmp-<pid>`, see `temp_path`) is pre-created as a
+        // directory, so `write_atomic`'s `File::create` on it fails with
+        // EISDIR regardless of the process's privileges (a root container
+        // with CAP_DAC_OVERRIDE would defeat a mode-0555 fixture).
         let dir = tempfile::tempdir().unwrap();
-        let ro_dir = dir.path().join("ro");
-        std::fs::create_dir(&ro_dir).unwrap();
-        let path = ro_dir.join("config.yaml");
+        let path = dir.path().join("config.yaml");
         let original = "model: fixture-path-sentinel\napi_key: fixture-only\n";
         std::fs::write(&path, original).unwrap();
-        chmod(&ro_dir, 0o555);
+        std::fs::create_dir(ConfigLoader::temp_path(&path)).unwrap();
 
-        let config = ConfigLoader::load(Some(&path));
-        chmod(&ro_dir, 0o755);
-        let config = config
+        let config = ConfigLoader::load(Some(&path))
             .unwrap_or_else(|e| panic!("a failed migration rewrite must not fail the load: {e}"));
         assert_eq!(config.model, "fixture-path-sentinel");
         assert_eq!(config.api_key, "fixture-only");
@@ -664,12 +665,14 @@ mod tests {
             original,
             "a failed migration must leave the original file byte-identical"
         );
-        // ...and must not leave temp debris behind.
-        let entries: Vec<_> = std::fs::read_dir(&ro_dir)
+        // ...and the failed write must have cleaned up after itself (only
+        // the pre-created temp directory and the config remain).
+        assert!(ConfigLoader::temp_path(&path).is_dir());
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(entries, vec![std::ffi::OsString::from("config.yaml")]);
+        assert_eq!(entries.len(), 2, "no temp debris beyond the fixture");
     }
 
     #[test]
@@ -710,15 +713,26 @@ mod tests {
         );
     }
 
+    /// Serialize tests that mutate process-global environment variables
+    /// (`apply_env_overrides` reads them; a sibling test may be setting or
+    /// removing the same variable concurrently).
+    static ENV_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[test]
     fn load_missing_config_returns_defaults_without_creating_the_file() {
         // The fourth case in the #649 matrix: no file at all stays the
         // defaults path and creates nothing (creation is the wizard's job).
+        // Only override-immune fields are compared: `apply_env_overrides`
+        // runs even for a missing file, and a sibling test mutates
+        // `AISH_CODEX_AUTH_PATH` in parallel.
+        let _guard = ENV_TEST_LOCK.lock();
+        std::env::remove_var("AISH_CODEX_AUTH_PATH");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("absent").join("config.yaml");
 
         let config = ConfigLoader::load(Some(&path)).unwrap();
-        assert_eq!(config, ConfigModel::default());
+        assert_eq!(config.model, ConfigModel::default().model);
+        assert_eq!(config.api_key, ConfigModel::default().api_key);
         assert!(!path.exists());
     }
 
