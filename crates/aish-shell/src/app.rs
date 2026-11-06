@@ -2700,22 +2700,22 @@ impl AishShell {
         // Only the home prefix collapses to `~` — no middle-component
         // abbreviation: dot-directories would shrink to "." (`~/.config/...`
         // → `~/./a/...`), which is unreadable, and the panel has room for
-        // the full path.
-        let home_for_display = dirs::home_dir()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let config_path_display = match config_source {
-            Some(path) => path.to_string_lossy().to_string(),
-            None => aish_config::ConfigLoader::default_config_path()
-                .to_string_lossy()
-                .to_string(),
+        // the full path. The prefix must match on a path-component boundary
+        // (`strip_prefix`): a plain string `starts_with` would turn
+        // `/home/alice/x.yaml` into `~ice/x.yaml` when home is `/home/al`.
+        let home_for_display = dirs::home_dir().unwrap_or_default();
+        let config_path: std::borrow::Cow<'_, std::path::Path> = match config_source {
+            Some(path) => std::borrow::Cow::Borrowed(path),
+            None => std::borrow::Cow::Owned(aish_config::ConfigLoader::default_config_path()),
         };
-        let config_path_display =
-            if !home_for_display.is_empty() && config_path_display.starts_with(&home_for_display) {
-                format!("~{}", &config_path_display[home_for_display.len()..])
-            } else {
-                config_path_display
-            };
+        let config_path_display = match config_path.strip_prefix(&home_for_display) {
+            // The path is exactly the home dir itself — no file to show.
+            Ok(rest) if rest.as_os_str().is_empty() => {
+                home_for_display.to_string_lossy().to_string()
+            }
+            Ok(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.to_string_lossy()),
+            Err(_) => config_path.to_string_lossy().to_string(),
+        };
         print!(
             "{}",
             prompt::render_welcome(
@@ -2852,6 +2852,9 @@ impl AishShell {
     }
 
     /// Create a new shell instance and immediately restore an existing session.
+    ///
+    /// `config_source` follows the same rule as [`Self::new`]: the path the
+    /// config was actually loaded from, shown in the welcome panel.
     pub fn resume(
         config: ConfigModel,
         session_id: &str,

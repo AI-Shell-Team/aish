@@ -1080,19 +1080,16 @@ fn default_session_index(
     best.map(|(idx, _)| idx)
 }
 
-/// Resolve the config path the session actually loaded: the explicit
-/// `--config` value when given, otherwise the resolved default (honoring
-/// `AISH_CONFIG_DIR`). Feeds the welcome panel's "config:" line so it shows
-/// the real file. Daemon children inherit the path via `AISH_DAEMON_CONFIG`.
+/// Resolve the config path the session actually loaded, in the loader's
+/// precedence order: the explicit `--config` value when given, otherwise the
+/// resolved default (honoring `AISH_CONFIG_DIR`). Daemon children already
+/// receive their selected path as `--config` (see `forward_pty_daemon_config`),
+/// so `AISH_DAEMON_CONFIG` needs no separate handling here. Feeds the welcome
+/// panel's "config:" line so it shows the real file.
 fn cli_config_source() -> Option<std::path::PathBuf> {
     Some(
-        CLI_CONFIG_PATH
-            .get_or_init(|| {
-                std::env::var("AISH_DAEMON_CONFIG")
-                    .ok()
-                    .or_else(|| CLI_CONFIG_PATH_EXPLICIT.with(|cell| cell.borrow().clone()))
-            })
-            .clone()
+        CLI_CONFIG_PATH_EXPLICIT
+            .with(|cell| cell.borrow().clone())
             .map_or_else(
                 || aish_config::ConfigLoader::default_config_path(),
                 std::path::PathBuf::from,
@@ -1104,7 +1101,6 @@ thread_local! {
     static CLI_CONFIG_PATH_EXPLICIT: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 }
-static CLI_CONFIG_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 fn run_shell_normal(mut config: aish_config::ConfigModel) {
     // Arm the terminal-death watchdog only for the standalone shell: this
@@ -1112,6 +1108,7 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
     // never covers run_pty_raw_attach (whose exit(0) mid-attach would skip
     // backend detach and termios restore).
     tty_watchdog::arm_for_interactive();
+    let mut config_source = cli_config_source();
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
         if !run_setup(&mut config) {
@@ -1121,12 +1118,15 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
             );
             std::process::exit(1);
         }
+        // The wizard writes the default path; after a successful reload the
+        // session runs on that file, so the panel must display it — not the
+        // (incomplete) `--config` the launch started from.
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
             config = loaded;
+            config_source = Some(config_path);
         }
     }
-    let config_source = cli_config_source();
     match aish_shell::AishShell::new(config, config_source.as_deref()) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
@@ -1372,6 +1372,7 @@ fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &st
     // Standalone resume: same watchdog scoping as run_shell_normal — the
     // daemon-attach path above (run_shell_resume) must stay unwatched.
     tty_watchdog::arm_for_interactive();
+    let mut config_source = cli_config_source();
     // Auto-trigger setup wizard on first run if config is incomplete
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
@@ -1382,13 +1383,15 @@ fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &st
             );
             std::process::exit(1);
         }
+        // Same rule as run_shell_normal: after a successful reload the
+        // session runs on the default file, so display that path.
         let config_path = aish_config::ConfigLoader::default_config_path();
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
             config = loaded;
+            config_source = Some(config_path);
         }
     }
 
-    let config_source = cli_config_source();
     match aish_shell::AishShell::resume(config, session_id, config_source.as_deref()) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
