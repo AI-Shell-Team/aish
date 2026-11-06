@@ -7,6 +7,7 @@
 pub struct WebSearchConfig {
     pub brave_api_key: String,
     pub tavily_api_key: String,
+    pub keenable_api_key: String,
     pub searxng_endpoint: String,
     /// Per-provider transport timeout in seconds (clamped to 1..=300).
     pub timeout_secs: u64,
@@ -19,6 +20,7 @@ impl Default for WebSearchConfig {
         Self {
             brave_api_key: String::new(),
             tavily_api_key: String::new(),
+            keenable_api_key: String::new(),
             searxng_endpoint: String::new(),
             timeout_secs: 60,
             default_limit: 10,
@@ -33,6 +35,7 @@ impl WebSearchConfig {
         Self {
             brave_api_key: std::env::var("BRAVE_API_KEY").unwrap_or_default(),
             tavily_api_key: std::env::var("TAVILY_API_KEY").unwrap_or_default(),
+            keenable_api_key: std::env::var("KEENABLE_API_KEY").unwrap_or_default(),
             searxng_endpoint: std::env::var("SEARXNG_ENDPOINT").unwrap_or_default(),
             timeout_secs: std::env::var("AISH_WEB_SEARCH_TIMEOUT_SECS")
                 .ok()

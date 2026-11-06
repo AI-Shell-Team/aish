@@ -211,6 +211,123 @@ impl SearchProvider for TavilyProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Keenable (KEENABLE_API_KEY) — POST /v1/search
+// ---------------------------------------------------------------------------
+
+pub struct KeenableProvider {
+    pub api_key: String,
+}
+
+const KEENABLE_ENDPOINT: &str = "https://api.keenable.ai/v1/search";
+
+#[derive(Debug, Deserialize)]
+struct KeenableApiResponse {
+    #[serde(default)]
+    results: Vec<KeenableResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KeenableResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    published_at: Option<String>,
+}
+
+/// Keenable client with redirects disabled so the API key cannot leak cross-host.
+fn keenable_client() -> Result<reqwest::Client, SearchProviderError> {
+    reqwest::Client::builder()
+        .user_agent(user_agent())
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| SearchProviderError::Network(e.to_string()))
+}
+
+impl SearchProvider for KeenableProvider {
+    fn id(&self) -> &'static str {
+        "keenable"
+    }
+
+    fn is_available(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = SearchResponse> + Send + 'a>> {
+        Box::pin(async move {
+            if self.api_key.trim().is_empty() {
+                return SearchResponse::failed("keenable", SearchProviderError::Auth);
+            }
+            // Never follow redirects: reqwest would forward the custom X-API-Key
+            // header to whatever host the redirect points at.
+            let client = match keenable_client() {
+                Ok(client) => client,
+                Err(err) => return SearchResponse::failed("keenable", err),
+            };
+            let response = match client
+                .post(KEENABLE_ENDPOINT)
+                .header("X-API-Key", self.api_key.trim())
+                .json(&serde_json::json!({
+                    "query": query,
+                    "max_results": limit,
+                }))
+                .timeout(timeout)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => return SearchResponse::failed("keenable", transport_error(&err)),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return SearchResponse::failed("keenable", status_error(status));
+            }
+            let payload: KeenableApiResponse = match read_response_json(response).await {
+                Ok(payload) => payload,
+                Err(err) => return SearchResponse::failed("keenable", err),
+            };
+
+            let fetched_at = epoch_now();
+            let results = payload
+                .results
+                .into_iter()
+                .filter(|r| !r.url.is_empty())
+                .take(limit)
+                .map(|r| {
+                    let snippet = if r.snippet.trim().is_empty() {
+                        r.description
+                    } else {
+                        r.snippet
+                    };
+                    SearchResult {
+                        title: r.title,
+                        url: r.url,
+                        snippet: (!snippet.is_empty()).then_some(snippet),
+                        published: r.published_at,
+                        fetched_at,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if results.is_empty() {
+                return SearchResponse::failed("keenable", SearchProviderError::NoResults);
+            }
+            SearchResponse::ok("keenable", results)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SearXNG (self-hosted, SEARXNG_ENDPOINT) — omp: GET /search?format=json
 // ---------------------------------------------------------------------------
 
