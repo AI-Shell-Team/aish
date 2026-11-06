@@ -1406,7 +1406,14 @@ impl AishShell {
     }
 
     /// Create a new shell instance from the given configuration.
-    pub fn new(config: ConfigModel) -> aish_core::Result<Self> {
+    ///
+    /// `config_source` is the path the config was actually loaded from
+    /// (`--config` or the resolved default); the welcome panel displays it
+    /// instead of a hardcoded `~/.config/aish/config.yaml`.
+    pub fn new(
+        config: ConfigModel,
+        config_source: Option<&std::path::Path>,
+    ) -> aish_core::Result<Self> {
         // Set terminal defaults and load bash environment
         environment::ensure_terminal_defaults();
         let _new_vars = environment::load_bash_env();
@@ -2689,6 +2696,26 @@ impl AishShell {
                     None,
                 )
             };
+        // The "config:" line shows the file the session actually loaded.
+        // Only the home prefix collapses to `~` — no middle-component
+        // abbreviation: dot-directories would shrink to "." (`~/.config/...`
+        // → `~/./a/...`), which is unreadable, and the panel has room for
+        // the full path.
+        let home_for_display = dirs::home_dir()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let config_path_display = match config_source {
+            Some(path) => path.to_string_lossy().to_string(),
+            None => aish_config::ConfigLoader::default_config_path()
+                .to_string_lossy()
+                .to_string(),
+        };
+        let config_path_display =
+            if !home_for_display.is_empty() && config_path_display.starts_with(&home_for_display) {
+                format!("~{}", &config_path_display[home_for_display.len()..])
+            } else {
+                config_path_display
+            };
         print!(
             "{}",
             prompt::render_welcome(
@@ -2697,6 +2724,7 @@ impl AishShell {
                 skill_count,
                 changelog.clone(),
                 changelog_title_override.as_deref(),
+                &config_path_display,
             )
         );
         let _ = io::stdout().flush();
@@ -2824,8 +2852,12 @@ impl AishShell {
     }
 
     /// Create a new shell instance and immediately restore an existing session.
-    pub fn resume(config: ConfigModel, session_id: &str) -> aish_core::Result<Self> {
-        let mut shell = Self::new(config)?;
+    pub fn resume(
+        config: ConfigModel,
+        session_id: &str,
+        config_source: Option<&std::path::Path>,
+    ) -> aish_core::Result<Self> {
+        let mut shell = Self::new(config, config_source)?;
         let transient_session_uuid = shell.session_uuid.clone();
         if let Err(err) = shell.resume_session_with_options(session_id, false, false) {
             if let Some(ref store) = shell.session_store {
@@ -15907,7 +15939,7 @@ mod resume_audit_uuid_tests {
             ..Default::default()
         };
 
-        let mut shell = AishShell::new(config.clone()).expect("shell construction");
+        let mut shell = AishShell::new(config.clone(), None).expect("shell construction");
         assert!(
             shell.session_store.is_some(),
             "temp session db should open (`session_db_path`)"
@@ -16069,7 +16101,7 @@ mod privilege_dispatch_tests {
             session_db_path: Some(db_path.display().to_string()),
             ..Default::default()
         };
-        let shell = AishShell::new(config).expect("shell construction");
+        let shell = AishShell::new(config, None).expect("shell construction");
         (tmp, env, shell)
     }
 

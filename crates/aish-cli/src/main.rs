@@ -273,6 +273,9 @@ enum RegistryAction {
 fn main() {
     let cli = Cli::parse();
     let config_path = cli.config.clone();
+    // Record the explicit --config for the welcome panel ("config:" line)
+    // before anything else reads it; see cli_config_source().
+    CLI_CONFIG_PATH_EXPLICIT.with(|cell| *cell.borrow_mut() = config_path.clone());
     let model_override = cli.model.clone();
     let api_base_override = cli.api_base.clone();
     let api_key_override = cli.api_key.clone();
@@ -1077,7 +1080,32 @@ fn default_session_index(
     best.map(|(idx, _)| idx)
 }
 
-/// Run the normal (non-daemon) AishShell.
+/// Resolve the config path the session actually loaded: the explicit
+/// `--config` value when given, otherwise the resolved default (honoring
+/// `AISH_CONFIG_DIR`). Feeds the welcome panel's "config:" line so it shows
+/// the real file. Daemon children inherit the path via `AISH_DAEMON_CONFIG`.
+fn cli_config_source() -> Option<std::path::PathBuf> {
+    Some(
+        CLI_CONFIG_PATH
+            .get_or_init(|| {
+                std::env::var("AISH_DAEMON_CONFIG")
+                    .ok()
+                    .or_else(|| CLI_CONFIG_PATH_EXPLICIT.with(|cell| cell.borrow().clone()))
+            })
+            .clone()
+            .map_or_else(
+                || aish_config::ConfigLoader::default_config_path(),
+                std::path::PathBuf::from,
+            ),
+    )
+}
+
+thread_local! {
+    static CLI_CONFIG_PATH_EXPLICIT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+static CLI_CONFIG_PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
 fn run_shell_normal(mut config: aish_config::ConfigModel) {
     // Arm the terminal-death watchdog only for the standalone shell: this
     // function is reached from the daemon-attach fallbacks, so arming here
@@ -1098,7 +1126,8 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
             config = loaded;
         }
     }
-    match aish_shell::AishShell::new(config) {
+    let config_source = cli_config_source();
+    match aish_shell::AishShell::new(config, config_source.as_deref()) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
                 shell.shutdown();
@@ -1359,7 +1388,8 @@ fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &st
         }
     }
 
-    match aish_shell::AishShell::resume(config, session_id) {
+    let config_source = cli_config_source();
+    match aish_shell::AishShell::resume(config, session_id, config_source.as_deref()) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
                 shell.shutdown();
