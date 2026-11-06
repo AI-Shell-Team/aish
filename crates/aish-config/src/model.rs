@@ -719,6 +719,12 @@ pub struct ConfigModel {
     /// enable switch).
     #[serde(default)]
     pub project_instructions: ProjectInstructionsConfig,
+    /// Runtime-only: the file this config was loaded from. Set by
+    /// `ConfigLoader::load` and `apply_env_overrides` consumers; never
+    /// serialized back to disk (a `--config` path must not leak into a
+    /// different config file written by `/setting`).
+    #[serde(skip)]
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 impl Default for ConfigModel {
@@ -776,6 +782,7 @@ impl Default for ConfigModel {
             fallback_revert_on_cooldown: default_true(),
             check_update_on_startup: default_true(),
             project_instructions: ProjectInstructionsConfig::default(),
+            source_path: None,
         }
     }
 }

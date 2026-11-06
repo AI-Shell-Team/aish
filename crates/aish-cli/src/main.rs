@@ -273,6 +273,9 @@ enum RegistryAction {
 fn main() {
     let cli = Cli::parse();
     let config_path = cli.config.clone();
+    // Record the explicit --config for the welcome panel ("config:" line)
+    // before anything else reads it; see cli_config_source().
+    CLI_CONFIG_PATH_EXPLICIT.with(|cell| *cell.borrow_mut() = config_path.clone());
     let model_override = cli.model.clone();
     let api_base_override = cli.api_base.clone();
     let api_key_override = cli.api_key.clone();
@@ -398,7 +401,19 @@ fn main() {
                 shown_path
             );
             tracing::debug!("Config load failed (using defaults): {}", e);
-            aish_config::ConfigModel::default()
+            // Keep the selected path on the fallback model: with an
+            // invalid YAML selected via --config, setup and later saves
+            // must still target that file (reporting/fixing it), not
+            // silently redirect to the default config. Resolve against
+            // the startup working directory exactly as a successful
+            // load does, so a relative --config survives later `cd`s.
+            let mut fallback = aish_config::ConfigModel::default();
+            if let Some(p) = config_path.as_deref() {
+                fallback.source_path = Some(
+                    aish_config::ConfigLoader::resolve_against_startup_cwd(std::path::Path::new(p)),
+                );
+            }
+            fallback
         }
     };
 
@@ -1077,13 +1092,36 @@ fn default_session_index(
     best.map(|(idx, _)| idx)
 }
 
-/// Run the normal (non-daemon) AishShell.
+/// Resolve the config path the session actually loaded. Prefer the loader's
+/// resolved `config.source_path` (absolute, honors `AISH_CONFIG_DIR`, already
+/// set on the fallback model when loading failed); fall back to the explicit
+/// `--config` value, then the resolved default. Feeds the welcome panel's
+/// "config:" line so it shows the real file — the same path saves target.
+fn cli_config_source(config: &aish_config::ConfigModel) -> Option<std::path::PathBuf> {
+    if let Some(p) = &config.source_path {
+        return Some(std::path::PathBuf::from(p));
+    }
+    CLI_CONFIG_PATH_EXPLICIT
+        .with(|cell| cell.borrow().clone())
+        .map_or_else(
+            || aish_config::ConfigLoader::default_config_path(),
+            std::path::PathBuf::from,
+        )
+        .into()
+}
+
+thread_local! {
+    static CLI_CONFIG_PATH_EXPLICIT: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn run_shell_normal(mut config: aish_config::ConfigModel) {
     // Arm the terminal-death watchdog only for the standalone shell: this
     // function is reached from the daemon-attach fallbacks, so arming here
     // never covers run_pty_raw_attach (whose exit(0) mid-attach would skip
     // backend detach and termios restore).
     tty_watchdog::arm_for_interactive();
+    let mut config_source = cli_config_source(&config);
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
         if !run_setup(&mut config) {
@@ -1093,12 +1131,20 @@ fn run_shell_normal(mut config: aish_config::ConfigModel) {
             );
             std::process::exit(1);
         }
-        let config_path = aish_config::ConfigLoader::default_config_path();
+        // The wizard writes the session's config file (config.source_path);
+        // after a successful reload the session runs on that file, so the
+        // panel must display it — not the (incomplete) `--config` the launch
+        // started from.
+        let config_path = config.source_path.clone().map_or_else(
+            || aish_config::ConfigLoader::default_config_path(),
+            std::path::PathBuf::from,
+        );
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
             config = loaded;
+            config_source = Some(config_path);
         }
     }
-    match aish_shell::AishShell::new(config) {
+    match aish_shell::AishShell::new(config, config_source.as_deref()) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
                 shell.shutdown();
@@ -1343,6 +1389,7 @@ fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &st
     // Standalone resume: same watchdog scoping as run_shell_normal — the
     // daemon-attach path above (run_shell_resume) must stay unwatched.
     tty_watchdog::arm_for_interactive();
+    let mut config_source = cli_config_source(&config);
     // Auto-trigger setup wizard on first run if config is incomplete
     if aish_shell::needs_interactive_setup(&config) {
         println!("\x1b[33mConfiguration incomplete — launching setup wizard.\x1b[0m\n");
@@ -1353,13 +1400,20 @@ fn run_shell_normal_resume(mut config: aish_config::ConfigModel, session_id: &st
             );
             std::process::exit(1);
         }
-        let config_path = aish_config::ConfigLoader::default_config_path();
+        // Same rule as run_shell_normal: after a successful reload the
+        // session runs on the wizard's file (config.source_path), so display
+        // that path.
+        let config_path = config.source_path.clone().map_or_else(
+            || aish_config::ConfigLoader::default_config_path(),
+            std::path::PathBuf::from,
+        );
         if let Ok(loaded) = aish_config::ConfigLoader::load(Some(&config_path)) {
             config = loaded;
+            config_source = Some(config_path);
         }
     }
 
-    match aish_shell::AishShell::resume(config, session_id) {
+    match aish_shell::AishShell::resume(config, session_id, config_source.as_deref()) {
         Ok(mut shell) => {
             if let Err(e) = shell.run() {
                 shell.shutdown();
@@ -1403,16 +1457,16 @@ fn show_info(config: &aish_config::ConfigModel) {
 }
 
 fn run_setup(config: &mut aish_config::ConfigModel) -> bool {
-    let config_dir = aish_config::ConfigLoader::default_config_path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            dirs::config_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("aish")
-        });
+    // The wizard reads and writes the exact file the session loaded (a
+    // `--config` launch must round-trip to its own file), falling back to
+    // the default config path when no source was recorded.
+    let config_file = config
+        .source_path
+        .clone()
+        .unwrap_or_else(aish_config::ConfigLoader::default_config_path);
+    config.source_path = Some(config_file.clone());
 
-    let mut wizard = aish_shell::wizard::SetupWizard::new(config_dir);
+    let mut wizard = aish_shell::wizard::SetupWizard::new(config_file);
     match wizard.run() {
         Ok(new_config) => {
             *config = aish_shell::wizard::apply_setup_result(config, new_config);

@@ -156,7 +156,7 @@ fn spawn_git_dirty_refresh(cwd: String) {
 /// while shortening middle components to their first character.
 ///
 /// Example: `~/nfs/xzx/github/aish` -> `~/n/x/g/aish`
-fn abbreviate_path(path: &str, home: &str) -> String {
+pub(crate) fn abbreviate_path(path: &str, home: &str) -> String {
     let display = if !home.is_empty() && path.starts_with(home) {
         format!("~{}", &path[home.len()..])
     } else {
@@ -465,12 +465,18 @@ pub fn render_prompt(
 /// header inside the panel — used by the upgrade range summary so the
 /// panel shows "更新内容（0.3.12 → 0.3.13）：" instead of a single-version
 /// title.
+///
+/// `config_path_display` is the config file the session actually loaded
+/// (`--config` override or the resolved default), abbreviated for display —
+/// NOT the hardcoded `~/.config/aish/config.yaml`: users launching with
+/// `--config` saw a wrong path in the panel (issue reported 2026-11-05).
 pub fn render_welcome(
     version: &str,
     model: &str,
     skill_count: usize,
     changelog: Vec<aish_i18n::changelog::ChangelogEntry>,
     changelog_title_override: Option<&str>,
+    config_path_display: &str,
 ) -> String {
     let mut out = String::new();
     out.push('\n');
@@ -502,7 +508,6 @@ pub fn render_welcome(
     let model_label = t("shell.welcome2.label.model");
     let config_label = t("shell.welcome2.label.config");
     let skills_label = t("cli.startup.label.skills");
-    let config_path = "~/.config/aish/config.yaml";
     let model_hint = t("shell.welcome2.model_hint");
     let skills_suffix = t("shell.welcome2.skills_loaded_suffix");
 
@@ -514,7 +519,7 @@ pub fn render_welcome(
             model,
             theme::faint(&model_hint)
         ),
-        format!("  {}: {}", theme::bold(&config_label), config_path),
+        format!("  {}: {}", theme::bold(&config_label), config_path_display),
         format!(
             "  {}: {} {}",
             theme::bold(&skills_label),
@@ -1001,7 +1006,14 @@ mod tests {
             text: "some removed thing".to_string(),
         };
         let range_title = "更新内容（0.3.12 → 0.3.13）：";
-        let result = render_welcome("0.3.13", "gpt-4", 0, vec![entry], Some(range_title));
+        let result = render_welcome(
+            "0.3.13",
+            "gpt-4",
+            0,
+            vec![entry],
+            Some(range_title),
+            "~/.config/aish/config.yaml",
+        );
         assert!(
             result.contains(range_title),
             "panel should render the override range title"
@@ -1029,7 +1041,14 @@ mod tests {
             category: "Added".to_string(),
             text: "X".repeat(120),
         };
-        let result = render_welcome("0.3.5", "gpt-4", 0, vec![entry], None);
+        let result = render_welcome(
+            "0.3.5",
+            "gpt-4",
+            0,
+            vec![entry],
+            None,
+            "~/.config/aish/config.yaml",
+        );
         let lines: Vec<&str> = result.lines().collect();
         let truncated_line = lines
             .iter()
@@ -1113,6 +1132,7 @@ mod tests {
             8,
             vec![mk("short change"), mk("another"), mk("third")],
             None,
+            "~/.config/aish/config.yaml",
         );
         let panel_lines: Vec<&str> = result
             .lines()
@@ -1141,7 +1161,14 @@ mod tests {
 
     #[test]
     fn test_render_welcome_contains_logo() {
-        let result = render_welcome("0.1.0", "gpt-4", 3, vec![], None);
+        let result = render_welcome(
+            "0.1.0",
+            "gpt-4",
+            3,
+            vec![],
+            None,
+            "~/.config/aish/config.yaml",
+        );
         assert!(result.contains("█████"), "should contain ASCII art logo");
         assert!(result.contains("╭"), "should contain rounded box top-left");
         assert!(result.contains("╮"), "should contain rounded box top-right");
@@ -1163,7 +1190,14 @@ mod tests {
 
     #[test]
     fn test_render_welcome_contains_quick_start() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
+        let result = render_welcome(
+            "0.1.0",
+            "gpt-4",
+            0,
+            vec![],
+            None,
+            "~/.config/aish/config.yaml",
+        );
         assert!(result.contains("•"), "should contain bullet points");
         assert!(result.contains("ls"), "should contain ls example command");
         assert!(result.contains("top"), "should contain top example command");
@@ -1173,7 +1207,14 @@ mod tests {
 
     #[test]
     fn test_render_welcome_uses_default_logo_color() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
+        let result = render_welcome(
+            "0.1.0",
+            "gpt-4",
+            0,
+            vec![],
+            None,
+            "~/.config/aish/config.yaml",
+        );
         assert!(
             !result.contains("\x1b[38;5;250m"),
             "logo should not use grayscale gradient colors"
@@ -1182,7 +1223,14 @@ mod tests {
 
     #[test]
     fn test_render_welcome_starts_with_blank_line() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
+        let result = render_welcome(
+            "0.1.0",
+            "gpt-4",
+            0,
+            vec![],
+            None,
+            "~/.config/aish/config.yaml",
+        );
         assert!(
             result.starts_with('\n'),
             "welcome banner should leave a blank line above the logo"
@@ -1190,8 +1238,31 @@ mod tests {
     }
 
     #[test]
+    fn test_render_welcome_shows_the_actual_config_path() {
+        // The panel's "config:" line must show the config the session really
+        // loaded, not the hardcoded default: `--config` launches were
+        // displaying `~/.config/aish/config.yaml` for a different file.
+        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None, "~/cfg/custom.yaml");
+        assert!(
+            result.contains("~/cfg/custom.yaml"),
+            "panel should display the actual config path"
+        );
+        assert!(
+            !result.contains("~/.config/aish/config.yaml"),
+            "panel must not display a hardcoded default path"
+        );
+    }
+
+    #[test]
     fn test_render_welcome_aligns_quick_start_content() {
-        let result = render_welcome("0.1.0", "gpt-4", 0, vec![], None);
+        let result = render_welcome(
+            "0.1.0",
+            "gpt-4",
+            0,
+            vec![],
+            None,
+            "~/.config/aish/config.yaml",
+        );
         let item1_prefix = t("shell.welcome2.quick_start.item1_prefix");
         let item2_prefix = t("shell.welcome2.quick_start.item2_prefix");
         let item3_prefix = t("shell.welcome2.quick_start.item3_prefix");

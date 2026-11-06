@@ -330,7 +330,10 @@ pub enum WizardState {
 
 /// Wizard configuration and state.
 pub struct SetupWizard {
-    config_dir: PathBuf,
+    /// Full path of the config file the wizard reads and writes — NOT a
+    /// directory. A session launched with `--config` must round-trip its
+    /// setup result to the same file that later `/setting` saves target.
+    config_path: PathBuf,
     state: WizardState,
     selected_provider: Option<ProviderInfo>,
     api_base: Option<String>,
@@ -357,9 +360,12 @@ fn map_codex_login_err(e: aish_llm::providers::codex::CodexError) -> AishError {
 }
 
 impl SetupWizard {
-    pub fn new(config_dir: PathBuf) -> Self {
+    /// Create a wizard that reads and writes `config_path` — the full file
+    /// path, not a directory. Pass the session's `config_save_path()` so a
+    /// `--config` launch round-trips its setup result to its own file.
+    pub fn new(config_path: PathBuf) -> Self {
         Self {
-            config_dir,
+            config_path,
             state: WizardState::ProviderSelection,
             selected_provider: None,
             api_base: None,
@@ -371,9 +377,9 @@ impl SetupWizard {
         }
     }
 
-    /// Get the config directory path.
-    pub fn config_dir(&self) -> &PathBuf {
-        &self.config_dir
+    /// Get the config file path the wizard reads and writes.
+    pub fn config_path(&self) -> &PathBuf {
+        &self.config_path
     }
 
     fn set_normalized_model(&mut self, raw: &str) {
@@ -1182,7 +1188,7 @@ impl SetupWizard {
 
     /// Load existing config from disk, or defaults when missing.
     fn load_existing_config(&self) -> ConfigModel {
-        let config_path = self.config_dir.join("config.yaml");
+        let config_path = self.config_path.clone();
         aish_config::ConfigLoader::load(Some(&config_path)).unwrap_or_default()
     }
 
@@ -1215,7 +1221,7 @@ impl SetupWizard {
         // Save to config file. ConfigLoader::save ensures the parent
         // directory exists (first-run case where ~/.config/aish/ does
         // not yet exist) and reports the path in the error message.
-        let config_path = self.config_dir.join("config.yaml");
+        let config_path = self.config_path.clone();
         aish_config::ConfigLoader::save(&config, &config_path)?;
 
         let path = format_config_path(&config_path);
@@ -1342,7 +1348,7 @@ mod tests {
 
     #[test]
     fn test_wizard_state_transitions() {
-        let wizard = SetupWizard::new(PathBuf::from("/tmp/test"));
+        let wizard = SetupWizard::new(PathBuf::from("/tmp/test/config.yaml"));
         assert_eq!(wizard.state, WizardState::ProviderSelection);
         assert!(wizard.selected_provider.is_none());
         assert!(wizard.selected_model.is_none());
