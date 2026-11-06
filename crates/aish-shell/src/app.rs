@@ -1406,7 +1406,14 @@ impl AishShell {
     }
 
     /// Create a new shell instance from the given configuration.
-    pub fn new(config: ConfigModel) -> aish_core::Result<Self> {
+    ///
+    /// `config_source` is the path the config was actually loaded from
+    /// (`--config` or the resolved default); the welcome panel displays it
+    /// instead of a hardcoded `~/.config/aish/config.yaml`.
+    pub fn new(
+        config: ConfigModel,
+        config_source: Option<&std::path::Path>,
+    ) -> aish_core::Result<Self> {
         // Set terminal defaults and load bash environment
         environment::ensure_terminal_defaults();
         let _new_vars = environment::load_bash_env();
@@ -2689,6 +2696,26 @@ impl AishShell {
                     None,
                 )
             };
+        // The "config:" line shows the file the session actually loaded.
+        // Only the home prefix collapses to `~` — no middle-component
+        // abbreviation: dot-directories would shrink to "." (`~/.config/...`
+        // → `~/./a/...`), which is unreadable, and the panel has room for
+        // the full path. The prefix must match on a path-component boundary
+        // (`strip_prefix`): a plain string `starts_with` would turn
+        // `/home/alice/x.yaml` into `~ice/x.yaml` when home is `/home/al`.
+        let home_for_display = dirs::home_dir().unwrap_or_default();
+        let config_path: std::borrow::Cow<'_, std::path::Path> = match config_source {
+            Some(path) => std::borrow::Cow::Borrowed(path),
+            None => std::borrow::Cow::Owned(aish_config::ConfigLoader::default_config_path()),
+        };
+        let config_path_display = match config_path.strip_prefix(&home_for_display) {
+            // The path is exactly the home dir itself — no file to show.
+            Ok(rest) if rest.as_os_str().is_empty() => {
+                home_for_display.to_string_lossy().to_string()
+            }
+            Ok(rest) => format!("~{}{}", std::path::MAIN_SEPARATOR, rest.to_string_lossy()),
+            Err(_) => config_path.to_string_lossy().to_string(),
+        };
         print!(
             "{}",
             prompt::render_welcome(
@@ -2697,6 +2724,7 @@ impl AishShell {
                 skill_count,
                 changelog.clone(),
                 changelog_title_override.as_deref(),
+                &config_path_display,
             )
         );
         let _ = io::stdout().flush();
@@ -2824,8 +2852,15 @@ impl AishShell {
     }
 
     /// Create a new shell instance and immediately restore an existing session.
-    pub fn resume(config: ConfigModel, session_id: &str) -> aish_core::Result<Self> {
-        let mut shell = Self::new(config)?;
+    ///
+    /// `config_source` follows the same rule as [`Self::new`]: the path the
+    /// config was actually loaded from, shown in the welcome panel.
+    pub fn resume(
+        config: ConfigModel,
+        session_id: &str,
+        config_source: Option<&std::path::Path>,
+    ) -> aish_core::Result<Self> {
+        let mut shell = Self::new(config, config_source)?;
         let transient_session_uuid = shell.session_uuid.clone();
         if let Err(err) = shell.resume_session_with_options(session_id, false, false) {
             if let Some(ref store) = shell.session_store {
@@ -8515,7 +8550,7 @@ impl AishShell {
     /// atomic (temp file + rename, permissions preserved). Comments are not
     /// preserved — the YAML is re-serialized.
     fn persist_mcp_config(&self) -> Result<(), String> {
-        let path = aish_config::ConfigLoader::default_config_path();
+        let path = self.config_save_path();
         let mcp = self.config.mcp.clone();
         aish_config::ConfigLoader::update_raw(&path, |document| {
             aish_mcp::commands::merge_into_document(document, &mcp)
@@ -9225,9 +9260,20 @@ impl AishShell {
         );
     }
 
+    /// The file this session's config was loaded from — the save target for
+    /// `/setting`, `/model` and every other config writer. Falls back to the
+    /// default path when the loader did not record one (e.g. a
+    /// programmatically built config in tests).
+    fn config_save_path(&self) -> std::path::PathBuf {
+        self.config
+            .source_path
+            .clone()
+            .unwrap_or_else(aish_config::ConfigLoader::default_config_path)
+    }
+
     /// Persist the current config to disk, then rebuild the live rotation state.
     fn persist_config_and_rebuild_rotation(&mut self) {
-        let config_path = aish_config::ConfigLoader::default_config_path();
+        let config_path = self.config_save_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
             eprintln!(
                 "{}",
@@ -9646,7 +9692,7 @@ impl AishShell {
         self.config.model = new_model.clone();
         self.refresh_config_dependent_tools();
         // Persist to config file
-        let config_path = aish_config::ConfigLoader::default_config_path();
+        let config_path = self.config_save_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
             eprintln!(
                 "{}",
@@ -10194,7 +10240,7 @@ impl AishShell {
 
     /// Save config to disk and print a confirmation.
     fn save_config_and_print(&self) {
-        let path = aish_config::ConfigLoader::default_config_path();
+        let path = self.config_save_path();
         match aish_config::ConfigLoader::save(&self.config, &path) {
             Ok(()) => {}
             Err(e) => eprintln!("Failed to save config: {}", e),
@@ -10294,7 +10340,7 @@ impl AishShell {
             self.config = trial;
 
             // Persist to disk.
-            let config_path = aish_config::ConfigLoader::default_config_path();
+            let config_path = self.config_save_path();
             if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
                 eprintln!(
                     "{}",
@@ -10794,16 +10840,12 @@ impl AishShell {
 
     /// Interactive setup wizard for configuring provider, API key, model, etc.
     fn run_setup_wizard(&mut self) {
-        let config_dir = aish_config::ConfigLoader::default_config_path()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| {
-                dirs::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("aish")
-            });
+        // The wizard reads and writes the same file later `/setting` saves
+        // target — a `--config` session must not split its setup result
+        // across two files.
+        let config_file = self.config_save_path();
 
-        let mut wizard = crate::wizard::SetupWizard::new(config_dir);
+        let mut wizard = crate::wizard::SetupWizard::new(config_file);
         match wizard.run() {
             Ok(new_config) => {
                 self.config = crate::wizard::apply_setup_result(&self.config, new_config);
@@ -15907,7 +15949,7 @@ mod resume_audit_uuid_tests {
             ..Default::default()
         };
 
-        let mut shell = AishShell::new(config.clone()).expect("shell construction");
+        let mut shell = AishShell::new(config.clone(), None).expect("shell construction");
         assert!(
             shell.session_store.is_some(),
             "temp session db should open (`session_db_path`)"
@@ -16069,7 +16111,7 @@ mod privilege_dispatch_tests {
             session_db_path: Some(db_path.display().to_string()),
             ..Default::default()
         };
-        let shell = AishShell::new(config).expect("shell construction");
+        let shell = AishShell::new(config, None).expect("shell construction");
         (tmp, env, shell)
     }
 

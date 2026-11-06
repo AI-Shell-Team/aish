@@ -10,6 +10,22 @@ use crate::model::ConfigModel;
 pub struct ConfigLoader;
 
 impl ConfigLoader {
+    /// Resolve a (possibly relative) config path against the startup working
+    /// directory NOW: the shell later `cd`s freely, and a relative
+    /// `--config custom.yaml` resolved at save time would target a different
+    /// file (issue: source_path must survive directory changes). Callers
+    /// storing `source_path` — including fallback models after a failed
+    /// load — must go through this so every writer resolves identically.
+    pub fn resolve_against_startup_cwd(path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(path)
+        }
+    }
+
     /// Load config from the given file, falling back to the default path.
     ///
     /// If the file does not exist a default config is returned (with env
@@ -27,6 +43,7 @@ impl ConfigLoader {
             Some(p) => p.to_path_buf(),
             None => Self::default_config_path(),
         };
+        let path = Self::resolve_against_startup_cwd(&path);
 
         let mut config = if path.exists() {
             debug!(path = %path.display(), "loading config file");
@@ -131,6 +148,11 @@ impl ConfigLoader {
         };
 
         Self::apply_env_overrides(&mut config);
+        // Remember where this config came from so `/setting` (and every other
+        // writer) persists back to the same file instead of always writing
+        // the default path — a `--config` launch must round-trip to its own
+        // file. Runtime-only: `source_path` is `#[serde(skip)]`.
+        config.source_path = Some(path);
         Ok(config)
     }
 
@@ -471,6 +493,52 @@ mod tests {
         value
             .as_mapping()
             .and_then(|map| map.get(serde_yaml::Value::String(key.to_string())).cloned())
+    }
+
+    #[test]
+    fn load_records_the_source_path() {
+        // `/setting` and every other config writer persist to
+        // `config.source_path`, so a `--config` launch must round-trip to its
+        // own file instead of always writing the default path. The explicit
+        // path wins over the default; a missing file still records where the
+        // defaults "came from".
+        //
+        // The `load(None)` case runs with `AISH_CONFIG_DIR` pointed at an
+        // isolated temp dir: without it, `default_config_path()` would open
+        // (and possibly migrate) the developer's real ~/.config/aish/config.yaml.
+        struct EnvGuard {
+            saved: Option<Option<std::ffi::OsString>>,
+        }
+        impl EnvGuard {
+            fn set(key: &str, value: &std::path::Path) -> Self {
+                let saved = std::env::var_os(key);
+                std::env::set_var(key, value);
+                Self { saved: Some(saved) }
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.saved.take() {
+                    Some(Some(v)) => std::env::set_var("AISH_CONFIG_DIR", v),
+                    _ => std::env::remove_var("AISH_CONFIG_DIR"),
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("custom.yaml");
+        std::fs::write(&explicit, "model: glm-4.7\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&explicit)).unwrap();
+        assert_eq!(config.source_path.as_deref(), Some(explicit.as_path()));
+
+        let isolated_default = dir.path().join("isolated-default").join("config.yaml");
+        let _env = EnvGuard::set("AISH_CONFIG_DIR", isolated_default.parent().unwrap());
+        let config = ConfigLoader::load(None).unwrap();
+        assert_eq!(
+            config.source_path.as_deref(),
+            Some(isolated_default.as_path())
+        );
     }
 
     #[test]
