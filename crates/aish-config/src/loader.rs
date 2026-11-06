@@ -10,6 +10,22 @@ use crate::model::ConfigModel;
 pub struct ConfigLoader;
 
 impl ConfigLoader {
+    /// Resolve a (possibly relative) config path against the startup working
+    /// directory NOW: the shell later `cd`s freely, and a relative
+    /// `--config custom.yaml` resolved at save time would target a different
+    /// file (issue: source_path must survive directory changes). Callers
+    /// storing `source_path` — including fallback models after a failed
+    /// load — must go through this so every writer resolves identically.
+    pub fn resolve_against_startup_cwd(path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(path)
+        }
+    }
+
     /// Load config from the given file, falling back to the default path.
     ///
     /// If the file does not exist a default config is returned (with env
@@ -27,17 +43,7 @@ impl ConfigLoader {
             Some(p) => p.to_path_buf(),
             None => Self::default_config_path(),
         };
-        // Resolve against the startup working directory NOW: the shell later
-        // `cd`s freely, and a relative `--config custom.yaml` resolved at
-        // save time would target a different file (issue: source_path must
-        // survive directory changes).
-        let path = if path.is_absolute() {
-            path
-        } else {
-            std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(&path)
-        };
+        let path = Self::resolve_against_startup_cwd(&path);
 
         let mut config = if path.exists() {
             debug!(path = %path.display(), "loading config file");
