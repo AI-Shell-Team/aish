@@ -94,8 +94,35 @@ impl ConfigLoader {
                 let migrated = serde_yaml::to_string(&value).map_err(|e| {
                     AishError::Config(format!("failed to serialize migrated config: {e}"))
                 })?;
-                Self::write_atomic(&path, &migrated)?;
-                debug!(path = %path.display(), "migrated config: added missing fields");
+                // The parsed-and-backfilled config above is valid: a failed
+                // persistence (read-only bind mount -> EROFS/EBUSY on rename,
+                // issue #649) must not turn it into an error and fall back to
+                // defaults, which hid the real cause behind "configuration
+                // incomplete" and pushed users into the setup wizard. Keep
+                // running on the in-memory config and surface the write
+                // failure as a warning; the file stays byte-identical and
+                // every later load retries the migration.
+                //
+                // The warning is deduplicated per path: startup loads the
+                // config twice (an early best-effort load for the log level
+                // and the real one), and repeating the same warning for the
+                // same file is noise.
+                static WARNED: std::sync::LazyLock<
+                    parking_lot::Mutex<std::collections::HashSet<PathBuf>>,
+                > = std::sync::LazyLock::new(|| {
+                    parking_lot::Mutex::new(std::collections::HashSet::new())
+                });
+                let mut warned = WARNED.lock();
+                if let Err(e) = Self::write_atomic(&path, &migrated) {
+                    if warned.insert(path.to_path_buf()) {
+                        eprintln!(
+                            "warning: could not persist migrated config to {} ({e}). The config was parsed successfully and the session runs on the backfilled defaults in memory; the file itself was left unchanged and will be migrated on the next writable start.",
+                            path.display()
+                        );
+                    }
+                } else {
+                    debug!(path = %path.display(), "migrated config: added missing fields");
+                }
             }
             config
         } else {
@@ -606,6 +633,121 @@ mod tests {
             migrated,
             "a cleaned file must not be rewritten again"
         );
+    }
+
+    #[test]
+    fn load_migration_failure_keeps_the_parsed_config() {
+        // Issue #649: a config on a read-only single-file bind mount fails
+        // the migration rewrite (EBUSY on rename). The parsed config is
+        // valid, so load must return it — with the missing fields backfilled
+        // in memory — instead of erroring into "defaults + setup wizard".
+        // The file stays byte-identical and every later load retries the
+        // migration.
+        //
+        // Deterministic failure fixture: the sibling temp path
+        // (`config.yaml.tmp-<pid>`, see `temp_path`) is pre-created as a
+        // directory, so `write_atomic`'s `File::create` on it fails with
+        // EISDIR regardless of the process's privileges (a root container
+        // with CAP_DAC_OVERRIDE would defeat a mode-0555 fixture).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let original = "model: fixture-path-sentinel\napi_key: fixture-only\n";
+        std::fs::write(&path, original).unwrap();
+        std::fs::create_dir(ConfigLoader::temp_path(&path)).unwrap();
+
+        let config = ConfigLoader::load(Some(&path))
+            .unwrap_or_else(|e| panic!("a failed migration rewrite must not fail the load: {e}"));
+        assert_eq!(config.model, "fixture-path-sentinel");
+        assert_eq!(config.api_key, "fixture-only");
+        // Backfilled in memory only: the file must be untouched...
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "a failed migration must leave the original file byte-identical"
+        );
+        // ...and the failed write must have cleaned up after itself (only
+        // the pre-created temp directory and the config remain).
+        assert!(ConfigLoader::temp_path(&path).is_dir());
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 2, "no temp debris beyond the fixture");
+    }
+
+    #[test]
+    fn load_a_writable_config_still_persists_the_migration() {
+        // The #649 fallback must not swallow the normal path: on a writable
+        // location the migration is still persisted (the wizard's re-load and
+        // later runs rely on the file being complete).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: glm-4.7\napi_key: secret\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&path)).unwrap();
+        assert_eq!(config.model, "glm-4.7");
+        assert_eq!(
+            top_level(&path, "model").and_then(|v| v.as_str().map(String::from)),
+            Some("glm-4.7".to_string()),
+            "the migration must be persisted on a writable location"
+        );
+        assert!(
+            top_level(&path, "auto_suggest").is_some(),
+            "missing fields must be backfilled into the file"
+        );
+    }
+
+    #[test]
+    fn load_still_fails_on_a_malformed_config() {
+        // The #649 fallback covers persistence failures only: a real parse
+        // error must stay an error, not silently become defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: [unclosed\n").unwrap();
+
+        let result = ConfigLoader::load(Some(&path));
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("failed to parse"),
+            "expected a parse error, got: {error}"
+        );
+    }
+
+    /// Serialize tests that mutate process-global environment variables
+    /// (`apply_env_overrides` reads them; a sibling test may be setting or
+    /// removing the same variable concurrently).
+    static ENV_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn load_missing_config_returns_defaults_without_creating_the_file() {
+        // The fourth case in the #649 matrix: no file at all stays the
+        // defaults path and creates nothing (creation is the wizard's job).
+        // Only override-immune fields are compared: `apply_env_overrides`
+        // runs even for a missing file, so a sibling test mutating
+        // `AISH_CODEX_AUTH_PATH` in parallel must not affect this result.
+        let _guard = ENV_TEST_LOCK.lock();
+        let previous_model = std::env::var_os("AISH_MODEL");
+        let previous_api_key = std::env::var_os("AISH_API_KEY");
+        std::env::remove_var("AISH_MODEL");
+        std::env::remove_var("AISH_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent").join("config.yaml");
+
+        let result = ConfigLoader::load(Some(&path));
+        // Restore the overrides whether the load succeeded or failed, so
+        // sibling tests see the original process environment.
+        match previous_model {
+            Some(value) => std::env::set_var("AISH_MODEL", value),
+            None => std::env::remove_var("AISH_MODEL"),
+        }
+        match previous_api_key {
+            Some(value) => std::env::set_var("AISH_API_KEY", value),
+            None => std::env::remove_var("AISH_API_KEY"),
+        }
+        let config = result.unwrap();
+        assert_eq!(config.model, ConfigModel::default().model);
+        assert_eq!(config.api_key, ConfigModel::default().api_key);
+        assert!(!path.exists());
     }
 
     #[cfg(unix)]

@@ -10,6 +10,7 @@ serde_yaml.workspace = true
 dirs.workspace = true
 tracing.workspace = true
 regex.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -92,7 +92,7 @@ fn default_remote_danger_patterns() -> Vec<String> {
 // Memory sub-config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     pub auto_recall: bool,
@@ -117,7 +117,7 @@ impl Default for MemoryConfig {
 // Tool argument preview sub-config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolArgPreviewConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -144,7 +144,7 @@ impl Default for ToolArgPreviewConfig {
 // Output offload sub-config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputOffloadConfig {
     pub base_dir: Option<String>,
@@ -154,7 +154,7 @@ pub struct OutputOffloadConfig {
 // Context auto-compact sub-config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextAutoCompactConfig {
     pub enabled: bool,
@@ -200,7 +200,7 @@ impl Default for ContextAutoCompactConfig {
 
 /// Configuration for inline AI completion (the gray ghost-text suggestions
 /// shown when the user types a `;`/`;`-prefixed AI prompt).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InlineCompletionConfig {
     /// Master toggle. When false, no InlineCompleter is constructed.
@@ -278,7 +278,7 @@ impl Default for InlineCompletionConfig {
 ///
 /// Users can configure multiple registries; each maps to an adapter type
 /// that knows how to search and install skills from that source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegistrySource {
     /// Human-readable name used in UI and as reference key
@@ -315,7 +315,7 @@ impl Default for RegistrySource {
 ///
 /// Controls auto-search behavior and the list of registry sources.
 /// Pre-configured with skills.sh and skillhub.cn as defaults.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkillsConfig {
     /// When true, the AI automatically searches registries if no loaded
@@ -425,7 +425,7 @@ impl TerminalResizeMode {
 ///
 /// Field names and defaults must stay in sync with `crates/aish-mcp`, whose
 /// `config` module resolves these raw values into runtime settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpServerConfig {
     /// Unique server name; also the `mcp__<name>__<tool>` tool prefix.
@@ -495,7 +495,7 @@ impl Default for McpServerConfig {
 }
 
 /// MCP client configuration (the `mcp:` section).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpConfig {
     /// Master switch. Default: true; with no `servers` it has no effect.
@@ -525,7 +525,7 @@ impl Default for McpConfig {
 // Top-level config model
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConfigModel {
     pub model: String,
@@ -781,7 +781,7 @@ impl Default for ConfigModel {
 }
 
 /// One additional API credential for multi-key quota rotation.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ApiAccountConfig {
     /// Human-readable label shown in the rotation UI.
     pub name: String,
