@@ -410,9 +410,7 @@ fn main() {
             let mut fallback = aish_config::ConfigModel::default();
             if let Some(p) = config_path.as_deref() {
                 fallback.source_path = Some(
-                    aish_config::ConfigLoader::resolve_against_startup_cwd(
-                        std::path::Path::new(p),
-                    ),
+                    aish_config::ConfigLoader::resolve_against_startup_cwd(std::path::Path::new(p)),
                 );
             }
             fallback
