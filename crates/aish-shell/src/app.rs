@@ -8550,7 +8550,7 @@ impl AishShell {
     /// atomic (temp file + rename, permissions preserved). Comments are not
     /// preserved — the YAML is re-serialized.
     fn persist_mcp_config(&self) -> Result<(), String> {
-        let path = aish_config::ConfigLoader::default_config_path();
+        let path = self.config_save_path();
         let mcp = self.config.mcp.clone();
         aish_config::ConfigLoader::update_raw(&path, |document| {
             aish_mcp::commands::merge_into_document(document, &mcp)
@@ -9260,9 +9260,20 @@ impl AishShell {
         );
     }
 
+    /// The file this session's config was loaded from — the save target for
+    /// `/setting`, `/model` and every other config writer. Falls back to the
+    /// default path when the loader did not record one (e.g. a
+    /// programmatically built config in tests).
+    fn config_save_path(&self) -> std::path::PathBuf {
+        self.config
+            .source_path
+            .clone()
+            .unwrap_or_else(aish_config::ConfigLoader::default_config_path)
+    }
+
     /// Persist the current config to disk, then rebuild the live rotation state.
     fn persist_config_and_rebuild_rotation(&mut self) {
-        let config_path = aish_config::ConfigLoader::default_config_path();
+        let config_path = self.config_save_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
             eprintln!(
                 "{}",
@@ -9681,7 +9692,7 @@ impl AishShell {
         self.config.model = new_model.clone();
         self.refresh_config_dependent_tools();
         // Persist to config file
-        let config_path = aish_config::ConfigLoader::default_config_path();
+        let config_path = self.config_save_path();
         if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
             eprintln!(
                 "{}",
@@ -10229,7 +10240,7 @@ impl AishShell {
 
     /// Save config to disk and print a confirmation.
     fn save_config_and_print(&self) {
-        let path = aish_config::ConfigLoader::default_config_path();
+        let path = self.config_save_path();
         match aish_config::ConfigLoader::save(&self.config, &path) {
             Ok(()) => {}
             Err(e) => eprintln!("Failed to save config: {}", e),
@@ -10329,7 +10340,7 @@ impl AishShell {
             self.config = trial;
 
             // Persist to disk.
-            let config_path = aish_config::ConfigLoader::default_config_path();
+            let config_path = self.config_save_path();
             if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
                 eprintln!(
                     "{}",
@@ -10829,7 +10840,8 @@ impl AishShell {
 
     /// Interactive setup wizard for configuring provider, API key, model, etc.
     fn run_setup_wizard(&mut self) {
-        let config_dir = aish_config::ConfigLoader::default_config_path()
+        let config_dir = self
+            .config_save_path()
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| {

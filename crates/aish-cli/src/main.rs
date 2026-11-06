@@ -1436,9 +1436,14 @@ fn show_info(config: &aish_config::ConfigModel) {
 }
 
 fn run_setup(config: &mut aish_config::ConfigModel) -> bool {
-    let config_dir = aish_config::ConfigLoader::default_config_path()
-        .parent()
-        .map(|p| p.to_path_buf())
+    // Write the wizard's result next to the config the session actually
+    // loaded (a `--config` launch must round-trip to its own file), falling
+    // back to the default directory when no source was recorded.
+    let config_dir = config
+        .source_path
+        .clone()
+        .or_else(|| Some(aish_config::ConfigLoader::default_config_path()))
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| {
             dirs::config_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))

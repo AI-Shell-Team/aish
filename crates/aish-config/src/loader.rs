@@ -131,6 +131,11 @@ impl ConfigLoader {
         };
 
         Self::apply_env_overrides(&mut config);
+        // Remember where this config came from so `/setting` (and every other
+        // writer) persists back to the same file instead of always writing
+        // the default path — a `--config` launch must round-trip to its own
+        // file. Runtime-only: `source_path` is `#[serde(skip)]`.
+        config.source_path = Some(path);
         Ok(config)
     }
 
@@ -471,6 +476,25 @@ mod tests {
         value
             .as_mapping()
             .and_then(|map| map.get(serde_yaml::Value::String(key.to_string())).cloned())
+    }
+
+    #[test]
+    fn load_records_the_source_path() {
+        // `/setting` and every other config writer persist to
+        // `config.source_path`, so a `--config` launch must round-trip to its
+        // own file instead of always writing the default path. The explicit
+        // path wins over the default; a missing file still records where the
+        // defaults "came from".
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("custom.yaml");
+        std::fs::write(&explicit, "model: glm-4.7\n").unwrap();
+
+        let config = ConfigLoader::load(Some(&explicit)).unwrap();
+        assert_eq!(config.source_path.as_deref(), Some(explicit.as_path()));
+
+        let default_path = ConfigLoader::default_config_path();
+        let config = ConfigLoader::load(None).unwrap();
+        assert_eq!(config.source_path.as_deref(), Some(default_path.as_path()));
     }
 
     #[test]
