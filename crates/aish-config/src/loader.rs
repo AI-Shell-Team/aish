@@ -27,6 +27,17 @@ impl ConfigLoader {
             Some(p) => p.to_path_buf(),
             None => Self::default_config_path(),
         };
+        // Resolve against the startup working directory NOW: the shell later
+        // `cd`s freely, and a relative `--config custom.yaml` resolved at
+        // save time would target a different file (issue: source_path must
+        // survive directory changes).
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(&path)
+        };
 
         let mut config = if path.exists() {
             debug!(path = %path.display(), "loading config file");
@@ -485,6 +496,29 @@ mod tests {
         // own file instead of always writing the default path. The explicit
         // path wins over the default; a missing file still records where the
         // defaults "came from".
+        //
+        // The `load(None)` case runs with `AISH_CONFIG_DIR` pointed at an
+        // isolated temp dir: without it, `default_config_path()` would open
+        // (and possibly migrate) the developer's real ~/.config/aish/config.yaml.
+        struct EnvGuard {
+            saved: Option<Option<std::ffi::OsString>>,
+        }
+        impl EnvGuard {
+            fn set(key: &str, value: &std::path::Path) -> Self {
+                let saved = std::env::var_os(key);
+                std::env::set_var(key, value);
+                Self { saved: Some(saved) }
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.saved.take() {
+                    Some(Some(v)) => std::env::set_var("AISH_CONFIG_DIR", v),
+                    _ => std::env::remove_var("AISH_CONFIG_DIR"),
+                }
+            }
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let explicit = dir.path().join("custom.yaml");
         std::fs::write(&explicit, "model: glm-4.7\n").unwrap();
@@ -492,9 +526,13 @@ mod tests {
         let config = ConfigLoader::load(Some(&explicit)).unwrap();
         assert_eq!(config.source_path.as_deref(), Some(explicit.as_path()));
 
-        let default_path = ConfigLoader::default_config_path();
+        let isolated_default = dir.path().join("isolated-default").join("config.yaml");
+        let _env = EnvGuard::set("AISH_CONFIG_DIR", isolated_default.parent().unwrap());
         let config = ConfigLoader::load(None).unwrap();
-        assert_eq!(config.source_path.as_deref(), Some(default_path.as_path()));
+        assert_eq!(
+            config.source_path.as_deref(),
+            Some(isolated_default.as_path())
+        );
     }
 
     #[test]

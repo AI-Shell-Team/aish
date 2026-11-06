@@ -10840,17 +10840,12 @@ impl AishShell {
 
     /// Interactive setup wizard for configuring provider, API key, model, etc.
     fn run_setup_wizard(&mut self) {
-        let config_dir = self
-            .config_save_path()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| {
-                dirs::config_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("aish")
-            });
+        // The wizard reads and writes the same file later `/setting` saves
+        // target — a `--config` session must not split its setup result
+        // across two files.
+        let config_file = self.config_save_path();
 
-        let mut wizard = crate::wizard::SetupWizard::new(config_dir);
+        let mut wizard = crate::wizard::SetupWizard::new(config_file);
         match wizard.run() {
             Ok(new_config) => {
                 self.config = crate::wizard::apply_setup_result(&self.config, new_config);

@@ -1436,21 +1436,16 @@ fn show_info(config: &aish_config::ConfigModel) {
 }
 
 fn run_setup(config: &mut aish_config::ConfigModel) -> bool {
-    // Write the wizard's result next to the config the session actually
-    // loaded (a `--config` launch must round-trip to its own file), falling
-    // back to the default directory when no source was recorded.
-    let config_dir = config
+    // The wizard reads and writes the exact file the session loaded (a
+    // `--config` launch must round-trip to its own file), falling back to
+    // the default config path when no source was recorded.
+    let config_file = config
         .source_path
         .clone()
-        .or_else(|| Some(aish_config::ConfigLoader::default_config_path()))
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| {
-            dirs::config_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("aish")
-        });
+        .unwrap_or_else(aish_config::ConfigLoader::default_config_path);
+    config.source_path = Some(config_file.clone());
 
-    let mut wizard = aish_shell::wizard::SetupWizard::new(config_dir);
+    let mut wizard = aish_shell::wizard::SetupWizard::new(config_file);
     match wizard.run() {
         Ok(new_config) => {
             *config = aish_shell::wizard::apply_setup_result(config, new_config);
