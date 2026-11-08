@@ -8,7 +8,7 @@ use aish_llm::{LlmSession, PreflightResult, Tool, ToolResult};
 
 use super::bing::BingProvider;
 use super::duckduckgo::DuckDuckGoProvider;
-use super::engines::{BraveProvider, SearxngProvider, TavilyProvider};
+use super::engines::{BraveProvider, OutcrawlProvider, SearxngProvider, TavilyProvider};
 use super::provider::{clamp_result_count, SearchProvider};
 use super::types::{
     clamp_timeout, dedupe_results, SearchProviderError, SearchResponse, SearchResult,
@@ -64,6 +64,11 @@ impl WebSearchTool {
         if !config.tavily_api_key.trim().is_empty() {
             providers.push(Arc::new(TavilyProvider {
                 api_key: config.tavily_api_key.clone(),
+            }));
+        }
+        if !config.outcrawl_api_key.trim().is_empty() {
+            providers.push(Arc::new(OutcrawlProvider {
+                api_key: config.outcrawl_api_key.clone(),
             }));
         }
         if !config.searxng_endpoint.trim().is_empty() {

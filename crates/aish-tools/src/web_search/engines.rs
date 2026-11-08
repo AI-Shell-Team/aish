@@ -211,6 +211,106 @@ impl SearchProvider for TavilyProvider {
 }
 
 // ---------------------------------------------------------------------------
+// Outcrawl (OUTCRAWL_API_KEY): POST /v1/search
+// ---------------------------------------------------------------------------
+
+pub struct OutcrawlProvider {
+    pub api_key: String,
+}
+
+const OUTCRAWL_ENDPOINT: &str = "https://api.outcrawl.ai/v1/search";
+
+#[derive(Debug, Deserialize)]
+struct OutcrawlApiResponse {
+    #[serde(default)]
+    hits: Vec<OutcrawlHit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OutcrawlHit {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    snippet: Option<String>,
+}
+
+fn outcrawl_results(
+    payload: OutcrawlApiResponse,
+    limit: usize,
+    fetched_at: i64,
+) -> Vec<SearchResult> {
+    payload
+        .hits
+        .into_iter()
+        .take(limit)
+        .map(|hit| SearchResult {
+            title: hit.title,
+            url: hit.url,
+            snippet: hit.snippet.filter(|snippet| !snippet.is_empty()),
+            published: None,
+            fetched_at,
+        })
+        .collect()
+}
+
+impl SearchProvider for OutcrawlProvider {
+    fn id(&self) -> &'static str {
+        "outcrawl"
+    }
+
+    fn is_available(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+
+    fn search<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Pin<Box<dyn Future<Output = SearchResponse> + Send + 'a>> {
+        Box::pin(async move {
+            if self.api_key.trim().is_empty() {
+                return SearchResponse::failed("outcrawl", SearchProviderError::Auth);
+            }
+            let client = match build_search_client(user_agent()) {
+                Ok(client) => client,
+                Err(err) => return SearchResponse::failed("outcrawl", err),
+            };
+            let response = match client
+                .post(OUTCRAWL_ENDPOINT)
+                .bearer_auth(&self.api_key)
+                .json(&serde_json::json!({
+                    "query": query,
+                    "limit": limit,
+                }))
+                .timeout(timeout)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => return SearchResponse::failed("outcrawl", transport_error(&err)),
+            };
+            let status = response.status();
+            if !status.is_success() {
+                return SearchResponse::failed("outcrawl", status_error(status));
+            }
+            let payload: OutcrawlApiResponse = match read_response_json(response).await {
+                Ok(payload) => payload,
+                Err(err) => return SearchResponse::failed("outcrawl", err),
+            };
+
+            let results = outcrawl_results(payload, limit, epoch_now());
+            if results.is_empty() {
+                return SearchResponse::failed("outcrawl", SearchProviderError::NoResults);
+            }
+            SearchResponse::ok("outcrawl", results)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SearXNG (self-hosted, SEARXNG_ENDPOINT) — omp: GET /search?format=json
 // ---------------------------------------------------------------------------
 
@@ -330,6 +430,45 @@ mod tests {
             api_key: "  ".to_string(),
         };
         assert!(!provider.is_available());
+    }
+
+    #[test]
+    fn outcrawl_requires_key() {
+        let provider = OutcrawlProvider {
+            api_key: " ".to_string(),
+        };
+        assert!(!provider.is_available());
+        let configured = OutcrawlProvider {
+            api_key: "oc_test".to_string(),
+        };
+        assert!(configured.is_available());
+    }
+
+    #[test]
+    fn outcrawl_payload_maps_hits_in_rank_order() {
+        let payload: OutcrawlApiResponse = serde_json::from_str(
+            r#"{"hits":[
+                {"url":"https://tokio.rs/","title":"Tokio","snippet":"An async runtime.","rank":1},
+                {"url":"https://docs.rs/tokio","title":"tokio - docs.rs","rank":2}
+            ],"usage":{"credits":"1"}}"#,
+        )
+        .unwrap();
+        let results = outcrawl_results(payload, 10, 1_700_000_000);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://tokio.rs/");
+        assert_eq!(results[0].snippet.as_deref(), Some("An async runtime."));
+        assert_eq!(results[1].title, "tokio - docs.rs");
+        assert_eq!(results[1].snippet, None);
+        assert_eq!(results[1].fetched_at, 1_700_000_000);
+    }
+
+    #[test]
+    fn outcrawl_results_respect_limit() {
+        let payload: OutcrawlApiResponse = serde_json::from_str(
+            r#"{"hits":[{"url":"https://a.example","title":"A"},{"url":"https://b.example","title":"B"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(outcrawl_results(payload, 1, 0).len(), 1);
     }
 
     #[test]
