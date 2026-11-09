@@ -48,6 +48,7 @@ dependencies = [
  "reqwest",
  "semver",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
