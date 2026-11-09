@@ -826,10 +826,20 @@ mod tests {
             let path = dir.join("MEMORY.md");
 
             let mut mgr = MemoryManager::new(path.clone()).unwrap();
-            let id1 = store_on(&mut mgr, "probe_service port=8080", MemoryScope::Host, first)
-                .unwrap();
-            let id2 = store_on(&mut mgr, "probe_service port=8080", MemoryScope::Host, second)
-                .unwrap();
+            let id1 = store_on(
+                &mut mgr,
+                "probe_service port=8080",
+                MemoryScope::Host,
+                first,
+            )
+            .unwrap();
+            let id2 = store_on(
+                &mut mgr,
+                "probe_service port=8080",
+                MemoryScope::Host,
+                second,
+            )
+            .unwrap();
             assert_ne!(id1, id2, "different hosts must not merge");
 
             // Reload: both records survive with their own provenance.
@@ -923,8 +933,13 @@ mod tests {
         let id1 = mgr
             .store("legacy fact", MemoryCategory::Environment, "auto", 1.0)
             .unwrap();
-        let id2 = store_on(&mut mgr, "legacy fact", MemoryScope::User, Some("some-host"))
-            .unwrap();
+        let id2 = store_on(
+            &mut mgr,
+            "legacy fact",
+            MemoryScope::User,
+            Some("some-host"),
+        )
+        .unwrap();
         assert_eq!(id1, id2);
         assert_eq!(mgr.list().len(), 1);
 
