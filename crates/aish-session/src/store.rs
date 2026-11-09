@@ -147,14 +147,16 @@ impl SessionStore {
     /// shells so the persisted row matches the PTY session id). If the UUID
     /// already exists (e.g. nested shells sharing an inherited id), a fresh
     /// random UUID is generated instead so transcript rows are not merged
-    /// into a foreign session.
+    /// into a foreign session. Empty or whitespace-only ids (e.g. missing
+    /// AISH_SESSION_ID in standalone mode) are rejected the same way so a
+    /// blank session_uuid row is never persisted.
     pub fn create_session_with_uuid(
         &self,
         uuid: &str,
         model: &str,
         api_base: Option<&str>,
     ) -> Result<SessionRecord> {
-        if self.get_session(uuid)?.is_some() {
+        if uuid.trim().is_empty() || self.get_session(uuid)?.is_some() {
             return self.create_session(model, api_base);
         }
 
@@ -1762,5 +1764,22 @@ mod tests {
             .unwrap();
         // Must not hijack the existing row: a fresh UUID is generated.
         assert_ne!(record.session_uuid, existing.session_uuid);
+    }
+
+    #[test]
+    fn create_session_with_uuid_rejects_blank_id() {
+        let (_temp, store) = temp_store();
+
+        // Empty and whitespace-only external ids must fall back to a fresh
+        // UUID instead of persisting a blank session_uuid row (#646).
+        for blank in ["", "   ", "\t"] {
+            let record = store.create_session_with_uuid(blank, "m", None).unwrap();
+            assert!(!record.session_uuid.trim().is_empty());
+            assert!(record.session_uuid.len() >= 32);
+        }
+
+        // No blank-id rows are persisted.
+        let sessions = store.list_sessions(10).unwrap();
+        assert!(sessions.iter().all(|s| !s.session_uuid.trim().is_empty()));
     }
 }
