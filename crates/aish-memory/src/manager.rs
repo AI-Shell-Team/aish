@@ -94,12 +94,24 @@ impl MemoryManager {
         let content_trimmed = content.trim();
 
         // Duplicate detection: same content (case-insensitive) + same category.
+        // Scope and source host narrow the match (issue #645): a User-scoped
+        // fact and a Host-scoped fact with identical text are different
+        // records, and so are the same text stored from two different
+        // machines. A None source host (legacy entries, the `store()` helper)
+        // matches any host so pre-#645 files keep deduplicating.
         // The confirmed TTL of THIS store wins: a later re-store (e.g. the
         // user confirms `permanent`) must refresh the existing entry's expiry
         // instead of silently keeping the old one.
         let content_lower = content_trimmed.to_lowercase();
         for entry in &mut self.entries {
-            if entry.category == category && entry.content.to_lowercase() == content_lower {
+            let host_matches = entry.source_host.is_none()
+                || source.host.is_none()
+                || entry.source_host == source.host;
+            if entry.category == category
+                && entry.scope == scope
+                && host_matches
+                && entry.content.to_lowercase() == content_lower
+            {
                 let now = Utc::now();
                 entry.expires_at = ttl_seconds.and_then(|secs| {
                     let secs = i64::try_from(secs).ok()?;
@@ -776,6 +788,147 @@ mod tests {
         assert_eq!(meta.id, 2);
         assert_eq!(meta.source, "");
         assert!(meta.created_at.is_none());
+    }
+
+    /// Issue #645: deduplication must not merge entries that differ in scope
+    /// or source host. Helper mirroring the issue's store call.
+    fn store_on(
+        mgr: &mut MemoryManager,
+        content: &str,
+        scope: MemoryScope,
+        host: Option<&str>,
+    ) -> aish_core::Result<i64> {
+        mgr.store_with_provenance(
+            content,
+            MemoryCategory::Environment,
+            scope,
+            MemorySource {
+                label: "synthetic-acceptance-fixture".to_string(),
+                session_uuid: Some("fixture-session".to_string()),
+                host: host.map(String::from),
+            },
+            1.0,
+            Some(3600),
+        )
+    }
+
+    #[test]
+    fn dedup_keeps_entries_from_different_hosts() {
+        // Issue #645 matrix row 1 + 2: same content/category/scope stored
+        // from two machines must stay two records, in either write order.
+        for (first, second) in [
+            (Some("fixture-host-a"), Some("fixture-host-b")),
+            (Some("fixture-host-b"), Some("fixture-host-a")),
+        ] {
+            let dir = std::env::temp_dir().join("aish_memory_test_645_host");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("MEMORY.md");
+
+            let mut mgr = MemoryManager::new(path.clone()).unwrap();
+            let id1 = store_on(&mut mgr, "probe_service port=8080", MemoryScope::Host, first)
+                .unwrap();
+            let id2 = store_on(&mut mgr, "probe_service port=8080", MemoryScope::Host, second)
+                .unwrap();
+            assert_ne!(id1, id2, "different hosts must not merge");
+
+            // Reload: both records survive with their own provenance.
+            let mgr2 = MemoryManager::new(path).unwrap();
+            let entries = mgr2.list();
+            assert_eq!(entries.len(), 2);
+            let hosts: Vec<_> = entries
+                .iter()
+                .filter_map(|e| e.source_host.as_deref())
+                .collect();
+            assert!(hosts.contains(&first.unwrap()));
+            assert!(hosts.contains(&second.unwrap()));
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn dedup_keeps_entries_that_differ_only_in_scope() {
+        // Issue #645 matrix row 3: same host, same everything except scope.
+        let dir = std::env::temp_dir().join("aish_memory_test_645_scope");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path.clone()).unwrap();
+        let id1 = store_on(
+            &mut mgr,
+            "probe_service port=8084",
+            MemoryScope::User,
+            Some("fixture-host-a"),
+        )
+        .unwrap();
+        let id2 = store_on(
+            &mut mgr,
+            "probe_service port=8084",
+            MemoryScope::Host,
+            Some("fixture-host-a"),
+        )
+        .unwrap();
+        assert_ne!(id1, id2, "User and Host scope must not merge");
+
+        let mgr2 = MemoryManager::new(path).unwrap();
+        let entries = mgr2.list();
+        assert_eq!(entries.len(), 2);
+        let scopes: Vec<_> = entries.iter().map(|e| e.scope.clone()).collect();
+        assert!(scopes.contains(&MemoryScope::User));
+        assert!(scopes.contains(&MemoryScope::Host));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dedup_still_merges_same_host_same_scope_same_content() {
+        // Issue #645 control row: reasonable dedup keeps working.
+        let dir = std::env::temp_dir().join("aish_memory_test_645_control");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        let id1 = store_on(
+            &mut mgr,
+            "probe_service port=8080",
+            MemoryScope::Host,
+            Some("fixture-host-a"),
+        )
+        .unwrap();
+        let id2 = store_on(
+            &mut mgr,
+            "probe_service port=8080",
+            MemoryScope::Host,
+            Some("fixture-host-a"),
+        )
+        .unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(mgr.list().len(), 1);
+    }
+
+    #[test]
+    fn dedup_merges_host_scoped_store_into_legacy_entry_without_host() {
+        // Pre-#645 files have entries with source_host None (the `store()`
+        // helper still writes None). A None host matches any host so those
+        // files keep deduplicating after the fix.
+        let dir = std::env::temp_dir().join("aish_memory_test_645_legacy");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("MEMORY.md");
+
+        let mut mgr = MemoryManager::new(path).unwrap();
+        let id1 = mgr
+            .store("legacy fact", MemoryCategory::Environment, "auto", 1.0)
+            .unwrap();
+        let id2 = store_on(&mut mgr, "legacy fact", MemoryScope::User, Some("some-host"))
+            .unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(mgr.list().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
