@@ -8,7 +8,7 @@
 //! - Local behavior is untouched: all new code paths live behind explicit
 //!   subcommands; the single-machine shell/daemon flow never calls into here.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -17,19 +17,6 @@ const REMOTE_BIN_ENV: &str = "AISH_REMOTE_BIN";
 
 /// Candidate paths probed on the remote host when `AISH_REMOTE_BIN` is unset.
 const REMOTE_BIN_CANDIDATES: &[&str] = &["/usr/local/bin/aish", "/usr/bin/aish"];
-
-/// Resolve the remote aish binary path: env override wins, otherwise probe.
-fn remote_bin() -> String {
-    if let Ok(path) = std::env::var(REMOTE_BIN_ENV) {
-        if !path.is_empty() {
-            return path;
-        }
-    }
-    REMOTE_BIN_CANDIDATES
-        .first()
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "aish".to_string())
-}
 
 /// A live ssh child process whose stdin/stdout carry the frame stream.
 pub struct SshChannel {
@@ -52,7 +39,6 @@ impl SshChannel {
             .arg("ServerAliveCountMax=3")
             .arg("--")
             .arg(host)
-            .arg(remote_bin())
             .args(remote_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -161,8 +147,13 @@ pub(crate) fn ssh_json_lines(
 }
 
 /// Probe that the remote host has a usable aish binary. Returns the resolved
-/// path on success.
+/// path on success. `AISH_REMOTE_BIN` (if set) wins without probing.
 pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
+    if let Ok(path) = std::env::var(REMOTE_BIN_ENV) {
+        if !path.is_empty() {
+            return Ok(path);
+        }
+    }
     // Try each candidate path; the first that exists and is executable wins.
     for candidate in REMOTE_BIN_CANDIDATES {
         let output = Command::new("ssh")
@@ -230,28 +221,36 @@ pub fn cmd_remote_attach(host: &str, session_id: &str) -> Result<(), String> {
 pub fn cmd_policy_push(host: &str, policy_file: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(policy_file)
         .map_err(|e| format!("cannot read policy file {policy_file}: {e}"))?;
-    // The envelope is passed as a single argument; the remote side validates
-    // version/targets before installing.
+    // The envelope is sent on stdin (ssh concatenates command args into one
+    // remote shell string, which would split an envelope containing spaces).
     let bin = probe_remote_bin(host)?;
-    let args = vec![bin, "--remote-policy-install".to_string(), content];
-    let replies = ssh_json_lines(host, &args, None)?;
-    match replies.into_iter().next() {
-        Some(reply) => {
-            let accepted = reply
-                .get("accepted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let version = reply.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-            let reason = reply.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-            if accepted {
-                println!("{host}: policy v{version} accepted and effective");
-                Ok(())
-            } else {
-                println!("{host}: policy v{version} REJECTED: {reason}");
-                Err(format!("{host}: policy rejected"))
-            }
-        }
-        None => Err(format!("{host}: no reply from remote policy install")),
+    let args = vec![bin, "--remote-policy-install-stdin".to_string()];
+    let mut ch = SshChannel::spawn(host, &args)?;
+    let (mut reader, mut stdin) = ch.split()?;
+    stdin
+        .write_all(content.as_bytes())
+        .map_err(|e| format!("cannot send envelope: {e}"))?;
+    drop(stdin); // EOF: remote parses the envelope
+
+    let mut reply_line = String::new();
+    reader
+        .read_line(&mut reply_line)
+        .map_err(|e| format!("ssh read failed: {e}"))?;
+    let _ = ch.wait();
+    let reply: serde_json::Value = serde_json::from_str(reply_line.trim())
+        .map_err(|e| format!("malformed remote reply: {e}"))?;
+    let accepted = reply
+        .get("accepted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let version = reply.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let reason = reply.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    if accepted {
+        println!("{host}: policy v{version} accepted and effective");
+        Ok(())
+    } else {
+        println!("{host}: policy v{version} REJECTED: {reason}");
+        Err(format!("{host}: policy rejected"))
     }
 }
 

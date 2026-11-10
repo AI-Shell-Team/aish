@@ -414,6 +414,13 @@ impl RoleArbiter {
         format!("takeover-{}", self.next_request_id)
     }
 
+    /// Register an fd as observer without auto-promotion. Used for
+    /// newly-live clients that arrive after the controller was promoted in
+    /// the same batch.
+    fn register_observer(&mut self, fd: RawFd) {
+        self.roles.entry(fd).or_insert(ClientRoleState::Observer);
+    }
+
     /// Handle a CLAIM_INPUT from `fd`.
     fn handle_claim(&mut self, fd: RawFd) -> ClaimDecision {
         if self.role_of(fd) == ClientRoleState::Controller {
@@ -1206,6 +1213,7 @@ pub fn run_pty_daemon_shell(
                 }
 
                 let timeout = Duration::from_millis(50);
+                let mut newly_live: Vec<RawFd> = Vec::new();
                 match select_multi(&read_fds, &write_fds, Some(timeout)) {
                     Ok(SelectResult {
                         readable, writable, ..
@@ -1481,22 +1489,33 @@ pub fn run_pty_daemon_shell(
                         }
                         if client.scrollback_queue.is_empty() {
                             client.state = ClientState::Live;
+                            newly_live.push(client.fd());
                         }
                     }
                 }
-                // Role promotion: first live client becomes controller when
-                // no controller (or stale slot) exists.
-                let mut promoted = false;
-                for client in &mut clients {
-                    if client.state == ClientState::Live && !promoted {
-                        let fd = client.fd();
+                // Role promotion: only clients that just reached Live state are
+                // considered (calling on_client_live repeatedly would re-insert
+                // and oscillate the role every loop iteration). The first
+                // newly-live client without an existing controller/stale slot
+                // becomes controller.
+                if !newly_live.is_empty() {
+                    let mut promoted = false;
+                    for fd in newly_live.drain(..) {
+                        if promoted {
+                            // Still register the role so later claims/notify
+                            // see a consistent map.
+                            arbiter.register_observer(fd);
+                            continue;
+                        }
                         if arbiter.on_client_live(fd) {
-                            let notify = RoleNotify {
-                                role: ClientRole::Controller,
-                                message: String::new(),
-                            };
-                            client.queue_frame(&Frame::role_notify(&notify));
                             promoted = true;
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Controller,
+                                    message: String::new(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
+                            }
                         }
                     }
                 }

@@ -111,6 +111,11 @@ struct Cli {
     #[arg(long, hide = true)]
     remote_policy_install: Option<String>,
 
+    // Install a policy envelope read from stdin (used by `remote policy-push`
+    // to avoid ssh argument-joining issues); prints a JSON verdict.
+    #[arg(long, hide = true)]
+    remote_policy_install_stdin: bool,
+
     // Print audit events since --since as JSON lines.
     #[arg(long, hide = true)]
     remote_audit_events: bool,
@@ -558,6 +563,14 @@ fn main() {
     if let Some(envelope) = &cli.remote_policy_install {
         tty_watchdog::disarm();
         remote_cmd::agent_policy_install(envelope);
+        return;
+    }
+    if cli.remote_policy_install_stdin {
+        tty_watchdog::disarm();
+        use std::io::Read;
+        let mut envelope = String::new();
+        let _ = std::io::stdin().read_to_string(&mut envelope);
+        remote_cmd::agent_policy_install(envelope.trim());
         return;
     }
     if cli.remote_audit_events {
