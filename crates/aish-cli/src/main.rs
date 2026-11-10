@@ -32,6 +32,9 @@ impl<'a> MakeWriter<'a> for AnimationAwareMakeWriter {
 
 mod install_channel;
 mod models_auth;
+mod attach_remote;
+mod diagnose;
+mod remote_cmd;
 mod skill_cmd;
 mod tty_watchdog;
 mod uninstall;
@@ -93,6 +96,41 @@ struct Cli {
     // Attach to an existing PTY daemon via socket path (raw terminal passthrough).
     #[arg(long, hide = true)]
     pty_attach: Option<String>,
+
+    // --- Remote C/S extensions (issues #586/#587/#588), agent side ---
+    // List local PTY sessions as JSON lines (remote discovery helper).
+    #[arg(long, hide = true)]
+    remote_sessions: bool,
+
+    // Attach to a local PTY session and pipe the frame protocol on stdio
+    // (remote attach transport helper).
+    #[arg(long, hide = true)]
+    remote_attach: Option<String>,
+
+    // Install a policy envelope passed as an argument; prints a JSON verdict.
+    #[arg(long, hide = true)]
+    remote_policy_install: Option<String>,
+
+    // Print audit events since --since as JSON lines.
+    #[arg(long, hide = true)]
+    remote_audit_events: bool,
+
+    // Run whitelisted read-only diagnostics; prints JSON lines.
+    #[arg(long, hide = true)]
+    remote_diagnose: bool,
+
+    // Checks list for --remote-diagnose.
+    #[arg(long, hide = true)]
+    checks: Option<String>,
+
+    // Read-only enforcement flag for --remote-diagnose (read-only is
+    // structural via the whitelist; this flag is accepted for symmetry).
+    #[arg(long, hide = true)]
+    enforce_read_only: bool,
+
+    // Since timestamp (RFC 3339) for --remote-audit-events.
+    #[arg(long, hide = true)]
+    since: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -205,6 +243,64 @@ enum Commands {
     Skill {
         #[command(subcommand)]
         action: SkillSubcommand,
+    },
+
+    /// Remote C/S extensions: sessions, attach, policy, audit, diagnose
+    Remote {
+        #[command(subcommand)]
+        action: RemoteSubcommand,
+    },
+}
+
+/// Subcommands for `aish remote`.
+#[derive(Subcommand)]
+enum RemoteSubcommand {
+    /// List PTY sessions on a remote host (shows liveness state)
+    Sessions {
+        /// Remote host in ssh target form (user@host)
+        #[arg(long)]
+        host: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach the local terminal to a remote PTY session
+    Attach {
+        /// Remote host in ssh target form (user@host)
+        #[arg(long)]
+        host: String,
+        /// Session UUID to attach
+        session: Option<String>,
+    },
+    /// Push a security policy file to a remote host
+    PolicyPush {
+        /// Remote host in ssh target form (user@host)
+        #[arg(long)]
+        host: String,
+        /// Local policy YAML file to install
+        #[arg(long)]
+        policy: String,
+    },
+    /// Pull remote audit events into the local audit store
+    AuditSync {
+        /// Remote host in ssh target form (user@host)
+        #[arg(long)]
+        host: String,
+        /// Local audit DB path (defaults to the standard session DB)
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Run whitelisted read-only diagnostics across hosts
+    Diagnose {
+        /// Comma-separated ssh targets
+        #[arg(long)]
+        hosts: String,
+        /// Comma-separated check names (svc, ports, logs, disk, load)
+        #[arg(long)]
+        checks: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -445,6 +541,40 @@ fn main() {
         return;
     }
 
+    // --- Remote C/S agent-side hidden entries (invoked over ssh) ---
+    if cli.remote_sessions {
+        tty_watchdog::disarm();
+        remote_cmd::agent_list_sessions();
+        return;
+    }
+    if let Some(session_id) = &cli.remote_attach {
+        tty_watchdog::disarm();
+        if let Err(e) = remote_cmd::agent_attach(session_id) {
+            eprintln!("remote attach relay failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(envelope) = &cli.remote_policy_install {
+        tty_watchdog::disarm();
+        remote_cmd::agent_policy_install(envelope);
+        return;
+    }
+    if cli.remote_audit_events {
+        tty_watchdog::disarm();
+        remote_cmd::agent_audit_events(cli.since.as_deref());
+        return;
+    }
+    if cli.remote_diagnose {
+        tty_watchdog::disarm();
+        let checks = cli
+            .checks
+            .clone()
+            .unwrap_or_else(|| "svc,ports,logs".to_string());
+        remote_cmd::agent_diagnose(&checks, cli.enforce_read_only);
+        return;
+    }
+
     match cli.command {
         // `aish` or `aish run`: start a fresh shell by default.
         // Use --continue/-c to attach to an existing live session.
@@ -540,6 +670,54 @@ fn main() {
                     }
                     RegistryAction::Remove { name } => skill_cmd::cmd_registry_remove(&name),
                 },
+            };
+            if let Err(msg) = outcome {
+                eprintln!("{msg}");
+                std::process::exit(1);
+            }
+        }
+        Some(Commands::Remote { action }) => {
+            let outcome: Result<(), String> = match action {
+                RemoteSubcommand::Sessions { host, json } => {
+                    remote_cmd::cmd_remote_sessions(&host, json)
+                }
+                RemoteSubcommand::Attach { host, session } => {
+                    let session_id = session.unwrap_or_default();
+                    if session_id.is_empty() {
+                        // List sessions, then require an explicit id.
+                        if let Err(e) = remote_cmd::cmd_remote_sessions(&host, false) {
+                            eprintln!("{e}");
+                        }
+                        eprintln!("specify a session id: aish remote attach --host <h> <id>");
+                        std::process::exit(1);
+                    }
+                    remote_cmd::cmd_remote_attach(&host, &session_id)
+                }
+                RemoteSubcommand::PolicyPush { host, policy } => {
+                    remote_cmd::cmd_policy_push(&host, &policy)
+                }
+                RemoteSubcommand::AuditSync { host, db } => {
+                    remote_cmd::cmd_audit_sync(&host, db.as_deref())
+                }
+                RemoteSubcommand::Diagnose {
+                    hosts,
+                    checks,
+                    json,
+                } => {
+                    let host_list: Vec<String> = hosts
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    let check_list: Vec<String> = checks
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                        .collect();
+                    remote_cmd::cmd_remote_diagnose(&host_list, &check_list, json)
+                }
             };
             if let Err(msg) = outcome {
                 eprintln!("{msg}");

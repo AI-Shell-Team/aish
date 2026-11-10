@@ -533,6 +533,21 @@ pub fn load_policy(config_path: Option<&Path>) -> SecurityPolicy {
     try_load_policy(config_path).unwrap_or_else(|_| SecurityPolicy::default())
 }
 
+/// Path of the remote-policy version marker. Written only by the C/S policy
+/// install flow (`--remote-policy-install`); always absent on hosts that
+/// never received a remote policy, so local-only usage is unaffected.
+pub fn remote_policy_version_path() -> PathBuf {
+    user_security_policy_path().with_extension("yaml.remote-version")
+}
+
+/// Parse a policy YAML string into a validated [`SecurityPolicy`].
+/// Used by the remote policy install flow to reject malformed bodies before
+/// they replace an effective policy.
+pub fn policy_from_yaml_str(text: &str) -> Result<SecurityPolicy, String> {
+    let data = serde_yaml::from_str::<Value>(text).map_err(|e| e.to_string())?;
+    policy_from_value(data)
+}
+
 fn optional_section_mapping<'a>(
     root: &'a Mapping,
     key: &str,
