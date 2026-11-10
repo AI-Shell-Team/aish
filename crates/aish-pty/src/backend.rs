@@ -252,7 +252,8 @@ impl AttachedBackend {
             }
 
             let frames = reader.drain_frames()?;
-            for frame in frames {
+            let mut frames_iter = frames.into_iter();
+            while let Some(frame) = frames_iter.next() {
                 match frame.frame_type {
                     TYPE_ATTACH_ACK => match frame.as_attach_ack() {
                         Ok(ack) => tracing::debug!(
@@ -286,6 +287,32 @@ impl AttachedBackend {
                         })?;
                         let child_pid = end.child_pid;
                         let running = end.running;
+                        // The daemon may queue role frames in the same flush
+                        // batch, right after ScrollbackEnd. Those frames are
+                        // already decoded here; returning immediately would
+                        // discard them. Surface the remainder as events.
+                        for frame in frames_iter {
+                            match frame.frame_type {
+                                TYPE_ROLE_NOTIFY => match frame.as_role_notify() {
+                                    Ok(notify) => pending_events
+                                        .push(PtyEvent::RoleNotice(notify.role, notify.message)),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "malformed role notify frame")
+                                    }
+                                },
+                                TYPE_PTY_OUTPUT | TYPE_SCROLLBACK
+                                    if !frame.payload.is_empty() => {
+                                        pending_events.push(PtyEvent::Output(frame.payload));
+                                    }
+                                TYPE_CONTROL_EVENT => match frame.as_control_event() {
+                                    Ok(evt) => pending_events.push(PtyEvent::Control(evt)),
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "malformed control event frame")
+                                    }
+                                },
+                                _ => {}
+                            }
+                        }
                         tracing::info!(
                             child_pid,
                             running,

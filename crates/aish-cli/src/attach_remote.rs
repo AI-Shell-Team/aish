@@ -147,16 +147,17 @@ fn remote_attach_loop(
                 match frame.frame_type {
                     aish_pty::daemon_protocol::TYPE_PTY_OUTPUT
                     | aish_pty::daemon_protocol::TYPE_SCROLLBACK
-                        if !frame.payload.is_empty() => {
-                            // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
-                            unsafe {
-                                libc::write(
-                                    stdout_fd,
-                                    frame.payload.as_ptr() as *const _,
-                                    frame.payload.len(),
-                                );
-                            }
+                        if !frame.payload.is_empty() =>
+                    {
+                        // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
+                        unsafe {
+                            libc::write(
+                                stdout_fd,
+                                frame.payload.as_ptr() as *const _,
+                                frame.payload.len(),
+                            );
                         }
+                    }
                     aish_pty::daemon_protocol::TYPE_EXIT_NOTICE => {
                         // Inner shell exited; finish after flushing output.
                         break;

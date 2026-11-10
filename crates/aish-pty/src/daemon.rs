@@ -1503,8 +1503,16 @@ pub fn run_pty_daemon_shell(
                     for fd in newly_live.drain(..) {
                         if promoted {
                             // Still register the role so later claims/notify
-                            // see a consistent map.
+                            // see a consistent map, and tell the client it is
+                            // an observer.
                             arbiter.register_observer(fd);
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Observer,
+                                    message: String::new(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
+                            }
                             continue;
                         }
                         if arbiter.on_client_live(fd) {
@@ -1512,6 +1520,16 @@ pub fn run_pty_daemon_shell(
                             if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
                                 let notify = RoleNotify {
                                     role: ClientRole::Controller,
+                                    message: String::new(),
+                                };
+                                c.queue_frame(&Frame::role_notify(&notify));
+                            }
+                        } else {
+                            // An existing controller holds the role; this
+                            // client starts as an observer — tell it.
+                            if let Some(c) = clients.iter_mut().find(|c| c.fd() == fd) {
+                                let notify = RoleNotify {
+                                    role: ClientRole::Observer,
                                     message: String::new(),
                                 };
                                 c.queue_frame(&Frame::role_notify(&notify));
