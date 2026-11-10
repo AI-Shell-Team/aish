@@ -30,10 +30,10 @@ impl<'a> MakeWriter<'a> for AnimationAwareMakeWriter {
     }
 }
 
-mod install_channel;
-mod models_auth;
 mod attach_remote;
 mod diagnose;
+mod install_channel;
+mod models_auth;
 mod remote_cmd;
 mod skill_cmd;
 mod tty_watchdog;
@@ -1813,6 +1813,22 @@ fn check_langfuse(
 /// socket and passes bytes back and forth. It demonstrates the detach/reattach
 /// lifecycle: exiting this function (via Ctrl+Q) detaches from the daemon
 /// without killing the underlying bash process.
+/// Helper: print a one-line observer-mode hint at the top of the terminal.
+/// Safe to call in raw mode: writes directly to stdout with CRLF line endings.
+fn print_observer_notice(stdout_fd: i32, message: &str) {
+    let msg = if message.is_empty() {
+        "\r\n\x1b[33m[aish] observer mode: input is read-only; the session is controlled by another client.\x1b[0m\r\n"
+            .to_string()
+    } else {
+        format!("\r\n\x1b[33m[aish] observer mode: {}\x1b[0m\r\n", message)
+    };
+    // SAFETY: [Category 8 — FFI] write() to stdout (valid fd); buffer valid
+    // for the duration of the call.
+    unsafe {
+        libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
+    }
+}
+
 fn run_pty_raw_attach(
     socket_path: &str,
     session_id: &str,
@@ -1906,6 +1922,11 @@ fn run_pty_raw_attach(
                 aish_pty::PtyEvent::Control(evt) => {
                     if matches!(evt, aish_pty::BackendControlEvent::ShellExiting { .. }) {
                         initial_exit = true;
+                    }
+                }
+                aish_pty::PtyEvent::RoleNotice(role, message) => {
+                    if role == aish_pty::daemon_protocol::ClientRole::Observer {
+                        print_observer_notice(stdout_fd, &message);
                     }
                 }
             }
@@ -2065,6 +2086,11 @@ fn run_pty_raw_attach(
                                 {
                                     should_exit = true;
                                     shell_exited = true;
+                                }
+                            }
+                            aish_pty::PtyEvent::RoleNotice(role, message) => {
+                                if role == aish_pty::daemon_protocol::ClientRole::Observer {
+                                    print_observer_notice(stdout_fd, &message);
                                 }
                             }
                         }

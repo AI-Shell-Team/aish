@@ -10,6 +10,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Environment variable overriding the remote aish binary path.
 const REMOTE_BIN_ENV: &str = "AISH_REMOTE_BIN";
@@ -65,7 +66,13 @@ impl SshChannel {
     /// concurrent frame read/write.
     pub fn split(
         &mut self,
-    ) -> Result<(BufReader<std::process::ChildStdout>, std::process::ChildStdin), String> {
+    ) -> Result<
+        (
+            BufReader<std::process::ChildStdout>,
+            std::process::ChildStdin,
+        ),
+        String,
+    > {
         let stdout = self
             .child
             .stdout
@@ -86,30 +93,68 @@ impl SshChannel {
             Err(e) => Err(format!("ssh wait failed: {e}")),
         }
     }
+
+    /// Kill the ssh child process (used on timeout).
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+    }
 }
 
 /// Run a remote aish subcommand and collect its stdout lines as JSON values.
 /// Used by list-style remote queries (sessions, events, diagnose results).
+/// When `timeout` is set, the ssh child is killed if it outlives the budget.
 pub(crate) fn ssh_json_lines(
     host: &str,
     remote_args: &[String],
+    timeout: Option<Duration>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut ch = SshChannel::spawn(host, remote_args)?;
-    let (reader, mut stdin) = ch.split()?;
+    let (reader, stdin) = ch.split()?;
     drop(stdin); // signal EOF so the remote command finishes
 
-    let mut values = Vec::new();
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("ssh read failed: {e}"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    // Parse lines on a detached thread that owns the reader; the parent
+    // polls with a deadline and kills the ssh child on timeout, which
+    // unblocks the blocking read. The thread must not be joined on the
+    // timeout path: the remote side may keep stdout open past the kill.
+    let host_owned = host.to_string();
+    let deadline = timeout.map(|d| Instant::now() + d);
+    let mut timed_out = false;
+    let values = {
+        let worker = std::thread::spawn(move || -> Vec<serde_json::Value> {
+            let mut values = Vec::new();
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                    Ok(v) => values.push(v),
+                    // Non-JSON lines (banner, warnings) are surfaced verbatim.
+                    Err(_) => eprintln!("[remote {}] {}", host_owned, line),
+                }
+            }
+            values
+        });
+        loop {
+            if worker.is_finished() {
+                break worker.join().unwrap_or_default();
+            }
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    timed_out = true;
+                    break Vec::new();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(v) => values.push(v),
-            // Non-JSON lines (banner, warnings) are surfaced verbatim.
-            Err(_) => eprintln!("[remote {}] {}", host, line),
-        }
+    };
+    if timed_out {
+        ch.kill();
+        return Err(format!(
+            "ssh timed out after {:?}",
+            timeout.unwrap_or_default()
+        ));
     }
     ch.wait()?;
     Ok(values)
@@ -151,7 +196,7 @@ pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
 pub fn cmd_remote_sessions(host: &str, json: bool) -> Result<(), String> {
     let bin = probe_remote_bin(host)?;
     let args = vec![bin, "--remote-sessions".to_string()];
-    let sessions = ssh_json_lines(host, &args)?;
+    let sessions = ssh_json_lines(host, &args, None)?;
 
     if json {
         for s in &sessions {
@@ -165,10 +210,7 @@ pub fn cmd_remote_sessions(host: &str, json: bool) -> Result<(), String> {
     }
     println!("Remote PTY sessions on {host}:");
     for s in &sessions {
-        let id = s
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
+        let id = s.get("session_id").and_then(|v| v.as_str()).unwrap_or("?");
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let cwd = s.get("cwd").and_then(|v| v.as_str()).unwrap_or("?");
         let alive = s.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -192,7 +234,7 @@ pub fn cmd_policy_push(host: &str, policy_file: &str) -> Result<(), String> {
     // version/targets before installing.
     let bin = probe_remote_bin(host)?;
     let args = vec![bin, "--remote-policy-install".to_string(), content];
-    let replies = ssh_json_lines(host, &args)?;
+    let replies = ssh_json_lines(host, &args, None)?;
     match replies.into_iter().next() {
         Some(reply) => {
             let accepted = reply
@@ -225,7 +267,7 @@ pub fn cmd_audit_sync(host: &str, db: Option<&str>) -> Result<(), String> {
         "--since".to_string(),
         cursor.to_rfc3339(),
     ];
-    let events = ssh_json_lines(host, &args)?;
+    let events = ssh_json_lines(host, &args, None)?;
 
     let store = aish_session::AuditStore::open(db.map(std::path::Path::new))
         .map_err(|e| format!("cannot open local audit store: {e}"))?;
@@ -306,8 +348,14 @@ fn insert_remote_event(
             .map(|v| v as i32),
         ai_tool: ev.get("ai_tool").and_then(|v| v.as_str()).map(String::from),
         ai_args: ev.get("ai_args").and_then(|v| v.as_str()).map(String::from),
-        ai_result: ev.get("ai_result").and_then(|v| v.as_str()).map(String::from),
-        decision: ev.get("decision").and_then(|v| v.as_str()).map(String::from),
+        ai_result: ev
+            .get("ai_result")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        decision: ev
+            .get("decision")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         user_choice: ev
             .get("user_choice")
             .and_then(|v| v.as_str())
@@ -360,11 +408,7 @@ fn save_sync_cursor(host: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(),
 }
 
 /// `aish remote diagnose --hosts h1,h2 --checks svc,ports,logs` (#588).
-pub fn cmd_remote_diagnose(
-    hosts: &[String],
-    checks: &[String],
-    json: bool,
-) -> Result<(), String> {
+pub fn cmd_remote_diagnose(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
     crate::diagnose::run(hosts, checks, json)
 }
 
@@ -478,9 +522,12 @@ pub fn agent_attach(session_id: &str) -> Result<(), String> {
 /// envelope. Prints one JSON verdict line: {accepted, version, reason}.
 ///
 /// First-phase trust model: the envelope must carry a version newer than the
-/// installed remote version and parse as a valid policy. Signature checking
-/// lands with the admin keypair distribution; until then version/target
-/// checks still prevent stale or mismatched installs.
+/// installed remote version and parse as a valid policy. A signature field
+/// that is absent or empty is accepted (unsigned first-phase envelopes); a
+/// non-empty one is rejected outright because there is no key material to
+/// verify against yet — ed25519 verification lands with the admin keypair
+/// distribution. Until then version/target checks still prevent stale or
+/// mismatched installs.
 pub fn agent_policy_install(envelope: &str) {
     let verdict = install_policy_envelope(envelope);
     println!("{}", serde_json::to_string(&verdict).unwrap_or_default());
@@ -527,8 +574,14 @@ fn install_policy_envelope(envelope: &str) -> serde_json::Value {
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0);
-    if version <= current {
-        return serde_json::json!({"accepted": false, "version": version, "reason": format!("version {version} not newer than installed {current}")});
+    if let Err(reason) = check_policy_version(version, current) {
+        return serde_json::json!({"accepted": false, "version": version, "reason": reason});
+    }
+
+    // Signature gate: absent/empty accepted, non-empty rejected (see
+    // `check_policy_signature` — ed25519 lands with keypair distribution).
+    if let Err(reason) = check_policy_signature(env.get("signature").and_then(|v| v.as_str())) {
+        return serde_json::json!({"accepted": false, "version": version, "reason": reason});
     }
 
     // The policy body must parse into a valid SecurityPolicy.
@@ -554,6 +607,33 @@ fn install_policy_envelope(envelope: &str) -> serde_json::Value {
     let _ = std::fs::write(&version_file, version.to_string());
 
     serde_json::json!({"accepted": true, "version": version, "reason": "installed"})
+}
+
+/// Version monotonicity rule for remote policy installs: a candidate must be
+/// strictly newer than the installed version. An absent marker parses as 0,
+/// so version 1 is the first installable version. Kept pure for tests.
+fn check_policy_version(candidate: u64, installed: u64) -> Result<(), String> {
+    if candidate <= installed {
+        Err(format!(
+            "version {candidate} not newer than installed {installed}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Signature gate for remote policy installs (first phase): an absent or
+/// empty signature is accepted so unsigned envelopes still install; a
+/// non-empty one is rejected outright because there is no verification key
+/// material yet. ed25519 verification lands with admin keypair distribution —
+/// at that point this becomes a real verify against the issuer key instead of
+/// a reject. Kept pure for tests.
+fn check_policy_signature(signature: Option<&str>) -> Result<(), String> {
+    match signature {
+        None => Ok(()),
+        Some(s) if s.trim().is_empty() => Ok(()),
+        Some(_) => Err("signature present but verification is not supported yet".to_string()),
+    }
 }
 
 /// `--remote-audit-events --since <rfc3339>`: print audit events newer than
@@ -638,18 +718,32 @@ pub fn agent_diagnose(checks: &str, enforce_read_only: bool) {
             continue;
         }
 
-        let output = std::process::Command::new("sh").arg("-c").arg(command).output();
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output();
         match output {
             Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let truncated = stdout.len() > 8192;
-                let body: String = stdout.chars().take(8192).collect();
+                // Merge stdout and stderr so remote warnings stay visible in
+                // the evidence instead of vanishing into the frame stream.
+                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stderr.trim().is_empty() {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(stderr.trim_end());
+                }
+                let truncated = text.len() > 8192;
+                let body: String = text.chars().take(8192).collect();
+                let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
                 println!(
                     "{}",
                     serde_json::json!({
                         "check": check,
                         "exit_code": out.status.code(),
                         "truncated": truncated,
+                        "lines": lines,
                         "summary": body.trim_end(),
                     })
                 );
@@ -661,5 +755,39 @@ pub fn agent_diagnose(checks: &str, enforce_read_only: bool) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_install_tests {
+    use super::{check_policy_signature, check_policy_version};
+
+    #[test]
+    fn version_check_requires_strictly_newer() {
+        assert!(check_policy_version(1, 0).is_ok());
+        assert!(check_policy_version(8, 7).is_ok());
+        assert_eq!(
+            check_policy_version(7, 7).unwrap_err(),
+            "version 7 not newer than installed 7"
+        );
+        assert_eq!(
+            check_policy_version(6, 7).unwrap_err(),
+            "version 6 not newer than installed 7"
+        );
+    }
+
+    #[test]
+    fn signature_check_accepts_absent_and_empty() {
+        assert!(check_policy_signature(None).is_ok());
+        assert!(check_policy_signature(Some("")).is_ok());
+        assert!(check_policy_signature(Some("   ")).is_ok());
+    }
+
+    #[test]
+    fn signature_check_rejects_non_empty() {
+        assert_eq!(
+            check_policy_signature(Some("abc")).unwrap_err(),
+            "signature present but verification is not supported yet"
+        );
     }
 }

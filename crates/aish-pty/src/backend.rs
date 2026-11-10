@@ -16,6 +16,8 @@ pub enum PtyEvent {
     Output(Vec<u8>),
     /// Decoded control event from bash (PromptReady, ShellExiting, etc.).
     Control(BackendControlEvent),
+    /// Role arbitration notification from the daemon (controller/observer).
+    RoleNotice(crate::daemon_protocol::ClientRole, String),
 }
 
 /// Abstraction over PTY I/O for both direct ownership and daemon-attached modes.
@@ -165,7 +167,7 @@ use std::time::{Duration, Instant};
 use crate::daemon_protocol::{
     encode_frame, AttachRequest, Frame, FrameReader, MAX_FRAME_PAYLOAD, PROTOCOL_VERSION,
     TYPE_ATTACH_ACK, TYPE_CONTROL_EVENT, TYPE_DAEMON_ERROR, TYPE_EXIT_NOTICE, TYPE_PTY_OUTPUT,
-    TYPE_SCROLLBACK, TYPE_SCROLLBACK_END, TYPE_SESSION_INFO,
+    TYPE_ROLE_NOTIFY, TYPE_SCROLLBACK, TYPE_SCROLLBACK_END, TYPE_SESSION_INFO,
 };
 
 /// Default deadline for the whole attach handshake (attach + scrollback replay).
@@ -430,6 +432,10 @@ impl PtyBackend for AttachedBackend {
                         "daemon error frame"
                     ),
                     Err(e) => tracing::warn!(error = %e, "malformed DaemonError frame"),
+                },
+                TYPE_ROLE_NOTIFY => match frame.as_role_notify() {
+                    Ok(notify) => events.push(PtyEvent::RoleNotice(notify.role, notify.message)),
+                    Err(e) => tracing::warn!(error = %e, "malformed role notify frame"),
                 },
                 TYPE_ATTACH_ACK | TYPE_SCROLLBACK_END => {
                     // Handshake frames must not arrive in live mode.

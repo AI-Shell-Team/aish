@@ -13,10 +13,9 @@ pub use decision::{RiskLevel, SandboxOffAction, SecurityAnalysis, SecurityDecisi
 pub use fallback::{FallbackRuleAssessment, FallbackRuleEngine};
 pub use manager::{SecurityManager, SecurityRequest};
 pub use policy::{
-    load_policy, policy_from_yaml_str, remote_policy_version_path,
-    resolve_security_policy_path, save_policy_ui_fields, try_load_policy,
-    writable_security_policy_path, InvalidFallbackRule, PolicyLoadError, PolicyRule,
-    SecurityPolicy, ValidationIssue,
+    load_policy, policy_from_yaml_str, remote_policy_version_path, resolve_security_policy_path,
+    save_policy_ui_fields, try_load_policy, writable_security_policy_path, InvalidFallbackRule,
+    PolicyEnvelope, PolicyLoadError, PolicyRule, SecurityPolicy, ValidationIssue,
 };
 pub use sandbox::{run_sandbox_daemon, run_sandbox_worker, SandboxClient};
 pub use types::{FsChange, MatchedRuleSummary};

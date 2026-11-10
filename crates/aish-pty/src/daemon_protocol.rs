@@ -29,6 +29,10 @@ pub const TYPE_ATTACH_ACK: u8 = 0x05;
 pub const TYPE_DAEMON_ERROR: u8 = 0x06;
 pub const TYPE_SCROLLBACK_END: u8 = 0x07;
 pub const TYPE_EXIT_NOTICE: u8 = 0x08;
+/// daemon → client: role arbitration notification (controller/observer).
+pub const TYPE_ROLE_NOTIFY: u8 = 0x09;
+/// daemon → client: a new client is asking the current controller to release input.
+pub const TYPE_TAKEOVER_REQUEST: u8 = 0x0A;
 
 // client → daemon (0x10–0x1F)
 pub const TYPE_ATTACH: u8 = 0x10;
@@ -36,6 +40,12 @@ pub const TYPE_INPUT: u8 = 0x11;
 pub const TYPE_RESIZE: u8 = 0x12;
 pub const TYPE_DETACH: u8 = 0x13;
 pub const TYPE_KILL_SESSION: u8 = 0x14;
+/// client → daemon: request to become the controller.
+pub const TYPE_CLAIM_INPUT: u8 = 0x15;
+/// client → daemon: voluntarily give up controller role.
+pub const TYPE_RELEASE_INPUT: u8 = 0x16;
+/// client → daemon: response to a takeover request.
+pub const TYPE_TAKEOVER_CONFIRM: u8 = 0x17;
 
 /// Header size: 1 byte type + 2 bytes length.
 pub const HEADER_SIZE: usize = 3;
@@ -106,6 +116,38 @@ pub struct ExitNotice {
 pub struct DaemonError {
     pub code: String,
     pub message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Takeover / role arbitration payloads
+// ---------------------------------------------------------------------------
+
+/// Role assigned to a client by the daemon's arbitration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClientRole {
+    Controller,
+    Observer,
+}
+
+/// daemon → client: current role (with optional human-readable message).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleNotify {
+    pub role: ClientRole,
+    pub message: String,
+}
+
+/// daemon → controller: a new client requests input control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakeoverRequest {
+    pub request_id: String,
+    pub client_description: String,
+}
+
+/// client → daemon: controller's answer to a takeover request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakeoverConfirm {
+    pub request_id: String,
+    pub approved: bool,
 }
 
 impl DaemonError {
@@ -245,6 +287,49 @@ impl Frame {
         let json = serde_json::to_string(&DaemonError::new(code, message)).unwrap_or_default();
         Self {
             frame_type: TYPE_DAEMON_ERROR,
+            payload: json.into_bytes(),
+        }
+    }
+
+    /// Create a ClaimInput frame (payload empty).
+    pub fn claim_input() -> Self {
+        Self {
+            frame_type: TYPE_CLAIM_INPUT,
+            payload: Vec::new(),
+        }
+    }
+
+    /// Create a ReleaseInput frame (payload empty).
+    pub fn release_input() -> Self {
+        Self {
+            frame_type: TYPE_RELEASE_INPUT,
+            payload: Vec::new(),
+        }
+    }
+
+    /// Create a TakeoverConfirm frame.
+    pub fn takeover_confirm(confirm: &TakeoverConfirm) -> Self {
+        let json = serde_json::to_string(confirm).unwrap_or_default();
+        Self {
+            frame_type: TYPE_TAKEOVER_CONFIRM,
+            payload: json.into_bytes(),
+        }
+    }
+
+    /// Create a RoleNotify frame.
+    pub fn role_notify(notify: &RoleNotify) -> Self {
+        let json = serde_json::to_string(notify).unwrap_or_default();
+        Self {
+            frame_type: TYPE_ROLE_NOTIFY,
+            payload: json.into_bytes(),
+        }
+    }
+
+    /// Create a TakeoverRequest frame.
+    pub fn takeover_request(req: &TakeoverRequest) -> Self {
+        let json = serde_json::to_string(req).unwrap_or_default();
+        Self {
+            frame_type: TYPE_TAKEOVER_REQUEST,
             payload: json.into_bytes(),
         }
     }
@@ -410,6 +495,21 @@ impl Frame {
 
     /// Decode payload as ExitNotice (daemon → client).
     pub fn as_exit_notice(&self) -> Result<ExitNotice, serde_json::Error> {
+        serde_json::from_slice(&self.payload)
+    }
+
+    /// Decode payload as TakeoverConfirm (client → daemon).
+    pub fn as_takeover_confirm(&self) -> Result<TakeoverConfirm, serde_json::Error> {
+        serde_json::from_slice(&self.payload)
+    }
+
+    /// Decode payload as RoleNotify (daemon → client).
+    pub fn as_role_notify(&self) -> Result<RoleNotify, serde_json::Error> {
+        serde_json::from_slice(&self.payload)
+    }
+
+    /// Decode payload as TakeoverRequest (daemon → client).
+    pub fn as_takeover_request(&self) -> Result<TakeoverRequest, serde_json::Error> {
         serde_json::from_slice(&self.payload)
     }
 

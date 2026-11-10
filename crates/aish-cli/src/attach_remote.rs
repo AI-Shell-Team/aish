@@ -15,7 +15,7 @@ pub fn run(host: &str, session_id: &str) -> Result<(), String> {
     let bin = crate::remote_cmd::probe_remote_bin(host)?;
     let args = vec![bin, "--remote-attach".to_string(), session_id.to_string()];
     let mut ch = SshChannel::spawn(host, &args)?;
-    let (reader, mut stdin) = ch.split()?;
+    let (reader, stdin) = ch.split()?;
 
     // Switch local terminal to raw mode for passthrough.
     let stdin_fd = std::io::stdin().as_raw_fd();
@@ -110,8 +110,7 @@ fn remote_attach_loop(
         // Local keystrokes → INPUT frames.
         // SAFETY: [Category 8 — FFI] FD_ISSET on initialized fd_set.
         if unsafe { libc::FD_ISSET(stdin_fd, &fds) } {
-            let n =
-                unsafe { libc::read(stdin_fd, input_buf.as_mut_ptr().cast(), input_buf.len()) };
+            let n = unsafe { libc::read(stdin_fd, input_buf.as_mut_ptr().cast(), input_buf.len()) };
             if n > 0 {
                 let bytes = &input_buf[..n as usize];
                 // Ctrl+Q (0x11) detaches cleanly.
@@ -147,8 +146,8 @@ fn remote_attach_loop(
                 net_buf.drain(..consumed);
                 match frame.frame_type {
                     aish_pty::daemon_protocol::TYPE_PTY_OUTPUT
-                    | aish_pty::daemon_protocol::TYPE_SCROLLBACK => {
-                        if !frame.payload.is_empty() {
+                    | aish_pty::daemon_protocol::TYPE_SCROLLBACK
+                        if !frame.payload.is_empty() => {
                             // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
                             unsafe {
                                 libc::write(
@@ -158,10 +157,25 @@ fn remote_attach_loop(
                                 );
                             }
                         }
-                    }
                     aish_pty::daemon_protocol::TYPE_EXIT_NOTICE => {
                         // Inner shell exited; finish after flushing output.
                         break;
+                    }
+                    aish_pty::daemon_protocol::TYPE_ROLE_NOTIFY => {
+                        if let Ok(notify) = frame.as_role_notify() {
+                            if notify.role == aish_pty::daemon_protocol::ClientRole::Observer {
+                                // Raw mode: write the hint straight to stdout.
+                                let msg = format!(
+                                    "\r\n[aish] observer mode: input is read-only ({}). \
+Use Ctrl+Q to detach, or claim input from the controller.\r\n",
+                                    notify.message
+                                );
+                                // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
+                                unsafe {
+                                    libc::write(stdout_fd, msg.as_ptr() as *const _, msg.len());
+                                }
+                            }
+                        }
                     }
                     _ => {}
                 }

@@ -13723,6 +13723,31 @@ fn collapse_display_lines(text: &str, max_lines: usize) -> String {
     format!("{} ...", collapsed.join("\n"))
 }
 
+/// Reload the security policy from disk and swap it into the live
+/// [`aish_tools::bash::PolicySlot`]. Returns the number of effective rules.
+///
+/// Public entry point for hot-swapping a policy received at runtime (e.g. a
+/// remote policy install in a future C/S flow). `config_path` follows
+/// [`aish_security::load_policy`] semantics: `None` resolves the user-level
+/// policy file, an explicit path overrides it (tests / custom locations).
+///
+/// Note: the `/setting` Security path does **not** go through here — it edits
+/// the in-memory policy in place and publishes the clone, then syncs the file
+/// separately. Loading from disk there would drop not-yet-persisted panel
+/// edits, so the two paths intentionally stay distinct.
+pub fn reload_policy_slot(
+    policy_slot: &aish_tools::bash::PolicySlot,
+    config_path: Option<&Path>,
+) -> Result<usize, String> {
+    let policy = match aish_security::try_load_policy(config_path) {
+        Ok(policy) => policy,
+        Err(e) => return Err(e.to_string()),
+    };
+    let rule_count = policy.rules.len();
+    aish_tools::bash::BashTool::publish_live_policy(policy_slot, policy);
+    Ok(rule_count)
+}
+
 /// Collapse long output for display, showing first/last N lines with a truncation notice.
 pub fn collapse_output(
     output: &str,

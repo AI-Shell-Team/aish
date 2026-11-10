@@ -43,7 +43,7 @@ const KNOWN_CHECKS: &[&str] = &["svc", "ports", "logs", "disk", "load"];
 const MAX_CONCURRENCY: usize = 4;
 
 /// Per-host remote execution timeout.
-const HOST_TIMEOUT: Duration = Duration::from_secs(30);
+const HOST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Entry point for `aish remote diagnose`.
 pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
@@ -68,8 +68,7 @@ pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String
     let checks_vec: Vec<String> = checks.to_vec();
 
     let mut pending: Vec<String> = hosts_vec.iter().rev().cloned().collect();
-    let mut results: HashMap<String, Result<Vec<serde_json::Value>, HostStatus>> =
-        HashMap::new();
+    let mut results: HashMap<String, Result<Vec<serde_json::Value>, HostStatus>> = HashMap::new();
 
     std::thread::scope(|scope| {
         let mut in_flight = 0usize;
@@ -119,21 +118,21 @@ pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String
 }
 
 /// Run the remote diagnose subcommand on one host.
-fn diagnose_host(
-    host: &str,
-    checks: &[String],
-) -> Result<Vec<serde_json::Value>, HostStatus> {
+fn diagnose_host(host: &str, checks: &[String]) -> Result<Vec<serde_json::Value>, HostStatus> {
     let bin = crate::remote_cmd::probe_remote_bin(host).map_err(|_| HostStatus::Unreachable)?;
     let mut args = vec![bin, "--remote-diagnose".to_string()];
     args.push("--checks".to_string());
     args.push(checks.join(","));
     args.push("--enforce-read-only".to_string());
 
-    let values = std::thread::scope(|scope| {
-        let handle = scope.spawn(|| ssh_json_lines(host, &args));
-        handle.join().map_err(|_| HostStatus::Unreachable)?
-    })
-    .map_err(|_| HostStatus::Unreachable)?;
+    let values = match std::thread::scope(|scope| {
+        let handle = scope.spawn(|| ssh_json_lines(host, &args, Some(HOST_TIMEOUT)));
+        handle.join()
+    }) {
+        Ok(Ok(values)) => values,
+        Ok(Err(_)) => return Err(HostStatus::Unreachable),
+        Err(_) => return Err(HostStatus::Unreachable),
+    };
 
     if values.is_empty() {
         return Err(HostStatus::EvidenceInsufficient);
@@ -146,6 +145,39 @@ fn diagnose_host(
         return Err(HostStatus::Denied);
     }
     Ok(values)
+}
+
+/// Aggregate status counts for the JSON report.
+fn summary_of(
+    hosts: &[String],
+    results: &HashMap<String, Result<Vec<serde_json::Value>, HostStatus>>,
+) -> serde_json::Value {
+    let total = hosts.len();
+    let mut success = 0usize;
+    let mut by_status: HashMap<&'static str, usize> = HashMap::new();
+    for h in hosts {
+        let label = match results.get(h) {
+            Some(Ok(_)) => {
+                success += 1;
+                HostStatus::Success.label()
+            }
+            Some(Err(status)) => status.label(),
+            None => HostStatus::Timeout.label(),
+        };
+        *by_status.entry(label).or_insert(0) += 1;
+    }
+    let failed = total - success;
+    let mut by_status: serde_json::Map<String, serde_json::Value> = by_status
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+        .collect();
+    by_status.sort_keys();
+    serde_json::json!({
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "by_status": serde_json::Value::Object(by_status),
+    })
 }
 
 /// Render the aggregate report. Coverage statement comes first; hosts with
@@ -187,6 +219,7 @@ fn render(
             host_reports.push(report);
         }
         out.insert("hosts".to_string(), serde_json::Value::Array(host_reports));
+        out.insert("summary".to_string(), summary_of(&hosts, &results));
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_default()
@@ -232,4 +265,84 @@ fn render(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_results() -> HashMap<String, Result<Vec<serde_json::Value>, HostStatus>> {
+        let mut results = HashMap::new();
+        results.insert(
+            "ok-host".to_string(),
+            Ok(vec![
+                serde_json::json!({"check": "disk", "summary": "/dev 90%"}),
+            ]),
+        );
+        results.insert("down-host".to_string(), Err(HostStatus::Unreachable));
+        results.insert("slow-host".to_string(), Err(HostStatus::Timeout));
+        results
+    }
+
+    #[test]
+    fn summary_counts_match_host_statuses() {
+        let hosts = vec![
+            "ok-host".to_string(),
+            "down-host".to_string(),
+            "slow-host".to_string(),
+        ];
+        let s = summary_of(&hosts, &sample_results());
+        assert_eq!(s["total"], 3);
+        assert_eq!(s["success"], 1);
+        assert_eq!(s["failed"], 2);
+        assert_eq!(s["by_status"]["success"], 1);
+        assert_eq!(s["by_status"]["unreachable"], 1);
+        assert_eq!(s["by_status"]["timeout"], 1);
+    }
+
+    #[test]
+    fn missing_host_counts_as_timeout() {
+        let hosts = vec!["ok-host".to_string(), "no-result".to_string()];
+        let s = summary_of(&hosts, &sample_results());
+        assert_eq!(s["total"], 2);
+        assert_eq!(s["success"], 1);
+        assert_eq!(s["failed"], 1);
+        assert_eq!(s["by_status"]["timeout"], 1);
+    }
+
+    #[test]
+    fn run_rejects_unknown_check_before_any_traffic() {
+        let err = run(
+            &["h".to_string()],
+            &["disk".to_string(), "rm-rf".to_string()],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown check 'rm-rf'"), "got: {err}");
+    }
+
+    #[test]
+    fn run_rejects_empty_hosts_and_checks() {
+        assert!(run(&[], &["disk".to_string()], false).is_err());
+        assert!(run(&["h".to_string()], &[], false).is_err());
+    }
+
+    #[test]
+    fn ssh_json_lines_timeout_kills_stuck_child() {
+        // Local sh sleep exceeds the budget; ssh_json_lines must kill it and
+        // return an error well under the sleep duration.
+        let start = std::time::Instant::now();
+        let err = ssh_json_lines(
+            "localhost",
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo '{\"a\":1}'; sleep 30".to_string(),
+            ],
+            Some(Duration::from_millis(500)),
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "got: {err}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
 }
