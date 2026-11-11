@@ -299,6 +299,8 @@ mod tests {
 
     fn fake_session_with_pid(id: &str, pid: u32) -> DaemonSessionInfo {
         DaemonSessionInfo {
+            controller: None,
+            controller_stale: false,
             session_id: id.to_string(),
             socket_path: std::path::PathBuf::from("/tmp/none.sock"),
             daemon_pid: pid,
