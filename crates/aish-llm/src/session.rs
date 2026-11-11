@@ -2189,12 +2189,41 @@ impl LlmSession {
         );
     }
 
+    /// If the installed security policy changed since the last approval was
+    /// remembered, clear the approval memory. The epoch marker is the policy
+    /// file's mtime; a missing file means "no policy installed" and never
+    /// invalidates anything.
+    fn maybe_invalidate_approvals_on_policy_change(
+        memory: &Option<Arc<parking_lot::Mutex<ApprovalMemory>>>,
+    ) {
+        use aish_security::policy_epoch_fingerprint;
+        let Some(memory) = memory else { return };
+        let fingerprint = policy_epoch_fingerprint();
+        {
+            let guard = memory.lock();
+            if guard.policy_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+                return;
+            }
+        }
+        let mut guard = memory.lock();
+        // Re-check under the lock: another thread may have already reset it.
+        if guard.policy_fingerprint.as_deref() != Some(fingerprint.as_str()) {
+            guard.clear();
+            guard.policy_fingerprint = Some(fingerprint);
+        }
+    }
+
     fn run_tool_preflight(
         &self,
         tool_name: &str,
         tool: &dyn Tool,
         args: &serde_json::Value,
     ) -> Option<ToolResult> {
+        // Policy epoch: when a remote policy install bumps the epoch marker,
+        // remembered approvals must not outlive the new (possibly stricter)
+        // policy. Cheap mtime check once per preflight.
+        Self::maybe_invalidate_approvals_on_policy_change(&self.approval_memory);
+
         if self.is_sub_agent && crate::prompt::SUBAGENT_GLOBAL_DENY.contains(&tool_name) {
             return Some(ToolResult::error(format!(
                 "Tool '{tool_name}' is not available in sub-agent sessions"

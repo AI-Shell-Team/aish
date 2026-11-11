@@ -540,6 +540,23 @@ pub fn remote_policy_version_path() -> PathBuf {
     user_security_policy_path().with_extension("yaml.remote-version")
 }
 
+/// Fingerprint of the installed policy for approval-invalidation: the
+/// policy file's mtime as seconds+nanos. A missing file yields "none".
+pub fn policy_epoch_fingerprint() -> String {
+    match resolve_security_policy_path(None) {
+        Some(path) => match std::fs::metadata(&path) {
+            Ok(meta) => meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| format!("{}:{}", d.as_secs(), d.subsec_nanos()))
+                .unwrap_or_else(|| "none".to_string()),
+            Err(_) => "none".to_string(),
+        },
+        None => "none".to_string(),
+    }
+}
+
 /// Parse a policy YAML string into a validated [`SecurityPolicy`].
 /// Used by the remote policy install flow to reject malformed bodies before
 /// they replace an effective policy.
