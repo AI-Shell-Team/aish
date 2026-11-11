@@ -35,6 +35,7 @@ mod diag_tasks;
 mod diagnose;
 mod install_channel;
 mod models_auth;
+mod policy_signing;
 mod remote_cmd;
 mod remote_hosts;
 mod skill_cmd;
@@ -310,6 +311,26 @@ enum RemoteSubcommand {
         #[arg(long)]
         host: String,
     },
+    /// Manage the local admin keypair and policy signers
+    Admin {
+        #[command(subcommand)]
+        action: RemoteAdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum RemoteAdminAction {
+    /// Generate the admin keypair used to sign policy envelopes
+    Keygen,
+    /// Show the admin public key (distribute this to target hosts)
+    ShowKey,
+    /// Register an admin public key on THIS host (target side)
+    AddSigner {
+        /// Admin public key (64 hex chars)
+        public_key: String,
+    },
+    /// List configured policy signers on THIS host
+    ListSigners,
 }
 
 #[derive(Subcommand)]
@@ -1020,6 +1041,38 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
             }
             remote_cmd::cmd_remote_doctor(&target)
         }
+        RemoteSubcommand::Admin { action } => match action {
+            RemoteAdminAction::Keygen => {
+                let pubkey = policy_signing::keygen()?;
+                println!("admin keypair generated.");
+                println!("public key (distribute to target hosts):");
+                println!("  {pubkey}");
+                println!("Tip: on each target host run: aish remote admin add-signer {pubkey}");
+                Ok(())
+            }
+            RemoteAdminAction::ShowKey => {
+                let pubkey = policy_signing::keygen_public_key()?;
+                println!("{pubkey}");
+                Ok(())
+            }
+            RemoteAdminAction::AddSigner { public_key } => {
+                policy_signing::add_signer(&public_key)?;
+                println!("signer registered");
+                Ok(())
+            }
+            RemoteAdminAction::ListSigners => {
+                let signers = policy_signing::list_signers()?;
+                if signers.is_empty() {
+                    println!("No policy signers configured on this host.");
+                    println!("Tip: 'aish remote admin add-signer <public-key-hex>' registers one");
+                } else {
+                    for s in &signers {
+                        println!("  {s}");
+                    }
+                }
+                Ok(())
+            }
+        },
     }
 }
 
@@ -1161,6 +1214,8 @@ fn spawn_pty_daemon(
     while std::time::Instant::now() < deadline {
         if aish_pty::check_daemon_alive(&socket_path) {
             return Ok(aish_pty::DaemonSessionInfo {
+                controller: None,
+                controller_stale: false,
                 session_id,
                 socket_path,
                 daemon_pid: 0, // real pid is in session JSON written by daemon
@@ -2785,6 +2840,8 @@ mod tests {
 
     fn session(id: &str, started_at: u64) -> aish_pty::DaemonSessionInfo {
         aish_pty::DaemonSessionInfo {
+            controller: None,
+            controller_stale: false,
             session_id: id.to_string(),
             socket_path: std::path::PathBuf::from(format!("/tmp/{id}.sock")),
             daemon_pid: 1,

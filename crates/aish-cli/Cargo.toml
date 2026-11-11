@@ -31,3 +31,5 @@ semver.workspace = true
 libc.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true

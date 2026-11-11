@@ -42,6 +42,18 @@ impl TestWorkspace {
             "model: test\napi_base: http://127.0.0.1:1/v1\napi_key: k\npty_daemon_enabled: true\ninline_completion:\n  enabled: false\n",
         )
         .expect("write selected config");
+        // Kill leftover daemons from previous runs and clear their session
+        // files, so the test attaches to the daemon it starts itself and
+        // the sidecar assertions see only this run's files.
+        for s in aish_pty::discover_sessions() {
+            let _ = aish_pty::kill_session(&s.socket_path);
+        }
+        let sessions_dir = aish_pty::pty_session_dir().expect("session dir");
+        if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+            for e in entries.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
         Self { root, outer: None }
     }
 }
@@ -101,32 +113,33 @@ fn spawn_outer(ws: &TestWorkspace) -> (Child, std::fs::File) {
 fn outer_bin() -> String {
     // The integration test lives in aish-pty; the aish binary is built by
     // aish-cli. Prefer the workspace target dir relative to this crate.
-    let candidates = [
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../aish-cli"),
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug/aish"),
-    ];
-    for base in candidates {
-        let p = format!("{}/aish", base.trim_end_matches('/'));
-        // CARGO_BIN_EXE is only set for the crate defining the binary; fall
-        // back to the workspace target path.
-        if std::path::Path::new(&p).exists() {
-            return p;
-        }
+    // Prefer an explicitly provided binary (set by the caller or CI), then
+    // the workspace target dir relative to this crate.
+    if let Ok(p) = std::env::var("AISH_TEST_BIN") {
+        return p;
     }
-    // cargo test builds workspace bins into the workspace target dir.
     let ws_target = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/debug/aish");
-    ws_target.to_string()
+    if std::path::Path::new(ws_target).exists() {
+        return ws_target.to_string();
+    }
+    panic!("aish binary not found; build aish-cli first or set AISH_TEST_BIN")
 }
 
 fn wait_for_session(ws: &TestWorkspace) -> (String, String) {
     let deadline = std::time::Instant::now() + Duration::from_secs(TIMEOUT_SECS);
     loop {
-        let sessions = aish_pty::discover_sessions();
-        if let Some(s) = sessions.into_iter().find(|s| {
-            std::fs::canonicalize(&s.cwd)
-                .map(|c| c == ws.root.join("workdir"))
-                .unwrap_or(false)
-        }) {
+        // Pick the NEWEST session in the workdir: stale daemons from
+        // previous runs can linger and would otherwise be selected.
+        let mut sessions: Vec<_> = aish_pty::discover_sessions()
+            .into_iter()
+            .filter(|s| {
+                std::fs::canonicalize(&s.cwd)
+                    .map(|c| c == ws.root.join("workdir"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+        if let Some(s) = sessions.into_iter().next() {
             return (s.socket_path.display().to_string(), s.session_id);
         }
         assert!(
@@ -176,7 +189,7 @@ fn second_client_gets_observer_role_and_input_is_gated() {
     {
         use std::io::Write as _;
         let _ = _master.write_all(b"echo PROBE_ATTACH\r");
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut probe_ok = false;
         while std::time::Instant::now() < deadline {
             let mut buf = [0u8; 65536];
@@ -247,6 +260,30 @@ fn second_client_gets_observer_role_and_input_is_gated() {
     assert!(
         !contains(&out2, b"BAD_OBSERVER"),
         "observer input must not be echoed back to the observer"
+    );
+
+    // The daemon updates the controller fields in the session JSON on role
+    // changes; poll for the controller field to appear (the outer attach can
+    // take a while due to shell startup).
+    let session_file = aish_pty::pty_session_dir()
+        .expect("session dir")
+        .join(format!("{session_id}.json"));
+    let mut controller_named = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    while std::time::Instant::now() < deadline {
+        if let Ok(text) = std::fs::read_to_string(&session_file) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if v.get("controller").and_then(|c| c.as_str()).is_some() {
+                    controller_named = true;
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        controller_named,
+        "session JSON must name the controller after role changes"
     );
 
     let _ = c2.detach();

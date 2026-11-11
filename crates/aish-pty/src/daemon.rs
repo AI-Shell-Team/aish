@@ -382,6 +382,11 @@ impl RoleArbiter {
             .unwrap_or(ClientRoleState::Observer)
     }
 
+    /// Whether a stale (disconnected) controller slot exists.
+    fn has_stale(&self) -> bool {
+        self.roles.values().any(|r| *r == ClientRoleState::Stale)
+    }
+
     /// fd of the current live controller, if any.
     fn controller_fd(&self) -> Option<RawFd> {
         self.roles
@@ -692,6 +697,12 @@ pub struct DaemonSessionInfo {
     pub api_base: Option<String>,
     /// Optional user-defined name for the session.
     pub name: Option<String>,
+    /// Description of the current input controller, if any (set by the
+    /// daemon on role changes; absent in session files predating this).
+    pub controller: Option<String>,
+    /// True when the previous controller disconnected (role transfer is
+    /// pending until a new client claims).
+    pub controller_stale: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +872,7 @@ fn write_session_file(info: &DaemonSessionInfo) {
     let path = dir.join(format!("{}.json", info.session_id));
     // SAFETY: [Category 8 — FFI] `getuid()` — see `pty_socket_dir` above.
     let uid = unsafe { libc::getuid() };
-    let json = serde_json::json!({
+    let mut json = serde_json::json!({
         "session_uuid": info.session_id,
         "socket_path": info.socket_path.to_string_lossy(),
         "daemon_pid": info.daemon_pid,
@@ -873,6 +884,14 @@ fn write_session_file(info: &DaemonSessionInfo) {
         "api_base": info.api_base,
         "name": info.name,
     });
+    // Controller fields; updated in place by update_controller_state.
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("controller".to_string(), serde_json::Value::Null);
+        obj.insert(
+            "controller_stale".to_string(),
+            serde_json::Value::Bool(false),
+        );
+    }
     if std::fs::write(
         &path,
         serde_json::to_string_pretty(&json).unwrap_or_default(),
@@ -885,6 +904,58 @@ fn write_session_file(info: &DaemonSessionInfo) {
 }
 
 /// Remove session file on exit.
+/// Best-effort audit trail for role changes. Appends to a per-session
+/// log file in the sessions dir; failures never affect the session.
+fn audit_role_event(session_id: &str, event: &str, detail: &str) {
+    let dir = match pty_session_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = dir.join(format!("{session_id}.role-audit.log"));
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{now}\t{event}\t{detail}");
+    }
+}
+
+/// Update the controller fields in the session JSON in place, so remote
+/// list commands can answer "who is in control". Best-effort.
+fn update_controller_state(session_id: &str, controller: Option<&str>, stale: bool) {
+    let dir = match pty_session_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = dir.join(format!("{session_id}.json"));
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "controller".to_string(),
+            controller.map(String::from).into(),
+        );
+        obj.insert(
+            "controller_stale".to_string(),
+            serde_json::Value::Bool(stale),
+        );
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&json).unwrap_or_default(),
+    );
+}
+
 fn remove_session_file(session_id: &str) {
     let dir = match pty_session_dir() {
         Ok(d) => d,
@@ -1000,6 +1071,14 @@ pub fn discover_sessions() -> Vec<DaemonSessionInfo> {
                                 .and_then(|v| v.as_str())
                                 .map(String::from),
                             name: json.get("name").and_then(|v| v.as_str()).map(String::from),
+                            controller: json
+                                .get("controller")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            controller_stale: json
+                                .get("controller_stale")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
                         });
                     } else {
                         // Stale session file, clean up
@@ -1190,6 +1269,8 @@ pub fn run_pty_daemon_shell(
                 model: None,
                 api_base: None,
                 name: None,
+                controller: None,
+                controller_stale: false,
             };
             write_session_file(&session_info);
             tracing::info!(session_id, child_pid, "shell daemon started");
@@ -1383,12 +1464,12 @@ pub fn run_pty_daemon_shell(
                                                 }
                                             TYPE_DETACH => remove = true,
                                             TYPE_CLAIM_INPUT => {
-                                                handle_claim_input(&mut arbiter, &mut clients, i);
+                                                handle_claim_input(&mut arbiter, &mut clients, i, session_id);
                                             }
                                             TYPE_RELEASE_INPUT => {
                                                 let fd = clients[i].fd();
                                                 if arbiter.handle_release(fd) {
-                                                    broadcast_role_notify(&mut clients, &arbiter);
+                                                    broadcast_role_notify(&mut clients, &arbiter, session_id);
                                                 }
                                             }
                                             TYPE_TAKEOVER_CONFIRM => {
@@ -1405,6 +1486,7 @@ pub fn run_pty_daemon_shell(
                                                             broadcast_role_notify(
                                                                 &mut clients,
                                                                 &arbiter,
+                                                                session_id,
                                                             );
                                                         }
                                                     }
@@ -1432,6 +1514,11 @@ pub fn run_pty_daemon_shell(
                                 arbiter.on_disconnect(fd);
                                 to_remove.push(i);
                             }
+                        }
+                        // A disconnect can change the controller state
+                        // (controller → stale); keep the sidecar current.
+                        if !to_remove.is_empty() {
+                            broadcast_role_notify(&mut clients, &arbiter, session_id);
                         }
                         for i in to_remove {
                             let r = clients.swap_remove(i);
@@ -1536,6 +1623,7 @@ pub fn run_pty_daemon_shell(
                             }
                         }
                     }
+                    broadcast_role_notify(&mut clients, &arbiter, session_id);
                 }
 
                 if child_exited {
@@ -1575,12 +1663,17 @@ pub fn run_pty_daemon_shell(
 /// - Controller claiming again: ignore.
 /// - No live controller (stale slot): immediate transfer.
 /// - Live controller: forward a TAKEOVER_REQUEST and park the request.
-fn handle_claim_input(arbiter: &mut RoleArbiter, clients: &mut [ClientConnection], i: usize) {
+fn handle_claim_input(
+    arbiter: &mut RoleArbiter,
+    clients: &mut [ClientConnection],
+    i: usize,
+    session_id: &str,
+) {
     let fd = clients[i].fd();
     match arbiter.handle_claim(fd) {
         ClaimDecision::Ignore => {}
         ClaimDecision::Granted => {
-            broadcast_role_notify(clients, arbiter);
+            broadcast_role_notify(clients, arbiter, session_id);
         }
         ClaimDecision::Forwarded { request_id } => {
             let req = TakeoverRequest {
@@ -1597,7 +1690,24 @@ fn handle_claim_input(arbiter: &mut RoleArbiter, clients: &mut [ClientConnection
 }
 
 /// Helper: send each live client a ROLE_NOTIFY with its current role.
-fn broadcast_role_notify(clients: &mut [ClientConnection], arbiter: &RoleArbiter) {
+fn broadcast_role_notify(
+    clients: &mut [ClientConnection],
+    arbiter: &RoleArbiter,
+    session_id: &str,
+) {
+    // Keep the session's controller-state sidecar and audit trail in sync.
+    let controller_desc = arbiter
+        .controller_fd()
+        .map(|_| format!("uid={}", unsafe { libc::getuid() }));
+    audit_role_event(
+        session_id,
+        "role_change",
+        &match controller_desc.as_deref() {
+            Some(c) => format!("controller={c}"),
+            None => "controller=none".to_string(),
+        },
+    );
+    update_controller_state(session_id, controller_desc.as_deref(), arbiter.has_stale());
     for client in clients.iter_mut() {
         if client.state != ClientState::Live {
             continue;

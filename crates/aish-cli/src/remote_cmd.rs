@@ -248,9 +248,20 @@ pub fn cmd_session_list(host: &str, json: bool) -> Result<(), String> {
             "attached"
         };
         let display_id = if id.len() >= 8 { &id[..8] } else { id };
+        let controller = s
+            .get("controller")
+            .and_then(|v| v.as_str())
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| {
+                if s.get("controller_stale").and_then(|v| v.as_bool()) == Some(true) {
+                    "(lost)".to_string()
+                } else {
+                    "—".to_string()
+                }
+            });
         println!(
             "{:<22} {:<10} {:<12} {:<28} {}",
-            display_id, state, "—", cwd, name
+            display_id, state, controller, cwd, name
         );
     }
     Ok(())
@@ -314,10 +325,60 @@ pub fn resolve_session(host: &str, selector: &str) -> Result<String, String> {
     }
 }
 
-/// `aish remote session attach --host <h> [session]` (#586).
+/// `aish remote session attach --host <h> [session]` (#586). Without a
+/// session selector, list the remote sessions and prompt for a number.
 pub fn cmd_session_attach(host: &str, session: &str) -> Result<(), String> {
-    let session_id = resolve_session(host, session)?;
+    let session_id = if session.is_empty() {
+        pick_remote_session(host)?
+    } else {
+        resolve_session(host, session)?
+    };
     crate::attach_remote::run(host, &session_id)
+}
+
+/// Numbered picker over the remote sessions (works over plain ssh, no TUI
+/// required — honest about the remote context, unlike reusing the local TUI).
+fn pick_remote_session(host: &str) -> Result<String, String> {
+    let bin = probe_remote_bin(host)?;
+    let args = vec![bin, "--remote-sessions".to_string()];
+    let sessions = ssh_json_lines(host, &args, None)?;
+    if sessions.is_empty() {
+        return Err(format!(
+            "no sessions on {host}.\nTip: start one with 'aish' on {host}, or use 'aish run --continue' locally"
+        ));
+    }
+    println!("Sessions on {host}:");
+    for (idx, s) in sessions.iter().enumerate() {
+        let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let cwd = s.get("cwd").and_then(|v| v.as_str()).unwrap_or("?");
+        let id = s.get("session_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let short = if id.len() >= 8 { &id[..8] } else { id };
+        println!("  [{}] {}  {cwd}  {name}", idx + 1, short);
+    }
+    print!("attach to session [1-{}]: ", sessions.len());
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    let choice: usize = line.trim().parse().map_err(|_| {
+        format!(
+            "invalid selection '{}'.\nTip: enter a number between 1 and {}",
+            line.trim(),
+            sessions.len()
+        )
+    })?;
+    if choice == 0 || choice > sessions.len() {
+        return Err(format!(
+            "selection {choice} out of range (1-{})",
+            sessions.len()
+        ));
+    }
+    Ok(sessions[choice - 1]
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// `aish remote session rename --host <h> <session> --to <name>`.
@@ -362,6 +423,16 @@ pub fn cmd_policy_push(
     let content = std::fs::read_to_string(policy_file)
         .map_err(|e| format!("cannot read policy file {policy_file}: {e}"))?;
     // Validate locally BEFORE any ssh traffic so bad YAML fails fast.
+    // Guard: reject envelope files passed as policy (an envelope is a JSON
+    // object with version/signature/policy keys — and JSON is valid YAML,
+    // so parse validation alone would accept it).
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+        if v.is_object() && (v.get("signature").is_some() || v.get("policy").is_some()) {
+            return Err(format!(
+                "{policy_file} looks like a policy ENVELOPE (has version/signature/policy keys), not a policy file.\nTip: pass the policy YAML itself; the envelope is built by this command"
+            ));
+        }
+    }
     if let Err(e) = aish_security::policy_from_yaml_str(&content) {
         return Err(format!("invalid policy YAML: {e}.\nTip: check the file syntax, or run 'aish remote policy show --host {host}' to see the installed policy"));
     }
@@ -385,12 +456,17 @@ pub fn cmd_policy_push(
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
-    let envelope = serde_json::json!({
+    let mut envelope = serde_json::json!({
         "version": version,
         "issuer": whoami_local(),
         "targets": targets_list,
         "policy": content,
     });
+    // Sign when an admin keypair exists; otherwise push unsigned (target
+    // hosts configured with signers will reject it).
+    if let Ok(signature) = crate::policy_signing::sign_envelope(version, &targets_list, &content) {
+        envelope["signature"] = serde_json::Value::String(signature);
+    }
     let envelope_str = serde_json::to_string(&envelope).unwrap_or_default();
 
     // Optional diff against the remote's installed policy.
@@ -836,6 +912,8 @@ pub fn agent_list_sessions() {
             "started_at": s.started_at,
             "alive": alive,
             "shell_running": shell_running,
+            "controller": s.controller,
+            "controller_stale": s.controller_stale,
         });
         println!("{}", serde_json::to_string(&record).unwrap_or_default());
     }
@@ -999,16 +1077,43 @@ fn install_policy_envelope(envelope: &str) -> serde_json::Value {
         return serde_json::json!({"accepted": false, "version": version, "reason": reason});
     }
 
-    // Signature gate: absent/empty accepted, non-empty rejected (see
-    // `check_policy_signature` — ed25519 lands with keypair distribution).
-    if let Err(reason) = check_policy_signature(env.get("signature").and_then(|v| v.as_str())) {
-        return serde_json::json!({"accepted": false, "version": version, "reason": reason});
-    }
-
-    // The policy body must parse into a valid SecurityPolicy.
+    // The policy body must exist before signature verification (the
+    // signed payload includes the body).
     let Some(policy_yaml) = env.get("policy").and_then(|p| p.as_str()) else {
         return serde_json::json!({"accepted": false, "version": version, "reason": "missing policy body"});
     };
+
+    // Signature gate: if any signer is configured, the signature is
+    // mandatory and verified; in unsigned mode, empty signatures are
+    // accepted and non-empty ones rejected.
+    let signature = env.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+    let has_signers = !crate::policy_signing::list_signers()
+        .unwrap_or_default()
+        .is_empty();
+    if has_signers {
+        if signature.is_empty() {
+            return serde_json::json!({"accepted": false, "version": version,
+                "reason": "unsigned envelope rejected: this host has policy signers configured"});
+        }
+        if let Err(reason) =
+            crate::policy_signing::verify_envelope(version, &targets, policy_yaml, signature)
+        {
+            return serde_json::json!({"accepted": false, "version": version, "reason": reason});
+        }
+    } else if let Err(reason) =
+        check_policy_signature(env.get("signature").and_then(|v| v.as_str()))
+    {
+        return serde_json::json!({"accepted": false, "version": version, "reason": reason});
+    }
+
+    // Reject envelope-shaped bodies: a real policy never carries
+    // signature/policy keys at top level.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(policy_yaml) {
+        if v.is_object() && (v.get("signature").is_some() || v.get("policy").is_some()) {
+            return serde_json::json!({"accepted": false, "version": version,
+                "reason": "policy body looks like an envelope, not a policy"});
+        }
+    }
     if let Err(e) = aish_security::policy_from_yaml_str(policy_yaml) {
         return serde_json::json!({"accepted": false, "version": version, "reason": format!("policy parse failed: {e}")});
     }
@@ -1385,5 +1490,28 @@ mod shell_quote_tests {
     fn dollar_and_semicolon_are_quoted() {
         assert!(shell_quote("$HOME").starts_with('\''));
         assert!(shell_quote("a;b").starts_with('\''));
+    }
+}
+
+#[cfg(test)]
+mod policy_signing_tests {
+    #[test]
+    fn sign_and_verify_roundtrip() {
+        // Isolated keypair via the module's own file paths would collide;
+        // use direct dalek primitives to validate the canonical payload.
+        use ed25519_dalek::{Signer, SigningKey, Verifier};
+        let mut csprng = rand_core::OsRng;
+        let key = SigningKey::generate(&mut csprng);
+        let targets = ["prod-*".to_string()];
+        let policy = "rules: []\n";
+        let payload = format!("{}|{}|{}", 7u64, targets.join(","), policy);
+        let sig = key.sign(payload.as_bytes());
+        assert!(key.verifying_key().verify(payload.as_bytes(), &sig).is_ok());
+        // Tampered payload must fail.
+        let tampered = format!("{}|{}|{}", 7u64, targets.join(","), "rules: [x]\n");
+        assert!(key
+            .verifying_key()
+            .verify(tampered.as_bytes(), &sig)
+            .is_err());
     }
 }
