@@ -300,10 +300,9 @@ impl AttachedBackend {
                                         tracing::warn!(error = %e, "malformed role notify frame")
                                     }
                                 },
-                                TYPE_PTY_OUTPUT | TYPE_SCROLLBACK
-                                    if !frame.payload.is_empty() => {
-                                        pending_events.push(PtyEvent::Output(frame.payload));
-                                    }
+                                TYPE_PTY_OUTPUT | TYPE_SCROLLBACK if !frame.payload.is_empty() => {
+                                    pending_events.push(PtyEvent::Output(frame.payload));
+                                }
                                 TYPE_CONTROL_EVENT => match frame.as_control_event() {
                                     Ok(evt) => pending_events.push(PtyEvent::Control(evt)),
                                     Err(e) => {

@@ -1,0 +1,105 @@
+//! Remote host aliases: a local config mapping short names to ssh targets
+//! and remote aish binary paths, so subcommands accept `--host db-0`
+//! instead of repeating `root@10.10.17.130`.
+//!
+//! Storage: `<config dir>/aish/remote-hosts.json` (JSON array). The file is
+//! created on first `host add` and never touched by single-machine flows.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteHostEntry {
+    /// Short, user-chosen alias (also the lookup key).
+    pub name: String,
+    /// ssh target form (user@host).
+    pub target: String,
+    /// Optional remote aish binary path (overrides probing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_bin: Option<String>,
+    /// Optional per-host defaults for diag (comma-separated check list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_checks: Option<String>,
+}
+
+fn hosts_file() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or("cannot resolve config dir")?;
+    let dir = base.join("aish");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    Ok(dir.join("remote-hosts.json"))
+}
+
+fn load_all() -> Result<Vec<RemoteHostEntry>, String> {
+    let path = hosts_file()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("corrupt {}: {e}", path.display()))
+}
+
+fn save_all(entries: &[RemoteHostEntry]) -> Result<(), String> {
+    let path = hosts_file()?;
+    let json = serde_json::to_string_pretty(entries).unwrap_or_default();
+    // Write-then-rename so an interrupted write cannot corrupt the file.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot install {}: {e}", path.display()))
+}
+
+/// Resolve a `--host` value: an exact alias name expands to its entry;
+/// anything containing `@` or `.` is treated as a literal ssh target.
+/// Returns (ssh_target, remote_bin_override).
+pub fn resolve(host: &str) -> Result<(String, Option<String>), String> {
+    // Fast path: looks like a literal ssh target (user@host, IP, host:port).
+    if host.contains('@') || host.parse::<std::net::IpAddr>().is_ok() || host.contains(':') {
+        return Ok((host.to_string(), None));
+    }
+    if let Some(entry) = lookup(host)? {
+        return Ok((entry.target, entry.remote_bin));
+    }
+    // A dotted name that is not a configured alias is still accepted as a
+    // literal hostname (e.g. 'prod.corp.lan').
+    if host.contains('.') {
+        return Ok((host.to_string(), None));
+    }
+    Err(format!(
+        "unknown remote host alias '{host}'.\nTip: add it with 'aish remote host add {host} user@real-host', or pass a full ssh target like user@host"
+    ))
+}
+
+fn lookup(name: &str) -> Result<Option<RemoteHostEntry>, String> {
+    Ok(load_all()?.into_iter().find(|e| e.name == name))
+}
+
+pub fn list() -> Result<Vec<RemoteHostEntry>, String> {
+    load_all()
+}
+
+pub fn add(name: &str, target: &str, remote_bin: Option<&str>) -> Result<(), String> {
+    let mut entries = load_all()?;
+    if entries.iter().any(|e| e.name == name) {
+        return Err(format!(
+            "alias '{name}' already exists. Use 'aish remote host remove {name}' first"
+        ));
+    }
+    entries.push(RemoteHostEntry {
+        name: name.to_string(),
+        target: target.to_string(),
+        remote_bin: remote_bin.map(String::from),
+        default_checks: None,
+    });
+    save_all(&entries)
+}
+
+pub fn remove(name: &str) -> Result<bool, String> {
+    let mut entries = load_all()?;
+    let before = entries.len();
+    entries.retain(|e| e.name != name);
+    let removed = entries.len() != before;
+    if removed {
+        save_all(&entries)?;
+    }
+    Ok(removed)
+}

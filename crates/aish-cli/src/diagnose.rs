@@ -47,6 +47,48 @@ const HOST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Entry point for `aish remote diagnose`.
 pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
+    let task_id = crate::diag_tasks::new_task_id();
+    let results = run_inner(hosts, checks, json)?;
+
+    // Persist the task so it can be listed/inspected/retried later.
+    let mut outcomes = std::collections::BTreeMap::new();
+    for (h, r) in &results {
+        let outcome = match r {
+            Ok(_) => crate::diag_tasks::HostOutcome::Success,
+            Err(s) => match s {
+                HostStatus::Unreachable => crate::diag_tasks::HostOutcome::Unreachable,
+                HostStatus::Denied => crate::diag_tasks::HostOutcome::Denied,
+                HostStatus::Timeout => crate::diag_tasks::HostOutcome::Timeout,
+                HostStatus::EvidenceInsufficient => {
+                    crate::diag_tasks::HostOutcome::EvidenceInsufficient
+                }
+                HostStatus::Success => crate::diag_tasks::HostOutcome::Success,
+            },
+        };
+        outcomes.insert(h.clone(), outcome);
+    }
+    let record = crate::diag_tasks::DiagTask {
+        id: task_id.clone(),
+        hosts: hosts.to_vec(),
+        checks: checks.to_vec(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        outcomes,
+        results: std::collections::BTreeMap::new(),
+    };
+    let _ = crate::diag_tasks::save(&record);
+    if !json {
+        println!("task: {task_id} (saved; see 'aish remote diag status {task_id}')");
+    }
+    Ok(())
+}
+
+/// Run the fan-out and render. Returns the per-host results for the
+/// caller to persist.
+fn run_inner(
+    hosts: &[String],
+    checks: &[String],
+    json: bool,
+) -> Result<HashMap<String, Result<Vec<serde_json::Value>, HostStatus>>, String> {
     if hosts.is_empty() {
         return Err("no hosts given; use --hosts h1,h2,...".to_string());
     }
@@ -114,7 +156,8 @@ pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String
             .or_insert_with(|| Err(HostStatus::Timeout));
     }
 
-    render(hosts_vec, checks_vec, results, json)
+    render(hosts_vec, checks_vec, &results, json)?;
+    Ok(results)
 }
 
 /// Run the remote diagnose subcommand on one host.
@@ -185,7 +228,7 @@ fn summary_of(
 fn render(
     hosts: Vec<String>,
     checks: Vec<String>,
-    results: HashMap<String, Result<Vec<serde_json::Value>, HostStatus>>,
+    results: &HashMap<String, Result<Vec<serde_json::Value>, HostStatus>>,
     json: bool,
 ) -> Result<(), String> {
     if json {

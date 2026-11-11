@@ -24,7 +24,7 @@ pub fn run(host: &str, session_id: &str) -> Result<(), String> {
     let mut orig_termios: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: [Category 8 — FFI] tcgetattr/tcsetattr operate on stdin (valid fd).
     if unsafe { libc::tcgetattr(stdin_fd, &mut orig_termios) } != 0 {
-        return Err("stdin is not a terminal".to_string());
+        return Err("remote attach needs an interactive terminal for raw keyboard input, but stdin is not a TTY.\nTip: run this command in a real terminal; use 'aish remote session list --host ...' to inspect sessions without attaching".to_string());
     }
     let mut raw = orig_termios;
     // SAFETY: [Category 8 — FFI] cfmakeraw mutates the in-memory struct.

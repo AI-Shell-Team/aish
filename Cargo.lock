@@ -50,6 +50,7 @@ dependencies = [
  "libc",
  "reqwest",
  "semver",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

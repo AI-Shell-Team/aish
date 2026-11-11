@@ -18,6 +18,20 @@ const REMOTE_BIN_ENV: &str = "AISH_REMOTE_BIN";
 /// Candidate paths probed on the remote host when `AISH_REMOTE_BIN` is unset.
 const REMOTE_BIN_CANDIDATES: &[&str] = &["/usr/local/bin/aish", "/usr/bin/aish"];
 
+/// POSIX-shell quote a single argument (single-quote wrapping, with the
+/// classic embedded-quote dance). Keeps arguments with spaces, quotes or
+/// `$` expansions intact across the ssh boundary.
+fn shell_quote(arg: &str) -> String {
+    if !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_alphanumeric() || "-_./=:,@+".contains(c))
+    {
+        return arg.to_string(); // safe to pass through bare
+    }
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 /// A live ssh child process whose stdin/stdout carry the frame stream.
 pub struct SshChannel {
     child: Child,
@@ -39,7 +53,9 @@ impl SshChannel {
             .arg("ServerAliveCountMax=3")
             .arg("--")
             .arg(host)
-            .args(remote_args)
+            // ssh joins remote_args with spaces into one remote shell string,
+            // so any argument containing spaces must be shell-quoted here.
+            .args(remote_args.iter().map(|a| shell_quote(a)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -174,7 +190,11 @@ pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
         }
     }
     Err(format!(
-        "no usable aish binary found on {host}; set {REMOTE_BIN_ENV} to the remote path"
+        "no usable aish binary found on {host} (checked {}).\n\
+         Fix: install aish on {host} into one of those paths, or set\n\
+         {REMOTE_BIN_ENV}=<remote path>, or add the host with\n\
+         'aish remote host add <alias> {host} --remote-bin <path>'",
+        REMOTE_BIN_CANDIDATES.join(", ")
     ))
 }
 
@@ -182,9 +202,10 @@ pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
 // Coordinator-side command implementations
 // ---------------------------------------------------------------------------
 
-/// `aish remote sessions --host <host>`: list remote PTY sessions with
-/// liveness state (#586).
-pub fn cmd_remote_sessions(host: &str, json: bool) -> Result<(), String> {
+/// `aish remote session list --host <h>`: list remote sessions with a
+/// four-state model and the current controller (#586). The remote agent
+/// reports both daemon liveness and whether the shell is still running.
+pub fn cmd_session_list(host: &str, json: bool) -> Result<(), String> {
     let bin = probe_remote_bin(host)?;
     let args = vec![bin, "--remote-sessions".to_string()];
     let sessions = ssh_json_lines(host, &args, None)?;
@@ -196,39 +217,216 @@ pub fn cmd_remote_sessions(host: &str, json: bool) -> Result<(), String> {
         return Ok(());
     }
     if sessions.is_empty() {
-        println!("No active PTY sessions on {host}.");
+        println!("No sessions on {host}.");
+        println!("Tip: start one with 'aish' on {host} (or attach here to create one).");
         return Ok(());
     }
-    println!("Remote PTY sessions on {host}:");
+    println!("Sessions on {host}:");
+    println!(
+        "{:<22} {:<10} {:<12} {:<28} NAME",
+        "SESSION", "STATE", "CONTROLLER", "CWD"
+    );
     for s in &sessions {
         let id = s.get("session_id").and_then(|v| v.as_str()).unwrap_or("?");
         let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let cwd = s.get("cwd").and_then(|v| v.as_str()).unwrap_or("?");
-        let alive = s.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
-        let state = if alive { "running" } else { "exited" };
-        println!("  {id}  [{state}]  {cwd}  {name}");
+        let daemon_alive = s.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
+        let shell_running = s.get("shell_running").and_then(|v| v.as_bool());
+        // Four-state model:
+        //   attached  — daemon alive, shell alive (usable right now)
+        //   exited    — daemon alive but the shell exited (only cleanup is
+        //               possible; the session cannot be resumed)
+        //   unreachable — daemon socket did not answer (host down or daemon
+        //               died; session state is unknown, not necessarily dead)
+        //   detached  — daemon alive, nobody attached (reserved; the agent
+        //               currently reports alive regardless of attach state)
+        let state = if !daemon_alive {
+            "unreachable"
+        } else if shell_running == Some(false) {
+            "exited"
+        } else {
+            "attached"
+        };
+        let display_id = if id.len() >= 8 { &id[..8] } else { id };
+        println!(
+            "{:<22} {:<10} {:<12} {:<28} {}",
+            display_id, state, "—", cwd, name
+        );
     }
     Ok(())
 }
 
-/// `aish remote attach --host <h> <session>` (#586).
-pub fn cmd_remote_attach(host: &str, session_id: &str) -> Result<(), String> {
-    crate::attach_remote::run(host, session_id)
+/// Resolve a session selector (full UUID, unique name, or unique prefix)
+/// against the remote session list. Returns the full UUID.
+pub fn resolve_session(host: &str, selector: &str) -> Result<String, String> {
+    let bin = probe_remote_bin(host)?;
+    let args = vec![bin, "--remote-sessions".to_string()];
+    let sessions = ssh_json_lines(host, &args, None)?;
+    if selector.is_empty() {
+        return Err("no session specified.\nTip: run 'aish remote session list --host ...' to see what is available".to_string());
+    }
+    // Exact id, exact name, then unique prefix.
+    let exact_id = sessions
+        .iter()
+        .find(|s| s.get("session_id").and_then(|v| v.as_str()) == Some(selector));
+    if let Some(s) = exact_id {
+        return Ok(s
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(selector)
+            .to_string());
+    }
+    let exact_name = sessions
+        .iter()
+        .find(|s| s.get("name").and_then(|v| v.as_str()) == Some(selector));
+    if let Some(s) = exact_name {
+        return Ok(s
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(selector)
+            .to_string());
+    }
+    let prefix: Vec<&serde_json::Value> = sessions
+        .iter()
+        .filter(|s| {
+            s.get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|id| id.starts_with(selector))
+                .unwrap_or(false)
+        })
+        .collect();
+    match prefix.len() {
+        1 => Ok(prefix[0].get("session_id").and_then(|v| v.as_str()).unwrap_or(selector).to_string()),
+        0 => Err(format!(
+            "no session matches '{selector}' on {host}.\nTip: run 'aish remote session list --host {host}' to see available sessions"
+        )),
+        _ => {
+            let ids: Vec<&str> = prefix
+                .iter()
+                .filter_map(|s| s.get("session_id").and_then(|v| v.as_str()))
+                .collect();
+            Err(format!(
+                "'{selector}' is ambiguous, matches {} sessions: {}.\nTip: use a longer prefix",
+                prefix.len(),
+                ids.join(", ")
+            ))
+        }
+    }
 }
 
-/// `aish remote policy-push --host <host> --policy <file>`: send a policy
-/// envelope and report whether the remote accepted it (#587).
-pub fn cmd_policy_push(host: &str, policy_file: &str) -> Result<(), String> {
+/// `aish remote session attach --host <h> [session]` (#586).
+pub fn cmd_session_attach(host: &str, session: &str) -> Result<(), String> {
+    let session_id = resolve_session(host, session)?;
+    crate::attach_remote::run(host, &session_id)
+}
+
+/// `aish remote session rename --host <h> <session> --to <name>`.
+pub fn cmd_session_rename(host: &str, session: &str, to: &str) -> Result<(), String> {
+    let session_id = resolve_session(host, session)?;
+    let bin = probe_remote_bin(host)?;
+    // Combined single arg: ssh joins remote argv with spaces, which would
+    // split a name containing spaces into separate clap subcommands.
+    let combined = format!("{session_id} {to}");
+    let args = vec![bin, "--remote-session-rename".to_string(), combined];
+    ssh_json_lines(host, &args, None)?;
+    println!("{host}: renamed {session_id} -> {to}");
+    Ok(())
+}
+
+/// `aish remote session kill --host <h> <session>`.
+pub fn cmd_session_kill(host: &str, session: &str) -> Result<(), String> {
+    let session_id = resolve_session(host, session)?;
+    let bin = probe_remote_bin(host)?;
+    let args = vec![
+        bin,
+        "--remote-session-kill".to_string(),
+        session_id.to_string(),
+    ];
+    ssh_json_lines(host, &args, None)?;
+    println!("{host}: killed session {session_id}");
+    Ok(())
+}
+
+/// `aish remote policy push`: build the envelope locally (version
+/// auto-increment per host), optionally preview the diff, then send it over
+/// stdin (ssh concatenates command args, which would split an envelope
+/// containing spaces) (#587).
+pub fn cmd_policy_push(
+    host: &str,
+    policy_file: &str,
+    targets: &str,
+    version_override: Option<u64>,
+    show_diff: bool,
+    yes: bool,
+) -> Result<(), String> {
     let content = std::fs::read_to_string(policy_file)
         .map_err(|e| format!("cannot read policy file {policy_file}: {e}"))?;
-    // The envelope is sent on stdin (ssh concatenates command args into one
-    // remote shell string, which would split an envelope containing spaces).
+    // Validate locally BEFORE any ssh traffic so bad YAML fails fast.
+    if let Err(e) = aish_security::policy_from_yaml_str(&content) {
+        return Err(format!("invalid policy YAML: {e}.\nTip: check the file syntax, or run 'aish remote policy show --host {host}' to see the installed policy"));
+    }
+
+    // Auto version: max(local counter, remote installed version) + 1, so a
+    // fresh local checkout never regresses against what the remote has.
+    let version = match version_override {
+        Some(v) => v,
+        None => {
+            let remote_v = remote_policy_installed(host)
+                .ok()
+                .flatten()
+                .map(|(v, _)| v)
+                .unwrap_or(0);
+            next_policy_version(host).max(remote_v + 1)
+        }
+    };
+    let targets_list: Vec<String> = targets
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    let envelope = serde_json::json!({
+        "version": version,
+        "issuer": whoami_local(),
+        "targets": targets_list,
+        "policy": content,
+    });
+    let envelope_str = serde_json::to_string(&envelope).unwrap_or_default();
+
+    // Optional diff against the remote's installed policy.
+    if show_diff {
+        match remote_policy_installed(host)? {
+            Some((installed_version, installed_yaml)) => {
+                println!("--- remote policy (v{installed_version})");
+                println!("+++ local  policy (v{version})");
+                print_unified_diff(&installed_yaml, &content);
+            }
+            None => println!(
+                "remote has no installed remote policy yet; pushing v{version} will create it"
+            ),
+        }
+        if !yes {
+            print!("push this policy to {host}? [y/N] ");
+            std::io::stdout().flush().ok();
+            let mut line = String::new();
+            std::io::stdin()
+                .read_line(&mut line)
+                .map_err(|e| e.to_string())?;
+            let answer = line.trim().to_ascii_lowercase();
+            if answer != "y" && answer != "yes" {
+                println!("aborted, nothing pushed");
+                return Ok(());
+            }
+        }
+    }
+
+    // Envelope travels on stdin.
     let bin = probe_remote_bin(host)?;
     let args = vec![bin, "--remote-policy-install-stdin".to_string()];
     let mut ch = SshChannel::spawn(host, &args)?;
     let (mut reader, mut stdin) = ch.split()?;
     stdin
-        .write_all(content.as_bytes())
+        .write_all(envelope_str.as_bytes())
         .map_err(|e| format!("cannot send envelope: {e}"))?;
     drop(stdin); // EOF: remote parses the envelope
 
@@ -246,18 +444,156 @@ pub fn cmd_policy_push(host: &str, policy_file: &str) -> Result<(), String> {
     let version = reply.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
     let reason = reply.get("reason").and_then(|v| v.as_str()).unwrap_or("");
     if accepted {
+        bump_local_version(host, version)?;
         println!("{host}: policy v{version} accepted and effective");
         Ok(())
     } else {
         println!("{host}: policy v{version} REJECTED: {reason}");
-        Err(format!("{host}: policy rejected"))
+        Err(format!(
+            "{host}: policy rejected. Tip: 'aish remote policy show --host {host}' shows the installed policy"
+        ))
     }
+}
+
+/// Local per-host version counter: <config dir>/aish/remote-sync/<host>.ver
+fn version_file(host: &str) -> Result<std::path::PathBuf, String> {
+    let base = dirs::config_dir().ok_or("cannot resolve config dir")?;
+    let dir = base.join("aish").join("remote-sync");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    let safe: String = host
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok(dir.join(format!("{safe}.ver")))
+}
+
+fn next_policy_version(host: &str) -> u64 {
+    version_file(host)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1
+}
+
+fn bump_local_version(host: &str, v: u64) -> Result<(), String> {
+    let path = version_file(host)?;
+    // Never regress the local counter.
+    let current = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if v > current {
+        std::fs::write(&path, v.to_string()).map_err(|e| format!("cannot write version: {e}"))?;
+    }
+    Ok(())
+}
+
+fn whoami_local() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Fetch the remote's installed policy (version + YAML) for diffing.
+fn remote_policy_installed(host: &str) -> Result<Option<(u64, String)>, String> {
+    let bin = probe_remote_bin(host)?;
+    let args = vec![bin, "--remote-policy-show".to_string()];
+    let lines = ssh_json_lines(host, &args, None)?;
+    match lines.into_iter().next() {
+        Some(v) => {
+            let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);
+            let yaml = v
+                .get("policy")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if yaml.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some((version, yaml)))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+/// Minimal line-based diff for the confirm-before-push preview.
+fn print_unified_diff(old: &str, new: &str) {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut removed = Vec::new();
+    let mut added = Vec::new();
+    let mut oi = 0usize;
+    let mut ni = 0usize;
+    while oi < old_lines.len() && ni < new_lines.len() {
+        if old_lines[oi] == new_lines[ni] {
+            oi += 1;
+            ni += 1;
+        } else {
+            removed.push(old_lines[oi]);
+            added.push(new_lines[ni]);
+            oi += 1;
+            ni += 1;
+        }
+    }
+    while oi < old_lines.len() {
+        removed.push(old_lines[oi]);
+        oi += 1;
+    }
+    while ni < new_lines.len() {
+        added.push(new_lines[ni]);
+        ni += 1;
+    }
+    for l in &removed {
+        println!("-{l}");
+    }
+    for l in &added {
+        println!("+{l}");
+    }
+    if removed.is_empty() && added.is_empty() {
+        println!("(no textual difference)");
+    }
+}
+
+/// `aish remote policy show`: what is currently effective on the remote.
+pub fn cmd_policy_show(host: &str) -> Result<(), String> {
+    let bin = probe_remote_bin(host)?;
+    let args = vec![bin, "--remote-policy-show".to_string()];
+    let lines = ssh_json_lines(host, &args, None)?;
+    let Some(v) = lines.into_iter().next() else {
+        println!("{host}: no remote-installed policy (the local policy applies)");
+        return Ok(());
+    };
+    let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);
+    let issuer = v.get("issuer").and_then(|x| x.as_str()).unwrap_or("—");
+    let installed = v
+        .get("installed_at")
+        .and_then(|x| x.as_str())
+        .unwrap_or("—");
+    let rules = v.get("rules").and_then(|x| x.as_u64()).unwrap_or(0);
+    let risk = v
+        .get("default_risk_level")
+        .and_then(|x| x.as_str())
+        .unwrap_or("—");
+    println!("{host}: policy v{version}");
+    println!("  issuer:       {issuer}");
+    println!("  installed:    {installed}");
+    println!("  rules:        {rules}");
+    println!("  default_risk: {risk}");
+    Ok(())
 }
 
 /// `aish remote audit-sync --host <host>`: pull remote audit events newer
 /// than the local sync cursor and merge them into the local audit store,
 /// deduplicating by (host, ts, event_type, command) (#587).
-pub fn cmd_audit_sync(host: &str, db: Option<&str>) -> Result<(), String> {
+pub fn cmd_audit_pull(host: &str, db: Option<&str>) -> Result<(), String> {
     let cursor = load_sync_cursor(host);
     let bin = probe_remote_bin(host)?;
     let args = vec![
@@ -268,8 +604,11 @@ pub fn cmd_audit_sync(host: &str, db: Option<&str>) -> Result<(), String> {
     ];
     let events = ssh_json_lines(host, &args, None)?;
 
-    let store = aish_session::AuditStore::open(db.map(std::path::Path::new))
-        .map_err(|e| format!("cannot open local audit store: {e}"))?;
+    let store = aish_session::AuditStore::open(db.map(std::path::Path::new)).map_err(|e| {
+        format!(
+            "cannot open local audit store: {e}.\nTip: pass --db <path> to use a dedicated file"
+        )
+    })?;
 
     let mut imported = 0usize;
     let mut duplicates = 0usize;
@@ -277,7 +616,7 @@ pub fn cmd_audit_sync(host: &str, db: Option<&str>) -> Result<(), String> {
         match insert_remote_event(&store, host, ev) {
             Ok(true) => imported += 1,
             Ok(false) => duplicates += 1,
-            Err(e) => eprintln!("{host}: skip event: {e}"),
+            Err(e) => eprintln!("{host}: skipped malformed event: {e}"),
         }
     }
     // Cursor = now: the next sync only fetches events newer than this pull.
@@ -285,6 +624,10 @@ pub fn cmd_audit_sync(host: &str, db: Option<&str>) -> Result<(), String> {
     save_sync_cursor(host, now)?;
 
     println!("{host}: imported {imported}, duplicates skipped {duplicates}");
+    println!("cursor: {} -> {}", cursor.to_rfc3339(), now.to_rfc3339());
+    if imported == 0 && duplicates == 0 {
+        println!("(no new events since the last pull; delete the cursor file to re-pull)");
+    }
     Ok(())
 }
 
@@ -407,8 +750,64 @@ fn save_sync_cursor(host: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(),
 }
 
 /// `aish remote diagnose --hosts h1,h2 --checks svc,ports,logs` (#588).
-pub fn cmd_remote_diagnose(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
+/// `aish remote diag run ...` (#588): execute and persist the task.
+pub fn diag_run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
     crate::diagnose::run(hosts, checks, json)
+}
+
+/// `aish remote diag list`: show saved tasks, newest first.
+pub fn diag_list() -> Result<(), String> {
+    let tasks = crate::diag_tasks::list()?;
+    if tasks.is_empty() {
+        println!("No diagnostic tasks saved.");
+        println!("Tip: run 'aish remote diag run --hosts ... --checks ...' to create one");
+        return Ok(());
+    }
+    println!("{:<14} {:<8} {:<24} CHECKS", "TASK", "HOSTS", "STARTED");
+    for t in &tasks {
+        let ok = t
+            .outcomes
+            .values()
+            .filter(|o| **o == crate::diag_tasks::HostOutcome::Success)
+            .count();
+        let status = format!("{ok}/{}", t.outcomes.len());
+        println!(
+            "{:<14} {:<8} {:<24} {}",
+            t.id,
+            status,
+            t.started_at,
+            t.checks.join(",")
+        );
+    }
+    Ok(())
+}
+
+/// `aish remote diag status <task>`: per-host outcome + evidence.
+pub fn diag_status(task: &str, json: bool) -> Result<(), String> {
+    let t = crate::diag_tasks::load(task)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&t).unwrap_or_default());
+        return Ok(());
+    }
+    println!("task {} (started {})", t.id, t.started_at);
+    println!("checks: {}", t.checks.join(", "));
+    for h in &t.hosts {
+        let outcome = t.outcomes.get(h).map(|o| o.label()).unwrap_or("pending");
+        println!("  {h}: {outcome}");
+    }
+    let failed: Vec<&String> = t
+        .hosts
+        .iter()
+        .filter(|h| t.outcomes.get(*h).map(|o| o.needs_retry()).unwrap_or(true))
+        .collect();
+    if !failed.is_empty() {
+        println!(
+            "Tip: 'aish remote diag retry {}' re-runs the {} failed host(s)",
+            t.id,
+            failed.len()
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +819,13 @@ pub fn cmd_remote_diagnose(hosts: &[String], checks: &[String], json: bool) -> R
 pub fn agent_list_sessions() {
     for s in aish_pty::discover_sessions() {
         let alive = aish_pty::check_daemon_alive(&s.socket_path);
+        // The shell (bash inside the PTY) is a child of the daemon: its
+        // /proc entry distinguishes "attached/exited" states.
+        let shell_running = if s.child_pid == 0 {
+            None
+        } else {
+            Some(std::path::Path::new(&format!("/proc/{}", s.child_pid)).exists())
+        };
         let record = serde_json::json!({
             "session_id": s.session_id,
             "name": s.name,
@@ -429,9 +835,25 @@ pub fn agent_list_sessions() {
             "child_pid": s.child_pid,
             "started_at": s.started_at,
             "alive": alive,
+            "shell_running": shell_running,
         });
         println!("{}", serde_json::to_string(&record).unwrap_or_default());
     }
+}
+
+/// `--remote-session-rename <id> <name>`: rename a local session.
+pub fn agent_session_rename(session_id: &str, name: &str) -> Result<(), String> {
+    aish_pty::rename_session(session_id, name).map_err(|e| e.to_string())
+}
+
+/// `--remote-session-kill <id>`: kill a local session and its worker tree.
+pub fn agent_session_kill(session_id: &str) -> Result<(), String> {
+    let sessions = aish_pty::discover_sessions();
+    let info = sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    aish_pty::kill_session(&info.socket_path).map_err(|e| e.to_string())
 }
 
 /// `--remote-attach <session-id>`: connect to the session's daemon socket and
@@ -604,8 +1026,29 @@ fn install_policy_envelope(envelope: &str) -> serde_json::Value {
         return serde_json::json!({"accepted": false, "version": version, "reason": format!("install failed: {e}")});
     }
     let _ = std::fs::write(&version_file, version.to_string());
+    // Metadata sidecar for 'aish remote policy show': issuer + install time.
+    let issuer = env
+        .get("issuer")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let installed_at = chrono::Utc::now().to_rfc3339();
+    let meta = serde_json::json!({
+        "version": version,
+        "issuer": issuer,
+        "installed_at": installed_at,
+    });
+    let _ = std::fs::write(
+        target_path.with_extension("yaml.remote-meta"),
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    );
 
-    serde_json::json!({"accepted": true, "version": version, "reason": "installed"})
+    serde_json::json!({
+        "accepted": true,
+        "version": version,
+        "reason": "installed",
+        "issuer": issuer,
+        "installed_at": installed_at,
+    })
 }
 
 /// Version monotonicity rule for remote policy installs: a candidate must be
@@ -633,6 +1076,44 @@ fn check_policy_signature(signature: Option<&str>) -> Result<(), String> {
         Some(s) if s.trim().is_empty() => Ok(()),
         Some(_) => Err("signature present but verification is not supported yet".to_string()),
     }
+}
+
+/// `--remote-policy-show`: report the installed remote policy (version,
+/// issuer, install time, rule count) for 'aish remote policy show'.
+pub fn agent_policy_show() {
+    use aish_security::remote_policy_version_path;
+    let version = std::fs::read_to_string(remote_policy_version_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let policy_path = aish_security::writable_security_policy_path();
+    let yaml = policy_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let meta_path = policy_path
+        .as_ref()
+        .map(|p| p.with_extension("yaml.remote-meta"));
+    let meta = meta_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let rules = aish_security::policy_from_yaml_str(&yaml)
+        .map(|p| p.rules.len())
+        .unwrap_or(0);
+    let risk = aish_security::policy_from_yaml_str(&yaml)
+        .ok()
+        .map(|p| p.default_risk_level.to_string())
+        .unwrap_or_default();
+    let record = serde_json::json!({
+        "version": version,
+        "issuer": meta.get("issuer").cloned().unwrap_or(serde_json::json!(null)),
+        "installed_at": meta.get("installed_at").cloned().unwrap_or(serde_json::json!(null)),
+        "policy": if yaml.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(yaml) },
+        "rules": rules,
+        "default_risk_level": risk,
+    });
+    println!("{}", serde_json::to_string(&record).unwrap_or_default());
 }
 
 /// `--remote-audit-events --since <rfc3339>`: print audit events newer than
@@ -788,5 +1269,121 @@ mod policy_install_tests {
             check_policy_signature(Some("abc")).unwrap_err(),
             "signature present but verification is not supported yet"
         );
+    }
+}
+
+/// `aish remote doctor --host <h>`: self-check the remote C/S setup and
+/// print actionable results (binary present, version, sessions readable,
+/// audit store readable).
+pub fn cmd_remote_doctor(host: &str) -> Result<(), String> {
+    println!("Checking remote C/S setup on {host}...");
+    let mut failures = 0usize;
+
+    // 1. ssh connectivity + binary
+    let bin = match probe_remote_bin(host) {
+        Ok(b) => {
+            println!("  ✓ remote aish binary: {b}");
+            b
+        }
+        Err(e) => {
+            println!("  ✗ remote aish binary: {e}");
+            return Ok(()); // everything else depends on this
+        }
+    };
+
+    // 2. version parity (informational)
+    let args = vec![bin.clone(), "--version".to_string()];
+    match ssh_raw_lines(host, &args) {
+        Ok(lines) => {
+            println!(
+                "  ✓ remote version: {}",
+                lines.first().unwrap_or(&"?".to_string())
+            );
+        }
+        Err(e) => {
+            println!("  ✗ remote version check failed: {e}");
+            failures += 1;
+        }
+    }
+
+    // 3. sessions listing
+    let args = vec![bin.clone(), "--remote-sessions".to_string()];
+    match ssh_json_lines(host, &args, None) {
+        Ok(sessions) => {
+            println!("  ✓ session discovery works ({} sessions)", sessions.len());
+        }
+        Err(e) => {
+            println!("  ✗ session discovery failed: {e}");
+            failures += 1;
+        }
+    }
+
+    // 4. audit store readable
+    let args = vec![
+        bin,
+        "--remote-audit-events".to_string(),
+        "--since".to_string(),
+        (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+    ];
+    match ssh_json_lines(host, &args, None) {
+        Ok(_) => println!("  ✓ audit store readable"),
+        Err(e) => {
+            println!("  ✗ audit store unreadable: {e}");
+            failures += 1;
+        }
+    }
+
+    if failures == 0 {
+        println!("All checks passed.");
+    } else {
+        println!("{failures} check(s) failed. Fix the ✗ items above and re-run.");
+    }
+    Ok(())
+}
+
+/// Run a remote command and collect plain stdout lines (no JSON parsing).
+fn ssh_raw_lines(host: &str, remote_args: &[String]) -> Result<Vec<String>, String> {
+    let mut ch = SshChannel::spawn(host, remote_args)?;
+    let (reader, stdin) = ch.split()?;
+    drop(stdin);
+    let lines = reader
+        .lines()
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| format!("ssh read failed: {e}"))?;
+    ch.wait()?;
+    Ok(lines)
+}
+
+#[cfg(test)]
+mod shell_quote_tests {
+    use super::shell_quote;
+
+    #[test]
+    fn bare_tokens_pass_through() {
+        assert_eq!(shell_quote("/usr/local/bin/aish"), "/usr/local/bin/aish");
+        assert_eq!(shell_quote("--remote-sessions"), "--remote-sessions");
+        assert_eq!(shell_quote("user@host"), "user@host");
+    }
+
+    #[test]
+    fn spaces_are_quoted() {
+        let q = shell_quote("uuid-1 web-1");
+        assert_eq!(q, "'uuid-1 web-1'");
+        // And the quoted form round-trips through a split on spaces when the
+        // remote shell parses it back as one word.
+        assert!(q.contains(' '));
+        assert!(q.starts_with('\''));
+    }
+
+    #[test]
+    fn embedded_quotes_are_escaped() {
+        let q = shell_quote("it's");
+        assert_eq!(q, "'it'\\''s'");
+    }
+
+    #[test]
+    fn dollar_and_semicolon_are_quoted() {
+        assert!(shell_quote("$HOME").starts_with('\''));
+        assert!(shell_quote("a;b").starts_with('\''));
     }
 }
