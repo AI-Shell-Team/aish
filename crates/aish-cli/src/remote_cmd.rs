@@ -105,13 +105,48 @@ impl SshChannel {
 /// Run a remote aish subcommand and collect its stdout lines as JSON values.
 /// Used by list-style remote queries (sessions, events, diagnose results).
 /// When `timeout` is set, the ssh child is killed if it outlives the budget.
+/// Map the first `--remote-*` flag in remote args to its canonical action
+/// name (must stay in sync with `agent_action_name`).
+pub fn agent_action_from_args(remote_args: &[String]) -> &'static str {
+    for a in remote_args {
+        match a.as_str() {
+            "--remote-sessions" => return "sessions.list",
+            "--remote-attach" => return "session.attach",
+            "--remote-policy-show" => return "policy.show",
+            "--remote-policy-install" | "--remote-policy-install-stdin" => return "policy.install",
+            "--remote-session-rename" => return "session.rename",
+            "--remote-session-kill" => return "session.kill",
+            "--remote-session-replay" => return "session.replay",
+            "--remote-audit-events" => return "audit.events",
+            "--remote-diagnose" => return "diagnose.run",
+            _ => {}
+        }
+    }
+    "unknown"
+}
+
 pub(crate) fn ssh_json_lines(
     host: &str,
     remote_args: &[String],
     timeout: Option<Duration>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut ch = SshChannel::spawn(host, remote_args)?;
-    let (reader, stdin) = ch.split()?;
+    let (reader, mut stdin) = ch.split()?;
+    // Operator identity: when the target enforces trust, the first stdin
+    // line is the signed challenge response. Harmless in open mode.
+    let action = agent_action_from_args(remote_args);
+    if action != "unknown" {
+        match crate::remote_identity::identity_request_json(action) {
+            Ok(identity) => {
+                use std::io::Write;
+                if let Err(e) = writeln!(stdin, "{identity}") {
+                    eprintln!("[identity] write to ssh stdin failed: {e}");
+                }
+                let _ = stdin.flush();
+            }
+            Err(e) => eprintln!("[identity] cannot sign challenge: {e}"),
+        }
+    }
     drop(stdin); // signal EOF so the remote command finishes
 
     // Parse lines on a detached thread that owns the reader; the parent
@@ -408,6 +443,63 @@ pub fn cmd_session_kill(host: &str, session: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `aish remote session replay`: stream the session's recorded output over
+/// ssh. Replay bytes go to stdout verbatim; stderr carries ssh errors.
+pub fn cmd_session_replay(host: &str, session: &str, tail: Option<usize>) -> Result<(), String> {
+    let session_id = resolve_session(host, session)?;
+    let bin = probe_remote_bin(host)?;
+    let mut args = vec![
+        bin,
+        "--remote-session-replay".to_string(),
+        session_id.to_string(),
+    ];
+    if let Some(n) = tail {
+        args.push("--replay-tail".to_string());
+        args.push(n.to_string());
+    }
+    let mut child = std::process::Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("--")
+        .arg(host)
+        .args(args.iter().map(|a| shell_quote(a)))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ssh spawn failed: {e}"))?;
+    // Operator identity: the first stdin line satisfies the target's auth
+    // gate (no-op in open mode). Then EOF so the agent streams the replay.
+    {
+        let mut stdin = child.stdin.take().ok_or("ssh stdin not piped")?;
+        if let Ok(identity) = crate::remote_identity::identity_request_json("session.replay") {
+            use std::io::Write;
+            let _ = writeln!(stdin, "{identity}");
+            let _ = stdin.flush();
+        }
+    } // stdin dropped → EOF
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("ssh wait failed: {e}"))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        let reason = if err.trim().is_empty() {
+            out.trim()
+        } else {
+            err.trim()
+        };
+        return Err(format!("replay failed: {reason}"));
+    }
+    use std::io::Write;
+    std::io::stdout()
+        .write_all(&output.stdout)
+        .map_err(|e| format!("write failed: {e}"))?;
+    Ok(())
+}
+
 /// `aish remote policy push`: build the envelope locally (version
 /// auto-increment per host), optionally preview the diff, then send it over
 /// stdin (ssh concatenates command args, which would split an envelope
@@ -496,11 +588,16 @@ pub fn cmd_policy_push(
         }
     }
 
-    // Envelope travels on stdin.
+    // Envelope travels on stdin, preceded by the operator identity line
+    // (consumed by the target's auth gate when enforcement is active).
     let bin = probe_remote_bin(host)?;
     let args = vec![bin, "--remote-policy-install-stdin".to_string()];
     let mut ch = SshChannel::spawn(host, &args)?;
     let (mut reader, mut stdin) = ch.split()?;
+    use std::io::Write as _;
+    if let Ok(identity) = crate::remote_identity::identity_request_json("policy.install") {
+        let _ = writeln!(stdin, "{identity}");
+    }
     stdin
         .write_all(envelope_str.as_bytes())
         .map_err(|e| format!("cannot send envelope: {e}"))?;
@@ -663,6 +760,117 @@ pub fn cmd_policy_show(host: &str) -> Result<(), String> {
     println!("  installed:    {installed}");
     println!("  rules:        {rules}");
     println!("  default_risk: {risk}");
+    Ok(())
+}
+
+/// `aish remote policy push --host group:<tag>`: push to every host carrying
+/// the tag. Each host gets its own envelope version (the per-host counter
+/// handles that). Stops at the first hard error; per-host rejections are
+/// reported and counted. `yes` skips the diff confirmation per host.
+pub fn cmd_policy_push_group(
+    tag: &str,
+    policy_file: &str,
+    targets: &str,
+    yes: bool,
+) -> Result<(), String> {
+    let hosts = crate::remote_hosts::expand_group(tag)?;
+    println!(
+        "pushing {policy_file} to {} host(s) in group '{tag}'",
+        hosts.len()
+    );
+    let mut ok = Vec::new();
+    let mut failed = Vec::new();
+    for (target, remote_bin) in &hosts {
+        if let Some(bin) = remote_bin {
+            std::env::set_var("AISH_REMOTE_BIN", bin);
+        }
+        // Per-host push without the interactive diff (group mode is already
+        // an explicit bulk action; failures are collected, not fatal).
+        match cmd_policy_push(target, policy_file, targets, None, false, yes) {
+            Ok(()) => ok.push(target.clone()),
+            Err(e) => failed.push(format!("{target}: {e}")),
+        }
+    }
+    println!(
+        "=== group '{tag}' push: {} ok, {} failed",
+        ok.len(),
+        failed.len()
+    );
+    for f in &failed {
+        println!("  FAILED {f}");
+    }
+    if ok.len() < hosts.len() {
+        Err(format!(
+            "{} of {} hosts failed. Tip: 'remote policy status --host group:{tag}' shows per-host state",
+            failed.len(),
+            hosts.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// `aish remote policy status`: drift detection across hosts. Compares each
+/// host's installed policy against the local expectation (per-host version
+/// counter). States: `current` (matches expectation), `drifted` (remote is
+/// NEWER than expected — changed elsewhere), `stale` (remote is OLDER —
+/// missed an update), `none` (no remote policy installed), `unreachable`.
+pub fn cmd_policy_status(targets: &[(String, Option<String>)], json: bool) -> Result<(), String> {
+    let mut results = Vec::new();
+    for (target, remote_bin) in targets {
+        if let Some(bin) = remote_bin {
+            std::env::set_var("AISH_REMOTE_BIN", bin);
+        }
+        let expected = next_policy_version(target).saturating_sub(1);
+        let state = match remote_policy_installed(target) {
+            Err(_) => "unreachable".to_string(),
+            Ok(None) => {
+                if expected == 0 {
+                    "none".to_string()
+                } else {
+                    "stale".to_string()
+                }
+            }
+            Ok(Some((installed, _))) => {
+                if installed >= expected && expected > 0 {
+                    "current".to_string()
+                } else if installed > expected {
+                    "drifted".to_string()
+                } else {
+                    "stale".to_string()
+                }
+            }
+        };
+        results.push(serde_json::json!({
+            "host": target,
+            "expected_version": expected,
+            "state": state,
+        }));
+    }
+    if json {
+        for r in &results {
+            println!("{}", r);
+        }
+        return Ok(());
+    }
+    println!("{:<24} {:<10} EXPECTED", "HOST", "STATE");
+    for r in &results {
+        println!(
+            "{:<24} {:<10} v{}",
+            r["host"].as_str().unwrap_or(""),
+            r["state"].as_str().unwrap_or(""),
+            r["expected_version"].as_u64().unwrap_or(0)
+        );
+    }
+    let drifted = results.iter().filter(|r| r["state"] == "drifted").count();
+    let stale = results.iter().filter(|r| r["state"] == "stale").count();
+    if drifted + stale > 0 {
+        println!(
+            "\n{drifted} drifted (changed outside this control host), {stale} stale (missed an update).\nTip: push again with 'remote policy push --host ...' to converge"
+        );
+    } else {
+        println!("\nAll hosts match the local expectation.");
+    }
     Ok(())
 }
 
@@ -890,6 +1098,43 @@ pub fn diag_status(task: &str, json: bool) -> Result<(), String> {
 // Agent-side hidden entries (run on the remote host, invoked over ssh)
 // ---------------------------------------------------------------------------
 
+/// Canonical action name for the agent-side identity gate. Each `--remote-*`
+/// entry maps to one stable action string; the client signs exactly this
+/// string, the agent verifies against it.
+pub fn agent_action_name(
+    sessions: bool,
+    attach: bool,
+    policy_show: bool,
+    policy_install: bool,
+    session_rename: bool,
+    session_kill: bool,
+    session_replay: bool,
+    audit_events: bool,
+    diagnose: bool,
+) -> &'static str {
+    if sessions {
+        "sessions.list"
+    } else if attach {
+        "session.attach"
+    } else if policy_show {
+        "policy.show"
+    } else if policy_install {
+        "policy.install"
+    } else if session_rename {
+        "session.rename"
+    } else if session_kill {
+        "session.kill"
+    } else if session_replay {
+        "session.replay"
+    } else if audit_events {
+        "audit.events"
+    } else if diagnose {
+        "diagnose.run"
+    } else {
+        "unknown"
+    }
+}
+
 /// `--remote-sessions`: print local PTY sessions as JSON lines with a
 /// liveness flag per session.
 pub fn agent_list_sessions() {
@@ -934,11 +1179,84 @@ pub fn agent_session_kill(session_id: &str) -> Result<(), String> {
     aish_pty::kill_session(&info.socket_path).map_err(|e| e.to_string())
 }
 
+/// Resolve a session selector (full UUID, name, or unique prefix) to a UUID.
+pub fn resolve_session_id(selector: &str) -> Result<String, String> {
+    let sessions = aish_pty::discover_sessions();
+    if let Some(s) = sessions.iter().find(|s| s.session_id == selector) {
+        return Ok(s.session_id.clone());
+    }
+    let named: Vec<&aish_pty::DaemonSessionInfo> = sessions
+        .iter()
+        .filter(|s| s.name.as_deref() == Some(selector))
+        .collect();
+    if named.len() == 1 {
+        return Ok(named[0].session_id.clone());
+    }
+    let prefixed: Vec<&aish_pty::DaemonSessionInfo> = sessions
+        .iter()
+        .filter(|s| s.session_id.starts_with(selector))
+        .collect();
+    if prefixed.len() == 1 {
+        return Ok(prefixed[0].session_id.clone());
+    }
+    Err(if sessions.is_empty() {
+        "no sessions on this host".to_string()
+    } else if named.len() > 1 || prefixed.len() > 1 {
+        format!("session selector '{selector}' is ambiguous")
+    } else {
+        format!("session '{selector}' not found")
+    })
+}
+
+/// `--remote-session-replay <id> [--tail N]`: stream a session's recorded
+/// terminal output. Each cast line is decoded (preferring raw_b64 for
+/// non-UTF-8 chunks) and printed verbatim; the consumer sees exactly the
+/// bytes the shell wrote, in order.
+pub fn agent_session_replay(session_id: &str, tail: Option<usize>) -> Result<(), String> {
+    let uuid = resolve_session_id(session_id)?;
+    let path = aish_pty::session_recording::SessionRecorder::cast_path(&uuid)
+        .ok_or("cannot resolve session directory")?;
+    if !path.exists() {
+        return Err(format!(
+            "no recording for session {uuid} (recording starts when a session is created by this build)"
+        ));
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read recording: {e}"))?;
+    let mut chunks: Vec<Vec<u8>> = text
+        .lines()
+        .filter_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            if let Some(b64) = v.get("raw_b64").and_then(|x| x.as_str()) {
+                aish_pty::session_recording::decode_raw_b64(b64)
+            } else {
+                v.get("data")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.as_bytes().to_vec())
+            }
+        })
+        .collect();
+    if let Some(n) = tail {
+        let start = chunks.len().saturating_sub(n);
+        chunks = chunks[start..].to_vec();
+    }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for chunk in chunks {
+        let _ = out.write_all(&chunk);
+    }
+    Ok(())
+}
+
 /// `--remote-attach <session-id>`: connect to the session's daemon socket and
 /// relay the frame protocol between our stdin/stdout and the socket.
 pub fn agent_attach(session_id: &str) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
+
+    // Operator identity: in enforcement mode the auth gate in main() has
+    // already verified the first stdin line; in open mode stdin starts
+    // directly with frame traffic (unchanged single-host behavior). Nothing
+    // extra to consume here — the gate runs before this entry is called.
 
     // Find the session and its socket path.
     let sessions = aish_pty::discover_sessions();

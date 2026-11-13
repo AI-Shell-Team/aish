@@ -20,6 +20,10 @@ pub struct RemoteHostEntry {
     /// Optional per-host defaults for diag (comma-separated check list).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_checks: Option<String>,
+    /// Optional group tags (e.g. ["prod", "web"]). A `--host group:prod`
+    /// selector expands to every host carrying that tag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 fn hosts_file() -> Result<PathBuf, String> {
@@ -77,7 +81,12 @@ pub fn list() -> Result<Vec<RemoteHostEntry>, String> {
     load_all()
 }
 
-pub fn add(name: &str, target: &str, remote_bin: Option<&str>) -> Result<(), String> {
+pub fn add(
+    name: &str,
+    target: &str,
+    remote_bin: Option<&str>,
+    groups: &[String],
+) -> Result<(), String> {
     let mut entries = load_all()?;
     if entries.iter().any(|e| e.name == name) {
         return Err(format!(
@@ -89,6 +98,7 @@ pub fn add(name: &str, target: &str, remote_bin: Option<&str>) -> Result<(), Str
         target: target.to_string(),
         remote_bin: remote_bin.map(String::from),
         default_checks: None,
+        groups: groups.to_vec(),
     });
     save_all(&entries)
 }
@@ -102,4 +112,38 @@ pub fn remove(name: &str) -> Result<bool, String> {
         save_all(&entries)?;
     }
     Ok(removed)
+}
+
+/// Is `host` a group selector (`group:<tag>`)? Returns the tag.
+pub fn group_tag(host: &str) -> Option<&str> {
+    host.strip_prefix("group:")
+}
+
+/// Expand a group selector to the matching host entries (alias + remote_bin).
+/// Unknown tag → error listing the known tags.
+pub fn expand_group(tag: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let entries = load_all()?;
+    let matched: Vec<&RemoteHostEntry> = entries
+        .iter()
+        .filter(|e| e.groups.iter().any(|g| g == tag))
+        .collect();
+    if matched.is_empty() {
+        let known: Vec<&String> = entries.iter().flat_map(|e| e.groups.iter()).collect();
+        return Err(if known.is_empty() {
+            format!("no hosts carry group '{tag}' (no groups configured at all)")
+        } else {
+            format!(
+                "no hosts carry group '{tag}'. Known groups: {}",
+                known
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        });
+    }
+    Ok(matched
+        .into_iter()
+        .map(|e| (e.target.clone(), e.remote_bin.clone()))
+        .collect())
 }

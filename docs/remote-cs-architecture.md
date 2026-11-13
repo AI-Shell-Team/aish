@@ -312,6 +312,106 @@ aish remote diag retry dgn-7f3a2c
 
 ---
 
+## 10.5 操作者身份验证（identity，免密之外的另一层）
+
+ssh 免密只解决"能不能连上"，不回答"你是谁"。aish 增加了独立的
+**操作者身份层**（与 ssh 凭据解耦）：
+
+### 10.5.1 机制
+
+- 每个 aish 实例自动拥有一个身份密钥对
+  `~/.config/aish/identity-key.json`（首次运行静默生成，0600）
+- 目标机维护受信操作者公钥表 `~/.config/aish/trusted-operators.json`
+- 客户端每次远程调用先发送一行签名挑战：`{action, pubkey, challenge, signature}`，
+  签名覆盖 `action|nonce`（绑定操作类型，防重放到其他操作）
+- 目标端 agent 入口先验证身份再执行；验证失败输出
+  `{"auth_failed": true, "reason": ...}` 并退出
+
+### 10.5.2 开关语义（单机无感）
+
+| 状态 | 行为 |
+|---|---|
+| `trusted-operators.json` 不存在或为空 | **开放模式**：不读身份行，行为与旧版完全一致 |
+| 至少配置了一个受信公钥 | **强制模式**：所有 `--remote-*` 入口要求有效身份 |
+
+配置命令：
+
+```bash
+aish remote admin show-identity          # 打印本机操作者公钥
+aish remote admin trust-operator <hex>   # 在目标机登记受信操作者（开启强制模式）
+aish remote admin list-operators
+aish remote admin untrust-operator <hex> # 移除；最后一个被移除时回到开放模式
+```
+
+`remote admin` 子命令本身不受身份门管控（`show-identity` 是登记自己的引导路径）。
+
+### 10.5.3 RBAC：策略里的 remote_access 段
+
+身份验证回答"你是谁"，`remote_access` 回答"你能做什么"（写进已安装策略，
+随信封签名分发）：
+
+```yaml
+remote_access:
+  actions:
+    session.attach:
+      operators: ["3614d369"]     # 公钥 hex 前缀匹配
+    policy.install:
+      operators: ["d7e3cb33"]
+```
+
+规则：无 `remote_access` 段 = 允许全部已认证操作者；action 列出但
+`operators` 为空 = 显式拒绝所有；`operators` 前缀匹配操作者公钥。
+
+### 10.5.4 实测记录（130 ⇄ 243）
+
+- 双方互配 trust 后，强制模式下 session list / policy push / diag / replay
+  全部通过（挑战-签名自动完成，用户无感）
+- 243 移除 130 的信任后，130 的请求被拒绝：
+  `{"auth_failed":true,"reason":"operator d7e3… is not trusted on this host"}`
+- RBAC：130（d7e3…）推策略到 130 被允许，243 的操作者（5fbe…）推同一策略
+  被 `remote_access` 拒绝：
+  `operator 5fbe… is not authorized for 'policy.install' by this host's remote_access policy`
+
+---
+
+## 10.6 会话录制与回放
+
+daemon 位于 PTY 与所有客户端之间，天然是录制点。每个会话的字节流按
+asciinema v2 兼容格式落盘到 `~/.local/share/aish/pty-sessions/<id>.cast`
+（一行一个 JSON：时间戳 + 输出内容；非 UTF-8 字节以 `raw_b64` 无损保留）。
+录制始终开启、自动滚动保留最近 20 个会话。
+
+```bash
+aish remote session replay --host prod-1 web-1           # 完整回放
+aish remote session replay --host prod-1 web-1 --tail 50 # 只看最后 50 行
+```
+
+---
+
+## 10.7 主机分组与策略漂移检测
+
+### 分组
+
+```bash
+aish remote host add prod-1 root@10.0.0.1 --group prod --group web
+aish remote policy push --host group:prod --policy p.yaml   # 组内逐台推送
+```
+
+### 漂移检测
+
+```bash
+aish remote policy status --host group:prod
+HOST                     STATE      EXPECTED
+root@10.0.0.1            current    v26
+root@10.0.0.2            drifted    v24    ← 远端比本地记录新（别处改过）
+root@10.0.0.3            stale      v26    ← 漏推
+```
+
+状态：`current`（与本地记录一致）/ `drifted`（远端更新——在别处被改）/
+`stale`（远端落后——漏推）/ `none` / `unreachable`。
+
+---
+
 ## 11. 代码地图
 
 | 文件 | 行数 | 职责 |
@@ -324,4 +424,7 @@ aish remote diag retry dgn-7f3a2c
 | `crates/aish-cli/src/diagnose.rs` | ~350 | 诊断 fan-out 与聚合 |
 | `crates/aish-cli/src/diag_tasks.rs` | ~150 | 诊断任务持久化 |
 | `crates/aish-cli/src/policy_signing.rs` | ~200 | ed25519 签名/验签/密钥管理 |
-| `crates/aish-cli/src/remote_hosts.rs` | ~120 | 主机别名存储与解析 |
+| `crates/aish-cli/src/remote_hosts.rs` | ~200 | 主机别名/分组存储与解析 |
+| `crates/aish-cli/src/remote_identity.rs` | ~300 | 操作者身份：密钥、挑战-签名、信任表 |
+| `crates/aish-cli/src/remote_access.rs` | ~110 | remote_access RBAC 校验 |
+| `crates/aish-pty/src/session_recording.rs` | ~190 | asciinema 格式录制与回放解码 |

@@ -1279,6 +1279,9 @@ pub fn run_pty_daemon_shell(
             let mut clients: Vec<ClientConnection> = Vec::new();
             let mut arbiter = RoleArbiter::new();
             let mut child_exited = false;
+            // Terminal recording: every PTY output byte lands in the session's
+            // .cast file (asciinema-compatible JSON lines) for replay.
+            let mut recorder = crate::session_recording::SessionRecorder::start(session_id);
 
             loop {
                 let sigchld_fd = sigchld.read_fd();
@@ -1317,6 +1320,10 @@ pub fn run_pty_daemon_shell(
                                     }
                                     Ok(n) => {
                                         let data = &buf[..n];
+                                        // Terminal recording (before any
+                                        // broadcast so recording never sees
+                                        // client-induced backpressure).
+                                        recorder.record_output(data);
                                         // Forward raw bytes to live clients (the
                                         // outer client needs OSC 5151 to detect
                                         // session switches).

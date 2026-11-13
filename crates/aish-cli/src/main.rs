@@ -36,8 +36,10 @@ mod diagnose;
 mod install_channel;
 mod models_auth;
 mod policy_signing;
+mod remote_access;
 mod remote_cmd;
 mod remote_hosts;
+mod remote_identity;
 mod skill_cmd;
 mod tty_watchdog;
 mod uninstall;
@@ -130,6 +132,14 @@ struct Cli {
     // Kill a remote-visible session by UUID.
     #[arg(long, hide = true)]
     remote_session_kill: Option<String>,
+
+    // Stream a session's recorded terminal output ("<id> [--tail N]").
+    #[arg(long, hide = true)]
+    remote_session_replay: Option<String>,
+
+    // Tail count for --remote-session-replay.
+    #[arg(long, hide = true)]
+    replay_tail: Option<usize>,
 
     // Print audit events since --since as JSON lines.
     #[arg(long, hide = true)]
@@ -331,6 +341,20 @@ enum RemoteAdminAction {
     },
     /// List configured policy signers on THIS host
     ListSigners,
+    /// Show THIS host's operator identity public key (register on targets)
+    ShowIdentity,
+    /// Register a trusted operator on THIS host (target side)
+    TrustOperator {
+        /// Operator public key (64 hex chars)
+        public_key: String,
+    },
+    /// List trusted operators on THIS host
+    ListOperators,
+    /// Remove a trusted operator from THIS host
+    UntrustOperator {
+        /// Operator public key (64 hex chars)
+        public_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -346,6 +370,9 @@ enum RemoteHostAction {
         /// Remote aish binary path if not in a standard location
         #[arg(long)]
         remote_bin: Option<String>,
+        /// Group tags (repeatable). Select with --host group:<tag>
+        #[arg(long = "group")]
+        groups: Vec<String>,
     },
     /// Remove a remote host alias
     Remove { name: String },
@@ -393,6 +420,20 @@ enum RemoteSessionAction {
         /// Session name, prefix, or UUID
         session: String,
     },
+    /// Replay a recorded session's terminal output
+    ///
+    /// Prints the session's recorded terminal output (asciinema-compatible
+    /// capture) to stdout. Works for live and exited sessions alike.
+    Replay {
+        /// Remote host (alias or user@host)
+        #[arg(long)]
+        host: String,
+        /// Session name, prefix, or UUID
+        session: String,
+        /// Show only the last N lines
+        #[arg(long)]
+        tail: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -426,6 +467,19 @@ enum RemotePolicyAction {
         /// Remote host (alias or user@host)
         #[arg(long)]
         host: String,
+    },
+    /// Policy drift detection across hosts
+    ///
+    /// Compares each host's installed policy version/issuer against the
+    /// local expectation (what we last pushed) and flags hosts that are
+    /// missing updates or whose policy changed outside this control host.
+    Status {
+        /// Remote hosts, comma-separated (aliases, ssh targets, group:tags)
+        #[arg(long)]
+        host: String,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -719,6 +773,90 @@ fn main() {
     }
 
     // --- Remote C/S agent-side hidden entries (invoked over ssh) ---
+    // Operator identity gate: when trusted operators are configured, every
+    // --remote-* entry requires a signed challenge that verifies against one
+    // of them. The identity JSON arrives as the first stdin line. Open mode
+    // (no trusted keys) behaves exactly as before, so single-host usage is
+    // unchanged.
+    // The gate must only run for AGENT entries (--remote-*). The presence
+    // of any of these flags is the definitive signal that this process was
+    // spawned by a remote client; every other subcommand (including the
+    // local `remote admin/diag list` management ops) runs without it.
+    let is_agent_entry = cli.remote_sessions
+        || cli.remote_attach.is_some()
+        || cli.remote_policy_show
+        || cli.remote_policy_install.is_some()
+        || cli.remote_policy_install_stdin
+        || cli.remote_session_rename.is_some()
+        || cli.remote_session_kill.is_some()
+        || cli.remote_session_replay.is_some()
+        || cli.remote_audit_events
+        || cli.remote_diagnose;
+    if remote_identity::enforcement_active() && is_agent_entry {
+        tty_watchdog::disarm();
+        let action = remote_cmd::agent_action_name(
+            cli.remote_sessions,
+            cli.remote_attach.is_some(),
+            cli.remote_policy_show,
+            cli.remote_policy_install.is_some() || cli.remote_policy_install_stdin,
+            cli.remote_session_rename.is_some(),
+            cli.remote_session_kill.is_some(),
+            cli.remote_session_replay.is_some(),
+            cli.remote_audit_events,
+            cli.remote_diagnose,
+        );
+        let mut first_line: Option<String> = None;
+        let mut operator_key: Option<String> = None;
+        let authed = remote_identity::authenticate_agent_action(
+            action,
+            || {
+                if first_line.is_none() {
+                    let mut line = String::new();
+                    match std::io::stdin().read_line(&mut line) {
+                        Ok(0) | Err(_) => None,
+                        Ok(_) => {
+                            let trimmed = line.trim().to_string();
+                            // Remember the presenting operator for RBAC.
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&trimmed) {
+                                operator_key =
+                                    v.get("pubkey").and_then(|k| k.as_str()).map(String::from);
+                            }
+                            first_line = Some(trimmed);
+                            first_line.clone()
+                        }
+                    }
+                } else {
+                    first_line.clone()
+                }
+            },
+            |reason| {
+                println!(
+                    "{}",
+                    serde_json::json!({"auth_failed": true, "reason": reason})
+                );
+            },
+        );
+        if !authed {
+            std::process::exit(2);
+        }
+        // Authorization (RBAC): the installed policy's remote_access section
+        // may restrict which operators may perform which actions.
+        if let Some(key) = &operator_key {
+            let yaml = remote_access::installed_policy_yaml();
+            if !remote_access::authorize_action(&yaml, action, key) {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "auth_failed": true,
+                        "reason": format!(
+                            "operator {key} is not authorized for '{action}' by this host's remote_access policy"
+                        ),
+                    })
+                );
+                std::process::exit(3);
+            }
+        }
+    }
     if cli.remote_sessions {
         tty_watchdog::disarm();
         remote_cmd::agent_list_sessions();
@@ -763,10 +901,22 @@ fn main() {
         }
         return;
     }
+    if let Some(session_id) = &cli.remote_session_replay {
+        tty_watchdog::disarm();
+        if let Err(e) = remote_cmd::agent_session_replay(session_id, cli.replay_tail) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cli.remote_policy_install_stdin {
         tty_watchdog::disarm();
         use std::io::Read;
         let mut envelope = String::new();
+        // In enforcement mode the auth gate above already consumed the
+        // identity line from stdin; the remainder is the envelope. In open
+        // mode the whole stdin is the envelope (unchanged single-host
+        // behavior).
         let _ = std::io::stdin().read_to_string(&mut envelope);
         remote_cmd::agent_policy_install(envelope.trim());
         return;
@@ -897,6 +1047,28 @@ fn main() {
     }
 }
 
+/// Expand a comma-separated --host list. Each element may be an alias, a
+/// literal ssh target, or `group:<tag>` (expands to all matching hosts).
+/// Returns (ssh_target, remote_bin_override) pairs in expansion order.
+fn expand_host_list(host: &str) -> Result<Vec<(String, Option<String>)>, String> {
+    let mut out = Vec::new();
+    for part in host.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(tag) = remote_hosts::group_tag(part) {
+            out.extend(remote_hosts::expand_group(tag)?);
+        } else {
+            out.push(remote_hosts::resolve(part)?);
+        }
+    }
+    if out.is_empty() {
+        return Err("no hosts given".to_string());
+    }
+    Ok(out)
+}
+
 /// Run a `aish remote` subcommand. Extracted so the arm can use `?`
 /// freely; errors are surfaced by the caller.
 fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
@@ -909,13 +1081,21 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                     println!("Tip: add one with 'aish remote host add <alias> user@host'");
                     return Ok(());
                 }
-                println!("{:<14} {:<28} REMOTE-BIN", "NAME", "TARGET");
+                println!(
+                    "{:<14} {:<28} {:<20} GROUPS",
+                    "NAME", "TARGET", "REMOTE-BIN"
+                );
                 for e in &entries {
                     println!(
-                        "{:<14} {:<28} {}",
+                        "{:<14} {:<28} {:<20} {}",
                         e.name,
                         e.target,
-                        e.remote_bin.as_deref().unwrap_or("(probe)")
+                        e.remote_bin.as_deref().unwrap_or("(probe)"),
+                        if e.groups.is_empty() {
+                            "—".to_string()
+                        } else {
+                            e.groups.join(",")
+                        }
                     );
                 }
                 Ok(())
@@ -924,7 +1104,8 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 name,
                 target,
                 remote_bin,
-            } => remote_hosts::add(&name, &target, remote_bin.as_deref()),
+                groups,
+            } => remote_hosts::add(&name, &target, remote_bin.as_deref(), &groups),
             RemoteHostAction::Remove { name } => {
                 if remote_hosts::remove(&name)? {
                     println!("removed alias '{name}'");
@@ -964,6 +1145,17 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 }
                 remote_cmd::cmd_session_kill(&target, &session)
             }
+            RemoteSessionAction::Replay {
+                host,
+                session,
+                tail,
+            } => {
+                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                if let Some(bin) = remote_bin {
+                    std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                remote_cmd::cmd_session_replay(&target, &session, tail)
+            }
         },
         RemoteSubcommand::Policy { action } => match action {
             RemotePolicyAction::Push {
@@ -974,6 +1166,10 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 diff,
                 yes,
             } => {
+                // Group selector: push to every host carrying the tag.
+                if let Some(tag) = remote_hosts::group_tag(&host) {
+                    return remote_cmd::cmd_policy_push_group(tag, &policy, &targets, yes);
+                }
                 let (target, remote_bin) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
@@ -986,6 +1182,10 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
                 }
                 remote_cmd::cmd_policy_show(&target)
+            }
+            RemotePolicyAction::Status { host, json } => {
+                let targets = expand_host_list(&host)?;
+                remote_cmd::cmd_policy_status(&targets, json)
             }
         },
         RemoteSubcommand::Audit { action } => match action {
@@ -1069,6 +1269,41 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                     for s in &signers {
                         println!("  {s}");
                     }
+                }
+                Ok(())
+            }
+            RemoteAdminAction::ShowIdentity => {
+                let (pubkey, _key) = remote_identity::ensure_identity()?;
+                println!("{pubkey}");
+                Ok(())
+            }
+            RemoteAdminAction::TrustOperator { public_key } => {
+                remote_identity::trust_operator(&public_key)?;
+                println!("operator trusted (identity enforcement is now ACTIVE on this host)");
+                Ok(())
+            }
+            RemoteAdminAction::ListOperators => {
+                let ops = remote_identity::list_trusted()?;
+                if ops.is_empty() {
+                    println!("No trusted operators configured on this host.");
+                    println!("Tip: 'aish remote admin trust-operator <public-key-hex>' registers one and enables identity enforcement");
+                } else {
+                    for k in &ops {
+                        println!("  {k}");
+                    }
+                }
+                Ok(())
+            }
+            RemoteAdminAction::UntrustOperator { public_key } => {
+                if remote_identity::untrust_operator(&public_key)? {
+                    let remaining = remote_identity::list_trusted()?.len();
+                    if remaining == 0 {
+                        println!("operator removed; identity enforcement is now OFF (open mode)");
+                    } else {
+                        println!("operator removed; {remaining} trusted operator(s) remain");
+                    }
+                } else {
+                    println!("operator was not in the trusted list");
                 }
                 Ok(())
             }

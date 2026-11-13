@@ -15,7 +15,16 @@ pub fn run(host: &str, session_id: &str) -> Result<(), String> {
     let bin = crate::remote_cmd::probe_remote_bin(host)?;
     let args = vec![bin, "--remote-attach".to_string(), session_id.to_string()];
     let mut ch = SshChannel::spawn(host, &args)?;
-    let (reader, stdin) = ch.split()?;
+    let (reader, mut stdin) = ch.split()?;
+    // Operator identity: when the target enforces trust, the first stdin
+    // bytes are the signed challenge line (terminated by '\n'), consumed by
+    // the agent's auth gate before any frame reaches the relay. Harmless in
+    // open mode — the line is simply ignored there.
+    if let Ok(identity) = crate::remote_identity::identity_request_json("session.attach") {
+        use std::io::Write;
+        let _ = writeln!(stdin, "{identity}");
+        let _ = stdin.flush();
+    }
 
     // Switch local terminal to raw mode for passthrough.
     let stdin_fd = std::io::stdin().as_raw_fd();

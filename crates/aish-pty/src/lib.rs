@@ -31,6 +31,7 @@ pub mod readline_tab;
 pub mod resource;
 pub mod scrollback;
 pub mod session_interceptor;
+pub mod session_recording;
 pub mod term_stream;
 pub mod types;
 
