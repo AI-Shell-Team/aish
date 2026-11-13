@@ -24,8 +24,9 @@
 aish 会悄悄在后台启动一个 **daemon 进程**。它做的事：
 
 - 持有一个**伪终端（PTY）**，你的 bash 就跑在里面
-- 监听一个**本机 Unix socket**（如 `/run/user/0/aish/pty-xxx.sock`）
-- 把你的会话元数据写成文件：`~/.local/share/aish/pty-sessions/<uuid>.json`
+- 监听一个**本机 Unix socket**（`pty_socket_dir()`：`$XDG_RUNTIME_DIR/aish/pty-<id8>.sock`，
+  回退 `/tmp/aish-<uid>/aish/`；会话元数据另写到
+  `~/.local/share/aish/pty-sessions/<uuid>.json`）
 
 关键特性：**终端关了，daemon 和 bash 还活着**。这就是"断网/换终端后会话
 还在"的原因——daemon 忽略挂断信号（SIGHUP），bash 跑在它的 PTY 里，
@@ -91,7 +92,7 @@ ssh user@远端 aish --remote-attach <id> # 常驻中继，会话结束才退出
 └──────────┴────────────┴─────────────────────┘
 ```
 
-两类方向、15 种帧：
+两类方向、17 种帧：
 
 **client → daemon（你发出的操作）**
 
@@ -103,21 +104,28 @@ ssh user@远端 aish --remote-attach <id> # 常驻中继，会话结束才退出
 | `DETACH` (0x13) | 我走了（会话保留） |
 | `KILL_SESSION` (0x14) | 杀掉整个会话 |
 | `CLAIM_INPUT` (0x15) | 我要夺取输入权 |
+| `RELEASE_INPUT` (0x16) | 我主动交出输入权（降回观察者） |
+| `TAKEOVER_CONFIRM` (0x17) | 我对接管请求的答复（同意/拒绝） |
 
 **daemon → client（你看到的东西）**
 
 | 帧 | 作用 |
 |---|---|
 | `PTY_OUTPUT` (0x01) | bash 的实时输出 |
+| `CONTROL_EVENT` (0x02) | 后端控制事件（如提示符就绪） |
 | `SCROLLBACK` (0x03) | 接入时的历史回放（256KB 环形缓冲） |
+| `SESSION_INFO` (0x04) | 会话元信息（子进程 PID、cwd 等） |
 | `ATTACH_ACK` (0x05) | 接入成功 |
+| `DAEMON_ERROR` (0x06) | 出错了 |
+| `SCROLLBACK_END` (0x07) | 历史回放结束（握手完成的标志） |
 | `EXIT_NOTICE` (0x08) | 会话已退出 |
 | `ROLE_NOTIFY` (0x09) | 你的角色变了（控制器/观察者） |
 | `TAKEOVER_REQUEST` (0x0A) | 有人想接管，需要你确认 |
-| `DAEMON_ERROR` (0x06) | 出错了 |
 
-版本兼容：`ATTACH`/`ATTACH_ACK` 帧都带 `protocol_version`，新客户端连旧
-daemon（或反过来）会自动降级，不会崩。
+版本兼容：`ATTACH`/`ATTACH_ACK` 帧都带 `protocol_version`（当前为 1）。
+双方各自携带自己的版本号；目前版本只有一档，尚未实现协商降级——
+新旧版本混合部署时，未知的帧类型会被对端忽略而不崩溃，但依赖新帧的
+功能不可用。
 
 ---
 
@@ -262,6 +270,7 @@ aish remote diag retry dgn-7f3a2c    # 只重跑失败的节点
 ```bash
 # ── 一次性配置 ─────────────────────────────
 aish remote host add prod-1 root@10.10.17.130   # 起个别名
+aish remote host list                           # 查看已配置的主机/分组
 aish remote doctor --host prod-1                 # 自检远端环境
 
 # ── 会话接管 ───────────────────────────────
@@ -350,7 +359,7 @@ aish remote admin untrust-operator <hex> # 移除；最后一个被移除时回�
 ssh 免密**不是**必须的。当目标机只能用密码登录时，aish 可以自带凭据：
 
 ```bash
-# 方式一：host add 时写入（存 remote-hosts.json，文件 0600）
+# 方式一：host add 时写入（存 remote-hosts.json）
 aish remote host add prod-1 root@10.0.0.1 --password 'uos123!!'
 
 # 方式二：环境变量（不落盘，适合 CI/脚本）
@@ -360,10 +369,12 @@ aish remote session list --host root@10.0.0.1
 
 实现：客户端检测到密码时，把 ssh 调用包进 `sshpass -e`（密码经
 `SSHPASS` 环境变量传给子进程，不出现在命令行/ps 输出里）；ssh 内部仍
-保持 `BatchMode=yes`——密码错误立即失败而不是挂起。环境变量优先于
-条目里存的密码。
+保持 `BatchMode=yes`——密码错误立即失败而不是挂起。别名条目里存的
+密码优先于环境变量（`remote_hosts::resolve`：`entry.password.or_else(env_password)`）；
+直接用 ssh 目标（非别名）时只读环境变量。
 
-安全权衡：密码落在 `remote-hosts.json` 明文仅受 0600 保护；生产环境
+安全权衡：密码落在 `remote-hosts.json` 明文，该文件由 write-then-rename
+写入、未显式设置 0600（沿用进程 umask）；生产环境
 推荐方式二（环境变量）或回到密钥。aish 的操作者身份层（10.5）独立于
 ssh 凭据，无论 ssh 用密码还是密钥都生效。
 
@@ -401,7 +412,8 @@ remote_access:
 daemon 位于 PTY 与所有客户端之间，天然是录制点。每个会话的字节流按
 asciinema v2 兼容格式落盘到 `~/.local/share/aish/pty-sessions/<id>.cast`
 （一行一个 JSON：时间戳 + 输出内容；非 UTF-8 字节以 `raw_b64` 无损保留）。
-录制始终开启、自动滚动保留最近 20 个会话。
+录制始终开启。`prune_recordings`（按最近修改保留 N 个）已实现但当前
+没有调用点——录制文件不会自动清理，需手动删除 `.cast` 文件。
 
 ```bash
 aish remote session replay --host prod-1 web-1           # 完整回放
@@ -416,6 +428,7 @@ aish remote session replay --host prod-1 web-1 --tail 50 # 只看最后 50 行
 
 ```bash
 aish remote host add prod-1 root@10.0.0.1 --group prod --group web
+aish remote host list                            # 查看别名与分组归属
 aish remote policy push --host group:prod --policy p.yaml   # 组内逐台推送
 ```
 
@@ -438,15 +451,16 @@ root@10.0.0.3            stale      v26    ← 漏推
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `crates/aish-pty/src/daemon.rs` | ~2000 | 事件循环、RoleArbiter、会话元数据 |
-| `crates/aish-pty/src/daemon_protocol.rs` | ~730 | 15 种帧的定义与编解码 |
+| `crates/aish-pty/src/daemon.rs` | ~2060 | 事件循环、RoleArbiter、会话元数据、录制挂钩 |
+| `crates/aish-pty/src/daemon_protocol.rs` | ~720 | 17 种帧的定义与编解码 |
 | `crates/aish-pty/src/backend.rs` | ~590 | 客户端抽象（本机 socket / ssh 两种后端） |
-| `crates/aish-cli/src/remote_cmd.rs` | ~1500 | 全部子命令实现 + agent 入口 |
+| `crates/aish-cli/src/remote_cmd.rs` | ~1880 | 全部子命令实现 + agent 入口 |
+| `crates/aish-cli/src/main.rs` | ~3230 | CLI 定义、身份/RBAC 门控（agent 入口） |
 | `crates/aish-cli/src/attach_remote.rs` | ~200 | 远程 attach 的本地终端循环 |
-| `crates/aish-cli/src/diagnose.rs` | ~350 | 诊断 fan-out 与聚合 |
-| `crates/aish-cli/src/diag_tasks.rs` | ~150 | 诊断任务持久化 |
+| `crates/aish-cli/src/diagnose.rs` | ~390 | 诊断 fan-out 与聚合 |
+| `crates/aish-cli/src/diag_tasks.rs` | ~120 | 诊断任务持久化 |
 | `crates/aish-cli/src/policy_signing.rs` | ~200 | ed25519 签名/验签/密钥管理 |
-| `crates/aish-cli/src/remote_hosts.rs` | ~200 | 主机别名/分组存储与解析 |
-| `crates/aish-cli/src/remote_identity.rs` | ~300 | 操作者身份：密钥、挑战-签名、信任表 |
-| `crates/aish-cli/src/remote_access.rs` | ~110 | remote_access RBAC 校验 |
-| `crates/aish-pty/src/session_recording.rs` | ~190 | asciinema 格式录制与回放解码 |
+| `crates/aish-cli/src/remote_hosts.rs` | ~175 | 主机别名/分组存储与解析 |
+| `crates/aish-cli/src/remote_identity.rs` | ~310 | 操作者身份：密钥、挑战-签名、信任表 |
+| `crates/aish-cli/src/remote_access.rs` | ~100 | remote_access RBAC 校验 |
+| `crates/aish-pty/src/session_recording.rs` | ~170 | asciinema 格式录制与回放解码 |
