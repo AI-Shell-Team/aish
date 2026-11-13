@@ -24,6 +24,11 @@ pub struct RemoteHostEntry {
     /// selector expands to every host carrying that tag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Optional ssh password (used with sshpass). Empty = passwordless ssh
+    /// (keys or agent). The whole file is 0600; storing passwords here is a
+    /// deliberate tradeoff documented in the architecture guide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 fn hosts_file() -> Result<PathBuf, String> {
@@ -31,6 +36,13 @@ fn hosts_file() -> Result<PathBuf, String> {
     let dir = base.join("aish");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     Ok(dir.join("remote-hosts.json"))
+}
+
+/// Password from the environment wins over stored entries (never logged).
+pub fn env_password() -> Option<String> {
+    std::env::var("AISH_REMOTE_PASSWORD")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn load_all() -> Result<Vec<RemoteHostEntry>, String> {
@@ -54,19 +66,24 @@ fn save_all(entries: &[RemoteHostEntry]) -> Result<(), String> {
 
 /// Resolve a `--host` value: an exact alias name expands to its entry;
 /// anything containing `@` or `.` is treated as a literal ssh target.
-/// Returns (ssh_target, remote_bin_override).
-pub fn resolve(host: &str) -> Result<(String, Option<String>), String> {
+/// Returns (ssh_target, remote_bin_override, password).
+pub fn resolve(host: &str) -> Result<(String, Option<String>, Option<String>), String> {
     // Fast path: looks like a literal ssh target (user@host, IP, host:port).
+    // The password can still come from the environment.
     if host.contains('@') || host.parse::<std::net::IpAddr>().is_ok() || host.contains(':') {
-        return Ok((host.to_string(), None));
+        return Ok((host.to_string(), None, env_password()));
     }
     if let Some(entry) = lookup(host)? {
-        return Ok((entry.target, entry.remote_bin));
+        return Ok((
+            entry.target,
+            entry.remote_bin,
+            entry.password.or_else(env_password),
+        ));
     }
     // A dotted name that is not a configured alias is still accepted as a
     // literal hostname (e.g. 'prod.corp.lan').
     if host.contains('.') {
-        return Ok((host.to_string(), None));
+        return Ok((host.to_string(), None, env_password()));
     }
     Err(format!(
         "unknown remote host alias '{host}'.\nTip: add it with 'aish remote host add {host} user@real-host', or pass a full ssh target like user@host"
@@ -86,6 +103,7 @@ pub fn add(
     target: &str,
     remote_bin: Option<&str>,
     groups: &[String],
+    password: Option<&str>,
 ) -> Result<(), String> {
     let mut entries = load_all()?;
     if entries.iter().any(|e| e.name == name) {
@@ -99,6 +117,7 @@ pub fn add(
         remote_bin: remote_bin.map(String::from),
         default_checks: None,
         groups: groups.to_vec(),
+        password: password.map(String::from),
     });
     save_all(&entries)
 }
@@ -121,7 +140,7 @@ pub fn group_tag(host: &str) -> Option<&str> {
 
 /// Expand a group selector to the matching host entries (alias + remote_bin).
 /// Unknown tag → error listing the known tags.
-pub fn expand_group(tag: &str) -> Result<Vec<(String, Option<String>)>, String> {
+pub fn expand_group(tag: &str) -> Result<Vec<(String, Option<String>, Option<String>)>, String> {
     let entries = load_all()?;
     let matched: Vec<&RemoteHostEntry> = entries
         .iter()
@@ -144,6 +163,12 @@ pub fn expand_group(tag: &str) -> Result<Vec<(String, Option<String>)>, String> 
     }
     Ok(matched
         .into_iter()
-        .map(|e| (e.target.clone(), e.remote_bin.clone()))
+        .map(|e| {
+            (
+                e.target.clone(),
+                e.remote_bin.clone(),
+                e.password.clone().or_else(env_password),
+            )
+        })
         .collect())
 }

@@ -41,7 +41,18 @@ impl SshChannel {
     /// Spawn `ssh <host> -- <remote aish invocation>` with piped stdio.
     /// stderr is inherited so ssh errors stay visible.
     pub fn spawn(host: &str, remote_args: &[String]) -> Result<Self, String> {
-        let mut cmd = Command::new("ssh");
+        // Password auth: when a password is available (env or caller), wrap
+        // the ssh invocation in sshpass so the connection completes without
+        // keys and without an interactive prompt. BatchMode stays on inside
+        // sshpass so a wrong password fails fast instead of hanging.
+        let password = crate::remote_hosts::env_password();
+        let mut cmd = match &password {
+            Some(_) => Command::new("sshpass"),
+            None => Command::new("ssh"),
+        };
+        if password.is_some() {
+            cmd.arg("-e").arg("ssh"); // -e: read password from SSHPASS env
+        }
         // BatchMode: never prompt for passwords (fail fast instead); the
         // remote command runs without a TTY so its stdio is a clean frame
         // channel. ServerAliveInterval detects dead peers quickly.
@@ -60,6 +71,10 @@ impl SshChannel {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
+        // sshpass -e reads the password from SSHPASS in the child env.
+        if let Some(pw) = password {
+            cmd.env("SSHPASS", pw);
+        }
         let child = cmd.spawn().map_err(|e| format!("ssh spawn failed: {e}"))?;
         Ok(Self { child })
     }
@@ -207,7 +222,17 @@ pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
     }
     // Try each candidate path; the first that exists and is executable wins.
     for candidate in REMOTE_BIN_CANDIDATES {
-        let output = Command::new("ssh")
+        // sshpass wrapper when a password is configured (same policy as
+        // SshChannel::spawn).
+        let password = crate::remote_hosts::env_password();
+        let mut probe_cmd = match &password {
+            Some(_) => Command::new("sshpass"),
+            None => Command::new("ssh"),
+        };
+        if password.is_some() {
+            probe_cmd.arg("-e").arg("ssh");
+        }
+        let output = probe_cmd
             .arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -216,8 +241,12 @@ pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
             .arg(host)
             .arg("test")
             .arg("-x")
-            .arg(candidate)
-            .output();
+            .arg(candidate);
+        let output = if let Some(pw) = &password {
+            output.env("SSHPASS", pw).output()
+        } else {
+            output.output()
+        };
         if let Ok(out) = output {
             if out.status.success() {
                 return Ok(candidate.to_string());
@@ -457,7 +486,15 @@ pub fn cmd_session_replay(host: &str, session: &str, tail: Option<usize>) -> Res
         args.push("--replay-tail".to_string());
         args.push(n.to_string());
     }
-    let mut child = std::process::Command::new("ssh")
+    let password = crate::remote_hosts::env_password();
+    let mut child = match &password {
+        Some(_) => std::process::Command::new("sshpass"),
+        None => std::process::Command::new("ssh"),
+    };
+    if let Some(pw) = &password {
+        child.arg("-e").arg("ssh").env("SSHPASS", pw);
+    }
+    let mut child = child
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
@@ -780,9 +817,13 @@ pub fn cmd_policy_push_group(
     );
     let mut ok = Vec::new();
     let mut failed = Vec::new();
-    for (target, remote_bin) in &hosts {
+    for (target, remote_bin, password) in &hosts {
         if let Some(bin) = remote_bin {
             std::env::set_var("AISH_REMOTE_BIN", bin);
+        }
+        match password {
+            Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+            None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
         }
         // Per-host push without the interactive diff (group mode is already
         // an explicit bulk action; failures are collected, not fatal).
@@ -815,11 +856,18 @@ pub fn cmd_policy_push_group(
 /// counter). States: `current` (matches expectation), `drifted` (remote is
 /// NEWER than expected — changed elsewhere), `stale` (remote is OLDER —
 /// missed an update), `none` (no remote policy installed), `unreachable`.
-pub fn cmd_policy_status(targets: &[(String, Option<String>)], json: bool) -> Result<(), String> {
+pub fn cmd_policy_status(
+    targets: &[(String, Option<String>, Option<String>)],
+    json: bool,
+) -> Result<(), String> {
     let mut results = Vec::new();
-    for (target, remote_bin) in targets {
+    for (target, remote_bin, password) in targets {
         if let Some(bin) = remote_bin {
             std::env::set_var("AISH_REMOTE_BIN", bin);
+        }
+        match password {
+            Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+            None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
         }
         let expected = next_policy_version(target).saturating_sub(1);
         let state = match remote_policy_installed(target) {

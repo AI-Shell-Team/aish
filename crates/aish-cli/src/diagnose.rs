@@ -169,6 +169,8 @@ fn diagnose_host(host: &str, checks: &[String]) -> Result<Vec<serde_json::Value>
     args.push("--enforce-read-only".to_string());
 
     let values = match std::thread::scope(|scope| {
+        // Password for literal targets comes from the environment
+        // (AISH_REMOTE_PASSWORD); ssh_json_lines reads it via env_password.
         let handle = scope.spawn(|| ssh_json_lines(host, &args, Some(HOST_TIMEOUT)));
         handle.join()
     }) {

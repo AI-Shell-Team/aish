@@ -373,6 +373,10 @@ enum RemoteHostAction {
         /// Group tags (repeatable). Select with --host group:<tag>
         #[arg(long = "group")]
         groups: Vec<String>,
+        /// ssh password (used with sshpass). Prefer AISH_REMOTE_PASSWORD
+        /// in production: it is not persisted anywhere.
+        #[arg(long)]
+        password: Option<String>,
     },
     /// Remove a remote host alias
     Remove { name: String },
@@ -1049,8 +1053,8 @@ fn main() {
 
 /// Expand a comma-separated --host list. Each element may be an alias, a
 /// literal ssh target, or `group:<tag>` (expands to all matching hosts).
-/// Returns (ssh_target, remote_bin_override) pairs in expansion order.
-fn expand_host_list(host: &str) -> Result<Vec<(String, Option<String>)>, String> {
+/// Returns (ssh_target, remote_bin_override, password) triples in order.
+fn expand_host_list(host: &str) -> Result<Vec<(String, Option<String>, Option<String>)>, String> {
     let mut out = Vec::new();
     for part in host.split(',') {
         let part = part.trim();
@@ -1105,7 +1109,14 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 target,
                 remote_bin,
                 groups,
-            } => remote_hosts::add(&name, &target, remote_bin.as_deref(), &groups),
+                password,
+            } => remote_hosts::add(
+                &name,
+                &target,
+                remote_bin.as_deref(),
+                &groups,
+                password.as_deref(),
+            ),
             RemoteHostAction::Remove { name } => {
                 if remote_hosts::remove(&name)? {
                     println!("removed alias '{name}'");
@@ -1117,31 +1128,47 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
         },
         RemoteSubcommand::Session { action } => match action {
             RemoteSessionAction::List { host, json } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_session_list(&target, json)
             }
             RemoteSessionAction::Attach { host, session } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 let session_id = session.unwrap_or_default();
                 remote_cmd::cmd_session_attach(&target, &session_id)
             }
             RemoteSessionAction::Rename { host, session, to } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_session_rename(&target, &session, &to)
             }
             RemoteSessionAction::Kill { host, session } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_session_kill(&target, &session)
             }
@@ -1150,9 +1177,13 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 session,
                 tail,
             } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_session_replay(&target, &session, tail)
             }
@@ -1170,16 +1201,24 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 if let Some(tag) = remote_hosts::group_tag(&host) {
                     return remote_cmd::cmd_policy_push_group(tag, &policy, &targets, yes);
                 }
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_policy_push(&target, &policy, &targets, version, diff, yes)
             }
             RemotePolicyAction::Show { host } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_policy_show(&target)
             }
@@ -1190,9 +1229,13 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
         },
         RemoteSubcommand::Audit { action } => match action {
             RemoteAuditAction::Pull { host, db } => {
-                let (target, remote_bin) = remote_hosts::resolve(&host)?;
+                let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
                 if let Some(bin) = remote_bin {
                     std::env::set_var("AISH_REMOTE_BIN", bin);
+                }
+                match password {
+                    Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                    None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
                 }
                 remote_cmd::cmd_audit_pull(&target, db.as_deref())
             }
@@ -1207,7 +1250,7 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .map(|h| remote_hosts::resolve(h).map(|(t, _)| t))
+                    .map(|h| remote_hosts::resolve(h).map(|(t, _, _)| t))
                     .collect::<Result<Vec<_>, _>>()?;
                 let check_list: Vec<String> = checks
                     .split(',')
@@ -1235,9 +1278,13 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
             }
         },
         RemoteSubcommand::Doctor { host } => {
-            let (target, remote_bin) = remote_hosts::resolve(&host)?;
+            let (target, remote_bin, password) = remote_hosts::resolve(&host)?;
             if let Some(bin) = remote_bin {
                 std::env::set_var("AISH_REMOTE_BIN", bin);
+            }
+            match password {
+                Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+                None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
             }
             remote_cmd::cmd_remote_doctor(&target)
         }

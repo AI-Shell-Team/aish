@@ -345,7 +345,29 @@ aish remote admin untrust-operator <hex> # 移除；最后一个被移除时回�
 
 `remote admin` 子命令本身不受身份门管控（`show-identity` 是登记自己的引导路径）。
 
-### 10.5.3 RBAC：策略里的 remote_access 段
+### 10.5.3 ssh 密码认证（方案 2，sshpass 集成）
+
+ssh 免密**不是**必须的。当目标机只能用密码登录时，aish 可以自带凭据：
+
+```bash
+# 方式一：host add 时写入（存 remote-hosts.json，文件 0600）
+aish remote host add prod-1 root@10.0.0.1 --password 'uos123!!'
+
+# 方式二：环境变量（不落盘，适合 CI/脚本）
+export AISH_REMOTE_PASSWORD='uos123!!'
+aish remote session list --host root@10.0.0.1
+```
+
+实现：客户端检测到密码时，把 ssh 调用包进 `sshpass -e`（密码经
+`SSHPASS` 环境变量传给子进程，不出现在命令行/ps 输出里）；ssh 内部仍
+保持 `BatchMode=yes`——密码错误立即失败而不是挂起。环境变量优先于
+条目里存的密码。
+
+安全权衡：密码落在 `remote-hosts.json` 明文仅受 0600 保护；生产环境
+推荐方式二（环境变量）或回到密钥。aish 的操作者身份层（10.5）独立于
+ssh 凭据，无论 ssh 用密码还是密钥都生效。
+
+### 10.5.4 RBAC：策略里的 remote_access 段
 
 身份验证回答"你是谁"，`remote_access` 回答"你能做什么"（写进已安装策略，
 随信封签名分发）：
@@ -362,7 +384,7 @@ remote_access:
 规则：无 `remote_access` 段 = 允许全部已认证操作者；action 列出但
 `operators` 为空 = 显式拒绝所有；`operators` 前缀匹配操作者公钥。
 
-### 10.5.4 实测记录（130 ⇄ 243）
+### 10.5.5 实测记录（130 ⇄ 243）
 
 - 双方互配 trust 后，强制模式下 session list / policy push / diag / replay
   全部通过（挑战-签名自动完成，用户无感）
