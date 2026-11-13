@@ -61,6 +61,13 @@ fn save_all(entries: &[RemoteHostEntry]) -> Result<(), String> {
     // Write-then-rename so an interrupted write cannot corrupt the file.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    // The file may hold ssh passwords (0600), set on the tmp file so the
+    // rename publishes the restrictive mode atomically.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
     std::fs::rename(&tmp, &path).map_err(|e| format!("cannot install {}: {e}", path.display()))
 }
 

@@ -860,6 +860,12 @@ fn main() {
                 std::process::exit(3);
             }
         }
+    } else if is_agent_entry {
+        // Open mode: the client still sends the identity line to keep the
+        // wire format uniform; consume and discard it so the relay / the
+        // envelope reader see clean stdin.
+        tty_watchdog::disarm();
+        remote_identity::consume_identity_line_if_present();
     }
     if cli.remote_sessions {
         tty_watchdog::disarm();
@@ -1246,12 +1252,29 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 checks,
                 json,
             } => {
+                // Resolve aliases to targets; forward the LAST resolved
+                // password into the env (diag threads read it via
+                // env_password). Mixed password/no-password groups must set
+                // AISH_REMOTE_PASSWORD explicitly.
+                let mut forwarded: Option<String> = None;
                 let host_list: Vec<String> = hosts
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .map(|h| remote_hosts::resolve(h).map(|(t, _, _)| t))
+                    .map(|h| {
+                        remote_hosts::resolve(h).map(|(t, _, pw)| {
+                            if pw.is_some() {
+                                forwarded = pw;
+                            }
+                            t
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
+                if let Some(p) = forwarded {
+                    std::env::set_var("AISH_REMOTE_PASSWORD", p);
+                } else {
+                    std::env::remove_var("AISH_REMOTE_PASSWORD");
+                }
                 let check_list: Vec<String> = checks
                     .split(',')
                     .map(str::trim)

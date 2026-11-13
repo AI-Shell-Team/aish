@@ -124,11 +124,23 @@ pub fn trust_operator(public_key_hex: &str) -> Result<(), String> {
         return Ok(());
     }
     trusted.push(public_key_hex.to_string());
+    write_trusted_file(&path, &trusted)
+}
+
+/// Write the trusted-operators file with 0600: it gates who may act on this
+/// host, so a world-readable copy would leak the operator identity list.
+fn write_trusted_file(path: &std::path::Path, trusted: &[String]) -> Result<(), String> {
     std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&trusted).unwrap_or_default(),
+        path,
+        serde_json::to_string_pretty(trusted).unwrap_or_default(),
     )
-    .map_err(|e| format!("cannot write trusted operators: {e}"))
+    .map_err(|e| format!("cannot write trusted operators: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 pub fn list_trusted() -> Result<Vec<String>, String> {
@@ -157,11 +169,7 @@ pub fn untrust_operator(public_key_hex: &str) -> Result<bool, String> {
         .filter(|k| k != public_key_hex)
         .collect();
     let removed = kept.len() < before;
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&kept).unwrap_or_default(),
-    )
-    .map_err(|e| format!("cannot write trusted operators: {e}"))?;
+    write_trusted_file(&path, &kept)?;
     Ok(removed)
 }
 
@@ -256,6 +264,22 @@ pub fn authenticate_agent_action(
         return false;
     }
     true
+}
+
+/// Open-mode counterpart of the auth gate: when enforcement is NOT active,
+/// the client still sends the identity line (so the wire format is
+/// uniform); the agent must consume and discard it so downstream stdin
+/// consumers (frame relay, envelope reader) see clean input. In
+/// enforcement mode the gate has already consumed the line, so this is a
+/// no-op there.
+pub fn consume_identity_line_if_present() {
+    if enforcement_active() {
+        return;
+    }
+    let mut line = String::new();
+    // Best-effort: EOF or parse failure are both fine — the line exists
+    // only to keep the two modes wire-compatible.
+    let _ = std::io::stdin().read_line(&mut line);
 }
 
 /// Client-side helper: produce the identity JSON line for `action`.

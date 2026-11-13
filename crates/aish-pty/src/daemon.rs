@@ -1280,7 +1280,10 @@ pub fn run_pty_daemon_shell(
             let mut arbiter = RoleArbiter::new();
             let mut child_exited = false;
             // Terminal recording: every PTY output byte lands in the session's
-            // .cast file (asciinema-compatible JSON lines) for replay.
+            // .cast file (asciinema-compatible JSON lines) for replay. Prune
+            // old recordings so disk usage stays bounded (keeps the newest
+            // 20; this session's file was just created, so it survives).
+            crate::session_recording::prune_recordings(20);
             let mut recorder = crate::session_recording::SessionRecorder::start(session_id);
 
             loop {
