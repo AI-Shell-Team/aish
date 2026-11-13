@@ -477,10 +477,12 @@ enum RemotePolicyAction {
     /// Compares each host's installed policy version/issuer against the
     /// local expectation (what we last pushed) and flags hosts that are
     /// missing updates or whose policy changed outside this control host.
+    /// Omit --host to scan every configured alias.
     Status {
-        /// Remote hosts, comma-separated (aliases, ssh targets, group:tags)
+        /// Remote hosts, comma-separated (aliases, ssh targets, group:tags);
+        /// defaults to all configured aliases
         #[arg(long)]
-        host: String,
+        host: Option<String>,
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -1057,6 +1059,28 @@ fn main() {
     }
 }
 
+/// All configured host aliases as (target, remote_bin, password) triples,
+/// for the no-argument full-fleet drift scan.
+fn all_configured_targets() -> Result<Vec<(String, Option<String>, Option<String>)>, String> {
+    let entries = remote_hosts::list()?;
+    if entries.is_empty() {
+        return Err(
+            "no remote hosts configured. Tip: add one with 'aish remote host add <alias> user@host'"
+                .to_string(),
+        );
+    }
+    Ok(entries
+        .into_iter()
+        .map(|e| {
+            (
+                e.target,
+                e.remote_bin,
+                e.password.or_else(remote_hosts::env_password),
+            )
+        })
+        .collect())
+}
+
 /// Expand a comma-separated --host list. Each element may be an alias, a
 /// literal ssh target, or `group:<tag>` (expands to all matching hosts).
 /// Returns (ssh_target, remote_bin_override, password) triples in order.
@@ -1229,7 +1253,10 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 remote_cmd::cmd_policy_show(&target)
             }
             RemotePolicyAction::Status { host, json } => {
-                let targets = expand_host_list(&host)?;
+                let targets = match host {
+                    Some(h) => expand_host_list(&h)?,
+                    None => all_configured_targets()?,
+                };
                 remote_cmd::cmd_policy_status(&targets, json)
             }
         },

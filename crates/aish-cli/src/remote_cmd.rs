@@ -59,6 +59,8 @@ impl SshChannel {
         cmd.arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
+            .arg("-o")
             .arg("ServerAliveInterval=10")
             .arg("-o")
             .arg("ServerAliveCountMax=3")
@@ -235,6 +237,8 @@ pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
         let output = probe_cmd
             .arg("-o")
             .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
             .arg("ConnectTimeout=5")
             .arg("--")
@@ -498,6 +502,8 @@ pub fn cmd_session_replay(host: &str, session: &str, tail: Option<usize>) -> Res
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("--")
         .arg(host)
@@ -715,7 +721,9 @@ fn whoami_local() -> String {
 fn remote_policy_installed(host: &str) -> Result<Option<(u64, String)>, String> {
     let bin = probe_remote_bin(host)?;
     let args = vec![bin, "--remote-policy-show".to_string()];
-    let lines = ssh_json_lines(host, &args, None)?;
+    // Bounded: a fleet-wide drift scan must not hang on one unreachable
+    // host (ssh itself gives up after ~30 s via ServerAlive*).
+    let lines = ssh_json_lines(host, &args, Some(Duration::from_secs(30)))?;
     match lines.into_iter().next() {
         Some(v) => {
             let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0);

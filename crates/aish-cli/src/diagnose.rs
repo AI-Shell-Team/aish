@@ -67,13 +67,26 @@ pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String
         };
         outcomes.insert(h.clone(), outcome);
     }
+    // Persist the raw per-host check results so `diag status` can replay
+    // the details later, not just the outcome states.
+    let mut results_map = std::collections::BTreeMap::new();
+    for (h, r) in &results {
+        let value = match r {
+            Ok(items) => serde_json::json!({ "status": "success", "results": items }),
+            Err(status) => serde_json::json!({
+                "status": status.label(),
+                "results": [],
+            }),
+        };
+        results_map.insert(h.clone(), value);
+    }
     let record = crate::diag_tasks::DiagTask {
         id: task_id.clone(),
         hosts: hosts.to_vec(),
         checks: checks.to_vec(),
         started_at: chrono::Utc::now().to_rfc3339(),
         outcomes,
-        results: std::collections::BTreeMap::new(),
+        results: results_map,
     };
     let _ = crate::diag_tasks::save(&record);
     if !json {
