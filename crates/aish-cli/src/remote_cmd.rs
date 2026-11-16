@@ -96,7 +96,9 @@ impl SshChannel {
         // channel. ServerAliveInterval detects dead peers quickly.
         cmd.arg("-o")
             .arg("BatchMode=yes")
-            .when(accept_new_supported(), |c| c.arg("-o").arg("StrictHostKeyChecking=accept-new"))
+            .when(accept_new_supported(), |c| {
+                c.arg("-o").arg("StrictHostKeyChecking=accept-new")
+            })
             .arg("-o")
             .arg("ServerAliveInterval=10")
             .arg("-o")
@@ -315,7 +317,9 @@ pub(crate) fn probe_remote_bin_full(
         let output = probe_cmd
             .arg("-o")
             .arg("BatchMode=yes")
-            .when(accept_new_supported(), |c| c.arg("-o").arg("StrictHostKeyChecking=accept-new"))
+            .when(accept_new_supported(), |c| {
+                c.arg("-o").arg("StrictHostKeyChecking=accept-new")
+            })
             .arg("-o")
             .arg("ConnectTimeout=5")
             .arg("--")
@@ -578,7 +582,9 @@ pub fn cmd_session_replay(host: &str, session: &str, tail: Option<usize>) -> Res
     let mut child = child
         .arg("-o")
         .arg("BatchMode=yes")
-        .when(accept_new_supported(), |c| c.arg("-o").arg("StrictHostKeyChecking=accept-new"))
+        .when(accept_new_supported(), |c| {
+            c.arg("-o").arg("StrictHostKeyChecking=accept-new")
+        })
         .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("--")
