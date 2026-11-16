@@ -58,6 +58,16 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Serialize concurrent ensure_identity calls (parallel tests, multiple
+/// aish processes racing first-run creation share one file).
+fn identity_creation_lock() -> std::io::Result<std::fs::File> {
+    let path = identity_path().map_err(|_| std::io::Error::other("no config dir"))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path.with_extension("lock"))
+}
+
 /// Load (or lazily create) this host's operator identity keypair. Creation is
 /// silent and automatic: every aish instance has an identity from first run.
 pub fn ensure_identity() -> Result<(String, SigningKey), String> {
@@ -77,6 +87,23 @@ pub fn ensure_identity() -> Result<(String, SigningKey), String> {
             .map_err(|_| "identity secret key must be 32 bytes")?;
         let key = SigningKey::from_bytes(&arr);
         return Ok((hex_encode(key.verifying_key().as_bytes()), key));
+    }
+    // Take the creation lock; if another writer won the race, re-read its
+    // published key instead of duplicating the file.
+    let lock = identity_creation_lock();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(hex_key) = json.get("secret_key_hex").and_then(|v| v.as_str()) {
+                if let Some(bytes) = hex_decode(hex_key) {
+                    if let Ok(arr) = <[u8; 32]>::try_from(bytes) {
+                        drop(lock);
+                        let _ = std::fs::remove_file(identity_path()?.with_extension("lock"));
+                        let key = SigningKey::from_bytes(&arr);
+                        return Ok((hex_encode(key.verifying_key().as_bytes()), key));
+                    }
+                }
+            }
+        }
     }
     let mut csprng = rand_core::OsRng;
     let key = SigningKey::generate(&mut csprng);
@@ -109,6 +136,8 @@ pub fn ensure_identity() -> Result<(String, SigningKey), String> {
         let key = SigningKey::from_bytes(&arr);
         return Ok((hex_encode(key.verifying_key().as_bytes()), key));
     }
+    drop(lock);
+    let _ = std::fs::remove_file(identity_path()?.with_extension("lock"));
     Ok((hex_encode(key.verifying_key().as_bytes()), key))
 }
 
