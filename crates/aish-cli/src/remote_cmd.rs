@@ -41,11 +41,21 @@ impl SshChannel {
     /// Spawn `ssh <host> -- <remote aish invocation>` with piped stdio.
     /// stderr is inherited so ssh errors stay visible.
     pub fn spawn(host: &str, remote_args: &[String]) -> Result<Self, String> {
-        // Password auth: when a password is available (env or caller), wrap
-        // the ssh invocation in sshpass so the connection completes without
-        // keys and without an interactive prompt. BatchMode stays on inside
-        // sshpass so a wrong password fails fast instead of hanging.
-        let password = crate::remote_hosts::env_password();
+        Self::spawn_with_password(host, remote_args, crate::remote_hosts::env_password())
+    }
+
+    /// Same as `spawn`, but with an explicit per-call password (diagnosis
+    /// fan-out passes each host's own credential; avoids the shared process
+    /// env when workers run concurrently).
+    pub fn spawn_with_password(
+        host: &str,
+        remote_args: &[String],
+        password: Option<String>,
+    ) -> Result<Self, String> {
+        // Password auth: when a password is available, wrap the ssh
+        // invocation in sshpass so the connection completes without keys and
+        // without an interactive prompt. BatchMode stays on inside sshpass
+        // so a wrong password fails fast instead of hanging.
         let mut cmd = match &password {
             Some(_) => Command::new("sshpass"),
             None => Command::new("ssh"),
@@ -147,7 +157,23 @@ pub(crate) fn ssh_json_lines(
     remote_args: &[String],
     timeout: Option<Duration>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut ch = SshChannel::spawn(host, remote_args)?;
+    ssh_json_lines_with_password(
+        host,
+        remote_args,
+        timeout,
+        crate::remote_hosts::env_password(),
+    )
+}
+
+/// `ssh_json_lines` with an explicit per-call password (diagnosis fan-out
+/// passes each host's own credential instead of the shared process env).
+pub(crate) fn ssh_json_lines_with_password(
+    host: &str,
+    remote_args: &[String],
+    timeout: Option<Duration>,
+    password: Option<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut ch = SshChannel::spawn_with_password(host, remote_args, password)?;
     let (reader, mut stdin) = ch.split()?;
     // Operator identity: when the target enforces trust, the first stdin
     // line is the signed challenge response. Harmless in open mode.
@@ -217,6 +243,19 @@ pub(crate) fn ssh_json_lines(
 /// Probe that the remote host has a usable aish binary. Returns the resolved
 /// path on success. `AISH_REMOTE_BIN` (if set) wins without probing.
 pub(crate) fn probe_remote_bin(host: &str) -> Result<String, String> {
+    probe_remote_bin_with_override(host, None)
+}
+
+/// `override_bin`（来自 host alias 配置）优先于环境变量与候选路径探测。
+pub(crate) fn probe_remote_bin_with_override(
+    host: &str,
+    override_bin: Option<&str>,
+) -> Result<String, String> {
+    if let Some(bin) = override_bin {
+        if !bin.is_empty() {
+            return Ok(bin.to_string());
+        }
+    }
     if let Ok(path) = std::env::var(REMOTE_BIN_ENV) {
         if !path.is_empty() {
             return Ok(path);
@@ -1397,13 +1436,36 @@ pub fn agent_attach(session_id: &str, prefix: Vec<u8>) -> Result<(), String> {
         } else {
             sock_fd.max(in_fd) + 1
         };
+        // Timed wait: after stdin EOF the outer select must not block
+        // indefinitely on a silent daemon — the drain budget below needs to
+        // be reachable to send Detach and let the session survive.
+        let mut timeout_arg = if stdin_eof {
+            let elapsed = stdin_eof_since.elapsed();
+            let remaining = Duration::from_millis(SOCK_DRAIN_BUDGET_MS).saturating_sub(elapsed);
+            libc::timeval {
+                tv_sec: remaining.as_secs() as _,
+                tv_usec: remaining.subsec_micros() as _,
+            }
+        } else {
+            libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            }
+        };
+        // Null timeout only while stdin is still open (block until data);
+        // after EOF the drain budget bounds every wait.
+        let timeout_ptr = if stdin_eof {
+            &mut timeout_arg as *mut libc::timeval
+        } else {
+            std::ptr::null_mut()
+        };
         let ret = unsafe {
             libc::select(
                 nfds,
                 &mut fds,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                timeout_ptr,
             )
         };
         if ret < 0 {

@@ -202,6 +202,15 @@ Use Ctrl+Q to detach, or claim input from the controller.\r\n",
         }
     }
 
+    // Agent auth rejection: when the gate denies, it prints
+    // {"auth_failed":true,...} on stdout and exits. That line is not a valid
+    // frame, so it stays in net_buf until EOF. Surface it as an error
+    // instead of returning Ok(()) with no explanation.
+    let leftover: String = String::from_utf8_lossy(&net_buf).trim().to_string();
+    if leftover.starts_with("{\"auth_failed\"") {
+        return Err(format!("remote attach rejected: {leftover}"));
+    }
+
     if detached {
         // Best-effort detach frame so the remote daemon keeps the session.
         let enc = aish_pty::daemon_protocol::encode_frame(&aish_pty::Frame::detach());

@@ -44,12 +44,14 @@ fn hosts_file() -> Result<PathBuf, String> {
 /// atomically. Used for password/identity/trusted-operator state files.
 pub fn write_secret_file(path: &Path, content: &str) -> Result<(), String> {
     use std::io::Write;
-    let tmp = path.with_extension("tmp0600");
-    // A leftover tmp file from a crashed previous run must not poison this
-    // write forever: remove it, then create fresh. OpenOptions sets the mode
-    // at create time — no window where the file exists under the ambient
-    // umask.
-    let _ = std::fs::remove_file(&tmp);
+    // Unique per-invocation tmp name: two concurrent writers must never
+    // rename each other's (possibly empty) file into place, and failure
+    // cleanup must remove only this invocation's file.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp0600.{}.{}", std::process::id(), seq));
+    // OpenOptions sets the mode at create time — no window where the file
+    // exists under the ambient umask.
     #[cfg(unix)]
     let mut f = {
         use std::os::unix::fs::OpenOptionsExt;
@@ -66,8 +68,12 @@ pub fn write_secret_file(path: &Path, content: &str) -> Result<(), String> {
         .create_new(true)
         .open(&tmp)
         .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-    f.write_all(content.as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    if let Err(e) = f.write_all(content.as_bytes()) {
+        // Clean up THIS invocation's tmp on failure; never touch another
+        // writer's file.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
     drop(f);
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);

@@ -134,12 +134,14 @@ pub fn list_recordings() -> Vec<(String, u64)> {
     out
 }
 
-/// Prune recordings: keep the `keep` most recently modified.
+/// Prune recordings: keep the `keep` most recently modified. Rotation
+/// segments (`.cast.1`) are removed together with their current `.cast`
+/// file, and orphaned segments (no matching `.cast`) are collected too.
 pub fn prune_recordings(keep: usize) {
     let Ok(dir) = crate::pty_session_dir() else {
         return;
     };
-    let mut entries: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(dir)
+    let mut entries: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -151,11 +153,33 @@ pub fn prune_recordings(keep: usize) {
             }
         })
         .collect();
-    if entries.len() <= keep {
-        return;
+    if entries.len() > keep {
+        entries.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
+        for (path, _) in entries.into_iter().skip(keep) {
+            // Remove the rotated segment alongside its current file so a
+            // pruned session leaves nothing behind.
+            let _ = std::fs::remove_file(path.with_extension("cast.1"));
+            let _ = std::fs::remove_file(path);
+        }
     }
-    entries.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
-    for (path, _) in entries.into_iter().skip(keep) {
+    // Orphaned rotation segments: current .cast already gone (e.g. pruned
+    // by an older build, or removed manually).
+    let mut orphans: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".cast.1") {
+                let current = dir.join(format!("{}.cast", name.trim_end_matches(".cast.1")));
+                if !current.exists() {
+                    return Some(e.path());
+                }
+            }
+            None
+        })
+        .collect();
+    for path in orphans.drain(..) {
         let _ = std::fs::remove_file(path);
     }
 }

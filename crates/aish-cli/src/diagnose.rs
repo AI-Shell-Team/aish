@@ -10,8 +10,6 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::remote_cmd::ssh_json_lines;
-
 /// Per-host status vocabulary mirrors the issue's acceptance criteria.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HostStatus {
@@ -54,21 +52,7 @@ pub struct HostTarget {
     pub password: Option<String>,
 }
 
-impl HostTarget {
-    /// Apply this host's credentials to the process env so the ssh calls
-    /// inside `diagnose_host` pick them up. Scoped: the caller runs each
-    /// host on its own worker thread, so there is no cross-host leakage —
-    /// unlike a single shared AISH_REMOTE_PASSWORD for the whole fan-out.
-    pub fn apply_env(&self) {
-        if let Some(bin) = &self.remote_bin {
-            std::env::set_var("AISH_REMOTE_BIN", bin);
-        }
-        match &self.password {
-            Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
-            None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
-        }
-    }
-}
+impl HostTarget {}
 
 /// Entry point for `aish remote diagnose`.
 pub fn run(targets: &[HostTarget], checks: &[String], json: bool) -> Result<(), String> {
@@ -168,10 +152,10 @@ fn run_inner(
                 let t = targets.iter().find(|t| t.target == host).cloned();
                 in_flight += 1;
                 handles.push(scope.spawn(move || {
-                    if let Some(t) = t {
-                        t.apply_env();
-                    }
-                    let outcome = diagnose_host(&host, &checks);
+                    let outcome = match &t {
+                        Some(t) => diagnose_host(t, &checks),
+                        None => Err(HostStatus::Unreachable),
+                    };
                     let _ = tx.send((host, outcome));
                 }));
             }
@@ -207,17 +191,26 @@ fn run_inner(
 }
 
 /// Run the remote diagnose subcommand on one host.
-fn diagnose_host(host: &str, checks: &[String]) -> Result<Vec<serde_json::Value>, HostStatus> {
-    let bin = crate::remote_cmd::probe_remote_bin(host).map_err(|_| HostStatus::Unreachable)?;
+fn diagnose_host(t: &HostTarget, checks: &[String]) -> Result<Vec<serde_json::Value>, HostStatus> {
+    let bin = crate::remote_cmd::probe_remote_bin_with_override(&t.target, t.remote_bin.as_deref())
+        .map_err(|_| HostStatus::Unreachable)?;
     let mut args = vec![bin, "--remote-diagnose".to_string()];
     args.push("--checks".to_string());
     args.push(checks.join(","));
     args.push("--enforce-read-only".to_string());
 
     let values = match std::thread::scope(|scope| {
-        // Password for literal targets comes from the environment
-        // (AISH_REMOTE_PASSWORD); ssh_json_lines reads it via env_password.
-        let handle = scope.spawn(|| ssh_json_lines(host, &args, Some(HOST_TIMEOUT)));
+        // Per-host credentials passed explicitly to the ssh call — no
+        // shared process env, so concurrent workers cannot read another
+        // host's password.
+        let handle = scope.spawn(|| {
+            crate::remote_cmd::ssh_json_lines_with_password(
+                &t.target,
+                &args,
+                Some(HOST_TIMEOUT),
+                t.password.clone(),
+            )
+        });
         handle.join()
     }) {
         Ok(Ok(values)) => values,
@@ -361,6 +354,7 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_cmd::ssh_json_lines;
 
     fn sample_results() -> HashMap<String, Result<Vec<serde_json::Value>, HostStatus>> {
         let mut results = HashMap::new();
