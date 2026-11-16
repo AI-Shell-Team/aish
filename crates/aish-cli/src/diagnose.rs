@@ -192,8 +192,12 @@ fn run_inner(
 
 /// Run the remote diagnose subcommand on one host.
 fn diagnose_host(t: &HostTarget, checks: &[String]) -> Result<Vec<serde_json::Value>, HostStatus> {
-    let bin = crate::remote_cmd::probe_remote_bin_with_override(&t.target, t.remote_bin.as_deref())
-        .map_err(|_| HostStatus::Unreachable)?;
+    let bin = crate::remote_cmd::probe_remote_bin_full(
+        &t.target,
+        t.remote_bin.as_deref(),
+        t.password.clone(),
+    )
+    .map_err(|_| HostStatus::Unreachable)?;
     let mut args = vec![bin, "--remote-diagnose".to_string()];
     args.push("--checks".to_string());
     args.push(checks.join(","));

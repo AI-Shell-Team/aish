@@ -251,6 +251,16 @@ pub(crate) fn probe_remote_bin_with_override(
     host: &str,
     override_bin: Option<&str>,
 ) -> Result<String, String> {
+    probe_remote_bin_full(host, override_bin, crate::remote_hosts::env_password())
+}
+
+/// Password-aware variant: a password-only host with no binary override
+/// still needs working ssh credentials for the probe calls themselves.
+pub(crate) fn probe_remote_bin_full(
+    host: &str,
+    override_bin: Option<&str>,
+    password: Option<String>,
+) -> Result<String, String> {
     if let Some(bin) = override_bin {
         if !bin.is_empty() {
             return Ok(bin.to_string());
@@ -262,10 +272,12 @@ pub(crate) fn probe_remote_bin_with_override(
         }
     }
     // Try each candidate path; the first that exists and is executable wins.
+    // The caller's per-host password wins; env is the fallback. Resolved
+    // once here (not per-iteration) and borrowed for the whole loop.
+    let password = password.or_else(crate::remote_hosts::env_password);
     for candidate in REMOTE_BIN_CANDIDATES {
         // sshpass wrapper when a password is configured (same policy as
         // SshChannel::spawn).
-        let password = crate::remote_hosts::env_password();
         let mut probe_cmd = match &password {
             Some(_) => Command::new("sshpass"),
             None => Command::new("ssh"),

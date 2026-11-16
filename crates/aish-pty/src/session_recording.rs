@@ -137,11 +137,14 @@ pub fn list_recordings() -> Vec<(String, u64)> {
 /// Prune recordings: keep the `keep` most recently modified. Rotation
 /// segments (`.cast.1`) are removed together with their current `.cast`
 /// file, and orphaned segments (no matching `.cast`) are collected too.
-pub fn prune_recordings(keep: usize) {
+/// `active_session_ids` are never pruned — an idle live session can rank
+/// outside the newest `keep` and its recorder would keep writing to a
+/// deleted file.
+pub fn prune_recordings(keep: usize, active_session_ids: &std::collections::HashSet<String>) {
     let Ok(dir) = crate::pty_session_dir() else {
         return;
     };
-    let mut entries: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
+    let entries: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -153,9 +156,20 @@ pub fn prune_recordings(keep: usize) {
             }
         })
         .collect();
-    if entries.len() > keep {
-        entries.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
-        for (path, _) in entries.into_iter().skip(keep) {
+    let prunable: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .iter()
+        .filter(|(p, _)| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|sid| !active_session_ids.contains(sid))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if prunable.len() > keep {
+        let mut sorted = prunable;
+        sorted.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
+        for (path, _) in sorted.into_iter().skip(keep) {
             // Remove the rotated segment alongside its current file so a
             // pruned session leaves nothing behind.
             let _ = std::fs::remove_file(path.with_extension("cast.1"));

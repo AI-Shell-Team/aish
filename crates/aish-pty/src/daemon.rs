@@ -1283,7 +1283,16 @@ pub fn run_pty_daemon_shell(
             // .cast file (asciinema-compatible JSON lines) for replay. Prune
             // old recordings so disk usage stays bounded (keeps the newest
             // 20; this session's file was just created, so it survives).
-            crate::session_recording::prune_recordings(20);
+            // Never prune a live session's recording: this daemon's own
+            // session plus any other running daemon's sessions.
+            let mut active: std::collections::HashSet<String> =
+                [session_id.to_string()].into_iter().collect();
+            for s in crate::discover_sessions() {
+                if crate::check_daemon_alive(&s.socket_path) {
+                    active.insert(s.session_id);
+                }
+            }
+            crate::session_recording::prune_recordings(20, &active);
             let mut recorder = crate::session_recording::SessionRecorder::start(session_id);
 
             loop {
