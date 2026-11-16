@@ -387,6 +387,32 @@ mod tests {
 
     #[test]
     fn ssh_json_lines_timeout_kills_stuck_child() {
+        // The test needs a working passwordless `ssh localhost`: it proves
+        // the timeout path kills a stuck child instead of waiting for it.
+        // CI runners have no localhost ssh credentials, so ssh exits with
+        // an empty stdout immediately (Ok([])) — skip instead of failing.
+        let probe = std::process::Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "--",
+                "localhost",
+                "echo",
+                "ok",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match probe {
+            Ok(out) if out.status.success() => {}
+            _ => {
+                eprintln!("skipping: no passwordless ssh to localhost");
+                return;
+            }
+        }
+
         // Local sh sleep exceeds the budget; ssh_json_lines must kill it and
         // return an error well under the sleep duration.
         let start = std::time::Instant::now();

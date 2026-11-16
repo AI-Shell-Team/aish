@@ -1766,7 +1766,6 @@ mod tests {
         assert_ne!(record.session_uuid, existing.session_uuid);
     }
 
-
     #[test]
     fn create_session_with_uuid_rejects_blank_id() {
         let (_temp, store) = temp_store();
