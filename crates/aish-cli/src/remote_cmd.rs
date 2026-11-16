@@ -21,6 +21,34 @@ const REMOTE_BIN_CANDIDATES: &[&str] = &["/usr/local/bin/aish", "/usr/bin/aish"]
 /// POSIX-shell quote a single argument (single-quote wrapping, with the
 /// classic embedded-quote dance). Keeps arguments with spaces, quotes or
 /// `$` expansions intact across the ssh boundary.
+/// OpenSSH >= 7.6 only. Old clients (e.g. UOS with OpenSSH 7.4) reject
+/// `-o StrictHostKeyChecking=accept-new` outright, breaking every call.
+/// Probe once and cache.
+trait CommandWhen {
+    fn when(&mut self, cond: bool, f: impl FnOnce(&mut Self) -> &mut Self) -> &mut Self;
+}
+impl CommandWhen for std::process::Command {
+    fn when(&mut self, cond: bool, f: impl FnOnce(&mut Self) -> &mut Self) -> &mut Self {
+        if cond {
+            f(self);
+        }
+        self
+    }
+}
+
+fn accept_new_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        std::process::Command::new("ssh")
+            .args(["-G", "-o", "StrictHostKeyChecking=accept-new", "probe"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
 fn shell_quote(arg: &str) -> String {
     if !arg.is_empty()
         && arg
@@ -68,8 +96,7 @@ impl SshChannel {
         // channel. ServerAliveInterval detects dead peers quickly.
         cmd.arg("-o")
             .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
+            .when(accept_new_supported(), |c| c.arg("-o").arg("StrictHostKeyChecking=accept-new"))
             .arg("-o")
             .arg("ServerAliveInterval=10")
             .arg("-o")
@@ -288,8 +315,7 @@ pub(crate) fn probe_remote_bin_full(
         let output = probe_cmd
             .arg("-o")
             .arg("BatchMode=yes")
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
+            .when(accept_new_supported(), |c| c.arg("-o").arg("StrictHostKeyChecking=accept-new"))
             .arg("-o")
             .arg("ConnectTimeout=5")
             .arg("--")
@@ -552,8 +578,7 @@ pub fn cmd_session_replay(host: &str, session: &str, tail: Option<usize>) -> Res
     let mut child = child
         .arg("-o")
         .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
+        .when(accept_new_supported(), |c| c.arg("-o").arg("StrictHostKeyChecking=accept-new"))
         .arg("-o")
         .arg("ConnectTimeout=10")
         .arg("--")
