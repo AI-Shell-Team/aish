@@ -1091,8 +1091,12 @@ fn save_sync_cursor(host: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(),
 
 /// `aish remote diagnose --hosts h1,h2 --checks svc,ports,logs` (#588).
 /// `aish remote diag run ...` (#588): execute and persist the task.
-pub fn diag_run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
-    crate::diagnose::run(hosts, checks, json)
+pub fn diag_run(
+    targets: &[crate::diagnose::HostTarget],
+    checks: &[String],
+    json: bool,
+) -> Result<(), String> {
+    crate::diagnose::run(targets, checks, json)
 }
 
 /// `aish remote diag list`: show saved tasks, newest first.
@@ -1277,7 +1281,20 @@ pub fn agent_session_replay(session_id: &str, tail: Option<usize>) -> Result<(),
             "no recording for session {uuid} (recording starts when a session is created by this build)"
         ));
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read recording: {e}"))?;
+    // Rotation: `.cast.1` holds the pre-rotation segment (older), the
+    // current `.cast` the newest. Replay the old segment first so the
+    // output stays chronological.
+    let mut text = String::new();
+    let rotated = path.with_extension("cast.1");
+    if rotated.exists() {
+        text.push_str(
+            &std::fs::read_to_string(&rotated)
+                .map_err(|e| format!("cannot read recording: {e}"))?,
+        );
+    }
+    text.push_str(
+        &std::fs::read_to_string(&path).map_err(|e| format!("cannot read recording: {e}"))?,
+    );
     let mut chunks: Vec<Vec<u8>> = text
         .lines()
         .filter_map(|line| {
@@ -1305,9 +1322,21 @@ pub fn agent_session_replay(session_id: &str, tail: Option<usize>) -> Result<(),
 
 /// `--remote-attach <session-id>`: connect to the session's daemon socket and
 /// relay the frame protocol between our stdin/stdout and the socket.
-pub fn agent_attach(session_id: &str) -> Result<(), String> {
+///
+/// `prefix` carries bytes already buffered from stdin by the identity auth
+/// gate (its `read_line` pulls up to 8 KiB, typically swallowing the attach
+/// frame the client sent right after the identity line). The relay must
+/// forward them before reading fd 0 again, otherwise the daemon never sees
+/// the attach handshake and the client hangs/silently exits.
+pub fn agent_attach(session_id: &str, prefix: Vec<u8>) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
+
+    /// How long the stdin-EOF drain tail waits for further daemon output
+    /// before giving up and detaching.
+    const SOCK_DRAIN_IDLE_MS: u64 = 500;
+    /// Hard upper bound for the whole stdin-EOF drain tail.
+    const SOCK_DRAIN_BUDGET_MS: u64 = 2000;
 
     // Operator identity: in enforcement mode the auth gate in main() has
     // already verified the first stdin line; in open mode stdin starts
@@ -1337,18 +1366,40 @@ pub fn agent_attach(session_id: &str) -> Result<(), String> {
     let out_fd = std::io::stdout().as_raw_fd();
     let mut buf = [0u8; 16384];
 
+    // Forward the auth gate's over-read first: without this the attach
+    // frame stays trapped in the gate's BufRead buffer and the daemon never
+    // receives the handshake.
+    let mut pending: Vec<u8> = prefix;
+    let mut stdin_eof = false;
+    let mut stdin_eof_since = std::time::Instant::now();
+    use std::time::Duration;
+
     loop {
+        // Drain pending over-read bytes into the socket before selecting.
+        if !pending.is_empty() {
+            stream
+                .write_all(&pending)
+                .map_err(|_| "socket write failed".to_string())?;
+            pending.clear();
+        }
         let mut fds = unsafe { std::mem::zeroed::<libc::fd_set>() };
         // SAFETY: [Category 8 — FFI] FD_ZERO/FD_SET on stack fd_set; fds are
         // small integers (stdin/stdout/socket).
         unsafe {
             libc::FD_ZERO(&mut fds);
             libc::FD_SET(sock_fd, &mut fds);
-            libc::FD_SET(in_fd, &mut fds);
+            if !stdin_eof {
+                libc::FD_SET(in_fd, &mut fds);
+            }
         }
+        let nfds = if stdin_eof {
+            sock_fd + 1
+        } else {
+            sock_fd.max(in_fd) + 1
+        };
         let ret = unsafe {
             libc::select(
-                sock_fd.max(in_fd) + 1,
+                nfds,
                 &mut fds,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -1374,19 +1425,73 @@ pub fn agent_attach(session_id: &str) -> Result<(), String> {
             }
         }
         // SAFETY: [Category 8 — FFI] FD_ISSET on initialized fd_set.
-        if unsafe { libc::FD_ISSET(in_fd, &fds) } {
+        if !stdin_eof && unsafe { libc::FD_ISSET(in_fd, &fds) } {
             let n = unsafe { libc::read(in_fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {
-                // ssh stdin closed: forward a Detach so the session survives.
+                // ssh stdin closed. Do NOT detach-and-exit immediately: the
+                // daemon flushes the attach scrollback asynchronously (its
+                // select loop polls every 50 ms), so a Detach sent right now
+                // races the reply and the daemon drops the queued output —
+                // the attach then appears to "silently do nothing". Stop
+                // watching stdin and drain the daemon side first; the Detach
+                // frame goes out in the drain tail below.
+                stdin_eof = true;
+                stdin_eof_since = std::time::Instant::now();
+                continue;
+            }
+            stream
+                .write_all(&buf[..n as usize])
+                .map_err(|_| "socket write failed".to_string())?;
+        }
+        // Stdin EOF tail: keep relaying daemon output until it goes quiet
+        // (SOCK_DRAIN_IDLE_MS without new bytes) or the drain budget expires,
+        // then detach so the session survives for the next client. The budget
+        // bounds the tail when the inner shell keeps redrawing (resize
+        // repaints), which would otherwise defeat the idle check.
+        if stdin_eof {
+            let elapsed = stdin_eof_since.elapsed();
+            if elapsed > Duration::from_millis(SOCK_DRAIN_BUDGET_MS) {
                 let enc = aish_pty::daemon_protocol::encode_frame(
                     &aish_pty::daemon_protocol::Frame::detach(),
                 );
                 stream.write_all(&enc).ok();
                 return Ok(());
             }
-            stream
-                .write_all(&buf[..n as usize])
-                .map_err(|_| "socket write failed".to_string())?;
+            let mut fds = unsafe { std::mem::zeroed::<libc::fd_set>() };
+            // SAFETY: [Category 8 — FFI] FD_ZERO/FD_SET on stack fd_set.
+            unsafe {
+                libc::FD_ZERO(&mut fds);
+                libc::FD_SET(sock_fd, &mut fds);
+            }
+            let mut tv = libc::timeval {
+                tv_sec: 0,
+                tv_usec: (SOCK_DRAIN_IDLE_MS * 1000) as libc::suseconds_t,
+            };
+            let ret = unsafe {
+                libc::select(
+                    sock_fd + 1,
+                    &mut fds,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tv,
+                )
+            };
+            if ret <= 0 {
+                // Timed out with no further output (or interrupted): done.
+                let enc = aish_pty::daemon_protocol::encode_frame(
+                    &aish_pty::daemon_protocol::Frame::detach(),
+                );
+                stream.write_all(&enc).ok();
+                return Ok(());
+            }
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                return Ok(()); // daemon closed the channel
+            }
+            // SAFETY: [Category 8 — FFI] write() to stdout (valid fd).
+            if unsafe { libc::write(out_fd, buf.as_ptr() as *const _, n) } < 0 {
+                return Ok(());
+            }
         }
     }
 }

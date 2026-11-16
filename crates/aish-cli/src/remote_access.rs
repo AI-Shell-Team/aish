@@ -20,13 +20,22 @@
 
 /// Check whether `operator_key` may perform `action` given the installed
 /// policy YAML. Order of evaluation:
-///   1. policy absent / unparsable / no remote_access section → allow
-///   2. remote_access present but `actions` absent → allow
-///   3. action absent from actions map → allow
-///   4. action present → operator key must prefix-match one entry
+///   1. policy absent (empty string = no remote policy installed) → allow
+///   2. YAML present but **unparsable → deny (fail closed)**: the caller is
+///      in enforcement mode, so a corrupted policy must not silently drop
+///      RBAC restrictions
+///   3. no `remote_access` section, or the action is not listed → allow
+///   4. action listed → operator key must prefix-match one entry;
+///      an empty/missing `operators` list denies everyone
 pub fn authorize_action(policy_yaml: &str, action: &str, operator_key: &str) -> bool {
-    let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(policy_yaml) else {
+    // No remote policy installed: RBAC has never been configured here.
+    if policy_yaml.trim().is_empty() {
         return true;
+    }
+    // Fail closed on parse errors: a hand-edited policy with a YAML mistake
+    // must not widen access.
+    let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(policy_yaml) else {
+        return false;
     };
     let Some(ra) = v.get("remote_access") else {
         return true;
@@ -92,8 +101,10 @@ mod tests {
     }
 
     #[test]
-    fn unparsable_policy_allows_fail_open() {
-        assert!(authorize_action(
+    fn unparsable_policy_fails_closed() {
+        // A corrupted policy must NOT drop RBAC restrictions (review fix):
+        // deny instead of fail-open.
+        assert!(!authorize_action(
             "\t\tgarbage\n  - [",
             "session.attach",
             "k"

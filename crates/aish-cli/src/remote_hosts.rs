@@ -6,7 +6,7 @@
 //! created on first `host add` and never touched by single-machine flows.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteHostEntry {
@@ -38,6 +38,40 @@ fn hosts_file() -> Result<PathBuf, String> {
     Ok(dir.join("remote-hosts.json"))
 }
 
+/// Write `content` to `path` atomically with owner-only permissions: the
+/// temp file is created 0600 *before* content lands in it, so the secret is
+/// never observable under the ambient umask, and rename publishes it
+/// atomically. Used for password/identity/trusted-operator state files.
+pub fn write_secret_file(path: &Path, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp0600");
+    // OpenOptions sets the mode at create time — no window where the file
+    // exists under the ambient umask.
+    #[cfg(unix)]
+    let mut f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?
+    };
+    #[cfg(not(unix))]
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    f.write_all(content.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    drop(f);
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot install {}: {e}", path.display())
+    })
+}
+
 /// Password from the environment wins over stored entries (never logged).
 pub fn env_password() -> Option<String> {
     std::env::var("AISH_REMOTE_PASSWORD")
@@ -58,17 +92,8 @@ fn load_all() -> Result<Vec<RemoteHostEntry>, String> {
 fn save_all(entries: &[RemoteHostEntry]) -> Result<(), String> {
     let path = hosts_file()?;
     let json = serde_json::to_string_pretty(entries).unwrap_or_default();
-    // Write-then-rename so an interrupted write cannot corrupt the file.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    // The file may hold ssh passwords (0600), set on the tmp file so the
-    // rename publishes the restrictive mode atomically.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| format!("cannot install {}: {e}", path.display()))
+    // The file may hold ssh passwords: atomic 0600 publish via tmp file.
+    write_secret_file(&path, &json)
 }
 
 /// Resolve a `--host` value: an exact alias name expands to its entry;

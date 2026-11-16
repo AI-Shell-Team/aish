@@ -18,21 +18,29 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
+/// Max bytes per recording before rotation drops the oldest segment.
+/// Bounds disk usage for a single chatty session (output is also bounded by
+/// file count via `prune_recordings`).
+pub const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
+
 pub struct SessionRecorder {
     session_id: String,
     file: Option<std::fs::File>,
     started: Instant,
+    written: u64,
 }
 
 impl SessionRecorder {
     /// Start recording for a session. Returns a recorder even if the file
     /// cannot be opened — recording failures never break the session.
     pub fn start(session_id: &str) -> Self {
+        let written = Self::cast_size(session_id);
         let file = Self::open_append(session_id);
         Self {
             session_id: session_id.to_string(),
             file,
             started: Instant::now(),
+            written,
         }
     }
 
@@ -47,8 +55,15 @@ impl SessionRecorder {
         OpenOptions::new().create(true).append(true).open(path).ok()
     }
 
-    /// Record an output chunk. `data` is raw PTY bytes.
+    /// Record an output chunk. `data` is raw PTY bytes. When the recording
+    /// exceeds MAX_RECORDING_BYTES it is rotated: the existing file is
+    /// renamed to `<id>.cast.1` (replacing an older rotation) and a fresh
+    /// file starts. Replay reads the current segment; older segments remain
+    /// on disk until the count-based prune collects them.
     pub fn record_output(&mut self, data: &[u8]) {
+        if self.written + data.len() as u64 > MAX_RECORDING_BYTES {
+            self.rotate();
+        }
         let Some(file) = self.file.as_mut() else {
             return;
         };
@@ -68,6 +83,24 @@ impl SessionRecorder {
             }
         };
         let _ = writeln!(file, "{line}");
+        self.written += data.len() as u64;
+    }
+
+    /// Rotate the current recording: rename to `.cast.1` and start fresh.
+    fn rotate(&mut self) {
+        if let Some(path) = Self::cast_path(&self.session_id) {
+            let rotated = path.with_extension("cast.1");
+            let _ = std::fs::rename(&path, &rotated);
+            self.file = Self::open_append(&self.session_id);
+            self.written = 0;
+        }
+    }
+
+    fn cast_size(session_id: &str) -> u64 {
+        Self::cast_path(session_id)
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     pub fn session_id(&self) -> &str {

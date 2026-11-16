@@ -15,6 +15,12 @@
 | sshpass | `sshpass -V` | 1.x 可用（仅密码模式需要） |
 | 被管机可达 | `ping -c1 <被管机>` | 有回包 |
 | 被管机架构 | `ssh <被管机> uname -m` | x86_64（aarch64 需另建，见附录 B） |
+| **主机钥指纹核验** | `ssh-keyscan <被管机> 2>/dev/null \| ssh-keygen -lf -` | 与被管机 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 输出一致 |
+
+> **密码部署前先核验 host key**：aish 的 ssh 使用
+> `StrictHostKeyChecking=accept-new`，首次连接自动记录主机钥。若你能带外
+> （如串口/物理访问）拿到被管机的 `ssh_host_ed25519_key.pub` 指纹，先比对
+> 再首次连接，可排除中间人替换主机钥的风险。
 
 ---
 

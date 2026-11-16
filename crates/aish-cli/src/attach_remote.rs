@@ -19,12 +19,21 @@ pub fn run(host: &str, session_id: &str) -> Result<(), String> {
     // Operator identity: when the target enforces trust, the first stdin
     // bytes are the signed challenge line (terminated by '\n'), consumed by
     // the agent's auth gate before any frame reaches the relay. Harmless in
-    // open mode — the line is simply ignored there.
-    if let Ok(identity) = crate::remote_identity::identity_request_json("session.attach") {
-        use std::io::Write;
-        let _ = writeln!(stdin, "{identity}");
-        let _ = stdin.flush();
+    // open mode — the line is simply ignored there. A line is sent even when
+    // identity creation fails (blank line): the gate then rejects with
+    // "malformed identity request" instead of hanging on "no identity
+    // presented", keeping the failure message actionable.
+    use std::io::Write;
+    match crate::remote_identity::identity_request_json("session.attach") {
+        Ok(identity) => {
+            let _ = writeln!(stdin, "{identity}");
+        }
+        Err(e) => {
+            let _ = writeln!(stdin);
+            eprintln!("[identity] {e}");
+        }
     }
+    let _ = stdin.flush();
 
     // Switch local terminal to raw mode for passthrough.
     let stdin_fd = std::io::stdin().as_raw_fd();

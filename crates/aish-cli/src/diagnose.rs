@@ -45,10 +45,36 @@ const MAX_CONCURRENCY: usize = 4;
 /// Per-host remote execution timeout.
 const HOST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// One host's resolved identity for a diag run: ssh target plus the
+/// per-host remote binary and password (none = inherit environment).
+#[derive(Debug, Clone)]
+pub struct HostTarget {
+    pub target: String,
+    pub remote_bin: Option<String>,
+    pub password: Option<String>,
+}
+
+impl HostTarget {
+    /// Apply this host's credentials to the process env so the ssh calls
+    /// inside `diagnose_host` pick them up. Scoped: the caller runs each
+    /// host on its own worker thread, so there is no cross-host leakage —
+    /// unlike a single shared AISH_REMOTE_PASSWORD for the whole fan-out.
+    pub fn apply_env(&self) {
+        if let Some(bin) = &self.remote_bin {
+            std::env::set_var("AISH_REMOTE_BIN", bin);
+        }
+        match &self.password {
+            Some(p) => std::env::set_var("AISH_REMOTE_PASSWORD", p),
+            None => std::env::remove_var("AISH_REMOTE_PASSWORD"),
+        }
+    }
+}
+
 /// Entry point for `aish remote diagnose`.
-pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String> {
+pub fn run(targets: &[HostTarget], checks: &[String], json: bool) -> Result<(), String> {
+    let hosts: Vec<String> = targets.iter().map(|t| t.target.clone()).collect();
     let task_id = crate::diag_tasks::new_task_id();
-    let results = run_inner(hosts, checks, json)?;
+    let results = run_inner(&hosts, targets, checks, json)?;
 
     // Persist the task so it can be listed/inspected/retried later.
     let mut outcomes = std::collections::BTreeMap::new();
@@ -99,6 +125,7 @@ pub fn run(hosts: &[String], checks: &[String], json: bool) -> Result<(), String
 /// caller to persist.
 fn run_inner(
     hosts: &[String],
+    targets: &[HostTarget],
     checks: &[String],
     json: bool,
 ) -> Result<HashMap<String, Result<Vec<serde_json::Value>, HostStatus>>, String> {
@@ -136,8 +163,14 @@ fn run_inner(
                 };
                 let tx = tx.clone();
                 let checks = checks_vec.clone();
+                // Per-host credentials: this thread's env applies only to
+                // its own ssh call (worker threads are per-host).
+                let t = targets.iter().find(|t| t.target == host).cloned();
                 in_flight += 1;
                 handles.push(scope.spawn(move || {
+                    if let Some(t) = t {
+                        t.apply_env();
+                    }
                     let outcome = diagnose_host(&host, &checks);
                     let _ = tx.send((host, outcome));
                 }));
@@ -371,7 +404,11 @@ mod tests {
     #[test]
     fn run_rejects_unknown_check_before_any_traffic() {
         let err = run(
-            &["h".to_string()],
+            &[crate::diagnose::HostTarget {
+                target: "h".to_string(),
+                remote_bin: None,
+                password: None,
+            }],
             &["disk".to_string(), "rm-rf".to_string()],
             false,
         )
@@ -382,7 +419,16 @@ mod tests {
     #[test]
     fn run_rejects_empty_hosts_and_checks() {
         assert!(run(&[], &["disk".to_string()], false).is_err());
-        assert!(run(&["h".to_string()], &[], false).is_err());
+        assert!(run(
+            &[crate::diagnose::HostTarget {
+                target: "h".to_string(),
+                remote_bin: None,
+                password: None,
+            }],
+            &[],
+            false
+        )
+        .is_err());
     }
 
     #[test]

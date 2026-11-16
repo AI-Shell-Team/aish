@@ -868,6 +868,67 @@ fn main() {
         tty_watchdog::disarm();
         remote_identity::consume_identity_line_if_present();
     }
+    // Attach over-read recovery: the identity gate's `read_line` buffers up
+    // to 8 KiB from fd 0, typically swallowing the attach frame the client
+    // writes immediately after the identity line. Drain whatever is still
+    // sitting in the Stdin BufRead buffer and hand it to the relay so the
+    // daemon actually receives the handshake. Applies in both enforcement
+    // and open mode (the gate/consume runs before this in either).
+    //
+    // The buffer check must be non-blocking: in an interactive attach the
+    // client keeps stdin open, so a second `fill_buf` would block forever
+    // waiting for keystrokes that arrive long after the handshake. Poll fd 0
+    // first and only pull bytes that are already buffered.
+    let mut attach_prefix: Vec<u8> = Vec::new();
+    if cli.remote_attach.is_some() {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut lock = stdin.lock();
+        // First fill_buf is safe unconditionally: the gate's read_line pulled
+        // bytes into the Stdin buffer, so the first fill_buf returns whatever
+        // is already buffered without touching fd 0.
+        let mut first = true;
+        loop {
+            if !first {
+                // Subsequent fills may need a real fd 0 read; poll first so an
+                // interactive attach (stdin kept open, no more bytes in
+                // flight) does not block here forever.
+                // SAFETY: [Category 8 — FFI] zeroed fd_set + FD_ZERO/FD_SET
+                // with a small fd (0), then a zero-timeout poll.
+                let mut fds: libc::fd_set = unsafe { std::mem::zeroed() };
+                unsafe {
+                    libc::FD_ZERO(&mut fds);
+                    libc::FD_SET(0, &mut fds);
+                }
+                let mut tv = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                };
+                let ret = unsafe {
+                    libc::select(
+                        1,
+                        &mut fds,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut tv,
+                    )
+                };
+                if ret <= 0 {
+                    break; // nothing buffered on fd 0 and nothing in flight
+                }
+            }
+            first = false;
+            match lock.fill_buf() {
+                Ok([]) => break, // EOF
+                Ok(chunk) => {
+                    attach_prefix.extend_from_slice(chunk);
+                    let n = chunk.len();
+                    lock.consume(n);
+                }
+                Err(_) => break,
+            }
+        }
+    }
     if cli.remote_sessions {
         tty_watchdog::disarm();
         remote_cmd::agent_list_sessions();
@@ -875,7 +936,7 @@ fn main() {
     }
     if let Some(session_id) = &cli.remote_attach {
         tty_watchdog::disarm();
-        if let Err(e) = remote_cmd::agent_attach(session_id) {
+        if let Err(e) = remote_cmd::agent_attach(session_id, attach_prefix) {
             eprintln!("remote attach relay failed: {e}");
             std::process::exit(1);
         }
@@ -1278,36 +1339,24 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                 checks,
                 json,
             } => {
-                // Resolve aliases to targets; forward the LAST resolved
-                // password into the env (diag threads read it via
-                // env_password). Mixed password/no-password groups must set
-                // AISH_REMOTE_PASSWORD explicitly.
-                let mut forwarded: Option<String> = None;
-                let host_list: Vec<String> = hosts
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|h| {
-                        remote_hosts::resolve(h).map(|(t, _, pw)| {
-                            if pw.is_some() {
-                                forwarded = pw;
-                            }
-                            t
-                        })
+                // Per-host credentials: each resolved host keeps its own
+                // target/remote-bin/password; diagnose threads apply their
+                // own env, so no password is shared across hosts.
+                let targets: Vec<diagnose::HostTarget> = expand_host_list(&hosts)?
+                    .into_iter()
+                    .map(|(target, remote_bin, password)| diagnose::HostTarget {
+                        target,
+                        remote_bin,
+                        password,
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
-                if let Some(p) = forwarded {
-                    std::env::set_var("AISH_REMOTE_PASSWORD", p);
-                } else {
-                    std::env::remove_var("AISH_REMOTE_PASSWORD");
-                }
+                    .collect();
                 let check_list: Vec<String> = checks
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .collect();
-                remote_cmd::diag_run(&host_list, &check_list, json)
+                remote_cmd::diag_run(&targets, &check_list, json)
             }
             RemoteDiagAction::List => remote_cmd::diag_list(),
             RemoteDiagAction::Status { task, json } => remote_cmd::diag_status(&task, json),
@@ -1323,7 +1372,19 @@ fn run_remote_command(action: RemoteSubcommand) -> Result<(), String> {
                     hosts.len(),
                     hosts.join(", ")
                 );
-                remote_cmd::diag_run(&hosts, &saved.checks, json)
+                let targets: Vec<diagnose::HostTarget> = hosts
+                    .iter()
+                    .map(|h| {
+                        remote_hosts::resolve(h).map(|(target, remote_bin, password)| {
+                            diagnose::HostTarget {
+                                target,
+                                remote_bin,
+                                password,
+                            }
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                remote_cmd::diag_run(&targets, &saved.checks, json)
             }
         },
         RemoteSubcommand::Doctor { host } => {

@@ -46,16 +46,13 @@ pub fn keygen() -> Result<String, String> {
         "public_key_hex": hex_encode(signing.verifying_key().as_bytes()),
         "secret_key_hex": hex_encode(&signing.to_bytes()),
     });
-    std::fs::write(
+    // Atomic 0600 publish: the private key is never readable under the
+    // ambient umask (fs::write alone would create it 0644 first).
+    crate::remote_hosts::write_secret_file(
         &path,
-        serde_json::to_string_pretty(&json).unwrap_or_default(),
+        &serde_json::to_string_pretty(&json).unwrap_or_default(),
     )
     .map_err(|e| format!("cannot write keypair: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
     Ok(hex_encode(signing.verifying_key().as_bytes()))
 }
 

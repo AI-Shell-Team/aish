@@ -84,29 +84,32 @@ pub fn ensure_identity() -> Result<(String, SigningKey), String> {
         "public_key_hex": hex_encode(key.verifying_key().as_bytes()),
         "secret_key_hex": hex_encode(&key.to_bytes()),
     });
-    std::fs::write(
+    crate::remote_hosts::write_secret_file(
         &path,
-        serde_json::to_string_pretty(&json).unwrap_or_default(),
+        &serde_json::to_string_pretty(&json).unwrap_or_default(),
     )
     .map_err(|e| format!("cannot write identity key: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
     Ok((hex_encode(key.verifying_key().as_bytes()), key))
 }
 
 /// Is operator identity enforcement active on THIS host? True when at least
-/// one trusted operator public key is configured. Absent/empty file = open
-/// mode (single-machine behavior is unchanged).
+/// one trusted operator public key is configured. Absent file = open mode
+/// (single-machine behavior is unchanged). A file that exists but cannot be
+/// read or parsed FAILS CLOSED: enforcement is treated as active (and every
+/// action denied downstream) rather than silently degrading to open mode.
 pub fn enforcement_active() -> bool {
-    trusted_path()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    match trusted_path() {
+        Err(_) => false,
+        Ok(p) => match std::fs::read_to_string(&p) {
+            // Absent file: open mode.
+            Err(_) => false,
+            Ok(s) => match serde_json::from_str::<Vec<String>>(&s) {
+                // Corrupt file: fail closed.
+                Err(_) => true,
+                Ok(v) => !v.is_empty(),
+            },
+        },
+    }
 }
 
 /// Register an operator public key on THIS host (target side). Idempotent.
@@ -130,17 +133,12 @@ pub fn trust_operator(public_key_hex: &str) -> Result<(), String> {
 /// Write the trusted-operators file with 0600: it gates who may act on this
 /// host, so a world-readable copy would leak the operator identity list.
 fn write_trusted_file(path: &std::path::Path, trusted: &[String]) -> Result<(), String> {
-    std::fs::write(
+    // Atomic 0600 publish via tmp+rename; the file gates who may act on
+    // this host, so it must never be world-readable mid-write.
+    crate::remote_hosts::write_secret_file(
         path,
-        serde_json::to_string_pretty(trusted).unwrap_or_default(),
+        &serde_json::to_string_pretty(trusted).unwrap_or_default(),
     )
-    .map_err(|e| format!("cannot write trusted operators: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
 }
 
 pub fn list_trusted() -> Result<Vec<String>, String> {
@@ -252,7 +250,17 @@ pub fn authenticate_agent_action(
         ));
         return false;
     }
-    let trusted = list_trusted().unwrap_or_default();
+    let trusted = match list_trusted() {
+        Ok(t) => t,
+        Err(e) => {
+            // Fail closed: a corrupt/unreadable trust list must not widen
+            // access to open mode.
+            fail(format!(
+                "trusted-operators file cannot be read: {e}\nTip: fix or remove the file, then re-register operators with 'aish remote admin trust-operator'"
+            ));
+            return false;
+        }
+    };
     if !trusted.iter().any(|k| k == pubkey) {
         fail(format!(
             "operator {pubkey} is not trusted on this host.\nTip: run 'aish remote admin trust-operator {pubkey}' on the target host"
