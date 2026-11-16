@@ -777,7 +777,6 @@ fn main() {
         let _ = run_pty_raw_attach(socket_path, &session_id, &daemon_launch_config);
         return;
     }
-
     // --- Remote C/S agent-side hidden entries (invoked over ssh) ---
     // Operator identity gate: when trusted operators are configured, every
     // --remote-* entry requires a signed challenge that verifies against one

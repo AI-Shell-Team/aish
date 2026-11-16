@@ -256,7 +256,17 @@ pub fn cmd_verify(name: &str) -> Result<(), String> {
         let status = if check.passed { "PASS" } else { "FAIL" };
         println!("  [{}] {} — {}", status, check.label, check.detail);
     }
-    Ok(())
+    if report.valid {
+        Ok(())
+    } else {
+        // Exit contract: invalid skill => non-zero, so scripts and CI can gate
+        // on `$?` instead of parsing the human-readable output.
+        Err(format!(
+            "Skill '{}' failed verification ({} check(s) failed).",
+            report.skill_name,
+            report.checks.iter().filter(|c| !c.passed).count()
+        ))
+    }
 }
 
 // ----- Trust & vet (quarantine) -----
@@ -507,4 +517,79 @@ pub fn cmd_registry_remove(name: &str) -> Result<(), String> {
 fn save_config(config: &ConfigModel) -> Result<(), String> {
     let path = aish_config::ConfigLoader::default_config_path();
     aish_config::ConfigLoader::save(config, &path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialize tests that mutate the process-global `AISH_CONFIG_DIR`.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Write a minimal skill with `script_executable` controlling whether
+    /// `scripts/marker.sh` gets the user exec bit, and point
+    /// `AISH_CONFIG_DIR` at the temp config root.
+    fn setup_skill(config: &std::path::Path, name: &str, script_executable: bool) {
+        let dir = config.join("skills").join(name);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test\n---\nBODY\n"),
+        )
+        .unwrap();
+        let script = dir.join("scripts").join("marker.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        if script_executable {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o744)).unwrap();
+        }
+        std::env::set_var("AISH_CONFIG_DIR", config);
+    }
+
+    #[test]
+    fn verify_returns_ok_for_valid_skill() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("config");
+        setup_skill(&config, "good-skill", true);
+
+        let result = cmd_verify("good-skill");
+        std::env::remove_var("AISH_CONFIG_DIR");
+        assert!(result.is_ok(), "valid skill must exit 0, got {:?}", result);
+    }
+
+    #[test]
+    fn verify_returns_err_for_invalid_skill() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = dir.path().join("config");
+        // 0644 script: exists but not executable => verification must fail.
+        setup_skill(&config, "bad-skill", false);
+
+        let result = cmd_verify("bad-skill");
+        std::env::remove_var("AISH_CONFIG_DIR");
+        let err = result.expect_err("invalid skill must not exit 0");
+        assert!(
+            err.contains("failed verification"),
+            "error should name the failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_err_for_missing_skill_is_distinct() {
+        let _guard = env_lock();
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::env::set_var("AISH_CONFIG_DIR", dir.path().join("config"));
+
+        let result = cmd_verify("no-such-skill");
+        std::env::remove_var("AISH_CONFIG_DIR");
+        let err = result.expect_err("missing skill must not exit 0");
+        assert!(
+            err.contains("not found"),
+            "missing skill error should say so, got: {err}"
+        );
+    }
 }
