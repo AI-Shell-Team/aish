@@ -45,8 +45,11 @@ fn hosts_file() -> Result<PathBuf, String> {
 pub fn write_secret_file(path: &Path, content: &str) -> Result<(), String> {
     use std::io::Write;
     let tmp = path.with_extension("tmp0600");
-    // OpenOptions sets the mode at create time — no window where the file
-    // exists under the ambient umask.
+    // A leftover tmp file from a crashed previous run must not poison this
+    // write forever: remove it, then create fresh. OpenOptions sets the mode
+    // at create time — no window where the file exists under the ambient
+    // umask.
+    let _ = std::fs::remove_file(&tmp);
     #[cfg(unix)]
     let mut f = {
         use std::os::unix::fs::OpenOptionsExt;

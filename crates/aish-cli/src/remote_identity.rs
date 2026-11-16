@@ -84,11 +84,31 @@ pub fn ensure_identity() -> Result<(String, SigningKey), String> {
         "public_key_hex": hex_encode(key.verifying_key().as_bytes()),
         "secret_key_hex": hex_encode(&key.to_bytes()),
     });
-    crate::remote_hosts::write_secret_file(
+    // Concurrent creation (parallel tests, two aish processes): another
+    // writer may have published the file between our exists() check and
+    // this write. Re-read theirs instead of failing — keys are
+    // deterministic per file, and the published file always wins.
+    if crate::remote_hosts::write_secret_file(
         &path,
         &serde_json::to_string_pretty(&json).unwrap_or_default(),
     )
-    .map_err(|e| format!("cannot write identity key: {e}"))?;
+    .is_err()
+    {
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("cannot read identity key: {e}"))?;
+        let json: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("corrupt identity key: {e}"))?;
+        let hex_key = json
+            .get("secret_key_hex")
+            .and_then(|v| v.as_str())
+            .ok_or("identity file missing secret_key_hex")?;
+        let bytes = hex_decode(hex_key).ok_or("identity key has invalid hex")?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "identity secret key must be 32 bytes")?;
+        let key = SigningKey::from_bytes(&arr);
+        return Ok((hex_encode(key.verifying_key().as_bytes()), key));
+    }
     Ok((hex_encode(key.verifying_key().as_bytes()), key))
 }
 
