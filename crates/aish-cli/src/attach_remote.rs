@@ -141,9 +141,8 @@ fn remote_attach_loop(
                 // must confirm (10 s timeout denies). No-op when already the
                 // controller — the daemon ignores self-claims.
                 if bytes.contains(&0x07) {
-                    let enc = aish_pty::daemon_protocol::encode_frame(
-                        &aish_pty::Frame::claim_input(),
-                    );
+                    let enc =
+                        aish_pty::daemon_protocol::encode_frame(&aish_pty::Frame::claim_input());
                     stdin
                         .write_all(&enc)
                         .map_err(|_| "remote connection closed".to_string())?;

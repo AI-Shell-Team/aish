@@ -164,7 +164,11 @@ pub fn add(
     if name.starts_with('-') {
         return Err(format!("alias name must not start with '-': {name}"));
     }
-    if name.contains('@') || name.contains(':') || name.contains(',') || name.contains(char::is_whitespace) {
+    if name.contains('@')
+        || name.contains(':')
+        || name.contains(',')
+        || name.contains(char::is_whitespace)
+    {
         return Err(format!(
             "alias name '{name}' is not selectable: names must not contain '@', ':', ',', or whitespace (they would be treated as a literal ssh target)"
         ));
@@ -174,7 +178,12 @@ pub fn add(
             "alias name '{name}' is not selectable: it parses as an IP address and would be treated as a literal ssh target"
         ));
     }
-    if target.is_empty() || (!target.contains('@') && !target.contains(':') && target.parse::<std::net::IpAddr>().is_err() && !target.contains('.')) {
+    if target.is_empty()
+        || (!target.contains('@')
+            && !target.contains(':')
+            && target.parse::<std::net::IpAddr>().is_err()
+            && !target.contains('.'))
+    {
         return Err(format!(
             "ssh target '{target}' does not look like a valid ssh target (expected user@host, host, host:port or an IP)"
         ));
