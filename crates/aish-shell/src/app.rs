@@ -692,7 +692,7 @@ fn llm_session_from_config(config: &ConfigModel) -> LlmSession {
 /// is empty so rotation skips it instead of wasting an attempt.
 fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccount> {
     let mut accounts = vec![aish_llm::ApiAccount {
-        name: "primary".to_string(),
+        name: PRIMARY_ACCOUNT_NAME.to_string(),
         api_key: config.api_key.clone(),
         api_base: None,
         model: None,
@@ -710,6 +710,37 @@ fn rotation_accounts_from_config(config: &ConfigModel) -> Vec<aish_llm::ApiAccou
         });
     }
     accounts
+}
+
+/// Reserved name of the synthetic top-level credential in the rotation pool
+/// (index 0, built from `config.api_key`). `/accounts add` rejects it
+/// case-insensitively, so it can never collide with a user account.
+const PRIMARY_ACCOUNT_NAME: &str = "primary";
+
+/// One switchable endpoint identity in the `/model` picker: the rotation
+/// account it belongs to plus the base URL and key its requests would use.
+struct EndpointSource {
+    name: String,
+    base: String,
+    key: String,
+}
+
+/// Encode a picker item's identity as `model\0base\0account`. NUL keeps the
+/// three fields unambiguous (model names and account names cannot contain it
+/// and URLs are validated upstream).
+fn picker_value(model: &str, base: &str, account: &str) -> String {
+    format!("{}\u{0}{}\u{0}{}", model, base, account)
+}
+
+/// Split a picker value back into its identity triple. Legacy two-field
+/// values (`model\0base`, written by earlier versions into `recent_models`)
+/// resolve to the primary account.
+fn parse_picker_value(val: &str) -> Option<(&str, &str, &str)> {
+    match val.split('\u{0}').collect::<Vec<_>>()[..] {
+        [model, base, account] => Some((model, base, account)),
+        [model, base] => Some((model, base, PRIMARY_ACCOUNT_NAME)),
+        _ => None,
+    }
 }
 
 /// Derive a readable account label from an endpoint URL (its host) or, failing
@@ -744,6 +775,30 @@ fn unique_account_name(accounts: &[aish_config::ApiAccountConfig], label: &str) 
 #[cfg(test)]
 mod account_helpers_tests {
     use super::*;
+
+    #[test]
+    fn picker_value_round_trips_triple() {
+        let val = picker_value("model-b", "https://api.x.com/v1", "acct-2");
+        assert_eq!(
+            parse_picker_value(&val),
+            Some(("model-b", "https://api.x.com/v1", "acct-2"))
+        );
+    }
+
+    #[test]
+    fn parse_picker_value_resolves_legacy_pair_to_primary() {
+        // recent_models entries written before account-aware values carry
+        // only model\0base; they must keep resolving instead of being dropped.
+        assert_eq!(
+            parse_picker_value("model-a\0https://api.x.com/v1"),
+            Some(("model-a", "https://api.x.com/v1", PRIMARY_ACCOUNT_NAME))
+        );
+    }
+
+    #[test]
+    fn parse_picker_value_rejects_garbage() {
+        assert_eq!(parse_picker_value("no-nul-at-all"), None);
+    }
 
     #[test]
     fn account_label_extracts_dotted_host() {
@@ -1066,6 +1121,14 @@ pub struct AishShell {
     /// Live MCP server names for `/mcp <sub> <server>` completion, shared with
     /// the completion engine and refreshed after every reconfiguration.
     mcp_completion_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// A `/model` "session only" switch is active: `config.model/api_base/
+    /// api_key` hold temporary values that must not reach the config file.
+    /// `session_override_baseline` holds the (model, base, key) that was live
+    /// before the switch — every persist writes that baseline instead and
+    /// restores the override afterwards (issue #592).
+    session_model_override: bool,
+    /// Baseline endpoint triple for an active `session_model_override`.
+    session_override_baseline: Option<(String, String, String)>,
 }
 
 impl AishShell {
@@ -2843,6 +2906,8 @@ impl AishShell {
             mcp_runtime: None,
             mcp_tool_names,
             mcp_completion_names,
+            session_model_override: false,
+            session_override_baseline: None,
             last_resource_check: None,
             shared_recorder,
             inline_ai: None,
@@ -9245,7 +9310,7 @@ impl AishShell {
                 weight: 1,
                 disabled: false,
             });
-        self.persist_config_and_rebuild_rotation();
+        let _ = self.persist_config_and_rebuild_rotation();
         println!(
             "\x1b[32m{}\x1b[0m",
             t_with_args("shell.accounts.added", &{
@@ -9271,20 +9336,107 @@ impl AishShell {
             .unwrap_or_else(aish_config::ConfigLoader::default_config_path)
     }
 
-    /// Persist the current config to disk, then rebuild the live rotation state.
-    fn persist_config_and_rebuild_rotation(&mut self) {
+    /// Display name of the account the current primary credential maps to.
+    /// The rotation pool always calls it "primary"; when that same key+base
+    /// is also a named account, prefer the user-visible name.
+    fn primary_display_name(&self) -> String {
+        self.config
+            .api_accounts
+            .iter()
+            .find(|a| {
+                !a.disabled
+                    && a.api_key == self.config.api_key
+                    && a.api_base.as_deref().unwrap_or(&self.config.api_base)
+                        == self.config.api_base
+            })
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| PRIMARY_ACCOUNT_NAME.to_string())
+    }
+
+    /// Snapshot of every switchable endpoint identity (primary first, then
+    /// each enabled account), used to resolve a picker selection to the key
+    /// its account actually uses.
+    fn endpoints_snapshot(&self) -> Vec<EndpointSource> {
+        let mut endpoints = vec![EndpointSource {
+            name: PRIMARY_ACCOUNT_NAME.to_string(),
+            base: self.config.api_base.clone(),
+            key: self.config.api_key.clone(),
+        }];
+        for a in &self.config.api_accounts {
+            if a.disabled {
+                continue;
+            }
+            let base = a
+                .api_base
+                .clone()
+                .unwrap_or_else(|| self.config.api_base.clone());
+            if endpoints
+                .iter()
+                .any(|e| e.base == base && e.key == a.api_key)
+            {
+                continue;
+            }
+            endpoints.push(EndpointSource {
+                name: a.name.clone(),
+                base,
+                key: a.api_key.clone(),
+            });
+        }
+        endpoints
+    }
+
+    /// Persist the current config to disk, then rebuild the live rotation
+    /// state. Returns the save error so callers can distinguish "switched for
+    /// this session only" from "saved as the default" (issue #592). When a
+    /// session-only override is active, the saved baseline triple is written
+    /// instead of the live (temporary) values, so an unrelated persist (e.g.
+    /// editing another setting) can never leak the override into the config
+    /// file; the in-memory override stays active for the rest of the session.
+    fn persist_config_and_rebuild_rotation(&mut self) -> Result<(), String> {
+        // While an override is live, `session_override_baseline` holds the
+        // (model, base, key) that should be on disk. Swap it in for the
+        // write, keeping the live values aside for the restore below.
+        let live_values = if self.session_model_override {
+            let baseline = self.session_override_baseline.take();
+            if let Some((model, base, key)) = &baseline {
+                Some((
+                    std::mem::replace(&mut self.config.model, model.clone()),
+                    std::mem::replace(&mut self.config.api_base, base.clone()),
+                    std::mem::replace(&mut self.config.api_key, key.clone()),
+                ))
+            } else {
+                // Inconsistent state (override without a baseline): stop
+                // treating the values as temporary rather than guessing.
+                self.session_model_override = false;
+                None
+            }
+        } else {
+            None
+        };
         let config_path = self.config_save_path();
-        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
+        let result =
+            aish_config::ConfigLoader::save(&self.config, &config_path).map_err(|e| e.to_string());
+        if let Err(e) = &result {
             eprintln!(
                 "{}",
                 t_with_args("shell.config_save_warning", &{
                     let mut args = std::collections::HashMap::new();
-                    args.insert("error".to_string(), e.to_string());
+                    args.insert("error".to_string(), e.clone());
                     args
                 })
             );
         }
+        // Put the override back in memory (still live until exit or an
+        // explicit default-saving switch) and stash the baseline for the
+        // next persist.
+        if let Some((model, base, key)) = live_values {
+            self.config.model = model;
+            self.config.api_base = base;
+            self.config.api_key = key;
+            self.session_model_override = true;
+        }
         self.rebuild_rotation();
+        result
     }
 
     /// Rebuild the LLM session rotation state from the current config.
@@ -9301,7 +9453,7 @@ impl AishShell {
                 policy,
             );
             if s.is_active() {
-                if let Some(ref name) = prev {
+                if let Some(name) = &prev {
                     s.use_account(name);
                 }
                 Some(s)
@@ -9315,20 +9467,28 @@ impl AishShell {
     }
 
     /// `/model` opens a model switcher spanning every configured endpoint:
-    /// it fetches each endpoint's model list, shows the URL next to each
-    /// model, and lets you search by model name or URL. Enter switches the
-    /// primary endpoint+model in place; recently-used entries float to the
-    /// top. `a` adds a multi-key account.
+    /// it fetches each endpoint's model list, shows the URL and account name
+    /// next to each model, and lets you search by model name or URL. Enter
+    /// switches and saves the choice as the default; `s` switches for this
+    /// session only (the config file is never written). Recently-used
+    /// entries float to the top. `a` adds a multi-key account (issue #592).
     fn model_picker_panel(&mut self) {
         use crate::wizard::model_fetch::fetch_models_from_api;
         use aish_ui::{
             PanelOutcome, PanelRuntime, SearchSelectItem, SearchSelectOutcome, SearchSelectPanel,
         };
 
-        // Collect endpoints + fetch model lists once on entry. Re-fetched only
-        // after an account is added; switching models reuses the cache.
-        let mut endpoints: Vec<(String, String)> =
-            vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+        // One candidate per (base, key) pair: the primary endpoint first, then
+        // every enabled account. `name` is the rotation account the entry
+        // belongs to ("primary" for the top-level credential), so two accounts
+        // on the same host stay distinguishable and a selection resolves to
+        // the key its owner actually uses.
+        let mut endpoints: Vec<EndpointSource> = Vec::new();
+        endpoints.push(EndpointSource {
+            name: PRIMARY_ACCOUNT_NAME.to_string(),
+            base: self.config.api_base.clone(),
+            key: self.config.api_key.clone(),
+        });
         for a in &self.config.api_accounts {
             if a.disabled {
                 continue;
@@ -9337,75 +9497,150 @@ impl AishShell {
                 .api_base
                 .clone()
                 .unwrap_or_else(|| self.config.api_base.clone());
-            // De-duplicate by (base, key): two accounts on the same host with
-            // different keys are distinct endpoints and must both be fetched.
-            if !endpoints.iter().any(|(b, k)| *b == base && *k == a.api_key) {
-                endpoints.push((base, a.api_key.clone()));
+            // De-duplicate by (base, key): two accounts sharing a credential
+            // are one fetch target; the first name wins.
+            if endpoints
+                .iter()
+                .any(|e| e.base == base && e.key == a.api_key)
+            {
+                continue;
             }
+            endpoints.push(EndpointSource {
+                name: a.name.clone(),
+                base,
+                key: a.api_key.clone(),
+            });
         }
+
+        // Fetch model lists once on entry, recording per-endpoint failures so
+        // one dead endpoint cannot hide behind another working one. Progress
+        // is echoed on one in-place line: the panel opens on an inline
+        // viewport, so anything printed here stays in the scrollback above it.
         let mut fetched: Vec<(String, String)> = Vec::new();
-        for (base, key) in &endpoints {
-            if let Ok(models) = fetch_models_from_api(base, key, 4) {
-                for m in models {
-                    fetched.push((m, base.clone()));
+        let mut fetch_errors: Vec<(String, String)> = Vec::new();
+        let total = endpoints.len();
+        for (idx, e) in endpoints.iter().enumerate() {
+            print!(
+                "\r\x1b[2K{} [{}/{}]",
+                t_with_args("shell.model.fetching", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("base".to_string(), e.base.clone());
+                    args
+                },),
+                idx + 1,
+                total
+            );
+            let _ = io::stdout().flush();
+            match fetch_models_from_api(&e.base, &e.key, 4) {
+                Ok(models) => {
+                    for m in models {
+                        fetched.push((m, e.base.clone()));
+                    }
                 }
+                Err(reason) => fetch_errors.push((e.base.clone(), reason)),
             }
         }
+        // Clear the progress line once done so it doesn't linger in scrollback.
+        print!("\r\x1b[2K");
+        let _ = io::stdout().flush();
 
         loop {
             let cur_model = self.config.model.clone();
             let cur_base = self.config.api_base.clone();
-            let current_val = format!("{}\u{0}{}", cur_model, cur_base);
+            let cur_account = self.primary_display_name();
+            let current_val = picker_value(&cur_model, &cur_base, &cur_account);
 
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             seen.insert(current_val.clone());
             let mut items: Vec<SearchSelectItem> =
                 vec![
                     SearchSelectItem::new(current_val.clone(), cur_model.clone())
-                        .with_detail(&cur_base)
-                        .with_search_text(format!("{} {}", cur_model, cur_base)),
+                        .with_detail(format!("{} · {}", cur_account, cur_base))
+                        .with_search_text(format!("{} {} {}", cur_model, cur_account, cur_base))
+                        .with_badge(t("shell.model.current_badge")),
                 ];
             for r in &self.config.recent_models {
                 if let Some((m, b)) = r.split_once('\u{0}') {
-                    if seen.insert(r.clone()) {
+                    // Recent entries predate account-aware values: resolve the
+                    // account the way a selection would (first endpoint whose
+                    // base matches).
+                    let acct = self
+                        .endpoints_snapshot()
+                        .into_iter()
+                        .find(|e| e.base == b)
+                        .map(|e| e.name)
+                        .unwrap_or_else(|| PRIMARY_ACCOUNT_NAME.to_string());
+                    let val = picker_value(m, b, &acct);
+                    if seen.insert(val.clone()) {
                         items.push(
-                            SearchSelectItem::new(r.clone(), m.to_string())
-                                .with_detail(b)
-                                .with_search_text(format!("{} {}", m, b))
+                            SearchSelectItem::new(val, m.to_string())
+                                .with_detail(format!("{} · {}", acct, b))
+                                .with_search_text(format!("{} {} {}", m, acct, b))
                                 .with_badge(t("shell.model.recent_badge")),
                         );
                     }
                 }
             }
             for (m, b) in &fetched {
-                let val = format!("{}\u{0}{}", m, b);
+                let acct = self
+                    .endpoints_snapshot()
+                    .into_iter()
+                    .find(|e| &e.base == b)
+                    .map(|e| e.name)
+                    .unwrap_or_else(|| PRIMARY_ACCOUNT_NAME.to_string());
+                let val = picker_value(m, b, &acct);
                 if seen.insert(val.clone()) {
                     items.push(
                         SearchSelectItem::new(val, m.clone())
-                            .with_detail(b)
-                            .with_search_text(format!("{} {}", m, b)),
+                            .with_detail(format!("{} · {}", acct, b))
+                            .with_search_text(format!("{} {} {}", m, acct, b)),
                     );
                 }
             }
             // Also surface each account's configured model, in case its endpoint
             // didn't respond to the /models fetch — the user explicitly set it,
-            // so it must always be reachable in the list.
+            // so it must always be reachable in the list. Marked "unverified"
+            // when this round's fetch could not confirm it.
+            let verified: std::collections::HashSet<&str> =
+                fetched.iter().map(|(m, _)| m.as_str()).collect();
             for a in &self.config.api_accounts {
                 if a.disabled {
                     continue;
                 }
                 if let Some(m) = &a.model {
-                    let base = a.api_base.clone().unwrap_or_else(|| cur_base.clone());
-                    let val = format!("{}\u{0}{}", m, base);
+                    let base = a
+                        .api_base
+                        .clone()
+                        .unwrap_or_else(|| self.config.api_base.clone());
+                    let val = picker_value(m, &base, &a.name);
                     if seen.insert(val.clone()) {
-                        items.push(
-                            SearchSelectItem::new(val, m.clone())
-                                .with_detail(&base)
-                                .with_search_text(format!("{} {}", m, base)),
-                        );
+                        let unverified = !verified.contains(m.as_str());
+                        let mut item = SearchSelectItem::new(val, m.clone())
+                            .with_detail(format!("{} · {}", a.name, base))
+                            .with_search_text(format!("{} {} {}", m, a.name, base));
+                        if unverified {
+                            item = item.with_badge(t("shell.model.unverified_badge"));
+                        }
+                        items.push(item);
                     }
                 }
             }
+
+            // Surface per-endpoint failures; never mask a dead endpoint behind
+            // a live one (issue #592).
+            let subtitle = if fetch_errors.is_empty() {
+                t("shell.model.picker_subtitle")
+            } else {
+                let details: Vec<String> = fetch_errors
+                    .iter()
+                    .map(|(base, reason)| format!("{}: {}", base, reason))
+                    .collect();
+                t_with_args("shell.model.fetch_partial_subtitle", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("errors".to_string(), details.join("; "));
+                    args
+                })
+            };
 
             let panel = SearchSelectPanel::new(
                 t("shell.model.picker_title"),
@@ -9413,12 +9648,9 @@ impl AishShell {
                 items,
             )
             .with_shimmer(Some(&current_val))
-            .with_subtitle(if fetched.is_empty() {
-                t("shell.model.fetch_failed_subtitle")
-            } else {
-                t("shell.model.picker_subtitle")
-            })
+            .with_subtitle(subtitle)
             .with_footer(t("shell.model.picker_footer"))
+            .with_action('s', t("shell.model.action_session"))
             .with_action('a', t("shell.model.action_add"))
             .with_action('m', t("shell.model.action_manage"));
 
@@ -9429,12 +9661,17 @@ impl AishShell {
 
             match outcome {
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Selected(val))) => {
-                    if let Some((model, base)) = val.split_once('\u{0}') {
-                        if model != self.config.model || base != self.config.api_base {
-                            let key = endpoints
-                                .iter()
-                                .find(|(b, _)| b == base)
-                                .map(|(_, k)| k.clone())
+                    if let Some((model, base, account)) = parse_picker_value(&val) {
+                        if model != self.config.model
+                            || base != self.config.api_base
+                            || account != self.primary_display_name()
+                        {
+                            let endpoint = self
+                                .endpoints_snapshot()
+                                .into_iter()
+                                .find(|e| e.base == base && e.name == account);
+                            let key = endpoint
+                                .map(|e| e.key)
                                 .unwrap_or_else(|| self.config.api_key.clone());
                             self.switch_endpoint_model(base, &key, model);
                         }
@@ -9446,10 +9683,36 @@ impl AishShell {
                     // are visible right away.
                     break;
                 }
+                Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('s', val))) => {
+                    if let Some((model, base, account)) = parse_picker_value(&val) {
+                        if model != self.config.model
+                            || base != self.config.api_base
+                            || account != self.primary_display_name()
+                        {
+                            let endpoint = self
+                                .endpoints_snapshot()
+                                .into_iter()
+                                .find(|e| e.base == base && e.name == account);
+                            let key = endpoint
+                                .map(|e| e.key)
+                                .unwrap_or_else(|| self.config.api_key.clone());
+                            self.switch_endpoint_model_session(base, &key, model);
+                        }
+                    }
+                    // Session-only switches also hand the keyboard back: the
+                    // switch is complete and the user usually wants to run a
+                    // shell command next.
+                    break;
+                }
                 Ok(PanelOutcome::Submitted(SearchSelectOutcome::Action('a', _))) => {
                     self.accounts_add_interactive();
                     // A new account may have added an endpoint: re-collect + re-fetch.
-                    endpoints = vec![(self.config.api_base.clone(), self.config.api_key.clone())];
+                    endpoints.clear();
+                    endpoints.push(EndpointSource {
+                        name: PRIMARY_ACCOUNT_NAME.to_string(),
+                        base: self.config.api_base.clone(),
+                        key: self.config.api_key.clone(),
+                    });
                     for a in &self.config.api_accounts {
                         if a.disabled {
                             continue;
@@ -9458,16 +9721,27 @@ impl AishShell {
                             .api_base
                             .clone()
                             .unwrap_or_else(|| self.config.api_base.clone());
-                        if !endpoints.iter().any(|(b, _)| b == &base) {
-                            endpoints.push((base, a.api_key.clone()));
+                        if !endpoints
+                            .iter()
+                            .any(|e| e.base == base && e.key == a.api_key)
+                        {
+                            endpoints.push(EndpointSource {
+                                name: a.name.clone(),
+                                base,
+                                key: a.api_key.clone(),
+                            });
                         }
                     }
                     fetched.clear();
-                    for (base, key) in &endpoints {
-                        if let Ok(models) = fetch_models_from_api(base, key, 4) {
-                            for m in models {
-                                fetched.push((m, base.clone()));
+                    fetch_errors.clear();
+                    for e in &endpoints {
+                        match fetch_models_from_api(&e.base, &e.key, 4) {
+                            Ok(models) => {
+                                for m in models {
+                                    fetched.push((m, e.base.clone()));
+                                }
                             }
+                            Err(reason) => fetch_errors.push((e.base.clone(), reason)),
                         }
                     }
                 }
@@ -9479,12 +9753,15 @@ impl AishShell {
         }
     }
 
-    /// Switch the active endpoint + model. Switching to a *different* endpoint
-    /// demotes the outgoing primary into `api_accounts` (so it stays listed
-    /// and switchable instead of being silently overwritten and lost) and, if
-    /// the target is itself an existing account, promotes it out of the pool to
-    /// avoid a duplicate. Switching only the model on the same endpoint leaves
-    /// the accounts untouched. The choice is recorded in recent history.
+    /// Switch the active endpoint + model and persist it as the default.
+    /// Switching to a *different* endpoint demotes the outgoing primary into
+    /// `api_accounts` (so it stays listed and switchable instead of being
+    /// silently overwritten and lost) and, if the target is itself an existing
+    /// account, promotes it out of the pool to avoid a duplicate. Switching
+    /// only the model on the same endpoint leaves the accounts untouched. The
+    /// choice is recorded in recent history. The result message states the
+    /// model, the account in use and whether the default was saved; a failed
+    /// config write keeps the session running and says so (issue #592).
     fn switch_endpoint_model(&mut self, base: &str, key: &str, model: &str) {
         let prev_base = self.config.api_base.clone();
         let prev_key = self.config.api_key.clone();
@@ -9524,6 +9801,10 @@ impl AishShell {
         self.config.api_base = base.to_string();
         self.config.api_key = key.to_string();
         self.config.model = model.to_string();
+        // An explicit save-as-default ends any pending session-only override:
+        // the new values are exactly what gets written to disk.
+        self.session_model_override = false;
+        self.session_override_baseline = None;
         self.ai_handler.update_model(model, Some(base), Some(key));
         if let Some(ai) = &self.inline_ai {
             ai.update_model(model);
@@ -9533,14 +9814,69 @@ impl AishShell {
         self.config.recent_models.retain(|r| r != &rec);
         self.config.recent_models.insert(0, rec);
         self.config.recent_models.truncate(20);
-        self.persist_config_and_rebuild_rotation();
+        let account = self.primary_display_name();
+        let save_result = self.persist_config_and_rebuild_rotation();
+        match save_result {
+            Ok(()) => println!(
+                "{}",
+                theme::success(&t_with_args("shell.model.switch_saved", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model.to_string());
+                    args.insert("account".to_string(), account);
+                    args
+                },)),
+            ),
+            Err(_) => println!(
+                "{}",
+                theme::warning(&t_with_args("shell.model.switch_session_only", &{
+                    let mut args = std::collections::HashMap::new();
+                    args.insert("model".to_string(), model.to_string());
+                    args.insert("account".to_string(), account);
+                    args
+                },)),
+            ),
+        }
+    }
+
+    /// Switch the active endpoint + model for this session only: the live LLM
+    /// session, inline completer and rotation follow immediately, but the
+    /// config file is never written. A flag marks the in-memory values as
+    /// temporary so every later persist swaps the saved baseline back in for
+    /// the write (issue #592).
+    fn switch_endpoint_model_session(&mut self, base: &str, key: &str, model: &str) {
+        // Stash the outgoing values as the baseline that stays on disk; a
+        // second session-only switch re-baselines onto the current live
+        // values (the previous override was never persisted anyway).
+        if !self.session_model_override {
+            self.session_override_baseline = Some((
+                self.config.model.clone(),
+                self.config.api_base.clone(),
+                self.config.api_key.clone(),
+            ));
+        }
+        self.config.api_base = base.to_string();
+        self.config.api_key = key.to_string();
+        self.config.model = model.to_string();
+        self.session_model_override = true;
+        self.ai_handler.update_model(model, Some(base), Some(key));
+        if let Some(ai) = &self.inline_ai {
+            ai.update_model(model);
+        }
+        self.refresh_config_dependent_tools();
+        let rec = format!("{}\u{0}{}", model, base);
+        self.config.recent_models.retain(|r| r != &rec);
+        self.config.recent_models.insert(0, rec);
+        self.config.recent_models.truncate(20);
+        self.rebuild_rotation();
+        let account = self.primary_display_name();
         println!(
-            "\x1b[32m{}\x1b[0m",
-            t_with_args("shell.model.switch_success", &{
+            "{}",
+            theme::accent(&t_with_args("shell.model.switch_session_ok", &{
                 let mut args = std::collections::HashMap::new();
                 args.insert("model".to_string(), model.to_string());
+                args.insert("account".to_string(), account);
                 args
-            })
+            },)),
         );
     }
 
@@ -9593,7 +9929,7 @@ impl AishShell {
                             continue;
                         }
                         self.config.api_accounts.retain(|a| a.name != name);
-                        self.persist_config_and_rebuild_rotation();
+                        let _ = self.persist_config_and_rebuild_rotation();
                         println!(
                             "\x1b[32m{}\x1b[0m",
                             t_with_args("shell.accounts.removed", &{
@@ -9604,7 +9940,7 @@ impl AishShell {
                         );
                     } else if let Some(m) = val.strip_prefix("fb:") {
                         self.config.fallback_models.retain(|x| x != m);
-                        self.persist_config_and_rebuild_rotation();
+                        let _ = self.persist_config_and_rebuild_rotation();
                         println!(
                             "\x1b[32m{}\x1b[0m",
                             t_with_args("shell.model.fallback_removed", &{
@@ -9649,7 +9985,7 @@ impl AishShell {
             return;
         }
         self.config.fallback_models.push(model.clone());
-        self.persist_config_and_rebuild_rotation();
+        let _ = self.persist_config_and_rebuild_rotation();
         println!(
             "\x1b[32m{}\x1b[0m",
             t_with_args("shell.model.fallback_added", &{
@@ -9688,24 +10024,49 @@ impl AishShell {
         if let Some(ai) = &self.inline_ai {
             ai.update_model(&new_model);
         }
-        // Update config
+        // Update config. A direct `/model <name>` asks for a new default, so
+        // any pending session-only override ends here (issue #592).
         self.config.model = new_model.clone();
+        self.session_model_override = false;
+        self.session_override_baseline = None;
         self.refresh_config_dependent_tools();
-        // Persist to config file
+        // Persist to config file; the result message states the scope so a
+        // failed write is distinguishable from a saved default.
         let config_path = self.config_save_path();
-        if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-            eprintln!(
+        let account = self.primary_display_name();
+        let save_result =
+            aish_config::ConfigLoader::save(&self.config, &config_path).map_err(|e| e.to_string());
+        match &save_result {
+            Ok(()) => println!(
                 "{}",
-                theme::warning(&{
+                theme::success(&t_with_args("shell.model.switch_saved", &{
                     let mut args = std::collections::HashMap::new();
-                    args.insert("error".to_string(), e.to_string());
-                    t_with_args("shell.config_save_warning", &args)
-                })
-            );
+                    args.insert("model".to_string(), new_model);
+                    args.insert("account".to_string(), account);
+                    args
+                },)),
+            ),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    theme::warning(&{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("error".to_string(), e.to_string());
+                        t_with_args("shell.config_save_warning", &args)
+                    })
+                );
+                println!(
+                    "{}",
+                    theme::warning(&t_with_args("shell.model.switch_session_only", &{
+                        let mut args = std::collections::HashMap::new();
+                        args.insert("model".to_string(), new_model);
+                        args.insert("account".to_string(), account);
+                        args
+                    },)),
+                );
+            }
         }
-        let mut args = std::collections::HashMap::new();
-        args.insert("model".to_string(), new_model);
-        println!("{}", t_with_args("shell.model.switch_success", &args));
+        self.rebuild_rotation();
     }
 
     /// Handle `/setting` — single-screen settings panel.
@@ -10339,18 +10700,25 @@ impl AishShell {
             settings_panel::apply(&mut trial, key, new_val)?;
             self.config = trial;
 
-            // Persist to disk.
-            let config_path = self.config_save_path();
-            if let Err(e) = aish_config::ConfigLoader::save(&self.config, &config_path) {
-                eprintln!(
-                    "{}",
-                    theme::warning(&{
-                        let mut a = std::collections::HashMap::new();
-                        a.insert("error".to_string(), e.to_string());
-                        t_with_args("shell.config_save_warning", &a)
-                    })
-                );
+            // A direct edit of the model identity keys in /setting is an
+            // explicit new default: any pending session-only `/model`
+            // override ends here, otherwise the swap-and-restore in persist
+            // would resurrect the old override over the user's edit.
+            if matches!(
+                key,
+                crate::settings_panel::SettingKey::Model
+                    | crate::settings_panel::SettingKey::ApiBase
+                    | crate::settings_panel::SettingKey::ApiKey
+            ) {
+                self.session_model_override = false;
+                self.session_override_baseline = None;
             }
+            // Persist to disk. `persist_config_and_rebuild_rotation` is used
+            // instead of a raw save so a pending session-only override on
+            // *other* keys (e.g. editing temperature) swaps the baseline
+            // model back in for the write — the temporary values must never
+            // leak into the config file (issue #592).
+            let _ = self.persist_config_and_rebuild_rotation();
 
             // Live side-effects so the change is felt without restart.
             match settings_panel::live_effect(key) {
@@ -16066,6 +16434,169 @@ mod resume_audit_uuid_tests {
             .filter(|e| e.ai_tool.as_deref() == Some("audit_probe"))
             .count();
         assert_eq!(probe_events, 2, "expected one ai_tool event per probe");
+    }
+}
+
+/// Session-only `/model` overrides must never leak into the config file, and
+/// the picker's account display must survive the promote/demote round-trip
+/// (issue #592).
+#[cfg(test)]
+mod model_switch_tests {
+    use super::*;
+
+    /// Process-global env vars repointed for the duration of one test.
+    /// `AishShell::new` resolves config/data/cache dirs lazily, so the guard
+    /// must outlive the shell.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::path::PathBuf>)>,
+    }
+
+    impl EnvGuard {
+        fn apply(vars: &[(&'static str, std::path::PathBuf)]) -> Self {
+            let mut saved: Vec<(&'static str, Option<std::path::PathBuf>)> = Vec::new();
+            for (key, value) in vars {
+                saved.push((*key, std::env::var_os(key).map(std::path::PathBuf::from)));
+                std::env::set_var(key, value);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, prev) in &self.saved {
+                match prev {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    /// Shell whose config and policy paths stay inside `tmp`. Caller must
+    /// hold `env_test_lock` and drop `shell` before `_env`.
+    fn open_override_shell() -> (tempfile::TempDir, EnvGuard, AishShell) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let config_dir = tmp.path().join("config");
+        let data_dir = tmp.path().join("data");
+        let cache_dir = tmp.path().join("cache");
+        for dir in [&home, &config_dir, &data_dir, &cache_dir] {
+            std::fs::create_dir_all(dir).expect("create temp dir");
+        }
+
+        let env = EnvGuard::apply(&[
+            ("HOME", home.clone()),
+            ("XDG_CONFIG_HOME", config_dir.clone()),
+            ("XDG_DATA_HOME", data_dir),
+            ("XDG_CACHE_HOME", cache_dir.clone()),
+            ("AISH_CONFIG_DIR", config_dir.join("aish")),
+            (
+                "AISH_BUILTIN_SKILLS_CACHE",
+                cache_dir.join("builtin-skills"),
+            ),
+            (
+                "AISH_SYSTEM_POLICY_PATH",
+                tmp.path().join("absent-system-policy.yaml"),
+            ),
+        ]);
+        let shell = AishShell::new(
+            ConfigModel {
+                model: "test-model".into(),
+                api_base: "https://api.example.com/v1".into(),
+                api_key: "test-key".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("shell construction");
+        (tmp, env, shell)
+    }
+
+    #[test]
+    fn session_override_never_leaks_into_unrelated_persist() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (tmp, _env, mut shell) = open_override_shell();
+        let config_path = tmp.path().join("config/aish/config.yaml");
+
+        // Session-only switch to another account's model.
+        shell.switch_endpoint_model_session("https://other.example/v1", "key-2", "model-b");
+        assert_eq!(shell.config.model, "model-b");
+        assert!(shell.session_model_override);
+
+        // An unrelated persist (e.g. /accounts add) must write the baseline.
+        shell.config.fallback_models.push("fallback-x".to_string());
+        let saved = shell.persist_config_and_rebuild_rotation();
+        assert!(saved.is_ok(), "save should succeed on a writable path");
+        let on_disk = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(
+            on_disk.contains("model: test-model"),
+            "baseline model must be on disk, got: {}",
+            on_disk
+                .lines()
+                .find(|l| l.starts_with("model:"))
+                .unwrap_or("")
+        );
+        assert!(!on_disk.contains("model: model-b"));
+        // The override stays live in memory.
+        assert_eq!(shell.config.model, "model-b");
+        assert!(shell.session_model_override);
+    }
+
+    #[test]
+    fn direct_model_command_commits_the_override_as_default() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _env, mut shell) = open_override_shell();
+
+        shell.switch_endpoint_model_session("https://other.example/v1", "key-2", "model-b");
+        assert!(shell.session_model_override);
+
+        // A direct `/model <name>` is an explicit new default: the override
+        // ends and the new model is what gets saved.
+        shell.handle_model_command(&["/model", "model-c"]);
+        assert!(!shell.session_model_override);
+        assert_eq!(shell.config.model, "model-c");
+    }
+
+    #[test]
+    fn display_name_prefers_the_named_account_sharing_the_credential() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _env, mut shell) = open_override_shell();
+
+        shell
+            .config
+            .api_accounts
+            .push(aish_config::ApiAccountConfig {
+                name: "backup".into(),
+                api_key: shell.config.api_key.clone(),
+                api_base: None, // inherits the primary base
+                model: Some("model-b".into()),
+                weight: 1,
+                disabled: false,
+            });
+        assert_eq!(shell.primary_display_name(), "backup");
+
+        // A disabled account must not be picked up as the display name.
+        shell.config.api_accounts[0].disabled = true;
+        assert_eq!(shell.primary_display_name(), "primary");
+    }
+
+    #[test]
+    fn picker_value_round_trip_through_recent_models() {
+        // recent_models only stores model\0base; the picker resolves the
+        // account from the endpoint snapshot at render time. A legacy entry
+        // must keep resolving instead of being dropped.
+        let legacy = "model-a\u{0}https://api.x.com/v1";
+        assert_eq!(
+            parse_picker_value(legacy),
+            Some(("model-a", "https://api.x.com/v1", PRIMARY_ACCOUNT_NAME))
+        );
     }
 }
 
