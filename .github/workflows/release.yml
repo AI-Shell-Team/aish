@@ -11,7 +11,7 @@ permissions:
 jobs:
   release-meta:
     name: Compute release metadata
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       tag: ${{ steps.metadata.outputs.tag }}
@@ -19,7 +19,7 @@ jobs:
       release_notes: ${{ steps.metadata.outputs.release_notes }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -39,10 +39,10 @@ jobs:
     name: Create GitHub release
     needs:
       - release-meta
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Create release entry with changelog notes
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
           name: aish ${{ needs.release-meta.outputs.tag }}
@@ -60,15 +60,15 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-musl
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-26.04
           - arch: arm64
             target: aarch64-unknown-linux-musl
-            runs_on: ubuntu-24.04-arm
+            runs_on: ubuntu-26.04-arm
     runs-on: ${{ matrix.runs_on }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up build environment
         env:
@@ -101,14 +101,14 @@ jobs:
           test -f "$INSTALL_ROOT/etc/systemd/system/aish-sandbox.socket"
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-bundle-linux-${{ matrix.arch }}
           path: artifacts/${{ matrix.arch }}/*
           if-no-files-found: error
 
       - name: Upload assets to GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release-meta.outputs.tag }}
           prerelease: ${{ contains(needs.release-meta.outputs.version, '-') }}
@@ -125,10 +125,10 @@ jobs:
         include:
           - arch: amd64
             target: x86_64-unknown-linux-musl
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-26.04
           - arch: arm64
             target: aarch64-unknown-linux-musl
-            runs_on: ubuntu-24.04-arm
+            runs_on: ubuntu-26.04-arm
     runs-on: ${{ matrix.runs_on }}
 
     steps:
@@ -139,7 +139,7 @@ jobs:
 
       - name: Checkout repository
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up build environment
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
@@ -149,7 +149,7 @@ jobs:
 
       - name: Set up Python
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -183,7 +183,7 @@ jobs:
 
       - name: Upload PyPI artifacts
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: release-pypi-linux-${{ matrix.arch }}
           path: artifacts/pypi/${{ matrix.arch }}/*
@@ -195,7 +195,7 @@ jobs:
       - release-meta
       - build-release-packages
       - build-pypi-packages
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: release
     permissions:
       contents: read
@@ -214,12 +214,12 @@ jobs:
       # DOWNLOAD_PREFIX: ${{ contains(needs.release-meta.outputs.version, '-') && 'download/beta' || 'download' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # CDN/R2 publishing is disabled because the CDN is unavailable.
       # Re-enable these steps once the CDN is back.
       # - name: Download release artifacts
-      #   uses: actions/download-artifact@v6
+      #   uses: actions/download-artifact@v8
       #   with:
       #     pattern: release-bundle-linux-*
       #     path: ${{ env.ARTIFACT_ROOT }}
@@ -242,7 +242,7 @@ jobs:
 
       - name: Download PyPI artifacts
         if: ${{ !contains(needs.release-meta.outputs.version, '-') }}
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: release-pypi-linux-*
           path: artifacts/pypi
@@ -269,7 +269,7 @@ jobs:
     needs:
       - release-meta
       - build-release-packages
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: release
     permissions:
       contents: read
@@ -283,7 +283,7 @@ jobs:
       WEBSITE_SITE_BASE_URL: ${{ vars.WEBSITE_SITE_BASE_URL || 'https://www.aishell.ai/repo' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -302,7 +302,7 @@ jobs:
           fi
 
       - name: Download release artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           pattern: release-bundle-linux-*
           path: ${{ env.ARTIFACT_ROOT }}
@@ -342,7 +342,7 @@ jobs:
       - build-pypi-packages
       - publish-release
       - publish-website
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Write job summary
         env:
